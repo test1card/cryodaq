@@ -182,6 +182,7 @@ class OperatorLogPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._connected: bool = False
+        self._read_only: bool = False
         self._current_experiment_id: str | None = None
         self._entries_all: list[dict] = []
         self._filtered_entries: list[dict] = []
@@ -238,10 +239,7 @@ class OperatorLogPanel(QWidget):
         title_font = _title_font()
         title_font.setPixelSize(theme.FONT_SIZE_XL)
         title.setFont(title_font)
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -251,9 +249,7 @@ class OperatorLogPanel(QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("operatorLogBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._banner_label.setVisible(False)
         return self._banner_label
 
@@ -274,9 +270,7 @@ class OperatorLogPanel(QWidget):
 
         caption = QLabel("Новая запись")
         caption.setFont(_label_font())
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(caption)
 
         fields_row = QHBoxLayout()
@@ -317,9 +311,7 @@ class OperatorLogPanel(QWidget):
         bottom_row.setContentsMargins(0, 0, 0, 0)
         bottom_row.setSpacing(theme.SPACE_2)
         self._bind_experiment_check = QCheckBox("Привязать к текущему эксперименту")
-        self._bind_experiment_check.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent;"
-        )
+        self._bind_experiment_check.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
         bottom_row.addWidget(self._bind_experiment_check)
         bottom_row.addStretch()
 
@@ -413,9 +405,7 @@ class OperatorLogPanel(QWidget):
         self._timeline_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._timeline_container.setStyleSheet("background-color: transparent;")
         self._timeline_layout = QVBoxLayout(self._timeline_container)
-        self._timeline_layout.setContentsMargins(
-            theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2
-        )
+        self._timeline_layout.setContentsMargins(theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2)
         self._timeline_layout.setSpacing(theme.SPACE_1)
         self._timeline_layout.addStretch()
 
@@ -426,9 +416,7 @@ class OperatorLogPanel(QWidget):
         self._empty_state_label.setFont(_body_font())
         self._empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_state_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_4}px;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_4}px;"
         )
         outer.addWidget(self._empty_state_label)
         self._empty_state_label.setVisible(False)
@@ -443,9 +431,7 @@ class OperatorLogPanel(QWidget):
 
         self._loaded_label = QLabel("")
         self._loaded_label.setFont(_label_font())
-        self._loaded_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._loaded_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(self._loaded_label)
         layout.addStretch()
 
@@ -463,9 +449,7 @@ class OperatorLogPanel(QWidget):
     def _caption(text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(_label_font())
-        label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         return label
 
     # ------------------------------------------------------------------
@@ -473,6 +457,8 @@ class OperatorLogPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_submit_clicked(self) -> None:
+        if self._read_only:
+            return
         message = self._message_edit.toPlainText().strip()
         if not message:
             self.show_warning("Введите текст записи.")
@@ -497,7 +483,7 @@ class OperatorLogPanel(QWidget):
         worker.start()
 
     def _on_submit_result(self, result: dict) -> None:
-        self._submit_btn.setEnabled(self._connected)
+        self._submit_btn.setEnabled(self._connected and not self._read_only)
         self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok", False):
             error = result.get("error", "Не удалось сохранить запись.")
@@ -611,9 +597,7 @@ class OperatorLogPanel(QWidget):
             filtered.append(entry)
         self._filtered_entries = filtered
         self._render_timeline()
-        self._loaded_label.setText(
-            f"Загружено: {len(self._entries_all)} записей · отфильтровано: {len(filtered)}"
-        )
+        self._loaded_label.setText(f"Загружено: {len(self._entries_all)} записей · отфильтровано: {len(filtered)}")
 
     # ------------------------------------------------------------------
     # Render
@@ -685,9 +669,7 @@ class OperatorLogPanel(QWidget):
         author_label = QLabel(author_text)
         author_label.setFont(_label_font())
         author_label.setStyleSheet(
-            f"color: {primary_color};"
-            f" background: transparent; border: none;"
-            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+            f"color: {primary_color}; background: transparent; border: none; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
         )
         head_row.addWidget(author_label)
         head_row.addStretch()
@@ -750,10 +732,16 @@ class OperatorLogPanel(QWidget):
         else:
             self.clear_message()
 
+    def set_read_only(self, read_only: bool) -> None:
+        """Keep the timeline searchable while disabling replay log writes."""
+
+        self._read_only = bool(read_only)
+        self._update_composer_enablement()
+
     def set_current_experiment(self, exp_id: str | None) -> None:
         self._current_experiment_id = exp_id
         has_active = exp_id is not None
-        self._bind_experiment_check.setEnabled(has_active)
+        self._bind_experiment_check.setEnabled(has_active and not self._read_only)
         if not has_active:
             self._bind_experiment_check.setChecked(False)
         else:
@@ -763,10 +751,12 @@ class OperatorLogPanel(QWidget):
         # returns empty list otherwise and that's a valid state.
 
     def _update_composer_enablement(self) -> None:
-        self._author_edit.setEnabled(self._connected)
-        self._tags_edit.setEnabled(self._connected)
-        self._message_edit.setEnabled(self._connected)
-        self._submit_btn.setEnabled(self._connected)
+        mutable = self._connected and not self._read_only
+        self._bind_experiment_check.setEnabled(mutable and self._current_experiment_id is not None)
+        self._author_edit.setEnabled(mutable)
+        self._tags_edit.setEnabled(mutable)
+        self._message_edit.setEnabled(mutable)
+        self._submit_btn.setEnabled(mutable)
 
     # ------------------------------------------------------------------
     # Banner

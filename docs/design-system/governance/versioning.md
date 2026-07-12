@@ -5,7 +5,7 @@ applies_to: how design-system releases are numbered and what changes go into eac
 status: canonical
 references: governance/deprecation-policy.md, governance/contribution.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-04-17
+last_updated: 2026-07-12
 ---
 
 # Versioning
@@ -20,7 +20,7 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `1.0.1` — audit fix pass against the v1.0.0 baseline (see `CHANGELOG.md`).
+**Current version:** `1.2.0` — operator-truth, replay-gating, and POD composition update (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
@@ -249,3 +249,4 @@ Anticipated versions:
 
 - 2026-04-17: Initial version. SemVer 2.0.0 baseline with CryoDAQ-specific definitions of "breaking". Release cadence expectations. Independence from CryoDAQ package version. Post-1.0.0 trajectory anticipated.
 - 2026-04-17 (v1.0.1): Created the `VERSION` and `CHANGELOG.md` artifacts that this document was referencing but which did not previously exist (FR-013). No process changes — the described release process is now actually wired up.
+- 2026-07-12 (v1.2.0): Reconciled canonical version metadata with the operator-truth, replay-gating, and POD composition contract.

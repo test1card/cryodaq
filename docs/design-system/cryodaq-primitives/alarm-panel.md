@@ -4,7 +4,7 @@ keywords: alarms, acknowledge, v1, v2, severity chip, fail-open, K1 safety, tray
 applies_to: Dual-engine alarm overlay (v1 threshold + v2 YAML-driven phase-aware)
 status: active
 implements: src/cryodaq/gui/shell/overlays/alarm_panel.py (Phase II.4); legacy src/cryodaq/gui/widgets/alarm_panel.py retained (DEPRECATED) until Phase II.13
-last_updated: 2026-04-18
+last_updated: 2026-07-12
 references: rules/data-display-rules.md, rules/copy-rules.md, rules/color-rules.md, cryodaq-primitives/alarm-badge.md, components/card.md, components/button.md
 ---
 
@@ -66,6 +66,7 @@ class AlarmPanel(QWidget):
 
     def on_reading(self, reading: Reading) -> None: ...
     def set_connected(self, connected: bool) -> None: ...
+    def set_read_only(self, read_only: bool) -> None: ...
     def update_v2_status(self, payload: dict) -> None: ...
     def get_active_v1_count(self) -> int: ...
     def get_active_v2_count(self) -> int: ...
@@ -73,6 +74,7 @@ class AlarmPanel(QWidget):
 
 - `on_reading(reading)`: v1 reading sink. Drops readings without `metadata["alarm_name"]`. Updates row severity / value / state based on `event_type` (`activated` | `acknowledged` | `cleared`).
 - `set_connected(bool)`: gates ACK buttons (disabled when disconnected) and pauses the v2 poll timer. Idempotent for repeated values.
+- `set_read_only(bool)`: replay gate. Alarm rows and polling remain observational; v1/v2 ACK buttons stay disabled and both dispatch handlers reject direct or queued invocation.
 - `update_v2_status(payload)`: accepts the raw `alarm_v2_status` response. Host / tests may call this directly without going through the 3 s poll. Emits `v2_alarm_count_changed`.
 - `get_active_v1_count()` / `get_active_v2_count()`: accessors reserved for future finalize / report-generation guards.
 
@@ -81,6 +83,7 @@ class AlarmPanel(QWidget):
 - **Connected + alarm active** → ACK button colored by severity token, enabled. Click dispatches `alarm_acknowledge` (v1) or `alarm_v2_ack` (v2) via `ZmqCommandWorker`.
 - **Disconnected** → ACK buttons disabled via `SURFACE_MUTED` + `MUTED_FOREGROUND`. Row data remains visible (fail-OPEN — stale data is better than hidden alarms).
 - **Engine error during poll** → existing v2 map is preserved; no table wipe. Logged as warning.
+- **Replay/read-only** → active and acknowledged history remains visible; `alarm_acknowledge` and `alarm_v2_ack` are unavailable even if replay readings make the transport look connected.
 - **Alarm transitions** — v1 `activated` increments `trigger_count`; `acknowledged` / `cleared` update the state cell (`Подтв.` / `Сброшена`).
 
 ## Severity chip
@@ -116,4 +119,5 @@ See `src/cryodaq/gui/shell/main_window_v2.py` lines 38, 148, 168, 178, 332 and t
 
 ## Changelog
 
+- **2026-07-12 (v1.2.0)** — documented replay-readable/alarm-ACK-disabled semantics and handler-level fail-closed dispatch.
 - **2026-04-18 (Phase II.4)** — rebuild landed. Emoji removed; DS v1.0.1 tokens throughout; `set_connected` hook added; eager registration kept by design (tray-count path).

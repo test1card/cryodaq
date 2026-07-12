@@ -82,6 +82,7 @@ class SensorCell(QFrame):
         self._buffer = buffer_store
         self._last_status: ChannelStatus | None = None
         self._data_stale = True
+        self._read_only = False
         self._is_renaming = False
         self._rename_edit: QLineEdit | None = None
         self._build_ui()
@@ -107,9 +108,7 @@ class SensorCell(QFrame):
         # Channel label (top, dim text, elided)
         self._label_widget = QLabel()
         self._label_widget.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; "
-            f"font-family: '{theme.FONT_UI}'; "
-            f"font-size: {theme.FONT_LABEL_SIZE}px;"
+            f"color: {theme.TEXT_MUTED}; font-family: '{theme.FONT_UI}'; font-size: {theme.FONT_LABEL_SIZE}px;"
         )
         self._label_widget.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         self._label_widget.setWordWrap(False)
@@ -132,22 +131,16 @@ class SensorCell(QFrame):
 
         self._unit_widget = QLabel("")
         self._unit_widget.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; "
-            f"font-family: '{theme.FONT_UI}'; "
-            f"font-size: {theme.FONT_LABEL_SIZE}px;"
+            f"color: {theme.TEXT_MUTED}; font-family: '{theme.FONT_UI}'; font-size: {theme.FONT_LABEL_SIZE}px;"
         )
         value_row.addWidget(self._unit_widget)
         value_row.addStretch()
         root.addLayout(value_row)
 
         # Status hint (bottom, small text)
-        self._status_hint_widget = QLabel(
-            "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
-        )  # Нет данных
+        self._status_hint_widget = QLabel("\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445")  # Нет данных
         self._status_hint_widget.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; "
-            f"font-family: '{theme.FONT_UI}'; "
-            f"font-size: {theme.FONT_SIZE_XS}px;"
+            f"color: {theme.TEXT_MUTED}; font-family: '{theme.FONT_UI}'; font-size: {theme.FONT_SIZE_XS}px;"
         )
         root.addWidget(self._status_hint_widget)
 
@@ -269,13 +262,13 @@ class SensorCell(QFrame):
     # ------------------------------------------------------------------
 
     def mouseDoubleClickEvent(self, event):  # noqa: ANN001
-        if event.button() == Qt.MouseButton.LeftButton:
+        if not self._read_only and event.button() == Qt.MouseButton.LeftButton:
             self._enter_rename_mode()
         super().mouseDoubleClickEvent(event)
 
     def _enter_rename_mode(self) -> None:
         """Replace label with QLineEdit for inline rename."""
-        if self._is_renaming:
+        if self._read_only or self._is_renaming:
             return
         self._is_renaming = True
         current_name = self._channel_mgr.get_name(self._channel_id)
@@ -298,6 +291,9 @@ class SensorCell(QFrame):
         """Save new name and exit rename mode."""
         if not self._is_renaming:
             return
+        if self._read_only:
+            self._exit_rename_mode()
+            return
         new_name = self._rename_edit.text().strip()
         if new_name and new_name != self._channel_mgr.get_name(self._channel_id):
             self.rename_requested.emit(self._channel_id, new_name)
@@ -316,11 +312,7 @@ class SensorCell(QFrame):
 
     def eventFilter(self, obj, event):  # noqa: ANN001
         """Handle Esc key to cancel rename."""
-        if (
-            obj is self._rename_edit
-            and event.type() == QEvent.Type.KeyPress
-            and event.key() == Qt.Key.Key_Escape
-        ):
+        if obj is self._rename_edit and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             self._exit_rename_mode()
             return True
         return super().eventFilter(obj, event)
@@ -329,21 +321,24 @@ class SensorCell(QFrame):
     # Context menu
     # ------------------------------------------------------------------
 
-    def contextMenuEvent(self, event):  # noqa: ANN001
+    def _build_context_menu(self) -> QMenu:
+        """Build the menu so replay affordances are testable without showing it."""
+
         menu = QMenu(self)
         menu.setObjectName("sensorCellContextMenu")
 
-        rename_action = menu.addAction(
-            "\u041f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u0442\u044c"  # Переименовать  # noqa: E501
-        )
-        rename_action.triggered.connect(self._enter_rename_mode)
+        if not self._read_only:
+            rename_action = menu.addAction(
+                "\u041f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u0442\u044c"  # Переименовать  # noqa: E501
+            )
+            rename_action.triggered.connect(self._enter_rename_mode)
 
-        hide_action = menu.addAction(
-            "\u0421\u043a\u0440\u044b\u0442\u044c"  # Скрыть
-        )
-        hide_action.triggered.connect(lambda: self.hide_requested.emit(self._channel_id))
+            hide_action = menu.addAction(
+                "\u0421\u043a\u0440\u044b\u0442\u044c"  # Скрыть
+            )
+            hide_action.triggered.connect(lambda: self.hide_requested.emit(self._channel_id))
 
-        menu.addSeparator()
+            menu.addSeparator()
 
         plot_action = menu.addAction(
             "\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043d\u0430 \u0433\u0440\u0430\u0444\u0438\u043a\u0435"  # Показать на графике  # noqa: E501
@@ -355,4 +350,16 @@ class SensorCell(QFrame):
         )
         history_action.triggered.connect(lambda: self.history_requested.emit(self._channel_id))
 
+        return menu
+
+    def contextMenuEvent(self, event):  # noqa: ANN001
+        menu = self._build_context_menu()
+
         menu.exec(event.globalPos())
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Keep sensor evidence inspectable while removing config writes."""
+
+        self._read_only = bool(read_only)
+        if self._read_only and self._is_renaming:
+            self._exit_rename_mode()

@@ -98,3 +98,38 @@ def test_on_reading_pressure_stores_full_id(app):
     last = view._buffer_store.get_last("VSP63D_1/pressure")
     assert last is not None
     assert last[1] == 1e-4
+
+
+def test_dashboard_replay_direct_config_signals_fail_closed(app, monkeypatch):
+    """Queued/direct grid signals cannot rename or hide channels in replay."""
+    mgr = ChannelManager()
+    mgr._channels = {"Т1": {"name": "Исходное", "visible": True}}
+    saved: list[bool] = []
+    monkeypatch.setattr(mgr, "save", lambda: saved.append(True))
+    view = DashboardView(mgr)
+    view.set_read_only(True)
+
+    view._sensor_grid.rename_requested.emit("Т1", "Запрещено")
+    view._sensor_grid.hide_requested.emit("Т1")
+    app.processEvents()
+
+    assert mgr.get_name("Т1") == "Исходное"
+    assert mgr.is_visible("Т1") is True
+    assert saved == []
+
+
+def test_dashboard_live_config_signals_still_persist(app, monkeypatch):
+    """The replay gate does not regress the live rename/hide contract."""
+    mgr = ChannelManager()
+    mgr._channels = {"Т1": {"name": "Исходное", "visible": True}}
+    saved: list[bool] = []
+    monkeypatch.setattr(mgr, "save", lambda: saved.append(True))
+    view = DashboardView(mgr)
+
+    view._sensor_grid.rename_requested.emit("Т1", "Новое")
+    view._sensor_grid.hide_requested.emit("Т1")
+    app.processEvents()
+
+    assert mgr.get_name("Т1") == "Новое"
+    assert mgr.is_visible("Т1") is False
+    assert saved == [True, True]

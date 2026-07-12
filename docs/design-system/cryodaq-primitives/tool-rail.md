@@ -4,7 +4,7 @@ keywords: tool-rail, sidebar, left-rail, navigation, icon-only, vertical, chrome
 applies_to: left vertical icon-only navigation strip
 status: active
 implements: src/cryodaq/gui/shell/tool_rail.py (Phase 0)
-last_updated: 2026-04-17
+last_updated: 2026-07-12
 references: rules/interaction-rules.md, rules/color-rules.md, tokens/icons.md
 ---
 
@@ -112,6 +112,7 @@ When both a canonical mnemonic and a numeric fallback exist, the tooltip shows t
 8. **Icon color inherits from slot's text color.** Recolor via `load_colored_icon`. (RULE-COLOR-005)
 9. **Icon size 24×24** centered in 56×56 slot — even padding all around (16px).
 10. **No badges on icons** in default rail (alarm badge is separate widget in TopWatchBar area, not on rail slot).
+11. **Replay routing is host-authoritative.** The rail may still emit inspection destinations, but `MainWindowV2` rejects new-experiment, settings/channel-editor, calibration and Engine-restart routes in replay. Mnemonic shortcuts traverse the same guarded handler; no shortcut may bypass it. Source, experiment, alarm and log destinations open read-only evidence surfaces.
 
 ## API
 
@@ -347,5 +348,6 @@ ToolRail registers both the canonical mnemonic and the numeric-fallback shortcut
 
 ## Changelog
 
+- 2026-07-12 (v1.2.0): Documented host-owned replay destination gating shared by mouse and mnemonic paths; mutating global routes are rejected and legacy operational panels open read-only.
 - 2026-04-17: Initial version. Documents Phase 0 implementation. 9 slot definitions confirmed. Slot 2+3 merge pending product decision. Ctrl+[1-9] shortcuts + Ctrl+L alias for Operator Log.
 - 2026-04-17 (v1.0.1): Aligned with canonical mnemonic shortcut registry per AD-002 (FR-011). Added canonical-shortcut column to the slot table (Ctrl+E / Ctrl+K / Ctrl+A / Ctrl+C / Ctrl+M / Ctrl+L / Ctrl+D). Demoted Ctrl+[1-9] to "numeric fallback" column. Clarified that slots 1 and 2 do not yet have approved mnemonics and still rely on the fallback. Keyboard-shortcut-policy section rewritten to match.

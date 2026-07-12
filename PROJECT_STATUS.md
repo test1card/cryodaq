@@ -1,16 +1,22 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-07-08 *(обновлено к релизу v0.64.1)*
-**Ветка:** master
-**Последний commit:** `67b6301`
+**Дата:** 2026-07-11 *(release baseline v0.64.1 + active pre-lab campaign note)*
+**Релизная ветка:** master
+**Активная campaign-ветка:** `feat/montana-phase-a` (candidate head меняется по мере independently reviewed slices)
+**Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
-**CI:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
-**Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08. Кодовых фич в очереди нет. Единственная открытая веха — **аппаратно-гейтированная лабораторная верификация** (`docs/lab_verification_checklist.md`), а не новый код.
+**CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
+**CI активного кандидата:** OPEN — исторический зелёный v0.64 не переносится на текущую feature-ветку. Нужен новый exact-SHA прогон Ubuntu + Windows после фикса, независимого ревью, commit и push всех принятых slices.
+**Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
+После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
+F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
+Физическая лабораторная верификация остаётся отдельным честным гейтом в
+`docs/lab_verification_checklist.md`; ни один software/mock pass её не закрывает.
 
 ---
 
-## Масштаб проекта
+## Масштаб проекта на границе релиза v0.64.1
 
 | Метрика | Значение |
 |---|---|
@@ -24,8 +30,10 @@
 | Версия пакета | **0.64.1** |
 | Python | 3.12+ (CI закреплён на 3.13) |
 
-Источник актуального репо-инвентаря — этот документ (курируется на границах
-релизов) и `CHANGELOG.md`. Детали по модулям — `docs/architecture.md`.
+Это зафиксированный снимок релизной границы v0.64.1, а не live-инвентарь
+текущей feature-ветки. `CHANGELOG.md` хранит shipped history; детали по
+архитектуре — в `docs/architecture.md`. Метрики обновляются на следующей
+авторизованной релизной границе.
 
 ---
 
@@ -147,8 +155,32 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 
 ## Открытые задачи
 
-Кодовых фич в очереди нет. Открыты только проверки, требующие физического
-доступа к приборам и лабораторным ПК — полный turnkey-протокол в
+До поездки в лабораторию закрываются безопасные software-side задачи:
+
+1. H3/H4: integrated runtime/lifecycle slice `026bf50` прошёл detached
+   clean-SHA gate (4 939 passed / 11 skipped / 1 deselected). Открыты H4 R3,
+   short soak, 72-hour soak и реальный Windows ONEDIR evidence.
+2. Persistence P1A: native round-5 PASS подтверждает FIFO, physical-cap и
+   integrity gates, receipt-authorized ack, cancellation и close settlement.
+   Slice пока не committed: обязательны deferred external review и финальная
+   acceptance перед публикацией.
+3. F35: F35.1 registry/capability foundation и F35.2 shared-bus
+   timing/recovery contracts
+   committed. F35.3A-1 ещё в repair/review; descriptor propagation,
+   conformance kit и passive reference-driver proof открыты.
+4. F36: F36.0 scenario/evidence contract и F36.1 immutable operator snapshots
+   committed. F36.2 under review и не committed; F36.3–F36.6 открыты.
+   После интеграции frontend в реальный shell обязателен isolated mock/replay
+   запуск со скриншотами каждого достижимого экрана и material state. Visual QA
+   проверяет operator scenarios, clipping, focus, stale/disconnected truth,
+   non-color cues и соответствие design system; одни скриншоты gate не закрывают.
+5. Новый exact-SHA CI Ubuntu + Windows должен стать зелёным для текущего
+   кандидата; зелёный релизный v0.64 — только историческая baseline evidence.
+6. Готовые точные Windows/physical evidence procedures с thresholds,
+   abort/rollback и ожидаемыми артефактами.
+
+Отдельно остаются проверки, требующие физического доступа к приборам и
+лабораторным ПК — полный turnkey-протокол в
 `docs/lab_verification_checklist.md`:
 
 1. **Гейт версии SQLite на лабораторном Ubuntu ПК** — подтвердить, что движок линкуется с безопасной версией (или срабатывает self-heal fallback).
@@ -205,7 +237,7 @@ cryodaq-gui                    # GUI only (нуждается в engine на ZMQ
 uvicorn cryodaq.web.server:app --host 127.0.0.1 --port 8080   # loopback-only
 cryodaq-cooldown build --data cooldown_v5/ --output model/
 cryodaq-replay-curve ...       # extract/transform reference curve for replay
-pytest                         # 3 657 selected / 3 658 collected (1 deselected: @ollama)
+pytest                         # current suite; counts above are the v0.64.1 release snapshot
 pytest tests/ --cov=src/cryodaq --cov-report=term
 ruff check src/ tests/         # zero errors (CI lint-gate зелёный)
 ruff format src/ tests/

@@ -61,11 +61,11 @@ class ExperimentOverlay(QWidget):
         self._is_editing_name = False
         self._custom_edits: dict[str, QLineEdit] = {}
         self._templates_by_id: dict[str, dict] = {}
-        # Phase II.9 harmonization: action buttons gate on connection
-        # state per Host Integration Contract. Default True keeps the
-        # overlay functional when MainWindowV2 has not yet pushed the
-        # first status tick.
+        # MainWindowV2 immediately pushes its observed connection state on
+        # construction.  Keep the standalone widget default for compatibility;
+        # replay authority is independently removed by ``_read_only``.
         self._connected: bool = True
+        self._read_only: bool = False
 
         self._finalize_worker = None
         self._abort_worker = None
@@ -231,9 +231,7 @@ class ExperimentOverlay(QWidget):
         card_col.setSpacing(theme.SPACE_2)
         card_header = QLabel("\u041a\u0410\u0420\u0422\u041e\u0427\u041a\u0410")
         card_header.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; "
-            f"font-family: '{theme.FONT_BODY}'; "
-            f"font-size: 11px; letter-spacing: 1px;"
+            f"color: {theme.MUTED_FOREGROUND}; font-family: '{theme.FONT_BODY}'; font-size: 11px; letter-spacing: 1px;"
         )
         card_col.addWidget(card_header)
 
@@ -266,9 +264,7 @@ class ExperimentOverlay(QWidget):
         card_col.addWidget(self._save_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         self._save_status = QLabel("")
-        self._save_status.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_XS}px;"
-        )
+        self._save_status.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_XS}px;")
         card_col.addWidget(self._save_status, alignment=Qt.AlignmentFlag.AlignRight)
 
         card_col.addStretch()
@@ -279,9 +275,7 @@ class ExperimentOverlay(QWidget):
         timeline_col.setSpacing(theme.SPACE_2)
         timeline_header = QLabel("\u0425\u0420\u041e\u041d\u0418\u041a\u0410")
         timeline_header.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; "
-            f"font-family: '{theme.FONT_BODY}'; "
-            f"font-size: 11px; letter-spacing: 1px;"
+            f"color: {theme.MUTED_FOREGROUND}; font-family: '{theme.FONT_BODY}'; font-size: 11px; letter-spacing: 1px;"
         )
         timeline_col.addWidget(timeline_header)
 
@@ -330,9 +324,7 @@ class ExperimentOverlay(QWidget):
         footer.addWidget(self._finalize_btn)
         root.addLayout(footer)
 
-        self.setStyleSheet(
-            self.styleSheet() + f"#ExperimentOverlay {{ background-color: {theme.BACKGROUND}; }}"
-        )
+        self.setStyleSheet(self.styleSheet() + f"#ExperimentOverlay {{ background-color: {theme.BACKGROUND}; }}")
 
     def _build_landing_page(self) -> QWidget:
         """Build the 'no active experiment' landing widget.
@@ -539,21 +531,36 @@ class ExperimentOverlay(QWidget):
         self._connected = connected
         self._apply_connection_gate()
 
+    def set_read_only(self, read_only: bool) -> None:
+        """Keep experiment history visible while disabling replay mutations."""
+
+        self._read_only = bool(read_only)
+        if self._read_only:
+            self._cancel_name_edit()
+        self._apply_connection_gate()
+
     def _apply_connection_gate(self) -> None:
         has_experiment = self._experiment is not None
-        self._save_btn.setEnabled(self._connected and has_experiment)
-        self._finalize_btn.setEnabled(self._connected and has_experiment)
+        mutable = self._connected and not self._read_only
+        self._save_btn.setEnabled(mutable and has_experiment)
+        self._finalize_btn.setEnabled(mutable and has_experiment)
+        self._more_btn.setEnabled(mutable and has_experiment)
+        self._sample_edit.setReadOnly(not mutable)
+        self._desc_edit.setReadOnly(not mutable)
+        self._notes_edit.setReadOnly(not mutable)
+        for edit in self._custom_edits.values():
+            edit.setReadOnly(not mutable)
         # Phase nav buttons are also visibility-gated by _refresh_display;
         # _connected just overlays an enabled/disabled state on top.
         if hasattr(self, "_prev_btn"):
-            self._prev_btn.setEnabled(self._connected)
+            self._prev_btn.setEnabled(mutable)
         if hasattr(self, "_next_btn"):
-            self._next_btn.setEnabled(self._connected)
+            self._next_btn.setEnabled(mutable)
         # IV.2 B.1: the landing page's create button dispatches the
         # existing experiment_create ZMQ command; it must gate on
         # connection just like the other action buttons.
         if hasattr(self, "_landing_create_btn"):
-            self._landing_create_btn.setEnabled(self._connected)
+            self._landing_create_btn.setEnabled(mutable)
 
     def _displayed_name(self) -> str:
         return self._name_label.text()
@@ -579,7 +586,7 @@ class ExperimentOverlay(QWidget):
 
         exp = self._experiment
         self._name_label.setText(exp.get("name", exp.get("title", "\u2014")))
-        self._finalize_btn.setEnabled(self._connected)
+        self._finalize_btn.setEnabled(self._connected and not self._read_only)
 
         # Passport line
         eid = exp.get("experiment_id", "")
@@ -608,14 +615,10 @@ class ExperimentOverlay(QWidget):
         if current_phase:
             phase_name = PHASE_LABELS_RU.get(current_phase, current_phase)
             dur = phase_durations.get(current_phase, "")
-            dur_suffix = (
-                f" \u00b7 {dur} \u0432 \u0444\u0430\u0437\u0435" if dur and dur != "\u00b7" else ""
-            )
+            dur_suffix = f" \u00b7 {dur} \u0432 \u0444\u0430\u0437\u0435" if dur and dur != "\u00b7" else ""
             self._phase_status.setText(f"{phase_name}{dur_suffix}")
         else:
-            self._phase_status.setText(
-                "\u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u0444\u0430\u0437\u044b"
-            )
+            self._phase_status.setText("\u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u0444\u0430\u0437\u044b")
 
         # Nav buttons — hide (not disable) when no preceding / succeeding phase
         # so the operator never sees a dead grey rectangle.
@@ -649,6 +652,7 @@ class ExperimentOverlay(QWidget):
         self._desc_edit.setPlainText(exp.get("description", ""))
         self._notes_edit.setPlainText(exp.get("notes", ""))
         self._rebuild_custom_fields(exp)
+        self._apply_connection_gate()
 
         # Timeline
         self._reload_timeline()
@@ -738,7 +742,7 @@ class ExperimentOverlay(QWidget):
     # ------------------------------------------------------------------
 
     def _on_save_card(self) -> None:
-        if not self._experiment:
+        if self._read_only or not self._experiment:
             return
         payload = self._build_card_payload()
         from cryodaq.gui.zmq_client import ZmqCommandWorker
@@ -756,14 +760,10 @@ class ExperimentOverlay(QWidget):
         # re-enable a command button.
         self._apply_connection_gate()
         if result.get("ok"):
-            self._save_status.setText(
-                "\u2713 \u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e"
-            )
+            self._save_status.setText("\u2713 \u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e")
             self.experiment_updated.emit()
         else:
-            self._save_status.setText(
-                str(result.get("error", "\u041e\u0448\u0438\u0431\u043a\u0430"))
-            )
+            self._save_status.setText(str(result.get("error", "\u041e\u0448\u0438\u0431\u043a\u0430")))
 
     def _build_card_payload(self) -> dict:
         name = self._name_label.text().strip()
@@ -775,9 +775,7 @@ class ExperimentOverlay(QWidget):
             "description": self._desc_edit.toPlainText().strip(),
             "notes": self._notes_edit.toPlainText().strip(),
             "custom_fields": {
-                fid: edit.text().strip()
-                for fid, edit in self._custom_edits.items()
-                if edit.text().strip()
+                fid: edit.text().strip() for fid, edit in self._custom_edits.items() if edit.text().strip()
             },
         }
 
@@ -810,6 +808,8 @@ class ExperimentOverlay(QWidget):
             pass
 
     def _send_advance(self, target: str) -> None:
+        if self._read_only:
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         self._phase_worker = ZmqCommandWorker(
@@ -828,7 +828,7 @@ class ExperimentOverlay(QWidget):
     # ------------------------------------------------------------------
 
     def _on_finalize_clicked(self) -> None:
-        if not self._experiment:
+        if self._read_only or not self._experiment:
             return
         name = self._experiment.get("name", "")
         dlg = QMessageBox(self)
@@ -843,9 +843,7 @@ class ExperimentOverlay(QWidget):
             "\u0431\u0443\u0434\u0435\u0442 \u0441\u043e\u0437\u0434\u0430\u043d\u0430 "
             "\u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438."
         )
-        btn_cancel = dlg.addButton(
-            "\u041e\u0442\u043c\u0435\u043d\u0430", QMessageBox.ButtonRole.RejectRole
-        )
+        btn_cancel = dlg.addButton("\u041e\u0442\u043c\u0435\u043d\u0430", QMessageBox.ButtonRole.RejectRole)
         dlg.addButton(
             "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c",
             QMessageBox.ButtonRole.AcceptRole,
@@ -857,6 +855,8 @@ class ExperimentOverlay(QWidget):
         self._do_finalize("experiment_finalize")
 
     def _on_abort_clicked(self) -> None:
+        if self._read_only:
+            return
         if not self._experiment:
             return
         name = self._experiment.get("name", "")
@@ -870,12 +870,8 @@ class ExperimentOverlay(QWidget):
             "\u041e\u0442\u0447\u0451\u0442 \u043d\u0435 \u0444\u043e\u0440\u043c\u0438\u0440\u0443\u0435\u0442\u0441\u044f. "  # noqa: E501
             "\u042d\u0442\u043e \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043d\u0435\u043b\u044c\u0437\u044f \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c."  # noqa: E501
         )
-        btn_cancel = dlg.addButton(
-            "\u041e\u0442\u043c\u0435\u043d\u0430", QMessageBox.ButtonRole.RejectRole
-        )
-        dlg.addButton(
-            "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c", QMessageBox.ButtonRole.AcceptRole
-        )
+        btn_cancel = dlg.addButton("\u041e\u0442\u043c\u0435\u043d\u0430", QMessageBox.ButtonRole.RejectRole)
+        dlg.addButton("\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c", QMessageBox.ButtonRole.AcceptRole)
         dlg.setDefaultButton(btn_cancel)
         dlg.exec()
         if dlg.clickedButton() == btn_cancel:
@@ -920,6 +916,8 @@ class ExperimentOverlay(QWidget):
     # ------------------------------------------------------------------
 
     def _show_more_menu(self) -> None:
+        if self._read_only:
+            return
         menu = QMenu(self)
         abort_action = menu.addAction(
             "\u041f\u0440\u0435\u0440\u0432\u0430\u0442\u044c \u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442"  # noqa: E501
@@ -932,7 +930,7 @@ class ExperimentOverlay(QWidget):
     # ------------------------------------------------------------------
 
     def _enter_name_edit(self) -> None:
-        if self._is_editing_name or not self._experiment:
+        if self._read_only or self._is_editing_name or not self._experiment:
             return
         self._is_editing_name = True
         self._name_edit.setText(self._experiment.get("name", ""))

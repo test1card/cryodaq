@@ -1,13 +1,17 @@
 # CryoDAQ — Feature Roadmap
 
-> **Living document.** Updated 2026-07-08 after v0.64.0. `CHANGELOG.md`
+> **Living document.** Updated 2026-07-11 for the software-side pre-lab
+> readiness campaign. `CHANGELOG.md`
 > is the authoritative shipped-history record; this file is only the forward
 > feature map.
 >
-> **Current frontier:** v0.64.0 is shipped from master `67b6301`, and the
+> **Current frontier:** v0.64.1 is shipped as the immutable `v0.64.1` tag, and the
 > release train v0.58.0 -> v0.64.0 closed the v0.60 Known Limitations backlog.
-> The next milestone is hardware lab verification via
-> `docs/lab_verification_checklist.md`, not a new code batch.
+> The active milestone is to close every safe software-side prerequisite before
+> hardware validation: H3/H4 runtime/frozen-build reliability, F35 multi-lab
+> extension contracts, and F36 operator-centered product/fleet readiness.
+> Physical gates remain governed by `docs/lab_verification_checklist.md` and
+> cannot be closed by simulation.
 
 ---
 
@@ -59,7 +63,8 @@
 | F32 | Knowledge-base indexer | ✅ DONE (v0.54.0; integration hardening v0.55.x) | M | M |
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
-| F35 | ASC hardware extension contract | 🔧 PARTIAL — generic acquisition backbone exists; registry/capabilities/metadata are missing | L | H |
+| F35 | ASC hardware extension contract | 🔧 PARTIAL — F35.1 registry/capabilities and F35.2 shared-bus timing/recovery contracts committed; F35.3 descriptor authority and downstream proof open | L | H |
+| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — F36.0 scenario contract and F36.1 immutable snapshots committed; F36.2 under review, F36.3-F36.6 open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -99,19 +104,63 @@ retention/rotation lifecycle bug is fixed.
 
 ---
 
-## Current milestone
+## Current milestone — software-side pre-lab readiness
 
-No release-blocking feature batch is queued.
+Before going to the laboratory, complete and independently review every gate
+that does not require real Windows hardware, a real instrument, a dummy load,
+an independent final element, or an operator in the physical loop:
 
-The remaining milestone is hardware lab verification:
+1. **H3/H4 runtime and packaging closure.** Atomic single-owner periodic-report
+   cutover, crash/restart/election evidence, Windows ONEDIR workflow contract,
+   instance-lock/lifecycle hardening, clean-SHA full suite, short soak, and the
+   longest locally honest soak.
+2. **F35 extension foundation.** Registry, narrow capability protocols, stable
+   channel descriptors, frozen-build allowlist proof, conformance kit, and a
+   passive reference-driver end-to-end proof.
+3. **F36 operator product foundation.** One backend-truth snapshot for
+   readiness/health/attention/experiment/data integrity, preflight and safety
+   recovery UX, passive infrastructure health, fleet-scale performance,
+   durable review/support evidence, and design-system-governed navigation.
+4. **Evidence packaging.** Exact real-Windows and physical-lab procedures,
+   expected artifacts, pass/fail thresholds, rollback/abort conditions, and
+   support-bundle capture must be ready before travel to the stand.
+
+The irreducible hardware milestone then remains:
 
 1. SQLite shim and startup gate on the laboratory Ubuntu PC.
 2. H5 / ZMQ idle-death check on the current laboratory PC.
 3. LakeShore runtime calibration on real hardware.
-4. Keithley TSP watchdog armed-mode pass on dummy load only.
+4. Keithley A8a-A8b upload/late-pet checks on dummy load; A8c-A8e host-death,
+   independent terminal V/I/P + trip-time, and independent final-element /
+   common-cause proof remain physical blockers. Phase C stays blocked until
+   all are evidenced; see the lab checklist for the full matrix.
 5. Windows frozen-build smoke (`install.bat`, shortcut, launcher).
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
+
+### Active evidence checkpoint — 2026-07-11
+
+This is feature-branch evidence, not shipped history and not a release claim:
+
+- The integrated H3/H4 runtime/lifecycle slice is committed at `026bf50`.
+  Its detached clean-SHA gate completed with 4,939 passed, 11 skipped, and
+  1 deselected. This closes that software integration checkpoint only; H4 R3,
+  the short and 72-hour soaks, and real-Windows ONEDIR evidence remain open.
+- GitHub CI was historically green for the v0.64 release line on Ubuntu and
+  Windows. The current pre-lab candidate does **not** inherit that result: its
+  CI gate remains open until the exact newly reviewed SHA is pushed and both
+  jobs pass.
+- The persistence P1A spool foundation has a native round-5 PASS for FIFO,
+  physical-cap/integrity, receipt-authorized acknowledgement, cancellation,
+  and close settlement. It remains uncommitted pending the required deferred
+  external review and final slice acceptance.
+- F35.1 and F35.2 are committed. F35.3A-1 remains under repair/review;
+  descriptor propagation, the conformance kit, and passive reference-driver
+  end-to-end proof are still open.
+- F36.0 and F36.1 are committed. F36.2 is under review and not committed;
+  F36.3 through F36.6 remain open.
+- No software, mock, replay, CI, soak, or screenshot evidence closes a real
+  Windows, dummy-load, independent-final-element, or physical-laboratory gate.
 
 ---
 
@@ -123,6 +172,13 @@ module boundary, but adding a new instrument type still requires central
 `engine.py` edits and several GUI paths infer semantics from deployed model or
 channel names. F35 turns that internal modularity into a supported extension
 contract for other ASC laboratories.
+
+Execution status: F35.1 (registry and narrow capability foundation) and F35.2
+(shared-bus timing/recovery contracts) are committed on the active feature branch.
+F35.3A-1 is still being repaired and independently reviewed. Until descriptor
+authority propagates through persistence/replay/reporting/GUI, the conformance
+kit passes, and the passive reference driver proves the whole path, F35 remains
+partial.
 
 Scope and acceptance criteria:
 
@@ -167,6 +223,152 @@ current safety authority.
 
 ---
 
+## Operator product and fleet-readiness milestone — F36
+
+CryoDAQ must become an operator-centered operating surface, not a collection
+of instrument modules and feature tabs. The primary display must answer, from
+backend truth: **can the run proceed, what is happening, what needs attention,
+is the system degrading, and what action is safe next?** This product layer
+must preserve the module-first driver architecture beneath it.
+
+### F36.0 — Task/evidence contract freeze — ✅ DONE
+
+Freeze 12 scripted operator scenarios covering cold start, disconnected engine,
+stale data, unsafe preconditions, alarm acknowledgement, safety recovery,
+cooldown deviation, storage degradation, passive infrastructure degradation,
+experiment handover, replay, and support-bundle capture. Define how later
+operator runs record task success, time, errors, and false
+safe/ready/recording presentations; this slice does not claim those
+measurements have already been collected.
+
+Acceptance for F36.0: scenario fixtures and measurement fields are deterministic
+and reusable, and no scenario requires real hazardous actuation. The target
+operating display must later demonstrate at least 90% task success, median
+decision time <=10 s, p95 <=20 s, and zero false safe/ready/recording states in
+the F36.2 operator-scenario gate before F36 closes.
+
+Implemented as the reviewed, still-unmeasured contract in
+`docs/operator_scenario_baseline.md` and
+`tests/fixtures/f36_operator_scenarios_v1.json`. This closes the baseline
+definition only; it does not claim the present UI or any operator measurement
+passes the target.
+
+### F36.1 — Canonical immutable operator view-models — ✅ DONE
+
+Create backend-owned/read-only contracts for:
+
+- `ReadinessSummary`
+- `PlantHealthSummary`
+- `InfrastructureNodeHealth`
+- `AttentionQueue`
+- `ExperimentOperatingState`
+- `DataIntegritySummary`
+- `CooldownHistorySummary`
+- `SupportBundleSummary`
+
+Panels consume one revisioned snapshot rather than independently polling and
+reinterpreting state. Every summary carries provenance, freshness, reason
+codes, revision/time, and explicit `ok | caution | warning | fault | stale |
+disconnected` semantics. Unknown never becomes optimistic green.
+
+Acceptance: model/view tests prove coherent revision cuts, defensive copies,
+disconnect/stale transitions, replay compatibility, and no GUI safety
+authority. Existing module panels remain usable as drill-down surfaces. The
+reviewed immutable snapshot contract is committed on the active feature branch;
+operator-surface acceptance remains a separate F36.2 gate.
+
+### F36.2 — Primary Operating Display, preflight, and recovery — 🔧 IN REVIEW
+
+Build a Shift Briefing / Preflight operating surface that prioritizes
+readiness, experiment state, top attention items, data integrity, and the next
+documented operator action. Add the missing reasoned safety-acknowledgement and
+recovery UI over the existing backend command contract; it must expose
+preconditions and never bypass the safety FSM.
+
+Reorganize navigation by operator intent, with contextual experiment creation:
+
+- **Operate:** Home/POD, Experiment, Source, Alarms, Instruments
+- **Analyze:** Analytics, Conductivity, MultiLine
+- **Record and review:** Log, Review/Archive
+- **More:** Calibration, Knowledge Base, Settings, Web, Engine restart
+
+Acceptance: all 12 F36.0 scenarios pass; keyboard-only operation and non-color
+state identification pass; no optimistic local state; legacy panel deep links
+remain compatible during migration. After the frontend is integrated into the
+real shell, launch CryoDAQ only in an isolated mock/replay configuration and
+capture every reachable screen and material state. Review those screenshots
+together with the scripted operator scenarios for clipping, hierarchy,
+translation, focus, stale/disconnected truth, non-color cues, and design-system
+conformance. Screenshot approval is evidence input, not a substitute for the
+scenario, accessibility, performance, or backend-truth gates.
+
+### F36.3 — Cooldown mission and durable attention history
+
+Unify live cooldown trajectory, deviation, phase, relevant alarms, recent
+history, and comparison-to-reference into one mission view. Make attention and
+incident evidence durable across GUI restarts rather than relying on bounded
+in-memory alarm history. Preserve the canonical alarm authority and audit
+revision; UI filtering/acknowledgement never rewrites truth.
+
+Acceptance: restart/replay tests reproduce the same incident timeline and
+cooldown decision state; missing data is explicit; exported evidence points to
+stable experiment/channel identities.
+
+### F36.4 — Passive infrastructure health and fleet scale
+
+Add an allowlisted read-only `HealthTelemetryDevice` contract for compressor,
+pump-station, cryocooler, and support nodes. It may report identity, heartbeat,
+mode, metrics, alarms, freshness, and provenance. It must not expose
+start/stop/reset/vent/purge/set commands or health-driven automatic
+remediation.
+
+Acceptance: a deterministic simulator proves at least 100 devices and 2,000
+channels at <=2 Hz human-readable update cadence, without unbounded widgets,
+poll tasks, queues, or memory growth. Aggregated/virtualized views meet the
+design-system frame, input, startup, and idle-memory budgets.
+
+### F36.5 — Onboard documentation, read-only API, and support bundle
+
+Ship version-matched offline operator/safety/troubleshooting documentation,
+document the read-only status/view-model API, and generate a deterministic,
+redacted support bundle containing versions, config fingerprints, health and
+attention snapshots, recent audit/log evidence, and integrity results.
+
+Acceptance: bundle schema and redaction tests cover tokens, credentials,
+operator/private data, absolute user paths, and hostile strings; identical
+inputs produce stable manifests; capture works while the engine is degraded.
+
+### F36.6 — Design-system and product-governance gate
+
+Every F36 UI slice must use `docs/design-system/` as a co-versioned contract.
+New or changed token/component/pattern/state semantics update the canonical
+specification, examples, accessibility/performance evidence, version, and
+changelog in the same slice. The industrial rule remains: quiet normal, loud
+exceptions, static data legibility, Russian operator wording, and no live-value
+animation.
+
+Acceptance: WCAG 2.2 AA-target evidence (with documented exceptions),
+keyboard/focus and NVDA/manual procedures, contrast/non-color states, scripted
+operator scenarios, and performance budgets pass. Screenshot approval alone is
+never sufficient.
+
+### F36 strict non-goals before physical validation
+
+- No GUI or product-assistant safety authority.
+- No health-driven automatic remediation.
+- No arbitrary network/device discovery.
+- No remote safety/source control or cloud dependency.
+- No generic hazardous-actuator SDK.
+- No claim that a mock, Linux/macOS source run, or CI workflow closes real
+  Windows ONEDIR, dummy-load, independent final-element, or lab gates.
+
+F36 follows ISA-101-style situational-awareness/HMI lifecycle practice,
+ISA-18.2 / IEC 62682 alarm lifecycle discipline, and Qt model/view and
+accessibility architecture, adapted to CryoDAQ's existing design system and
+safety boundaries.
+
+---
+
 ## Deferred feature work
 
 - **F8 — Cooldown ML prediction upgrade.** Still research-gated: dataset
@@ -180,8 +382,13 @@ current safety authority.
 - **F35 is not deferred.** Implement it after the current lab-readiness
   integration/frozen gates and before calling CryoDAQ a multi-lab ASC
   platform or adding another safety-critical source family.
-- **F18 — CI/CD residuals.** Matrix and green full suite are done; coverage
-  publishing, release automation, and binary artifacts remain optional.
+- **F36 is not deferred.** Complete its safe software and operator-scenario
+  gates before laboratory validation; keep its hazardous-control non-goals and
+  physical acceptance gates open.
+- **F18 — CI/CD residuals.** The matrix and green full suite are historical
+  v0.64 release-line evidence only; the active candidate exact-SHA CI remains
+  open. Coverage publishing, release automation, and binary artifacts remain
+  optional.
 - **F-Y — Diagnostic mode rework.** Re-spec only if lab operation produces
   concrete diagnostic decisions that the current alarm/overlay path cannot
   support.
@@ -196,3 +403,5 @@ current safety authority.
 - `docs/architecture.md` — tracked architecture overview.
 - `docs/design-system/` — tracked UI design-system source.
 - `docs/lab_verification_checklist.md` — next milestone protocol.
+- `AGENTS.md` / `docs/ORCHESTRATION.md` — canonical engineering and evidence
+  workflow for roadmap slices.

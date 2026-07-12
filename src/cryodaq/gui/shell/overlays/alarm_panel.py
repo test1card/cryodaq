@@ -284,6 +284,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
         self._v2_poll_in_flight: bool = False
         self._v1_ack_buttons: list[QPushButton] = []
         self._v2_ack_buttons: list[QPushButton] = []
+        self._read_only: bool = False
 
         self.setObjectName("alarmPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -400,9 +401,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
         # IV.3 F2 amend: unified empty-state title uses MUTED_FOREGROUND
         # per the DS empty-state convention — a full-weight FOREGROUND
         # here competes visually with the actual alarm rows.
-        title.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        title.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(title)
 
         subtitle = QLabel("Система отслеживает все каналы автоматически.")
@@ -410,9 +409,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" font-style: italic;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; font-style: italic;"
         )
         layout.addWidget(subtitle)
 
@@ -426,17 +423,12 @@ class AlarmPanel(OverlayPanelBase, QWidget):
         layout.setSpacing(theme.SPACE_2)
         title = QLabel("ТРЕВОГИ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         self._summary_label = QLabel("")
         self._summary_label.setFont(_label_font())
-        self._summary_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._summary_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         self._summary_label.setVisible(False)
         layout.addWidget(self._summary_label)
         return header
@@ -576,6 +568,12 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             self._cooldown_poll_timer.stop()
         self._apply_ack_enabled()
 
+    def set_read_only(self, read_only: bool) -> None:
+        """Preserve alarm inspection while disabling replay acknowledgement."""
+
+        self._read_only = bool(read_only)
+        self._apply_ack_enabled()
+
     def update_v2_status(self, payload: dict) -> None:
         """Update v2 alarm table from an ``alarm_v2_status`` payload.
 
@@ -691,7 +689,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             if alarm.state == "active":
                 btn = _make_ack_button(alarm.severity)
                 btn.clicked.connect(lambda _checked=False, name=alarm.name: self._acknowledge(name))
-                btn.setEnabled(self._connected)
+                btn.setEnabled(self._connected and not self._read_only)
                 self._v1_ack_buttons.append(btn)
                 self._table.setCellWidget(row_idx, 7, btn)
             else:
@@ -778,7 +776,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             else:
                 btn = _make_ack_button(level, label="ПОДТВЕРДИТЬ")
                 btn.clicked.connect(lambda _checked=False, aid=alarm_id: self._acknowledge_v2(aid))
-                btn.setEnabled(self._connected)
+                btn.setEnabled(self._connected and not self._read_only)
                 self._v2_ack_buttons.append(btn)
                 self._v2_table.setCellWidget(row_idx, 5, btn)
 
@@ -814,19 +812,11 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             if level in v2_counts:
                 v2_counts[level] += 1
         total_critical = (
-            sum(
-                1
-                for row in self._alarms.values()
-                if row.state == "active" and row.severity == "CRITICAL"
-            )
+            sum(1 for row in self._alarms.values() if row.state == "active" and row.severity == "CRITICAL")
             + v2_counts["CRITICAL"]
         )
         total_warning = (
-            sum(
-                1
-                for row in self._alarms.values()
-                if row.state == "active" and row.severity == "WARNING"
-            )
+            sum(1 for row in self._alarms.values() if row.state == "active" and row.severity == "WARNING")
             + v2_counts["WARNING"]
         )
 
@@ -850,12 +840,10 @@ class AlarmPanel(OverlayPanelBase, QWidget):
     # ------------------------------------------------------------------
 
     def _acknowledge(self, alarm_name: str) -> None:
-        worker = ZmqCommandWorker(
-            {"cmd": "alarm_acknowledge", "alarm_name": alarm_name}, parent=self
-        )
-        self._register_worker(
-            worker, lambda result, name=alarm_name: self._on_ack_result(result, name)
-        )
+        if self._read_only:
+            return
+        worker = ZmqCommandWorker({"cmd": "alarm_acknowledge", "alarm_name": alarm_name}, parent=self)
+        self._register_worker(worker, lambda result, name=alarm_name: self._on_ack_result(result, name))
 
     def _on_ack_result(self, result: dict, alarm_name: str) -> None:
         if result.get("ok"):
@@ -868,10 +856,10 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             )
 
     def _acknowledge_v2(self, alarm_id: str) -> None:
+        if self._read_only:
+            return
         worker = ZmqCommandWorker({"cmd": "alarm_v2_ack", "alarm_name": alarm_id}, parent=self)
-        self._register_worker(
-            worker, lambda result, aid=alarm_id: self._on_ack_v2_result(result, aid)
-        )
+        self._register_worker(worker, lambda result, aid=alarm_id: self._on_ack_v2_result(result, aid))
 
     def _on_ack_v2_result(self, result: dict, alarm_id: str) -> None:
         if result.get("ok"):
@@ -992,7 +980,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
     def _apply_ack_enabled(self) -> None:
         for btn in list(self._v1_ack_buttons) + list(self._v2_ack_buttons):
             try:
-                btn.setEnabled(self._connected)
+                btn.setEnabled(self._connected and not self._read_only)
             except RuntimeError:
                 # Button's C++ object already gone (row rebuilt) — prune.
                 continue

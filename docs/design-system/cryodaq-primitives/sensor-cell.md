@@ -4,7 +4,7 @@ keywords: sensor, cell, channel, temperature, pressure, reading, kelvin, tile, g
 applies_to: single-channel data cell widget
 status: active
 implements: src/cryodaq/gui/dashboard/sensor_cell.py; src/cryodaq/gui/dashboard/dynamic_sensor_grid.py (Phase B.3)
-last_updated: 2026-04-17
+last_updated: 2026-07-12
 references: rules/data-display-rules.md, rules/accessibility-rules.md, patterns/numeric-formatting.md
 ---
 
@@ -63,6 +63,7 @@ Minimum cell size: 160×80px (per `DynamicSensorGrid._MIN_CELL_WIDTH` / `_CELL_H
 8. **No emoji / no icon in default state.** Clean. Icon prefix only when channel has a specific state to communicate (fault icon next to value if fault). (RULE-COPY-005)
 9. **Height default = ROW_HEIGHT × 1.8** or so — enough for 2-3 lines of stacked text. Not exactly ROW_HEIGHT (which is buttons).
 10. **Interactive on click/double-click** — click shows hover info (popover), double-click opens full channel diagnostic. Single-click on cell must NOT execute destructive command.
+11. **Replay keeps inspection but removes configuration authority.** `SensorCell.set_read_only(True)` cancels any in-flight inline editor, rejects double-click/queued rename, and omits Rename/Hide from the context menu. Plot and history inspection remain available. `DynamicSensorGrid` propagates this state to existing and rebuilt cells, while `DashboardView` independently rejects queued/direct rename and hide signals before `ChannelManager.save()`.
 
 ## Visual state matrix
 
@@ -114,6 +115,9 @@ class SensorCell(QFrame):
     
     def update_reading(self, reading: SensorReading) -> None:
         """Update displayed value + status. Atomic — no animation."""
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Remove rename/hide authority while retaining inspection."""
 ```
 
 ## Reference implementation
@@ -343,4 +347,5 @@ if r.status == "fault":
 
 ## Changelog
 
+- 2026-07-12 (v1.2.0): Added the replay/configuration gate. Mouse and keyboard rename, context-menu hide, and queued/direct persistence signals fail closed; plot/history inspection remains available.
 - 2026-04-17: Initial version. Documents Phase B.3 implementation (DynamicSensorGrid with width-driven dynamic column count: `cols = available_width // (MIN_CELL_WIDTH + spacing)`, `MIN_CELL_WIDTH = 160`, `CELL_HEIGHT = 80`). Cold/warm distinction via COLD_HIGHLIGHT left edge. Positionally fixed reference status surfaced in tooltip for Т11 / Т12 («Неподвижный опорный канал»). Fault state uses border + icon + color redundancy. Hover / keyboard-focus / pressed interaction states added to the visual state matrix (FR-021).

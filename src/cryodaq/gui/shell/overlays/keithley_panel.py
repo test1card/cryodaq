@@ -222,25 +222,22 @@ class _SmuChannelBlock(QFrame):
     channel_target_updated = Signal(str, float)
     channel_limits_updated = Signal(str, float, float)
 
-    def __init__(
-        self, key: str, label: str, palette_index: int, parent: QWidget | None = None
-    ) -> None:
+    def __init__(self, key: str, label: str, palette_index: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._key = key
         self._label_text = label
         self._palette_index = palette_index
         self._channel_state: str = "off"
         self._connected: bool = False
-        self._safety_ready: bool = True
+        self._safety_ready: bool = False
+        self._read_only: bool = False
         # IV.2 A.3: default to the longest per-block buffer so the
         # first tick before _apply_global_window lands renders the
         # full available history. Parent panel overwrites this the
         # moment the TimeWindow controller fires.
         self._window_s: float = float(_BUFFER_MAXLEN)
         self._workers: list[ZmqCommandWorker] = []
-        self._buffers: dict[str, deque[tuple[float, float]]] = {
-            m: deque(maxlen=_BUFFER_MAXLEN) for m in _MEASUREMENTS
-        }
+        self._buffers: dict[str, deque[tuple[float, float]]] = {m: deque(maxlen=_BUFFER_MAXLEN) for m in _MEASUREMENTS}
         self._value_labels: dict[str, QLabel] = {}
         self._plot_widgets: dict[str, pg.PlotWidget] = {}
         self._plots: dict[str, pg.PlotDataItem] = {}
@@ -278,9 +275,7 @@ class _SmuChannelBlock(QFrame):
 
         self._title_label = QLabel(self._label_text)
         self._title_label.setFont(_title_font())
-        self._title_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-        )
+        self._title_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(self._title_label)
         layout.addStretch()
 
@@ -393,9 +388,7 @@ class _SmuChannelBlock(QFrame):
 
         title = QLabel(_MEASUREMENT_LABELS[key])
         title.setFont(_label_font())
-        title.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        title.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tile_layout.addWidget(title)
 
@@ -474,8 +467,7 @@ class _SmuChannelBlock(QFrame):
         else:
             color = theme.MUTED_FOREGROUND
         self._state_badge.setStyleSheet(
-            f"color: {color}; background: transparent; border: none;"
-            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+            f"color: {color}; background: transparent; border: none; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
         )
         self._apply_frame_style()
 
@@ -518,15 +510,11 @@ class _SmuChannelBlock(QFrame):
     def _caption(text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(_label_font())
-        label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         return label
 
     @staticmethod
-    def _spinbox(
-        minimum: float, maximum: float, value: float, step: float, decimals: int
-    ) -> QDoubleSpinBox:
+    def _spinbox(minimum: float, maximum: float, value: float, step: float, decimals: int) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
         spin.setRange(minimum, maximum)
         spin.setSingleStep(step)
@@ -551,6 +539,8 @@ class _SmuChannelBlock(QFrame):
     # ------------------------------------------------------------------
 
     def _on_start_clicked(self) -> None:
+        if self._read_only:
+            return
         p = float(self._p_spin.value())
         v = float(self._v_spin.value())
         i = float(self._i_spin.value())
@@ -566,10 +556,14 @@ class _SmuChannelBlock(QFrame):
         )
 
     def _on_stop_clicked(self) -> None:
+        if self._read_only:
+            return
         self.channel_stop_requested.emit(self._key)
         self._dispatch_command({"cmd": "keithley_stop", "channel": self._key})
 
     def _on_emergency_clicked(self) -> None:
+        if self._read_only:
+            return
         answer = QMessageBox.warning(
             self,
             "Аварийное отключение",
@@ -587,17 +581,17 @@ class _SmuChannelBlock(QFrame):
         self._dispatch_command({"cmd": "keithley_emergency_off", "channel": self._key})
 
     def _on_p_spin_changed(self, value: float) -> None:
-        if self._channel_state != "on" or value <= 0:
+        if self._read_only or self._channel_state != "on" or value <= 0:
             return
         self._p_debounce.start()
 
     def _on_limit_spin_changed(self, _value: float | None = None) -> None:
-        if self._channel_state != "on":
+        if self._read_only or self._channel_state != "on":
             return
         self._limits_debounce.start()
 
     def _send_p_target(self) -> None:
-        if self._channel_state != "on":
+        if self._read_only or self._channel_state != "on":
             return
         p = float(self._p_spin.value())
         if p <= 0:
@@ -612,7 +606,7 @@ class _SmuChannelBlock(QFrame):
         )
 
     def _send_limits(self) -> None:
-        if self._channel_state != "on":
+        if self._read_only or self._channel_state != "on":
             return
         v = float(self._v_spin.value())
         i = float(self._i_spin.value())
@@ -630,6 +624,10 @@ class _SmuChannelBlock(QFrame):
 
     def _dispatch_command(self, cmd: dict) -> None:
         """Fire-and-forget ZMQ command. Result is logged; UI does not block."""
+
+        if self._read_only:
+            logger.warning("Keithley command discarded while panel is read-only: %s", cmd.get("cmd"))
+            return
 
         worker = ZmqCommandWorker(cmd, parent=self)
         worker.finished.connect(self._on_command_result)
@@ -677,11 +675,15 @@ class _SmuChannelBlock(QFrame):
         self._safety_ready = ready
         self._update_control_enablement()
 
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
+        self._update_control_enablement()
+
     def set_window(self, seconds: float) -> None:
         self._window_s = max(1.0, float(seconds))
 
     def _update_control_enablement(self) -> None:
-        interactive_ok = self._connected and self._safety_ready
+        interactive_ok = self._connected and self._safety_ready and not self._read_only
         self._p_spin.setEnabled(interactive_ok)
         self._v_spin.setEnabled(interactive_ok)
         self._i_spin.setEnabled(interactive_ok)
@@ -691,7 +693,7 @@ class _SmuChannelBlock(QFrame):
         self._stop_btn.setEnabled(stop_enabled)
         # Emergency stays reachable whenever we have a live link, even if
         # safety preconditions block normal control. It's the escape hatch.
-        self._emergency_btn.setEnabled(self._connected)
+        self._emergency_btn.setEnabled(self._connected and not self._read_only)
 
     # ------------------------------------------------------------------
     # Readings + refresh
@@ -760,9 +762,7 @@ class _SmuChannelBlock(QFrame):
             plot_item.setXRange(left, 0, padding=0)
 
     def _refresh_stale(self, now: float) -> None:
-        should_be_stale = self._channel_state == "on" and is_stale(
-            self._last_update_ts, _STALE_AFTER_S, now=now
-        )
+        should_be_stale = self._channel_state == "on" and is_stale(self._last_update_ts, _STALE_AFTER_S, now=now)
         if should_be_stale == self._stale:
             return
         self._stale = should_be_stale
@@ -800,7 +800,8 @@ class KeithleyPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._connected: bool = False
-        self._safety_ready: bool = True
+        self._safety_ready: bool = False
+        self._read_only: bool = False
         self._banner_timer = QTimer(self)
         self._banner_timer.setSingleShot(True)
         self._banner_timer.setInterval(_BANNER_AUTO_CLEAR_MS)
@@ -875,9 +876,7 @@ class KeithleyPanel(QWidget):
         conn_font = _label_font()
         conn_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
         self._connection_label.setFont(conn_font)
-        self._connection_label.setStyleSheet(
-            f"color: {theme.STATUS_FAULT}; background: transparent; border: none;"
-        )
+        self._connection_label.setStyleSheet(f"color: {theme.STATUS_FAULT}; background: transparent; border: none;")
         layout.addWidget(self._connection_label)
         return header
 
@@ -887,9 +886,7 @@ class KeithleyPanel(QWidget):
         self._banner_label.setVisible(False)
         self._banner_label.setObjectName("keithleyBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         return self._banner_label
 
     def _build_gate_label(self) -> QWidget:
@@ -917,9 +914,7 @@ class KeithleyPanel(QWidget):
 
         caption = QLabel("Окно:")
         caption.setFont(_label_font())
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(caption)
 
         self._time_selector = TimeWindowSelector(show_6h=True, parent=self)
@@ -970,18 +965,24 @@ class KeithleyPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_start_both(self) -> None:
+        if self._read_only:
+            return
         self.both_channels_start_requested.emit()
         for block in self._blocks.values():
             block._on_start_clicked()
         self.show_info("Команды запуска отправлены для обоих каналов.")
 
     def _on_stop_both(self) -> None:
+        if self._read_only:
+            return
         self.both_channels_stop_requested.emit()
         for block in self._blocks.values():
             block._on_stop_clicked()
         self.show_info("Команды остановки отправлены для обоих каналов.")
 
     def _on_emergency_both(self) -> None:
+        if self._read_only:
+            return
         answer = QMessageBox.warning(
             self,
             "Аварийное отключение A+B",
@@ -1067,7 +1068,10 @@ class KeithleyPanel(QWidget):
         self._safety_ready = ready
         for block in self._blocks.values():
             block.set_safety_ready(ready)
-        if not ready:
+        if self._read_only:
+            self._gate_reason_label.setText("Архивный повтор: управление источником недоступно")
+            self._gate_reason_label.setVisible(True)
+        elif not ready:
             text = "Управление заблокировано"
             if reason:
                 text = f"{text}: {reason}"
@@ -1078,11 +1082,25 @@ class KeithleyPanel(QWidget):
             self._gate_reason_label.setText("")
         self._update_both_buttons_enablement()
 
+    def set_read_only(self, read_only: bool) -> None:
+        """Keep replay/source inspection available while removing command authority."""
+
+        self._read_only = bool(read_only)
+        for block in self._blocks.values():
+            block.set_read_only(self._read_only)
+        if self._read_only:
+            self._gate_reason_label.setText("Архивный повтор: управление источником недоступно")
+            self._gate_reason_label.setVisible(True)
+        elif not self._safety_ready:
+            self._gate_reason_label.setText("Управление заблокировано: нет авторитетных данных Safety")
+            self._gate_reason_label.setVisible(True)
+        self._update_both_buttons_enablement()
+
     def _update_both_buttons_enablement(self) -> None:
-        gated = self._connected and self._safety_ready
+        gated = self._connected and self._safety_ready and not self._read_only
         self._start_both_btn.setEnabled(gated)
         self._stop_both_btn.setEnabled(gated)
-        self._emergency_both_btn.setEnabled(self._connected)
+        self._emergency_both_btn.setEnabled(self._connected and not self._read_only)
 
     # ------------------------------------------------------------------
     # Status banner

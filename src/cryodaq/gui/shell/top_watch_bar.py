@@ -54,6 +54,7 @@ def _format_pressure(p: float) -> str:
     mantissa, exp = f"{p:.1e}".split("e")
     return f"{mantissa}e{int(exp)}"
 
+
 # Positionally fixed reference channels (design system invariant #21,
 # MANIFEST.md decision #21). Т11 / Т12 are physically immovable on the
 # second stage (nitrogen plate); cannot be relocated without dismantling
@@ -103,9 +104,7 @@ class TopWatchBar(QWidget):
     alarms_clicked = Signal()
     experiment_status_received = Signal(dict)  # B.5: forward /status to dashboard
 
-    def __init__(
-        self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None
-    ) -> None:
+    def __init__(self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         # DESIGN: invariant #1 — height = HEADER_HEIGHT (56), coupled to
         # TOOL_RAIL_WIDTH per RULE-SPACE-006 (corner square).
@@ -122,16 +121,14 @@ class TopWatchBar(QWidget):
         # Per-channel last-seen tracking: channel_id -> (monotonic_ts, status)
         self._channel_last_seen: dict[str, tuple[float, ChannelStatus]] = {}
         self._alarm_count: int = 0
+        self._replay_pinned = False
 
         self._build_ui()
         self._build_persistent_context()
-        # v0.55.2 A5: presume all visible Т-channels are OK until either a
-        # real reading arrives (which updates the timestamp) or
-        # _STALE_TIMEOUT_S elapses (which kicks them back to "ожидают").
-        # Without this seed the counter shows "0/16 норма • 16 ожидают"
-        # at startup even though the per-cell SensorCells already render
-        # "Норма" from cached/initial state — a visible inconsistency.
-        self._seed_visible_channels_ok()
+        # Cold start is deliberately empty.  Only an actual reading may add a
+        # current channel state; otherwise the header must remain visibly
+        # unavailable instead of manufacturing a brief green/OK interval.
+        self._refresh_channels()
 
         # 1 Hz polling for zones 1, 2, 3
         self._fast_timer = QTimer(self)
@@ -234,9 +231,7 @@ class TopWatchBar(QWidget):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setFixedHeight(20)
-        sep.setStyleSheet(
-            f"color: {theme.BORDER}; max-width: 1px; background: transparent;"
-        )
+        sep.setStyleSheet(f"color: {theme.BORDER}; max-width: 1px; background: transparent;")
         lay.addWidget(sep)
         return container
 
@@ -251,9 +246,7 @@ class TopWatchBar(QWidget):
     def _build_persistent_context(self) -> None:
         """Add 4-value persistent context strip to the watch bar."""
         # v0.55.2 ds-007: route inline font sizes/weights through tokens.
-        label_style = (
-            f"color: {theme.TEXT_MUTED}; font-size: {theme.FONT_SIZE_XS}px;"
-        )
+        label_style = f"color: {theme.TEXT_MUTED}; font-size: {theme.FONT_SIZE_XS}px;"
         value_style = (
             f"color: {theme.TEXT_PRIMARY}; "
             f"font-size: {theme.FONT_SIZE_SM}px; "
@@ -273,15 +266,11 @@ class TopWatchBar(QWidget):
             "}"
         )
         ctx = QHBoxLayout(self._context_frame)
-        ctx.setContentsMargins(
-            theme.SPACE_2, theme.SPACE_1 // 2, theme.SPACE_2, theme.SPACE_1 // 2
-        )
+        ctx.setContentsMargins(theme.SPACE_2, theme.SPACE_1 // 2, theme.SPACE_2, theme.SPACE_1 // 2)
         ctx.setSpacing(theme.SPACE_3)
 
         # Pressure
-        self._ctx_pressure_label = QLabel(
-            "\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435"
-        )  # Давление
+        self._ctx_pressure_label = QLabel("\u0414\u0430\u0432\u043b\u0435\u043d\u0438\u0435")  # Давление
         self._ctx_pressure_label.setStyleSheet(label_style)
         self._ctx_pressure_value = QLabel("\u2014")
         self._ctx_pressure_value.setStyleSheet(value_style)
@@ -332,9 +321,7 @@ class TopWatchBar(QWidget):
     def _make_ctx_dot() -> QLabel:
         """Middle dot separator for items within persistent context strip."""
         dot = QLabel(" \u00b7 ")  # · middle dot
-        dot.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_XS}px;"
-        )
+        dot.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_XS}px;")
         return dot
 
     # ------------------------------------------------------------------
@@ -408,23 +395,6 @@ class TopWatchBar(QWidget):
     # Reading ingestion (called from MainWindowV2._dispatch_reading)
     # ------------------------------------------------------------------
 
-    def _seed_visible_channels_ok(self) -> None:
-        """Seed _channel_last_seen with OK for every visible Т-channel.
-
-        Called once at construction so the zone-3 counter does not flash
-        "0/N норма • N ожидают" while waiting for the first ZMQ reading
-        to arrive. Real readings overwrite the seed; if no reading lands
-        within _STALE_TIMEOUT_S the stale check in _refresh_channels
-        will kick the entries back to "ожидают" — same semantics as
-        before, just with a sane initial state.
-        """
-        if self._channel_mgr is None:
-            return
-        now = time.monotonic()
-        for ch in self._channel_mgr.get_all_visible():
-            if ch.startswith("Т"):
-                self._channel_last_seen.setdefault(ch, (now, ChannelStatus.OK))
-
     def on_reading(self, reading: Reading) -> None:
         """Update per-channel last-seen cache and persistent context."""
         ch = reading.channel
@@ -495,14 +465,14 @@ class TopWatchBar(QWidget):
     def _refresh_channels(self) -> None:
         """Re-render zone 3 using ChannelManager visible channels as denominator."""
         if self._channel_mgr is None:
-            self._channel_label.setText("● —/— норма")
+            self._channel_label.setText("◇ Данные каналов недоступны")
             self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
 
         visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("Т")]
         total = len(visible_ids)
         if total == 0:
-            self._channel_label.setText("● —/— норма")
+            self._channel_label.setText("◇ Нет настроенных каналов")
             self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
 
@@ -529,26 +499,35 @@ class TopWatchBar(QWidget):
                 ):
                     worst = ChannelStatus.OVERRANGE
 
-        color = {
-            ChannelStatus.OK: theme.STATUS_OK,
-            ChannelStatus.OVERRANGE: theme.STATUS_CAUTION,
-            ChannelStatus.SENSOR_ERROR: theme.STATUS_FAULT,
-        }.get(worst, theme.TEXT_MUTED)
+        if non_ok:
+            color = {
+                ChannelStatus.OVERRANGE: theme.STATUS_CAUTION,
+                ChannelStatus.SENSOR_ERROR: theme.STATUS_FAULT,
+            }.get(worst, theme.TEXT_MUTED)
+            cue = "▲" if worst is ChannelStatus.OVERRANGE else "■"
+        elif waiting:
+            color = theme.STATUS_STALE
+            cue = "◇"
+        else:
+            color = theme.STATUS_OK
+            cue = "●"
 
-        text = f"● {ok_count}/{total} норма"
+        if waiting == total:
+            text = f"{cue} Нет текущих данных · {waiting} ожидают"
+        elif waiting:
+            text = f"{cue} {ok_count}/{total} текущих"
+        else:
+            text = f"{cue} {ok_count}/{total} норма"
         if non_ok > 0:
             text += f" · {non_ok} вне нормы"
-        if waiting > 0:
+        if waiting > 0 and waiting != total:
             waits = ru_plural(waiting, "ожидает", "ожидают", "ожидают")
             text += f" · {waiting} {waits}"
         # Item 13: tooltip explains the count breakdown.
         tooltip_parts = [f"{total} каналов температуры"]
         tooltip_parts.append(f"{ok_count} в норме")
         if waiting:
-            tooltip_parts.append(
-                f"{waiting} {ru_plural(waiting, 'ожидает', 'ожидают', 'ожидают')}"
-                " первого показания"
-            )
+            tooltip_parts.append(f"{waiting} {ru_plural(waiting, 'ожидает', 'ожидают', 'ожидают')} первого показания")
         if non_ok:
             tooltip_parts.append(f"{non_ok} вне нормы")
         self._channel_label.setText(text)
@@ -594,9 +573,7 @@ class TopWatchBar(QWidget):
     def _on_recent_alarms_result(self, result: dict) -> None:
         if not result.get("ok"):
             return
-        plan = plan_from_response(
-            result, self._alarm_sound_last_seq, have_baseline=self._alarm_sound_have_baseline
-        )
+        plan = plan_from_response(result, self._alarm_sound_last_seq, have_baseline=self._alarm_sound_have_baseline)
         self._alarm_sound_have_baseline = True
         self._alarm_sound_last_seq = plan.next_seq
         for level in plan.new_levels:
@@ -623,8 +600,18 @@ class TopWatchBar(QWidget):
             self._engine_label.setText("● Engine: нет связи")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
 
+    def set_replay_mode(self, replay: bool) -> None:
+        """Pin archive/replay truth before the first asynchronous status poll."""
+
+        if replay:
+            self._replay_pinned = True
+            self._update_mode_badge("replay", None)
+
     def _update_mode_badge(self, app_mode: str | None, result: dict | None = None) -> None:
         """Update mode badge from app_mode field in /status response."""
+        if self._replay_pinned and app_mode != "replay":
+            app_mode = "replay"
+            result = None
         self._app_mode = app_mode
         if app_mode is None:
             self._mode_badge.setVisible(False)
@@ -747,9 +734,7 @@ class TopWatchBar(QWidget):
         self._mode_badge.setCursor(Qt.CursorShape.WaitCursor)
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        self._mode_switch_worker = ZmqCommandWorker(
-            {"cmd": "set_app_mode", "app_mode": target}, parent=self
-        )
+        self._mode_switch_worker = ZmqCommandWorker({"cmd": "set_app_mode", "app_mode": target}, parent=self)
         self._mode_switch_worker.finished.connect(self._on_mode_switch_result)
         self._mode_switch_worker.start()
 

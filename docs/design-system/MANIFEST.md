@@ -1,14 +1,14 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-04-17
+last_updated: 2026-07-11
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-04-17
-**Session:** Phase UI-1 v2 design system creation
-**Scope:** Batches 1-6 complete. Full design system v1.0.1 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-07-11
+**Session:** Phase UI-1 foundation plus F36 operator-snapshot additions
+**Scope:** Design system v1.2.0 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -16,20 +16,26 @@ last_updated: 2026-04-17
 design-system/
 ├── README.md                           # Entry point, navigation, precedence rules
 ├── MANIFEST.md                         # This file
+├── CHANGELOG.md                        # Design-system release history
+├── VERSION                             # Authoritative version marker
 ├── ANTI_PATTERNS.md                    # 40+ forbidden patterns with historical refs
+├── DEEP_AUDIT_REPORT.md                # Retained v1.0.0 audit evidence
+├── adr/                                # 2 accepted design decisions
+│   ├── 001-light-theme-status-unlock.md
+│   └── 002-accent-status-decoupling.md
 │
 ├── tokens/                             # Foundation: 11 files, what exists and why
-│   ├── colors.md                       # 71 color tokens across 9 namespaces
+│   ├── colors.md                       # 77 color/runtime-color constants
 │   ├── typography.md                   # 36 typography tokens, Fira fonts, Cyrillic rules
 │   ├── spacing.md                      # 9 spacing tokens + semantic aliases
 │   ├── radius.md                       # 5 radius tokens, tight scale
-│   ├── layout.md                       # 5 layout tokens, coupled constants
+│   ├── layout.md                       # 7 layout tokens, including coupled constants
 │   ├── chart-tokens.md                 # pyqtgraph integration
-│   ├── motion.md                       # PROPOSED — duration/easing tokens
+│   ├── motion.md                       # 3 shipped durations; easing/expanded scale proposed
 │   ├── elevation.md                    # zero-shadow policy + z-index levels
 │   ├── icons.md                        # Lucide bundle + emoji prohibition
 │   ├── breakpoints.md                  # desktop-only responsive
-│   └── keyboard-shortcuts.md           # PROPOSED — shortcut registry
+│   └── keyboard-shortcuts.md           # canonical bindings; Python constants proposed
 │
 ├── rules/                              # Enforcement: 9 files, 79 rules with code examples
 │   ├── color-rules.md                  # COLOR-001..010
@@ -42,7 +48,7 @@ design-system/
 │   ├── content-voice-rules.md          # COPY-001..008
 │   └── governance-rules.md             # GOV-001..003 (thin pointers to governance/*)
 │
-└── components/                         # Generic primitives: 14 files, anatomy + invariants + code
+├── components/                         # Generic primitives: 14 files, anatomy + invariants + code
     ├── card.md                         # generic rounded container
     ├── button.md                       # secondary/ghost/destructive/icon/hold-confirm
     ├── input-field.md                  # text/numeric/search/password + validation
@@ -58,18 +64,27 @@ design-system/
     ├── tab-group.md                    # sibling view switcher
     └── chart-tile.md                   # BentoTile + pyqtgraph variant
 
-└── cryodaq-primitives/                 # Domain-specific: 9 files, Phase II implementation guides
+├── cryodaq-primitives/                 # Domain-specific: 18 files
     ├── top-watch-bar.md                # 4 vitals + mode badge (B.4 + B.4.5.2)
     ├── tool-rail.md                    # left icon nav (Phase 0)
     ├── bottom-status-bar.md            # system status strip
     ├── sensor-cell.md                  # single-channel cell (B.3)
     ├── phase-stepper.md                # 6-phase stepper (B.5/B.5.5/B.5.6)
     ├── alarm-badge.md                  # header alarm indicator
+    ├── alarm-panel.md                  # alarm detail surface
+    ├── analytics-panel.md              # analysis surface
+    ├── archive-panel.md                # persisted-data surface
+    ├── calibration-panel.md            # calibration surface
+    ├── conductivity-panel.md           # conductivity surface
     ├── experiment-card.md              # active-experiment dashboard tile + overlay
+    ├── experiment-panel.md             # experiment detail surface
+    ├── instruments-panel.md            # instrument detail surface
     ├── quick-log-block.md              # inline operator log widget
-    └── keithley-panel.md               # dual-channel SMU control
+    ├── keithley-panel.md               # dual-channel SMU control
+    ├── operator-log-panel.md            # operator-log surface
+    └── operator-snapshot-components.md # F36 pure status/attention/readiness/card atoms
 
-└── patterns/                           # Cross-surface patterns: 9 files, composition recipes
+├── patterns/                           # Cross-surface patterns: 11 files, composition recipes
     ├── page-scaffolds.md               # 3 canonical scaffolds (Bento / Single-panel / Split)
     ├── information-hierarchy.md        # 3-tier model + F-pattern scan order
     ├── cross-surface-consistency.md    # 5 consistency dimensions + two-surface test
@@ -78,9 +93,11 @@ design-system/
     ├── real-time-data.md               # coalescing, stale detection, update pipeline
     ├── numeric-formatting.md           # per-quantity format reference + tabular-nums
     ├── destructive-actions.md          # 3-severity classification + two-layer pattern
-    └── copy-voice.md                   # Russian vocabulary lexicon + imperative/descriptive
+    ├── copy-voice.md                   # Russian vocabulary lexicon + imperative/descriptive
+    ├── operator-snapshot-presentation.md # coherent revision and authority composition
+    └── operator-display-composition.md # root-owned eight-card POD composition
 
-└── accessibility/                      # Accessibility commitments: 5 files
+├── accessibility/                      # Accessibility commitments: 5 files
     ├── wcag-baseline.md                # WCAG 2.2 AA target, scope, per-criterion commitment
     ├── contrast-matrix.md              # measured ratios all tokens vs all surfaces
     ├── keyboard-navigation.md          # tab order, shortcut registry, focus trap
@@ -98,15 +115,17 @@ design-system/
 
 ## Statistics
 
-- **67 files, ~20 906 lines, ~1064 KB markdown**
+- **81 Markdown files in the design-system tree**: 77 contract/specification
+  documents, README, MANIFEST, CHANGELOG, and the retained deep-audit report;
+  `VERSION` is the additional non-Markdown release marker.
 - **79 rule IDs** across 9 rule categories (Batches 1+2+6)
 - **14 generic components** specified (Batch 3)
-- **9 CryoDAQ domain primitives** specified (Batch 4)
-- **9 cross-surface patterns** specified (Batch 5)
+- **18 CryoDAQ domain primitives** specified (Batch 4 + F36)
+- **11 cross-surface patterns** specified (Batch 5 + F36)
 - **5 accessibility documents** (Batch 6)
 - **6 governance documents** (Batch 6)
-- **74 color tokens** inventoried from theme.py (includes RING + SUCCESS_400 / WARNING_400 / DANGER_400 chart series additions; Phase III.A added SELECTION_BG + FOCUS_RING neutral-interaction tokens to every bundled theme pack — see `adr/002-accent-status-decoupling.md`)
-- **141 tokens total** (colors 76 + typography 36 + spacing 9 + layout 7 + radius 5 + motion 3 + quantity 4 + corner-shape 1)
+- **77 color/runtime-color constants** inventoried from theme.py (includes RING + SUCCESS_400 / WARNING_400 / DANGER_400 chart series additions; Phase III.A added ON_ACCENT, SELECTION_BG, and FOCUS_RING — see `adr/002-accent-status-decoupling.md`)
+- **142 exported uppercase runtime constants** (colors 77 + typography 36 + spacing 9 + layout 7 + radius 5 + motion 3 + quantity 4 + corner-shape 1)
 
 ## Cross-reference health
 
@@ -187,6 +206,25 @@ Batch 6 — accessibility + governance:
 65. **Architect is singular approval gate for v1.x** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
 66. **ACCENT ≠ STATUS_OK — Phase III.A decoupling** — per `adr/002-accent-status-decoupling.md`. Primary buttons, mode badges, progress chunks, active tab indicators use ACCENT (UI activation). STATUS_OK reserved for safety / health / channel-OK indicators. `SELECTION_BG` + `FOCUS_RING` added as neutral interaction tokens. Per-theme ACCENT recalibrated to warm-neutral (11 themes; `default_cool` indigo preserved as historical baseline).
 
+F36 operator-snapshot additions:
+
+67. **Pure snapshot presentation** — F36 components accept typed immutable summaries only; they do not import transport, routes, commands, or SafetyManager.
+68. **Atomic revision render** — status, content, freshness, and provenance belong to one revision; lower revisions and same-revision changed truth are rejected.
+69. **Navigation intent only** — the next-action control emits a bounded typed destination request and performs no route or plant action itself.
+70. **Bounded text without hidden authority** — visible hostile text is bounded with both ends, an explicit marker, and digest; the complete plain value remains accessible.
+71. **Fleet virtualization** — attention queues use Qt model/view and uniform delegate rows at the 2,000-item public bound.
+72. **Transactional child preflight** — card and footer stage render plans and recheck every baseline before the first widget mutation; child rejection cannot tear parent/child truth.
+73. **Plain-safe Qt text boundary** — backend markup/entities are HTML-escaped inside owned tooltip chrome, while C0/C1 and bidi-format controls become visible code-point markers.
+74. **Strict navigation intent** — logical IDs use a bounded ASCII grammar; NFC operator copy rejects markup, control, and bidi-format characters.
+75. **Owner-bound typed card body** — an optional `AttentionList` is constructor-bound to its card, consumes the same `AttentionQueue` plan, rejects independent render/model replacement, and commits with parent/footer as one revision; arbitrary QWidget bodies are prohibited.
+76. **First-presentation barrier** — staged pre-rendered body/footer truth stays hidden behind explicit disconnected/unavailable shell state until the first coherent card commit; unexpected Qt reveal failure hides and permanently fails the card instance closed.
+77. **Root-owned POD composition** — all eight composed cards reject standalone render; one root transaction rechecks and commits their exact immutable cut.
+78. **Post-commit coherence barrier** — synchronous Qt callbacks cannot silently tear sibling truth; a mismatch permanently replaces the page with a non-authoritative failure barrier.
+79. **Complete bounded attention geometry** — two-line rows remain fully legible, with four visible rows and deterministic scrolling across at most eight projected items.
+80. **Truthful scenario scope** — composition tests do not claim later acknowledgement, recovery, capture, or human-performance tasks; the legacy shell now gates replay mutation, while final POD-to-shell cutover and scenario evidence remain separate gates.
+
 ## Status
 
-**Design system v1.0.1 — complete.** All 67 files, 79 rules, 139 tokens, 6 batches.
+**Design system v1.2.0 — F36 atoms and POD composition implemented, external evidence open.** Existing
+79 rules and the 142-constant runtime inventory are unchanged. Real Windows ONEDIR DPI/NVDA,
+final POD-to-shell cutover, whole-shell screenshots, operator-performance, and long-session evidence remain open.

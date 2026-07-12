@@ -95,10 +95,12 @@ class MainWindowV2(QMainWindow):
         *,
         embedded: bool = False,
         subscriber: Any | None = None,
+        replay_mode: bool = False,
     ) -> None:
         super().__init__(parent)
         self._bridge = bridge
         self._embedded = embedded
+        self._replay_mode = bool(replay_mode)
         self._start_time = time.monotonic()
         self._reading_count = 0
         self._rate_count = 0
@@ -147,7 +149,9 @@ class MainWindowV2(QMainWindow):
         # DashboardView is the home surface (5-zone dashboard). The
         # _overview_panel attribute name is retained for call-site stability.
         self._overview_panel = DashboardView(self._channel_mgr)
+        self._overview_panel.set_read_only(self._replay_mode)
         self._alarm_panel = AlarmPanel()
+        self._alarm_panel.set_read_only(self._replay_mode)
         # Lazy panel slots — populated on first overlay open
         self._experiment_overlay: ExperimentOverlay | None = None
         self._keithley_panel: KeithleyPanel | None = None
@@ -178,6 +182,7 @@ class MainWindowV2(QMainWindow):
 
         # Shell components
         self._top_bar = TopWatchBar(channel_manager=self._channel_mgr)
+        self._top_bar.set_replay_mode(self._replay_mode)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
         self._overlay = OverlayContainer()
@@ -202,13 +207,8 @@ class MainWindowV2(QMainWindow):
         self._latest_experiment_status: dict | None = None
 
         # B.8: wire dashboard «+ Создать» button to new experiment dialog
-        if (
-            hasattr(self._overview_panel, "_phase_widget")
-            and self._overview_panel._phase_widget is not None
-        ):
-            self._overview_panel._phase_widget.create_experiment_requested.connect(
-                self._show_new_experiment_dialog
-            )
+        if hasattr(self._overview_panel, "_phase_widget") and self._overview_panel._phase_widget is not None:
+            self._overview_panel._phase_widget.create_experiment_requested.connect(self._show_new_experiment_dialog)
 
         # Compose layout
         central = QWidget()
@@ -234,6 +234,14 @@ class MainWindowV2(QMainWindow):
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
+        if self._replay_mode and name in {
+            "new_experiment",
+            "restart_engine",
+            "settings",
+            "calibration",
+        }:
+            logger.warning("Replay mode rejected mutating shell route: %s", name)
+            return
         if name == "new_experiment":
             self._show_new_experiment_dialog()
             return
@@ -268,6 +276,8 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
+        if name in {"source", "experiment", "log"}:
+            widget.set_read_only(self._replay_mode)
         # II.6 post-review: replay cached connection + safety state into
         # the Keithley overlay on first construction. Without this the
         # overlay stays in its default (disconnected, safety_ready=True)
@@ -278,10 +288,13 @@ class MainWindowV2(QMainWindow):
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
             if self._last_safety_state is not None:
-                ready, reason_text = _map_safety_state(
-                    self._last_safety_state, self._last_safety_reason
-                )
+                ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
                 widget.set_safety_ready(ready, reason_text)
+            else:
+                widget.set_safety_ready(
+                    False,
+                    "Нет авторитетного состояния Safety",
+                )
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -435,11 +448,7 @@ class MainWindowV2(QMainWindow):
             self._experiment_overlay.on_reading(reading)
         if reading.unit == "K" and self._calibration_panel is not None:
             self._calibration_panel.on_reading(reading)
-        if (
-            channel.startswith("\u0422")
-            and reading.unit == "K"
-            and self._conductivity_panel is not None
-        ):
+        if channel.startswith("\u0422") and reading.unit == "K" and self._conductivity_panel is not None:
             self._conductivity_panel.on_reading(reading)
         # v0.55.6 \u2014 Etalon MultiLine length + environment readings. Filter
         # is intentionally pre-MultiLinePanel to avoid wasted slot calls
@@ -450,10 +459,7 @@ class MainWindowV2(QMainWindow):
         # then forward to the live panel via its public scoping helper.
         if "MultiLine" in channel:
             self._multiline_snapshot[channel] = reading
-            if (
-                self._multiline_panel is not None
-                and self._multiline_panel.channel_belongs_to_panel(channel)
-            ):
+            if self._multiline_panel is not None and self._multiline_panel.channel_belongs_to_panel(channel):
                 self._multiline_panel.on_reading(reading)
         # F3-Cycle2: route temperature readings to analytics view + shell cache.
         # This is intentional parallel routing — calibration_panel and analytics_view
@@ -471,11 +477,7 @@ class MainWindowV2(QMainWindow):
             short_id = channel.split(" ", 1)[0] if " " in channel else channel
             if short_id == "Т12":
                 self._push_analytics("set_cold_temperature_reading", reading)
-        if (
-            "/smua/" in channel
-            or "/smub/" in channel
-            or channel.startswith("analytics/keithley_channel_state/")
-        ):
+        if "/smua/" in channel or "/smub/" in channel or channel.startswith("analytics/keithley_channel_state/"):
             if self._keithley_panel is not None:
                 self._keithley_panel.on_reading(reading)
             if channel.endswith("/power") and self._conductivity_panel is not None:
@@ -484,9 +486,10 @@ class MainWindowV2(QMainWindow):
             # Must guard on SMU sub-path explicitly — the outer condition also
             # matches analytics/keithley_channel_state/* channels which lack
             # the smua/smub segment KeithleyPowerWidget expects at parts[-2].
-            if (
-                ("/smua/" in channel or "/smub/" in channel)
-                and channel.split("/")[-1] in ("voltage", "current", "power")
+            if ("/smua/" in channel or "/smub/" in channel) and channel.split("/")[-1] in (
+                "voltage",
+                "current",
+                "power",
             ):
                 self._analytics_keithley_snapshot[channel] = reading
                 if self._analytics_view is not None:
@@ -514,9 +517,7 @@ class MainWindowV2(QMainWindow):
                 self._last_safety_reason = str(reason) if reason else ""
                 self._bottom_bar.set_safety_state(self._last_safety_state)
                 if self._keithley_panel is not None:
-                    ready, reason_text = _map_safety_state(
-                        self._last_safety_state, self._last_safety_reason
-                    )
+                    ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
                     self._keithley_panel.set_safety_ready(ready, reason_text)
         if self._instrument_panel is not None:
             self._instrument_panel.on_reading(reading)
@@ -544,6 +545,7 @@ class MainWindowV2(QMainWindow):
         elif channel.startswith("analytics/r_thermal"):
             # R_thermal live reading — forward metadata as RThermalData.
             from cryodaq.gui.shell.views.analytics_view import RThermalData
+
             meta = reading.metadata or {}
             history = meta.get("history") or []
             self._push_analytics(
@@ -625,13 +627,10 @@ class MainWindowV2(QMainWindow):
         future_t_abs: list[float] = []
         if isinstance(future_t, list):
             import time as _time
+
             now_ts = _time.time()
             future_t_abs = [now_ts + float(h) * 3600.0 for h in future_t]
-        if (
-            future_t_abs
-            and isinstance(future_mean, list)
-            and len(future_t_abs) == len(future_mean)
-        ):
+        if future_t_abs and isinstance(future_mean, list) and len(future_t_abs) == len(future_mean):
             predicted = list(zip(future_t_abs, future_mean, strict=False))
         if (
             future_t_abs
@@ -688,9 +687,7 @@ class MainWindowV2(QMainWindow):
                 self._last_safety_reason = ""
                 self._bottom_bar.set_safety_state(None)
                 if self._keithley_panel is not None:
-                    self._keithley_panel.set_safety_ready(
-                        False, "Engine потерян — состояние безопасности неизвестно"
-                    )
+                    self._keithley_panel.set_safety_ready(False, "Engine потерян — состояние безопасности неизвестно")
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
@@ -802,12 +799,16 @@ class MainWindowV2(QMainWindow):
             self._latest_experiment_status is not None
             and self._latest_experiment_status.get("active_experiment") is not None
         )
-        if has_active:
+        if has_active or self._replay_mode:
             self._on_tool_clicked("experiment")
         else:
             self._show_new_experiment_dialog()
 
     def _show_new_experiment_dialog(self) -> None:
+
+        if self._replay_mode:
+            logger.warning("Replay mode rejected experiment creation dialog")
+            return
 
         templates = []
         if self._latest_experiment_status:
@@ -817,6 +818,9 @@ class MainWindowV2(QMainWindow):
         dialog.exec()
 
     def _on_create_experiment(self, payload: dict) -> None:
+        if self._replay_mode:
+            logger.warning("Replay mode rejected experiment_create dispatch")
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         cmd = {"cmd": "experiment_create", **payload}
@@ -867,6 +871,10 @@ class MainWindowV2(QMainWindow):
         message instead of attempting a restart.
         """
         from PySide6.QtWidgets import QMessageBox
+
+        if self._replay_mode:
+            logger.warning("Replay mode rejected Engine restart")
+            return
 
         reply = QMessageBox.question(
             self,

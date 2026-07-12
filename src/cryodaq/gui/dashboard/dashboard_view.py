@@ -52,6 +52,7 @@ class DashboardView(QWidget):
         self._sensor_grid: DynamicSensorGrid | None = None
         self._phase_widget: PhaseAwareWidget | None = None
         self._quick_log: QuickLogBlock | None = None
+        self._read_only = False
         self._log_submit_worker = None
         self._log_poll_worker = None
         self._build_ui()
@@ -83,9 +84,7 @@ class DashboardView(QWidget):
             elif obj_name == "phaseZone":
                 zone = self._make_zone(obj_name, None)
                 self._phase_widget = PhaseAwareWidget(parent=self)
-                self._phase_widget.phase_transition_requested.connect(
-                    self._on_phase_transition_requested
-                )
+                self._phase_widget.phase_transition_requested.connect(self._on_phase_transition_requested)
                 zone.layout().addWidget(self._phase_widget)
             elif obj_name == "sensorGridZone":
                 zone = self._make_zone(obj_name, None)
@@ -178,6 +177,26 @@ class DashboardView(QWidget):
         # B.5.5: route analytics readings to phase widget
         if channel.startswith("analytics/") and self._phase_widget is not None:
             self._phase_widget.on_reading(reading)
+            if self._read_only:
+                self.set_read_only(True)
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Keep dashboard evidence visible while removing replay mutations."""
+
+        self._read_only = bool(read_only)
+        if self._phase_widget is not None:
+            for widget in (
+                self._phase_widget._create_btn,
+                self._phase_widget._back_btn,
+                self._phase_widget._forward_btn,
+                self._phase_widget._jump_combo,
+            ):
+                widget.setEnabled(not self._read_only)
+        if self._quick_log is not None:
+            self._quick_log._input.setEnabled(not self._read_only)
+            self._quick_log._send_btn.setEnabled(not self._read_only)
+        if self._sensor_grid is not None:
+            self._sensor_grid.set_read_only(self._read_only)
 
     # ------------------------------------------------------------------
     # Sensor grid signal handlers
@@ -185,11 +204,15 @@ class DashboardView(QWidget):
 
     def _on_rename_requested(self, channel_id: str, new_name: str) -> None:
         """Operator renamed a channel via inline rename or context menu."""
+        if self._read_only:
+            return
         self._channel_mgr.set_name(channel_id, new_name)
         self._channel_mgr.save()
 
     def _on_hide_requested(self, channel_id: str) -> None:
         """Operator wants to hide a channel from the dashboard."""
+        if self._read_only:
+            return
         self._channel_mgr.set_visible(channel_id, False)
         self._channel_mgr.save()
 
@@ -207,6 +230,8 @@ class DashboardView(QWidget):
 
     def _on_phase_transition_requested(self, phase: str) -> None:
         """Forward phase transition request to engine via ZMQ."""
+        if self._read_only:
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         worker = ZmqCommandWorker(
@@ -229,6 +254,8 @@ class DashboardView(QWidget):
         """Forward experiment_status response to phase widget."""
         if self._phase_widget is not None:
             self._phase_widget.on_status_update(status)
+            if self._read_only:
+                self.set_read_only(True)
 
     # ------------------------------------------------------------------
     # Quick log handlers (B.7)
@@ -236,6 +263,8 @@ class DashboardView(QWidget):
 
     def _on_log_entry_submitted(self, message: str) -> None:
         """Send log entry via ZMQ and refresh visible entries."""
+        if self._read_only:
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         self._log_submit_worker = ZmqCommandWorker(

@@ -4,7 +4,7 @@ keywords: experiment, phase stepper, timeline, finalize, abort, connection gatin
 applies_to: Experiment management overlay (active experiment surface)
 status: active
 implements: src/cryodaq/gui/shell/experiment_overlay.py (B.8 + Phase II.9 harmonization)
-last_updated: 2026-04-18
+last_updated: 2026-07-12
 references: rules/color-rules.md, rules/copy-rules.md, cryodaq-primitives/experiment-card.md
 ---
 
@@ -29,6 +29,7 @@ Stage 0 audit of `experiment_overlay.py`:
 
 - `_connected: bool = True` — new attribute, defaults True so nothing regresses on pre-first-tick usage.
 - `set_connected(connected: bool) -> None` — new public method. Disables `_save_btn`, `_finalize_btn`, `_prev_btn`, `_next_btn` on `False`. Idempotent.
+- `set_read_only(read_only: bool) -> None` — archive/replay gate. Cancels name editing; makes card fields and custom fields read-only; disables create, save, finalize, abort/more, and phase navigation. Every command handler also rejects direct or queued invocation while read-only.
 - `_apply_connection_gate()` — internal helper. Handles the button enabled-state logic.
 - `_refresh_display()` — updated to respect `self._connected` when re-rendering the active experiment (so reconnect-after-set-experiment also picks up the gate).
 - `MainWindowV2._tick_status` — added Phase II.9 mirror (same pattern as II.4 / II.8).
@@ -62,6 +63,7 @@ class ExperimentOverlay(QWidget):
 
     # Phase II.9 Host Integration Contract
     def set_connected(self, connected: bool) -> None: ...
+    def set_read_only(self, read_only: bool) -> None: ...
 ```
 
 ## Host Integration Contract
@@ -86,8 +88,10 @@ See `src/cryodaq/gui/shell/main_window_v2.py` for the canonical wiring (import a
 
 - Disconnected + active experiment → action buttons disable, but phase pills and timeline remain fully visible. Operator retains situational awareness even during engine silence.
 - Reconnect → buttons re-enable on next `_tick_status`.
+- Replay/read-only → timeline, passport, phase and card evidence remain visible, but connection recovery or a later status refresh cannot restore experiment mutation authority.
 
 ## Changelog
 
+- **2026-07-12 (v1.2.0)** — documented the archive/replay `set_read_only` gate and handler-level rejection for create/edit/phase/finalize/abort paths.
 - **2026-04-18 (Phase II.9)** — harmonization landed: `set_connected` Host Integration Contract added; `MainWindowV2` wired. No DS token churn (audit showed zero forbidden hits).
 - **Phase I.1 B.8 (prior)** — initial card-style rebuild replacing tab-based `ExperimentWorkspace`.

@@ -4,7 +4,7 @@ keywords: top-bar, watch-bar, header, chrome, vitals, at-a-glance, pressure, tem
 applies_to: top chrome strip showing global vitals + mode badge
 status: active
 implements: src/cryodaq/gui/shell/top_watch_bar.py (Phase B.4/B.4.5.2)
-last_updated: 2026-04-17
+last_updated: 2026-07-12
 references: rules/data-display-rules.md, rules/color-rules.md, rules/content-voice-rules.md
 ---
 
@@ -332,10 +332,12 @@ Stale detection: if no update in `stale_timeout_s` (from safety.yaml, default 10
 | State | Treatment |
 |---|---|
 | **Normal operation** | All vitals FOREGROUND, mode badge STATUS_OK or STATUS_CAUTION |
+| **Cold start / no channel readings** | Diamond cue + persistent «Нет текущих данных · N ожидают» in stale treatment; never seeded or rendered as OK |
 | **Vital in warning** | That vital's value → STATUS_WARNING color; others unchanged |
 | **Vital in fault** | Value → STATUS_FAULT; immediate no-fade (RULE-INTER-006) |
 | **Vital stale** | Value → STATUS_STALE; tooltip describes |
 | **Engine disconnected** | All 4 vitals → STATUS_STALE + tooltip "Нет связи с engine"; mode badge to `—` greyed |
+| **Replay** | `REPLAY` badge is pinned before asynchronous polling and cannot be overwritten by a later live/debug/unknown status result |
 
 ## Common mistakes
 
@@ -367,5 +369,6 @@ Stale detection: if no update in `stale_timeout_s` (from safety.yaml, default 10
 
 ## Changelog
 
+- 2026-07-12 (v1.2.0): Cold start no longer seeds channel OK truth; unavailable/stale text plus diamond is shown until real readings arrive. Replay mode is pinned before polling so the archive identity cannot be overwritten.
 - 2026-04-17: Initial version. Documents B.4 / B.4.5.2 implementation. 4 fixed vitals (Pressure / T min / T max / Heater) + mode badge. T-min / T-max locked to Т11 / Т12 — positionally fixed reference channels on the second stage (nitrogen plate), not relocatable without dismantling the rheostat. Mode badge distinguishes Experiment from Debug.
 - 2026-04-17 (v1.0.1): Fixed `mбар` → `мбар` in pressure invariant (FR-016) — was a typo mixing Latin `m` with Cyrillic `бар`. Code identifier `mbar:` in `set_pressure` API stays Latin (parameter name).

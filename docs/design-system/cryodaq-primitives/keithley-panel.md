@@ -4,7 +4,7 @@ keywords: keithley, smu, power, current, voltage, resistance, tsp, dual-channel,
 applies_to: Keithley 2604B source-measure unit control overlay
 status: active
 implements: src/cryodaq/gui/shell/overlays/keithley_panel.py (Phase II.6 rewrite); legacy src/cryodaq/gui/widgets/keithley_panel.py retained (DEPRECATED) until Phase III.3
-last_updated: 2026-04-18
+last_updated: 2026-07-12
 references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/destructive-actions.md
 ---
 
@@ -167,6 +167,7 @@ class KeithleyPanel(QWidget):
     def on_reading(self, reading: Reading) -> None: ...
     def set_connected(self, connected: bool) -> None: ...
     def set_safety_ready(self, ready: bool, reason: str = "") -> None: ...
+    def set_read_only(self, read_only: bool) -> None: ...
 
     # Transient banner
     def show_info(self, text: str) -> None: ...
@@ -200,6 +201,8 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 | **Channel "on"** | State badge «ВКЛ» STATUS_OK; start disabled, stop/emergency enabled; spins debounced-live against engine |
 | **Channel "fault"** | State badge «АВАРИЯ» STATUS_FAULT; 3 px STATUS_FAULT border on channel block; start/stop/spins disabled on the faulted channel; emergency still enabled; sibling channel unaffected |
 | **Safety gated** | Start/Stop/spins disabled across both channels; emergency stays enabled; gate label «Управление заблокировано: {reason}» visible in STATUS_WARNING |
+| **Cold start / unknown Safety** | Connected readings alone do not enable source controls; explicit «нет авторитетного состояния Safety» gate remains until an authoritative ready/run-permitted/running state arrives |
+| **Replay/read-only** | V/I/R/P and source-state evidence remains visible; spins, start/stop/set-target/set-limits and every emergency-off control are disabled; handler/dispatcher guards reject direct or queued commands |
 | **Stale reading (state="on")** | Readouts keep FOREGROUND text color (RULE-DATA-005 — never dim values); readouts card gets STATUS_STALE 1 px border; each readout suffix becomes «12.345 В (устар.)» |
 | **Transient banner** | Thin colored border (STATUS_INFO / STATUS_WARNING / STATUS_FAULT); auto-clear 4 s |
 
@@ -230,5 +233,6 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 
 ## Changelog
 
+- **2026-07-12 (v1.2.0)** — source authority now defaults fail-closed until authoritative Safety truth. Documented the replay read-only gate, including the deliberate distinction: emergency-off remains reachable with a live link when Safety blocks normal live control, but replay removes all source command authority including emergency-off.
 - **2026-04-18 — Phase II.6 rewrite.** Full rebuild of `shell/overlays/keithley_panel.py` aligned with engine power-control API. Replaces dead B.7 (`920aa97`) mode-based overlay. Removes all `mode=current/voltage` content from this spec. Replaces legacy v1 surface (`widgets/keithley_panel.py` now DEPRECATED) behind `MainWindowV2` Ctrl+K. Follow-ups FU.4 (K4 custom-command popup) and FU.5 (HoldConfirm 1 s for emergency) explicitly deferred.
 - **2026-04-17 — Initial version.** Documented mode-based Keithley 2604B control panel (B.7 design). Superseded by 2026-04-18 rewrite; entry preserved for historical trace.

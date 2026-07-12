@@ -3,7 +3,7 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-04-17
+last_updated: 2026-07-11
 status: canonical
 ---
 
@@ -49,6 +49,7 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 | Wire a destructive action | `patterns/destructive-actions.md` |
 | Format a number (temperature/pressure/time) | `patterns/numeric-formatting.md` |
 | Display stale data | `patterns/real-time-data.md` |
+| Compose the Primary Operator Display | `patterns/operator-display-composition.md` |
 | Check WCAG contrast | `accessibility/contrast-matrix.md` |
 | Write Russian copy | `patterns/copy-voice.md` |
 | Add a new token | `governance/contribution.md` |
@@ -58,10 +59,17 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 ```
 docs/design-system/
 ├── README.md                        # this file
+├── MANIFEST.md                      # exact corpus inventory and encoded decisions
+├── CHANGELOG.md                     # design-system release history
+├── VERSION                          # authoritative version marker
 ├── ANTI_PATTERNS.md                 # catalog of forbidden patterns with historical refs
+├── DEEP_AUDIT_REPORT.md             # retained v1.0.0 audit evidence
+├── adr/                             # accepted architecture/design decisions
+│   ├── 001-light-theme-status-unlock.md
+│   └── 002-accent-status-decoupling.md
 │
 ├── tokens/                          # what values to use
-│   ├── colors.md                    # 74 color tokens
+│   ├── colors.md                    # 77 color tokens
 │   ├── typography.md                # 36 typography tokens
 │   ├── spacing.md                   # 9 spacing tokens
 │   ├── radius.md                    # 5 radius tokens
@@ -107,8 +115,17 @@ docs/design-system/
 │   ├── sensor-cell.md
 │   ├── phase-stepper.md
 │   ├── alarm-badge.md
+│   ├── alarm-panel.md
+│   ├── analytics-panel.md
+│   ├── archive-panel.md
+│   ├── calibration-panel.md
+│   ├── conductivity-panel.md
 │   ├── experiment-card.md
+│   ├── experiment-panel.md
+│   ├── instruments-panel.md
 │   ├── quick-log-block.md
+│   ├── operator-log-panel.md
+│   ├── operator-snapshot-components.md
 │   └── keithley-panel.md
 │
 ├── patterns/                        # multi-component compositions
@@ -120,6 +137,8 @@ docs/design-system/
 │   ├── cross-surface-consistency.md
 │   ├── destructive-actions.md
 │   ├── copy-voice.md
+│   ├── operator-snapshot-presentation.md
+│   ├── operator-display-composition.md
 │   └── responsive-behavior.md
 │
 ├── accessibility/                   # WCAG + keyboard + motion
@@ -220,11 +239,11 @@ design-system prose in the same reviewed slice.
 
 ## Token count summary
 
-From `src/cryodaq/gui/theme.py` inventory (v1.0.1, 139 tokens):
+From `src/cryodaq/gui/theme.py` inventory (v1.2.0, 142 exported uppercase constants):
 
 | Category | Count | File |
 |---|---:|---|
-| Colors | 74 | `tokens/colors.md` |
+| Colors | 77 | `tokens/colors.md` |
 | Typography | 36 | `tokens/typography.md` |
 | Spacing | 9 | `tokens/spacing.md` |
 | Radius | 5 | `tokens/radius.md` |
@@ -241,4 +260,6 @@ From `src/cryodaq/gui/theme.py` inventory (v1.0.1, 139 tokens):
 
 ## Changelog
 
+- 2026-07-11: Added the F36 snapshot and Primary Operator Display entry points;
+  reconciled the root tree and runtime-token inventory with the v1.2.0 corpus.
 - 2026-04-17: Initial version. Written during Phase I.1 after Vladimir visual review revealed cross-surface inconsistency. Based on real `theme.py` token inventory (126 tokens across 5 categories at v1.0.0; expanded to 139 tokens in v1.0.1).

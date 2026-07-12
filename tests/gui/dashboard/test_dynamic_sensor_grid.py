@@ -53,6 +53,7 @@ def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
             def _spy():
                 call_counts[cid] += 1
                 orig()
+
             return _spy
 
         cell.refresh_from_buffer = _make_spy(ch_id, original)
@@ -74,9 +75,7 @@ def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
         cell = grid._cells[ch_id]
         expected = f"{val:.2f}"
         actual = cell._value_widget.text()
-        assert expected in actual, (
-            f"Cell {ch_id!r} must display '{expected}' after refresh, got {actual!r}"
-        )
+        assert expected in actual, f"Cell {ch_id!r} must display '{expected}' after refresh, got {actual!r}"
 
 
 def test_grid_dispatch_reading(app, mock_channel_mgr, buffer_store):
@@ -97,6 +96,18 @@ def test_grid_dispatch_reading(app, mock_channel_mgr, buffer_store):
     cell = grid._cells.get("\u04221")
     assert cell is not None
     assert "77.30" in cell._value_widget.text()
+
+
+def test_grid_read_only_survives_cell_rebuild(app, mock_channel_mgr, buffer_store):
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    grid.set_read_only(True)
+    assert all(cell._read_only for cell in grid._cells.values())
+
+    mock_channel_mgr.set_visible("Т2", False)
+    mock_channel_mgr._notify()
+
+    assert grid._read_only is True
+    assert all(cell._read_only for cell in grid._cells.values())
 
 
 def test_grid_close_event_cleans_up(app, mock_channel_mgr, buffer_store):

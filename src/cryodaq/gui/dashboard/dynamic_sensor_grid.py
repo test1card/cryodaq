@@ -42,6 +42,7 @@ class DynamicSensorGrid(QWidget):
         super().__init__(parent)
         self._channel_mgr = channel_manager
         self._buffer = buffer_store
+        self._read_only = False
         self._cells: dict[str, SensorCell] = {}
         self._build_ui()
         self._rebuild_cells()
@@ -95,6 +96,7 @@ class DynamicSensorGrid(QWidget):
 
         for ch_id in visible_ids:
             cell = SensorCell(ch_id, self._channel_mgr, self._buffer, self)
+            cell.set_read_only(self._read_only)
             cell.rename_requested.connect(self.rename_requested)
             cell.hide_requested.connect(self.hide_requested)
             cell.show_on_plot_requested.connect(self.show_on_plot_requested)
@@ -154,6 +156,13 @@ class DynamicSensorGrid(QWidget):
         cell = self._cells.get(short_id)
         if cell is not None:
             cell.update_value(reading)
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Propagate the replay/configuration gate to every sensor cell."""
+
+        self._read_only = bool(read_only)
+        for cell in self._cells.values():
+            cell.set_read_only(self._read_only)
 
     # ------------------------------------------------------------------
     # Channel manager hooks

@@ -26,13 +26,8 @@ def test_top_watch_bar_constructs() -> None:
     assert bar._engine_label is not None
 
 
-def test_seed_visible_channels_marks_them_ok() -> None:
-    """v0.55.2 A5: seed _channel_last_seen so the counter doesn't show
-    "0/N норма • N ожидают" while waiting for the first ZMQ reading.
-    Real ChannelManager returns short IDs ("Т1") — the fake mirrors
-    that contract.
-    HIGH: assert rendered _channel_label text/color, not just private cache keys.
-    """
+def test_cold_start_channels_are_unavailable_until_real_reading() -> None:
+    """No startup cache entry may manufacture current/OK channel truth."""
     _app()
 
     class _FakeChannelMgr:
@@ -43,22 +38,12 @@ def test_seed_visible_channels_marks_them_ok() -> None:
     bar._fast_timer.stop()
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
-    # Two Т-channels seeded under their short IDs, the non-Т one ignored.
-    assert "Т1" in bar._channel_last_seen
-    assert "Т2" in bar._channel_last_seen
-    assert "Pressure" not in bar._channel_last_seen
-    # Rendered label: 2/2 норма, no "ожидают" text, OK color.
+    assert bar._channel_last_seen == {}
     bar._refresh_channels()
     label_text = bar._channel_label.text()
-    assert "2/2 норма" in label_text, (
-        f"Expected '2/2 норма' in channel label, got: {label_text!r}"
-    )
-    assert "ожидает" not in label_text, (
-        f"Unexpected 'ожидает' in channel label: {label_text!r}"
-    )
-    assert theme.STATUS_OK in bar._channel_label.styleSheet(), (
-        f"Channel label must use STATUS_OK color after seed, got: {bar._channel_label.styleSheet()!r}"
-    )
+    assert label_text == "◇ Нет текущих данных · 2 ожидают"
+    assert theme.STATUS_STALE in bar._channel_label.styleSheet()
+    assert "2 ожидают первого показания" in bar._channel_label.toolTip()
 
 
 def test_on_reading_stores_under_short_id() -> None:
@@ -101,12 +86,8 @@ def test_on_reading_stores_under_short_id() -> None:
     # Rendered summary reflects the reading — "1/1 норма", no "ожидают".
     bar._refresh_channels()
     label_text = bar._channel_label.text()
-    assert "1/1 норма" in label_text, (
-        f"Expected '1/1 норма' in channel summary, got: {label_text!r}"
-    )
-    assert "ожидает" not in label_text, (
-        f"Unexpected 'ожидает' after reading under short id: {label_text!r}"
-    )
+    assert "1/1 норма" in label_text, f"Expected '1/1 норма' in channel summary, got: {label_text!r}"
+    assert "ожидает" not in label_text, f"Unexpected 'ожидает' after reading under short id: {label_text!r}"
 
 
 def test_experiment_click_emits_signal() -> None:
@@ -167,17 +148,13 @@ def test_set_alarm_count_updates_label() -> None:
     bar._channel_refresh_timer.stop()
     bar._stale_timer.stop()
     bar.set_alarm_count(0)
-    assert bar._alarms_label.text() == "Тревоги: 0", (
-        f"Zero alarms text wrong: {bar._alarms_label.text()!r}"
-    )
+    assert bar._alarms_label.text() == "Тревоги: 0", f"Zero alarms text wrong: {bar._alarms_label.text()!r}"
     assert theme.TEXT_MUTED in bar._alarms_label.styleSheet(), (
         f"Zero alarms must use TEXT_MUTED: {bar._alarms_label.styleSheet()!r}"
     )
     bar.set_alarm_count(3)
     # Text: "Тревоги: 3 активны" (3 → plural "активны")
-    assert bar._alarms_label.text() == "Тревоги: 3 активны", (
-        f"Three alarms text wrong: {bar._alarms_label.text()!r}"
-    )
+    assert bar._alarms_label.text() == "Тревоги: 3 активны", f"Three alarms text wrong: {bar._alarms_label.text()!r}"
     assert theme.STATUS_FAULT in bar._alarms_label.styleSheet(), (
         f"Nonzero alarms must use STATUS_FAULT: {bar._alarms_label.styleSheet()!r}"
     )

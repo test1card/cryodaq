@@ -1,7 +1,7 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-04-17
+last_updated: 2026-07-12
 ---
 
 # Design System Changelog
@@ -11,6 +11,82 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [1.2.0] — 2026-07-11
+
+### Added
+
+- Added `patterns/operator-display-composition.md` for the composed F36
+  Primary Operator Display: eight-card hierarchy, root-owned atomic render,
+  irreversible integrity barrier, attention geometry, replay limitations,
+  accessibility/performance budgets, and open evidence.
+
+### Changed
+
+- POD-owned snapshot cards now reject standalone rendering; the root rechecks
+  whole-display coherence after synchronous child signals before accepting a
+  snapshot.
+- Attention presentation shows complete two-line rows, bounds the viewport at
+  four rows, and scrolls a deterministic projection of at most eight items.
+- Handover navigation now requires the exact backend `handover_pending` reason
+  instead of inferring shift semantics from generic caution state.
+- Failed-closed POD instances now discard delayed or queued child navigation;
+  generic experiment severity stays on the experiment surface, and only the
+  sole exact `handover_pending` reason selects the handover log.
+- Reconciled the complete README tree and MANIFEST corpus/count annotations
+  with the v1.2.0 files and current runtime contracts.
+- POD tests describe their actual composition subset and no longer claim that
+  all twelve operator scenarios are behaviorally closed.
+- Legacy-shell replay now pins archive identity and removes configuration,
+  source, experiment, alarm-acknowledgement, operator/dashboard-log, settings,
+  calibration and live-control Engine-restart authority in the embedded shell
+  across mouse, keyboard, lazy-open, refresh and direct/queued handler paths.
+  The launcher tray may still restart the isolated replay subprocess; it does
+  not acquire live plant-control authority. Cold start and unknown Safety render
+  unavailable/blocked truth rather than optimistic OK/source readiness.
+
+### Open evidence
+
+- Legacy-shell replay gating is implemented for the enumerated operational and
+  configuration surfaces. Final POD-to-shell cutover, whole-shell screenshots,
+  Windows ONEDIR DPI/NVDA, full keyboard traversal, operator task timing, and
+  long-session memory remain unclaimed acceptance gates.
+
+## [1.1.0] — 2026-07-11
+
+### Added
+
+- Implemented pure F36 operator-snapshot presentation atoms: canonical
+  six-state label, freshness/provenance footer, readiness blocker row,
+  attention row and virtualized list, navigation-intent control, and atomic
+  snapshot card shell.
+- Added `cryodaq-primitives/operator-snapshot-components.md` with public APIs,
+  state anatomy, accessibility contract, examples, and performance evidence.
+- Added `patterns/operator-snapshot-presentation.md` for coherent-revision,
+  authority-preserving composition across future Primary Operating Display
+  surfaces.
+
+### Changed
+
+- Design-system manifest now records F36 immutable snapshot presentation,
+  navigation-only output, bounded hostile text, and fleet virtualization.
+- Independent review tightened card rendering to preflight/recheck every child
+  before mutation, HTML-escaped all Qt tooltip payloads, exposed control/bidi
+  characters visibly, and restricted navigation IDs/copy to normalized safe
+  forms.
+- Composed-card review removed the arbitrary `set_content(QWidget)` path and
+  added owner-bound transactional `AttentionList` content so header, rows,
+  freshness, and provenance commit from one `AttentionQueue` revision or do
+  not change.
+- Cold-start review added a first-presentation barrier: pre-rendered bound rows
+  and footer remain hidden behind explicit disconnected/unavailable shell truth
+  until a successful coherent transaction; unexpected Qt reveal failure hides
+  and permanently fails the card instance closed.
+
+### Open evidence
+
+- Real Windows ONEDIR DPI/NVDA, composed-POD screenshots, operator task timing,
+  and 12-hour memory measurements remain unclaimed acceptance gates.
 
 ## [1.0.1] — 2026-04-17
 
