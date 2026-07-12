@@ -72,6 +72,8 @@ import zmq.asyncio
 
 from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.operator_snapshot import OperatorSnapshot
+from cryodaq.operator_snapshot_transport import encode_operator_snapshot_frames
 
 logger = logging.getLogger(__name__)
 
@@ -581,6 +583,30 @@ class ZMQPublisher:
             raise
         except Exception:
             logger.exception("Ошибка отправки ZMQ события %s", event_type)
+
+    async def publish_operator_snapshot(self, snapshot: OperatorSnapshot) -> bool:
+        """Publish one complete observational snapshot on the sole PUB socket.
+
+        Encoding and the multipart send happen under the same lock used by
+        readings and events.  A presentation-path failure is observable but
+        deliberately cannot escape into safety or control behavior.
+        """
+        try:
+            async with self._send_lock:
+                frames = encode_operator_snapshot_frames(snapshot)
+                socket = self._socket
+                if not self._running or socket is None:
+                    raise RuntimeError("publisher socket unavailable")
+                await socket.send_multipart(list(frames))
+                self._total_sent += 1
+                return True
+        except asyncio.CancelledError:
+            self._publish_failure_count += 1
+            raise
+        except Exception:
+            self._publish_failure_count += 1
+            logger.exception("Ошибка отправки operator snapshot")
+            return False
 
     @staticmethod
     def _barrier_error(code: str) -> dict[str, Any]:
