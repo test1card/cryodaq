@@ -14,6 +14,7 @@ is a valid gap and is never reused.
 from __future__ import annotations
 
 import asyncio
+import functools
 import stat
 import threading
 from collections.abc import Callable
@@ -69,29 +70,45 @@ class SnapshotRevision:
     def __post_init__(self) -> None:
         if type(self.revision) is not int or not 1 <= self.revision <= _MAX_REVISION:
             raise ValueError("revision must be a positive signed 63-bit integer")
-        if not isinstance(self.received_at, datetime) or self.received_at.tzinfo is None:
-            raise ValueError("received_at must be a timezone-aware datetime")
+        if type(self.received_at) is not datetime or self.received_at.tzinfo is None:
+            raise ValueError("received_at must be an exact timezone-aware datetime")
         if self.received_at.utcoffset() != timedelta(0):
             raise ValueError("received_at must be UTC")
+        received_at = self.received_at
+        object.__setattr__(
+            self,
+            "received_at",
+            datetime(
+                received_at.year,
+                received_at.month,
+                received_at.day,
+                received_at.hour,
+                received_at.minute,
+                received_at.second,
+                received_at.microsecond,
+                tzinfo=UTC,
+                fold=received_at.fold,
+            ),
+        )
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _to_epoch_us(value: datetime) -> int:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise OperatorSnapshotRevisionError("allocator clock must return a timezone-aware datetime")
+def _to_epoch_us(value: datetime, *, subject: str = "allocator clock") -> int:
+    if type(value) is not datetime or value.tzinfo is None:
+        raise OperatorSnapshotRevisionError(f"{subject} must be an exact timezone-aware datetime")
     offset = value.utcoffset()
     if offset is None:
-        raise OperatorSnapshotRevisionError("allocator clock must return a timezone-aware datetime")
+        raise OperatorSnapshotRevisionError(f"{subject} must be an exact timezone-aware datetime")
     if offset != timedelta(0):
         value = value.astimezone(UTC)
     epoch = datetime(1970, 1, 1, tzinfo=UTC)
     delta = value - epoch
     microseconds = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     if not 0 <= microseconds <= _MAX_REVISION:
-        raise OperatorSnapshotRevisionError("allocator clock is outside the supported UTC range")
+        raise OperatorSnapshotRevisionError(f"{subject} is outside the supported UTC range")
     return microseconds
 
 
@@ -177,9 +194,10 @@ class OperatorSnapshotRevisionAllocator:
     def path(self) -> Path:
         return self._path
 
-    def allocate(self) -> SnapshotRevision:
+    def allocate(self, *, not_before: datetime | None = None) -> SnapshotRevision:
         """Commit and return the next ordering token synchronously."""
 
+        not_before_us = 0 if not_before is None else _to_epoch_us(not_before, subject="not_before")
         with self._lock:
             conn = None
             transaction = False
@@ -209,7 +227,11 @@ class OperatorSnapshotRevisionAllocator:
                 if revision == _MAX_REVISION:
                     raise OperatorSnapshotRevisionExhaustedError("operator snapshot revision space is exhausted")
 
-                received_at_us = max(_to_epoch_us(self._clock()), previous_received_at_us)
+                received_at_us = max(
+                    _to_epoch_us(self._clock()),
+                    previous_received_at_us,
+                    not_before_us,
+                )
                 next_revision = revision + 1
                 cursor = conn.execute(
                     "UPDATE snapshot_revision SET revision=?, received_at_us=? "
@@ -242,11 +264,11 @@ class OperatorSnapshotRevisionAllocator:
                 if conn is not None:
                     conn.close()
 
-    async def allocate_async(self) -> SnapshotRevision:
+    async def allocate_async(self, *, not_before: datetime | None = None) -> SnapshotRevision:
         """Run allocation off-loop and settle it before propagating cancellation."""
 
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, self.allocate)
+        future = loop.run_in_executor(None, functools.partial(self.allocate, not_before=not_before))
         return await _settle_executor_future(future)
 
     def _prepare_path(self) -> None:

@@ -4,7 +4,7 @@ import asyncio
 import multiprocessing
 import os
 import threading
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from queue import Empty
 from typing import Any
@@ -179,11 +179,11 @@ class _BlockingAllocator(OperatorSnapshotRevisionAllocator):
         self.block_after_commit = block_after_commit
         self.fail = fail
 
-    def allocate(self) -> SnapshotRevision:
+    def allocate(self, *, not_before: datetime | None = None) -> SnapshotRevision:
         if not self.block_after_commit:
             self.entered.set()
             assert self.release.wait(5)
-        result = super().allocate()
+        result = super().allocate(not_before=not_before)
         if self.block_after_commit:
             self.entered.set()
             assert self.release.wait(5)
@@ -229,9 +229,9 @@ async def test_async_allocation_runs_blocking_core_off_event_loop(tmp_path: Path
     observed_threads: list[int] = []
 
     class RecordingAllocator(OperatorSnapshotRevisionAllocator):
-        def allocate(self) -> SnapshotRevision:
+        def allocate(self, *, not_before: datetime | None = None) -> SnapshotRevision:
             observed_threads.append(threading.get_ident())
-            return super().allocate()
+            return super().allocate(not_before=not_before)
 
     result = await RecordingAllocator(tmp_path).allocate_async()
     assert result.revision == 1
@@ -272,6 +272,44 @@ def test_clock_with_non_null_tzinfo_but_none_offset_fails_without_consuming_revi
 
     # The rejected clock value rolled back the transaction, including any
     # first-open schema initialization, and consumed no ordering token.
+    assert OperatorSnapshotRevisionAllocator(tmp_path).allocate().revision == 1
+
+
+def test_atomic_not_before_floor_survives_clock_rollback_and_restart(tmp_path: Path) -> None:
+    floor = datetime(2026, 7, 12, 4, 0, tzinfo=UTC)
+    allocator = OperatorSnapshotRevisionAllocator(
+        tmp_path,
+        clock=lambda: datetime(2000, 1, 1, tzinfo=UTC),
+    )
+
+    first = allocator.allocate(not_before=floor)
+    second_floor = floor + timedelta(microseconds=1)
+    second = OperatorSnapshotRevisionAllocator(
+        tmp_path,
+        clock=lambda: datetime(1990, 1, 1, tzinfo=UTC),
+    ).allocate(not_before=second_floor)
+
+    assert first.received_at == floor
+    assert first.received_at is not floor
+    assert second.revision == 2
+    assert second.received_at == second_floor
+    assert second.received_at >= first.received_at
+
+
+def test_revision_timestamp_is_exact_detached_and_subclasses_fail_before_allocation(tmp_path: Path) -> None:
+    received_at = datetime(2026, 7, 12, 4, 0, tzinfo=UTC)
+    revision = SnapshotRevision(1, received_at)
+    assert type(revision.received_at) is datetime
+    assert revision.received_at is not received_at
+
+    class DatetimeSubclass(datetime):
+        pass
+
+    hostile = DatetimeSubclass(2026, 7, 12, 4, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="exact timezone-aware"):
+        SnapshotRevision(1, hostile)
+    with pytest.raises(OperatorSnapshotRevisionError, match="not_before.*exact"):
+        OperatorSnapshotRevisionAllocator(tmp_path).allocate(not_before=hostile)
     assert OperatorSnapshotRevisionAllocator(tmp_path).allocate().revision == 1
 
 
