@@ -224,6 +224,9 @@ _ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
 _ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
 _SOAK_BRIDGE_FD_ENV = "CRYODAQ_SOAK_BRIDGE_FD"
 _SOAK_BRIDGE_NONCE_ENV = "CRYODAQ_SOAK_BRIDGE_NONCE"
+_SOAK_ARTIFACT_FD_ENV = "CRYODAQ_SOAK_ARTIFACT_FD"
+_SOAK_ARTIFACT_NONCE_ENV = "CRYODAQ_SOAK_ARTIFACT_NONCE"
+_SOAK_ASSISTANT_GENERATION_ENV = "CRYODAQ_SOAK_ASSISTANT_GENERATION"
 _SOAK_BRIDGE_SCHEMA = "cryodaq.soak.bridge-identity"
 _SOAK_BRIDGE_VERSION = 1
 _SOAK_BRIDGE_MAX_BYTES = 512
@@ -313,7 +316,114 @@ def _without_soak_bridge_environment(environment: Mapping[str, str]) -> dict[str
     result = dict(environment)
     result.pop(_SOAK_BRIDGE_FD_ENV, None)
     result.pop(_SOAK_BRIDGE_NONCE_ENV, None)
+    result.pop(_SOAK_ARTIFACT_FD_ENV, None)
+    result.pop(_SOAK_ARTIFACT_NONCE_ENV, None)
+    result.pop(_SOAK_ASSISTANT_GENERATION_ENV, None)
     return result
+
+
+@dataclass(slots=True)
+class _SoakArtifactCapability:
+    """Launcher-retained endpoint duplicated only into assistant execs."""
+
+    fd: int
+    nonce: str
+    generation: int = 0
+    _closed: bool = False
+
+    def child_grant(self) -> tuple[int, int, dict[str, str]]:
+        if self._closed:
+            raise RuntimeError("soak artifact capability is closed")
+        candidate = self.generation + 1
+        duplicate = os.dup(self.fd)
+        os.set_inheritable(duplicate, False)
+        return (
+            duplicate,
+            candidate,
+            {
+                _SOAK_ARTIFACT_FD_ENV: str(duplicate),
+                _SOAK_ARTIFACT_NONCE_ENV: self.nonce,
+                _SOAK_ASSISTANT_GENERATION_ENV: str(candidate),
+            },
+        )
+
+    def commit_generation(self, candidate: int) -> None:
+        if type(candidate) is not int or candidate != self.generation + 1:
+            raise RuntimeError("assistant generation commit is invalid")
+        self.generation = candidate
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            _SOAK_BRIDGE_ACTIVE_FDS.discard(self.fd)
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+
+
+def _consume_soak_artifact_capability(
+    *,
+    bridge_handshake: _SoakBridgeHandshake | None,
+    cli_mock: bool,
+    tray_only: bool,
+    replay_requested: bool,
+    setup_wizard: bool,
+) -> _SoakArtifactCapability | None:
+    raw_fd = os.environ.pop(_SOAK_ARTIFACT_FD_ENV, None)
+    nonce = os.environ.pop(_SOAK_ARTIFACT_NONCE_ENV, None)
+    hostile_generation = os.environ.pop(_SOAK_ASSISTANT_GENERATION_ENV, None)
+    if raw_fd is None and nonce is None and hostile_generation is None:
+        return None
+    fd = -1
+    try:
+        if raw_fd is None or nonce is None or hostile_generation is not None:
+            raise RuntimeError("partial soak artifact capability environment")
+        fd = int(raw_fd, 10)
+        if (
+            raw_fd != str(fd)
+            or bridge_handshake is None
+            or os.name != "posix"
+            or sys.platform == "win32"
+            or getattr(sys, "frozen", False)
+            or not cli_mock
+            or not tray_only
+            or replay_requested
+            or setup_wizard
+        ):
+            raise RuntimeError("soak artifact capability requires the isolated POSIX bridge launch")
+        if fd < 3 or not os.get_inheritable(fd) or re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
+            raise RuntimeError("invalid soak artifact capability")
+        metadata = os.fstat(fd)
+        if not stat_module.S_ISSOCK(metadata.st_mode):
+            raise RuntimeError("soak artifact descriptor is not a socket")
+        import fcntl
+        import socket
+
+        if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDWR:
+            raise RuntimeError("soak artifact descriptor is not read/write")
+        endpoint = socket.socket(fileno=fd)
+        try:
+            if (
+                endpoint.family != socket.AF_UNIX
+                or (endpoint.type & socket.SOCK_STREAM) != socket.SOCK_STREAM
+                or endpoint.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+            ):
+                raise RuntimeError("soak artifact descriptor is not an AF_UNIX stream")
+            endpoint.getpeername()
+            endpoint.detach()
+        finally:
+            if endpoint.fileno() >= 0:
+                endpoint.close()
+        _guard_soak_bridge_fd_from_descendants(fd)
+        return _SoakArtifactCapability(fd, nonce)
+    except BaseException:
+        if fd >= 3:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
 
 
 def _consume_soak_bridge_handshake(
@@ -673,6 +783,7 @@ class LauncherWindow(QMainWindow):
         force_replay: bool = False,
         legacy_channel_era: str | None = None,
         soak_bridge_handshake: _SoakBridgeHandshake | None = None,
+        soak_artifact_capability: _SoakArtifactCapability | None = None,
     ) -> None:
         super().__init__()
         self._app = app
@@ -686,6 +797,7 @@ class LauncherWindow(QMainWindow):
         self._force_replay = force_replay
         self._legacy_channel_era = legacy_channel_era
         self._soak_bridge_handshake = soak_bridge_handshake
+        self._soak_artifact_capability = soak_artifact_capability
         self._engine_proc: subprocess.Popen | None = None
         self._engine_stderr_handler: logging.Handler | None = None
         self._engine_stderr_logger: logging.Logger | None = None
@@ -1164,12 +1276,23 @@ class LauncherWindow(QMainWindow):
         # for the console-enabled frozen smoke harness.
         creationflags = _WINDOWS_CREATE_NO_WINDOW if sys.platform == "win32" else 0
         shutdown_authority: _AssistantShutdownAuthority | None = None
+        soak_duplicate: int | None = None
+        soak_generation: int | None = None
+        soak_capability = getattr(self, "_soak_artifact_capability", None)
         try:
             if sys.platform == "win32":
                 from cryodaq.paths import get_data_dir
 
                 shutdown_authority = _new_assistant_shutdown_authority(get_data_dir())
                 env[_ASSISTANT_SHUTDOWN_ENV] = str(shutdown_authority.path)
+            pass_fds: tuple[int, ...] = ()
+            if soak_capability is not None:
+                soak_duplicate, soak_generation, grant = soak_capability.child_grant()
+                env.update(grant)
+                pass_fds = (soak_duplicate,)
+            popen_kwargs: dict[str, Any] = {}
+            if pass_fds:
+                popen_kwargs.update({"close_fds": True, "pass_fds": pass_fds})
             self._assistant_proc = subprocess.Popen(
                 cmd,
                 env=env,
@@ -1180,7 +1303,10 @@ class LauncherWindow(QMainWindow):
                 # banner; the assistant has no such path).
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
+                **popen_kwargs,
             )
+            if soak_capability is not None and soak_generation is not None:
+                soak_capability.commit_generation(soak_generation)
             self._assistant_shutdown_path = None if shutdown_authority is None else shutdown_authority.path
             self._assistant_shutdown_authority = shutdown_authority
             logger.info("cryodaq-assistant запущен, PID=%d", self._assistant_proc.pid)
@@ -1189,6 +1315,12 @@ class LauncherWindow(QMainWindow):
             self._assistant_proc = None
             self._assistant_shutdown_path = None
             self._assistant_shutdown_authority = None
+        finally:
+            if soak_duplicate is not None:
+                try:
+                    os.close(soak_duplicate)
+                except OSError:
+                    pass
 
     def _stop_assistant(self) -> None:
         """Остановить cryodaq-assistant подпроцесс, если он запущен."""
@@ -1935,6 +2067,9 @@ class LauncherWindow(QMainWindow):
                     first_error = exc
 
         attempt("assistant", self._stop_assistant)
+        soak_capability = getattr(self, "_soak_artifact_capability", None)
+        if soak_capability is not None:
+            attempt("soak_artifact", soak_capability.close)
         attempt("bridge", self._bridge.shutdown)
         attempt("engine", self._stop_engine)
         attempt("event_loop", self._loop.close)
@@ -2279,6 +2414,18 @@ def main() -> None:
         replay_requested=args.replay is not None,
         setup_wizard=args.setup_wizard,
     )
+    try:
+        soak_artifact_capability = _consume_soak_artifact_capability(
+            bridge_handshake=soak_bridge_handshake,
+            cli_mock=args.mock,
+            tray_only=args.tray,
+            replay_requested=args.replay is not None,
+            setup_wizard=args.setup_wizard,
+        )
+    except BaseException:
+        if soak_bridge_handshake is not None:
+            soak_bridge_handshake.close()
+        raise
 
     replay_source: Path | None = None
     if args.replay is not None:
@@ -2361,10 +2508,13 @@ def main() -> None:
             force_replay=args.force_replay,
             legacy_channel_era=args.legacy_channel_era,
             soak_bridge_handshake=soak_bridge_handshake,
+            soak_artifact_capability=soak_artifact_capability,
         )
     except BaseException:
         if soak_bridge_handshake is not None:
             soak_bridge_handshake.close()
+        if soak_artifact_capability is not None:
+            soak_artifact_capability.close()
         raise
     if not args.tray:
         window.show()

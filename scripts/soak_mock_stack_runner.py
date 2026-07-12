@@ -1,9 +1,9 @@
-"""Hard-disabled POSIX soak runner provenance foundation (H4 R1).
+"""Hard-disabled POSIX soak runner foundation with an R3b receipt sink.
 
-This module contains pure types and validators only.  It cannot launch a
-process, create execution authority, write evidence, or publish a successful
-qualification.  R2/R3 must integrate real process handles, the locked observer,
-and the accepted soak foundation before activation is reviewed.
+The inherited AF_UNIX endpoint may durably capture isolated periodic-artifact
+evidence, but the runner still cannot launch a source process or publish a
+successful qualification. Activation and terminal PASS remain fused until the
+locked observer and integrated short-run acceptance are reviewed together.
 """
 
 from __future__ import annotations
@@ -13,10 +13,14 @@ import json
 import os
 import re
 import secrets
+import socket
+import stat
+import struct
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Any, Final, Protocol
 
 _TEST_FILE: Final = "tests/integration/test_periodic_png_multiprocess.py"
 _COLLECTION_ARGV: Final = (
@@ -55,6 +59,12 @@ _BRIDGE_HANDSHAKE_VERSION: Final = 1
 _MAX_BRIDGE_HANDSHAKE_BYTES: Final = 512
 _BRIDGE_FD_ENV: Final = "CRYODAQ_SOAK_BRIDGE_FD"
 _BRIDGE_NONCE_ENV: Final = "CRYODAQ_SOAK_BRIDGE_NONCE"
+_ARTIFACT_FD_ENV: Final = "CRYODAQ_SOAK_ARTIFACT_FD"
+_ARTIFACT_NONCE_ENV: Final = "CRYODAQ_SOAK_ARTIFACT_NONCE"
+_FRAME_PREFIX: Final = struct.Struct("!I")
+_ARTIFACT_IO_TIMEOUT_S: Final = 10.0
+_MAX_RECEIPT_LEDGER_BYTES: Final = 8 * 1024 * 1024
+_MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 
 
 class _RunnerFoundationError(ValueError):
@@ -223,12 +233,510 @@ class _BridgeHandshakePipe:
             self.read_fd = -1
 
 
+class _ArtifactCapabilityPair:
+    """Runner-owned AF_UNIX socketpair with one launcher-only duplicate."""
+
+    __slots__ = ("nonce", "runner", "launcher")
+
+    def __init__(self, nonce: str, runner: socket.socket, launcher: socket.socket) -> None:
+        self.nonce = nonce
+        self.runner = runner
+        self.launcher = launcher
+
+    @classmethod
+    def create(cls) -> _ArtifactCapabilityPair:
+        if os.name != "posix":
+            raise _RunnerActivationDisabled("artifact capability is POSIX-only")
+        runner, launcher = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            runner.set_inheritable(False)
+            launcher.set_inheritable(False)
+            return cls(secrets.token_hex(32), runner, launcher)
+        except BaseException:
+            runner.close()
+            launcher.close()
+            raise
+
+    def child_environment(self) -> dict[str, str]:
+        if self.launcher.fileno() < 3:
+            raise _RunnerFoundationError("artifact launcher endpoint is closed")
+        return {
+            _ARTIFACT_FD_ENV: str(self.launcher.fileno()),
+            _ARTIFACT_NONCE_ENV: self.nonce,
+        }
+
+    def child_pass_fds(self) -> tuple[int, ...]:
+        if self.launcher.fileno() < 3:
+            raise _RunnerFoundationError("artifact launcher endpoint is closed")
+        return (self.launcher.fileno(),)
+
+    def close_launcher_end(self) -> None:
+        if self.launcher.fileno() >= 0:
+            self.launcher.close()
+
+    def close(self) -> None:
+        self.close_launcher_end()
+        if self.runner.fileno() >= 0:
+            self.runner.close()
+
+
+class _ArtifactReceiptSink:
+    """Runner-side bounded decoder and durable file+ledger authority."""
+
+    __slots__ = ("_dir_fd", "_last_generation", "_next_sequence", "_nonce", "_socket", "_terminal")
+
+    def __init__(self, endpoint: socket.socket, *, nonce: str, evidence_dir: Path) -> None:
+        from cryodaq.agents.assistant.soak_periodic_delivery import frame_body_limit
+
+        if re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
+            raise _RunnerFoundationError("artifact nonce is invalid")
+        if endpoint.family != socket.AF_UNIX or endpoint.type & socket.SOCK_STREAM != socket.SOCK_STREAM:
+            raise _RunnerFoundationError("artifact endpoint is invalid")
+        endpoint.getpeername()
+        metadata = evidence_dir.lstat()
+        if (
+            not evidence_dir.is_absolute()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_uid != os.getuid()
+        ):
+            raise _RunnerFoundationError("evidence directory is unsafe")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        self._dir_fd = os.open(evidence_dir, flags)
+        opened = os.fstat(self._dir_fd)
+        if not os.path.samestat(metadata, opened):
+            os.close(self._dir_fd)
+            raise _RunnerFoundationError("evidence directory identity changed")
+        self._socket = endpoint
+        self._socket.set_inheritable(False)
+        self._socket.settimeout(_ARTIFACT_IO_TIMEOUT_S)
+        self._nonce = nonce
+        self._last_generation = 0
+        self._next_sequence = 1
+        self._terminal = False
+        _ = frame_body_limit()
+
+    def accept_one(
+        self,
+        *,
+        assistant_observation: _AssistantProcessObservation,
+        expected_launcher_pid: int,
+        expected_assistant_generation: int,
+        expected_slot_id: str,
+        expected_generation_id: str,
+        expected_owner_token: str,
+        expected_artifact_sha256: str,
+    ) -> dict[str, object]:
+        from cryodaq.agents.assistant.soak_periodic_delivery import (
+            build_ack,
+            decode_frame_body,
+            frame_body_limit,
+        )
+
+        if self._terminal:
+            raise _RunnerFoundationError("artifact sink is terminal")
+        try:
+            deadline = time.monotonic() + _ARTIFACT_IO_TIMEOUT_S
+            if (
+                type(expected_assistant_generation) is not int
+                or expected_assistant_generation <= 0
+                or type(expected_slot_id) is not str
+                or _SHA256_RE.fullmatch(expected_slot_id) is None
+                or type(expected_generation_id) is not str
+                or re.fullmatch(r"[0-9a-f]{32}", expected_generation_id) is None
+                or type(expected_owner_token) is not str
+                or re.fullmatch(r"[0-9a-f]{32}", expected_owner_token) is None
+                or type(expected_artifact_sha256) is not str
+                or _SHA256_RE.fullmatch(expected_artifact_sha256) is None
+            ):
+                raise _RunnerFoundationError("expected artifact authority is invalid")
+            assistant_identity = _bind_positive_assistant_identity(
+                assistant_observation,
+                expected_launcher_pid=expected_launcher_pid,
+            )
+            prefix = self._read_exact(_FRAME_PREFIX.size, deadline=deadline)
+            (size,) = _FRAME_PREFIX.unpack(prefix)
+            if not 1 <= size <= frame_body_limit():
+                raise _RunnerFoundationError("artifact frame size is invalid")
+            frame = decode_frame_body(self._read_exact(size, deadline=deadline))
+            metadata = frame.metadata
+            generation = metadata["assistant_generation"]
+            sequence = metadata["sequence"]
+            if (
+                metadata["nonce"] != self._nonce
+                or metadata["assistant_pid"] != assistant_identity.pid
+                or generation != expected_assistant_generation
+                or metadata["slot_id"] != expected_slot_id
+                or metadata["generation_id"] != expected_generation_id
+                or metadata["owner_token"] != expected_owner_token
+                or metadata["artifact_sha256"] != expected_artifact_sha256
+                or type(generation) is not int
+                or type(sequence) is not int
+                or generation < self._last_generation
+                or generation > self._last_generation + 1
+                or (generation == self._last_generation and sequence != self._next_sequence)
+                or (generation == self._last_generation + 1 and sequence != 1)
+            ):
+                raise _RunnerFoundationError("artifact identity/generation/sequence is invalid")
+            ack = build_ack(frame)
+            ack_metadata = json.loads(ack[_FRAME_PREFIX.size :].decode("ascii"))
+            self._persist(
+                frame,
+                ack_metadata=ack_metadata,
+                assistant_start_identity=assistant_identity.start_identity,
+            )
+            self._write_all(ack, deadline=deadline)
+            self._last_generation = generation
+            self._next_sequence = sequence + 1
+            return dict(metadata)
+        except BaseException:
+            self._terminal = True
+            self.close()
+            raise
+
+    def _persist(
+        self,
+        frame: Any,
+        *,
+        ack_metadata: dict[str, object],
+        assistant_start_identity: str,
+    ) -> None:
+        metadata = frame.metadata
+        generation = metadata["assistant_generation"]
+        sequence = metadata["sequence"]
+        digest = str(metadata["artifact_sha256"])[7:]
+        final_name = f"periodic-g{generation}-s{sequence}-{digest}.png"
+        staging = f".{final_name}.{secrets.token_hex(8)}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(staging, flags, 0o600, dir_fd=self._dir_fd)
+        try:
+            os.fchmod(fd, 0o600)
+            staging_stat = os.fstat(fd)
+            if (
+                not stat.S_ISREG(staging_stat.st_mode)
+                or staging_stat.st_uid != os.getuid()
+                or stat.S_IMODE(staging_stat.st_mode) != 0o600
+                or staging_stat.st_nlink != 1
+            ):
+                raise _RunnerFoundationError("artifact staging descriptor is unsafe")
+            self._write_fd(fd, frame.photo)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(staging, final_name, src_dir_fd=self._dir_fd, dst_dir_fd=self._dir_fd, follow_symlinks=False)
+            os.unlink(staging, dir_fd=self._dir_fd)
+            os.fsync(self._dir_fd)
+            verify_fd = os.open(final_name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=self._dir_fd)
+            try:
+                final_stat = os.fstat(verify_fd)
+                if (
+                    not stat.S_ISREG(final_stat.st_mode)
+                    or final_stat.st_uid != os.getuid()
+                    or stat.S_IMODE(final_stat.st_mode) != 0o600
+                    or final_stat.st_nlink != 1
+                    or final_stat.st_size != len(frame.photo)
+                ):
+                    raise _RunnerFoundationError("persisted artifact descriptor is unsafe")
+                raw = bytearray()
+                while len(raw) <= len(frame.photo):
+                    chunk = os.read(verify_fd, min(64 * 1024, len(frame.photo) + 1 - len(raw)))
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+                if bytes(raw) != frame.photo:
+                    raise _RunnerFoundationError("persisted artifact rehash mismatch")
+            finally:
+                os.close(verify_fd)
+            record = (
+                json.dumps(
+                    {
+                        "acknowledgement_sha256": ack_metadata["acknowledgement_sha256"],
+                        "assistant_start_identity": assistant_start_identity,
+                        "filename": final_name,
+                        "receipt_id": ack_metadata["receipt_id"],
+                        **metadata,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+                + b"\n"
+            )
+            if len(record) > _MAX_RECEIPT_RECORD_BYTES:
+                raise _RunnerFoundationError("receipt ledger record is oversized")
+            ledger = self._open_validated_ledger()
+            try:
+                if os.fstat(ledger).st_size + len(record) > _MAX_RECEIPT_LEDGER_BYTES:
+                    raise _RunnerFoundationError("receipt ledger capacity is exhausted")
+                self._write_fd(ledger, record)
+                os.fsync(ledger)
+            finally:
+                os.close(ledger)
+            os.fsync(self._dir_fd)
+        except BaseException:
+            try:
+                os.unlink(staging, dir_fd=self._dir_fd)
+            except OSError:
+                pass
+            raise
+
+    def _open_validated_ledger(self) -> int:
+        name = "periodic-receipts.jsonl"
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        nonblock = getattr(os, "O_NONBLOCK", 0)
+        created = False
+        try:
+            fd = os.open(
+                name,
+                os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL | nofollow | nonblock,
+                0o600,
+                dir_fd=self._dir_fd,
+            )
+            created = True
+            os.fchmod(fd, 0o600)
+        except FileExistsError:
+            observed = os.stat(name, dir_fd=self._dir_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or observed.st_uid != os.getuid()
+                or stat.S_IMODE(observed.st_mode) != 0o600
+                or observed.st_nlink != 1
+                or not 1 <= observed.st_size <= _MAX_RECEIPT_LEDGER_BYTES
+            ):
+                raise _RunnerFoundationError("existing receipt ledger is unsafe") from None
+            fd = os.open(name, os.O_RDWR | os.O_APPEND | nofollow | nonblock, dir_fd=self._dir_fd)
+            opened = os.fstat(fd)
+            if not os.path.samestat(observed, opened):
+                os.close(fd)
+                raise _RunnerFoundationError("receipt ledger identity changed")
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            os.close(fd)
+            raise _RunnerFoundationError("receipt ledger descriptor is unsafe")
+        if not created:
+            raw = os.pread(fd, metadata.st_size + 1, 0)
+            if len(raw) != metadata.st_size or not raw.endswith(b"\n"):
+                os.close(fd)
+                raise _RunnerFoundationError("receipt ledger has a partial tail")
+            seen_receipts: set[str] = set()
+            ledger_generation = 0
+            ledger_next_sequence = 1
+            for line in raw.splitlines(keepends=True):
+                if len(line) > _MAX_RECEIPT_RECORD_BYTES or not line.endswith(b"\n"):
+                    os.close(fd)
+                    raise _RunnerFoundationError("receipt ledger record is invalid")
+                try:
+                    value = json.loads(line[:-1].decode("ascii"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    os.close(fd)
+                    raise _RunnerFoundationError("receipt ledger record is invalid") from None
+                canonical = (
+                    json.dumps(
+                        value,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    ).encode("ascii")
+                    + b"\n"
+                )
+                if type(value) is not dict or canonical != line:
+                    os.close(fd)
+                    raise _RunnerFoundationError("receipt ledger record is not canonical")
+                if not self._valid_ledger_record(value):
+                    os.close(fd)
+                    raise _RunnerFoundationError("receipt ledger record is semantically invalid")
+                receipt_id = value["receipt_id"]
+                generation = value["assistant_generation"]
+                sequence = value["sequence"]
+                if (
+                    receipt_id in seen_receipts
+                    or generation < ledger_generation
+                    or generation > ledger_generation + 1
+                    or (generation == ledger_generation and sequence != ledger_next_sequence)
+                    or (generation == ledger_generation + 1 and sequence != 1)
+                ):
+                    os.close(fd)
+                    raise _RunnerFoundationError("receipt ledger ordering is invalid")
+                seen_receipts.add(receipt_id)
+                ledger_generation = generation
+                ledger_next_sequence = sequence + 1
+        return fd
+
+    @staticmethod
+    def _valid_ledger_record(value: dict[str, object]) -> bool:
+        expected = {
+            "acknowledgement_sha256",
+            "artifact_sha256",
+            "artifact_size",
+            "assistant_generation",
+            "assistant_pid",
+            "assistant_start_identity",
+            "caption_sha256",
+            "caption_size",
+            "filename",
+            "generation_id",
+            "nonce",
+            "owner_token",
+            "receipt_id",
+            "schema",
+            "sequence",
+            "slot_id",
+            "type",
+            "version",
+        }
+        if set(value) != expected:
+            return False
+        generation = value["assistant_generation"]
+        sequence = value["sequence"]
+        artifact_hash = value["artifact_sha256"]
+        try:
+            start_identity_bytes = value["assistant_start_identity"].encode("utf-8")
+        except (AttributeError, UnicodeEncodeError):
+            return False
+        ack_core = {
+            "artifact_sha256": artifact_hash,
+            "assistant_generation": generation,
+            "assistant_pid": value["assistant_pid"],
+            "nonce": value["nonce"],
+            "receipt_id": value["receipt_id"],
+            "schema": value["schema"],
+            "sequence": sequence,
+            "type": "ack",
+            "version": value["version"],
+        }
+        expected_ack = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    ack_core,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+            ).hexdigest()
+        )
+        return bool(
+            type(generation) is int
+            and generation > 0
+            and type(sequence) is int
+            and sequence > 0
+            and value["receipt_id"] == f"g{generation}:s{sequence}"
+            and type(artifact_hash) is str
+            and _SHA256_RE.fullmatch(artifact_hash) is not None
+            and value["filename"] == f"periodic-g{generation}-s{sequence}-{artifact_hash[7:]}.png"
+            and type(value["acknowledgement_sha256"]) is str
+            and value["acknowledgement_sha256"] == expected_ack
+            and value["schema"] == "cryodaq.soak.periodic-artifact"
+            and type(value["version"]) is int
+            and value["version"] == 1
+            and value["type"] == "artifact"
+            and type(value["assistant_pid"]) is int
+            and value["assistant_pid"] > 0
+            and type(value["nonce"]) is str
+            and re.fullmatch(r"[0-9a-f]{64}", value["nonce"]) is not None
+            and type(value["slot_id"]) is str
+            and _SHA256_RE.fullmatch(value["slot_id"]) is not None
+            and type(value["generation_id"]) is str
+            and re.fullmatch(r"[0-9a-f]{32}", value["generation_id"]) is not None
+            and type(value["owner_token"]) is str
+            and re.fullmatch(r"[0-9a-f]{32}", value["owner_token"]) is not None
+            and type(value["caption_sha256"]) is str
+            and _SHA256_RE.fullmatch(value["caption_sha256"]) is not None
+            and type(value["artifact_size"]) is int
+            and 33 <= value["artifact_size"] <= 10 * 1024 * 1024
+            and type(value["caption_size"]) is int
+            and 1 <= value["caption_size"] <= 4096
+            and type(value["assistant_start_identity"]) is str
+            and 1 <= len(start_identity_bytes) <= _MAX_START_IDENTITY_BYTES
+        )
+
+    def _read_exact(self, size: int, *, deadline: float) -> bytes:
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise _RunnerFoundationError("artifact stream deadline expired")
+            self._socket.settimeout(timeout)
+            try:
+                chunk = self._socket.recv(remaining)
+            except TimeoutError as exc:
+                raise _RunnerFoundationError("artifact stream deadline expired") from exc
+            if not chunk:
+                raise _RunnerFoundationError("artifact stream ended mid-frame")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _write_all(self, raw: bytes, *, deadline: float) -> None:
+        view = memoryview(raw)
+        while view:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise _RunnerFoundationError("artifact ACK deadline expired")
+            self._socket.settimeout(timeout)
+            try:
+                sent = self._socket.send(view)
+            except TimeoutError as exc:
+                raise _RunnerFoundationError("artifact ACK deadline expired") from exc
+            if sent <= 0:
+                raise _RunnerFoundationError("artifact ACK did not progress")
+            view = view[sent:]
+
+    @staticmethod
+    def _write_fd(fd: int, raw: bytes) -> None:
+        view = memoryview(raw)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise _RunnerFoundationError("durable evidence write did not progress")
+            view = view[written:]
+
+    def close(self) -> None:
+        if self._socket.fileno() >= 0:
+            self._socket.close()
+        if self._dir_fd >= 0:
+            os.close(self._dir_fd)
+            self._dir_fd = -1
+
+
 @dataclass(frozen=True, slots=True)
 class _BridgeProcessObservation:
     identity: _ProcessIdentity
     parent_pid: int
     role: str
     alive: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _AssistantProcessObservation:
+    identity: _ProcessIdentity
+    parent_pid: int
+    role: str
+    alive: bool
+
+
+def _bind_positive_assistant_identity(
+    observation: _AssistantProcessObservation,
+    *,
+    expected_launcher_pid: int,
+) -> _ProcessIdentity:
+    if type(observation.alive) is not bool or not observation.alive:
+        raise _RunnerFoundationError("reported assistant process is not alive")
+    if type(expected_launcher_pid) is not int or expected_launcher_pid <= 0:
+        raise _RunnerFoundationError("launcher identity is invalid")
+    if observation.parent_pid != expected_launcher_pid:
+        raise _RunnerFoundationError("reported assistant is not a direct launcher child")
+    if observation.role != "assistant":
+        raise _RunnerFoundationError("reported PID is not the allowlisted assistant role")
+    return observation.identity
 
 
 def _bind_positive_bridge_identity(
@@ -503,12 +1011,12 @@ class _CancellationCleanupContract:
 
 
 class _PosixSoakRunner:
-    """Non-runnable R1 shell retained solely for the future fixed runner."""
+    """Non-runnable shell retained until integrated short-run acceptance."""
 
     def run(self) -> None:
         raise _RunnerActivationDisabled(
-            "H4 runner activation requires R2/R3, locked observer dependency, "
-            "foundation integration, and real POSIX evidence"
+            "H4 runner activation requires R2/R3 integration, the locked observer, "
+            "and reviewed real POSIX short-run evidence"
         )
 
 

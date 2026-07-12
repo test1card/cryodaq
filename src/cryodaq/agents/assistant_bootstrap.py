@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import os
 import signal
@@ -40,6 +41,55 @@ DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_ASSISTANT_CMD_ADDR = "tcp://127.0.0.1:5557"
 _CONFIG_MAX_BYTES = 64 * 1024
 _FUTURE_SKEW_S = 300.0
+
+
+def _consume_soak_periodic_session(*, periodic_allowed: bool) -> Any | None:
+    """Consume the exact inherited local-delivery grant, if present."""
+
+    from cryodaq.agents.assistant.soak_periodic_delivery import (
+        SOAK_ARTIFACT_FD_ENV,
+        SOAK_ARTIFACT_NONCE_ENV,
+        SOAK_ASSISTANT_GENERATION_ENV,
+        SoakPeriodicDeliverySession,
+    )
+
+    raw_fd = os.environ.pop(SOAK_ARTIFACT_FD_ENV, None)
+    nonce = os.environ.pop(SOAK_ARTIFACT_NONCE_ENV, None)
+    raw_generation = os.environ.pop(SOAK_ASSISTANT_GENERATION_ENV, None)
+    if raw_fd is None and nonce is None and raw_generation is None:
+        return None
+    fd = -1
+    try:
+        if raw_fd is None or nonce is None or raw_generation is None:
+            raise RuntimeError("partial soak periodic capability environment")
+        fd = int(raw_fd, 10)
+        generation = int(raw_generation, 10)
+        if (
+            raw_fd != str(fd)
+            or raw_generation != str(generation)
+            or os.name != "posix"
+            or sys.platform == "win32"
+            or getattr(sys, "frozen", False)
+            or not periodic_allowed
+            or fd < 3
+            or not os.get_inheritable(fd)
+            or not 1 <= generation <= (1 << 63) - 1
+        ):
+            raise RuntimeError("soak periodic capability is not allowed")
+        transferred_fd = fd
+        fd = -1
+        return SoakPeriodicDeliverySession.from_fd(
+            transferred_fd,
+            nonce=nonce,
+            assistant_generation=generation,
+        )
+    except BaseException:
+        if fd >= 3:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
 
 
 def _strict_agent_enabled(config_dir: Path) -> bool:
@@ -269,21 +319,24 @@ async def run(
     resolved_config = Path(config_dir) if config_dir is not None else get_config_dir()
     resolved_data = Path(data_dir) if data_dir is not None else get_data_dir()
     periodic_allowed = _periodic_allowed_from_environment()
-    reporting = load_report_coordinator_config(
-        resolved_config,
-        automatic_allowed=_automatic_allowed_from_environment(),
-    )
-    llm_enabled = _strict_agent_enabled(resolved_config)
-    shutdown_event = asyncio.Event()
-    shutdown_sentinel = _validated_shutdown_sentinel(resolved_data) if sys.platform == "win32" else None
-
-    # Construct H2 before installing signal handlers. A constructor failure has
-    # no process-global cleanup obligation and cannot leak handlers.
-    coordinator = ReportCoordinator(
-        resolved_data,
-        config=reporting,
-        event_addr=engine_pub_addr,
-    )
+    soak_periodic_session = _consume_soak_periodic_session(periodic_allowed=periodic_allowed)
+    try:
+        reporting = load_report_coordinator_config(
+            resolved_config,
+            automatic_allowed=_automatic_allowed_from_environment(),
+        )
+        llm_enabled = _strict_agent_enabled(resolved_config)
+        shutdown_event = asyncio.Event()
+        shutdown_sentinel = _validated_shutdown_sentinel(resolved_data) if sys.platform == "win32" else None
+        coordinator = ReportCoordinator(
+            resolved_data,
+            config=reporting,
+            event_addr=engine_pub_addr,
+        )
+    except BaseException:
+        if soak_periodic_session is not None:
+            soak_periodic_session.close_now()
+        raise
 
     def request_shutdown() -> None:
         logger.info("cryodaq-assistant: shutdown requested")
@@ -315,6 +368,8 @@ async def run(
                         signal_cleanup_error = exc
             if signal_cleanup_error is not None:
                 raise primary_signal_error from signal_cleanup_error
+            if soak_periodic_session is not None:
+                soak_periodic_session.close_now()
             raise
 
     shutdown_task: asyncio.Task[bool] | None = None
@@ -337,10 +392,20 @@ async def run(
 
         if periodic_allowed:
             supervisor_type, factory_builder = _load_periodic_runtime()
-            coordinator_factory = factory_builder(
-                data_dir=resolved_data,
-                archive_dir=resolved_data / "archive",
-            )
+            factory_kwargs: dict[str, Any] = {
+                "data_dir": resolved_data,
+                "archive_dir": resolved_data / "archive",
+            }
+            if soak_periodic_session is not None:
+                factory_kwargs.update(
+                    {
+                        "_delivery_factory": soak_periodic_session.lease,
+                        "_destination_fingerprint": "sha256:"
+                        + hashlib.sha256(f"soak-local/v1:{soak_periodic_session.nonce}".encode("ascii")).hexdigest(),
+                        "_delivery_kind": "soak_local",
+                    }
+                )
+            coordinator_factory = factory_builder(**factory_kwargs)
             periodic_supervisor = supervisor_type(
                 data_dir=resolved_data,
                 config_dir=resolved_config,
@@ -419,6 +484,8 @@ async def run(
                 if not periodic_task.done():
                     periodic_task.cancel()
                 await asyncio.gather(periodic_task, return_exceptions=True)
+            if soak_periodic_session is not None:
+                await attempt(soak_periodic_session.close())
 
             for task in (shutdown_task, sentinel_task, coordinator_task):
                 if task is not None and not task.done():
