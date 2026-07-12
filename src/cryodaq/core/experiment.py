@@ -234,6 +234,22 @@ class ExperimentState:
 
 
 @dataclass(frozen=True, slots=True)
+class OperatorExperimentSnapshot:
+    """Constant-time, path-free experiment identity cut for operator views.
+
+    This is deliberately not a recording receipt. The experiment manager
+    owns card/lifecycle identity, but it does not own a durable recording
+    session. Consumers must therefore keep recording truth UNKNOWN until a
+    separately reviewed recording authority exists.
+    """
+
+    revision: int
+    experiment_id: str | None
+    experiment_name: str | None
+    phase: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RunRecord:
     record_id: str
     source_run_id: str
@@ -338,8 +354,13 @@ class ExperimentManager:
         self._state_path = self._data_dir / "experiment_state.json"
         self._active: ExperimentInfo | None = None
         self._state = ExperimentState(app_mode=AppMode.EXPERIMENT)
+        self._operator_phase: str | None = None
+        self._operator_snapshot = OperatorExperimentSnapshot(0, None, None, None)
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
         self._load_state()
+        if self._active is not None:
+            self._operator_phase = self.get_current_phase()
+        self._refresh_operator_snapshot(force=True)
 
     @property
     def active_experiment(self) -> ExperimentInfo | None:
@@ -356,6 +377,15 @@ class ExperimentManager:
     @property
     def active_experiment_id(self) -> str | None:
         return self._active.experiment_id if self._active is not None else None
+
+    def snapshot_operator_experiment(self) -> OperatorExperimentSnapshot:
+        """Return one immutable, no-I/O experiment identity cut.
+
+        Sampling performs no filesystem work and exposes no mutable metadata,
+        paths, operator identity, command method, or recording capability.
+        """
+
+        return self._operator_snapshot
 
     def get_templates(self) -> list[ExperimentTemplate]:
         if self._templates_cache is None:
@@ -1171,17 +1201,48 @@ class ExperimentManager:
         return AppMode(value)
 
     def _set_active(self, info: ExperimentInfo) -> None:
+        if self._active is None or self._active.experiment_id != info.experiment_id:
+            self._operator_phase = None
         self._active = info
         self._state = ExperimentState(
             app_mode=self._state.app_mode,
             active_experiment_id=info.experiment_id,
         )
-        self._write_state()
+        try:
+            self._write_state()
+        finally:
+            # _write_state already follows the manager's in-memory commit.
+            # If durability fails, preserve the exception while ensuring the
+            # observational cut cannot publish the previous lifecycle state.
+            self._refresh_operator_snapshot()
 
     def _clear_active(self) -> None:
         self._active = None
+        self._operator_phase = None
         self._state = ExperimentState(app_mode=self._state.app_mode, active_experiment_id=None)
-        self._write_state()
+        try:
+            self._write_state()
+        finally:
+            self._refresh_operator_snapshot()
+
+    def _refresh_operator_snapshot(self, *, force: bool = False) -> None:
+        previous = self._operator_snapshot
+        active = self._active
+        candidate = (
+            None if active is None else active.experiment_id,
+            None if active is None else active.name,
+            self._operator_phase if active is not None else None,
+        )
+        if not force and candidate == (
+            previous.experiment_id,
+            previous.experiment_name,
+            previous.phase,
+        ):
+            return
+        self._operator_snapshot = OperatorExperimentSnapshot(
+            previous.revision + 1,
+            *candidate,
+        )
 
     def _load_state(self) -> None:
         active_experiment_id: str | None = None
@@ -1505,6 +1566,9 @@ class ExperimentManager:
         from cryodaq.core.atomic_write import atomic_write_text
 
         atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+        self._operator_phase = phase
+        self._refresh_operator_snapshot()
 
         return entry
 
