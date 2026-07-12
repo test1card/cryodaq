@@ -32,7 +32,8 @@ def _mock_keithley():
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock()
+    # Exact verified-OFF contract: only literal True proves the hardware OFF.
+    k.emergency_off = AsyncMock(return_value=True)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -523,11 +524,65 @@ async def test_interlock_stop_source_faults_when_off_unconfirmed():
     mgr, broker = await _make_manager(mock=False, keithley=k)
     try:
         await _get_to_running(mgr, broker)
-        await mgr.on_interlock_trip(
-            "overheat_soft", "Т5 Радиатор", 320.0, action="stop_source"
-        )
+        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
         assert mgr.state == SafetyState.FAULT_LATCHED, (
             f"unconfirmed OFF on interlock stop must latch FAULT, got {mgr.state}"
         )
+    finally:
+        await mgr.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unqualified_result",
+    [
+        pytest.param(1, id="integer-one"),
+        pytest.param("confirmed", id="nonempty-string"),
+        pytest.param(AsyncMock(), id="async-mock-object"),
+        pytest.param(object(), id="truthy-object"),
+    ],
+)
+async def test_interlock_stop_source_rejects_truthy_non_bool_off_evidence(
+    unqualified_result,
+):
+    """Only literal ``True`` may clear active-source evidence after a trip."""
+    k = _mock_keithley()
+    k.emergency_off = AsyncMock(return_value=unqualified_result)
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _get_to_running(mgr, broker)
+        active_before = set(mgr._active_sources)
+        assert active_before
+
+        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
+
+        assert mgr.state is SafetyState.FAULT_LATCHED
+        assert mgr._active_sources == active_before
+        snapshot = mgr.snapshot_operator_safety()
+        assert snapshot.verified_off is False
+        assert any(blocker.code == "reviewed_source_off_unverified" for blocker in snapshot.blockers)
+        source = next(fact for fact in snapshot.plant_health if fact.subsystem_id == "reviewed_source")
+        assert source.reason_code == "reviewed_source_off_unverified"
+    finally:
+        await mgr.stop()
+
+
+@pytest.mark.asyncio
+async def test_interlock_stop_source_accepts_exact_true_off_evidence():
+    k = _mock_keithley()
+    k.emergency_off = AsyncMock(return_value=True)
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _get_to_running(mgr, broker)
+
+        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
+
+        assert mgr.state is SafetyState.SAFE_OFF
+        assert mgr._active_sources == set()
+        snapshot = mgr.snapshot_operator_safety()
+        assert snapshot.verified_off is True
+        assert all(blocker.code != "reviewed_source_off_unverified" for blocker in snapshot.blockers)
+        source = next(fact for fact in snapshot.plant_health if fact.subsystem_id == "reviewed_source")
+        assert source.reason_code == "reviewed_source_verified_off"
     finally:
         await mgr.stop()

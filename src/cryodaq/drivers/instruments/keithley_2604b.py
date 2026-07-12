@@ -6,9 +6,12 @@ only checks a late pet; it does not regulate and is not autonomous.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
@@ -58,6 +61,11 @@ _IV_FIELDS = (
     ("resistance", "Ohm"),
     ("power", "W"),
 )
+
+_OUTPUT_STATE_NUMBER_RE = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z"
+)
+_OUTPUT_STATE_MAX_CHARS = 64
 
 # TSP software late-pet watchdog, gated on _wdog_enabled (default False).
 # Version 3 is explicitly non-autonomous: it covers stall-then-recover only.
@@ -217,9 +225,19 @@ class Keithley2604B(InstrumentDriver):
         # readback-verified (outputs may still be ON). A blocking RUN
         # precondition in SafetyManager, cleared by a later verified OFF.
         self._unsafe_output_state = False
+        # Connection-scoped evidence: only OFF readback collected in the
+        # current connection generation may authorize transport teardown.
+        self._connection_generation = 0
+        self._output_off_verified: dict[SmuChannel, bool] = {
+            "smua": False,
+            "smub": False,
+        }
 
     async def connect(self) -> None:
         log.info("%s: connecting to %s", self.name, self._resource_str)
+        self._connection_generation += 1
+        self._output_off_verified = {"smua": False, "smub": False}
+        self._unsafe_output_state = True
         await self._transport.open(self._resource_str)
         try:
             idn = await self._transport.query("*IDN?")
@@ -244,7 +262,11 @@ class Keithley2604B(InstrumentDriver):
             # instead readback-verify both channels; an unverified/still-ON
             # output sets the blocking _unsafe_output_state flag so SafetyManager
             # refuses RUN (only RUN) until a later verified OFF clears it.
-            if not self.mock:
+            if self.mock:
+                # Deterministic simulator state only; no hardware authority.
+                self._output_off_verified = {"smua": True, "smub": True}
+                self._unsafe_output_state = False
+            else:
                 self._unsafe_output_state = False
                 try:
                     await self._transport.write("smua.source.levelv = 0")
@@ -263,6 +285,8 @@ class Keithley2604B(InstrumentDriver):
                         try:
                             if not await self._verify_output_off(smu_channel):
                                 self._unsafe_output_state = True
+                            else:
+                                self._output_off_verified[smu_channel] = True
                         except Exception as exc:
                             log.critical(
                                 "%s: SAFETY: connect force-off readback FAILED on %s: %s",
@@ -300,10 +324,43 @@ class Keithley2604B(InstrumentDriver):
     async def disconnect(self) -> None:
         if not self._connected:
             return
-        await self.emergency_off()
-        await self._wdog_disarm()
-        await self._transport.close()
-        self._connected = False
+        off_confirmed = all(self._output_off_verified.values())
+        if not off_confirmed:
+            try:
+                off_confirmed = await self.emergency_off()
+            except BaseException:
+                self._output_off_verified = {"smua": False, "smub": False}
+                self._unsafe_output_state = True
+                raise
+        if off_confirmed is not True:
+            self._unsafe_output_state = True
+            raise OutputStateUnverifiedError(
+                f"{self.name}: disconnect refused without a "
+                "readback-verified OFF for both outputs"
+            )
+
+        # Only terminal OFF proof authorizes teardown.  Once authorized,
+        # settle disarm/close even if the caller is cancelled.
+        pending: asyncio.CancelledError | None = None
+        cleanup_error: Exception | None = None
+        try:
+            await self._wdog_disarm()
+        except asyncio.CancelledError as exc:
+            pending = exc
+        except Exception as exc:
+            cleanup_error = exc
+        try:
+            await self._transport.close()
+        except asyncio.CancelledError as exc:
+            pending = pending or exc
+        except Exception as exc:
+            cleanup_error = cleanup_error or exc
+        finally:
+            self._connected = False
+        if pending is not None:
+            raise pending
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def read_channels(self) -> list[Reading]:
         if not self._connected:
@@ -431,6 +488,11 @@ class Keithley2604B(InstrumentDriver):
         if runtime.active:
             raise RuntimeError(f"Channel {smu_channel} already active")
 
+        # Invalidate before the first enabling/configuration write.  Partial
+        # transport failure must never leave stale OFF authority.
+        self._output_off_verified[smu_channel] = False
+        self._unsafe_output_state = True
+
         runtime.p_target = p_target
         runtime.v_comp = v_compliance
         runtime.i_comp = i_compliance
@@ -459,10 +521,7 @@ class Keithley2604B(InstrumentDriver):
         runtime = self._channels[smu_channel]
 
         if self.mock:
-            self._last_v[smu_channel] = 0.0
-            self._compliance_count[smu_channel] = 0
-            runtime.active = False
-            runtime.p_target = 0.0
+            self._mark_channel_off_verified(smu_channel)
             return
 
         if not self._connected:
@@ -476,6 +535,8 @@ class Keithley2604B(InstrumentDriver):
         # loop must keep treating this channel as active while the output is
         # UNVERIFIED. (A transport error from the query already propagates.)
         if not await self._verify_output_off(smu_channel):
+            self._output_off_verified[smu_channel] = False
+            self._unsafe_output_state = True
             raise OutputStateUnverifiedError(
                 f"{self.name}: {smu_channel} output state UNVERIFIED after "
                 f"OUTPUT_OFF (readback did not confirm OFF) — output may still be ON"
@@ -484,6 +545,8 @@ class Keithley2604B(InstrumentDriver):
         self._compliance_count[smu_channel] = 0
         runtime.active = False
         runtime.p_target = 0.0
+        self._output_off_verified[smu_channel] = True
+        self._unsafe_output_state = not all(self._output_off_verified.values())
 
     async def read_buffer(self, start_idx: int = 1, count: int = 100) -> list[dict[str, float]]:
         if not self._connected:
@@ -508,18 +571,22 @@ class Keithley2604B(InstrumentDriver):
         fault instead of reporting SAFE_OFF).
         """
         channels = [normalize_smu_channel(channel)] if channel is not None else list(SMU_CHANNELS)
-        for smu_channel in channels:
-            runtime = self._channels[smu_channel]
-            runtime.active = False
-            runtime.p_target = 0.0
-            self._last_v[smu_channel] = 0.0
-            self._compliance_count[smu_channel] = 0
 
-        if self.mock or not self._connected:
+        if not self._connected:
+            if self.mock:
+                for smu_channel in channels:
+                    self._mark_channel_off_verified(smu_channel)
+                return channel is not None or all(self._output_off_verified.values())
+            return all(self._output_off_verified.values())
+
+        if self.mock:
+            for smu_channel in channels:
+                self._mark_channel_off_verified(smu_channel)
             return True
 
         all_confirmed = True
         for smu_channel in channels:
+            write_succeeded = True
             try:
                 await self._transport.write(f"{smu_channel}.source.levelv = 0")
                 await self._transport.write(
@@ -527,6 +594,7 @@ class Keithley2604B(InstrumentDriver):
                 )
             except Exception as exc:
                 log.critical("%s: emergency_off failed on %s: %s", self.name, smu_channel, exc)
+                write_succeeded = False
                 all_confirmed = False
             # SAFETY (Phase 2a G.1): readback-verify each channel.
             # emergency_off is the most critical path — silent failure here
@@ -535,8 +603,16 @@ class Keithley2604B(InstrumentDriver):
             # and a raise here would just propagate noise; the CRITICAL log
             # plus the False return are the signalling mechanisms (CR-2).
             try:
-                if not await self._verify_output_off(smu_channel):
+                readback_confirmed = await self._verify_output_off(smu_channel)
+                if not readback_confirmed:
                     all_confirmed = False
+                    self._output_off_verified[smu_channel] = False
+                    self._unsafe_output_state = True
+                elif write_succeeded:
+                    self._mark_channel_off_verified(smu_channel)
+                else:
+                    self._output_off_verified[smu_channel] = False
+                    self._unsafe_output_state = True
             except Exception as exc:
                 log.critical(
                     "%s: emergency_off verify FAILED on %s: %s — instrument may still be sourcing!",
@@ -545,12 +621,24 @@ class Keithley2604B(InstrumentDriver):
                     exc,
                 )
                 all_confirmed = False
+                self._output_off_verified[smu_channel] = False
+                self._unsafe_output_state = True
         # F2: a full both-channel emergency_off that confirms OFF resolves any
         # connect-time unverified-output block. Only the full scope (channel is
         # None) confirms BOTH channels, so only it may clear the flag.
         if channel is None and all_confirmed:
             self._unsafe_output_state = False
         return all_confirmed
+
+    def _mark_channel_off_verified(self, smu_channel: SmuChannel) -> None:
+        """Commit one connection-scoped OFF proof and clear runtime state."""
+        runtime = self._channels[smu_channel]
+        runtime.active = False
+        runtime.p_target = 0.0
+        self._last_v[smu_channel] = 0.0
+        self._compliance_count[smu_channel] = 0
+        self._output_off_verified[smu_channel] = True
+        self._unsafe_output_state = not all(self._output_off_verified.values())
 
     async def check_error(self) -> str | None:
         if not self._connected:
@@ -987,15 +1075,27 @@ class Keithley2604B(InstrumentDriver):
         response = await self._transport.query(
             f"print({smu_channel}.source.output)", timeout_ms=3000
         )
+        token = response.strip()
         try:
-            if float(response.strip()) > 0.5:
-                log.critical(
-                    "%s: %s still reports output=%s", self.name, smu_channel, response.strip()
-                )
-                return False
-        except ValueError:
+            if (
+                not token
+                or len(token) > _OUTPUT_STATE_MAX_CHARS
+                or _OUTPUT_STATE_NUMBER_RE.fullmatch(token) is None
+            ):
+                raise InvalidOperation
+            value = Decimal(token)
+        except InvalidOperation:
             log.critical(
-                "%s: %s unexpected output response: %r", self.name, smu_channel, response.strip()
+                "%s: %s unexpected output response: %r", self.name, smu_channel, token
+            )
+            return False
+        # Keithley output is an enum.  Accept only a finite numeric literal
+        # whose exact Decimal value is zero.  +0 and -0 are equivalent OFF
+        # encodings; NaN/Inf, negative/fractional values and trailing junk are
+        # all unverified, never coerced to OFF.
+        if not value.is_finite() or not value.is_zero():
+            log.critical(
+                "%s: %s still reports output=%s", self.name, smu_channel, token
             )
             return False
         return True

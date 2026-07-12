@@ -121,6 +121,7 @@ from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 from cryodaq.report_process import ReportProcessError, ReportProcessRunner
+from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
 from cryodaq.storage.cold_rotation import build_cold_rotation_service, normalize_schedule_time
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -1716,6 +1717,25 @@ def _engine_config_path(name: str) -> Path:
     return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
 
 
+async def _load_live_descriptor_authority(
+    instruments_cfg: Path,
+    driver_load: DriverLoadResult,
+):
+    """Load and validate production descriptor authority off the event loop."""
+
+    descriptor_base = _CONFIG_DIR / "channel_descriptors.yaml"
+    descriptor_local = (
+        _CONFIG_DIR / "channel_descriptors.local.yaml" if instruments_cfg.name == "instruments.local.yaml" else None
+    )
+    owner = await asyncio.to_thread(
+        load_live_channel_descriptor_catalog,
+        descriptor_base,
+        local_path=descriptor_local,
+    )
+    owner.require_exact_instruments(tuple(config.name for config in driver_load.validated_configs))
+    return owner
+
+
 @dataclass(slots=True)
 class _SafetyFaultLogContext:
     writer: Any
@@ -2545,6 +2565,11 @@ async def _run_engine(*, mock: bool = False) -> None:
     )
     safety_manager.load_config(safety_cfg)
 
+    # F35: descriptor identity is mandatory production startup authority.
+    # A machine-local instrument configuration requires a complete local
+    # descriptor replacement; it never falls back to the tracked base.
+    live_descriptor_catalog = await _load_live_descriptor_authority(instruments_cfg, driver_load)
+
     housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
     # Merge legacy interlocks.yaml protection patterns with the modern
     # alarms_v3.yaml critical channels. Without this the throttle thins
@@ -2565,7 +2590,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     )
 
     # SQLite — persistence-first: writer создаётся ДО scheduler
-    writer = SQLiteWriter(_DATA_DIR)
+    writer = SQLiteWriter(_DATA_DIR, channel_catalog=live_descriptor_catalog)
     await writer.start_immediate()
     # Disk-full graceful degradation (Phase 2a H.1): wire writer to the
     # engine event loop and SafetyManager so a disk-full error in the
@@ -2603,6 +2628,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         sqlite_writer=writer,
         adaptive_throttle=adaptive_throttle,
         calibration_acquisition=calibration_acquisition,
+        reviewed_source_disconnect=safety_manager.disconnect_reviewed_source,
         drain_timeout_s=safety_manager._config.scheduler_drain_timeout_s,
     )
     for cfg in driver_configs:

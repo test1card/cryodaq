@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +24,7 @@ from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     BusRecoveryLevel,
     DriverRuntimeBinding,
+    DriverTrustClass,
     SharedBusParticipant,
     SharedBusRecoveryCoordinator,
 )
@@ -126,6 +128,7 @@ class Scheduler:
         sqlite_writer: Any | None = None,
         adaptive_throttle: Any | None = None,
         calibration_acquisition: Any | None = None,
+        reviewed_source_disconnect: Callable[[InstrumentDriver, str], Awaitable[bool]] | None = None,
         drain_timeout_s: float = 5.0,
     ) -> None:
         self._broker = broker
@@ -133,6 +136,7 @@ class Scheduler:
         self._sqlite_writer = sqlite_writer
         self._adaptive_throttle = adaptive_throttle
         self._calibration_acquisition = calibration_acquisition
+        self._reviewed_source_disconnect = reviewed_source_disconnect
         self._drain_timeout_s = drain_timeout_s
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
@@ -154,10 +158,43 @@ class Scheduler:
         *,
         timeout_s: float = _DISCONNECT_TIMEOUT_S,
         context: str = "",
-    ) -> None:
+    ) -> bool:
         """Disconnect with a bounded wait so wedged transports do not hang recovery."""
+        from cryodaq.drivers.registry import runtime_binding_for_driver
+
+        binding = runtime_binding_for_driver(driver)
+        if binding is not None and binding.trust_class is DriverTrustClass.REVIEWED_SOURCE:
+            callback = self._reviewed_source_disconnect
+            if callback is None:
+                logger.critical(
+                    "Reviewed source '%s' cannot be disconnected without SafetyManager authority (%s)",
+                    driver.name,
+                    context,
+                )
+                return False
+            try:
+                result = await asyncio.wait_for(callback(driver, context), timeout=timeout_s)
+                return result is True
+            except TimeoutError:
+                logger.critical(
+                    "Таймаут безопасного отключения reviewed source '%s' за %.1fs (%s)",
+                    driver.name,
+                    timeout_s,
+                    context,
+                )
+                return False
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Ошибка безопасного отключения reviewed source '%s' (%s)",
+                    driver.name,
+                    context,
+                )
+                return False
         try:
             await asyncio.wait_for(driver.disconnect(), timeout=timeout_s)
+            return True
         except TimeoutError:
             if context:
                 logger.warning(
@@ -168,11 +205,13 @@ class Scheduler:
                 )
             else:
                 logger.warning("Таймаут отключения '%s' за %.1fs", driver.name, timeout_s)
+            return False
         except Exception:
             if context:
                 logger.exception("Ошибка отключения '%s' (%s)", driver.name, context)
             else:
                 logger.exception("Ошибка отключения '%s'", driver.name)
+            return False
 
     async def _poll_loop(self, state: _InstrumentState) -> None:
         """Цикл опроса одного прибора с reconnect и backoff."""
@@ -589,9 +628,20 @@ class Scheduler:
         # Step 1b: Persist KRDG + SRDG atomically in one transaction
         combined = list(persisted_readings) + srdg_to_persist
         persistence_authoritative = False
+        committed_publish_readings = list(persisted_readings)
         if self._sqlite_writer is not None and combined:
             try:
-                persisted = await self._sqlite_writer.write_immediate(combined)
+                if getattr(self._sqlite_writer, "descriptor_authoritative", False) is True:
+                    receipt = await self._sqlite_writer.write_committed(combined)
+                    if receipt is None:
+                        return
+                    committed = self._sqlite_writer.readings_from_commit(receipt)
+                    if len(committed) != len(combined):
+                        raise RuntimeError("commit receipt cardinality disagrees with persisted batch")
+                    committed_publish_readings = committed[: len(persisted_readings)]
+                    persisted = True
+                else:
+                    persisted = await self._sqlite_writer.write_immediate(combined)
             except Exception:
                 logger.exception(
                     "CRITICAL: Ошибка записи '%s' — данные НЕ отправлены подписчикам",
@@ -622,9 +672,9 @@ class Scheduler:
             self._calibration_acquisition.on_srdg_persisted(len(srdg_to_persist), srdg_pending_state)
 
         # Step 2: Publish to brokers
-        if persisted_readings:
+        if committed_publish_readings:
             await self._broker.publish_batch(
-                persisted_readings,
+                committed_publish_readings,
                 persistence_authoritative=persistence_authoritative,
             )
         if self._safety_broker is not None:
