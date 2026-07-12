@@ -14,11 +14,11 @@ def test_only_bounded_storage_adapter_imports_channel_contract() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("cryodaq.channels"):
-                importers.add(str(path.relative_to(source_root)))
+                importers.add(path.relative_to(source_root).as_posix())
             elif isinstance(node, ast.Import) and any(
                 alias.name.startswith("cryodaq.channels") for alias in node.names
             ):
-                importers.add(str(path.relative_to(source_root)))
+                importers.add(path.relative_to(source_root).as_posix())
     assert importers == {
         "storage/channel_descriptors.py",
         "storage/descriptor_archive.py",

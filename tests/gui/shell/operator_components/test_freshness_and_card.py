@@ -400,7 +400,10 @@ def test_deleted_body_host_during_first_commit_fails_closed(qapp, attention_queu
     card.show()
     host = card._content_host
     host.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    # Drain only the deletion this scenario owns. A process-wide deferred-delete
+    # drain also destroys unrelated Qt graphics objects retained by earlier GUI
+    # tests, turning this focused ownership check into order-dependent teardown.
+    QCoreApplication.sendPostedEvents(host, QEvent.Type.DeferredDelete)
 
     with pytest.raises(RuntimeError):
         card.render(attention_queue_factory(revision=1, count=1))

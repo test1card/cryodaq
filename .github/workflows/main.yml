@@ -63,7 +63,17 @@ jobs:
         # teardown. In isolation these tests pass cleanly. Harmless on Linux.
         run: pytest tests/gui/test_app_palette.py --tb=short -v --timeout=120 --timeout-method=thread
 
+      - name: Run operator ownership tests (isolated)
+        # These tests intentionally delete owned Qt children and wait for
+        # queued button activation to prove fail-closed behavior. In the
+        # monolithic GUI process, either operation also drains deferred
+        # QGraphicsScene teardown left by unrelated pyqtgraph tests; PySide can
+        # then crash natively before the ownership assertion runs. A fresh
+        # process retains every assertion while removing that cross-file Qt
+        # lifetime contamination.
+        run: pytest tests/gui/shell/operator_components/test_freshness_and_card.py tests/gui/shell/views/test_operator_display.py --tb=short -v --timeout=120 --timeout-method=thread
+
       - name: Run tests
         # -v names the running test (a Qt segfault on Windows prints no
         # traceback); --timeout turns a hang into a faulthandler dump.
-        run: pytest tests/ --deselect tests/gui/test_app_palette.py -x --tb=short -v --timeout=120 --timeout-method=thread
+        run: pytest tests/ --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py -x --tb=short -v --timeout=120 --timeout-method=thread
