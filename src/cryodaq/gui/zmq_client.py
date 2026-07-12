@@ -228,6 +228,18 @@ class ZmqBridge:
         """Return the number of bridge restarts since launcher start."""
         return self._restart_count
 
+    def process_pid(self) -> int | None:
+        """Return the current bridge PID as a read-only identity hint.
+
+        PID alone is never signal authority; the soak observer must combine it
+        with an independently re-resolved OS start identity.
+        """
+
+        if self._process is None or not self._process.is_alive():
+            return None
+        pid = self._process.pid
+        return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
     def send_command(self, cmd: dict) -> dict:
         """Thread-safe command dispatch with Future-per-request correlation."""
         if not self.is_alive():

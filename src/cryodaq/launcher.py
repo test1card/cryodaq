@@ -12,10 +12,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import logging.handlers
 import math
 import os
+import re
 import signal
 import stat as stat_module
 import subprocess
@@ -220,6 +222,168 @@ _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _WINDOWS_CREATE_NO_WINDOW = 0x08000000
 _ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
 _ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
+_SOAK_BRIDGE_FD_ENV = "CRYODAQ_SOAK_BRIDGE_FD"
+_SOAK_BRIDGE_NONCE_ENV = "CRYODAQ_SOAK_BRIDGE_NONCE"
+_SOAK_BRIDGE_SCHEMA = "cryodaq.soak.bridge-identity"
+_SOAK_BRIDGE_VERSION = 1
+_SOAK_BRIDGE_MAX_BYTES = 512
+_SOAK_BRIDGE_ACTIVE_FDS: set[int] = set()
+_SOAK_BRIDGE_AT_FORK_REGISTERED = False
+
+
+def _close_soak_bridge_fds_after_fork() -> None:
+    """Remove launcher-only pipe authority from every forked descendant."""
+
+    for fd in tuple(_SOAK_BRIDGE_ACTIVE_FDS):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _SOAK_BRIDGE_ACTIVE_FDS.clear()
+
+
+def _guard_soak_bridge_fd_from_descendants(fd: int) -> None:
+    """Make *fd* close-on-exec and close it in children of a real fork."""
+
+    global _SOAK_BRIDGE_AT_FORK_REGISTERED
+    os.set_inheritable(fd, False)
+    if hasattr(os, "register_at_fork") and not _SOAK_BRIDGE_AT_FORK_REGISTERED:
+        os.register_at_fork(after_in_child=_close_soak_bridge_fds_after_fork)
+        _SOAK_BRIDGE_AT_FORK_REGISTERED = True
+    _SOAK_BRIDGE_ACTIVE_FDS.add(fd)
+
+
+@dataclass(slots=True)
+class _SoakBridgeHandshake:
+    """One-shot runner pipe owned only by an isolated POSIX mock launcher."""
+
+    fd: int
+    nonce: str
+    _closed: bool = False
+    _emitted: bool = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        _SOAK_BRIDGE_ACTIVE_FDS.discard(self.fd)
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+    def emit(self, *, bridge_pid: int | None, restart_count: int) -> None:
+        if self._closed or self._emitted:
+            raise RuntimeError("soak bridge handshake is already closed or emitted")
+        if (
+            not isinstance(bridge_pid, int)
+            or isinstance(bridge_pid, bool)
+            or bridge_pid <= 0
+            or bridge_pid == os.getpid()
+        ):
+            raise RuntimeError("bridge PID unavailable for positive handshake")
+        if type(restart_count) is not int or restart_count != 1:
+            raise RuntimeError("bridge restarted before positive handshake")
+        record = {
+            "schema": _SOAK_BRIDGE_SCHEMA,
+            "version": _SOAK_BRIDGE_VERSION,
+            "nonce": self.nonce,
+            "launcher_pid": os.getpid(),
+            "bridge_pid": bridge_pid,
+            "restart_count": restart_count,
+        }
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+        if len(payload) > _SOAK_BRIDGE_MAX_BYTES:
+            raise RuntimeError("soak bridge handshake exceeds its bound")
+        try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(self.fd, payload[offset:])
+                if written <= 0:
+                    raise RuntimeError("soak bridge handshake write did not progress")
+                offset += written
+            self._emitted = True
+        finally:
+            self.close()
+
+
+def _without_soak_bridge_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Strip launcher-only descriptor authority from every child environment."""
+
+    result = dict(environment)
+    result.pop(_SOAK_BRIDGE_FD_ENV, None)
+    result.pop(_SOAK_BRIDGE_NONCE_ENV, None)
+    return result
+
+
+def _consume_soak_bridge_handshake(
+    *,
+    cli_mock: bool,
+    tray_only: bool,
+    replay_requested: bool,
+    setup_wizard: bool,
+) -> _SoakBridgeHandshake | None:
+    """Consume and validate the private one-shot launcher environment."""
+
+    raw_fd = os.environ.pop(_SOAK_BRIDGE_FD_ENV, None)
+    nonce = os.environ.pop(_SOAK_BRIDGE_NONCE_ENV, None)
+    if raw_fd is None and nonce is None:
+        return None
+    if raw_fd is None:
+        raise RuntimeError("partial soak bridge handshake environment")
+    try:
+        fd = int(raw_fd, 10)
+    except ValueError as exc:
+        raise RuntimeError("invalid soak bridge handshake descriptor") from exc
+    try:
+        if nonce is None:
+            raise RuntimeError("partial soak bridge handshake environment")
+        if (
+            os.name != "posix"
+            or sys.platform == "win32"
+            or getattr(sys, "frozen", False)
+            or not cli_mock
+            or not tray_only
+            or replay_requested
+            or setup_wizard
+        ):
+            raise RuntimeError("soak bridge handshake is restricted to POSIX source --mock --tray")
+        if re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
+            raise RuntimeError("invalid soak bridge handshake nonce")
+        if fd < 3 or not os.get_inheritable(fd):
+            raise RuntimeError("soak bridge handshake descriptor is not inherited")
+        metadata = os.fstat(fd)
+        if not stat_module.S_ISFIFO(metadata.st_mode):
+            raise RuntimeError("soak bridge handshake descriptor is not a pipe")
+        import fcntl
+
+        if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_WRONLY:
+            raise RuntimeError("soak bridge handshake descriptor is not write-only")
+        root_text = os.environ.get("CRYODAQ_ROOT")
+        if not root_text:
+            raise RuntimeError("soak bridge handshake requires isolated CRYODAQ_ROOT")
+        root = Path(root_text)
+        root_observed = _real_directory_stat(root)
+        if not root.is_absolute() or root_observed is None:
+            raise RuntimeError("soak bridge handshake root is unsafe")
+        resolved_root = root.resolve(strict=True)
+        repository_root = Path(__file__).resolve().parents[2]
+        if resolved_root == repository_root or resolved_root.is_relative_to(repository_root):
+            raise RuntimeError("soak bridge handshake root is not isolated")
+        root_stat = resolved_root.stat()
+        if (root_observed.st_dev, root_observed.st_ino) != (root_stat.st_dev, root_stat.st_ino):
+            raise RuntimeError("soak bridge handshake root identity changed")
+        if root_stat.st_uid != os.getuid() or stat_module.S_IMODE(root_stat.st_mode) != 0o700:
+            raise RuntimeError("soak bridge handshake root ownership/mode is unsafe")
+        _guard_soak_bridge_fd_from_descendants(fd)
+        return _SoakBridgeHandshake(fd=fd, nonce=nonce)
+    except BaseException:
+        if fd >= 3:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
 
 
 def _real_directory_stat(path: Path) -> os.stat_result | None:
@@ -508,6 +672,7 @@ class LauncherWindow(QMainWindow):
         replay_loop: bool = False,
         force_replay: bool = False,
         legacy_channel_era: str | None = None,
+        soak_bridge_handshake: _SoakBridgeHandshake | None = None,
     ) -> None:
         super().__init__()
         self._app = app
@@ -520,6 +685,7 @@ class LauncherWindow(QMainWindow):
         self._replay_loop = replay_loop
         self._force_replay = force_replay
         self._legacy_channel_era = legacy_channel_era
+        self._soak_bridge_handshake = soak_bridge_handshake
         self._engine_proc: subprocess.Popen | None = None
         self._engine_stderr_handler: logging.Handler | None = None
         self._engine_stderr_logger: logging.Logger | None = None
@@ -618,6 +784,18 @@ class LauncherWindow(QMainWindow):
             QTimer.singleShot(200, self._show_replay_engine_failure)
         else:
             self._bridge.start()
+            if self._soak_bridge_handshake is not None:
+                try:
+                    self._soak_bridge_handshake.emit(
+                        bridge_pid=self._bridge.process_pid(),
+                        restart_count=self._bridge.restart_count(),
+                    )
+                except Exception:
+                    self._soak_bridge_handshake.close()
+                    self._bridge.shutdown()
+                    self._stop_assistant()
+                    self._stop_engine()
+                    raise
 
         if tray_only:
             self._main_window = None
@@ -798,7 +976,7 @@ class LauncherWindow(QMainWindow):
                         python = str(pythonw)
                 cmd = [python, "-m", "cryodaq.engine"]
 
-        env = os.environ.copy()
+        env = _without_soak_bridge_environment(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         if self._mock and self._replay_source is None:
             env["CRYODAQ_MOCK"] = "1"
@@ -974,7 +1152,7 @@ class LauncherWindow(QMainWindow):
                     python = str(pythonw)
             cmd = [python, "-m", "cryodaq.agents.assistant_bootstrap"]
 
-        env = os.environ.copy()
+        env = _without_soak_bridge_environment(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env["CRYODAQ_ASSISTANT_EXPERIMENT_MODE"] = "1" if self._assistant_experiment_mode else "0"
         env["CRYODAQ_ASSISTANT_PERIODIC_MODE"] = (
@@ -1272,7 +1450,11 @@ class LauncherWindow(QMainWindow):
         top_bar.hide()
 
         # --- Встроенное главное окно ---
-        self._main_window = MainWindow(bridge=self._bridge, embedded=True)
+        self._main_window = MainWindow(
+            bridge=self._bridge,
+            embedded=True,
+            replay_mode=self._replay_source is not None,
+        )
         # Phase UI-1 v2: shell v2 has its own BottomStatusBar; hide
         # launcher's status bar entirely.
         self.statusBar().setVisible(False)
@@ -1721,7 +1903,7 @@ class LauncherWindow(QMainWindow):
             cmd = [sys.executable, "--mode=gui"]
         else:
             cmd = [sys.executable, "-m", "cryodaq.gui"]
-        env = os.environ.copy()
+        env = _without_soak_bridge_environment(os.environ)
         if self._mock:
             env["CRYODAQ_MOCK"] = "1"
         creationflags = _CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -2091,6 +2273,13 @@ def main() -> None:
 
     mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
 
+    soak_bridge_handshake = _consume_soak_bridge_handshake(
+        cli_mock=args.mock,
+        tray_only=args.tray,
+        replay_requested=args.replay is not None,
+        setup_wizard=args.setup_wizard,
+    )
+
     replay_source: Path | None = None
     if args.replay is not None:
         if args.replay == _REPLAY_LIST_SENTINEL:
@@ -2159,18 +2348,24 @@ def main() -> None:
     else:
         logger.info("Первичная настройка отложена: launcher запущен в --tray режиме")
 
-    window = LauncherWindow(
-        app,
-        mock=mock,
-        tray_only=args.tray,
-        lock_fd=lock_fd,
-        replay_source=replay_source,
-        replay_speed=args.replay_speed,
-        replay_phase=args.replay_phase,
-        replay_loop=args.replay_loop,
-        force_replay=args.force_replay,
-        legacy_channel_era=args.legacy_channel_era,
-    )
+    try:
+        window = LauncherWindow(
+            app,
+            mock=mock,
+            tray_only=args.tray,
+            lock_fd=lock_fd,
+            replay_source=replay_source,
+            replay_speed=args.replay_speed,
+            replay_phase=args.replay_phase,
+            replay_loop=args.replay_loop,
+            force_replay=args.force_replay,
+            legacy_channel_era=args.legacy_channel_era,
+            soak_bridge_handshake=soak_bridge_handshake,
+        )
+    except BaseException:
+        if soak_bridge_handshake is not None:
+            soak_bridge_handshake.close()
+        raise
     if not args.tray:
         window.show()
         if replay_source is not None:
