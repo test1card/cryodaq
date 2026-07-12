@@ -13,11 +13,14 @@ import json
 from typing import Protocol
 
 from cryodaq.core.experiment import OperatorExperimentSnapshot
+from cryodaq.engine_wiring.operator_safety_snapshot import OperatorSafetySnapshot
 from cryodaq.engine_wiring.operator_snapshot_authorities import (
     AuthorityAvailability,
     CommonCut,
     ExperimentReceipt,
     IntegrityPersistenceReceipt,
+    PlantHealthEvidence,
+    ReadinessEvidence,
     SafetyReadinessReceipt,
 )
 from cryodaq.operator_snapshot import RecordingTruth
@@ -25,6 +28,10 @@ from cryodaq.operator_snapshot import RecordingTruth
 
 class _ExperimentOwner(Protocol):
     def snapshot_operator_experiment(self) -> OperatorExperimentSnapshot: ...
+
+
+class _SafetyOwner(Protocol):
+    def snapshot_operator_safety(self) -> OperatorSafetySnapshot: ...
 
 
 def _token(revision: int, domain: str, payload: str) -> str:
@@ -43,18 +50,81 @@ def _unavailable(cut: CommonCut, reason: str) -> dict[str, object]:
 
 
 class LiveSafetyReadinessAuthority:
-    """Deliberately dark until SafetyManager owns a coherent proof cut."""
+    """Map the SafetyManager's immutable cached proof cut conservatively."""
 
-    __slots__ = ("__owner",)
+    __slots__ = ("__owner", "__last_revision", "__last_observed", "__last_token")
 
-    def __init__(self, owner: object) -> None:
+    def __init__(self, owner: _SafetyOwner) -> None:
         self.__owner = owner
+        self.__last_revision = 0
+        self.__last_observed = 0.0
+        self.__last_token: str | None = None
 
     def snapshot_for_cut(self, cut: CommonCut) -> SafetyReadinessReceipt:
-        # Holding the owner preserves explicit composition ownership without
-        # probing generic status dicts or private driver state.
-        _ = self.__owner
-        return SafetyReadinessReceipt(**_unavailable(cut, "safety_verified_off_cut_unavailable"))
+        try:
+            snapshot = self.__owner.snapshot_operator_safety()
+            if type(snapshot) is not OperatorSafetySnapshot:
+                raise TypeError("wrong safety snapshot type")
+            blockers = tuple(
+                ReadinessEvidence(
+                    item.code,
+                    item.state,
+                    item.operator_text,
+                    item.required_evidence,
+                )
+                for item in snapshot.blockers
+            )
+            plant = tuple(
+                PlantHealthEvidence(
+                    item.subsystem_id,
+                    item.display_name,
+                    item.state,
+                    item.reason_code,
+                )
+                for item in snapshot.plant_health
+            )
+            payload = json.dumps(
+                {
+                    "observed_monotonic_s": snapshot.observed_monotonic_s,
+                    "lifecycle": snapshot.lifecycle.value,
+                    "readiness": snapshot.readiness.value,
+                    "verified_off": snapshot.verified_off,
+                    "blockers": [
+                        [item.code, item.state.value, item.operator_text, item.required_evidence]
+                        for item in snapshot.blockers
+                    ],
+                    "plant_health": [
+                        [item.subsystem_id, item.display_name, item.state.value, item.reason_code]
+                        for item in snapshot.plant_health
+                    ],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            token = _token(snapshot.revision, "safety", payload)
+            if snapshot.revision < self.__last_revision:
+                raise ValueError("safety revision regressed")
+            if snapshot.observed_monotonic_s < self.__last_observed:
+                raise ValueError("safety observed time regressed")
+            if snapshot.revision == self.__last_revision and token != self.__last_token:
+                raise ValueError("safety revision equivocated")
+            receipt = SafetyReadinessReceipt(
+                cut=cut,
+                revision=snapshot.revision,
+                token=token,
+                availability=AuthorityAvailability.AVAILABLE,
+                readiness=snapshot.readiness,
+                verified_off=snapshot.verified_off,
+                blockers=blockers,
+                plant_health=plant,
+            )
+        except Exception:
+            return SafetyReadinessReceipt(**_unavailable(cut, "safety_verified_off_cut_unavailable"))
+        self.__last_revision = snapshot.revision
+        self.__last_observed = snapshot.observed_monotonic_s
+        self.__last_token = token
+        return receipt
 
 
 class LiveExperimentAuthority:
