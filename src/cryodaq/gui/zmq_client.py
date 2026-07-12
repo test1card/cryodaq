@@ -7,6 +7,7 @@ on Windows), only the subprocess dies — GUI detects and restarts it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import multiprocessing as mp
 import queue
@@ -26,6 +27,7 @@ from cryodaq.core.zmq_subprocess import (
     zmq_bridge_main,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.operator_snapshot import OperatorSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,32 @@ _CMD_REPLY_TIMEOUT_S = 65.0  # H7: outermost command tier — server 55s < REQ 6
 # server ever reports a newer proto than this client knows — see
 # docs/protocol.md.
 CLIENT_PROTOCOL_VERSION = 1
+_COUNTER_LOCK_TIMEOUT_S = 0.01
+
+
+def _read_shared_counter(counter: Any, fallback: int) -> int:
+    """Read presentation evidence without blocking on an orphaned lock."""
+
+    lock = counter.get_lock()
+    if not lock.acquire(timeout=_COUNTER_LOCK_TIMEOUT_S):
+        return fallback
+    try:
+        return int(counter.value)
+    finally:
+        lock.release()
+
+
+def _increment_shared_counter(counter: Any) -> int | None:
+    """Best-effort evidence increment; presentation must never block."""
+
+    lock = counter.get_lock()
+    if not lock.acquire(timeout=_COUNTER_LOCK_TIMEOUT_S):
+        return None
+    try:
+        counter.value = min((1 << 64) - 1, int(counter.value) + 1)
+        return int(counter.value)
+    finally:
+        lock.release()
 
 
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
@@ -85,6 +113,11 @@ class ZmqBridge:
         self._data_queue: mp.Queue = mp.Queue(maxsize=10_000)
         self._cmd_queue: mp.Queue = mp.Queue(maxsize=1_000)
         self._reply_queue: mp.Queue = mp.Queue(maxsize=1_000)
+        self._snapshot_queue = mp.JoinableQueue(maxsize=2)
+        self._snapshot_malformed_count = mp.Value("Q", 0, lock=True)
+        self._snapshot_drop_count = mp.Value("Q", 0, lock=True)
+        self._snapshot_malformed_count_cached = 0
+        self._snapshot_drop_count_cached = 0
         self._shutdown_event: mp.Event = mp.Event()
         self._process: mp.Process | None = None
         self._last_heartbeat: float = 0.0
@@ -93,6 +126,7 @@ class ZmqBridge:
         # the first reading arrives so startup and between-experiment
         # pauses don't trigger false-positive restarts.
         self._last_reading_time: float = 0.0
+        self._last_snapshot_time: float = 0.0
         # IV.6 B1 fix: timestamp of the most recent cmd_timeout control
         # message emitted by the subprocess. Launcher watchdog uses
         # ``command_channel_stalled()`` to detect command-channel-only
@@ -114,6 +148,19 @@ class ZmqBridge:
         """Start the ZMQ bridge subprocess."""
         if self._process is not None and self._process.is_alive():
             return
+        # Invalidate presentation freshness before any restart cleanup or
+        # spawn operation that may raise.  Failure must remain unavailable.
+        self._last_snapshot_time = 0.0
+        # A dead or partially started subprocess may still have feeder-
+        # buffered cuts.  A fresh queue on every spawn attempt makes restart
+        # invalidation atomic even when later cleanup or Process.start fails.
+        old_snapshot_queue = self._snapshot_queue
+        _drain(old_snapshot_queue, task_done=True)
+        with contextlib.suppress(Exception):
+            old_snapshot_queue.cancel_join_thread()
+        with contextlib.suppress(Exception):
+            old_snapshot_queue.close()
+        self._snapshot_queue = mp.JoinableQueue(maxsize=2)
         if self._reply_consumer is not None and self._reply_consumer.is_alive():
             self._reply_stop.set()
             self._reply_consumer.join(timeout=1.0)
@@ -133,6 +180,9 @@ class ZmqBridge:
                 self._reply_queue,
                 self._shutdown_event,
                 self._assistant_cmd_addr,
+                self._snapshot_queue,
+                self._snapshot_malformed_count,
+                self._snapshot_drop_count,
             ),
             daemon=True,
             name="zmq_bridge",
@@ -196,16 +246,65 @@ class ZmqBridge:
 
     def heartbeat_stale(self, *, timeout_s: float = 30.0) -> bool:
         """Return True if the bridge heartbeat is older than ``timeout_s``."""
-        return (
-            self._last_heartbeat != 0.0 and (time.monotonic() - self._last_heartbeat) >= timeout_s
+        return self._last_heartbeat != 0.0 and (time.monotonic() - self._last_heartbeat) >= timeout_s
+
+    def poll_operator_snapshots(self) -> list[OperatorSnapshot]:
+        """Drain complete snapshots decoded in the subprocess; never synthesize."""
+        snapshots: list[OperatorSnapshot] = []
+        while True:
+            try:
+                snapshot = self._snapshot_queue.get_nowait()
+            except (queue.Empty, EOFError, OSError):
+                break
+            try:
+                if type(snapshot) is not OperatorSnapshot:
+                    observed = _increment_shared_counter(self._snapshot_malformed_count)
+                    if observed is not None:
+                        self._snapshot_malformed_count_cached = observed
+                    continue
+                snapshots.append(snapshot)
+                self._last_snapshot_time = time.monotonic()
+            finally:
+                self._snapshot_queue.task_done()
+        return snapshots
+
+    def snapshot_flow_age_s(self) -> float | None:
+        """Monotonic age of the last valid cut, or None before first receipt."""
+        if self._last_snapshot_time == 0.0:
+            return None
+        return max(0.0, time.monotonic() - self._last_snapshot_time)
+
+    def snapshot_flow_stalled(self, *, timeout_s: float = 30.0) -> bool:
+        """Snapshot presentation is stale after first flow; never a restart signal."""
+        age = self.snapshot_flow_age_s()
+        return age is not None and age >= timeout_s
+
+    def snapshot_flow_healthy(self, *, timeout_s: float = 30.0) -> bool:
+        """Independent presentation-flow health; intentionally not bridge health."""
+        age = self.snapshot_flow_age_s()
+        return self.is_alive() and age is not None and age < timeout_s
+
+    @property
+    def snapshot_malformed_count(self) -> int:
+        observed = _read_shared_counter(
+            self._snapshot_malformed_count,
+            self._snapshot_malformed_count_cached,
         )
+        self._snapshot_malformed_count_cached = observed
+        return observed
+
+    @property
+    def snapshot_drop_count(self) -> int:
+        observed = _read_shared_counter(
+            self._snapshot_drop_count,
+            self._snapshot_drop_count_cached,
+        )
+        self._snapshot_drop_count_cached = observed
+        return observed
 
     def data_flow_stalled(self, *, timeout_s: float = 30.0) -> bool:
         """Return True if readings previously flowed but are now stale."""
-        return (
-            self._last_reading_time != 0.0
-            and (time.monotonic() - self._last_reading_time) >= timeout_s
-        )
+        return self._last_reading_time != 0.0 and (time.monotonic() - self._last_reading_time) >= timeout_s
 
     def command_channel_stalled(self, *, timeout_s: float = 10.0) -> bool:
         """Return True if a command timeout occurred within the last
@@ -336,13 +435,16 @@ class ZmqBridge:
             self._process = None
         else:
             logger.info("ZMQ bridge subprocess stopped")
+        self._last_snapshot_time = 0.0
 
 
-def _drain(q: mp.Queue) -> None:
+def _drain(q: Any, *, task_done: bool = False) -> None:
     """Drain a multiprocessing Queue, ignoring errors."""
     while True:
         try:
             q.get_nowait()
+            if task_done:
+                q.task_done()
         except (queue.Empty, EOFError, OSError):
             break
 

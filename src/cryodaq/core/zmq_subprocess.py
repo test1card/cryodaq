@@ -25,6 +25,13 @@ import threading
 import time
 from typing import Any
 
+from cryodaq.core.operator_snapshot_ingress import (
+    OperatorSnapshotQueueIngress,
+    SnapshotIngressOrderingError,
+    SnapshotIngressQueueError,
+)
+from cryodaq.operator_snapshot_transport import OperatorSnapshotTransportError
+
 logger = logging.getLogger(__name__)
 
 # Re-export constants so GUI code doesn't need to import zmq_bridge
@@ -43,6 +50,10 @@ _ASSISTANT_PROTOCOL_VERSION_CMD = "assistant.protocol_version"
 # module is loaded in the GUI process, which must not import zmq/zmq_bridge
 # at module scope. Keep in sync with cryodaq.core.zmq_bridge.DEFAULT_TOPIC.
 DEFAULT_TOPIC = b"readings"
+OPERATOR_SNAPSHOT_TOPIC = b"operator.snapshot"
+READING_MAX_WIRE_BYTES = 2 * 1024 * 1024
+OPERATOR_SNAPSHOT_MAX_WIRE_BYTES = 8 * 1024 * 1024
+_COUNTER_LOCK_TIMEOUT_S = 0.01
 
 # IV.3 Finding 7 / H7: subprocess REQ-socket RCVTIMEO/SNDTIMEO. This MUST sit
 # strictly above the server slow handler cap (HANDLER_TIMEOUT_SLOW_S = 55 s in
@@ -55,6 +66,21 @@ DEFAULT_TOPIC = b"readings"
 # still working. Named (not an inline literal) so tests assert the ordering on
 # the live constant rather than grepping source text.
 SUBPROCESS_REQ_TIMEOUT_S = 60.0
+
+
+def _increment_shared_counter(counter: Any | None, amount: int = 1) -> bool:
+    """Update optional evidence without trusting a possibly orphaned lock."""
+
+    if counter is None or amount <= 0:
+        return False
+    lock = counter.get_lock()
+    if not lock.acquire(timeout=_COUNTER_LOCK_TIMEOUT_S):
+        return False
+    try:
+        counter.value = min((1 << 64) - 1, int(counter.value) + amount)
+        return True
+    finally:
+        lock.release()
 
 
 def _unpack_reading_dict(payload: bytes) -> dict[str, Any]:
@@ -74,6 +100,46 @@ def _unpack_reading_dict(payload: bytes) -> dict[str, Any]:
     }
 
 
+class ReadingFrameError(ValueError):
+    """A reading multipart message failed the exact public boundary."""
+
+
+def _decode_reading_frames(frames: object) -> dict[str, Any]:
+    """Reject prefix-topic and malformed frames before msgpack decoding."""
+    if type(frames) not in (list, tuple) or len(frames) != 2:
+        raise ReadingFrameError("invalid reading frame shape")
+    topic, payload = frames
+    if type(topic) is not bytes or type(payload) is not bytes:
+        raise ReadingFrameError("invalid reading frame type")
+    if topic != DEFAULT_TOPIC:
+        raise ReadingFrameError("wrong reading topic")
+    if len(payload) > READING_MAX_WIRE_BYTES:
+        raise ReadingFrameError("reading payload too large")
+    return _unpack_reading_dict(payload)
+
+
+def _new_sub_socket(
+    context: Any,
+    zmq_module: Any,
+    pub_addr: str,
+    *,
+    topic: bytes,
+    max_wire_bytes: int,
+) -> Any:
+    """Create one independently capped SUB socket; called only in subprocess."""
+    sub = context.socket(zmq_module.SUB)
+    sub.setsockopt(zmq_module.LINGER, 0)
+    sub.setsockopt(zmq_module.RCVTIMEO, 100)
+    sub.setsockopt(zmq_module.MAXMSGSIZE, max_wire_bytes)
+    sub.setsockopt(zmq_module.TCP_KEEPALIVE, 1)
+    sub.setsockopt(zmq_module.TCP_KEEPALIVE_IDLE, 10)
+    sub.setsockopt(zmq_module.TCP_KEEPALIVE_INTVL, 5)
+    sub.setsockopt(zmq_module.TCP_KEEPALIVE_CNT, 3)
+    sub.connect(pub_addr)
+    sub.subscribe(topic)
+    return sub
+
+
 def zmq_bridge_main(
     pub_addr: str,
     cmd_addr: str,
@@ -82,6 +148,9 @@ def zmq_bridge_main(
     reply_queue: mp.Queue,
     shutdown_event: mp.Event,
     assistant_cmd_addr: str = DEFAULT_ASSISTANT_CMD_ADDR,
+    snapshot_queue: Any | None = None,
+    snapshot_malformed_count: Any | None = None,
+    snapshot_drop_count: Any | None = None,
 ) -> None:
     """Entry point for ZMQ bridge subprocess.
 
@@ -126,19 +195,17 @@ def zmq_bridge_main(
         # Order matters: connect() BEFORE subscribe(). The inverse pattern
         # (subscribe-before-connect with setsockopt_string(SUBSCRIBE, "")) produced
         # zero received messages on macOS Python 3.14 pyzmq 25+.
-        sub = ctx.socket(zmq.SUB)
-        sub.setsockopt(zmq.LINGER, 0)
-        sub.setsockopt(zmq.RCVTIMEO, 100)
+        sub = _new_sub_socket(
+            ctx,
+            zmq,
+            pub_addr,
+            topic=DEFAULT_TOPIC,
+            max_wire_bytes=READING_MAX_WIRE_BYTES,
+        )
         # 2026-04-20 idle-death fix: same keepalive as REQ side to
         # survive macOS kernel idle reaping. SUB normally gets a
         # stream of readings so idle is rare, but between-experiment
         # quiet periods exist (scheduler paused, no active polls).
-        sub.setsockopt(zmq.TCP_KEEPALIVE, 1)
-        sub.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 10)
-        sub.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 5)
-        sub.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)
-        sub.connect(pub_addr)
-        sub.subscribe(DEFAULT_TOPIC)
         last_heartbeat = time.monotonic()
         try:
             while not shutdown_event.is_set():
@@ -146,27 +213,23 @@ def zmq_bridge_main(
                 # responsive for shutdown and heartbeat emission.
                 try:
                     parts = sub.recv_multipart()
-                    if len(parts) == 2:
+                    try:
+                        reading_dict = _decode_reading_frames(parts)
+                    except Exception:
+                        reading_dict = None
+                    if reading_dict is not None:
                         try:
-                            reading_dict = _unpack_reading_dict(parts[1])
-                        except Exception:
-                            reading_dict = None  # skip malformed
-                        if reading_dict is not None:
-                            try:
-                                data_queue.put_nowait(reading_dict)
-                            except queue.Full:
-                                dropped_counter["n"] += 1
-                                if dropped_counter["n"] % 100 == 1:
-                                    with contextlib.suppress(queue.Full):
-                                        data_queue.put_nowait(
-                                            {
-                                                "__type": "warning",
-                                                "message": (
-                                                    f"Queue overflow: "
-                                                    f"{dropped_counter['n']} readings dropped"
-                                                ),
-                                            }
-                                        )
+                            data_queue.put_nowait(reading_dict)
+                        except queue.Full:
+                            dropped_counter["n"] += 1
+                            if dropped_counter["n"] % 100 == 1:
+                                with contextlib.suppress(queue.Full):
+                                    data_queue.put_nowait(
+                                        {
+                                            "__type": "warning",
+                                            "message": (f"Queue overflow: {dropped_counter['n']} readings dropped"),
+                                        }
+                                    )
                 except zmq.Again:
                     pass
                 except zmq.ZMQError:
@@ -180,6 +243,42 @@ def zmq_bridge_main(
                     with contextlib.suppress(queue.Full):
                         data_queue.put_nowait({"__type": "heartbeat", "ts": now})
                     last_heartbeat = now
+        finally:
+            sub.close(linger=0)
+
+    def snapshot_drain_loop() -> None:
+        """Own the dedicated snapshot SUB socket and strict decode boundary."""
+        if snapshot_queue is None:
+            return
+        sub = _new_sub_socket(
+            ctx,
+            zmq,
+            pub_addr,
+            topic=OPERATOR_SNAPSHOT_TOPIC,
+            max_wire_bytes=OPERATOR_SNAPSHOT_MAX_WIRE_BYTES,
+        )
+        ingress = OperatorSnapshotQueueIngress(snapshot_queue)
+        try:
+            while not shutdown_event.is_set():
+                try:
+                    frames = sub.recv_multipart()
+                    receipt = ingress.accept_frames(frames)
+                except zmq.Again:
+                    continue
+                except zmq.ZMQError:
+                    if shutdown_event.is_set():
+                        break
+                    time.sleep(0.01)
+                except (
+                    OperatorSnapshotTransportError,
+                    SnapshotIngressOrderingError,
+                    SnapshotIngressQueueError,
+                    TypeError,
+                    ValueError,
+                ):
+                    _increment_shared_counter(snapshot_malformed_count)
+                else:
+                    _increment_shared_counter(snapshot_drop_count, receipt.dropped_oldest)
         finally:
             sub.close(linger=0)
 
@@ -279,15 +378,24 @@ def zmq_bridge_main(
                 reply_queue.put(reply, timeout=2.0)
             except queue.Full:
                 with contextlib.suppress(queue.Full):
-                    data_queue.put_nowait(
-                        {"__type": "warning", "message": "Reply queue overflow"}
-                    )
+                    data_queue.put_nowait({"__type": "warning", "message": "Reply queue overflow"})
 
     sub_thread = threading.Thread(target=sub_drain_loop, name="zmq-sub-drain", daemon=True)
+    snapshot_thread = (
+        threading.Thread(
+            target=snapshot_drain_loop,
+            name="zmq-snapshot-drain",
+            daemon=True,
+        )
+        if snapshot_queue is not None
+        else None
+    )
     cmd_thread = threading.Thread(target=cmd_forward_loop, name="zmq-cmd-forward", daemon=True)
 
     try:
         sub_thread.start()
+        if snapshot_thread is not None:
+            snapshot_thread.start()
         cmd_thread.start()
         while not shutdown_event.is_set():
             shutdown_event.wait(timeout=0.5)
@@ -296,7 +404,13 @@ def zmq_bridge_main(
     finally:
         shutdown_event.set()
         sub_thread.join(timeout=2.0)
+        if snapshot_thread is not None:
+            snapshot_thread.join(timeout=2.0)
         cmd_thread.join(timeout=4.0)
-        if sub_thread.is_alive() or cmd_thread.is_alive():
+        if (
+            sub_thread.is_alive()
+            or (snapshot_thread is not None and snapshot_thread.is_alive())
+            or cmd_thread.is_alive()
+        ):
             logger.warning("ZMQ bridge threads did not exit cleanly before context term")
         ctx.term()
