@@ -56,6 +56,10 @@ class ResolvedStorageDescriptor:
     unit: str
     role: str
     safety_class: str
+    display_group: str
+    display_name: str
+    visible_by_default: bool
+    display_order: int
     envelope_json: bytes | None
     legacy: bool
 
@@ -123,6 +127,10 @@ def _verified_rows(
                     unit=descriptor.unit,
                     role=descriptor.role.value,
                     safety_class=descriptor.safety_class.value,
+                    display_group=descriptor.display_group,
+                    display_name=descriptor.display_name,
+                    visible_by_default=descriptor.visible_by_default,
+                    display_order=descriptor.display_order,
                     envelope_json=row.envelope_json,
                     legacy=False,
                 ),
@@ -218,6 +226,10 @@ def resolve_legacy_descriptor(
         unit=descriptor.unit,
         role=descriptor.role.value,
         safety_class=descriptor.safety_class.value,
+        display_group=descriptor.display_group,
+        display_name=descriptor.display_name,
+        visible_by_default=descriptor.visible_by_default,
+        display_order=descriptor.display_order,
         envelope_json=None,
         legacy=True,
     )
@@ -229,6 +241,8 @@ __all__ = [
     "ArchivedDescriptor",
     "ResolvedStorageDescriptor",
     "DescriptorArchiveError",
+    "PersistedChannelEnvelopeError",
+    "decode_persisted_channel_envelope",
     "load_referenced_descriptors",
     "resolve_archived_descriptors",
     "resolve_legacy_descriptor",

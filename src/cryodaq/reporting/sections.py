@@ -154,9 +154,7 @@ def _add_kv_table(document: Document, rows: list[tuple[str, str]]) -> None:
         table.cell(i, 1).text = xml_safe(value)
 
 
-def _existing_artifact(
-    dataset: ReportDataset, role: str, *, category: str | None = None
-) -> Path | None:
+def _existing_artifact(dataset: ReportDataset, role: str, *, category: str | None = None) -> Path | None:
     for item in dataset.artifact_index:
         if str(item.get("role", "")).strip() != role:
             continue
@@ -275,15 +273,15 @@ def _add_multichannel_plot(
         document.add_paragraph(xml_safe(f"{title}: данные отсутствуют."))
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    series: dict[str, list[tuple[Any, float]]] = {}
+    series: dict[tuple[object, ...], list[tuple[Any, float]]] = {}
     for r in readings:
-        series.setdefault(r.channel, []).append((r.timestamp, r.value))
+        series.setdefault(_reading_series_key(r), []).append((r.timestamp, r.value))
     plt.figure(figsize=(8, 4))
-    for channel, points in sorted(series.items()):
+    for series_key, points in sorted(series.items()):
         points.sort()
         xs = [t for t, _ in points]
         ys = [v for _, v in points]
-        label = channel.split(" ")[0] if " " in channel else channel
+        label = str(series_key[3])
         plt.plot(xs, ys, label=label, linewidth=0.8)
     plt.title(title)
     if xlabel:
@@ -347,6 +345,53 @@ def _channel_display(raw: str) -> str:
     return raw
 
 
+def _reading_display(reading: HistoricalReading) -> str:
+    descriptor = reading.descriptor
+    if descriptor is not None and not descriptor.legacy:
+        return descriptor.display_name
+    return _channel_display(reading.channel)
+
+
+def _reading_series_key(reading: HistoricalReading) -> tuple[object, ...]:
+    """Stable descriptor order; legacy names remain a bounded fallback only."""
+    descriptor = reading.descriptor
+    if descriptor is not None and not descriptor.legacy:
+        return (
+            0,
+            descriptor.display_group,
+            descriptor.display_order,
+            descriptor.display_name,
+            descriptor.channel_id,
+            descriptor.descriptor_revision,
+            descriptor.descriptor_hash,
+        )
+    return (1, "legacy", 2**31 - 1, _channel_display(reading.channel), reading.channel, 0, "")
+
+
+def _visible_quantity(reading: HistoricalReading, quantity: str) -> bool:
+    descriptor = reading.descriptor
+    if descriptor is None or descriptor.legacy:
+        return False
+    return descriptor.visible_by_default and descriptor.quantity == quantity
+
+
+def _legacy(reading: HistoricalReading) -> bool:
+    descriptor = reading.descriptor
+    return reading.legacy and (descriptor is None or descriptor.legacy)
+
+
+def _descriptor_integrity_notice(document: Document, dataset: ReportDataset) -> None:
+    if dataset.descriptor_complete and not dataset.descriptor_issues:
+        return
+    detail = ", ".join(dataset.descriptor_issues) or "неполная история дескрипторов"
+    document.add_paragraph(
+        xml_safe(
+            "Внимание: часть данных каналов исключена из отчёта, поскольку "
+            f"идентичность дескрипторов не подтверждена ({detail})."
+        )
+    )
+
+
 _ROLE_RU = {
     "measured_values": "Измеренные величины (CSV)",
     "experiment_data": "Данные эксперимента (Parquet)",
@@ -404,21 +449,18 @@ def render_title_page(document: Document, dataset: ReportDataset, _assets_dir: P
         document.add_paragraph(xml_safe(f"Заметки: {experiment['notes']}"))
 
 
-def render_experiment_metadata_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_experiment_metadata_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     experiment = dataset.metadata["experiment"]
     template = dataset.metadata["template"]
     summary = dataset.summary_metadata
     document.add_heading("Метаданные эксперимента", level=1)
+    _descriptor_integrity_notice(document, dataset)
 
     # Custom fields with template labels
     custom_values = experiment.get("custom_fields", {})
     custom_defs = template.get("custom_fields", [])
     if custom_values and custom_defs:
-        label_map = {
-            str(f.get("id", "")): str(f.get("label", f.get("id", ""))) for f in custom_defs
-        }
+        label_map = {str(f.get("id", "")): str(f.get("label", f.get("id", ""))) for f in custom_defs}
         rows = []
         for field_id, value in custom_values.items():
             label = label_map.get(field_id, field_id)
@@ -442,9 +484,7 @@ def render_experiment_metadata_section(
             document.add_paragraph(xml_safe(" │ ".join(parts)))
 
 
-def render_run_timeline_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_run_timeline_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Таймлайн прогонов", level=1)
     if not dataset.run_records:
         document.add_paragraph("Прогоны не выполнялись.")
@@ -463,9 +503,7 @@ def render_run_timeline_section(
         table.cell(idx, 4).text = xml_safe(_status_ru(item.get("status", "")))
 
 
-def render_run_parameters_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_run_parameters_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Параметры запусков", level=1)
     if not dataset.run_records:
         document.add_paragraph("Параметры запусков отсутствуют.")
@@ -480,9 +518,7 @@ def render_run_parameters_section(
         _add_kv_table(document, rows)
 
 
-def render_result_tables_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_result_tables_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Итоговые результаты и таблицы", level=1)
     table_map = {
         "measured_values": "Таблица измеренных величин",
@@ -501,9 +537,7 @@ def render_result_tables_section(
         document.add_paragraph("Архивные таблицы результатов не найдены.")
 
 
-def render_conductivity_section(
-    document: Document, dataset: ReportDataset, assets_dir: Path
-) -> None:
+def render_conductivity_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Теплопроводность vs температура", level=1)
     archived_plot = _existing_artifact(dataset, "conductivity_vs_temperature", category="plot")
     if archived_plot is not None:
@@ -511,9 +545,7 @@ def render_conductivity_section(
         cap = document.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
         cap.paragraph_format.first_line_indent = Cm(0)
-        cap.add_run(
-            xml_safe(f"Рисунок {_next_figure()} — Теплопроводность vs температура")
-        ).font.size = Pt(12)
+        cap.add_run(xml_safe(f"Рисунок {_next_figure()} — Теплопроводность vs температура")).font.size = Pt(12)
         return
     path = _find_table_path(dataset, "conductivity_vs_temperature")
     if path is None:
@@ -539,15 +571,11 @@ def render_conductivity_section(
     plt.close()
     document.add_picture(str(plot_path), width=Inches(6.2))
     document.add_paragraph(
-        xml_safe(
-            f"Диапазон: {min(temps):.1f} — {max(temps):.1f} К, максимум: {max(conds):.3g} Вт/К"
-        )
+        xml_safe(f"Диапазон: {min(temps):.1f} — {max(temps):.1f} К, максимум: {max(conds):.3g} Вт/К")
     )
 
 
-def render_artifact_manifest_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_artifact_manifest_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Ключевые артефакты", level=1)
     if not dataset.artifact_index:
         document.add_paragraph("Артефакты в архивной карточке отсутствуют.")
@@ -570,7 +598,11 @@ def render_artifact_manifest_section(
 
 def render_cooldown_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Охлаждение", level=1)
-    temp_readings = [item for item in dataset.readings if item.unit == "K"]
+    temp_readings = [
+        item
+        for item in dataset.readings
+        if _visible_quantity(item, "temperature") or (_legacy(item) and item.unit == "K")
+    ]
     _add_archived_or_multichannel(
         document,
         dataset,
@@ -603,10 +635,7 @@ def render_cooldown_section(document: Document, dataset: ReportDataset, assets_d
                 target_k = float(target)
                 reached = t_final <= target_k * 1.05  # 5% tolerance
                 document.add_paragraph(
-                    xml_safe(
-                        f"Целевая: {target_k:.1f} К — "
-                        f"{'достигнута ✓' if reached else 'не достигнута'}"
-                    )
+                    xml_safe(f"Целевая: {target_k:.1f} К — {'достигнута ✓' if reached else 'не достигнута'}")
                 )
             except (ValueError, TypeError):
                 pass
@@ -614,7 +643,11 @@ def render_cooldown_section(document: Document, dataset: ReportDataset, assets_d
 
 def render_thermal_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Тепловая нагрузка", level=1)
-    power_readings = [item for item in dataset.readings if item.channel.endswith("/power")]
+    power_readings = [
+        item
+        for item in dataset.readings
+        if _visible_quantity(item, "power") or (_legacy(item) and item.channel.endswith("/power"))
+    ]
     _add_archived_or_multichannel(
         document,
         dataset,
@@ -626,16 +659,16 @@ def render_thermal_section(document: Document, dataset: ReportDataset, assets_di
         ylabel="Мощность (Вт)",
     )
     if power_readings:
-        by_channel: dict[str, list[float]] = defaultdict(list)
+        by_channel: dict[tuple[object, ...], list[float]] = defaultdict(list)
         for item in power_readings:
-            by_channel[item.channel].append(item.value)
+            by_channel[_reading_series_key(item)].append(item.value)
 
         table = document.add_table(rows=1 + len(by_channel), cols=3)
         table.style = "Table Grid"
         for i, hdr in enumerate(["Канал", "Средняя мощность", "Макс. мощность"]):
             table.cell(0, i).text = hdr
-        for idx, (channel, values) in enumerate(sorted(by_channel.items()), 1):
-            table.cell(idx, 0).text = xml_safe(_channel_display(channel))
+        for idx, (series_key, values) in enumerate(sorted(by_channel.items()), 1):
+            table.cell(idx, 0).text = xml_safe(str(series_key[3]))
             table.cell(idx, 1).text = xml_safe(f"{mean(values):.4g} Вт")
             table.cell(idx, 2).text = xml_safe(f"{max(values):.4g} Вт")
 
@@ -645,7 +678,8 @@ def render_pressure_section(document: Document, dataset: ReportDataset, assets_d
     pressure = [
         item
         for item in dataset.readings
-        if "pressure" in item.channel.lower() or item.unit.lower() in {"mbar", "pa"}
+        if _visible_quantity(item, "pressure")
+        or (_legacy(item) and ("pressure" in item.channel.lower() or item.unit.lower() in {"mbar", "pa"}))
     ]
     _add_archived_or_multichannel(
         document,
@@ -671,9 +705,7 @@ def render_pressure_section(document: Document, dataset: ReportDataset, assets_d
             )
 
 
-def render_operator_log_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_operator_log_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Служебный лог", level=1)
     if not dataset.operator_log:
         document.add_paragraph("Записи служебного лога за интервал эксперимента отсутствуют.")
@@ -691,10 +723,7 @@ def render_operator_log_section(
         who = item.author or item.source or "система"
         tag_suffix = f" [{', '.join(item.tags)}]" if item.tags else ""
         document.add_paragraph(
-            xml_safe(
-                f"{_format_dt(item.timestamp, time_only=True)} │ "
-                f"{who}: {item.message}{tag_suffix}"
-            ),
+            xml_safe(f"{_format_dt(item.timestamp, time_only=True)} │ {who}: {item.message}{tag_suffix}"),
             style="List Bullet",
         )
     if skipped > 0:
@@ -703,10 +732,7 @@ def render_operator_log_section(
             who = item.author or item.source or "система"
             tag_suffix = f" [{', '.join(item.tags)}]" if item.tags else ""
             document.add_paragraph(
-                xml_safe(
-                    f"{_format_dt(item.timestamp, time_only=True)} │ "
-                    f"{who}: {item.message}{tag_suffix}"
-                ),
+                xml_safe(f"{_format_dt(item.timestamp, time_only=True)} │ {who}: {item.message}{tag_suffix}"),
                 style="List Bullet",
             )
 
@@ -720,7 +746,7 @@ def render_alarms_section(document: Document, dataset: ReportDataset, _assets_di
         document.add_paragraph(
             xml_safe(
                 f"{_format_dt(item.timestamp, time_only=True)} │ "
-                f"{_channel_display(item.channel)} = {item.value:g} {item.unit} [{item.status}]"
+                f"{_reading_display(item)} = {item.value:g} {item.unit} [{item.status}]"
             ),
             style="List Bullet",
         )
@@ -778,33 +804,23 @@ def render_config_section(document: Document, dataset: ReportDataset, _assets_di
             _add_kv_table(document, rows)
 
 
-def render_operator_comments_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_operator_comments_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Комментарии оператора", level=1)
     document.add_paragraph("Заполнить после автоматической генерации отчёта.")
     document.add_paragraph("")
     document.add_paragraph("")
 
 
-def render_operator_interpretation_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_operator_interpretation_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Интерпретация результатов", level=1)
-    document.add_paragraph(
-        "Сюда оператор добавляет интерпретацию, выводы и замечания по качеству данных."
-    )
+    document.add_paragraph("Сюда оператор добавляет интерпретацию, выводы и замечания по качеству данных.")
     document.add_paragraph("")
     document.add_paragraph("")
 
 
-def render_operator_photos_section(
-    document: Document, dataset: ReportDataset, _assets_dir: Path
-) -> None:
+def render_operator_photos_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Фотографии и внешние изображения", level=1)
-    document.add_paragraph(
-        "В этот раздел можно вставить фотографии образца, оснастки и внешние иллюстрации."
-    )
+    document.add_paragraph("В этот раздел можно вставить фотографии образца, оснастки и внешние иллюстрации.")
     table = document.add_table(rows=2, cols=2)
     table.cell(0, 0).text = "Изображение 1"
     table.cell(0, 1).text = "Описание"

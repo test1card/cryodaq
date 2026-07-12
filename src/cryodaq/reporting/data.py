@@ -15,6 +15,7 @@ from cryodaq.report_state import (
     ReportContractError,
 )
 from cryodaq.storage.archive_reader import ArchiveReader
+from cryodaq.storage.descriptor_archive import ResolvedStorageDescriptor
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,30 @@ class HistoricalReading:
     value: float
     unit: str
     status: str
+    descriptor: ResolvedStorageDescriptor | None = None
+    legacy: bool = True
+
+    def __post_init__(self) -> None:
+        descriptor = self.descriptor
+        if descriptor is None:
+            if self.legacy is not True:
+                raise ValueError("a non-legacy report reading requires a descriptor")
+            return
+        if type(descriptor) is not ResolvedStorageDescriptor:
+            raise TypeError("report descriptor must be exactly ResolvedStorageDescriptor")
+        if self.legacy is not descriptor.legacy:
+            raise ValueError("report legacy classification disagrees with descriptor")
+        expected_channel = descriptor.display_name if descriptor.legacy else descriptor.channel_id
+        if (self.instrument_id, self.channel, self.unit) != (
+            descriptor.instrument_id,
+            expected_channel,
+            descriptor.unit,
+        ):
+            raise ValueError("report reading identity disagrees with descriptor")
+
+    @property
+    def grants_control_authority(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +92,8 @@ class ReportDataset:
     artifact_index: list[dict[str, Any]] = field(default_factory=list)
     result_tables: list[dict[str, Any]] = field(default_factory=list)
     summary_metadata: dict[str, Any] = field(default_factory=dict)
+    descriptor_complete: bool = True
+    descriptor_issues: tuple[str, ...] = ()
 
 
 class ReportDataExtractor:
@@ -98,22 +125,14 @@ class ReportDataExtractor:
             readings=readings,
             operator_log=operator_log,
             alarm_readings=alarm_readings,
-            run_records=[
-                dict(item) for item in metadata.get("run_records", []) if isinstance(item, dict)
-            ],
-            artifact_index=[
-                dict(item) for item in metadata.get("artifact_index", []) if isinstance(item, dict)
-            ],
-            result_tables=[
-                dict(item) for item in metadata.get("result_tables", []) if isinstance(item, dict)
-            ],
+            run_records=[dict(item) for item in metadata.get("run_records", []) if isinstance(item, dict)],
+            artifact_index=[dict(item) for item in metadata.get("artifact_index", []) if isinstance(item, dict)],
+            result_tables=[dict(item) for item in metadata.get("result_tables", []) if isinstance(item, dict)],
             summary_metadata=dict(metadata.get("summary_metadata") or {}),
         )
 
     @staticmethod
-    def _validate_artifact_paths(
-        metadata: dict[str, Any], experiment_root: Path
-    ) -> None:
+    def _validate_artifact_paths(metadata: dict[str, Any], experiment_root: Path) -> None:
         """Reject metadata-controlled artifact paths outside the experiment jail."""
         root = experiment_root.resolve()
         total = 0
@@ -131,24 +150,18 @@ class ReportDataExtractor:
                     raise ReportContractError("artifact path must be a bounded string")
                 candidate = Path(raw)
                 if candidate.suffix.lower() not in ALLOWED_REPORT_INPUT_SUFFIXES:
-                    raise ReportContractError(
-                        "artifact path has an unsupported extension"
-                    )
+                    raise ReportContractError("artifact path has an unsupported extension")
                 if not candidate.is_absolute():
                     candidate = root / candidate
                 if candidate.is_symlink():
                     raise ReportContractError("artifact path must not be a symlink")
                 resolved = candidate.resolve()
                 if resolved != root and root not in resolved.parents:
-                    raise ReportContractError(
-                        "artifact path escapes the experiment root"
-                    )
+                    raise ReportContractError("artifact path escapes the experiment root")
                 if not resolved.exists():
                     raise ReportContractError("artifact path must exist")
                 if not resolved.is_file():
-                    raise ReportContractError(
-                        "artifact path must reference a regular file"
-                    )
+                    raise ReportContractError("artifact path must reference a regular file")
                 size = resolved.stat().st_size
                 if size > MAX_SOURCE_FILE_BYTES:
                     raise ReportContractError("artifact input is too large")
@@ -230,9 +243,7 @@ class ReportDataExtractor:
         # Semantics mirror those exporters: start inclusive, end exclusive (the
         # old direct scan was end-inclusive; no real report lands a reading on
         # the exact end microsecond), all channels, sorted by timestamp.
-        rows = ArchiveReader(self._data_dir, self._data_dir / "archive").query_rows(
-            start_time, end_time, None
-        )
+        rows = ArchiveReader(self._data_dir, self._data_dir / "archive").query_rows(start_time, end_time, None)
         return [
             HistoricalReading(
                 timestamp=_parse_timestamp(raw_ts),
@@ -259,9 +270,7 @@ class ReportDataExtractor:
         # decode stay here so hot and cold rows behave identically.
         reader = ArchiveReader(self._data_dir, self._data_dir / "archive")
         rows: list[OperatorLogRecord] = []
-        for raw_ts, exp_id, author, source, message, tags in reader.query_operator_log(
-            start_time, end_time
-        ):
+        for raw_ts, exp_id, author, source, message, tags in reader.query_operator_log(start_time, end_time):
             # Mirrors the old SQL `experiment_id = ? OR experiment_id IS NULL`.
             if experiment_id and not (exp_id == experiment_id or exp_id is None):
                 continue
