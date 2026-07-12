@@ -1,0 +1,1091 @@
+schema_version: 1
+descriptors:
+- schema_version: 1
+  channel_id: Т1
+  instrument_id: LS218_1
+  source_key: input.1.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Криостат верх
+  visible_by_default: true
+  display_order: 0
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т1.raw
+  instrument_id: LS218_1
+  source_key: input.1.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Криостат верх — исходный сигнал
+  visible_by_default: false
+  display_order: 1
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т2
+  instrument_id: LS218_1
+  source_key: input.2.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Криостат низ
+  visible_by_default: true
+  display_order: 2
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т2.raw
+  instrument_id: LS218_1
+  source_key: input.2.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Криостат низ — исходный сигнал
+  visible_by_default: false
+  display_order: 3
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т3
+  instrument_id: LS218_1
+  source_key: input.3.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Радиатор 1
+  visible_by_default: true
+  display_order: 4
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т3.raw
+  instrument_id: LS218_1
+  source_key: input.3.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Радиатор 1 — исходный сигнал
+  visible_by_default: false
+  display_order: 5
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т4
+  instrument_id: LS218_1
+  source_key: input.4.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Радиатор 2
+  visible_by_default: true
+  display_order: 6
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т4.raw
+  instrument_id: LS218_1
+  source_key: input.4.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Радиатор 2 — исходный сигнал
+  visible_by_default: false
+  display_order: 7
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т5
+  instrument_id: LS218_1
+  source_key: input.5.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Экран 77К
+  visible_by_default: true
+  display_order: 8
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т5.raw
+  instrument_id: LS218_1
+  source_key: input.5.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Экран 77К — исходный сигнал
+  visible_by_default: false
+  display_order: 9
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т6
+  instrument_id: LS218_1
+  source_key: input.6.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Экран 4К
+  visible_by_default: true
+  display_order: 10
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т6.raw
+  instrument_id: LS218_1
+  source_key: input.6.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Экран 4К — исходный сигнал
+  visible_by_default: false
+  display_order: 11
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т7
+  instrument_id: LS218_1
+  source_key: input.7.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Детектор
+  visible_by_default: true
+  display_order: 12
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т7.raw
+  instrument_id: LS218_1
+  source_key: input.7.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Детектор — исходный сигнал
+  visible_by_default: false
+  display_order: 13
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т8
+  instrument_id: LS218_1
+  source_key: input.8.temperature
+  quantity: temperature
+  unit: K
+  role: reference_measurement
+  safety_class: observational
+  display_group: криостат
+  display_name: Калибровка
+  visible_by_default: true
+  display_order: 14
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т8.raw
+  instrument_id: LS218_1
+  source_key: input.8.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Калибровка — исходный сигнал
+  visible_by_default: false
+  display_order: 15
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т9
+  instrument_id: LS218_2
+  source_key: input.1.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: компрессор
+  display_name: Компрессор вход
+  visible_by_default: true
+  display_order: 16
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т9.raw
+  instrument_id: LS218_2
+  source_key: input.1.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Компрессор вход — исходный сигнал
+  visible_by_default: false
+  display_order: 17
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т10
+  instrument_id: LS218_2
+  source_key: input.2.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: компрессор
+  display_name: Компрессор выход
+  visible_by_default: true
+  display_order: 18
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т10.raw
+  instrument_id: LS218_2
+  source_key: input.2.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Компрессор выход — исходный сигнал
+  visible_by_default: false
+  display_order: 19
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т11
+  instrument_id: LS218_2
+  source_key: input.3.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: safety_critical_input
+  display_group: компрессор
+  display_name: Плита 1-й ступени
+  visible_by_default: true
+  display_order: 20
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т11.raw
+  instrument_id: LS218_2
+  source_key: input.3.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Плита 1-й ступени — исходный сигнал
+  visible_by_default: false
+  display_order: 21
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т12
+  instrument_id: LS218_2
+  source_key: input.4.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: safety_critical_input
+  display_group: компрессор
+  display_name: 2-я ступень
+  visible_by_default: true
+  display_order: 22
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т12.raw
+  instrument_id: LS218_2
+  source_key: input.4.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: 2-я ступень — исходный сигнал
+  visible_by_default: false
+  display_order: 23
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т13
+  instrument_id: LS218_2
+  source_key: input.5.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: компрессор
+  display_name: Труба подачи
+  visible_by_default: true
+  display_order: 24
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т13.raw
+  instrument_id: LS218_2
+  source_key: input.5.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Труба подачи — исходный сигнал
+  visible_by_default: false
+  display_order: 25
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т14
+  instrument_id: LS218_2
+  source_key: input.6.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: компрессор
+  display_name: Труба возврата
+  visible_by_default: true
+  display_order: 26
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т14.raw
+  instrument_id: LS218_2
+  source_key: input.6.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Труба возврата — исходный сигнал
+  visible_by_default: false
+  display_order: 27
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т15
+  instrument_id: LS218_2
+  source_key: input.7.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: компрессор
+  display_name: Вакуумный кожух
+  visible_by_default: true
+  display_order: 28
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т15.raw
+  instrument_id: LS218_2
+  source_key: input.7.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Вакуумный кожух — исходный сигнал
+  visible_by_default: false
+  display_order: 29
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т16
+  instrument_id: LS218_2
+  source_key: input.8.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: компрессор
+  display_name: Фланец
+  visible_by_default: true
+  display_order: 30
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т16.raw
+  instrument_id: LS218_2
+  source_key: input.8.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Фланец — исходный сигнал
+  visible_by_default: false
+  display_order: 31
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т17
+  instrument_id: LS218_3
+  source_key: input.1.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: оптика
+  display_name: Зеркало 1
+  visible_by_default: false
+  display_order: 32
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т17.raw
+  instrument_id: LS218_3
+  source_key: input.1.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Зеркало 1 — исходный сигнал
+  visible_by_default: false
+  display_order: 33
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т18
+  instrument_id: LS218_3
+  source_key: input.2.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: оптика
+  display_name: Зеркало 2
+  visible_by_default: false
+  display_order: 34
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т18.raw
+  instrument_id: LS218_3
+  source_key: input.2.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Зеркало 2 — исходный сигнал
+  visible_by_default: false
+  display_order: 35
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т19
+  instrument_id: LS218_3
+  source_key: input.3.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: оптика
+  display_name: Подвес
+  visible_by_default: false
+  display_order: 36
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т19.raw
+  instrument_id: LS218_3
+  source_key: input.3.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Подвес — исходный сигнал
+  visible_by_default: false
+  display_order: 37
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т20
+  instrument_id: LS218_3
+  source_key: input.4.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: оптика
+  display_name: Рама
+  visible_by_default: false
+  display_order: 38
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т20.raw
+  instrument_id: LS218_3
+  source_key: input.4.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Рама — исходный сигнал
+  visible_by_default: false
+  display_order: 39
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т21
+  instrument_id: LS218_3
+  source_key: input.5.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: резерв
+  display_name: Резерв 1
+  visible_by_default: false
+  display_order: 40
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т21.raw
+  instrument_id: LS218_3
+  source_key: input.5.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Резерв 1 — исходный сигнал
+  visible_by_default: false
+  display_order: 41
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т22
+  instrument_id: LS218_3
+  source_key: input.6.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: резерв
+  display_name: Резерв 2
+  visible_by_default: false
+  display_order: 42
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т22.raw
+  instrument_id: LS218_3
+  source_key: input.6.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Резерв 2 — исходный сигнал
+  visible_by_default: false
+  display_order: 43
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т23
+  instrument_id: LS218_3
+  source_key: input.7.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: резерв
+  display_name: Резерв 3
+  visible_by_default: false
+  display_order: 44
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т23.raw
+  instrument_id: LS218_3
+  source_key: input.7.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Резерв 3 — исходный сигнал
+  visible_by_default: false
+  display_order: 45
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т24
+  instrument_id: LS218_3
+  source_key: input.8.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: резерв
+  display_name: Резерв 4
+  visible_by_default: false
+  display_order: 46
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Т24.raw
+  instrument_id: LS218_3
+  source_key: input.8.raw_sensor
+  quantity: raw_sensor
+  unit: sensor_unit
+  role: reference_measurement
+  safety_class: observational
+  display_group: калибровка
+  display_name: Резерв 4 — исходный сигнал
+  visible_by_default: false
+  display_order: 47
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smua/voltage
+  instrument_id: Keithley_1
+  source_key: smua.voltage
+  quantity: voltage
+  unit: V
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUA voltage
+  visible_by_default: true
+  display_order: 48
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smua/current
+  instrument_id: Keithley_1
+  source_key: smua.current
+  quantity: current
+  unit: A
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUA current
+  visible_by_default: true
+  display_order: 49
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smua/resistance
+  instrument_id: Keithley_1
+  source_key: smua.resistance
+  quantity: resistance
+  unit: Ohm
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUA resistance
+  visible_by_default: true
+  display_order: 50
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smua/power
+  instrument_id: Keithley_1
+  source_key: smua.power
+  quantity: power
+  unit: W
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUA power
+  visible_by_default: true
+  display_order: 51
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smub/voltage
+  instrument_id: Keithley_1
+  source_key: smub.voltage
+  quantity: voltage
+  unit: V
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUB voltage
+  visible_by_default: true
+  display_order: 52
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smub/current
+  instrument_id: Keithley_1
+  source_key: smub.current
+  quantity: current
+  unit: A
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUB current
+  visible_by_default: true
+  display_order: 53
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smub/resistance
+  instrument_id: Keithley_1
+  source_key: smub.resistance
+  quantity: resistance
+  unit: Ohm
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUB resistance
+  visible_by_default: true
+  display_order: 54
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: Keithley_1/smub/power
+  instrument_id: Keithley_1
+  source_key: smub.power
+  quantity: power
+  unit: W
+  role: source_readback
+  safety_class: hazardous_source_readback
+  display_group: источник
+  display_name: SMUB power
+  visible_by_default: true
+  display_order: 55
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: VSP63D_1/pressure
+  instrument_id: VSP63D_1
+  source_key: pressure
+  quantity: pressure
+  unit: mbar
+  role: primary_measurement
+  safety_class: safety_critical_input
+  display_group: вакуум
+  display_name: Давление
+  visible_by_default: true
+  display_order: 56
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch1
+  instrument_id: MultiLine_1
+  source_key: length.1
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 1
+  visible_by_default: true
+  display_order: 57
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch2
+  instrument_id: MultiLine_1
+  source_key: length.2
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 2
+  visible_by_default: true
+  display_order: 58
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch3
+  instrument_id: MultiLine_1
+  source_key: length.3
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 3
+  visible_by_default: true
+  display_order: 59
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch4
+  instrument_id: MultiLine_1
+  source_key: length.4
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 4
+  visible_by_default: true
+  display_order: 60
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch5
+  instrument_id: MultiLine_1
+  source_key: length.5
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 5
+  visible_by_default: true
+  display_order: 64
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch6
+  instrument_id: MultiLine_1
+  source_key: length.6
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 6
+  visible_by_default: true
+  display_order: 65
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch7
+  instrument_id: MultiLine_1
+  source_key: length.7
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 7
+  visible_by_default: true
+  display_order: 66
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/length_ch8
+  instrument_id: MultiLine_1
+  source_key: length.8
+  quantity: length
+  unit: mm
+  role: primary_measurement
+  safety_class: observational
+  display_group: интерферометр
+  display_name: Длина, канал 8
+  visible_by_default: true
+  display_order: 67
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/env_temperature
+  instrument_id: MultiLine_1
+  source_key: env.temperature
+  quantity: temperature
+  unit: °C
+  role: environment
+  safety_class: observational
+  display_group: окружение
+  display_name: Температура воздуха
+  visible_by_default: true
+  display_order: 61
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/env_pressure
+  instrument_id: MultiLine_1
+  source_key: env.pressure
+  quantity: pressure
+  unit: hPa
+  role: environment
+  safety_class: observational
+  display_group: окружение
+  display_name: Давление воздуха
+  visible_by_default: true
+  display_order: 62
+  descriptor_revision: 1
+- schema_version: 1
+  channel_id: MultiLine_1/env_humidity
+  instrument_id: MultiLine_1
+  source_key: env.humidity
+  quantity: relative_humidity
+  unit: '%'
+  role: environment
+  safety_class: observational
+  display_group: окружение
+  display_name: Влажность воздуха
+  visible_by_default: true
+  display_order: 63
+  descriptor_revision: 1
+bindings:
+- instrument_id: LS218_1
+  emitted_channel: Т1 Криостат верх
+  channel_id: Т1
+- instrument_id: LS218_1
+  emitted_channel: Т1 Криостат верх_raw
+  channel_id: Т1.raw
+- instrument_id: LS218_1
+  emitted_channel: Т2 Криостат низ
+  channel_id: Т2
+- instrument_id: LS218_1
+  emitted_channel: Т2 Криостат низ_raw
+  channel_id: Т2.raw
+- instrument_id: LS218_1
+  emitted_channel: Т3 Радиатор 1
+  channel_id: Т3
+- instrument_id: LS218_1
+  emitted_channel: Т3 Радиатор 1_raw
+  channel_id: Т3.raw
+- instrument_id: LS218_1
+  emitted_channel: Т4 Радиатор 2
+  channel_id: Т4
+- instrument_id: LS218_1
+  emitted_channel: Т4 Радиатор 2_raw
+  channel_id: Т4.raw
+- instrument_id: LS218_1
+  emitted_channel: Т5 Экран 77К
+  channel_id: Т5
+- instrument_id: LS218_1
+  emitted_channel: Т5 Экран 77К_raw
+  channel_id: Т5.raw
+- instrument_id: LS218_1
+  emitted_channel: Т6 Экран 4К
+  channel_id: Т6
+- instrument_id: LS218_1
+  emitted_channel: Т6 Экран 4К_raw
+  channel_id: Т6.raw
+- instrument_id: LS218_1
+  emitted_channel: Т7 Детектор
+  channel_id: Т7
+- instrument_id: LS218_1
+  emitted_channel: Т7 Детектор_raw
+  channel_id: Т7.raw
+- instrument_id: LS218_1
+  emitted_channel: Т8 Калибровка
+  channel_id: Т8
+- instrument_id: LS218_1
+  emitted_channel: Т8 Калибровка_raw
+  channel_id: Т8.raw
+- instrument_id: LS218_2
+  emitted_channel: Т9 Компрессор вход
+  channel_id: Т9
+- instrument_id: LS218_2
+  emitted_channel: Т9 Компрессор вход_raw
+  channel_id: Т9.raw
+- instrument_id: LS218_2
+  emitted_channel: Т10 Компрессор выход
+  channel_id: Т10
+- instrument_id: LS218_2
+  emitted_channel: Т10 Компрессор выход_raw
+  channel_id: Т10.raw
+- instrument_id: LS218_2
+  emitted_channel: Т11 Теплообменник 1
+  channel_id: Т11
+- instrument_id: LS218_2
+  emitted_channel: Т11 Теплообменник 1_raw
+  channel_id: Т11.raw
+- instrument_id: LS218_2
+  emitted_channel: Т12 Теплообменник 2
+  channel_id: Т12
+- instrument_id: LS218_2
+  emitted_channel: Т12 Теплообменник 2_raw
+  channel_id: Т12.raw
+- instrument_id: LS218_2
+  emitted_channel: Т13 Труба подачи
+  channel_id: Т13
+- instrument_id: LS218_2
+  emitted_channel: Т13 Труба подачи_raw
+  channel_id: Т13.raw
+- instrument_id: LS218_2
+  emitted_channel: Т14 Труба возврата
+  channel_id: Т14
+- instrument_id: LS218_2
+  emitted_channel: Т14 Труба возврата_raw
+  channel_id: Т14.raw
+- instrument_id: LS218_2
+  emitted_channel: Т15 Вакуумный кожух
+  channel_id: Т15
+- instrument_id: LS218_2
+  emitted_channel: Т15 Вакуумный кожух_raw
+  channel_id: Т15.raw
+- instrument_id: LS218_2
+  emitted_channel: Т16 Фланец
+  channel_id: Т16
+- instrument_id: LS218_2
+  emitted_channel: Т16 Фланец_raw
+  channel_id: Т16.raw
+- instrument_id: LS218_3
+  emitted_channel: Т17 Зеркало 1
+  channel_id: Т17
+- instrument_id: LS218_3
+  emitted_channel: Т17 Зеркало 1_raw
+  channel_id: Т17.raw
+- instrument_id: LS218_3
+  emitted_channel: Т18 Зеркало 2
+  channel_id: Т18
+- instrument_id: LS218_3
+  emitted_channel: Т18 Зеркало 2_raw
+  channel_id: Т18.raw
+- instrument_id: LS218_3
+  emitted_channel: Т19 Подвес
+  channel_id: Т19
+- instrument_id: LS218_3
+  emitted_channel: Т19 Подвес_raw
+  channel_id: Т19.raw
+- instrument_id: LS218_3
+  emitted_channel: Т20 Рама
+  channel_id: Т20
+- instrument_id: LS218_3
+  emitted_channel: Т20 Рама_raw
+  channel_id: Т20.raw
+- instrument_id: LS218_3
+  emitted_channel: Т21 Резерв 1
+  channel_id: Т21
+- instrument_id: LS218_3
+  emitted_channel: Т21 Резерв 1_raw
+  channel_id: Т21.raw
+- instrument_id: LS218_3
+  emitted_channel: Т22 Резерв 2
+  channel_id: Т22
+- instrument_id: LS218_3
+  emitted_channel: Т22 Резерв 2_raw
+  channel_id: Т22.raw
+- instrument_id: LS218_3
+  emitted_channel: Т23 Резерв 3
+  channel_id: Т23
+- instrument_id: LS218_3
+  emitted_channel: Т23 Резерв 3_raw
+  channel_id: Т23.raw
+- instrument_id: LS218_3
+  emitted_channel: Т24 Резерв 4
+  channel_id: Т24
+- instrument_id: LS218_3
+  emitted_channel: Т24 Резерв 4_raw
+  channel_id: Т24.raw
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smua/voltage
+  channel_id: Keithley_1/smua/voltage
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smua/current
+  channel_id: Keithley_1/smua/current
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smua/resistance
+  channel_id: Keithley_1/smua/resistance
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smua/power
+  channel_id: Keithley_1/smua/power
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smub/voltage
+  channel_id: Keithley_1/smub/voltage
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smub/current
+  channel_id: Keithley_1/smub/current
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smub/resistance
+  channel_id: Keithley_1/smub/resistance
+- instrument_id: Keithley_1
+  emitted_channel: Keithley_1/smub/power
+  channel_id: Keithley_1/smub/power
+- instrument_id: VSP63D_1
+  emitted_channel: VSP63D_1/pressure
+  channel_id: VSP63D_1/pressure
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch1
+  channel_id: MultiLine_1/length_ch1
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch2
+  channel_id: MultiLine_1/length_ch2
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch3
+  channel_id: MultiLine_1/length_ch3
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch4
+  channel_id: MultiLine_1/length_ch4
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch5
+  channel_id: MultiLine_1/length_ch5
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch6
+  channel_id: MultiLine_1/length_ch6
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch7
+  channel_id: MultiLine_1/length_ch7
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/length_ch8
+  channel_id: MultiLine_1/length_ch8
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/env_temperature
+  channel_id: MultiLine_1/env_temperature
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/env_pressure
+  channel_id: MultiLine_1/env_pressure
+- instrument_id: MultiLine_1
+  emitted_channel: MultiLine_1/env_humidity
+  channel_id: MultiLine_1/env_humidity

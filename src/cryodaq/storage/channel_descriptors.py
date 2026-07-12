@@ -6,15 +6,29 @@ publish readings, infer vendor semantics, or grant source/control authority.
 
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass
+import stat
+import struct
+import unicodedata
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from types import MappingProxyType
 from typing import Final
+from weakref import WeakKeyDictionary
+
+import yaml
 
 from cryodaq.channels.descriptors import (
     MAX_CATALOG_DESCRIPTORS,
     ChannelCatalog,
     ChannelDescriptorError,
     ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
     validate_catalog_update,
 )
 from cryodaq.channels.persistence import (
@@ -24,10 +38,39 @@ from cryodaq.channels.persistence import (
     decode_persisted_channel_envelope,
     resolve_persisted_channel,
 )
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
 
 CATALOG_SCHEMA_VERSION: Final = 1
 MAX_CATALOG_ENVELOPE_BYTES: Final = MAX_CATALOG_DESCRIPTORS * MAX_PERSISTED_ENVELOPE_BYTES
+MAX_LIVE_METADATA_DEPTH: Final = 8
+MAX_LIVE_METADATA_ITEMS: Final = 1024
+MAX_LIVE_METADATA_TEXT_BYTES: Final = 65_536
+MAX_LIVE_METADATA_AGGREGATE_BYTES: Final = 1_048_576
+MAX_LIVE_READING_TEXT_BYTES: Final = 1024
+MAX_LIVE_DESCRIPTOR_CONFIG_BYTES: Final = 256 * 1024
+MAX_LIVE_DESCRIPTOR_CONFIG_DEPTH: Final = 8
+
+_LIVE_DESCRIPTOR_ROOT_KEYS: Final = frozenset({"schema_version", "descriptors", "bindings"})
+_LIVE_DESCRIPTOR_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "channel_id",
+        "instrument_id",
+        "source_key",
+        "quantity",
+        "unit",
+        "role",
+        "safety_class",
+        "display_group",
+        "display_name",
+        "visible_by_default",
+        "display_order",
+        "descriptor_revision",
+    }
+)
+_LIVE_BINDING_KEYS: Final = frozenset({"instrument_id", "emitted_channel", "channel_id"})
+_BOUND_READING_PROVENANCE: Final = object()
 
 SCHEMA_DESCRIPTOR_META: Final = """
 CREATE TABLE IF NOT EXISTS channel_descriptor_meta (
@@ -137,6 +180,284 @@ class ChannelDescriptorStorageError(RuntimeError):
     """The SQLite descriptor authority is malformed, corrupt, or ambiguous."""
 
 
+class _StrictDescriptorLoader(yaml.SafeLoader):
+    """Bounded YAML grammar with neither aliases nor duplicate mapping keys."""
+
+    def __init__(self, stream: object) -> None:
+        super().__init__(stream)
+        self._descriptor_depth = 0
+
+    def compose_node(self, parent: yaml.Node | None, index: int | None) -> yaml.Node:
+        if self.check_event(yaml.AliasEvent):
+            event = self.peek_event()
+            raise yaml.constructor.ConstructorError(
+                "while composing a descriptor manifest",
+                getattr(event, "start_mark", None),
+                "YAML aliases are not allowed",
+                getattr(event, "start_mark", None),
+            )
+        self._descriptor_depth += 1
+        if self._descriptor_depth > MAX_LIVE_DESCRIPTOR_CONFIG_DEPTH:
+            self._descriptor_depth -= 1
+            event = self.peek_event()
+            raise yaml.constructor.ConstructorError(
+                "while composing a descriptor manifest",
+                getattr(event, "start_mark", None),
+                "descriptor manifest nesting exceeds its limit",
+                getattr(event, "start_mark", None),
+            )
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._descriptor_depth -= 1
+
+    def construct_mapping(self, node: yaml.Node, deep: bool = False) -> dict[object, object]:
+        if not isinstance(node, yaml.MappingNode):
+            raise yaml.constructor.ConstructorError(None, None, "expected a mapping", node.start_mark)
+        result: dict[object, object] = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in result
+            except TypeError:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found an unhashable key",
+                    key_node.start_mark,
+                ) from None
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found a duplicate key",
+                    key_node.start_mark,
+                )
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
+def _read_live_descriptor_config(path: Path) -> bytes:
+    """Read one immutable regular-file snapshot under a hard byte ceiling."""
+
+    selected = Path(path)
+    absolute = Path(os.path.abspath(os.fspath(selected)))
+    directory_fd: int | None = None
+    fd: int | None = None
+    parent_snapshots: tuple[tuple[Path, tuple[int, int, int, int, int]], ...] = ()
+    try:
+        supports_dirfd_walk = hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd
+        if supports_dirfd_walk:
+            parts = absolute.parts
+            if len(parts) < 2:
+                raise ChannelDescriptorStorageError("live descriptor manifest path is invalid")
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                directory_flags |= os.O_NOFOLLOW
+            directory_fd = os.open(parts[0], directory_flags)
+            for component in parts[1:-1]:
+                next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            filename = parts[-1]
+            before = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+        else:
+            # Windows does not expose dir_fd traversal through os.open.  Keep
+            # an exact identity snapshot of every ancestor, reject links, and
+            # recheck the entire chain after the file descriptor is consumed.
+            # This is the platform fallback for the same symlink-free authority
+            # policy; a parent replacement cannot silently select another file.
+            snapshots: list[tuple[Path, tuple[int, int, int, int, int]]] = []
+            for parent in reversed(absolute.parents):
+                parent_stat = parent.lstat()
+                if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+                    raise ChannelDescriptorStorageError("live descriptor manifest authority path must be symlink-free")
+                snapshots.append(
+                    (
+                        parent,
+                        (
+                            parent_stat.st_dev,
+                            parent_stat.st_ino,
+                            parent_stat.st_mode,
+                            parent_stat.st_mtime_ns,
+                            parent_stat.st_ctime_ns,
+                        ),
+                    )
+                )
+            parent_snapshots = tuple(snapshots)
+            before = absolute.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ChannelDescriptorStorageError("live descriptor manifest must be a single-link regular file")
+        if before.st_size <= 0 or before.st_size > MAX_LIVE_DESCRIPTOR_CONFIG_BYTES:
+            raise ChannelDescriptorStorageError("live descriptor manifest exceeds its bounded file grammar")
+        file_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            file_flags |= os.O_NOFOLLOW
+        if supports_dirfd_walk:
+            fd = os.open(filename, file_flags, dir_fd=directory_fd)
+        else:
+            fd = os.open(absolute, file_flags)
+        try:
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            ):
+                raise ChannelDescriptorStorageError("live descriptor manifest changed before reading")
+            chunks: list[bytes] = []
+            remaining = MAX_LIVE_DESCRIPTOR_CONFIG_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, min(remaining, 65_536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            finished = os.fstat(fd)
+            if (
+                finished.st_dev,
+                finished.st_ino,
+                finished.st_size,
+                finished.st_mtime_ns,
+                finished.st_ctime_ns,
+            ) != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            ):
+                raise ChannelDescriptorStorageError("live descriptor manifest changed while reading")
+            for parent, expected in parent_snapshots:
+                parent_stat = parent.lstat()
+                actual = (
+                    parent_stat.st_dev,
+                    parent_stat.st_ino,
+                    parent_stat.st_mode,
+                    parent_stat.st_mtime_ns,
+                    parent_stat.st_ctime_ns,
+                )
+                if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode) or actual != expected:
+                    raise ChannelDescriptorStorageError("live descriptor manifest authority path changed while reading")
+        finally:
+            os.close(fd)
+            fd = None
+    except ChannelDescriptorStorageError:
+        raise
+    except FileNotFoundError:
+        raise ChannelDescriptorStorageError("live descriptor manifest is unavailable") from None
+    except OSError:
+        raise ChannelDescriptorStorageError("live descriptor manifest cannot be read safely") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+    raw = b"".join(chunks)
+    if not raw or len(raw) > MAX_LIVE_DESCRIPTOR_CONFIG_BYTES:
+        raise ChannelDescriptorStorageError("live descriptor manifest exceeds its bounded file grammar")
+    return raw
+
+
+def _parse_live_descriptor_manifest(
+    path: Path,
+) -> tuple[ChannelCatalog, Mapping[tuple[str, str], str]]:
+    raw = _read_live_descriptor_config(path)
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        payload = yaml.load(text, Loader=_StrictDescriptorLoader)
+    except Exception:
+        raise ChannelDescriptorStorageError("live descriptor manifest is not valid strict UTF-8 YAML") from None
+    if type(payload) is not dict or set(payload) != _LIVE_DESCRIPTOR_ROOT_KEYS:
+        raise ChannelDescriptorStorageError("live descriptor manifest root schema is not exact")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ChannelDescriptorStorageError("live descriptor manifest schema_version must be integer 1")
+    descriptor_rows = payload["descriptors"]
+    binding_rows = payload["bindings"]
+    if type(descriptor_rows) is not list or not 1 <= len(descriptor_rows) <= MAX_CATALOG_DESCRIPTORS:
+        raise ChannelDescriptorStorageError("live descriptor manifest descriptors are not a bounded list")
+    if type(binding_rows) is not list or len(binding_rows) != len(descriptor_rows):
+        raise ChannelDescriptorStorageError("live descriptor manifest bindings must match descriptor count")
+
+    descriptors: list[ChannelDescriptorV1] = []
+    for row in descriptor_rows:
+        if type(row) is not dict or set(row) != _LIVE_DESCRIPTOR_KEYS:
+            raise ChannelDescriptorStorageError("live descriptor entry schema is not exact")
+        try:
+            quantity = ChannelQuantity(row["quantity"]) if type(row["quantity"]) is str else None
+            role = ChannelRole(row["role"]) if type(row["role"]) is str else None
+            safety_class = ChannelSafetyClass(row["safety_class"]) if type(row["safety_class"]) is str else None
+            if quantity is None or role is None or safety_class is None:
+                raise TypeError
+            descriptor = ChannelDescriptorV1(
+                schema_version=row["schema_version"],
+                channel_id=row["channel_id"],
+                instrument_id=row["instrument_id"],
+                source_key=row["source_key"],
+                quantity=quantity,
+                unit=row["unit"],
+                role=role,
+                safety_class=safety_class,
+                display_group=row["display_group"],
+                display_name=row["display_name"],
+                visible_by_default=row["visible_by_default"],
+                display_order=row["display_order"],
+                descriptor_revision=row["descriptor_revision"],
+            )
+        except (TypeError, ValueError, ChannelDescriptorError):
+            raise ChannelDescriptorStorageError("live descriptor entry violates canonical contracts") from None
+        descriptors.append(descriptor)
+
+    bindings: dict[tuple[str, str], str] = {}
+    for row in binding_rows:
+        if type(row) is not dict or set(row) != _LIVE_BINDING_KEYS:
+            raise ChannelDescriptorStorageError("live descriptor binding schema is not exact")
+        instrument_id = _bounded_live_text(
+            row["instrument_id"],
+            field="binding instrument_id",
+            maximum=MAX_LIVE_READING_TEXT_BYTES,
+        )
+        emitted_channel = _bounded_live_text(
+            row["emitted_channel"],
+            field="binding emitted_channel",
+            maximum=MAX_LIVE_READING_TEXT_BYTES,
+        )
+        channel_id = _bounded_live_text(
+            row["channel_id"],
+            field="binding channel_id",
+            maximum=MAX_LIVE_READING_TEXT_BYTES,
+        )
+        pair = (instrument_id, emitted_channel)
+        if pair in bindings or channel_id in bindings.values():
+            raise ChannelDescriptorStorageError("live descriptor bindings are not one-to-one")
+        bindings[pair] = channel_id
+    try:
+        catalog = ChannelCatalog(descriptors)
+    except (TypeError, ValueError, ChannelDescriptorError):
+        raise ChannelDescriptorStorageError("live descriptor catalog violates canonical contracts") from None
+    return catalog, MappingProxyType(bindings)
+
+
+def load_live_channel_descriptor_catalog(
+    base_path: Path,
+    *,
+    local_path: Path | None = None,
+) -> LiveChannelDescriptorCatalog:
+    """Load one strict whole-file descriptor authority.
+
+    A supplied local manifest is a complete replacement, never a partial merge.
+    It must exist and validate; malformed or missing local configuration never
+    falls back to the tracked base.  This bounded synchronous loader owns no
+    runtime resources and must be called off the engine event loop when wired.
+    """
+
+    selected = Path(local_path) if local_path is not None else Path(base_path)
+    catalog, bindings = _parse_live_descriptor_manifest(selected)
+    return LiveChannelDescriptorCatalog(catalog, bindings=bindings)
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedSQLiteReading:
     """One immutable hot reading row paired with its resolved descriptor."""
@@ -149,6 +470,439 @@ class ResolvedSQLiteReading:
     unit: str
     status: str
     descriptor: ChannelDescriptorV1 | None
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenList:
+    items: tuple[_FrozenValue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenTuple:
+    items: tuple[_FrozenValue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenDict:
+    items: tuple[tuple[str, _FrozenValue], ...]
+
+
+type _FrozenValue = None | bool | int | float | str | _FrozenList | _FrozenTuple | _FrozenDict
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedLiveReading:
+    """Recursively immutable, data-only snapshot of one validated Reading."""
+
+    timestamp_iso: str
+    instrument_id: str
+    channel: str
+    value: float
+    unit: str
+    status: ChannelStatus
+    raw: float | None
+    metadata: _FrozenDict
+
+
+@dataclass(frozen=True, slots=True)
+class _ReceiptIntegrity:
+    """Owner-private issuance record for one exact observational receipt."""
+
+    payload: _OwnedLiveReading
+    descriptor: ChannelDescriptorV1
+    payload_fingerprint: tuple[object, ...]
+    descriptor_envelope: bytes
+    token: object
+
+
+def _frozen_value_fingerprint(value: _FrozenValue) -> object:
+    if value is None:
+        return ("none",)
+    if type(value) is bool:
+        return ("bool", value)
+    if type(value) is int:
+        return ("int", value)
+    if type(value) is float:
+        return ("float64", struct.pack(">d", value))
+    if type(value) is str:
+        return ("text", value)
+    if type(value) is _FrozenList:
+        return ("list", tuple(_frozen_value_fingerprint(item) for item in value.items))
+    if type(value) is _FrozenTuple:
+        return ("tuple", tuple(_frozen_value_fingerprint(item) for item in value.items))
+    if type(value) is _FrozenDict:
+        return (
+            "dict",
+            tuple((key, _frozen_value_fingerprint(item)) for key, item in value.items),
+        )
+    raise ChannelDescriptorStorageError("receipt payload contains a non-canonical frozen value")
+
+
+def _owned_live_reading_fingerprint(value: object) -> tuple[object, ...]:
+    if type(value) is not _OwnedLiveReading:
+        raise ChannelDescriptorStorageError("receipt payload is not an exact owned reading")
+    if type(value.timestamp_iso) is not str:
+        raise ChannelDescriptorStorageError("receipt timestamp fingerprint is malformed")
+    if any(type(item) is not str for item in (value.instrument_id, value.channel, value.unit)):
+        raise ChannelDescriptorStorageError("receipt text fingerprint is malformed")
+    if type(value.value) is not float or (value.raw is not None and type(value.raw) is not float):
+        raise ChannelDescriptorStorageError("receipt numeric fingerprint is malformed")
+    if type(value.status) is not ChannelStatus or type(value.metadata) is not _FrozenDict:
+        raise ChannelDescriptorStorageError("receipt status or metadata fingerprint is malformed")
+    return (
+        value.timestamp_iso,
+        value.instrument_id,
+        value.channel,
+        struct.pack(">d", value.value),
+        value.unit,
+        value.status.value,
+        None if value.raw is None else struct.pack(">d", value.raw),
+        _frozen_value_fingerprint(value.metadata),
+    )
+
+
+def _bounded_live_text(value: object, *, field: str, maximum: int) -> str:
+    if type(value) is not str:
+        raise ChannelDescriptorStorageError(f"{field} must be an exact string")
+    if unicodedata.normalize("NFC", value) != value:
+        raise ChannelDescriptorStorageError(f"{field} must be NFC-normalized")
+    if any(unicodedata.category(character).startswith("C") for character in value):
+        raise ChannelDescriptorStorageError(f"{field} contains a Unicode control character")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ChannelDescriptorStorageError(f"{field} is not valid Unicode text") from exc
+    if not encoded or len(encoded) > maximum:
+        raise ChannelDescriptorStorageError(f"{field} exceeds its bounded text grammar")
+    return value
+
+
+def _freeze_live_metadata(value: object) -> _FrozenDict:
+    """Validate and freeze the bounded Reading metadata data grammar.
+
+    The accepted grammar is deliberately narrower than ``Any``: exact null,
+    bool, signed-64-bit int, float, UTF-8 text, list, tuple and string-keyed
+    dict values.  Container identity is tracked only along the active path so
+    ordinary repeated immutable/scalar values are accepted while cycles are
+    rejected.  The global item budget bounds both work and retained memory.
+    """
+
+    if type(value) is not dict:
+        raise ChannelDescriptorStorageError("reading metadata must be an exact string-keyed dict")
+    remaining = [MAX_LIVE_METADATA_ITEMS]
+    remaining_bytes = [MAX_LIVE_METADATA_AGGREGATE_BYTES]
+    active: set[int] = set()
+
+    def consume_bytes(count: int) -> None:
+        remaining_bytes[0] -= count
+        if remaining_bytes[0] < 0:
+            raise ChannelDescriptorStorageError("reading metadata exceeds its aggregate byte limit")
+
+    def freeze(item: object, depth: int) -> _FrozenValue:
+        remaining[0] -= 1
+        if remaining[0] < 0:
+            raise ChannelDescriptorStorageError("reading metadata exceeds its item limit")
+        if depth > MAX_LIVE_METADATA_DEPTH:
+            raise ChannelDescriptorStorageError("reading metadata exceeds its depth limit")
+        if item is None or type(item) in (bool, float):
+            consume_bytes(8)
+            return item  # type: ignore[return-value]
+        if type(item) is int:
+            if not -(2**63) <= item <= 2**63 - 1:
+                raise ChannelDescriptorStorageError("reading metadata integer exceeds signed 64-bit range")
+            consume_bytes(8)
+            return item
+        if type(item) is str:
+            text = _bounded_live_text(item, field="metadata text", maximum=MAX_LIVE_METADATA_TEXT_BYTES)
+            consume_bytes(len(text.encode("utf-8")) + 8)
+            return text
+        if type(item) not in (list, tuple, dict):
+            raise ChannelDescriptorStorageError("reading metadata contains a non-data value")
+
+        consume_bytes(8)
+
+        identity = id(item)
+        if identity in active:
+            raise ChannelDescriptorStorageError("reading metadata contains a cycle")
+        active.add(identity)
+        try:
+            if type(item) is list:
+                return _FrozenList(tuple(freeze(child, depth + 1) for child in item))
+            if type(item) is tuple:
+                return _FrozenTuple(tuple(freeze(child, depth + 1) for child in item))
+            pairs: list[tuple[str, _FrozenValue]] = []
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise ChannelDescriptorStorageError("reading metadata must be an exact string-keyed dict")
+                key = _bounded_live_text(
+                    key,
+                    field="metadata key",
+                    maximum=MAX_LIVE_METADATA_TEXT_BYTES,
+                )
+                consume_bytes(len(key.encode("utf-8")) + 8)
+                pairs.append((key, freeze(child, depth + 1)))
+            return _FrozenDict(tuple(pairs))
+        finally:
+            active.remove(identity)
+
+    frozen = freeze(value, 0)
+    assert isinstance(frozen, _FrozenDict)
+    return frozen
+
+
+def _thaw_live_metadata(value: _FrozenValue) -> object:
+    if isinstance(value, _FrozenList):
+        return [_thaw_live_metadata(item) for item in value.items]
+    if isinstance(value, _FrozenTuple):
+        return tuple(_thaw_live_metadata(item) for item in value.items)
+    if isinstance(value, _FrozenDict):
+        return {key: _thaw_live_metadata(item) for key, item in value.items}
+    return value
+
+
+def _own_live_reading(reading: object) -> _OwnedLiveReading:
+    if type(reading) is not Reading:
+        raise TypeError("descriptor binding requires an exact Reading")
+    if type(reading.timestamp) is not datetime or type(reading.timestamp.tzinfo) is not timezone:
+        raise ChannelDescriptorStorageError("reading timestamp must use an exact timezone-aware datetime")
+    if type(reading.value) is not float:
+        raise ChannelDescriptorStorageError("reading value must be an exact float")
+    if reading.raw is not None and type(reading.raw) is not float:
+        raise ChannelDescriptorStorageError("reading raw must be None or an exact float")
+    if type(reading.status) is not ChannelStatus:
+        raise ChannelDescriptorStorageError("reading status must be an exact ChannelStatus")
+    return _OwnedLiveReading(
+        timestamp_iso=reading.timestamp.isoformat(),
+        instrument_id=_bounded_live_text(
+            reading.instrument_id,
+            field="instrument_id",
+            maximum=MAX_LIVE_READING_TEXT_BYTES,
+        ),
+        channel=_bounded_live_text(
+            reading.channel,
+            field="channel",
+            maximum=MAX_LIVE_READING_TEXT_BYTES,
+        ),
+        value=reading.value,
+        unit=_bounded_live_text(reading.unit, field="unit", maximum=MAX_LIVE_READING_TEXT_BYTES),
+        status=reading.status,
+        raw=reading.raw,
+        metadata=_freeze_live_metadata(reading.metadata),
+    )
+
+
+def _restore_live_reading(owned: _OwnedLiveReading) -> Reading:
+    metadata = _thaw_live_metadata(owned.metadata)
+    assert type(metadata) is dict
+    return Reading(
+        timestamp=datetime.fromisoformat(owned.timestamp_iso),
+        instrument_id=owned.instrument_id,
+        channel=owned.channel,
+        value=owned.value,
+        unit=owned.unit,
+        status=owned.status,
+        raw=owned.raw,
+        metadata=metadata,
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False, eq=False, weakref_slot=True)
+class DescriptorBoundReading:
+    """An owned live reading paired with one verified descriptor revision.
+
+    The pair is observational data only.  It contains no driver, transport,
+    credential, callback, source adapter, or control authority.  ``reading``
+    returns a fresh exact ``Reading`` so a consumer cannot mutate the owned
+    metadata snapshot shared with another consumer.
+    """
+
+    _payload: _OwnedLiveReading
+    descriptor: ChannelDescriptorV1
+    _owner_key: object
+    _provenance: object
+    _integrity_token: object
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("descriptor-bound readings are issued only by LiveChannelDescriptorCatalog")
+
+    @classmethod
+    def _issue(
+        cls,
+        payload: _OwnedLiveReading,
+        descriptor: ChannelDescriptorV1,
+        *,
+        owner_key: object,
+        integrity_token: object,
+    ) -> DescriptorBoundReading:
+        issued = object.__new__(cls)
+        object.__setattr__(issued, "_payload", payload)
+        object.__setattr__(issued, "descriptor", descriptor)
+        object.__setattr__(issued, "_owner_key", owner_key)
+        object.__setattr__(issued, "_provenance", _BOUND_READING_PROVENANCE)
+        object.__setattr__(issued, "_integrity_token", integrity_token)
+        return issued
+
+    @property
+    def reading(self) -> Reading:
+        return _restore_live_reading(self._payload)
+
+    @property
+    def grants_control_authority(self) -> bool:
+        return False
+
+
+class LiveChannelDescriptorCatalog:
+    """Explicit, immutable catalog owner for later runtime activation.
+
+    Production manifests resolve an exact ``(instrument_id, emitted channel)``
+    compatibility binding to a stable ``channel_id``.  This keeps today's
+    LakeShore human-label emissions intact while the descriptor identity stays
+    whitespace-free.  The emitted label is retained only as an exact lookup
+    key; display names, vendor names, units and aliases are never identity
+    fallbacks.  Direct ``ChannelCatalog`` construction uses an identity binding
+    for pure contract tests.  An unknown live channel never synthesizes a
+    legacy descriptor.  Runtime wiring remains a separate atom.
+    """
+
+    __slots__ = ("_bindings", "_catalog", "_issued", "_owner_key")
+
+    def __init__(
+        self,
+        catalog: object,
+        *,
+        bindings: Mapping[tuple[str, str], str] | None = None,
+    ) -> None:
+        self._catalog = snapshot_catalog(catalog)
+        self._owner_key = object()
+        self._issued: WeakKeyDictionary[DescriptorBoundReading, _ReceiptIntegrity] = WeakKeyDictionary()
+        if bindings is None:
+            configured = {
+                (descriptor.instrument_id, descriptor.channel_id): descriptor.channel_id
+                for descriptor in self._catalog.descriptors
+            }
+        else:
+            configured = dict(bindings)
+            if len(configured) != len(bindings):
+                raise ChannelDescriptorStorageError("live descriptor bindings contain a duplicate pair")
+            if set(configured.values()) != set(self._catalog.by_channel_id):
+                raise ChannelDescriptorStorageError(
+                    "live descriptor bindings must cover every current descriptor exactly once"
+                )
+            if len(configured) != len(self._catalog.descriptors):
+                raise ChannelDescriptorStorageError("live descriptor bindings must be unique and complete")
+            for (instrument_id, emitted_channel), channel_id in configured.items():
+                if type(instrument_id) is not str or type(emitted_channel) is not str or type(channel_id) is not str:
+                    raise ChannelDescriptorStorageError("live descriptor binding fields must be exact strings")
+                descriptor = self._catalog.by_channel_id.get(channel_id)
+                if descriptor is None or descriptor.instrument_id != instrument_id:
+                    raise ChannelDescriptorStorageError(
+                        "live descriptor binding instrument_id disagrees with its descriptor"
+                    )
+        self._bindings = MappingProxyType(configured)
+
+    @property
+    def grants_control_authority(self) -> bool:
+        return False
+
+    @property
+    def instrument_ids(self) -> frozenset[str]:
+        """Configured instrument identities, detached from binding internals."""
+
+        return frozenset(instrument_id for instrument_id, _ in self._bindings)
+
+    def storage_catalog_snapshot(self) -> ChannelCatalog:
+        """Return a defensive catalog value for one persistence transaction.
+
+        The returned value carries descriptor data only.  It cannot bind a
+        live reading or establish source/control authority; those operations
+        remain owned by this instance.
+        """
+
+        return snapshot_catalog(self._catalog)
+
+    def require_exact_instruments(self, instrument_ids: object) -> None:
+        """Fail startup unless manifest and driver configuration agree exactly."""
+
+        if type(instrument_ids) not in (tuple, list, frozenset, set):
+            raise TypeError("configured instrument ids must be an explicit finite collection")
+        configured = tuple(instrument_ids)
+        if any(type(item) is not str for item in configured) or len(set(configured)) != len(configured):
+            raise ChannelDescriptorStorageError("configured instrument ids are malformed or duplicated")
+        expected = frozenset(configured)
+        if self.instrument_ids != expected:
+            missing = sorted(expected - self.instrument_ids)
+            extra = sorted(self.instrument_ids - expected)
+            raise ChannelDescriptorStorageError(
+                f"live descriptor manifest instrument mismatch (missing={missing}, extra={extra})"
+            )
+
+    def bind(self, reading: object) -> DescriptorBoundReading:
+        owned = _own_live_reading(reading)
+        channel_id = self._bindings.get((owned.instrument_id, owned.channel))
+        if channel_id is None:
+            if any(emitted_channel == owned.channel for _, emitted_channel in self._bindings):
+                raise ChannelDescriptorStorageError(
+                    "live reading instrument_id disagrees with the explicit descriptor binding"
+                )
+            raise ChannelDescriptorStorageError(
+                "live reading channel is unavailable in the explicit descriptor catalog bindings"
+            )
+        descriptor = self._catalog.by_channel_id[channel_id]
+        descriptor_hash_for_reading(
+            self._catalog,
+            instrument_id=owned.instrument_id,
+            channel=channel_id,
+            unit=owned.unit,
+        )
+        # The emitted label above is only a lookup key. Every reading this
+        # owner issues (and therefore every receipted/published Reading) must
+        # carry the canonical descriptor.channel_id in `.channel`, matching
+        # entry.channel_id and the persisted SQLite row exactly.
+        if owned.channel != channel_id:
+            owned = replace(owned, channel=channel_id)
+        # Snapshot the selected descriptor independently of the catalog owner.
+        envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
+        selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
+        integrity_token = object()
+        issued = DescriptorBoundReading._issue(
+            owned,
+            selected,
+            owner_key=self._owner_key,
+            integrity_token=integrity_token,
+        )
+        self._issued[issued] = _ReceiptIntegrity(
+            payload=owned,
+            descriptor=selected,
+            payload_fingerprint=_owned_live_reading_fingerprint(owned),
+            descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(selected).canonical_json,
+            token=integrity_token,
+        )
+        return issued
+
+    def owns(self, candidate: object) -> bool:
+        """Return whether this exact owner issued an intact observational receipt."""
+
+        if type(candidate) is not DescriptorBoundReading:
+            return False
+        integrity = self._issued.get(candidate)
+        if integrity is None:
+            return False
+        try:
+            envelope = PersistedChannelEnvelopeV1.from_descriptor(candidate.descriptor)
+            catalog_descriptor = self._catalog.by_channel_id.get(candidate.descriptor.channel_id)
+            return (
+                candidate._provenance is _BOUND_READING_PROVENANCE
+                and candidate._owner_key is self._owner_key
+                and candidate._integrity_token is integrity.token
+                and candidate._payload is integrity.payload
+                and candidate.descriptor is integrity.descriptor
+                and _owned_live_reading_fingerprint(candidate._payload) == integrity.payload_fingerprint
+                and envelope.canonical_json == integrity.descriptor_envelope
+                and catalog_descriptor is not None
+                and catalog_descriptor.canonical_json == candidate.descriptor.canonical_json
+            )
+        except (AttributeError, TypeError, ValueError, ChannelDescriptorError, ChannelDescriptorStorageError):
+            return False
 
 
 def _enable_foreign_keys(conn: sqlite3.Connection) -> None:
@@ -603,11 +1357,21 @@ def read_sqlite_reading(conn: sqlite3.Connection, reading_id: object) -> Resolve
 __all__ = [
     "CATALOG_SCHEMA_VERSION",
     "MAX_CATALOG_ENVELOPE_BYTES",
+    "MAX_LIVE_DESCRIPTOR_CONFIG_BYTES",
+    "MAX_LIVE_DESCRIPTOR_CONFIG_DEPTH",
+    "MAX_LIVE_METADATA_AGGREGATE_BYTES",
+    "MAX_LIVE_METADATA_DEPTH",
+    "MAX_LIVE_METADATA_ITEMS",
+    "MAX_LIVE_METADATA_TEXT_BYTES",
+    "MAX_LIVE_READING_TEXT_BYTES",
     "ChannelDescriptorStorageError",
+    "DescriptorBoundReading",
+    "LiveChannelDescriptorCatalog",
     "ResolvedSQLiteReading",
     "descriptor_hash_for_reading",
     "initialize_descriptor_storage",
     "install_catalog",
+    "load_live_channel_descriptor_catalog",
     "read_sqlite_reading",
     "resolve_sqlite_descriptor",
     "snapshot_catalog",
