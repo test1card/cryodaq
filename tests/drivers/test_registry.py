@@ -9,7 +9,7 @@ import yaml
 
 import cryodaq.drivers.registry as registry_module
 from cryodaq.drivers.base import InstrumentDriver
-from cryodaq.drivers.contracts import ControlledSource, VerifiedOffSource
+from cryodaq.drivers.contracts import ControlledSource, DriverTrustClass, VerifiedOffSource
 from cryodaq.drivers.instruments.keithley_2604b import WatchdogMode
 from cryodaq.drivers.registry import (
     ALLOWLISTED_DRIVER_MODULES,
@@ -31,6 +31,7 @@ from cryodaq.drivers.registry import (
     ValueKind,
     construct_driver,
     get_driver_spec,
+    runtime_binding_for_driver,
     validate_instrument_entries,
     validate_instrument_entry,
 )
@@ -51,6 +52,7 @@ def test_registry_is_exact_static_allowlist() -> None:
         "keithley_2604b",
         "thyracont_vsp63d",
         "etalon_multiline",
+        "asc_reference_tcp",
     }
     assert ALLOWLISTED_DRIVER_MODULES == tuple(sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values()))
 
@@ -90,6 +92,15 @@ def test_passive_and_reviewed_source_namespaces_are_disjoint() -> None:
         DriverCapability.VERIFIED_OFF_SOURCE,
     }.issubset(source.capabilities)
     assert DriverCapability.CALIBRATABLE_SENSOR not in PASSIVE_DRIVER_SPECS["lakeshore_218s"].capabilities
+
+    extension = PASSIVE_DRIVER_SPECS["asc_reference_tcp"]
+    assert extension.authority is DriverAuthority.PASSIVE_EXTENSION
+    assert extension.capabilities == frozenset({DriverCapability.PASSIVE_SENSOR})
+    assert extension.reviewed_source_binding is None
+    assert {
+        DriverCapability.CONTROLLED_SOURCE,
+        DriverCapability.VERIFIED_OFF_SOURCE,
+    }.isdisjoint(extension.capabilities)
 
 
 def test_protocol_conformance_cannot_promote_passive_spec_to_source() -> None:
@@ -390,3 +401,91 @@ async def test_constructed_reviewed_source_executes_mock_control_contract() -> N
     await driver.stop_source("smua")
     assert await driver.emergency_off()
     await driver.disconnect()
+
+
+async def test_reference_extension_constructs_in_mock_mode_with_passive_binding() -> None:
+    config = validate_instrument_entry(
+        {
+            "type": "asc_reference_tcp",
+            "name": "asc.reference.instrument-1",
+            "host": "localhost",
+            "port": 9000,
+            "channels": [
+                {
+                    "channel_id": "asc.reference.temperature.stage-a",
+                    "unit": "K",
+                    "mock_value": 4.2,
+                }
+            ],
+            "poll_interval_s": 0.25,
+        }
+    )
+    driver = construct_driver(config, DriverConstructionContext(mock=True))
+    binding = runtime_binding_for_driver(driver)
+
+    assert type(driver).__module__ == "cryodaq.drivers.passive_extensions.asc_reference_tcp"
+    assert binding is not None
+    assert binding.driver is driver
+    assert binding.trust_class is DriverTrustClass.PASSIVE_EXTENSION
+    assert binding.timing.poll_interval_s == 0.25
+    assert binding.bus_descriptor is None
+    assert binding.participant is None
+    assert binding.coordinator is None
+    assert binding.lifecycle is None
+    assert not isinstance(driver, ControlledSource)
+    assert not isinstance(driver, VerifiedOffSource)
+
+    await driver.connect()
+    readings = await driver.read_channels()
+    await driver.disconnect()
+    assert [(item.instrument_id, item.channel, item.value, item.unit) for item in readings] == [
+        (
+            "asc.reference.instrument-1",
+            "asc.reference.temperature.stage-a",
+            4.2,
+            "K",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("channels", "message"),
+    [
+        ([], "at least one"),
+        ([{"channel_id": "a", "unit": "K", "extra": 1}], "unknown keys"),
+        ([{"channel_id": "a"}], "requires channel_id and unit"),
+        ([{"channel_id": "not a stable id", "unit": "K"}], "invalid ASC reference grammar"),
+        ([{"channel_id": "a", "unit": "not a unit"}], "invalid ASC reference grammar"),
+        (
+            [
+                {"channel_id": "a", "unit": "K"},
+                {"channel_id": "a", "unit": "K"},
+            ],
+            "must be unique",
+        ),
+        ([{"channel_id": "a", "unit": "K", "mock_value": float("nan")}], "must be finite"),
+    ],
+)
+def test_reference_extension_channel_schema_fails_closed(channels: object, message: str) -> None:
+    with pytest.raises(DriverRegistryError, match=message):
+        validate_instrument_entry(
+            {
+                "type": "asc_reference_tcp",
+                "name": "asc.reference.instrument-1",
+                "port": 9000,
+                "channels": channels,
+            }
+        )
+
+
+def test_reference_extension_rejects_non_local_host_during_validation() -> None:
+    with pytest.raises(DriverRegistryError, match="must be one of"):
+        validate_instrument_entry(
+            {
+                "type": "asc_reference_tcp",
+                "name": "asc.reference.instrument-1",
+                "host": "192.0.2.1",
+                "port": 9000,
+                "channels": [{"channel_id": "a", "unit": "K"}],
+            }
+        )

@@ -309,12 +309,24 @@ def test_engine_loader_contains_no_vendor_switch_or_method_authority_scan() -> N
             if isinstance(child, ast.Constant) and isinstance(child.value, str)
         }
         assert compared_literals.isdisjoint(
-            {"lakeshore_218s", "thyracont_vsp63d", "etalon_multiline", "keithley_2604b"}
+            {
+                "lakeshore_218s",
+                "thyracont_vsp63d",
+                "etalon_multiline",
+                "asc_reference_tcp",
+                "keithley_2604b",
+            }
         )
 
     run_source = inspect.getsource(engine_module._run_engine)
     assert 'hasattr(cfg.driver, "emergency_off")' not in run_source
     assert "keithley_driver=driver_load.reviewed_source" in run_source
+
+
+def test_reference_extension_adoption_requires_no_central_engine_edit() -> None:
+    source = Path(inspect.getsourcefile(engine_module) or "").read_text(encoding="utf-8")
+    assert "asc_reference_tcp" not in source
+    assert "ASCReferenceTCP" not in source
 
 
 async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(

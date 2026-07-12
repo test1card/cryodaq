@@ -46,6 +46,7 @@ class DuplicateInstrumentNameError(DriverRegistryError):
 
 class DriverAuthority(StrEnum):
     PASSIVE_MEASUREMENT = "passive_measurement"
+    PASSIVE_EXTENSION = "passive_extension"
     REVIEWED_SOURCE = "reviewed_source"
 
 
@@ -65,6 +66,7 @@ class ValueKind(StrEnum):
     BOOLEAN = "boolean"
     STRING_MAP = "string_map"
     INTEGER_LIST = "integer_list"
+    ASC_REFERENCE_CHANNELS = "asc_reference_channels"
 
 
 def _freeze_schema_value(value: object, *, path: str) -> object:
@@ -235,7 +237,10 @@ class DriverSpec:
             DriverCapability.CONTROLLED_SOURCE,
             DriverCapability.VERIFIED_OFF_SOURCE,
         }
-        if self.authority is DriverAuthority.PASSIVE_MEASUREMENT:
+        if self.authority in {
+            DriverAuthority.PASSIVE_MEASUREMENT,
+            DriverAuthority.PASSIVE_EXTENSION,
+        }:
             if capabilities & source_capabilities or self.reviewed_source_binding is not None:
                 raise ValueError("passive DriverSpec cannot declare source authority")
             return
@@ -315,6 +320,42 @@ def _construct_multiline(config: ValidatedInstrumentConfig, context: DriverConst
     )
 
 
+def _construct_asc_reference_tcp(
+    config: ValidatedInstrumentConfig,
+    context: DriverConstructionContext,
+) -> InstrumentDriver:
+    from cryodaq.drivers.passive_extensions.asc_reference_tcp import (
+        ASCReferenceChannel,
+        ASCReferenceTCP,
+    )
+
+    values = config.values
+    channel_values = values["channels"]
+    assert isinstance(channel_values, tuple)
+    channels = tuple(
+        ASCReferenceChannel(
+            channel_id=str(item["channel_id"]),
+            unit=str(item["unit"]),
+            mock_value=float(item["mock_value"]),
+        )
+        for item in channel_values
+        if isinstance(item, Mapping)
+    )
+    if len(channels) != len(channel_values):  # defensive; validation owns the normal shape
+        raise DriverRegistryError("validated ASC reference channels are malformed")
+    return ASCReferenceTCP(
+        config.name,
+        str(values["host"]),
+        int(values["port"]),
+        channels,
+        mock=context.mock,
+        connect_timeout_s=float(values["connect_timeout_s"]),
+        read_timeout_s=float(values["read_timeout_s"]),
+        close_timeout_s=float(values["close_timeout_s"]),
+        max_frame_bytes=int(values["max_frame_bytes"]),
+    )
+
+
 def _construct_keithley(config: ValidatedInstrumentConfig, context: DriverConstructionContext) -> InstrumentDriver:
     from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
@@ -349,6 +390,9 @@ _COMMON_FIELDS: Final[dict[str, ConfigField]] = {
     "connect_timeout_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.01, maximum=300.0),
     "read_timeout_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.01, maximum=300.0),
 }
+
+_ASC_REFERENCE_IDENTIFIER: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_ASC_REFERENCE_UNIT: Final = re.compile(r"[A-Za-z][A-Za-z0-9*/.^_-]{0,31}\Z")
 
 
 def _fields(**specific: ConfigField) -> Mapping[str, ConfigField]:
@@ -409,6 +453,24 @@ _PASSIVE_SPECS = {
         normalizer=_multiline_normalizer,
         factory=_construct_multiline,
     ),
+    "asc_reference_tcp": DriverSpec(
+        type_name="asc_reference_tcp",
+        module="cryodaq.drivers.passive_extensions.asc_reference_tcp",
+        class_name="ASCReferenceTCP",
+        authority=DriverAuthority.PASSIVE_EXTENSION,
+        capabilities=frozenset({DriverCapability.PASSIVE_SENSOR}),
+        config_fields=_fields(
+            host=ConfigField(ValueKind.STRING, default="localhost", choices=("127.0.0.1", "::1", "localhost")),
+            port=ConfigField(ValueKind.INTEGER, required=True, minimum=1, maximum=65_535),
+            channels=ConfigField(ValueKind.ASC_REFERENCE_CHANNELS, required=True),
+            close_timeout_s=ConfigField(ValueKind.NUMBER, default=1.0, minimum=0.01, maximum=30.0),
+            max_frame_bytes=ConfigField(ValueKind.INTEGER, default=512, minimum=64, maximum=4_096),
+            connect_timeout_s=ConfigField(ValueKind.NUMBER, default=2.0, minimum=0.01, maximum=30.0),
+            read_timeout_s=ConfigField(ValueKind.NUMBER, default=2.0, minimum=0.01, maximum=30.0),
+        ),
+        normalizer=_identity_normalizer,
+        factory=_construct_asc_reference_tcp,
+    ),
 }
 
 _SOURCE_SPECS = {
@@ -433,7 +495,11 @@ _SOURCE_SPECS = {
 
 _CANONICAL_DRIVER_SPECS: Final[tuple[DriverSpec, ...]] = tuple([*_PASSIVE_SPECS.values(), *_SOURCE_SPECS.values()])
 PASSIVE_DRIVER_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
-    {spec.type_name: spec for spec in _CANONICAL_DRIVER_SPECS if spec.authority is DriverAuthority.PASSIVE_MEASUREMENT}
+    {
+        spec.type_name: spec
+        for spec in _CANONICAL_DRIVER_SPECS
+        if spec.authority in {DriverAuthority.PASSIVE_MEASUREMENT, DriverAuthority.PASSIVE_EXTENSION}
+    }
 )
 REVIEWED_SOURCE_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
     {spec.type_name: spec for spec in _CANONICAL_DRIVER_SPECS if spec.authority is DriverAuthority.REVIEWED_SOURCE}
@@ -540,6 +606,37 @@ def _validate_field(path: str, value: object, field: ConfigField) -> object:
         if any(item < 1 or item > 32 for item in items) or len(set(items)) != len(items):
             raise DriverRegistryError(f"{path} must contain unique channel numbers in 1..32")
         result = items
+    elif kind is ValueKind.ASC_REFERENCE_CHANNELS:
+        if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+            raise DriverRegistryError(f"{path} must be a sequence of channel mappings")
+        items = tuple(value)
+        if not items:
+            raise DriverRegistryError(f"{path} must contain at least one channel")
+        channels: list[Mapping[str, object]] = []
+        identities: set[str] = set()
+        for index, item in enumerate(items):
+            item_path = f"{path}[{index}]"
+            if not isinstance(item, Mapping) or any(not isinstance(key, str) for key in item):
+                raise DriverRegistryError(f"{item_path} must be a mapping with string keys")
+            unknown = sorted(set(item) - {"channel_id", "unit", "mock_value"})
+            if unknown:
+                raise DriverRegistryError(f"{item_path} has unknown keys: {', '.join(unknown)}")
+            if "channel_id" not in item or "unit" not in item:
+                raise DriverRegistryError(f"{item_path} requires channel_id and unit")
+            channel_id = _validate_field(f"{item_path}.channel_id", item["channel_id"], ConfigField(ValueKind.STRING))
+            unit = _validate_field(f"{item_path}.unit", item["unit"], ConfigField(ValueKind.STRING))
+            mock_value = _validate_number(f"{item_path}.mock_value", item.get("mock_value", 0.0))
+            assert isinstance(channel_id, str)
+            assert isinstance(unit, str)
+            if _ASC_REFERENCE_IDENTIFIER.fullmatch(channel_id) is None:
+                raise DriverRegistryError(f"{item_path}.channel_id has invalid ASC reference grammar")
+            if _ASC_REFERENCE_UNIT.fullmatch(unit) is None:
+                raise DriverRegistryError(f"{item_path}.unit has invalid ASC reference grammar")
+            if channel_id in identities:
+                raise DriverRegistryError(f"{path} channel_id values must be unique")
+            identities.add(channel_id)
+            channels.append(MappingProxyType({"channel_id": channel_id, "unit": unit, "mock_value": mock_value}))
+        result = tuple(channels)
     else:  # pragma: no cover
         raise AssertionError(f"unsupported field kind {kind}")
 
@@ -672,11 +769,11 @@ def _runtime_binding(config: ValidatedInstrumentConfig, driver: InstrumentDriver
         bus_descriptor = BusDescriptor(match.group(1).upper())
     if config.spec.authority is DriverAuthority.REVIEWED_SOURCE and bus_descriptor is not None:
         raise DriverRegistryError("reviewed source cannot receive generic shared-bus recovery authority")
-    trust_class = (
-        DriverTrustClass.REVIEWED_SOURCE
-        if config.spec.authority is DriverAuthority.REVIEWED_SOURCE
-        else DriverTrustClass.PASSIVE_MEASUREMENT
-    )
+    trust_class = {
+        DriverAuthority.REVIEWED_SOURCE: DriverTrustClass.REVIEWED_SOURCE,
+        DriverAuthority.PASSIVE_MEASUREMENT: DriverTrustClass.PASSIVE_MEASUREMENT,
+        DriverAuthority.PASSIVE_EXTENSION: DriverTrustClass.PASSIVE_EXTENSION,
+    }[config.spec.authority]
     return _issue_registry_runtime_binding(
         driver=driver,
         timing=timing,
