@@ -24,6 +24,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 # import. See gui/theme.py docstring for the contract.
 import cryodaq.gui.theme as theme  # noqa: F401 (side-effect import)
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
+from cryodaq.gui.state.operator_snapshot_ingress import OperatorSnapshotIngressOwner
 from cryodaq.gui.zmq_client import ZmqBridge, set_bridge, shutdown
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 
@@ -264,6 +265,8 @@ def main() -> None:
 
     # --- MainWindow ---
     window = MainWindow(bridge=bridge)
+    snapshot_ingress = OperatorSnapshotIngressOwner(bridge, parent=window)
+    snapshot_ingress.start()
     window.show()
 
     # --- QTimer для опроса данных из subprocess ---
@@ -273,9 +276,11 @@ def main() -> None:
     def _tick() -> None:
         for reading in bridge.poll_readings():
             window._dispatch_reading(reading)
+        snapshot_ingress.pump()
 
         # Auto-restart subprocess if it dies or stops sending heartbeats
         if not bridge.is_healthy():
+            snapshot_ingress.invalidate_transport()
             if bridge.is_alive():
                 logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
                 bridge.shutdown()
@@ -284,6 +289,7 @@ def main() -> None:
             bridge.start()
             return
         if bridge.data_flow_stalled():
+            snapshot_ingress.invalidate_transport()
             logger.warning("ZMQ bridge not healthy (no readings), restarting...")
             bridge.shutdown()
             bridge.start()
@@ -298,6 +304,7 @@ def main() -> None:
 
     # --- Корректное завершение ---
     timer.stop()
+    snapshot_ingress.stop()
     shutdown()
     release_lock(lock_fd, ".gui.lock")
     logger.info("GUI завершён")
