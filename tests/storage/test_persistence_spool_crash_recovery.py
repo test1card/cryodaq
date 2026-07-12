@@ -18,12 +18,14 @@ from cryodaq.storage.persistence_spool import (
     create_materialization_receipt_channel,
 )
 
+_FRESH_CREATED_AT = datetime.now(UTC)
+
 
 def _uuid(number: int) -> str:
     return str(UUID(int=number))
 
 
-def _envelope() -> NormalizedBatchEnvelope:
+def _envelope(created_at: float | None = None) -> NormalizedBatchEnvelope:
     row = NormalizedSpoolRow.create(
         ingest_uuid=_uuid(1),
         timestamp=datetime(2026, 7, 11, 3, 4, 5, tzinfo=UTC),
@@ -36,49 +38,54 @@ def _envelope() -> NormalizedBatchEnvelope:
     return NormalizedBatchEnvelope.create(
         (row,),
         batch_uuid=_uuid(2),
-        created_at=datetime(2026, 7, 11, 3, 4, 6, tzinfo=UTC),
+        created_at=(_FRESH_CREATED_AT if created_at is None else datetime.fromtimestamp(created_at, tz=UTC)),
     )
 
 
-def _append_then_crash(path: str) -> None:
+def _append_then_crash(path: str, created_at: float) -> None:
     spool = PersistenceSpool(Path(path))
-    outcome = spool.append(_envelope())
+    outcome = spool.append(_envelope(created_at))
     if outcome is not PersistenceOutcome.DURABLY_QUEUED:
         os._exit(91)
     os._exit(0)
 
 
-def _ack_then_crash_before_checkpoint(path: str) -> None:
+def _ack_then_crash_before_checkpoint(path: str, created_at: float) -> None:
     issuer, verifier = create_materialization_receipt_channel()
     spool = PersistenceSpool(Path(path), receipt_verifier=verifier)
     spool._checkpoint_reuse = lambda _conn: os._exit(0)
-    spool.acknowledge(issuer.issue(_envelope()))
+    spool.acknowledge(issuer.issue(_envelope(created_at)))
     os._exit(92)
 
 
 def test_committed_envelope_survives_abrupt_process_exit_and_reopens_once(tmp_path) -> None:
     path = tmp_path / "spool.db"
-    process = get_context("spawn").Process(target=_append_then_crash, args=(str(path),))
+    envelope = _envelope()
+    process = get_context("spawn").Process(
+        target=_append_then_crash,
+        args=(str(path), envelope.created_at),
+    )
     process.start()
     process.join(timeout=10)
     assert process.exitcode == 0
 
     spool = PersistenceSpool(path)
-    assert spool.pending_batches() == (_envelope(),)
-    assert spool.append(_envelope()) is PersistenceOutcome.DURABLY_QUEUED
+    assert spool.pending_batches() == (envelope,)
+    assert spool.append(envelope) is PersistenceOutcome.DURABLY_QUEUED
     assert spool.health().pending_batches == 1
     spool.close()
 
 
 def test_committed_ack_survives_crash_before_checkpoint_without_tombstone(tmp_path) -> None:
     path = tmp_path / "spool.db"
+    envelope = _envelope()
     spool = PersistenceSpool(path)
-    assert spool.append(_envelope()) is PersistenceOutcome.DURABLY_QUEUED
+    assert spool.append(envelope) is PersistenceOutcome.DURABLY_QUEUED
     spool.close()
 
     process = get_context("spawn").Process(
         target=_ack_then_crash_before_checkpoint,
-        args=(str(path),),
+        args=(str(path), envelope.created_at),
     )
     process.start()
     process.join(timeout=10)
