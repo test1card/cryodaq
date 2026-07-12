@@ -100,6 +100,15 @@ class _FileFence:
     changed_ns: int
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectoryFence:
+    """Stable directory identity, excluding legitimate child-entry churn."""
+
+    device: int
+    inode: int
+    mode: int
+
+
 class ReportProcessError(RuntimeError):
     """A bounded report child failed, timed out, or violated its result contract."""
 
@@ -466,7 +475,9 @@ def _read_periodic_artifact_dirfd(
         | getattr(os, "O_NOFOLLOW", 0)
     )
     file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    directories: list[tuple[int, _FileFence, int | None, str | None, Path]] = []
+    directories: list[
+        tuple[int, _DirectoryFence, int | None, str | None, Path]
+    ] = []
     file_fd: int | None = None
     try:
         root_fd: int | None = None
@@ -487,12 +498,12 @@ def _read_periodic_artifact_dirfd(
                 "invalid_periodic_generation", "periodic data directory is unavailable"
             ) from None
         assert root_fd is not None
-        if _file_fence(before_root) != _file_fence(opened_root):
+        if _directory_fence(before_root) != _directory_fence(opened_root):
             os.close(root_fd)
             raise ReportProcessError(
                 "invalid_periodic_generation", "periodic data directory changed while opening"
             )
-        directories.append((root_fd, _file_fence(opened_root), None, None, data_dir))
+        directories.append((root_fd, _directory_fence(opened_root), None, None, data_dir))
 
         parent_fd = root_fd
         current = data_dir
@@ -516,14 +527,14 @@ def _read_periodic_artifact_dirfd(
                     "invalid_periodic_generation", "periodic artifact directory is unavailable"
                 ) from None
             assert child_fd is not None
-            if _file_fence(before) != _file_fence(opened):
+            if _directory_fence(before) != _directory_fence(opened):
                 os.close(child_fd)
                 raise ReportProcessError(
                     "invalid_periodic_generation",
                     "periodic artifact directory changed while opening",
                 )
             directories.append(
-                (child_fd, _file_fence(opened), parent_fd, name, current)
+                (child_fd, _directory_fence(opened), parent_fd, name, current)
             )
             parent_fd = child_fd
 
@@ -595,7 +606,7 @@ def _read_periodic_artifact_path_fallback(
         data_dir / "reporting" / "periodic" / "generations",
         final,
     ]
-    fences: list[tuple[Path, _FileFence]] = []
+    fences: list[tuple[Path, _DirectoryFence]] = []
     for path in directories:
         try:
             info = path.lstat()
@@ -604,7 +615,7 @@ def _read_periodic_artifact_path_fallback(
                 "invalid_periodic_generation", "periodic artifact directory is unavailable"
             ) from exc
         _require_real_directory(info, "periodic artifact directory")
-        fences.append((path, _file_fence(info)))
+        fences.append((path, _directory_fence(info)))
     raw = _read_periodic_artifact_path_file(final / "periodic.png", expected_size)
     for path, expected in fences:
         try:
@@ -614,7 +625,7 @@ def _read_periodic_artifact_path_fallback(
         if (
             stat.S_ISLNK(current.st_mode)
             or not stat.S_ISDIR(current.st_mode)
-            or _file_fence(current) != expected
+            or _directory_fence(current) != expected
         ):
             raise ReportProcessError(
                 "invalid_periodic_artifact", "periodic artifact directory changed"
@@ -697,7 +708,9 @@ def _require_regular_single_link(info: os.stat_result, label: str) -> None:
 
 
 def _verify_open_directory_chain(
-    directories: Sequence[tuple[int, _FileFence, int | None, str | None, Path]],
+    directories: Sequence[
+        tuple[int, _DirectoryFence, int | None, str | None, Path]
+    ],
 ) -> None:
     for descriptor, expected, parent_fd, name, path in directories:
         try:
@@ -725,7 +738,10 @@ def _verify_open_directory_chain(
             raise ReportProcessError(
                 "invalid_periodic_artifact", "periodic artifact directory changed"
             )
-        if _file_fence(current_fd) != expected or _file_fence(current_path) != expected:
+        if (
+            _directory_fence(current_fd) != expected
+            or _directory_fence(current_path) != expected
+        ):
             raise ReportProcessError(
                 "invalid_periodic_artifact", "periodic artifact directory changed"
             )
@@ -922,6 +938,14 @@ def _file_fence(info: os.stat_result) -> _FileFence:
         info.st_size,
         info.st_mtime_ns,
         info.st_ctime_ns,
+    )
+
+
+def _directory_fence(info: os.stat_result) -> _DirectoryFence:
+    return _DirectoryFence(
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
     )
 
 

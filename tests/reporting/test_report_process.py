@@ -177,6 +177,64 @@ def test_periodic_artifact_reader_rejects_replacement_during_fd_read(
     assert replaced is True
 
 
+@pytest.mark.parametrize("force_path_fallback", [False, True])
+def test_periodic_artifact_reader_allows_unrelated_state_file_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_path_fallback: bool,
+) -> None:
+    import cryodaq.report_process as module
+
+    artifact, _png, raw = _install_periodic_artifact(tmp_path)
+    if force_path_fallback:
+        monkeypatch.setattr(module.os, "supports_dir_fd", set())
+    real_read = module.os.read
+    changed = False
+
+    def write_state_during_read(fd: int, amount: int) -> bytes:
+        nonlocal changed
+        chunk = real_read(fd, amount)
+        if chunk and not changed:
+            changed = True
+            (tmp_path / "reporting" / "periodic_state.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+        return chunk
+
+    monkeypatch.setattr(module.os, "read", write_state_during_read)
+    assert read_periodic_artifact_bytes(tmp_path, artifact) == raw
+    assert changed is True
+
+
+def test_periodic_artifact_reader_fallback_still_rejects_generation_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    artifact, png, raw = _install_periodic_artifact(tmp_path)
+    monkeypatch.setattr(module.os, "supports_dir_fd", set())
+    real_read = module.os.read
+    replaced = False
+
+    def replace_generation_during_read(fd: int, amount: int) -> bytes:
+        nonlocal replaced
+        chunk = real_read(fd, amount)
+        if chunk and not replaced:
+            replaced = True
+            final = png.parent
+            final.rename(final.with_name(f"{final.name}.moved"))
+            final.mkdir()
+            (final / "periodic.png").write_bytes(raw)
+        return chunk
+
+    monkeypatch.setattr(module.os, "read", replace_generation_during_read)
+    with pytest.raises(ReportProcessError, match="changed"):
+        read_periodic_artifact_bytes(tmp_path, artifact)
+    assert replaced is True
+
+
 def test_periodic_artifact_reader_rejects_oversized_file_before_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
