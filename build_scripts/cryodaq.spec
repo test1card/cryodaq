@@ -108,9 +108,6 @@ hidden_imports = [
     "cryodaq.reporting.generator",
     "cryodaq.reporting.periodic_input",
     "cryodaq.reporting.periodic_renderer",
-    "cryodaq.drivers.instruments.lakeshore_218s",
-    "cryodaq.drivers.instruments.keithley_2604b",
-    "cryodaq.drivers.instruments.thyracont_vsp63d",
     "cryodaq.analytics.plugin_loader",
     "cryodaq.core.safety_manager",
     "cryodaq.core.scheduler",
@@ -122,8 +119,30 @@ hidden_imports = [
     "pyarrow.parquet",
 ]
 
-# Collect every cryodaq submodule (catches anything we missed above).
-hidden_imports += collect_submodules("cryodaq")
+# This is the reviewed frozen-driver allowlist.  Keep it set-equal to the
+# runtime registry; tests enforce equality in both directions.
+FROZEN_DRIVER_MODULES = (
+    "cryodaq.drivers.instruments.etalon_multiline",
+    "cryodaq.drivers.instruments.keithley_2604b",
+    "cryodaq.drivers.instruments.lakeshore_218s",
+    "cryodaq.drivers.instruments.thyracont_vsp63d",
+    "cryodaq.drivers.passive_extensions.asc_reference_tcp",
+)
+
+
+def _is_non_driver_application_module(name):
+    return not (
+        name == "cryodaq.drivers.instruments"
+        or name.startswith("cryodaq.drivers.instruments.")
+        or name == "cryodaq.drivers.passive_extensions"
+        or name.startswith("cryodaq.drivers.passive_extensions.")
+    )
+
+
+# Broad collection remains for non-driver application closure only. Driver
+# namespaces are excluded first, then the reviewed allowlist is added exactly.
+hidden_imports += collect_submodules("cryodaq", filter=_is_non_driver_application_module)
+hidden_imports += list(FROZEN_DRIVER_MODULES)
 
 # datas: files bundled INSIDE the _MEIPASS dir (read-only constants).
 # Configs, plugins and runtime data live NEXT TO the exe and are seeded by
