@@ -776,12 +776,10 @@ async def test_malformed_provider_result_after_invocation_becomes_delivery_unkno
     )
     await coordinator.start()
     try:
-        for _ in range(100):
-            payload = (await _load_stable(tmp_path)).payload
-            observed = payload["last_terminal"] or payload["active"]
-            if observed is not None and observed["status"] == "DELIVERY_UNKNOWN":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
+        payload = (await _load_stable(tmp_path)).payload
+        observed = payload["last_terminal"] or payload["active"]
+        assert observed is not None
         assert observed["status"] == "DELIVERY_UNKNOWN"
         assert observed["error_code"] == "delivery_internal_unknown"
     finally:

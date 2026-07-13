@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 
-def test_only_bounded_storage_adapter_imports_channel_contract() -> None:
+def test_only_approved_passive_adapters_import_channel_contract() -> None:
     source_root = Path(__file__).parents[2] / "src" / "cryodaq"
     channel_root = source_root / "channels"
     importers: set[str] = set()
@@ -20,6 +20,11 @@ def test_only_bounded_storage_adapter_imports_channel_contract() -> None:
             ):
                 importers.add(path.relative_to(source_root).as_posix())
     assert importers == {
+        "core/broker.py",
+        "core/descriptor_transport.py",
+        "core/zmq_bridge.py",
+        "core/zmq_subprocess.py",
+        "gui/zmq_client.py",
         "storage/channel_descriptors.py",
         "storage/descriptor_archive.py",
         "storage/sqlite_writer.py",
