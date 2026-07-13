@@ -299,13 +299,29 @@ def _read_live_descriptor_config(path: Path) -> bytes:
             fd = os.open(absolute, file_flags)
         try:
             opened = os.fstat(fd)
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or opened.st_nlink != 1
-                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-                or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-                != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-            ):
+            # On Windows, lstat-by-path and fstat-by-handle disagree on fields
+            # one API cannot supply for an *unchanged* file: st_dev/st_ino file
+            # identity and st_ctime (creation-time vs change-time semantics).
+            # Bind only the fields that are stable across both calls on every
+            # platform — link count, size, mtime. POSIX keeps the full identity
+            # fence unchanged (and the engine, which loads this manifest, runs on
+            # POSIX with the stronger dir_fd traversal above).
+            if os.name == "nt":
+                changed_before_reading = (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or (opened.st_size, opened.st_mtime_ns)
+                    != (before.st_size, before.st_mtime_ns)
+                )
+            else:
+                changed_before_reading = (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                    or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                    != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                )
+            if changed_before_reading:
                 raise ChannelDescriptorStorageError("live descriptor manifest changed before reading")
             chunks: list[bytes] = []
             remaining = MAX_LIVE_DESCRIPTOR_CONFIG_BYTES + 1
