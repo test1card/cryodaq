@@ -101,10 +101,17 @@ def test_gitignore_does_not_hide_canonical_guidance() -> None:
         result = subprocess.run(
             ["git", "check-ignore", "--no-index", "-q", relative],
             cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
             check=False,
             timeout=10,
         )
-        assert result.returncode == 1, f"canonical guidance is ignored: {relative}"
+        if result.returncode == 0:
+            raise AssertionError(f"canonical guidance is ignored: {relative}")
+        if result.returncode != 1:
+            raise AssertionError(
+                f"git check-ignore failed for {relative} (rc={result.returncode}): {result.stderr.strip()}"
+            )
 
 
 def test_machine_generated_memory_target_is_ignored() -> None:

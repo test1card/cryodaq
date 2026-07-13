@@ -797,6 +797,11 @@ def test_failure_side_same_inode_late_mutation_is_rejected(
     def mutate_after_read(*args: object, **kwargs: object) -> None:
         original = side.read_bytes()
         side.write_bytes(original)
+        rewritten = side.stat()
+        os.utime(
+            side,
+            ns=(rewritten.st_atime_ns, rewritten.st_mtime_ns + 2_000_000_000),
+        )
         real_fence(*args, **kwargs)
 
     monkeypatch.setattr(runner, "_run_process", failed_child)

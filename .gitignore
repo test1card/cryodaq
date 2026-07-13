@@ -40,6 +40,12 @@ config/.first_run_recovery.*
 # Local dev-tooling state (repo hygiene 2026-07-08: fully user-local).
 .claude/
 
+# Canonical tracked guidance must remain visible despite broader user excludes.
+!/AGENTS.md
+!/CLAUDE.md
+!/docs/
+!/docs/ORCHESTRATION.md
+
 # OS
 .DS_Store
 Thumbs.db
