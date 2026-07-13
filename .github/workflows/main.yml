@@ -76,4 +76,7 @@ jobs:
       - name: Run tests
         # -v names the running test (a Qt segfault on Windows prints no
         # traceback); --timeout turns a hang into a faulthandler dump.
-        run: pytest tests/ --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py -x --tb=short -v --timeout=120 --timeout-method=thread
+        # --maxfail=10 (green-up phase): enumerate the whole platform tail in
+        # one CI round-trip instead of leaking one failure per push under -x.
+        # Restore -x once the branch is first green.
+        run: pytest tests/ --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py --maxfail=10 --tb=short -v --timeout=120 --timeout-method=thread
