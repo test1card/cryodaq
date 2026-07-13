@@ -474,7 +474,7 @@ def _read_periodic_artifact_dirfd(
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
-    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     directories: list[
         tuple[int, _DirectoryFence, int | None, str | None, Path]
     ] = []
@@ -642,7 +642,10 @@ def _read_periodic_artifact_path_file(path: Path, expected_size: int) -> bytes:
             raise ReportProcessError(
                 "invalid_periodic_artifact", "periodic PNG size does not match evidence"
             )
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+        )
         opened = os.fstat(fd)
         _require_regular_single_link(opened, "periodic PNG")
         if _file_fence(before) != _file_fence(opened):
@@ -891,7 +894,7 @@ def _read_regular_bounded_fenced(
         raise ReportProcessError(f"{label} is not a regular single-link file")
     if before.st_size > maximum:
         raise ReportProcessError(f"{label} is too large")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags)
         try:
@@ -1079,7 +1082,13 @@ def _validate_png(raw: bytes) -> tuple[int, int]:
 
 
 def _write_exclusive_fsynced(path: Path, raw: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     fd = os.open(path, flags, 0o600)
     try:
         with os.fdopen(fd, "wb", closefd=False) as stream:

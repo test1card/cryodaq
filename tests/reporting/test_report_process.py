@@ -87,6 +87,70 @@ def test_periodic_artifact_reader_supports_ready_and_delivery_retry_without_stat
     assert not (tmp_path / "reporting" / "periodic_state.json").exists()
 
 
+def test_content_file_opens_use_binary_mode_without_affecting_directory_opens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cryodaq.report_process as module
+
+    binary_flag = 0x8000
+    artifact, png, raw = _install_periodic_artifact(tmp_path)
+    written = tmp_path / "written.bin"
+    calls: list[tuple[str, int, int | None]] = []
+    original_open = module.os.open
+
+    def capture_open(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        calls.append((os.fspath(path), flags, dir_fd))
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(module.os, "O_BINARY", binary_flag, raising=False)
+    monkeypatch.setattr(module.os, "open", capture_open)
+    monkeypatch.setattr(
+        module.os,
+        "supports_dir_fd",
+        module.os.supports_dir_fd | {capture_open},
+    )
+
+    assert read_periodic_artifact_bytes(tmp_path, artifact) == raw
+    assert module._read_periodic_artifact_path_file(png, len(raw)) == raw
+    assert module._read_regular_bounded(png, MAX_PNG_BYTES, "periodic PNG") == raw
+    module._write_exclusive_fsynced(written, raw)
+
+    assert written.read_bytes() == raw
+    content_calls = [
+        flags
+        for path, flags, dir_fd in calls
+        if (path == "periodic.png" and dir_fd is not None)
+        or (path == os.fspath(png) and dir_fd is None)
+        or path == os.fspath(written)
+    ]
+    directory_calls = [
+        flags
+        for path, flags, _dir_fd in calls
+        if path
+        in {
+            os.fspath(tmp_path),
+            "reporting",
+            "periodic",
+            "generations",
+            _PERIODIC_GENERATION,
+        }
+    ]
+    assert len(content_calls) == 4
+    assert len(directory_calls) == 5
+    assert all(
+        flags & binary_flag for flags in content_calls
+    )
+    assert all(not flags & binary_flag for flags in directory_calls)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
