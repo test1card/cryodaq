@@ -508,5 +508,27 @@ worktree after D7.1 is settled.
 - Exact-SHA run `29286279027` first failed both OS jobs at docs freshness under
   `pytest -x`, after 2,348 Windows and 2,350 Ubuntu passing tests; no later-suite
   result is claimed.
-- The CI-006 exact hydration node passed locally on native Windows. The full
-  suite is still running and independent review remains open.
+- The CI-006 exact hydration node passed locally on native Windows. At that
+  checkpoint, the full suite was still running and independent review remained
+  open; this historical state is superseded by the reviewed evidence below.
+
+## 2026-07-14 reviewed PC/WSL evidence checkpoint
+
+- Independently reviewed commits are `c67aeb2` (CI-006), `63d5e15` (ledger),
+  `7762fbe` (H4-C1), `de1e0c8` (TCP tests), and `bb87282` (WSL filesystem
+  handling and guidance).
+- On WSL2 Ubuntu 24.04 with Python 3.12.3 at exact `bb87282`, the main no-`-x`
+  CI topology completed with 6,580 passed, 7 skipped, and 76 deselected in
+  709.02 seconds. The isolated GUI shards passed 7 and 68 tests; the focused
+  WSL-fix set passed 20 tests.
+- On native Windows, the full CI-006 multiprocess module passed 6 tests; the
+  selector regression and exact hydration node passed; and the GUI shards
+  passed 7 and 68 tests. A separate full local inventory ended with 192
+  failures and 1 error, but is **not software evidence**: that local CPython
+  lacks `socket.AF_UNIX`, the account lacks symlink privilege (`WinError 1314`),
+  and ACL-destructive base-temp failures cascaded through the run. Hosted
+  `windows-latest` remains required.
+- All five slices received independent review. The WSL-fix reviewers could not
+  access WSL; root execution supplied the 20-test and full-suite evidence above.
+- Push and GitHub exact-SHA verification remain pending. Physical hardware,
+  frozen-build, and soak gates remain open.
