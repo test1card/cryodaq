@@ -11,6 +11,17 @@ AGENTS = REPO_ROOT / "AGENTS.md"
 CLAUDE = REPO_ROOT / "CLAUDE.md"
 ORCHESTRATION = REPO_ROOT / "docs" / "ORCHESTRATION.md"
 
+# Governance model (maintainer decision):
+#   - AGENTS.md         instructs ALL agents (Claude included) -> canonical,
+#                       tool/model-neutral.
+#   - docs/ORCHESTRATION.md  tool-neutral delegation playbook -> no models,
+#                       no Claude-specific routing.
+#   - CLAUDE.md         Claude-specific instructions -> MAY carry model/provider
+#                       routing (the developer model-orchestra table) and be
+#                       more than a thin pointer. It must still defer to
+#                       AGENTS.md, not duplicate the code index, and not carry
+#                       transient campaign state (SHAs, branch names, mem dumps).
+
 
 def test_canonical_guidance_files_exist_and_cross_link() -> None:
     assert AGENTS.is_file()
@@ -27,38 +38,48 @@ def test_canonical_guidance_files_exist_and_cross_link() -> None:
     assert "../AGENTS.md" in orchestration_text
 
 
-def test_claude_file_is_a_thin_pointer_not_a_second_policy() -> None:
+def test_claude_file_defers_to_agents_without_duplicating_index() -> None:
+    # CLAUDE.md may now carry the Claude-specific model-orchestra routing
+    # table, so it is no longer a thin pointer and is not size-capped. It must
+    # still defer to AGENTS.md ("canonical repository") and must not duplicate
+    # the module index that lives elsewhere.
     text = CLAUDE.read_text(encoding="utf-8")
-    assert len(text.encode("utf-8")) < 1_024
     assert "canonical repository" in text
     assert "Индекс модулей" not in text
     assert "src/cryodaq/" not in text
 
 
 def test_canonical_guidance_is_stable_not_campaign_state() -> None:
-    text = (
-        AGENTS.read_text(encoding="utf-8")
-        + CLAUDE.read_text(encoding="utf-8")
-        + ORCHESTRATION.read_text(encoding="utf-8")
-    )
-    assert "<claude-mem-context>" not in text
-    assert "# Memory Context\n" not in text
-    assert "get_observations([IDs])" not in text
+    agents_text = AGENTS.read_text(encoding="utf-8")
+    claude_text = CLAUDE.read_text(encoding="utf-8")
+    orchestration_text = ORCHESTRATION.read_text(encoding="utf-8")
+    combined = agents_text + claude_text + orchestration_text
+
+    # Transient campaign state must stay out of ALL permanent guidance,
+    # CLAUDE.md included: it may carry stable model routing, but never SHAs,
+    # branch names, or memory dumps.
+    assert "<claude-mem-context>" not in combined
+    assert "# Memory Context\n" not in combined
+    assert "get_observations([IDs])" not in combined
     assert not re.search(
         r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])",
-        text,
+        combined,
         flags=re.IGNORECASE,
     ), "commit SHA leaked into permanent guidance"
-    assert "feat/montana" not in text
+    assert "feat/montana" not in combined
+
+    # Model/provider routing is permitted only in CLAUDE.md. AGENTS.md and
+    # docs/ORCHESTRATION.md must remain tool/model-neutral.
+    model_neutral = agents_text + orchestration_text
     assert not re.search(
         r"\b(?:Fable|Opus|Sonnet|Haiku|GLM(?:-[0-9.]+)?|Grok|Luna|Terra|"
         r"GPT-[0-9.]+|Gemini|Codex|Qwen|DeepSeek|Llama|Mistral)\b",
-        text,
+        model_neutral,
         flags=re.IGNORECASE,
-    ), "transient model/provider routing leaked into permanent guidance"
+    ), "model/provider routing leaked into model-neutral guidance"
     assert not re.search(
         r"\bClaude\b",
-        ORCHESTRATION.read_text(encoding="utf-8"),
+        orchestration_text,
         flags=re.IGNORECASE,
     ), "Claude-specific routing leaked into the tool-neutral playbook"
 
