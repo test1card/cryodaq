@@ -1,6 +1,6 @@
 # CryoDAQ — Feature Roadmap
 
-> **Living document.** Updated 2026-07-12 for the software-side pre-lab
+> **Living document.** Updated 2026-07-13 for the software-side pre-lab
 > readiness campaign. `CHANGELOG.md`
 > is the authoritative shipped-history record; this file is only the forward
 > feature map.
@@ -63,8 +63,8 @@
 | F32 | Knowledge-base indexer | ✅ DONE (v0.54.0; integration hardening v0.55.x) | M | M |
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
-| F35 | ASC hardware extension contract | 🔧 PARTIAL — registry/capabilities, shared-bus contracts, and hot/cold descriptor durability committed; downstream replay/report/UI threading and extension proof open | L | H |
-| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot wire/authority/composition/publication/ingress/store and conservative replay/live foundations committed; production authority and shell cutover open | L | H |
+| F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, replay/report parity, conformance/reference driver, and exact packaging foundations committed; live wire, generic GUI, and full end-to-end extension proof open | L | H |
+| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot plane and live safety authority committed; production recording/integrity authorities and atomic shell cutover open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -138,7 +138,7 @@ The irreducible hardware milestone then remains:
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
-### Active evidence checkpoint — 2026-07-12
+### Active evidence checkpoint — 2026-07-13
 
 This is feature-branch evidence, not shipped history and not a release claim:
 
@@ -150,24 +150,33 @@ This is feature-branch evidence, not shipped history and not a release claim:
   bounded framed transfer, durable runner ledger, and ACK authority. The
   short and 72-hour soaks and real-Windows ONEDIR evidence remain open.
 - GitHub CI was historically green for the v0.64 release line on Ubuntu and
-  Windows. The exact candidate `e2dd938` is pushed, but Actions run
-  `29186167904` is still in progress; the active-candidate CI gate is not
-  green until both jobs pass on that exact SHA.
+  Windows. The exact pushed candidate is now `c1e26e2` in Actions run
+  `29251698616`: Windows failed the periodic PNG crash-recovery node and is
+  explicitly deferred to Vladimir's real Windows/WSL diagnosis; Ubuntu was
+  last known still running. This is an open exact-SHA gate, not a green
+  candidate claim.
 - The bounded persistence spool is committed with FIFO, physical-cap and
   integrity gates, receipt-authorized acknowledgement, cancellation, and
   close settlement.
-- F35 now preserves frozen channel descriptors in the hot SQLite catalog,
-  cold-rotation sidecar, and bounded hot/cold archive resolution. Downstream
-  replay/report/UI descriptor threading, the conformance kit, and the passive
-  reference-driver end-to-end proof are still open.
-- F36 now has committed dark foundations for the snapshot wire contract,
+- F35 now selects a complete base/local live descriptor authority off-loop,
+  commits canonical descriptors and readings in one SQLite transaction, and
+  publishes only owner-issued committed receipts. Replay and reporting retain
+  the canonical descriptor envelope through hot/cold data. The passive
+  conformance harness, ASC reference TCP driver, registry adoption, and exact
+  frozen-driver allowlist foundation are committed. The live D4 wire envelope,
+  D7 generic GUI routing, real localhost/Windows evidence, and one complete
+  acquisition-to-health-display reference-extension proof remain open.
+- F36 now has committed foundations for the snapshot wire contract,
   durable revision allocation, typed common-cut authority receipts, ordered
   composition, publication through the existing publisher, two-SUB bounded
   ingress, one GUI-thread Store, conservative pure replay sessions, and
-  conservative live adapters. Live safety and data-integrity authorities are
-  intentionally unavailable, recording remains `UNKNOWN`, and optional
-  F36.3-F36.5 authorities are not synthesized. Server/live activation, atomic
-  shell cutover, all operator scenarios, and screenshot/visual QA remain open.
+  conservative live adapters. The SafetyManager cache and live safety/readiness
+  authority are committed and fail conservative when proof is absent. Pure
+  recording and persistence-authority contracts exist, but their actual
+  loop-owned experiment/acquisition/persistence integration is still open;
+  production recording therefore remains `UNKNOWN` and data integrity remains
+  unavailable. Atomic shell cutover, all operator scenarios, and
+  screenshot/visual QA remain open.
 - No software, mock, replay, CI, soak, or screenshot evidence closes a real
   Windows, dummy-load, independent-final-element, or physical-laboratory gate.
 
@@ -182,15 +191,16 @@ module boundary, but adding a new instrument type still requires central
 channel names. F35 turns that internal modularity into a supported extension
 contract for other ASC laboratories.
 
-Execution status: F35.1 (registry and narrow capability foundation), F35.2
-(shared-bus timing/recovery contracts), and the first F35.3 durability stack
-are committed on the active feature branch. The latter stores canonical
-descriptor envelopes in hot SQLite, writes and validates a cold-rotation
-descriptor sidecar, and resolves bounded hot/cold archive rows without
-downgrading corrupt descriptor-bearing data to legacy semantics. Until that
-descriptor authority is threaded through replay/reporting/generic GUI paths,
-the conformance kit passes, and the passive reference driver proves the whole
-path, F35 remains partial.
+Execution status: F35.1 registry/capabilities and F35.2 shared-bus contracts
+are committed. Within F35.3, D1 manifest authority, D2 persistence activation,
+D3 committed-receipt publication, D5 replay parity, and D6 reporting parity are
+complete on the active branch. D4 live descriptor wire transport and D7
+design-system-governed generic GUI routing remain open. The reusable passive
+conformance harness, ASC reference TCP driver, registry adoption, and exact
+frozen-driver allowlist are also committed foundations; their real localhost,
+real-Windows packaging, and full acquisition -> persistence -> live wire ->
+replay/report -> instrument-health-display end-to-end proof remain open. F35
+therefore remains partial without understating the completed foundations.
 
 Scope and acceptance criteria:
 
@@ -289,15 +299,19 @@ authority. Existing module panels remain usable as drill-down surfaces. The
 reviewed immutable snapshot contract is committed on the active feature branch;
 operator-surface acceptance remains a separate F36.2 gate.
 
-The supporting snapshot data plane is also committed but remains deliberately
-dark: a bounded protocol envelope, durable global revision allocator, typed
-common-cut receipts, asynchronous ordered composer, replay-compatible
-publisher, separate readings/snapshot SUB paths, and one GUI-thread Store.
+The supporting snapshot data plane is also committed: a bounded protocol
+envelope, durable global revision allocator, typed common-cut receipts,
+asynchronous ordered composer, replay-compatible publisher, separate
+readings/snapshot SUB paths, and one GUI-thread Store.
 Pure replay sessions and conservative live adapters preserve explicit
-unavailability rather than inventing authority. In particular, mandatory live
-safety and data-integrity authorities are not yet available, recording remains
-`UNKNOWN`, and the optional F36.3-F36.5 authorities remain unavailable until
-their real owners exist.
+unavailability rather than inventing authority. The committed SafetyManager
+cache and live safety/readiness authority now provide truthful live safety
+facts, including conservative UNKNOWN/disconnected behavior when evidence is
+missing. Pure recording and persistence-authority owners are also committed,
+but they are not yet integrated with the actual loop-owned experiment,
+acquisition, and persistence feeds. Until that integration lands, production
+recording remains `UNKNOWN`, data integrity remains unavailable, and optional
+F36.3-F36.5 authorities are not synthesized.
 
 ### F36.2 — Primary Operating Display, preflight, and recovery — 🔧 PARTIAL
 

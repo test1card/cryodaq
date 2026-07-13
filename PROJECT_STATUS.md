@@ -1,13 +1,13 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-07-12 *(release baseline v0.64.1 + active pre-lab campaign note)*
+**Дата:** 2026-07-13 *(release baseline v0.64.1 + active pre-lab campaign note)*
 **Релизная ветка:** master
-**Активная campaign-ветка:** `feat/montana-phase-a` (текущий pushed candidate `e2dd938`; новые independently reviewed slices двигают head)
+**Активная campaign-ветка:** `feat/montana-phase-a` (текущий pushed candidate `c1e26e2`)
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
 **CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
-**CI активного кандидата:** OPEN — exact-SHA run `29186167904` для `e2dd938` выполняется. Исторический зелёный v0.64 не переносится на текущую feature-ветку; гейт закроется только после PASS Ubuntu + Windows на одном финальном SHA.
+**CI активного кандидата:** OPEN — exact-SHA run `29251698616` для `c1e26e2`: Windows FAIL на periodic PNG crash-recovery, диагностика явно отложена до работы Владимира на Windows/WSL; Ubuntu в последнем зафиксированном состоянии ещё выполнялся. Исторический зелёный v0.64 не переносится на текущую feature-ветку; гейт закроется только после PASS Ubuntu + Windows на одном финальном SHA.
 **Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
 После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
 F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
@@ -165,23 +165,28 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    evidence открыты.
 2. Persistence P1A committed: FIFO, physical-cap и integrity gates,
    receipt-authorized ack, cancellation и close settlement сохраняются.
-3. F35: F35.1 registry/capability foundation и F35.2 shared-bus
-   timing/recovery contracts committed. Канонические descriptor envelope-ы
-   теперь сохраняются в hot SQLite, cold sidecar и bounded hot/cold archive
-   resolution. Downstream replay/report/UI descriptor threading, conformance
-   kit и passive reference-driver proof открыты.
-4. F36: committed dark foundation включает wire envelope, durable revision
+3. F35: F35.1 registry/capability и F35.2 shared-bus contracts committed.
+   F35.3 D1 manifest authority, D2 persistence activation, D3 owner-issued
+   committed receipts, D5 replay parity и D6 reporting parity завершены.
+   Passive conformance harness, ASC reference TCP driver, registry adoption и
+   exact frozen-driver allowlist committed как foundations. Открыты live D4
+   descriptor wire, D7 generic/design-system GUI routing, real localhost и
+   Windows evidence, а также полный acquisition-to-health-display e2e proof.
+4. F36: committed foundation включает wire envelope, durable revision
    allocator, typed authority receipts, ordered composer, replay-compatible
    publisher, отдельный snapshot SUB, один GUI-thread Store, pure replay session
-   и conservative live adapters. Mandatory live safety/data-integrity authority
-   пока unavailable, recording=`UNKNOWN`; optional F36.3-F36.5 authority не
-   синтезируется. Открыты server/live activation, atomic shell cutover, все 12
-   operator scenarios и связанные accessibility/performance gates.
+   и conservative live adapters. SafetyManager cache + live safety/readiness
+   authority доступны и fail-conservative. Pure recording и persistence
+   authority owners committed, но их actual loop-owned experiment/acquisition/
+   persistence integration открыта; production recording=`UNKNOWN`, integrity
+   unavailable. Открыты atomic shell cutover, все 12 operator scenarios и
+   связанные accessibility/performance gates.
    После интеграции frontend в реальный shell обязателен isolated mock/replay
    запуск со скриншотами каждого достижимого экрана и material state. Visual QA
    проверяет operator scenarios, clipping, focus, stale/disconnected truth,
    non-color cues и соответствие design system; одни скриншоты gate не закрывают.
-5. Exact-SHA CI run `29186167904` для `e2dd938` сейчас выполняется. Ubuntu +
+5. Exact-SHA CI run `29251698616` для `c1e26e2`: Windows FAIL отложен до
+   воспроизведения на Windows/WSL Владимира; Ubuntu last-known running. Ubuntu +
    Windows должны стать зелёными на одном финальном кандидате; зелёный релизный
    v0.64 — только историческая baseline evidence.
 6. Готовые точные Windows/physical evidence procedures с thresholds,
