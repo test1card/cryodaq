@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -213,7 +214,7 @@ def test_multiple_reviewed_sources_fail_before_any_factory_runs(
 def test_malformed_root_is_path_qualified_registry_error(tmp_path: Path, root: object) -> None:
     path = _write_config(tmp_path, root)
 
-    with pytest.raises(DriverRegistryError, match=rf"{path}.*root config must be a mapping"):
+    with pytest.raises(DriverRegistryError, match=rf"{re.escape(str(path))}.*root config must be a mapping"):
         _load_drivers(path, mock=True, data_dir=tmp_path)
 
 
@@ -241,7 +242,7 @@ def test_constructor_failure_has_one_path_qualified_public_surface(
 
     with pytest.raises(
         DriverRegistryError,
-        match=rf"{path}.*instruments\[0\].*'vacuum'.*construction failed",
+        match=rf"{re.escape(str(path))}.*instruments\[0\].*'vacuum'.*construction failed",
     ) as exc_info:
         _load_drivers(path, mock=True, data_dir=tmp_path)
 
