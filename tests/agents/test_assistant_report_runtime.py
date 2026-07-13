@@ -331,3 +331,31 @@ def test_assistant_bootstrap_import_is_report_only_and_lightweight() -> None:
     )
     completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
+
+
+def test_assistant_main_uses_selector_event_loop_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+    import cryodaq.logging_setup as logging_setup
+
+    loops: list[asyncio.AbstractEventLoop] = []
+
+    async def probe() -> None:
+        loops.append(asyncio.get_running_loop())
+
+    def forbidden_run(coroutine) -> None:
+        coroutine.close()
+        pytest.fail("Windows assistant entrypoint must use asyncio.Runner")
+
+    monkeypatch.setattr(module, "run", probe)
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.asyncio, "run", forbidden_run)
+    monkeypatch.setattr(logging_setup, "resolve_log_level", lambda: "INFO")
+    monkeypatch.setattr(logging_setup, "setup_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["cryodaq-assistant"])
+
+    module.main()
+
+    assert len(loops) == 1
+    assert isinstance(loops[0], asyncio.SelectorEventLoop)

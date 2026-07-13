@@ -7,8 +7,10 @@ import os
 import queue
 import socket
 import struct
+import sys
 import time
 import zlib
+from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -166,6 +168,13 @@ def _reap(process: multiprocessing.Process, *, expected: int | None = 0) -> None
         assert process.exitcode == expected
 
 
+def _run_child(coroutine: Coroutine[Any, Any, Any]) -> Any:
+    if sys.platform == "win32":
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(coroutine)
+    return asyncio.run(coroutine)
+
+
 def _force_reap(process: multiprocessing.Process) -> None:
     if process.pid is None:
         return
@@ -175,25 +184,32 @@ def _force_reap(process: multiprocessing.Process) -> None:
     assert not process.is_alive(), f"process {process.pid} was not reaped"
 
 
-def _reap_many(processes: list[multiprocessing.Process]) -> None:
-    """Reap a group under one cleanup budget before asserting any exit."""
+def _reap_many(
+    processes: list[multiprocessing.Process],
+    *,
+    expected: int | None = 0,
+) -> None:
+    """Reap a group under bounded graceful and post-kill budgets."""
 
     processes = [process for process in processes if process.pid is not None]
     deadline = time.monotonic() + 6.0
     for process in processes:
-        process.join(timeout=max(0.0, min(1.0, deadline - time.monotonic())))
+        process.join(timeout=max(0.0, min(_PROCESS_TIMEOUT_S, deadline - time.monotonic())))
     for process in processes:
         if process.is_alive():
             process.terminate()
     for process in processes:
         process.join(timeout=max(0.0, min(1.0, deadline - time.monotonic())))
+    killed: list[multiprocessing.Process] = []
     for process in processes:
         if process.is_alive():
             process.kill()
-    for process in processes:
-        process.join(timeout=max(0.0, deadline - time.monotonic()))
+            killed.append(process)
+    for process in killed:
+        process.join(timeout=_PROCESS_TIMEOUT_S)
     assert all(not process.is_alive() for process in processes)
-    assert all(process.exitcode == 0 for process in processes)
+    if expected is not None:
+        assert all(process.exitcode == expected for process in processes)
 
 
 def _wait_terminal(data_dir: Path, status: str = "SUCCEEDED") -> dict[str, Any]:
@@ -504,7 +520,7 @@ def _supervisor_child(
     stop_path: str | None = None,
 ) -> None:
     try:
-        asyncio.run(
+        _run_child(
             _run_supervisor_child(
                 Path(data_dir),
                 stop,
@@ -621,7 +637,7 @@ def _engine_child(
     try:
         if pub_addr is None or cmd_addr is None:
             pub_addr, cmd_addr = _reserve_tcp_pair()
-        asyncio.run(_Engine(pub_addr, cmd_addr, messages).run(commands))
+        _run_child(_Engine(pub_addr, cmd_addr, messages).run(commands))
     except BaseException as exc:
         messages.put(("error", os.getpid(), type(exc).__name__, str(exc)))
         raise
@@ -683,7 +699,7 @@ def _hydration_adapter_child(
     messages: Any,
 ) -> None:
     try:
-        asyncio.run(
+        _run_child(
             _hydration_adapter(
                 pub_addr,
                 cmd_addr,
@@ -763,7 +779,7 @@ def _restart_adapter_child(
     messages: Any,
 ) -> None:
     try:
-        asyncio.run(_restart_adapter(pub_addr, cmd_addr, allow_fresh_start, messages))
+        _run_child(_restart_adapter(pub_addr, cmd_addr, allow_fresh_start, messages))
     except BaseException as exc:
         messages.put(("error", os.getpid(), type(exc).__name__, str(exc)))
         raise
@@ -817,7 +833,7 @@ def _disconnect_adapter_child(
     messages: Any,
 ) -> None:
     try:
-        asyncio.run(_disconnect_adapter(pub_addr, cmd_addr, post_restart_frame, messages))
+        _run_child(_disconnect_adapter(pub_addr, cmd_addr, post_restart_frame, messages))
     except BaseException as exc:
         messages.put(("error", os.getpid(), type(exc).__name__, str(exc)))
         raise
@@ -854,7 +870,7 @@ def _replay_off_child(config_dir: str, data_dir: str, stop: Any, messages: Any) 
     os.environ["CRYODAQ_ASSISTANT_EXPERIMENT_MODE"] = "0"
     os.environ["CRYODAQ_ASSISTANT_PERIODIC_MODE"] = "0"
     try:
-        asyncio.run(
+        _run_child(
             bootstrap.run(
                 config_dir=Path(config_dir),
                 data_dir=Path(data_dir),
@@ -911,11 +927,15 @@ def test_real_loopback_publisher_rep_and_adapter_startup_hydration_alarm_seals(
     finally:
         archive_release.set()
         adapter_stop.set()
-        if adapter is not None and adapter.pid is not None:
-            _reap(adapter)
         if engine.pid is not None:
             commands.put(("shutdown",))
-            _reap(engine)
+        _reap_many(
+            [process for process in (adapter, engine) if process is not None],
+            expected=None,
+        )
+    assert adapter is not None
+    assert adapter.exitcode == 0
+    assert engine.exitcode == 0
 
 
 @pytest.mark.timeout(30)

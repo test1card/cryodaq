@@ -548,7 +548,11 @@ def main() -> None:
     parser.parse_args()
     setup_logging("assistant", level=resolve_log_level())
     try:
-        asyncio.run(run())
+        if sys.platform == "win32":
+            with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+                runner.run(run())
+        else:
+            asyncio.run(run())
     except KeyboardInterrupt:
         logger.info("cryodaq-assistant interrupted by operator")
 
