@@ -144,6 +144,7 @@ Config files in `config/`:
 | `physical_alarms.yaml` | VacuumGuard + CooldownAlarm tunables |
 | `interlocks.yaml` | Interlock conditions + actions |
 | `channels.yaml` | Display names, visibility, groupings |
+| `channel_descriptors.yaml` + `channel_descriptors.local.yaml` | Canonical channel-identity descriptor authority (see below) |
 | `notifications.yaml` | Telegram credentials + escalation |
 | `housekeeping.yaml` | Throttle, retention, cold rotation |
 | `plugins.yaml` | sensor_diagnostics + vacuum_trend config |
@@ -155,6 +156,38 @@ Config files in `config/`:
 
 `*.local.yaml` overrides base files. Local configs are gitignored and intended
 for machine-specific deployment settings (COM ports, GPIB addresses, tokens).
+
+### Channel descriptor authority
+
+`config/channel_descriptors.yaml` is the whole-file **descriptor authority**:
+it assigns every acquired reading a stable canonical identity, independent of
+the raw label an instrument happens to emit. It is distinct from `channels.yaml`
+(which only governs display names, visibility, and GUI grouping).
+
+- **Bindings.** Each `(instrument_id, emitted_channel)` pair maps to exactly one
+  canonical `channel_id` — e.g. a LakeShore emitting `"Т1 Криостат верх"` binds
+  to `"Т1"`. Bindings are one-to-one: no two raw channels share a `channel_id`,
+  and no `channel_id` is bound twice.
+- **Canonical identity, not display text.** Downstream consumers — persistence,
+  interlocks, replay, reporting — key on the canonical `channel_id`; human-facing
+  text comes from the descriptor's `display_name`, never from the raw emitted
+  label.
+- **Whole-file replacement.** A machine-local `channel_descriptors.local.yaml`
+  (copied from the tracked `.example`) is a *complete* replacement of the base
+  manifest, never a partial merge. If present it must exist and validate; a
+  malformed or incomplete local file fails closed and never falls back to the
+  base.
+- **Fail-closed loading.** The manifest is parsed under a strict bounded grammar
+  with symlink-free, single-link, TOCTOU-checked reads; any schema, identity, or
+  integrity violation raises rather than loading a partial authority.
+- **Identity only, not capability.** A descriptor confers channel identity alone
+  — it does not grant hazardous-source authority (that lives in the safety
+  subsystem).
+- **Reconcile before lab use.** The tracked base roster and the machine-local
+  physical roster must be reconciled before a deployment drives real hardware.
+
+Loader: `src/cryodaq/storage/channel_descriptors.py`
+(`load_live_channel_descriptor_catalog`).
 
 ---
 
