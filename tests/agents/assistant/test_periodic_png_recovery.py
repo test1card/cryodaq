@@ -485,11 +485,11 @@ async def test_config_change_terminalizes_each_pre_delivery_status(tmp_path: Pat
     )
     await coordinator.start()
     try:
-        for _ in range(100):
-            if (await _load_stable(tmp_path)).payload["last_terminal"] is not None:
-                break
-            await asyncio.sleep(0.001)
+        # Deterministic barrier: racing the background _run_loop left
+        # last_terminal unset within the poll window on the Windows runner.
+        await coordinator.reconcile_once()
         terminal = (await _load_stable(tmp_path)).payload["last_terminal"]
+        assert terminal is not None
         assert terminal["status"] == "FAILED"
         assert terminal["failure_phase"] == "config"
         assert terminal["certainty"] == "not_applicable"
