@@ -426,20 +426,44 @@ def test_finite_error_status_reading_never_reaches_rate_estimator() -> None:
 def test_usable_readings_feed_rate_estimator_nan_dropped() -> None:
     """Fed through the doctrine gate, usable readings accumulate and a
     mid-stream non-finite (NaN, error status) reading is dropped, so the
-    estimator still yields the correct rate afterward."""
+    estimator still yields the correct rate afterward.
+
+    Timestamps are deterministic (not Reading.now()): a wall-clock tight
+    loop can collapse onto one clock tick on a fast/coarse-clock CI runner,
+    zeroing the OLS time-variance denominator and making get_rate()
+    legitimately return None (rate_estimator.py's den==0 guard is correct
+    production behavior — the flake was in the test's timing, not the code).
+    """
     from cryodaq.core.rate_estimator import RateEstimator
 
     est = RateEstimator(window_s=120.0, min_points=5)
+    base_ts = 1_700_000_000.0
+    step_s = 2.0
+
+    def _reading(i: int, value: float, **kwargs: object) -> Reading:
+        return Reading(
+            timestamp=datetime.fromtimestamp(base_ts + i * step_s, tz=UTC),
+            instrument_id="test",
+            channel="T1",
+            value=value,
+            unit="K",
+            **kwargs,
+        )
+
     for i in range(5):
-        assert _feed(est.push, Reading.now("T1", 300.0 - i, "K")) is True
+        assert _feed(est.push, _reading(i, 300.0 - i)) is True
     # SENSOR_ERROR / TIMEOUT reading arrives as NaN
-    dropped = Reading.now("T1", float("nan"), "K", status=ChannelStatus.SENSOR_ERROR)
+    dropped = _reading(5, float("nan"), status=ChannelStatus.SENSOR_ERROR)
     assert _feed(est.push, dropped) is False
     for i in range(6, 11):
-        assert _feed(est.push, Reading.now("T1", 300.0 - i, "K")) is True
+        assert _feed(est.push, _reading(i, 300.0 - i)) is True
 
-    # timestamps are wall-clock (Reading.now); rate is finite and computed
-    assert est.get_rate("T1") is not None
+    # value = 300 - i and timestamp = base_ts + i*step_s are both exactly
+    # affine in i, so the OLS fit is exact regardless of the dropped point:
+    # dv/dt = -1/step_s K/s = -60/step_s K/min = -30 K/min.
+    rate = est.get_rate("T1")
+    assert rate is not None
+    assert rate == pytest.approx(-30.0)
 
 
 def test_vacuum_trend_push_rejects_nonfinite_independently() -> None:
