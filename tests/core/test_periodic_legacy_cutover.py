@@ -593,10 +593,7 @@ async def test_real_supervisor_and_coordinator_deliver_one_due_slot_without_lega
             assert runner.calls == 0
             await clock.advance_to(239.0)
             await asyncio.wait_for(telegram.sent.wait(), timeout=3.0)
-            for _ in range(100):
-                if load_periodic_state(tmp_path).payload["last_terminal"] is not None:
-                    break
-                await asyncio.sleep(0.01)
+            await constructed[0].reconcile_once()
         except TimeoutError as exc:
             state = (
                 load_periodic_state(tmp_path).payload
