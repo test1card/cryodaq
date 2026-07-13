@@ -940,7 +940,7 @@ def _file_fence(info: os.stat_result) -> _FileFence:
         info.st_nlink,
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        (getattr(info, "st_birthtime_ns", info.st_ctime_ns) if os.name == "nt" else info.st_ctime_ns),
     )
 
 
