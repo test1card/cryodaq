@@ -2661,7 +2661,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         scheduler.add(cfg)
 
     # ZMQ PUB
-    zmq_queue = await broker.subscribe("zmq_publisher")
+    # F35 D4: only the ZMQ publisher path opts in to the descriptor envelope
+    # companion — every other subscriber (writer, alarms, safety broker,
+    # sound-carrier, assistant relay) stays on the default bare-Reading path.
+    zmq_queue = await broker.subscribe("zmq_publisher", wants_descriptor_envelope=True)
     zmq_pub = ZMQPublisher()
 
     # Interlock Engine — действия делегируются SafetyManager.

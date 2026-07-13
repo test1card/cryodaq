@@ -635,16 +635,21 @@ class Scheduler:
         combined = list(persisted_readings) + srdg_to_persist
         persistence_authoritative = False
         committed_publish_readings = list(persisted_readings)
+        # F35 D4: descriptor envelopes positionally aligned with
+        # committed_publish_readings. None (default/non-authoritative path)
+        # is passed explicitly to DataBroker — never fabricated.
+        descriptor_envelopes: list[bytes | None] | None = None
         if self._sqlite_writer is not None and combined:
             try:
                 if getattr(self._sqlite_writer, "descriptor_authoritative", False) is True:
                     receipt = await self._sqlite_writer.write_committed(combined)
                     if receipt is None:
                         return
-                    committed = self._sqlite_writer.readings_from_commit(receipt)
-                    if len(committed) != len(combined):
+                    entries = self._sqlite_writer.entries_from_commit(receipt)
+                    if len(entries) != len(combined):
                         raise RuntimeError("commit receipt cardinality disagrees with persisted batch")
-                    committed_publish_readings = committed[: len(persisted_readings)]
+                    committed_publish_readings = [entry.reading for entry in entries[: len(persisted_readings)]]
+                    descriptor_envelopes = [entry.descriptor_envelope for entry in entries[: len(persisted_readings)]]
                     persisted = True
                 else:
                     persisted = await self._sqlite_writer.write_immediate(combined)
@@ -682,6 +687,7 @@ class Scheduler:
             await self._broker.publish_batch(
                 committed_publish_readings,
                 persistence_authoritative=persistence_authoritative,
+                descriptor_envelopes=descriptor_envelopes,
             )
         if self._safety_broker is not None:
             await self._safety_broker.publish_batch(readings)
