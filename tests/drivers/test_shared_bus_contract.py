@@ -114,6 +114,22 @@ class _Coordinator:
         return self.result
 
 
+class _VirtualClock:
+    def __init__(self, *, duration_s: float) -> None:
+        self.now = 0.0
+        self.duration_s = duration_s
+        self.finished = asyncio.Event()
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, delay_s: float) -> None:
+        self.now += delay_s
+        if self.now >= self.duration_s:
+            self.finished.set()
+        await asyncio.sleep(0)
+
+
 def _binding(
     driver: _Driver,
     bus_id: str,
@@ -188,11 +204,12 @@ async def test_mixed_cadence_is_serialized_per_bus_without_slowest_device_flatte
     concurrency = [0, 0]
     fast = _Driver("fast", delay_s=0.001, concurrency=concurrency)
     slow = _Driver("slow", delay_s=0.001, concurrency=concurrency)
-    scheduler = Scheduler(DataBroker())
+    clock = _VirtualClock(duration_s=0.16)
+    scheduler = Scheduler(DataBroker(), shared_bus_clock=clock, shared_bus_sleep=clock.sleep)
     scheduler.add(InstrumentConfig(fast, runtime_binding=_binding(fast, "bus-a", poll=0.01)))
     scheduler.add(InstrumentConfig(slow, runtime_binding=_binding(slow, "bus-a", poll=0.04)))
     await scheduler.start()
-    await asyncio.sleep(0.18)
+    await asyncio.wait_for(clock.finished.wait(), timeout=1.0)
     await scheduler.stop()
     assert concurrency[1] == 1
     assert fast.reads >= 3 * slow.reads

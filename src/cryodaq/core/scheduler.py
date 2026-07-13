@@ -130,6 +130,8 @@ class Scheduler:
         calibration_acquisition: Any | None = None,
         reviewed_source_disconnect: Callable[[InstrumentDriver, str], Awaitable[bool]] | None = None,
         drain_timeout_s: float = 5.0,
+        shared_bus_clock: Callable[[], float] | None = None,
+        shared_bus_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
@@ -138,6 +140,8 @@ class Scheduler:
         self._calibration_acquisition = calibration_acquisition
         self._reviewed_source_disconnect = reviewed_source_disconnect
         self._drain_timeout_s = drain_timeout_s
+        self._shared_bus_clock = shared_bus_clock
+        self._shared_bus_sleep = shared_bus_sleep
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
         self._shared_bus_tasks: dict[str, asyncio.Task[None]] = {}
@@ -453,8 +457,10 @@ class Scheduler:
         """Serialize one explicit registry-bound bus while preserving per-device cadence."""
 
         loop = asyncio.get_running_loop()
-        next_due = {state.config.driver.name: loop.time() for state in states}
-        next_eligible = {state.config.driver.name: loop.time() for state in states}
+        clock = self._shared_bus_clock or loop.time
+        sleep = self._shared_bus_sleep or asyncio.sleep
+        next_due = {state.config.driver.name: clock() for state in states}
+        next_eligible = {state.config.driver.name: clock() for state in states}
         recovery_backoff = {state.config.driver.name: 0.01 for state in states}
         correlated_failures = 0
         failure_generation: set[str] = set()
@@ -471,7 +477,7 @@ class Scheduler:
         coordinator: SharedBusRecoveryCoordinator | None = next(iter(coordinators.values()), None)
 
         while self._running:
-            now = loop.time()
+            now = clock()
             due = [
                 state
                 for state in states
@@ -481,7 +487,7 @@ class Scheduler:
                 wake = min(
                     max(next_due[state.config.driver.name], next_eligible[state.config.driver.name]) for state in states
                 )
-                await asyncio.sleep(max(0.0, wake - loop.time()))
+                await sleep(max(0.0, wake - clock()))
                 continue
             failures = 0
             successes = 0
@@ -532,12 +538,12 @@ class Scheduler:
                             logger.warning("Device recovery failed for '%s'", driver.name)
                     if state.consecutive_errors >= 3:
                         await self._mark_disconnected(state, bus_id)
-                    next_eligible[driver.name] = loop.time() + recovery_backoff[driver.name]
+                    next_eligible[driver.name] = clock() + recovery_backoff[driver.name]
                     recovery_backoff[driver.name] = min(recovery_backoff[driver.name] * 2, 1.0)
                 finally:
                     interval = cfg.poll_interval_s
                     deadline = next_due[driver.name] + interval
-                    now_after = loop.time()
+                    now_after = clock()
                     if deadline <= now_after:
                         deadline += (int((now_after - deadline) / interval) + 1) * interval
                     next_due[driver.name] = deadline
