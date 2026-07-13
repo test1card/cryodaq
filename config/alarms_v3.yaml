@@ -48,7 +48,7 @@ global_alarms:
       - channels: [Т11, Т12]
         check: any_below
         threshold: 200           # K
-      - channel: P1
+      - channel: VSP63D_1/pressure
         check: above
         threshold: 1.0e-3        # mbar — граница молекулярного режима
     level: CRITICAL
@@ -68,10 +68,10 @@ global_alarms:
       - channels: [Т11, Т12]
         check: any_below
         threshold: 200
-      - channel: P1
+      - channel: VSP63D_1/pressure
         check: above
         threshold: 1.0e-4        # mbar — ещё безопасно, но аномально
-      - channel: P1
+      - channel: VSP63D_1/pressure
         check: rate_above
         threshold: 0             # dP/dt > 0
         rate_window_s: 60
@@ -149,7 +149,7 @@ global_alarms:
 
   data_loss_pressure:
     alarm_type: stale
-    channel: P1
+    channel: VSP63D_1/pressure
     timeout_s: 60
     level: CRITICAL
     message: "Нет данных давления > 60с. Вакуумный контроль потерян."
@@ -208,7 +208,7 @@ phase_alarms:
       alarm_type: composite
       operator: AND
       conditions:
-        - channel: P1
+        - channel: VSP63D_1/pressure
           check: above
           threshold: 1.0e-4
         - channel: phase_elapsed_s
@@ -220,11 +220,11 @@ phase_alarms:
 
     vacuum_stall:
       alarm_type: rate
-      channel: P1
+      channel: VSP63D_1/pressure
       check: relative_rate_near_zero
       rate_threshold: 0.01       # |dP/P| < 1% за окно
       additional_condition:
-        channel: P1
+        channel: VSP63D_1/pressure
         check: above
         threshold: 1.0e-5
       level: INFO
@@ -274,7 +274,7 @@ phase_alarms:
 #
 # Секция ниже содержит только те интерлоки, чьи каналы НЕ покрываются regex
 # patterns из config/interlocks.yaml — сейчас это только Keithley power каналы
-# (smua_power, smub_power), которые не матчатся temperature-regex из interlocks.yaml.
+# (Keithley_1/smua/power, Keithley_1/smub/power), которые не матчатся temperature-regex из interlocks.yaml.
 #
 # НЕ добавлять сюда дубликаты config/interlocks.yaml. Каналы Т1–Т12 уже
 # защищены через regex patterns в interlocks.yaml.
@@ -282,7 +282,7 @@ phase_alarms:
 interlocks:
 
   keithley_overpower_interlock:
-    channels: [smua_power, smub_power]
+    channels: ["Keithley_1/smua/power", "Keithley_1/smub/power"]
     check: any_above
     threshold: 4.5               # W — жёстче аларма (4.0), мягче лимита (5.0)
     action: stop_source
