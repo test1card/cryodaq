@@ -10,8 +10,12 @@ import pytest
 from scripts import soak_mock_stack_runner as runner
 
 
-@pytest.mark.skipif(os.name != "posix", reason="pass_fds is POSIX-only")
 def test_runner_launcher_endpoint_crosses_only_explicit_pass_fds() -> None:
+    if os.name != "posix":
+        with pytest.raises(runner._RunnerActivationDisabled, match="artifact capability is POSIX-only"):
+            runner._ArtifactCapabilityPair.create()
+        return
+
     capability = runner._ArtifactCapabilityPair.create()
     fd = capability.launcher.fileno()
     code = "import os,sys; fd=int(sys.argv[1]); print(os.fstat(fd).st_mode)"
@@ -28,6 +32,11 @@ def test_runner_launcher_endpoint_crosses_only_explicit_pass_fds() -> None:
 
 
 def test_runner_capability_has_no_network_or_path_selection() -> None:
+    if os.name != "posix":
+        with pytest.raises(runner._RunnerActivationDisabled, match="artifact capability is POSIX-only"):
+            runner._ArtifactCapabilityPair.create()
+        return
+
     capability = runner._ArtifactCapabilityPair.create()
     try:
         assert capability.runner.family == socket.AF_UNIX
