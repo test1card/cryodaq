@@ -281,6 +281,48 @@ def test_state_mutation_during_read_is_rejected(tmp_path: Path, monkeypatch) -> 
         load_periodic_state(data)
 
 
+def test_loader_retries_transient_windows_access_denial(tmp_path: Path, monkeypatch) -> None:
+    data = tmp_path / "data"
+    expected = _pending(tmp_path)
+    write_periodic_state(data, expected)
+    real_open = periodic_state_module.os.open
+    calls = 0
+
+    def transient_denial(path, flags, *args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError(13, "sharing violation")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(periodic_state_module, "_STATE_READ_ATTEMPTS", 3)
+    monkeypatch.setattr(periodic_state_module.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(periodic_state_module.os, "open", transient_denial)
+
+    assert load_periodic_state(data) == expected
+    assert calls == 2
+
+
+def test_loader_fails_closed_after_persistent_windows_access_denial(tmp_path: Path, monkeypatch) -> None:
+    data = tmp_path / "data"
+    write_periodic_state(data, _pending(tmp_path))
+    calls = 0
+
+    def persistent_denial(_path, _flags, *_args):
+        nonlocal calls
+        calls += 1
+        raise PermissionError(13, "sharing violation")
+
+    monkeypatch.setattr(periodic_state_module, "_STATE_READ_ATTEMPTS", 3)
+    monkeypatch.setattr(periodic_state_module.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(periodic_state_module.os, "open", persistent_denial)
+
+    with pytest.raises(PeriodicIOError, match="cannot be read safely") as raised:
+        load_periodic_state(data)
+    assert isinstance(raised.value.__cause__, PermissionError)
+    assert calls == 3
+
+
 def test_encoded_state_bound_is_enforced(tmp_path: Path) -> None:
     payload = copy.deepcopy(_pending(tmp_path).payload)
     payload["health"]["error_text"] = "x" * (128 * 1024)

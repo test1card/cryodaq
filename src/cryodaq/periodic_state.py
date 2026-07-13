@@ -35,6 +35,8 @@ MAX_UNRESOLVED_DELIVERIES = 16
 
 _MAX_STATE_BYTES = 128 * 1024
 _MAX_FUTURE_SKEW_S = 300.0
+_STATE_READ_ATTEMPTS = 10 if os.name == "nt" else 1
+_STATE_READ_RETRY_DELAY_S = 0.01
 _MAX_ERROR_TEXT_BYTES = 2_048
 _MAX_CAPTION_CODEPOINTS = 1_024
 _MAX_CAPTION_BYTES = 4_096
@@ -1765,6 +1767,17 @@ def _enforce_initial_durable_state(candidate: Mapping[str, object]) -> None:
 
 
 def _read_state_file(path: Path) -> bytes:
+    for attempt in range(_STATE_READ_ATTEMPTS):
+        try:
+            return _read_state_file_once(path)
+        except PeriodicIOError as exc:
+            if not isinstance(exc.__cause__, PermissionError) or attempt + 1 == _STATE_READ_ATTEMPTS:
+                raise
+        time.sleep(_STATE_READ_RETRY_DELAY_S)
+    raise RuntimeError("periodic state read retry budget is invalid")
+
+
+def _read_state_file_once(path: Path) -> bytes:
     before = _require_safe_regular_file(path)
     if before.st_size > _MAX_STATE_BYTES:
         raise PeriodicContractError("periodic state exceeds 128 KiB")
