@@ -25,6 +25,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui.state.descriptor_store import (
     DescriptorStore,
     IdentityStatus,
+    IngestResult,
     TransportState,
 )
 
@@ -180,6 +181,18 @@ def test_monotonic_reject_equal_revision():
     assert view.descriptor.descriptor_revision == 2
     assert view.descriptor.display_name == "Original"
     assert view.descriptor is original
+    assert view.identity_status is IdentityStatus.REFUSED
+    assert any(d.reason == "same_revision_conflict" for d in view.diagnostics)
+
+
+def test_equal_revision_exact_canonical_payload_is_idempotent():
+    store = DescriptorStore()
+    original = _descriptor(channel_id="ch1", descriptor_revision=2)
+    duplicate = _descriptor(channel_id="ch1", descriptor_revision=2)
+
+    assert store.ingest(_qualified(descriptor=original)) is IngestResult.ACCEPTED
+    assert store.ingest(_qualified(descriptor=duplicate)) is IngestResult.ACCEPTED
+    assert store.identity_status("ch1") is IdentityStatus.AUTHORITATIVE
 
 
 def test_monotonic_reject_lower_revision():
@@ -189,6 +202,7 @@ def test_monotonic_reject_lower_revision():
 
     view = store.view("ch1")
     assert view.descriptor.descriptor_revision == 3
+    assert view.identity_status is IdentityStatus.REFUSED
 
 
 def test_monotonic_reject_lower_records_diagnostic():
@@ -272,6 +286,7 @@ def test_equivocation_records_diagnostic_and_keeps_prior():
     equiv = [d for d in view.diagnostics if d.reason == "equivocation"]
     assert len(equiv) == 1
     assert equiv[0].incoming_revision == 5
+    assert view.identity_status is IdentityStatus.REFUSED
 
 
 def test_equivocation_does_not_block_subsequent_valid_update():
@@ -465,7 +480,7 @@ def test_refusal_bearing_carrier_never_overwrites_authoritative():
     )
 
     view = store.view("ch1")
-    assert view.identity_status is IdentityStatus.AUTHORITATIVE
+    assert view.identity_status is IdentityStatus.REFUSED
     assert view.descriptor is original
     assert view.descriptor.descriptor_revision == 2
     assert view.descriptor.display_name == "Original"
@@ -494,7 +509,7 @@ def test_bound_enforcement_at_cap():
         )
     assert len(store) == 3
 
-    store.ingest(
+    result = store.ingest(
         _qualified(
             descriptor=_descriptor(
                 channel_id="ch3",
@@ -508,6 +523,7 @@ def test_bound_enforcement_at_cap():
     )
     assert len(store) == 3
     assert "ch3" not in store
+    assert result is IngestResult.CAPACITY_EXHAUSTED
 
 
 def test_bound_does_not_block_existing_entry_update():
@@ -521,6 +537,11 @@ def test_bound_does_not_block_existing_entry_update():
 def test_default_bound_is_max_catalog():
     store = DescriptorStore()
     assert store.max_entries == MAX_CATALOG_DESCRIPTORS
+
+
+def test_bound_cannot_exceed_catalog_limit():
+    with pytest.raises(ValueError, match=str(MAX_CATALOG_DESCRIPTORS)):
+        DescriptorStore(max_entries=MAX_CATALOG_DESCRIPTORS + 1)
 
 
 def test_presentation_descriptor_cached_on_repeated_view():
@@ -566,23 +587,35 @@ def test_invalidate_transport_never_optimistic_green():
         assert view.transport_state is not TransportState.CONNECTED
 
 
-def test_invalidate_transport_keeps_identity():
+def test_invalidate_transport_keeps_last_known_descriptor_non_authoritative():
     store = DescriptorStore()
     desc = _descriptor(channel_id="ch1")
     store.ingest(_qualified(descriptor=desc))
     store.invalidate_transport()
     view = store.view("ch1")
-    assert view.identity_status is IdentityStatus.AUTHORITATIVE
+    assert view.identity_status is IdentityStatus.REFUSED
     assert view.descriptor is desc
 
 
-def test_new_reading_reconnects_after_invalidation():
+def test_descriptor_absent_reading_cannot_requalify_after_invalidation():
     store = DescriptorStore()
     desc = _descriptor(channel_id="ch1")
     store.ingest(_qualified(descriptor=desc))
     store.invalidate_transport()
 
     store.ingest(_qualified(descriptor=None, channel="ch1"))
+    view = store.view("ch1")
+    assert view.transport_state is TransportState.CONNECTED
+    assert view.identity_status is IdentityStatus.REFUSED
+
+
+def test_matching_descriptor_requalifies_after_invalidation():
+    store = DescriptorStore()
+    desc = _descriptor(channel_id="ch1")
+    store.ingest(_qualified(descriptor=desc))
+    store.invalidate_transport()
+
+    assert store.ingest(_qualified(descriptor=desc)) is IngestResult.ACCEPTED
     view = store.view("ch1")
     assert view.transport_state is TransportState.CONNECTED
     assert view.identity_status is IdentityStatus.AUTHORITATIVE
@@ -621,15 +654,28 @@ def test_forged_non_reading_rejected():
         store.ingest(forged)
 
 
-def test_forged_descriptor_channel_id_mismatch_rejected():
+@pytest.mark.parametrize(
+    ("descriptor", "reading"),
+    [
+        (_descriptor(channel_id="ch1"), _reading(channel="ch2")),
+        (_descriptor(instrument_id="inst1"), _reading(instrument_id="inst2")),
+        (_descriptor(unit="K"), _reading(unit="°C")),
+    ],
+)
+def test_descriptor_qualifier_tuple_mismatch_is_refused(
+    descriptor: ChannelDescriptorV1,
+    reading: Reading,
+):
     store = DescriptorStore()
-    desc = _descriptor(channel_id="ch1")
     forged = DescriptorQualifiedReading(
-        reading=_reading(channel="ch2"),
-        descriptor=desc,
+        reading=reading,
+        descriptor=descriptor,
     )
-    with pytest.raises(TypeError):
-        store.ingest(forged)
+    assert store.ingest(forged) is IngestResult.REFUSED
+    view = store.view(reading.channel)
+    assert view.identity_status is IdentityStatus.REFUSED
+    assert view.descriptor.quantity is ChannelQuantity.LEGACY_UNKNOWN
+    assert view.diagnostics[-1].descriptor_issue is DescriptorEnvelopeIssue.IDENTITY_MISMATCH
 
 
 def test_no_control_authority_on_view():
@@ -698,7 +744,7 @@ def test_authoritative_not_downgraded_by_legacy_reading():
     assert view.descriptor is desc
 
 
-def test_authoritative_not_downgraded_by_refused_reading():
+def test_authoritative_descriptor_is_retained_but_downgraded_by_refused_reading():
     store = DescriptorStore()
     desc = _descriptor(channel_id="ch1", descriptor_revision=1)
     store.ingest(_qualified(descriptor=desc))
@@ -710,18 +756,28 @@ def test_authoritative_not_downgraded_by_refused_reading():
         )
     )
     view = store.view("ch1")
-    assert view.identity_status is IdentityStatus.AUTHORITATIVE
+    assert view.identity_status is IdentityStatus.REFUSED
     assert view.descriptor is desc
     assert any(d.reason == "refused" for d in view.diagnostics)
 
 
-def test_refused_then_legacy_updates_status():
+def test_matching_descriptor_requalifies_after_refusal():
+    store = DescriptorStore()
+    desc = _descriptor(channel_id="ch1", descriptor_revision=1)
+    store.ingest(_qualified(descriptor=desc))
+    store.ingest(_qualified(descriptor=None, issue=DescriptorEnvelopeIssue.MALFORMED, channel="ch1"))
+
+    assert store.ingest(_qualified(descriptor=desc)) is IngestResult.ACCEPTED
+    assert store.identity_status("ch1") is IdentityStatus.AUTHORITATIVE
+
+
+def test_refused_then_legacy_remains_refused_until_requalified():
     store = DescriptorStore()
     store.ingest(_qualified(descriptor=None, issue=DescriptorEnvelopeIssue.MALFORMED, channel="ch1"))
     assert store.identity_status("ch1") is IdentityStatus.REFUSED
 
     store.ingest(_qualified(descriptor=None, channel="ch1"))
-    assert store.identity_status("ch1") is IdentityStatus.LEGACY_ABSENT
+    assert store.identity_status("ch1") is IdentityStatus.REFUSED
 
 
 def test_legacy_then_refused_updates_status():
@@ -812,3 +868,44 @@ def test_owner_thread_guard_allows_same_thread():
     store.ingest(_qualified(descriptor=_descriptor(channel_id="ch1"), channel="ch1"))
     store.invalidate_transport()
     assert store.view("ch1").transport_state is TransportState.DISCONNECTED
+
+
+def test_owner_thread_guard_uses_thread_object_identity(monkeypatch):
+    owner = object()
+    successor_with_recycled_ident = object()
+    current = iter((owner, successor_with_recycled_ident))
+    monkeypatch.setattr(threading, "current_thread", lambda: next(current))
+
+    store = DescriptorStore()
+
+    with pytest.raises(RuntimeError, match="thread"):
+        len(store)
+
+
+@pytest.mark.parametrize(
+    "access",
+    [
+        lambda store: store.max_entries,
+        lambda store: len(store),
+        lambda store: "ch1" in store,
+        lambda store: store.view("ch1"),
+        lambda store: store.identity_status("ch1"),
+        lambda store: store.presentation_descriptor("ch1"),
+    ],
+)
+def test_all_public_state_reads_reject_other_thread(access):
+    store = DescriptorStore()
+    store.ingest(_qualified(descriptor=None, channel="ch1"))
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            access(store)
+        except RuntimeError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    assert len(errors) == 1
+    assert "thread" in str(errors[0]).lower()

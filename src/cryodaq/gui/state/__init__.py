@@ -7,6 +7,7 @@ from cryodaq.gui.state.descriptor_store import (
     DescriptorStore,
     DescriptorView,
     IdentityStatus,
+    IngestResult,
     TransportState,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "DescriptorStore",
     "DescriptorView",
     "IdentityStatus",
+    "IngestResult",
     "TransportState",
 ]
