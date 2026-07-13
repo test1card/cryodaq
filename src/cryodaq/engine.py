@@ -65,6 +65,10 @@ from cryodaq.core.physical_alarms_config import (
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
+from cryodaq.core.safety_pattern_liveness import (
+    SafetyPatternLivenessError,
+    validate_safety_pattern_liveness,
+)
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 from cryodaq.core.smu_channel import normalize_smu_channel
@@ -2588,6 +2592,28 @@ async def _run_engine(*, mock: bool = False) -> None:
         housekeeping_raw.get("adaptive_throttle", {}),
         protected_patterns=merged_patterns,
     )
+
+    # F-1 startup diagnostic: a dead CRITICAL/safety pattern silently disarms
+    # its runtime consumer. Validate the exact protected-pattern union supplied
+    # to AdaptiveThrottle against the SELECTED descriptor manifest, before any
+    # broker subscriber, writer, scheduler, or acquisition exists. TEMPORARY
+    # no-brick policy for the lab build: catch only this diagnostic exception,
+    # log it at CRITICAL, and continue until the exact lab-local manifest has
+    # been validated and recorded. Then remove this catch to enable the
+    # exception's intended fail-closed exit-2 behavior.
+    try:
+        validate_safety_pattern_liveness(
+            descriptor_catalog=live_descriptor_catalog,
+            interlocks_config_path=interlocks_cfg,
+            safety_manager=safety_manager,
+            adaptive_throttle_patterns=merged_patterns,
+        )
+    except SafetyPatternLivenessError as exc:
+        logger.critical(
+            "TEMPORARY LAB BUILD: startup safety-pattern liveness failed; "
+            "continuing boot until the selected lab manifest is validated:\n%s",
+            exc,
+        )
 
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR, channel_catalog=live_descriptor_catalog)
