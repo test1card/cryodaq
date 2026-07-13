@@ -21,6 +21,11 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Runner-level backstop: a native hang (Qt/C-level block) is invisible to
+    # pytest's thread-method --timeout, so without this a stuck test runs to the
+    # 6h default. 40 min is ~2x a healthy full run; a timeout here means "a test
+    # hung" — read the faulthandler dumps in the log to find it.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -75,8 +80,7 @@ jobs:
 
       - name: Run tests
         # -v names the running test (a Qt segfault on Windows prints no
-        # traceback); --timeout turns a hang into a faulthandler dump.
-        # --maxfail=10 (green-up phase): enumerate the whole platform tail in
-        # one CI round-trip instead of leaking one failure per push under -x.
-        # Restore -x once the branch is first green.
-        run: pytest tests/ --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py --maxfail=10 --tb=short -v --timeout=120 --timeout-method=thread
+        # traceback); --timeout turns a hang into a faulthandler dump. -x stops
+        # at the first failure for the fastest completing signal; the job-level
+        # timeout-minutes above backstops any native hang -x/--timeout can't kill.
+        run: pytest tests/ --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py -x --tb=short -v --timeout=120 --timeout-method=thread
