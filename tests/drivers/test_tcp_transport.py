@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 
 import pytest
 
@@ -10,12 +11,37 @@ from cryodaq.drivers.transport.tcp import TCPTransport, TCPTransportError
 
 
 @pytest.mark.asyncio
-async def test_connect_timeout_raises_on_unreachable_host():
-    # Use an RFC5737 documentation address — guaranteed unroutable —
-    # with a tight connect timeout so the test stays sub-second.
-    t = TCPTransport("192.0.2.1", 65530, connect_timeout_s=0.5, read_timeout_s=0.5)
-    with pytest.raises(TCPTransportError):
+async def test_connect_timeout_wraps_timeout_and_settles_cancellation(monkeypatch):
+    settled = asyncio.Event()
+
+    async def _stall_open_connection(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            settled.set()
+
+    monkeypatch.setattr(asyncio, "open_connection", _stall_open_connection)
+    t = TCPTransport("unused.invalid", 65530, connect_timeout_s=0.01, read_timeout_s=0.5)
+
+    with pytest.raises(TCPTransportError) as exc_info:
         await t.open()
+
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+    assert settled.is_set()
+    assert not t.connected
+
+
+@pytest.mark.asyncio
+async def test_connect_os_error_raises_on_owned_non_listening_loopback_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        port = reserved.getsockname()[1]
+        t = TCPTransport("127.0.0.1", port, connect_timeout_s=0.1, read_timeout_s=0.5)
+
+        with pytest.raises(TCPTransportError) as exc_info:
+            await t.open()
+
+    assert isinstance(exc_info.value.__cause__, OSError)
     assert not t.connected
 
 
