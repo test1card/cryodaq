@@ -477,8 +477,8 @@ accepted.
 - Partial **unreviewed/untested D7.1** work remains in the shared worktree:
   `src/cryodaq/gui/app.py` (`3c5928fc...`),
   `src/cryodaq/gui/shell/main_window_v2.py` (`3e6aca05...`), new
-  `src/cryodaq/channels/live_display.py` (`99376cbb...`), and new
-  `src/cryodaq/gui/state/channel_descriptor_store.py` (`ec8a02c7...`).
+  **src/cryodaq/channels/live_display.py** (`99376cbb...`), and new
+  **src/cryodaq/gui/state/channel_descriptor_store.py** (`ec8a02c7...`).
   It changes the GUI to one descriptor-aware drain, adds paired dispatch, and
   begins the GUI-thread descriptor store/label contract. No D7.1 tests or docs
   were added before the stop; the slice is incomplete. Root inspection already
@@ -502,3 +502,11 @@ the bounded tests/docs; obtain an independent frozen-diff verdict; only then
 commit locally if authorized. Separately re-challenge the F36 blueprint before
 any persistence/spool activation. H4 may resume from its clean isolated
 worktree after D7.1 is settled.
+
+## 2026-07-14 PC CI checkpoint — docs freshness
+
+- Exact-SHA run `29286279027` first failed both OS jobs at docs freshness under
+  `pytest -x`, after 2,348 Windows and 2,350 Ubuntu passing tests; no later-suite
+  result is claimed.
+- The CI-006 exact hydration node passed locally on native Windows. The full
+  suite is still running and independent review remains open.
