@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Any
 
+from cryodaq.channels.persistence import MAX_PERSISTED_ENVELOPE_BYTES
 from cryodaq.core.operator_snapshot_ingress import (
     OperatorSnapshotQueueIngress,
     SnapshotIngressOrderingError,
@@ -84,10 +85,27 @@ def _increment_shared_counter(counter: Any | None, amount: int = 1) -> bool:
 
 
 def _unpack_reading_dict(payload: bytes) -> dict[str, Any]:
-    """Unpack msgpack Reading into a plain dict (picklable for mp.Queue)."""
+    """Unpack msgpack Reading into a plain dict (picklable for mp.Queue).
+
+    F35 D4: the optional ``"desc"`` descriptor envelope crosses as
+    ``descriptor_envelope`` (bytes | None). Bound-checked defensively here
+    (mirrors ``READING_MAX_WIRE_BYTES`` above it) — malformed type or
+    oversize bytes are dropped to ``None``, never crossing the mp.Queue
+    boundary and never raising.  The exact bool
+    ``descriptor_envelope_malformed`` distinguishes a present-but-rejected
+    descriptor from an absent legacy descriptor without carrying attacker
+    bytes across the process boundary.
+    """
     import msgpack
 
     data = msgpack.unpackb(payload, raw=False)
+    envelope_present = "desc" in data
+    envelope = data.get("desc")
+    envelope_malformed = envelope_present and (
+        type(envelope) is not bytes or len(envelope) > MAX_PERSISTED_ENVELOPE_BYTES
+    )
+    if envelope_malformed:
+        envelope = None
     return {
         "timestamp": data["ts"],
         "instrument_id": data.get("iid", ""),
@@ -97,6 +115,8 @@ def _unpack_reading_dict(payload: bytes) -> dict[str, Any]:
         "status": data["st"],
         "raw": data.get("raw"),
         "metadata": data.get("meta", {}),
+        "descriptor_envelope": envelope,
+        "descriptor_envelope_malformed": envelope_malformed,
     }
 
 

@@ -314,3 +314,87 @@ async def test_live_writer_forbids_legacy_bool_authority_api(tmp_path: Path) -> 
     with pytest.raises(RuntimeError, match="legacy queue"):
         await writer.start(asyncio.Queue())
     await writer.stop()
+
+
+# ---------------------------------------------------------------------------
+# F35 D4.1 — entries_from_commit(): additive, same verification as
+# readings_from_commit(), but keeps the descriptor envelope alongside each
+# reading instead of discarding it.
+# ---------------------------------------------------------------------------
+
+
+async def test_entries_from_commit_returns_the_exact_receipt_entries(tmp_path: Path) -> None:
+    descriptor = _descriptor()
+    writer = SQLiteWriter(tmp_path, channel_catalog=_owner(descriptor))
+
+    receipt = await writer.write_committed([_reading()])
+    assert receipt is not None
+
+    entries = writer.entries_from_commit(receipt)
+
+    assert entries is receipt.entries
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.channel_id == descriptor.channel_id
+    assert entry.descriptor_hash == descriptor.descriptor_hash
+    assert entry.descriptor_envelope == PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json
+    # readings_from_commit() (untouched, D4.1 is purely additive) must still
+    # agree reading-for-reading with entries_from_commit()'s .reading values.
+    assert writer.readings_from_commit(receipt) == [item.reading for item in entries]
+    await writer.stop()
+
+
+async def test_entries_from_commit_rejects_foreign_and_mutated_receipts_identically_to_readings(
+    tmp_path: Path,
+) -> None:
+    first = SQLiteWriter(tmp_path / "first", channel_catalog=_owner())
+    second = SQLiteWriter(tmp_path / "second", channel_catalog=_owner())
+    receipt = await first.write_committed([_reading()])
+    assert receipt is not None
+
+    with pytest.raises(TypeError, match="foreign, forged, or mutated"):
+        second.entries_from_commit(receipt)
+
+    entry = receipt.entries[0]
+    object.__setattr__(entry, "descriptor_hash", "sha256:" + "0" * 64)
+    with pytest.raises(TypeError, match="foreign, forged, or mutated"):
+        first.entries_from_commit(receipt)
+
+    await first.stop()
+    await second.stop()
+
+
+async def test_entries_from_commit_cardinality_matches_persisted_batch(tmp_path: Path) -> None:
+    """Positional pairing evidence for D4.3: entries_from_commit()'s length
+    and order must agree exactly with the committed batch."""
+    first = _descriptor(channel_id="probe.1")
+    second = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id="probe.2",
+        instrument_id="probe",
+        source_key="input.2.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="probes",
+        display_name="Probe 2",
+        visible_by_default=True,
+        display_order=2,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=_owner(first, second))
+    batch = [
+        _reading(channel="probe.1", value=1.0),
+        _reading(channel="probe.2", value=2.0),
+    ]
+
+    receipt = await writer.write_committed(batch)
+    assert receipt is not None
+
+    entries = writer.entries_from_commit(receipt)
+
+    assert len(entries) == len(batch)
+    assert [entry.channel_id for entry in entries] == ["probe.1", "probe.2"]
+    assert [entry.reading.value for entry in entries] == [1.0, 2.0]
+    await writer.stop()

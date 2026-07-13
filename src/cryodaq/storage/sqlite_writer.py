@@ -618,6 +618,21 @@ class SQLiteWriter:
         assert isinstance(receipt, CommittedBatchReceipt)
         return [entry.reading for entry in receipt.entries]
 
+    def entries_from_commit(self, receipt: object) -> tuple[CommittedReadingReceipt, ...]:
+        """Return the verified receipt entries (reading + descriptor envelope).
+
+        F35 D4: same ownership/integrity verification as ``readings_from_commit``,
+        but keeps ``channel_id``/``descriptor_hash``/``descriptor_revision``/
+        ``descriptor_envelope`` alongside each reading instead of discarding them.
+        Purely additive — ``readings_from_commit`` is untouched and still used
+        wherever bare readings suffice.
+        """
+
+        if not self.owns_commit(receipt):
+            raise TypeError("commit receipt is foreign, forged, or mutated")
+        assert isinstance(receipt, CommittedBatchReceipt)
+        return receipt.entries
+
     def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> bool:
         """Write a single day's readings to the given connection.
 

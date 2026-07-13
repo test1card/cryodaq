@@ -20,6 +20,11 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
+from cryodaq.channels.descriptors import ChannelDescriptorV1
+from cryodaq.core.descriptor_transport import (
+    DescriptorQualifiedReading,
+    qualify_reading_descriptor,
+)
 from cryodaq.core.zmq_subprocess import (
     DEFAULT_ASSISTANT_CMD_ADDR,
     DEFAULT_CMD_ADDR,
@@ -80,6 +85,35 @@ def _reading_from_dict(d: dict[str, Any]) -> Reading:
         raw=d.get("raw"),
         metadata=d.get("metadata", {}),
     )
+
+
+ReadingWithDescriptor = DescriptorQualifiedReading
+
+
+def _descriptor_from_envelope(
+    payload: object,
+    *,
+    expected_channel_id: str,
+    expected_instrument_id: str,
+    expected_unit: str,
+) -> ChannelDescriptorV1 | None:
+    """Decode fail-closed: absent/malformed/oversize/mismatched -> None, never raise.
+
+    Reuses ``decode_persisted_channel_envelope``'s own strict/duplicate-key/
+    size adversarial contract rather than re-implementing it here. A present
+    envelope whose channel, instrument, or unit disagrees with the exact
+    Reading tuple is treated like a malformed one.  A descriptor can never be
+    attached by channel identity alone.
+    """
+    identity_reading = Reading(
+        timestamp=datetime.fromtimestamp(0, tz=UTC),
+        instrument_id=expected_instrument_id,
+        channel=expected_channel_id,
+        value=0.0,
+        unit=expected_unit,
+        status=ChannelStatus.OK,
+    )
+    return qualify_reading_descriptor(identity_reading, payload).descriptor
 
 
 class ZmqBridge:
@@ -143,6 +177,11 @@ class ZmqBridge:
         # Warn at most once for this ZmqBridge instance. Subprocess restarts do
         # not re-arm the warning and therefore cannot create operator log spam.
         self._proto_warned: bool = False
+        # F35 D4: count of readings whose descriptor envelope was present but
+        # failed to decode/verify (fail-closed to None, never raised). Decoded
+        # entirely in-process here (GUI process, not the subprocess), so a
+        # plain instance counter is enough — no cross-process mp.Value needed.
+        self._descriptor_malformed_count: int = 0
 
     def start(self) -> None:
         """Start the ZMQ bridge subprocess."""
@@ -243,6 +282,62 @@ class ZmqBridge:
                 logger.warning("poll_readings: error processing item: %s", exc)
                 continue
         return readings
+
+    def poll_readings_with_descriptor(self) -> list[ReadingWithDescriptor]:
+        """Drain all available readings, pairing each with its decoded descriptor.
+
+        Additive alongside ``poll_readings()``, which stays byte-for-byte
+        unchanged — every current call site keeps compiling and behaving
+        exactly as today. Both methods drain the same underlying
+        ``mp.Queue``; a caller should use one or the other for a given
+        consumer, not both, or items will be split between the two drains.
+
+        ``descriptor`` is ``None`` for legacy/non-authoritative readings (no
+        envelope on the wire) and for a present-but-malformed/oversize/
+        identity-mismatched envelope — decode is fail-closed, never raises
+        into the caller, never synthesizes a descriptor.
+        """
+        paired: list[ReadingWithDescriptor] = []
+        while True:
+            try:
+                d = self._data_queue.get_nowait()
+                msg_type = d.get("__type")
+                if msg_type == "heartbeat":
+                    self._last_heartbeat = time.monotonic()
+                    continue
+                if msg_type == "cmd_timeout":
+                    self._last_cmd_timeout = time.monotonic()
+                    logger.warning(
+                        "ZMQ bridge: %s",
+                        d.get("message", "command timeout"),
+                    )
+                    continue
+                if msg_type == "warning":
+                    logger.warning("ZMQ bridge: %s", d.get("message", ""))
+                    continue
+                self._last_reading_time = time.monotonic()
+                reading = _reading_from_dict(d)
+                envelope_payload = d.get("descriptor_envelope")
+                qualified = qualify_reading_descriptor(
+                    reading,
+                    envelope_payload,
+                    envelope_present=(envelope_payload is not None or d.get("descriptor_envelope_malformed") is True),
+                    malformed_at_boundary=d.get("descriptor_envelope_malformed") is True,
+                )
+                if qualified.descriptor_issue is not None:
+                    self._descriptor_malformed_count += 1
+                paired.append(qualified)
+            except (queue.Empty, EOFError):
+                break
+            except Exception as exc:
+                logger.warning("poll_readings_with_descriptor: error processing item: %s", exc)
+                continue
+        return paired
+
+    @property
+    def descriptor_malformed_count(self) -> int:
+        """Count of readings whose descriptor envelope failed to decode/verify."""
+        return self._descriptor_malformed_count
 
     def heartbeat_stale(self, *, timeout_s: float = 30.0) -> bool:
         """Return True if the bridge heartbeat is older than ``timeout_s``."""

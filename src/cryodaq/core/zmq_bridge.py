@@ -70,7 +70,12 @@ import msgpack
 import zmq
 import zmq.asyncio
 
-from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY
+from cryodaq.channels.persistence import MAX_PERSISTED_ENVELOPE_BYTES
+from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, PublishedReading
+from cryodaq.core.descriptor_transport import (
+    DescriptorQualifiedReading,
+    qualify_reading_descriptor,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.operator_snapshot import OperatorSnapshot
 from cryodaq.operator_snapshot_transport import encode_operator_snapshot_frames
@@ -181,6 +186,7 @@ def encode_periodic_command_reply(reply: dict[str, Any]) -> PeriodicCommandReply
         allow_nan=False,
     ).encode("utf-8")
     return PeriodicCommandReply(reply, wire)
+
 
 try:
     _APP_VERSION = _pkg_version("cryodaq")
@@ -318,8 +324,7 @@ async def _bind_with_retry(socket: Any, address: str) -> None:
                 raise
             if attempt == _BIND_MAX_ATTEMPTS - 1:
                 logger.critical(
-                    "ZMQ bind FAILED after %d attempts: %s still in use. "
-                    "Check for stale sockets via lsof/netstat.",
+                    "ZMQ bind FAILED after %d attempts: %s still in use. Check for stale sockets via lsof/netstat.",
                     _BIND_MAX_ATTEMPTS,
                     address,
                 )
@@ -340,8 +345,16 @@ def _pack_reading(
     *,
     transport: dict[str, Any] | None = None,
     public_metadata: dict[str, Any] | None = None,
+    descriptor_envelope: bytes | None = None,
 ) -> bytes:
-    """Сериализовать Reading в msgpack."""
+    """Сериализовать Reading в msgpack.
+
+    ``descriptor_envelope`` (F35 D4): optional additive top-level key
+    (``"desc"``). Omitted entirely when ``None`` — a consumer still running
+    the pre-D4 ``_unpack_reading()`` builds ``Reading(...)`` from named keys
+    only and structurally ignores unknown keys, so this frame stays
+    byte-for-byte backward compatible for any such consumer.
+    """
     data = {
         "ts": reading.timestamp.timestamp(),
         "iid": reading.instrument_id,
@@ -354,6 +367,18 @@ def _pack_reading(
     }
     if transport is not None:
         data["transport"] = transport
+    if descriptor_envelope is not None and type(descriptor_envelope) is not bytes:
+        logger.warning("Dropping malformed descriptor envelope before ZMQ serialization")
+        descriptor_envelope = None
+    elif descriptor_envelope is not None and len(descriptor_envelope) > MAX_PERSISTED_ENVELOPE_BYTES:
+        logger.warning(
+            "Dropping oversized descriptor envelope before ZMQ serialization (%d > %d bytes)",
+            len(descriptor_envelope),
+            MAX_PERSISTED_ENVELOPE_BYTES,
+        )
+        descriptor_envelope = None
+    if descriptor_envelope is not None:
+        data["desc"] = descriptor_envelope
     return msgpack.packb(data, use_bin_type=True)
 
 
@@ -394,7 +419,7 @@ def _unpack_event(payload: bytes) -> dict[str, Any]:
     return json.loads(payload.decode("utf-8"))
 
 
-def _unpack_reading(payload: bytes) -> Reading:
+def _unpack_reading_data(payload: bytes) -> tuple[Reading, object, bool]:
     """Десериализовать Reading из msgpack.
 
     Defence in depth over the SUB socket's ``ZMQ_MAXMSGSIZE`` cap: reject an
@@ -414,7 +439,7 @@ def _unpack_reading(payload: bytes) -> Reading:
         max_array_len=MAX_DATA_MSG_SIZE,
         max_map_len=MAX_DATA_MSG_SIZE,
     )
-    return Reading(
+    reading = Reading(
         timestamp=datetime.fromtimestamp(data["ts"], tz=UTC),
         instrument_id=data.get("iid", ""),
         channel=data["ch"],
@@ -423,6 +448,25 @@ def _unpack_reading(payload: bytes) -> Reading:
         status=ChannelStatus(data["st"]),
         raw=data.get("raw"),
         metadata=data.get("meta", {}),
+    )
+    return reading, data.get("desc"), "desc" in data
+
+
+def _unpack_reading(payload: bytes) -> Reading:
+    """Deserialize a Reading while ignoring the additive descriptor field."""
+
+    reading, _, _ = _unpack_reading_data(payload)
+    return reading
+
+
+def _unpack_qualified_reading(payload: bytes) -> DescriptorQualifiedReading:
+    """Deserialize once and strictly qualify the optional descriptor field."""
+
+    reading, descriptor_payload, descriptor_present = _unpack_reading_data(payload)
+    return qualify_reading_descriptor(
+        reading,
+        descriptor_payload,
+        envelope_present=descriptor_present,
     )
 
 
@@ -511,11 +555,9 @@ class ZMQPublisher:
         self._total_sent += 1
         return sequence
 
-    async def _publish_reading(self, reading: Reading) -> None:
+    async def _publish_reading(self, reading: Reading, *, descriptor_envelope: bytes | None = None) -> None:
         metadata = dict(reading.metadata)
-        authoritative = (
-            metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, False) is True
-        )
+        authoritative = metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, False) is True
         async with self._send_lock:
             await self._send_allocated(
                 self._topic,
@@ -526,17 +568,24 @@ class ZMQPublisher:
                         authoritative=authoritative,
                     ),
                     public_metadata=metadata,
+                    descriptor_envelope=descriptor_envelope,
                 ),
             )
 
     async def _publish_loop(self, queue: asyncio.Queue[Reading]) -> None:
         while self._running:
             try:
-                reading = await asyncio.wait_for(queue.get(), timeout=1.0)
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
             except TimeoutError:
                 continue
             try:
-                await self._publish_reading(reading)
+                # F35 D4: the zmq_publisher subscription opts in to
+                # DataBroker's descriptor-envelope companion, so this queue
+                # carries PublishedReading pairs instead of bare Reading.
+                if type(item) is PublishedReading:
+                    await self._publish_reading(item.reading, descriptor_envelope=item.descriptor_envelope)
+                else:
+                    await self._publish_reading(item)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -634,11 +683,7 @@ class ZMQPublisher:
 
     async def barrier(self, nonce: str) -> dict[str, Any]:
         """Publish one queue fence and return its byte-equivalent evidence."""
-        if (
-            type(nonce) is not str
-            or len(nonce) != 32
-            or any(ch not in "0123456789abcdef" for ch in nonce)
-        ):
+        if type(nonce) is not str or len(nonce) != 32 or any(ch not in "0123456789abcdef" for ch in nonce):
             return self._barrier_error("barrier_invalid")
         task = self._task
         queue = self._queue
@@ -739,12 +784,7 @@ class ZMQPublisher:
             return self._barrier_error("barrier_unavailable")
 
     async def start(self, queue: asyncio.Queue[Reading]) -> None:
-        if (
-            self._running
-            or self._task is not None
-            or self._socket is not None
-            or self._ctx is not None
-        ):
+        if self._running or self._task is not None or self._socket is not None or self._ctx is not None:
             raise RuntimeError("ZMQPublisher is already started")
         self._queue = queue
         self._session_id = secrets.token_hex(16)
@@ -787,9 +827,7 @@ class ZMQPublisher:
     async def stop(self) -> None:
         self._running = False
         caller_task = asyncio.current_task()
-        caller_cancel_baseline = (
-            caller_task.cancelling() if caller_task is not None else 0
-        )
+        caller_cancel_baseline = caller_task.cancelling() if caller_task is not None else 0
         first_error: BaseException | None = None
         drain_task = self._task
         if drain_task is not None:
@@ -797,10 +835,7 @@ class ZMQPublisher:
             try:
                 await drain_task
             except asyncio.CancelledError as exc:
-                if (
-                    caller_task is not None
-                    and caller_task.cancelling() > caller_cancel_baseline
-                ):
+                if caller_task is not None and caller_task.cancelling() > caller_cancel_baseline:
                     first_error = exc
             except BaseException as exc:
                 first_error = exc
@@ -845,10 +880,7 @@ class ZMQPublisher:
                 await asyncio.shield(cleanup_task)
                 break
             except asyncio.CancelledError as exc:
-                if (
-                    caller_task is not None
-                    and caller_task.cancelling() > caller_cancel_baseline
-                ):
+                if caller_task is not None and caller_task.cancelling() > caller_cancel_baseline:
                     first_error = exc
                 elif first_error is None:
                     first_error = exc
@@ -880,6 +912,11 @@ class ZMQSubscriber:
         await sub.start()
         ...
         await sub.stop()
+
+    ``descriptor_callback`` is an additive opt-in for consumers that need the
+    provider-neutral immutable descriptor-qualified carrier.  Supplying it does
+    not disable or change the legacy bare ``callback``; both observe the same
+    frame from the same socket and receive path.
     """
 
     def __init__(
@@ -888,15 +925,18 @@ class ZMQSubscriber:
         *,
         topic: bytes = DEFAULT_TOPIC,
         callback: Callable[[Reading], object] | None = None,
+        descriptor_callback: Callable[[DescriptorQualifiedReading], object] | None = None,
     ) -> None:
         self._address = address
         self._topic = topic
         self._callback = callback
+        self._descriptor_callback = descriptor_callback
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._total_received: int = 0
+        self._descriptor_issue_count: int = 0
 
     async def _receive_loop(self) -> None:
         while self._running:
@@ -919,7 +959,17 @@ class ZMQSubscriber:
             if len(parts) != 2:
                 continue
             try:
-                reading = _unpack_reading(parts[1])
+                if self._descriptor_callback is None:
+                    reading = _unpack_reading(parts[1])
+                    qualified = None
+                else:
+                    qualified = _unpack_qualified_reading(parts[1])
+                    reading = qualified.reading
+                    if qualified.descriptor_issue is not None:
+                        self._descriptor_issue_count = min(
+                            (1 << 64) - 1,
+                            self._descriptor_issue_count + 1,
+                        )
                 self._total_received += 1
             except Exception:
                 logger.exception("Ошибка десериализации Reading")
@@ -931,6 +981,19 @@ class ZMQSubscriber:
                         await result
                 except Exception:
                     logger.exception("Ошибка в callback подписчика")
+            if self._descriptor_callback and qualified is not None:
+                try:
+                    result = self._descriptor_callback(qualified)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    logger.exception("Ошибка в descriptor callback подписчика")
+
+    @property
+    def descriptor_issue_count(self) -> int:
+        """Saturating count of refused present descriptor envelopes."""
+
+        return self._descriptor_issue_count
 
     async def start(self) -> None:
         self._ctx = zmq.asyncio.Context()
@@ -1174,9 +1237,7 @@ class ZMQCommandServer:
 
         action = str(cmd.get("cmd", ""))
         timeout = (
-            self._handler_timeout_override_s
-            if self._handler_timeout_override_s is not None
-            else _timeout_for(cmd)
+            self._handler_timeout_override_s if self._handler_timeout_override_s is not None else _timeout_for(cmd)
         )
 
         async def _invoke() -> Any:
@@ -1194,9 +1255,7 @@ class ZMQCommandServer:
             # asyncio.wait_for layer.
             inner_message = str(exc).strip()
             error_message = (
-                inner_message
-                if inner_message
-                else f"handler timeout ({timeout:g}s); operation may still be running."
+                inner_message if inner_message else f"handler timeout ({timeout:g}s); operation may still be running."
             )
             logger.error(
                 "ZMQ command handler timeout: action=%s error=%s payload=%r",
@@ -1300,9 +1359,7 @@ class ZMQCommandServer:
                 # Serialization or send failure — must still send a reply
                 # to avoid leaving the REP socket in stuck state.
                 try:
-                    await self._socket.send(
-                        self._encode_reply({"ok": False, "error": "serialization error"})
-                    )
+                    await self._socket.send(self._encode_reply({"ok": False, "error": "serialization error"}))
                 except Exception:
                     pass
 

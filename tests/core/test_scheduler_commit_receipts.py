@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker
+from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker, PublishedReading
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler, _InstrumentState
 from cryodaq.drivers.base import InstrumentDriver, Reading
 
@@ -31,9 +31,19 @@ def _reading(value: float, *, metadata: dict[str, Any] | None = None) -> Reading
     )
 
 
+class _Entry:
+    """Minimal stand-in for SQLiteWriter.CommittedReadingReceipt (F35 D4)."""
+
+    def __init__(self, reading: Reading, *, descriptor_envelope: bytes | None = b'{"desc":"stub"}') -> None:
+        self.reading = reading
+        self.descriptor_envelope = descriptor_envelope
+
+
 async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading() -> None:
     broker = DataBroker()
     queue = await broker.subscribe("observer")
+    # F35 D4.3: only an opted-in subscriber sees the paired descriptor envelope.
+    envelope_queue = await broker.subscribe("zmq_publisher", wants_descriptor_envelope=True)
     original = _reading(1.0, metadata={"origin": "driver"})
     committed = _reading(2.0, metadata={"origin": "commit"})
     receipt = object()
@@ -49,9 +59,9 @@ async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading(
             self.written = readings
             return receipt
 
-        def readings_from_commit(self, candidate: object) -> list[Reading]:
+        def entries_from_commit(self, candidate: object) -> list[_Entry]:
             assert candidate is receipt
-            return [committed]
+            return [_Entry(committed, descriptor_envelope=b'{"channel_id":"probe.1"}')]
 
         async def write_immediate(self, _readings: list[Reading]) -> bool:
             raise AssertionError("descriptor production path must not use legacy bool API")
@@ -72,6 +82,11 @@ async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading(
         PERSISTENCE_AUTHORITATIVE_METADATA_KEY: True,
     }
 
+    paired = envelope_queue.get_nowait()
+    assert type(paired) is PublishedReading
+    assert paired.reading.value == 2.0
+    assert paired.descriptor_envelope == b'{"channel_id":"probe.1"}'
+
 
 async def test_descriptor_scheduler_publishes_nothing_without_commit_receipt() -> None:
     broker = DataBroker()
@@ -84,7 +99,7 @@ async def test_descriptor_scheduler_publishes_nothing_without_commit_receipt() -
         async def write_committed(self, _readings: list[Reading]) -> None:
             return None
 
-        def readings_from_commit(self, _candidate: object) -> list[Reading]:
+        def entries_from_commit(self, _candidate: object) -> list[_Entry]:
             raise AssertionError("no receipt must never be interpreted")
 
     scheduler = Scheduler(broker, sqlite_writer=_Writer())
@@ -106,7 +121,7 @@ async def test_descriptor_scheduler_rejects_receipt_cardinality_and_publishes_no
         async def write_committed(self, _readings: list[Reading]) -> object:
             return object()
 
-        def readings_from_commit(self, _candidate: object) -> list[Reading]:
+        def entries_from_commit(self, _candidate: object) -> list[_Entry]:
             return []
 
     scheduler = Scheduler(broker, sqlite_writer=_Writer())
