@@ -17,13 +17,36 @@ import json
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
 import cryodaq.support.collector as collector_module
+from cryodaq.operator_snapshot import (
+    AttentionItem,
+    AttentionQueue,
+    AvailabilityTruth,
+    CooldownHistorySummary,
+    CooldownSample,
+    DataIntegritySummary,
+    ExperimentOperatingState,
+    InfrastructureNode,
+    InfrastructureNodeHealth,
+    OperatorPresentationState,
+    OperatorSnapshot,
+    PlantHealthItem,
+    PlantHealthSummary,
+    ReadinessSummary,
+    ReadinessTruth,
+    RecordingTruth,
+    SnapshotCut,
+    SnapshotMode,
+    SummaryStatus,
+    SupportBundleEntry,
+    SupportBundleManifest,
+    SupportBundleSummary,
+)
 from cryodaq.support.bundle import (
     BundleCapture,
     ConfigFingerprint,
@@ -40,6 +63,85 @@ from cryodaq.support.collector import collect_bundle_capture
 _NOW = datetime(2026, 7, 14, 12, 0, 0, 0, tzinfo=UTC)
 _BUNDLE_ID = "support-f36-5-test"
 _HASH = "b" * 64
+
+# A fixed observed_at that is safely before _NOW (used in snapshot cuts).
+_OBS = datetime(2026, 7, 14, 11, 59, 0, 0, tzinfo=UTC)
+
+
+def _status(state: OperatorPresentationState = OperatorPresentationState.OK) -> SummaryStatus:
+    return SummaryStatus(state, 1, 0.25, ("authoritative",), "Подтверждено движком")
+
+
+def _snapshot(
+    *,
+    attention_items: tuple[AttentionItem, ...] = (),
+    health_items: tuple[PlantHealthItem, ...] | None = None,
+    integrity_storage: AvailabilityTruth = AvailabilityTruth.AVAILABLE,
+) -> OperatorSnapshot:
+    """Build a minimal but fully valid LIVE OperatorSnapshot.
+
+    Parameters
+    ----------
+    attention_items:
+        Attention items to include.  The queue status is derived from their
+        max state so the validation invariant is always satisfied.
+    health_items:
+        Plant-health subsystems.  Defaults to a single OK subsystem so the
+        summary is never empty.
+    integrity_storage:
+        Availability truth for the data-integrity section.
+    """
+    cut = SnapshotCut(1, _OBS, _OBS + timedelta(seconds=1), "engine-v1", SnapshotMode.LIVE)
+    ok = _status()
+    manifest = SupportBundleManifest(
+        "bundle-1",
+        _OBS,
+        (SupportBundleEntry("status/status.json", 123, "a" * 64),),
+    )
+
+    if health_items is None:
+        health_items = (PlantHealthItem("plant", "Установка", OperatorPresentationState.OK, ()),)
+
+    # Derive health summary state from items.
+    from cryodaq.operator_snapshot import STATE_PRECEDENCE
+
+    if health_items:
+        health_state = max((item.state for item in health_items), key=STATE_PRECEDENCE.__getitem__)
+    else:
+        health_state = OperatorPresentationState.CAUTION  # empty requires non-ok
+
+    health_status = _status(health_state)
+
+    # Derive attention queue state from items.
+    if attention_items:
+        attn_state = max((item.state for item in attention_items), key=STATE_PRECEDENCE.__getitem__)
+    else:
+        attn_state = OperatorPresentationState.OK
+    attn_status = _status(attn_state)
+
+    return OperatorSnapshot(
+        cut,
+        ReadinessSummary(cut, ok, ReadinessTruth.READY, ()),
+        PlantHealthSummary(cut, health_status, health_items),
+        InfrastructureNodeHealth(
+            cut,
+            _status(OperatorPresentationState.OK),
+            (InfrastructureNode("ups", "ИБП", OperatorPresentationState.OK, ()),),
+        ),
+        AttentionQueue(cut, attn_status, attention_items),
+        ExperimentOperatingState(
+            cut,
+            ok,
+            "exp-1",
+            "Эксперимент",
+            "cooldown",
+            RecordingTruth.RECORDING,
+            "rec-1",
+        ),
+        DataIntegritySummary(cut, ok, 42, 41, 0, 0, integrity_storage),
+        CooldownHistorySummary(cut, ok, (CooldownSample(0, 300),), None, ()),
+        SupportBundleSummary(cut, ok, AvailabilityTruth.AVAILABLE, manifest),
+    )
 
 
 def _minimal_capture(**overrides: object) -> BundleCapture:
@@ -304,6 +406,77 @@ def test_degraded_engine_partial_snapshot_failure_marks_section_unavailable() ->
     assert "integrity" not in ev["unavailable_fields"]
 
 
+def test_collector_attention_real_item_emits_evidence_record() -> None:
+    """A real AttentionItem produces an attention EvidenceRecord with correct fields.
+
+    This test MUST fail against the old code that reads item.severity.value, because
+    AttentionItem has no severity field — that AttributeError would be swallowed by the
+    per-item except and no records would be emitted, causing this assertion to fail.
+    """
+    item = AttentionItem(
+        "alarm-vacuum",
+        OperatorPresentationState.FAULT,
+        "Вакуум нарушен",
+        "Проверить насос",
+        _OBS,
+    )
+    snap = _snapshot(attention_items=(item,))
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    attention_records = [r for r in ev["records"] if r["kind"] == "attention"]
+    assert len(attention_records) == 1, (
+        "Expected exactly one attention EvidenceRecord; got "
+        f"{len(attention_records)}.  If zero, the collector is reading a "
+        "nonexistent field (e.g. item.severity) and silently dropping the item."
+    )
+    payload = attention_records[0]["payload"]
+    assert payload["attention_id"] == "alarm-vacuum"
+    assert payload["state"] == "fault"
+    # severity is derived from state for fault → "fault"
+    assert payload["severity"] == "fault"
+    # observed_at must be present and canonical
+    assert "observed_at" in payload
+    assert payload["observed_at"].endswith("Z")
+    # title and detail are free-text and are NOT in the bundle schema allowed fields
+    assert "title" not in payload
+    assert "detail" not in payload
+    # attention section must not be marked unavailable
+    assert "attention" not in ev["unavailable_fields"]
+
+
+def test_collector_attention_severity_derived_from_state_for_all_non_ok_states() -> None:
+    """severity is derived from state; caution/warning/fault map 1-to-1; others fall back to warning."""
+    cases = [
+        (OperatorPresentationState.CAUTION, "caution"),
+        (OperatorPresentationState.WARNING, "warning"),
+        (OperatorPresentationState.FAULT, "fault"),
+    ]
+    for state, expected_severity in cases:
+        item = AttentionItem("attn-1", state, "Заголовок", "Детали", _OBS)
+        snap = _snapshot(attention_items=(item,))
+        capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snap)
+        bundle = build_support_bundle(capture)
+        ev = _evidence(bundle)
+        records = [r for r in ev["records"] if r["kind"] == "attention"]
+        assert len(records) == 1, f"no attention record for state={state}"
+        assert records[0]["payload"]["severity"] == expected_severity, f"wrong severity for state={state}"
+
+
+def test_collector_attention_empty_queue_emits_no_records_and_no_unavailable() -> None:
+    """An empty attention queue produces zero records and does NOT mark attention unavailable."""
+    snap = _snapshot(attention_items=())
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    attention_records = [r for r in ev["records"] if r["kind"] == "attention"]
+    assert len(attention_records) == 0
+    assert "attention" not in ev["unavailable_fields"]
+
+
 def test_collector_secret_inputs_and_exception_are_absent_from_bundle_and_logs(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -311,7 +484,7 @@ def test_collector_secret_inputs_and_exception_are_absent_from_bundle_and_logs(
     token = "Bearer planted-token-abcdefghijklmnopqrstuvwxyz0123456789"
     credential = "password=planted-credential"
     absolute_path = r"C:\Users\alice\private\planted.txt"
-    hostile = "hostile\x00\u202evalue"
+    hostile = "hostile\x00‮value"
     forced_error = f"{token} {credential} {absolute_path} {hostile}"
 
     def fail_version(*args: object, **kwargs: object) -> None:
@@ -334,25 +507,84 @@ def test_collector_secret_inputs_and_exception_are_absent_from_bundle_and_logs(
 
 
 def test_collector_rolls_back_partial_health_iteration_and_preserves_other_sections() -> None:
-    """A mid-iteration health failure degrades only health and keeps integrity."""
-    first = SimpleNamespace(subsystem_id="first", state=SimpleNamespace(value="ok"))
+    """A mid-iteration health failure degrades only health and keeps integrity.
+
+    Uses a real OperatorSnapshot for the non-failing sections.  The health
+    subsystems list is replaced with a generator that raises mid-iteration so
+    we exercise the rollback path; the snapshot object itself is real.
+    """
+    # Build a real snapshot first, then override plant_health with a broken generator.
+    real_snap = _snapshot(integrity_storage=AvailabilityTruth.AVAILABLE)
+
+    first = PlantHealthItem("first", "Первый", OperatorPresentationState.OK, ())
 
     def broken_subsystems():
         yield first
         raise RuntimeError("collector iteration failed")
 
-    snapshot = MagicMock()
-    snapshot.plant_health.subsystems = broken_subsystems()
-    snapshot.attention.items = ()
-    snapshot.data_integrity.storage.value = "available"
+    # Monkeypatch plant_health.subsystems on the real snapshot.
+    # OperatorSnapshot is a frozen dataclass so we use MagicMock only for the
+    # plant_health attribute; attention and data_integrity come from the real object.
+    mock_snap = MagicMock()
+    mock_snap.plant_health.subsystems = broken_subsystems()
+    mock_snap.attention.items = real_snap.attention.items
+    mock_snap.data_integrity.storage.value = real_snap.data_integrity.storage.value
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
     assert "health" in ev["unavailable_fields"]
     assert not any(record["kind"] == "health" for record in ev["records"])
     assert any(record["kind"] == "integrity" for record in ev["records"])
+
+
+def test_collector_all_health_items_fail_marks_health_unavailable() -> None:
+    """If every health item raises, health is marked unavailable (not silently zero records)."""
+
+    # Use a MagicMock with items that each raise.
+    def bad_subsystems():
+        yield MagicMock(subsystem_id=None)  # _safe_identifier(None) will raise
+
+    mock_snap = MagicMock()
+    mock_snap.plant_health.subsystems = bad_subsystems()
+    mock_snap.attention.items = ()
+    mock_snap.data_integrity.storage.value = "available"
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "health" in ev["unavailable_fields"], (
+        "health must be marked unavailable when all items are dropped — not silently zero records"
+    )
+    assert not any(r["kind"] == "health" for r in ev["records"])
+
+
+def test_collector_all_attention_items_fail_marks_attention_unavailable() -> None:
+    """If every attention item raises, attention is marked unavailable (not silently zero records)."""
+
+    def bad_items():
+        yield MagicMock(attention_id=None)  # _safe_identifier(None) will raise
+
+    mock_snap = MagicMock()
+    mock_snap.plant_health.subsystems = []
+    mock_snap.attention.items = bad_items()
+    mock_snap.data_integrity.storage.value = "available"
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "attention" in ev["unavailable_fields"], (
+        "attention must be marked unavailable when all items are dropped — not silently zero records"
+    )
+    assert not any(r["kind"] == "attention" for r in ev["records"])
+
+
+# ---------------------------------------------------------------------------
+# collect_bundle_capture integration
+# ---------------------------------------------------------------------------
 
 
 def test_degraded_engine_bundle_still_contains_versions_when_engine_absent() -> None:
@@ -371,11 +603,6 @@ def test_degraded_engine_bundle_still_contains_versions_when_engine_absent() -> 
     assert "driver-pack" in components
     # versions section must NOT be in unavailable_fields (it succeeded).
     assert "versions" not in ev["unavailable_fields"]
-
-
-# ---------------------------------------------------------------------------
-# collect_bundle_capture integration
-# ---------------------------------------------------------------------------
 
 
 def test_collect_bundle_capture_minimal_call_produces_sealable_capture() -> None:

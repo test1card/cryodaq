@@ -196,7 +196,9 @@ def _collect_health(
     try:
         added = 0
         pending: list[EvidenceRecord] = []
+        items_seen = 0
         for subsystem in snapshot.plant_health.subsystems:
+            items_seen += 1
             if added >= _MAX_HEALTH_RECORDS:
                 break
             try:
@@ -211,7 +213,11 @@ def _collect_health(
                 added += 1
             except Exception as exc:
                 _log.debug("bundle-collector: skipping health item (%s)", type(exc).__name__)
-        records.extend(pending)
+        if items_seen > 0 and not pending:
+            # Every item failed — mark degraded rather than silently emitting zero records.
+            _mark_unavailable("health", unavailable)
+        else:
+            records.extend(pending)
     except Exception as exc:
         _log.warning("bundle-collector: health section failed (%s)", type(exc).__name__)
         _mark_unavailable("health", unavailable)
@@ -225,15 +231,31 @@ def _collect_attention(
     try:
         added = 0
         pending: list[EvidenceRecord] = []
+        items_seen = 0
         for item in snapshot.attention.items:
+            items_seen += 1
             if added >= _MAX_ATTENTION_RECORDS:
                 break
             try:
+                # AttentionItem has no severity field.  Derive a bundle severity
+                # from the presentation state: caution/warning/fault map 1-to-1;
+                # stale/disconnected/unknown fall back to "warning" so the record
+                # is never silently suppressed for an unrecognised state.
+                state_val = _safe_identifier(item.state.value)
+                _SEVERITY_FROM_STATE = {
+                    "caution": "caution",
+                    "warning": "warning",
+                    "fault": "fault",
+                }
+                severity = _SEVERITY_FROM_STATE.get(state_val, "warning")
                 payload: dict[str, object] = {
                     "attention_id": _safe_identifier(item.attention_id),
-                    "state": _safe_identifier(item.state.value),
-                    "severity": _safe_identifier(item.severity.value),
+                    "severity": severity,
+                    "state": state_val,
                 }
+                # Map first transport reason code to bundle reason_code if present.
+                if item.transport_reason_codes:
+                    payload["reason_code"] = _safe_identifier(item.transport_reason_codes[0])
                 if hasattr(item, "observed_at") and item.observed_at is not None:
                     payload["observed_at"] = _utc_iso(item.observed_at)
                 rec = EvidenceRecord.from_payload("attention", payload)
@@ -241,7 +263,11 @@ def _collect_attention(
                 added += 1
             except Exception as exc:
                 _log.debug("bundle-collector: skipping attention item (%s)", type(exc).__name__)
-        records.extend(pending)
+        if items_seen > 0 and not pending:
+            # Every item failed — mark degraded rather than silently emitting zero records.
+            _mark_unavailable("attention", unavailable)
+        else:
+            records.extend(pending)
     except Exception as exc:
         _log.warning("bundle-collector: attention section failed (%s)", type(exc).__name__)
         _mark_unavailable("attention", unavailable)
