@@ -15,7 +15,7 @@ Conventions for naming design tokens — the source-of-truth values that all vis
 
 ## Current state: flat token architecture
 
-CryoDAQ v2.0.0 retains a **flat token structure** — all tokens live as attributes of the `theme` module (`src/cryodaq/gui/theme.py`), named by category + role without intermediate layers:
+CryoDAQ v3.0.0 retains a **flat token structure** — all tokens live as attributes of the `theme` module (`src/cryodaq/gui/theme.py`), named by category + role without intermediate layers:
 
 ```python
 # theme.py — current structure
@@ -48,7 +48,7 @@ The UI UX Pro Max skill recommends a three-layer token system (primitive → sem
 └─────────────────────────────────────────┘
 ```
 
-Current v2.0.0 remains single-layer (primitive+semantic collapsed). Any migration requires its own compatibility analysis and an approved major-release plan documented in `governance/deprecation-policy.md`.
+Current v3.0.0 remains single-layer (primitive+semantic collapsed). Any migration requires its own compatibility analysis and an approved major-release plan documented in `governance/deprecation-policy.md`.
 
 ## Naming format
 
@@ -172,7 +172,7 @@ GRID_GAP = 8               # BentoGrid inter-tile gap
 
 ## Category prefix registry
 
-Current registered prefixes — every token in `theme.py` belongs to one. Counts reflect the shipped flat-token state of `src/cryodaq/gui/theme.py` in v2.0.0 (verify via the audit script in `governance/testing-strategy.md`).
+Current registered prefixes — every token in `theme.py` belongs to one. Counts reflect the shipped flat-token state of `src/cryodaq/gui/theme.py` in v3.0.0 (verify via the audit script in `governance/testing-strategy.md`).
 
 ### Root color / role tokens (no prefix)
 
@@ -259,7 +259,7 @@ STONE_900 = FOREGROUND       # alias
 # ... etc
 ```
 
-These remain **deprecated and available in v2.0.0**. Removal is not part of this scoped identity release and requires a separately approved future major, v3.0.0 at the earliest. See `governance/deprecation-policy.md`.
+These remain **deprecated and available in current v3.0.0**. Removal is not part of this composition-contract release and requires a separately approved future major. See `governance/deprecation-policy.md`.
 
 Rule: **no new code uses STONE_***. Existing call sites migrate to canonical names during the panel's next modification. External audit flags any new STONE_* reference.
 
@@ -421,3 +421,6 @@ Minimum requirements for adding a new token (reviewed per `governance/contributi
 - 2026-04-17: Initial version. Closes RULE-GOV-001. Documents the flat architecture and the then-proposed future-v2 three-layer target, superseded by the scoped v2.0.0 decision below. Prefix registry. STONE_* legacy alias policy. W3C DTCG alignment (future).
 - 2026-04-17 (v1.0.1): Rebuilt prefix registry from actual `theme.py` reality (FR-012). Added `SURFACE_`, `TEXT_`, `TRANSITION_`, `QUANTITY_`, `QDARKTHEME_`, `ACCENT_`, `BORDER_`, `CARD_`, `MUTED_`, `SUCCESS_`, `WARNING_`, `DANGER_` prefixes that were previously undocumented. Corrected spacing scale to `SPACE_0`…`SPACE_6` (7 steps shipped, not 9). Moved `OVERLAY_` and `ICON_SIZE_` to the proposed-prefixes table — neither is in theme.py yet. Updated STONE_* count to actual 13 aliases.
 - 2026-07-14 (v2.0.0): Scoped the major release to descriptor-qualified instrument identity. Flat tokens and deprecated STONE_* aliases remain current; three-layer, alias-removal, and light-theme work require a separately approved future major.
+- 2026-07-14 (v3.0.0): Confirmed the flat token inventory remains current while
+  the breaking informative/beautiful composition contract expands to the full
+  GUI corpus; token-layer migration remains a separate future-major decision.

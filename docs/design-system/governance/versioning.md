@@ -20,7 +20,7 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `2.0.0` — descriptor-qualified InstrumentsPanel ingress (see `CHANGELOG.md`).
+**Current version:** `3.0.0` — breaking corpus-wide informative/beautiful composition gate (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
@@ -217,6 +217,11 @@ Anticipated versions:
 
 - **v2.0.0** (2026): breaking descriptor-qualified instrument identity API;
   visual tokens and component anatomy otherwise remain unchanged.
+- **v3.0.0** (2026): the complete GUI corpus must be informative and
+  intentionally beautiful. The breaking compliance expansion rejects generic
+  LabVIEW-style dashboard assembly and requires migration of touched surfaces;
+  safety truth, legibility, provenance, freshness, uncertainty, and the next
+  safe action retain precedence.
 - **Later releases:** light theme, three-layer token migration, or palette
   restructuring require their own compatibility analysis and release notes;
   they are not implied by the v2.0.0 identity cutover.
@@ -256,3 +261,5 @@ Anticipated versions:
 - 2026-07-14 (v2.0.0): Removed the public bare-reading InstrumentsPanel
   ingress in favor of descriptor-qualified identity, a caller-breaking API
   change under this policy.
+- 2026-07-14 (v3.0.0): Added the breaking corpus-wide informative/beautiful
+  composition principle and generic LabVIEW-dashboard anti-pattern.

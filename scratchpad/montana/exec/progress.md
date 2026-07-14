@@ -892,3 +892,36 @@ worktree after D7.1 is settled.
   Windows relevant evidence:
   **123 passed**; Ruff check/format and diff check passed. Independent re-review:
   **PASS, no P0-P3**.
+
+## 2026-07-14 roadmap-wide GUI design-system authority
+
+- By explicit user direction, every GUI/UI/UX slice in the Montana campaign,
+  including F35 setup/routing and all F36 shell work, now has a mandatory
+  design-system acceptance gate. Authors must read `docs/design-system/README.md`
+  and the applicable token, rule, component, pattern, accessibility,
+  performance, and governance documents before editing.
+- Functional correctness alone is insufficient. Integration requires canonical
+  tokens/components, Russian operator copy, keyboard/focus behavior, non-color
+  cues, conservative stale/disconnected truth, documented performance budgets,
+  and independent review against the cited rules.
+- When code evidence shows a design principle is stale, the same reviewed slice
+  repairs the canonical design-system specification and its examples/tests.
+  Reusable token/component/pattern/state changes also update the design-system
+  version and changelog. Incidental legacy GUI behavior is not design authority.
+- The architect further clarified the product criterion: every GUI must be
+  informative and beautiful. Beauty is reviewed as purposeful hierarchy,
+  proportion, spacing rhythm, typography, restraint, and distinctive CryoDAQ
+  identity; a generic LabVIEW-style box grid is not acceptable. Aesthetics may
+  never hide safety truth, freshness, provenance, uncertainty, or the next safe
+  action.
+- Independent review correctly classified the corpus-wide rule as breaking,
+  not additive: previously token-compliant generic screens may now fail. The
+  design-system release is therefore v3.0.0. Touched surfaces must migrate in
+  the same slice; the untouched GUI remains an explicit audited backlog. The
+  two qualities are jointly mandatory, while safety truth, legibility,
+  provenance, freshness, uncertainty, and next-safe-action clarity take
+  precedence over aesthetics.
+- The canonical backlog is enumerated in
+  `docs/design-system/GUI_MIGRATION_INVENTORY.md`; every production-visible
+  surface starts pending and can move to accepted only with linked scenario,
+  accessibility, performance, visual-composition, and truth-semantics evidence.

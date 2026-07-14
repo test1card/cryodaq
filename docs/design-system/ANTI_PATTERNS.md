@@ -493,6 +493,25 @@ Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1)
 
 ## Layout
 
+### case: generic-labview-dashboard
+
+**Pattern:** A screen assembled as a uniform grid of default-looking controls
+and equally weighted bordered boxes, with dense chrome and no clear visual
+journey from current truth to exception to next action.
+
+**Why forbidden:** It may expose every value yet still hide operational
+meaning. Equal weight increases search time, feels interchangeable with legacy
+instrument software, and discards the deliberate CryoDAQ identity required for
+long, high-attention shifts.
+
+**Fix:** Compose around operator questions. Use restrained surface hierarchy,
+intentional proportion and whitespace, strong typography, progressive detail,
+and a recognisable CryoDAQ silhouette. Keep normal state quiet and make
+exceptions prominent without decorating or animating live values.
+
+**Related rules:** Information hierarchy, RULE-SURF-001, RULE-SPACE-004,
+RULE-TYPO-001, and the design philosophy in `README.md`.
+
 ### case: decoupled-header-toolrail
 
 **Pattern:** Changing `HEADER_HEIGHT` from 56 to 48 without updating `TOOL_RAIL_WIDTH`.

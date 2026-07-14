@@ -74,7 +74,7 @@ _DEPRECATED_TOKENS = {
 
 Deprecated tokens work identically (Python magic returns the new value); the only difference is the warning.
 
-**Deprecated since v1.0.0:** the entire `STONE_*` prefix family (palette rename from Phase 0). The aliases remain deprecated and available in current v2.0.0.
+**Deprecated since v1.0.0:** the entire `STONE_*` prefix family (palette rename from Phase 0). The aliases remain deprecated and available in current v3.0.0.
 
 ### Rule deprecation
 
@@ -198,10 +198,10 @@ External audit flags any remaining `STONE_*` reference. Replace during the panel
 ## STONE_* specific lifecycle
 
 **Deprecated in:** v1.0.0
-**Removed in:** a separately approved future major, v3.0.0 at the earliest; no removal version is committed yet
-**Current state in v2.0.0:** the aliases remain deprecated and available; legacy-panel call sites migrate as each panel is reviewed
+**Removed in:** a separately approved future major; no removal version is committed yet
+**Current state in v3.0.0:** the aliases remain deprecated and available; legacy-panel call sites migrate as each panel is reviewed
 
-Migration effort: part of Phase II ongoing work. It is not bundled into the scoped v2.0.0 instrument-identity release and does not block v2.x releases.
+Migration effort: part of Phase II ongoing work. It is not bundled into the v3.0.0 composition-contract release.
 
 ## Emergency deprecation
 
@@ -274,4 +274,4 @@ Changes to these are architecture / safety topics, not design deprecations.
 ## Changelog
 
 - 2026-04-17: Initial version. Closes RULE-GOV-003. Three-state lifecycle (Active → Deprecated → Removed). Per-artifact deprecation windows (1-3 minor versions). Emergency deprecation exception. STONE_* lifecycle documented as current case.
-- 2026-07-14 (v2.0.0): Recorded the scoped identity-API major-release exception. STONE_* remains deprecated and available; removal and three-layer/light-theme migration now require a separately approved future major, v3.0.0 at the earliest.
+- 2026-07-14 (v3.0.0): Confirmed STONE_* remains deprecated and available; the composition-contract major does not remove aliases. Removal and three-layer/light-theme migration require a separately approved future major.

@@ -12,6 +12,34 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
+## [3.0.0] — 2026-07-14
+
+### Added
+
+- Established informative and intentionally beautiful composition as the two
+  primary GUI acceptance qualities. Visual craft is assessed through hierarchy,
+  proportion, spacing rhythm, typography, restraint, and recognisable CryoDAQ
+  identity rather than token compliance alone.
+- Added the generic LabVIEW-style dashboard assembly anti-pattern: uniform box
+  grids, default-looking controls, dense chrome, and equal visual weight are
+  unacceptable when they erase task hierarchy or product identity.
+
+### Changed
+
+- Clarified that safety truth, data legibility, freshness, provenance,
+  uncertainty, and the next safe action always take precedence over aesthetics.
+- Extended the design-system gate from F36 surfaces to every CryoDAQ GUI/UI/UX
+  change in the roadmap.
+
+### Breaking
+
+- The complete existing GUI corpus is now subject to the informative/beautiful
+  composition gate. Previously token-compliant generic screens are not
+  grandfathered: each touched surface must migrate in-slice, and the remaining
+  corpus stays an explicit audited migration backlog until reviewed. This
+  expanded compliance boundary requires a major version under
+  `governance/versioning.md`.
+
 ## [2.0.0] — 2026-07-14
 
 ### Changed

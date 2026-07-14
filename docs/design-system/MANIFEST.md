@@ -8,7 +8,7 @@ last_updated: 2026-07-14
 
 **Generated:** 2026-07-14
 **Session:** Phase UI-1 foundation, F36 operator snapshots, and F35 D7.2
-**Scope:** Design system v2.0.0 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Scope:** Design system v3.0.0 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -18,6 +18,7 @@ design-system/
 ├── MANIFEST.md                         # This file
 ├── CHANGELOG.md                        # Design-system release history
 ├── VERSION                             # Authoritative version marker
+├── GUI_MIGRATION_INVENTORY.md          # Auditable v3 production-surface backlog
 ├── ANTI_PATTERNS.md                    # 40+ forbidden patterns with historical refs
 ├── DEEP_AUDIT_REPORT.md                # Retained v1.0.0 audit evidence
 ├── adr/                                # 2 accepted design decisions
@@ -200,11 +201,11 @@ Batch 6 — accessibility + governance:
 59. **Destructive Dialog default-focus = Cancel** — operator Enter muscle-memory dismisses safely.
 60. **Shift+Enter keyboard alternative for HoldConfirmButton** — full keyboard accessibility without requiring held-key.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in v2.0.0** — this major release is
-    scoped to the breaking instrument-identity API; three-layer token migration
-    remains a separately reviewed future change.
-63. **STONE_* remains deprecated/read-only in v2.0.0** — this scoped major
-    does not claim or perform the unfinished cross-panel token migration.
+62. **Design system remains flat-token in current v3.0.0** — the v2.0.0
+    instrument-identity major and v3.0.0 composition-contract major did not
+    perform the separately reviewed future three-layer token migration.
+63. **STONE_* remains deprecated/read-only in current v3.0.0** — neither
+    major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
 66. **ACCENT ≠ STATUS_OK — Phase III.A decoupling** — per `adr/002-accent-status-decoupling.md`. Primary buttons, mode badges, progress chunks, active tab indicators use ACCENT (UI activation). STATUS_OK reserved for safety / health / channel-OK indicators. `SELECTION_BG` + `FOCUS_RING` added as neutral interaction tokens. Per-theme ACCENT recalibrated to warm-neutral (11 themes; `default_cool` indigo preserved as historical baseline).
@@ -232,6 +233,6 @@ F36 operator-snapshot additions:
 
 ## Status
 
-**Design system v2.0.0 — descriptor-qualified instrument identity and F36 composition implemented, external evidence open.** Existing
+**Design system v3.0.0 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; descriptor-qualified instrument identity and F36 composition are implemented, the remaining GUI migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
 79 rules and the 142-constant runtime inventory are unchanged. Real Windows ONEDIR DPI/NVDA,
 final POD-to-shell cutover, whole-shell screenshots, operator-performance, and long-session evidence remain open.

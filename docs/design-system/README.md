@@ -3,11 +3,13 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-07-11
+last_updated: 2026-07-14
 status: canonical
 ---
 
 # CryoDAQ Design Language
+
+**Current design-system version:** `3.0.0`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
@@ -19,19 +21,31 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 
 **Operating principles, ranked by priority:**
 
-1. **Data legibility over decoration.** Sensor readings are life-critical. Nothing visual may impair reading of temperature, pressure, or safety state. No animation on data flow, no decoration near readouts.
-2. **Deliberate desaturation.** Our palette is intentionally desaturated dark. This reduces eye strain during long shifts and avoids the "toy" appearance of bright neon dashboards. Sharp primary colors are signal loss to the eye.
-3. **Static by default, motion only for state transition.** UI is still. Motion indicates change, never decoration. Pulsing alarms, count-up numbers, parallax — all forbidden.
-4. **Consistency over cleverness.** The same concept must render the same way across every surface. If "active phase" is green border in dashboard, it must be green border in overlay. No per-surface variation.
-5. **Discoverability via layout, not via interaction.** Everything an operator needs must be visible or at most one click away. Hover-only affordances fail in stress operations.
-6. **Operator clarity and bounded autonomy.** No magic: operators can see what the system is doing and why, and may override only where the safety architecture explicitly permits it. Ordinary UI actions require an explicit operator trigger; automatic fail-closed, interlock, verified-OFF, persistence, and bounded-shutdown actions retain their independent authority.
-7. **Quiet normalcy, loud exceptions.** Normal state is invisible (muted tones). Abnormal state is impossible to miss (loud red, prominent placement, persistent badge).
+1. **Informative before everything else.** The interface must make current truth,
+   change, uncertainty, and the next safe action understandable at a glance.
+   Sensor readings are life-critical; beauty never obscures temperature,
+   pressure, safety state, provenance, or freshness.
+2. **Beautiful by deliberate composition.** Beauty is a functional quality:
+   purposeful hierarchy, proportion, spacing rhythm, typography, restraint,
+   and a recognisable CryoDAQ visual identity reduce fatigue and make important
+   differences easier to perceive. Token compliance alone is insufficient.
+   A generic LabVIEW-style grid of equally weighted boxes, default controls,
+   and dense chrome is a design failure even when it is technically usable.
+3. **Deliberate desaturation.** Our palette is intentionally desaturated dark. This reduces eye strain during long shifts and avoids the "toy" appearance of bright neon dashboards. Sharp primary colors are signal loss to the eye.
+4. **Static by default, motion only for state transition.** UI is still. Motion indicates change, never decoration. Pulsing alarms, count-up numbers, parallax — all forbidden.
+5. **Consistency over cleverness.** The same concept must render the same way across every surface. If "active phase" is green border in dashboard, it must be green border in overlay. No per-surface variation.
+6. **Discoverability via layout, not via interaction.** Everything an operator needs must be visible or at most one click away. Hover-only affordances fail in stress operations.
+7. **Operator clarity and bounded autonomy.** No magic: operators can see what the system is doing and why, and may override only where the safety architecture explicitly permits it. Ordinary UI actions require an explicit operator trigger; automatic fail-closed, interlock, verified-OFF, persistence, and bounded-shutdown actions retain their independent authority.
+8. **Quiet normalcy, loud exceptions.** Normal state is invisible (muted tones). Abnormal state is impossible to miss (loud red, prominent placement, persistent badge).
 
 **Anti-philosophies explicitly rejected:**
 - Material Design playfulness (ripples, elevation transitions) — we are not Google Calendar.
 - Apple HIG soft-touch aesthetic (translucent blur, dock bounce) — we are not iOS.
 - Enterprise SaaS gradient CTAs (Indigo→Violet buttons) — we are not Stripe.
 - Gaming/cyberpunk neon (glow, chromatic aberration) — we are not a crypto dashboard.
+- Generic LabVIEW-style dashboard assembly (uniform box grids, default widgets,
+  dense chrome, equal visual weight everywhere) — instrumentation does not have
+  to look accidental or interchangeable.
 
 ## Navigation
 
@@ -50,6 +64,7 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 | Format a number (temperature/pressure/time) | `patterns/numeric-formatting.md` |
 | Display stale data | `patterns/real-time-data.md` |
 | Compose the Primary Operator Display | `patterns/operator-display-composition.md` |
+| Check or update GUI v3 migration status | `GUI_MIGRATION_INVENTORY.md` |
 | Check WCAG contrast | `accessibility/contrast-matrix.md` |
 | Write Russian copy | `patterns/copy-voice.md` |
 | Add a new token | `governance/contribution.md` |
@@ -60,6 +75,7 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 docs/design-system/
 ├── README.md                        # this file
 ├── MANIFEST.md                      # exact corpus inventory and encoded decisions
+├── GUI_MIGRATION_INVENTORY.md       # auditable v3 surface migration backlog
 ├── CHANGELOG.md                     # design-system release history
 ├── VERSION                          # authoritative version marker
 ├── ANTI_PATTERNS.md                 # catalog of forbidden patterns with historical refs
@@ -239,7 +255,7 @@ design-system prose in the same reviewed slice.
 
 ## Token count summary
 
-From `src/cryodaq/gui/theme.py` inventory (v2.0.0, 142 exported uppercase constants):
+From `src/cryodaq/gui/theme.py` inventory (v3.0.0, 142 exported uppercase constants):
 
 | Category | Count | File |
 |---|---:|---|
@@ -260,6 +276,11 @@ From `src/cryodaq/gui/theme.py` inventory (v2.0.0, 142 exported uppercase consta
 
 ## Changelog
 
+- 2026-07-14: Released v3.0.0: made informative and intentionally beautiful
+  composition jointly mandatory across the complete GUI corpus, and explicitly
+  rejected generic LabVIEW-style dashboard assembly. Safety truth, legibility,
+  provenance, freshness, uncertainty, and the next safe action retain
+  precedence over aesthetics.
 - 2026-07-14: Released v2.0.0 for the breaking descriptor-qualified
   `InstrumentsPanel` ingress contract; tokens and visual anatomy are unchanged.
 - 2026-07-11: Added the F36 snapshot and Primary Operator Display entry points;

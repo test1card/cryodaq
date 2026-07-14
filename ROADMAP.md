@@ -1,6 +1,6 @@
 # CryoDAQ — Feature Roadmap
 
-> **Living document.** Updated 2026-07-13 for the software-side pre-lab
+> **Living document.** Updated 2026-07-14 for the software-side pre-lab
 > readiness campaign. `CHANGELOG.md`
 > is the authoritative shipped-history record; this file is only the forward
 > feature map.
@@ -12,6 +12,34 @@
 > extension contracts, and F36 operator-centered product/fleet readiness.
 > Physical gates remain governed by `docs/lab_verification_checklist.md` and
 > cannot be closed by simulation.
+
+---
+
+## GUI design-system gate
+
+Every GUI/UI/UX change in every roadmap feature, not only F36, must be both
+informative and intentionally beautiful, and must treat
+`docs/design-system/` as a co-versioned acceptance contract. Before authoring,
+the slice identifies and reads the applicable tokens, rules, components,
+patterns, accessibility, performance, and governance specifications. The code
+must use canonical tokens/components, Russian operator wording, keyboard and
+focus behavior, non-color state cues, explicit stale/disconnected truth, and
+the documented frame/startup/memory budgets. A generic LabVIEW-style grid of
+default-looking controls or equally weighted boxes fails this gate even when it
+is functionally complete; visual hierarchy, proportion, spacing rhythm,
+typography, restraint, and a recognisable CryoDAQ identity are required.
+The complete existing GUI corpus is in scope: previously token-compliant
+generic surfaces are not grandfathered. Each touched surface migrates in its
+reviewed slice, and the untouched remainder stays in the canonical enumerated
+`docs/design-system/GUI_MIGRATION_INVENTORY.md` backlog under design-system
+v3.0.0 rather than being silently called complete.
+
+If reachable production behavior shows that a design-system rule is stale,
+the same reviewed slice corrects the canonical rule and its examples/tests;
+when a reusable token, component, pattern, or state semantic changes, the slice
+also updates design-system versioning and changelog evidence. Legacy GUI code
+is not authority for new presentation behavior. A functional test pass or
+screenshot alone cannot satisfy this gate.
 
 ---
 
@@ -398,7 +426,8 @@ inputs produce stable manifests; capture works while the engine is degraded.
 
 ### F36.6 — Design-system and product-governance gate
 
-Every F36 UI slice must use `docs/design-system/` as a co-versioned contract.
+Every F36 UI slice, in addition to the roadmap-wide GUI gate above, must use
+`docs/design-system/` as a co-versioned contract.
 New or changed token/component/pattern/state semantics update the canonical
 specification, examples, accessibility/performance evidence, version, and
 changelog in the same slice. The industrial rule remains: quiet normal, loud
