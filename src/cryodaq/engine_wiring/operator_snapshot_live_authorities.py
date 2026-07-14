@@ -1,18 +1,23 @@
 """Fail-closed adapters from current live owners to F36 authority receipts.
 
-Only the experiment owner presently exposes a constant-time immutable cut.
-Safety lacks explicit verified-OFF/transition proof, and persistence lacks a
-coherent durable revision/pending/drop owner.  Those adapters therefore emit
-typed UNAVAILABLE receipts so the mandatory composer remains dark.
+The adapters in this module only project immutable, constant-time owner cuts.
+They perform no I/O and activate no producer, publisher, engine, or GUI path.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 from typing import Protocol
 
 from cryodaq.core.experiment import OperatorExperimentSnapshot
+from cryodaq.engine_wiring.experiment_recording_owner import (
+    ExperimentOperation,
+    ExperimentRecordingOwner,
+    ExperimentRecordingSnapshot,
+)
 from cryodaq.engine_wiring.operator_safety_snapshot import OperatorSafetySnapshot
 from cryodaq.engine_wiring.operator_snapshot_authorities import (
     AuthorityAvailability,
@@ -23,7 +28,19 @@ from cryodaq.engine_wiring.operator_snapshot_authorities import (
     ReadinessEvidence,
     SafetyReadinessReceipt,
 )
-from cryodaq.operator_snapshot import RecordingTruth
+from cryodaq.engine_wiring.persistence_authority_owner import (
+    PersistenceAuthorityOwner,
+    PersistenceAuthoritySnapshot,
+)
+from cryodaq.operator_snapshot import (
+    MAX_ID_UTF8_BYTES,
+    MAX_NONNEGATIVE_INT,
+    MAX_REASON_UTF8_BYTES,
+    AvailabilityTruth,
+    RecordingTruth,
+)
+
+_GENERATION_RE = re.compile(r"[0-9a-f]{32}")
 
 
 class _ExperimentOwner(Protocol):
@@ -47,6 +64,38 @@ def _unavailable(cut: CommonCut, reason: str) -> dict[str, object]:
         "availability": AuthorityAvailability.UNAVAILABLE,
         "unavailable_reason": reason,
     }
+
+
+def _exact_revision(value: object, *, minimum: int = 0) -> int:
+    if type(value) is not int or not minimum <= value <= MAX_NONNEGATIVE_INT:
+        raise ValueError("revision or count is outside the signed 63-bit contract")
+    return value
+
+
+def _exact_text(
+    value: object,
+    *,
+    limit: int = MAX_ID_UTF8_BYTES,
+    optional: bool = False,
+) -> str | None:
+    if optional and value is None:
+        return None
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError("owner snapshot identity must be exact non-empty text")
+    encoded = value.encode("utf-8")
+    if len(encoded) > limit or value != unicodedata.normalize("NFC", value):
+        raise ValueError("owner snapshot identity exceeds its bounded text contract")
+    if any(unicodedata.category(char).startswith("C") for char in value):
+        raise ValueError("owner snapshot identity contains forbidden control text")
+    return value
+
+
+def _generation_id(value: object) -> str:
+    generation = _exact_text(value)
+    assert generation is not None
+    if _GENERATION_RE.fullmatch(generation) is None:
+        raise ValueError("owner generation must be exact lowercase 128-bit hex")
+    return generation
 
 
 class LiveSafetyReadinessAuthority:
@@ -181,21 +230,175 @@ class LiveExperimentAuthority:
         return receipt
 
 
-class LiveIntegrityPersistenceAuthority:
-    """Deliberately dark until one persistence coordinator owns all counters."""
+class LiveRecordingExperimentAuthority:
+    """Project the recording owner's complete three-feed cut conservatively."""
 
-    __slots__ = ("__owner",)
+    __slots__ = ("__owner", "__last_revision", "__last_token")
 
-    def __init__(self, owner: object) -> None:
+    def __init__(self, owner: ExperimentRecordingOwner) -> None:
+        if type(owner) is not ExperimentRecordingOwner:
+            raise TypeError("owner must be an exact ExperimentRecordingOwner")
         self.__owner = owner
+        self.__last_revision = 0
+        self.__last_token: str | None = None
+
+    def snapshot_for_cut(self, cut: CommonCut) -> ExperimentReceipt:
+        try:
+            snapshot = self.__owner.snapshot()
+            if type(snapshot) is not ExperimentRecordingSnapshot:
+                raise TypeError("wrong recording snapshot type")
+            revision = _exact_revision(snapshot.revision, minimum=1)
+            feed_revisions = (
+                _exact_revision(snapshot.experiment_revision, minimum=1),
+                _exact_revision(snapshot.acquisition_revision, minimum=1),
+                _exact_revision(snapshot.persistence_revision, minimum=1),
+            )
+            _exact_text(snapshot.owner_id)
+            generation_id = _generation_id(snapshot.generation_id)
+            _exact_text(snapshot.acquisition_epoch_id, optional=True)
+            _exact_text(snapshot.persistence_epoch_id, optional=True)
+            _exact_text(snapshot.reason, limit=MAX_REASON_UTF8_BYTES)
+            if type(snapshot.experiment_operation) is not ExperimentOperation:
+                raise TypeError("wrong experiment operation type")
+            if type(snapshot.recording) is not RecordingTruth:
+                raise TypeError("wrong recording truth type")
+            if snapshot.experiment_operation is ExperimentOperation.ACTIVE:
+                _exact_text(snapshot.experiment_id)
+                _exact_text(snapshot.experiment_name)
+                _exact_text(snapshot.phase, optional=True)
+            elif any(value is not None for value in (snapshot.experiment_id, snapshot.experiment_name, snapshot.phase)):
+                raise ValueError("inactive experiment snapshot carries identity")
+            if snapshot.experiment_operation is ExperimentOperation.UNAVAILABLE:
+                raise ValueError("experiment operation is unavailable")
+            if snapshot.recording is RecordingTruth.RECORDING:
+                if (
+                    snapshot.experiment_operation is not ExperimentOperation.ACTIVE
+                    or snapshot.acquisition_epoch_id is None
+                    or snapshot.persistence_epoch_id is None
+                ):
+                    raise ValueError("recording lacks active experiment/acquisition/persistence proof")
+                session_id = _exact_text(snapshot.recording_session_id)
+                assert session_id is not None
+                prefix = f"recording-v1:{generation_id}:"
+                if not session_id.startswith(prefix):
+                    raise ValueError("recording session does not belong to the owner generation")
+                counter = session_id.removeprefix(prefix)
+                if re.fullmatch(r"[1-9a-f][0-9a-f]*", counter) is None or int(counter, 16) > MAX_NONNEGATIVE_INT:
+                    raise ValueError("recording session counter is invalid")
+            elif snapshot.recording_session_id is not None:
+                raise ValueError("non-recording snapshot carries a recording session")
+            payload = json.dumps(
+                [
+                    snapshot.owner_id,
+                    snapshot.generation_id,
+                    *feed_revisions,
+                    snapshot.acquisition_epoch_id,
+                    snapshot.persistence_epoch_id,
+                    snapshot.experiment_operation.value,
+                    snapshot.experiment_id,
+                    snapshot.experiment_name,
+                    snapshot.phase,
+                    snapshot.recording.value,
+                    snapshot.recording_session_id,
+                    snapshot.reason,
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            token = _token(revision, "experiment-recording", payload)
+            if revision < self.__last_revision or (revision == self.__last_revision and token != self.__last_token):
+                raise ValueError("recording revision regressed or equivocated")
+            receipt = ExperimentReceipt(
+                cut=cut,
+                revision=revision,
+                token=token,
+                availability=AuthorityAvailability.AVAILABLE,
+                experiment_id=snapshot.experiment_id,
+                experiment_name=snapshot.experiment_name,
+                phase=snapshot.phase,
+                recording=snapshot.recording,
+                recording_session_id=snapshot.recording_session_id,
+            )
+        except Exception:
+            return ExperimentReceipt(**_unavailable(cut, "experiment_recording_cut_unavailable"))
+        self.__last_revision = revision
+        self.__last_token = token
+        return receipt
+
+
+class LiveIntegrityPersistenceAuthority:
+    """Project the persistence owner's coherent receipt/counter cut."""
+
+    __slots__ = ("__owner", "__last_revision", "__last_token")
+
+    def __init__(self, owner: PersistenceAuthorityOwner) -> None:
+        if type(owner) is not PersistenceAuthorityOwner:
+            raise TypeError("owner must be an exact PersistenceAuthorityOwner")
+        self.__owner = owner
+        self.__last_revision = 0
+        self.__last_token: str | None = None
 
     def snapshot_for_cut(self, cut: CommonCut) -> IntegrityPersistenceReceipt:
-        _ = self.__owner
-        return IntegrityPersistenceReceipt(**_unavailable(cut, "persistence_coherent_cut_unavailable"))
+        try:
+            snapshot = self.__owner.snapshot()
+            if type(snapshot) is not PersistenceAuthoritySnapshot:
+                raise TypeError("wrong persistence snapshot type")
+            revision = _exact_revision(snapshot.revision, minimum=1)
+            receipt_revision = _exact_revision(snapshot.receipt_revision, minimum=1)
+            if revision > receipt_revision:
+                raise ValueError("persistence owner revision exceeds receipt sequence")
+            _exact_text(snapshot.owner_id)
+            _generation_id(snapshot.generation_id)
+            _exact_text(snapshot.recording_epoch_id)
+            _exact_text(snapshot.reason, limit=MAX_REASON_UTF8_BYTES)
+            persisted_revision = _exact_revision(snapshot.committed_materialization_revision)
+            archive_revision = (
+                None if snapshot.archive_revision is None else _exact_revision(snapshot.archive_revision, minimum=1)
+            )
+            pending_records = _exact_revision(snapshot.pending_count)
+            dropped_records = _exact_revision(snapshot.dropped_or_rejected_count)
+            if type(snapshot.storage) is not AvailabilityTruth:
+                raise TypeError("wrong persistence storage truth type")
+            payload = json.dumps(
+                [
+                    snapshot.owner_id,
+                    snapshot.generation_id,
+                    receipt_revision,
+                    snapshot.recording_epoch_id,
+                    persisted_revision,
+                    archive_revision,
+                    pending_records,
+                    dropped_records,
+                    snapshot.storage.value,
+                    snapshot.reason,
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            token = _token(revision, "integrity-persistence", payload)
+            if revision < self.__last_revision or (revision == self.__last_revision and token != self.__last_token):
+                raise ValueError("persistence revision regressed or equivocated")
+            receipt = IntegrityPersistenceReceipt(
+                cut=cut,
+                revision=revision,
+                token=token,
+                availability=AuthorityAvailability.AVAILABLE,
+                persisted_revision=persisted_revision,
+                archive_revision=archive_revision,
+                pending_records=pending_records,
+                dropped_records=dropped_records,
+                storage=snapshot.storage,
+            )
+        except Exception:
+            return IntegrityPersistenceReceipt(**_unavailable(cut, "persistence_coherent_cut_unavailable"))
+        self.__last_revision = revision
+        self.__last_token = token
+        return receipt
 
 
 __all__ = [
     "LiveExperimentAuthority",
     "LiveIntegrityPersistenceAuthority",
+    "LiveRecordingExperimentAuthority",
     "LiveSafetyReadinessAuthority",
 ]

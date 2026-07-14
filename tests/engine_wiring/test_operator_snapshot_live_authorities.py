@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,6 +9,13 @@ import pytest
 import yaml
 
 from cryodaq.core.experiment import ExperimentManager, OperatorExperimentSnapshot
+from cryodaq.engine_wiring.experiment_recording_owner import (
+    AcquisitionLifecycle,
+    ExperimentOperation,
+    ExperimentRecordingOwner,
+    PersistenceLifecycle,
+    RecordingFeedAuthority,
+)
 from cryodaq.engine_wiring.operator_snapshot_authorities import (
     AuthorityAvailability,
     CommonCut,
@@ -15,9 +23,15 @@ from cryodaq.engine_wiring.operator_snapshot_authorities import (
 from cryodaq.engine_wiring.operator_snapshot_live_authorities import (
     LiveExperimentAuthority,
     LiveIntegrityPersistenceAuthority,
+    LiveRecordingExperimentAuthority,
     LiveSafetyReadinessAuthority,
 )
-from cryodaq.operator_snapshot import RecordingTruth
+from cryodaq.engine_wiring.persistence_authority_owner import (
+    PersistenceAuthorityOwner,
+    PersistenceOutcomeAuthority,
+    PersistenceOwnerLifecycle,
+)
+from cryodaq.operator_snapshot import MAX_NONNEGATIVE_INT, AvailabilityTruth, RecordingTruth
 
 NOW = datetime(2026, 7, 12, 5, 0, tzinfo=UTC)
 CUT = CommonCut(1, f"cut-v1:1:{'a' * 64}", NOW)
@@ -200,10 +214,6 @@ def test_non_utf8_experiment_identity_is_typed_unavailable() -> None:
             LiveSafetyReadinessAuthority(object()),
             "safety_verified_off_cut_unavailable",
         ),
-        (
-            LiveIntegrityPersistenceAuthority(object()),
-            "persistence_coherent_cut_unavailable",
-        ),
     ],
 )
 def test_unproved_mandatory_owner_never_becomes_available(
@@ -224,11 +234,289 @@ def test_integrity_does_not_treat_broker_delivery_stats_as_persistence_truth() -
         }
         is_disk_full = False
 
-    receipt = LiveIntegrityPersistenceAuthority(ForgedOwner()).snapshot_for_cut(CUT)
+    with pytest.raises(TypeError, match="exact PersistenceAuthorityOwner"):
+        LiveIntegrityPersistenceAuthority(ForgedOwner())  # type: ignore[arg-type]
+
+
+def _recording_owner() -> tuple[ExperimentRecordingOwner, RecordingFeedAuthority]:
+    authority = RecordingFeedAuthority("recording-feed", b"r" * 32)
+    return ExperimentRecordingOwner("recording-owner", authority.generation_id, authority), authority
+
+
+def _initialize_recording_owner(
+    owner: ExperimentRecordingOwner,
+    authority: RecordingFeedAuthority,
+) -> None:
+    owner.feed_experiment(
+        authority.experiment(
+            1,
+            "operation-1",
+            ExperimentOperation.ACTIVE,
+            "experiment-1",
+            "Cooldown",
+            "cooldown",
+        )
+    )
+    owner.feed_acquisition(authority.acquisition(1, AcquisitionLifecycle.RUNNING, "acquisition-1"))
+    owner.feed_persistence(authority.persistence(1, PersistenceLifecycle.LOSSLESS, "persistence-1"))
+
+
+def _persistence_owner() -> tuple[PersistenceAuthorityOwner, PersistenceOutcomeAuthority]:
+    authority = PersistenceOutcomeAuthority("persistence-feed", b"p" * 32)
+    return PersistenceAuthorityOwner("persistence-owner", authority.generation_id, authority), authority
+
+
+def test_live_owner_projections_require_exact_owner_types() -> None:
+    with pytest.raises(TypeError, match="exact ExperimentRecordingOwner"):
+        LiveRecordingExperimentAuthority(object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="exact PersistenceAuthorityOwner"):
+        LiveIntegrityPersistenceAuthority(object())  # type: ignore[arg-type]
+
+
+def test_recording_projection_stays_unavailable_until_all_three_feeds_exist() -> None:
+    owner, authority = _recording_owner()
+    adapter = LiveRecordingExperimentAuthority(owner)
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+
+    owner.feed_experiment(
+        authority.experiment(
+            1,
+            "operation-1",
+            ExperimentOperation.ACTIVE,
+            "experiment-1",
+            "Cooldown",
+        )
+    )
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+    owner.feed_acquisition(authority.acquisition(1, AcquisitionLifecycle.RUNNING, "acquisition-1"))
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+
+    owner.feed_persistence(authority.persistence(1, PersistenceLifecycle.LOSSLESS, "persistence-1"))
+    receipt = adapter.snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.recording is RecordingTruth.NOT_RECORDING
+    assert receipt.experiment_id == "experiment-1"
+
+
+def test_recording_projection_publishes_only_owner_issued_recording_session() -> None:
+    owner, authority = _recording_owner()
+    _initialize_recording_owner(owner, authority)
+    assert owner.begin_recording_epoch() is True
+
+    receipt = LiveRecordingExperimentAuthority(owner).snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.recording is RecordingTruth.RECORDING
+    assert receipt.recording_session_id == owner.snapshot().recording_session_id
+    assert receipt.experiment_id == "experiment-1"
+    assert receipt.phase == "cooldown"
+
+
+def test_recording_projection_accepts_independent_noncontiguous_feed_revisions() -> None:
+    owner, authority = _recording_owner()
+    owner.feed_experiment(
+        authority.experiment(
+            100,
+            "operation-100",
+            ExperimentOperation.ACTIVE,
+            "experiment-1",
+            "Cooldown",
+        )
+    )
+    owner.feed_acquisition(authority.acquisition(200, AcquisitionLifecycle.RUNNING, "acquisition-1"))
+    owner.feed_persistence(authority.persistence(300, PersistenceLifecycle.LOSSLESS, "persistence-1"))
+    assert owner.snapshot().revision == 3
+
+    receipt = LiveRecordingExperimentAuthority(owner).snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.revision == 3
+    assert receipt.recording is RecordingTruth.NOT_RECORDING
+
+
+def test_recording_projection_remains_available_but_not_recording_after_proven_loss() -> None:
+    owner, authority = _recording_owner()
+    _initialize_recording_owner(owner, authority)
+    assert owner.begin_recording_epoch() is True
+    adapter = LiveRecordingExperimentAuthority(owner)
+    assert adapter.snapshot_for_cut(CUT).recording is RecordingTruth.RECORDING
+
+    owner.feed_persistence(authority.persistence(2, PersistenceLifecycle.LOSS))
+    receipt = adapter.snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.recording is RecordingTruth.NOT_RECORDING
+    assert receipt.recording_session_id is None
+
+
+def test_recording_projection_rejects_session_not_bound_to_owner_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner, authority = _recording_owner()
+    _initialize_recording_owner(owner, authority)
+    assert owner.begin_recording_epoch() is True
+    monkeypatch.setattr(
+        owner,
+        "_ExperimentRecordingOwner__snapshot",
+        replace(owner.snapshot(), recording_session_id=f"recording-v1:{'0' * 32}:1"),
+    )
+    receipt = LiveRecordingExperimentAuthority(owner).snapshot_for_cut(CUT)
     assert receipt.availability is AuthorityAvailability.UNAVAILABLE
+    assert receipt.recording is RecordingTruth.UNKNOWN
+
+
+def test_recording_projection_rejects_regression_and_same_revision_equivocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner, authority = _recording_owner()
+    _initialize_recording_owner(owner, authority)
+    adapter = LiveRecordingExperimentAuthority(owner)
+    accepted = adapter.snapshot_for_cut(CUT)
+    assert adapter.snapshot_for_cut(CUT).token == accepted.token
+    snapshot = owner.snapshot()
+
+    monkeypatch.setattr(
+        owner,
+        "_ExperimentRecordingOwner__snapshot",
+        replace(snapshot, phase="measurement"),
+    )
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+    monkeypatch.setattr(
+        owner,
+        "_ExperimentRecordingOwner__snapshot",
+        replace(snapshot, revision=snapshot.revision - 1),
+    )
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"revision": True},
+        {"experiment_revision": 0},
+        {"recording": "recording"},
+        {"recording_session_id": "forged-session"},
+        {"owner_id": " hostile "},
+        {"owner_id": "x" * 300},
+        {"reason": "bad\nreason"},
+    ],
+)
+def test_recording_projection_rejects_corrupt_exact_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: dict[str, object],
+) -> None:
+    owner, authority = _recording_owner()
+    _initialize_recording_owner(owner, authority)
+    monkeypatch.setattr(
+        owner,
+        "_ExperimentRecordingOwner__snapshot",
+        replace(owner.snapshot(), **mutation),
+    )
+    receipt = LiveRecordingExperimentAuthority(owner).snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.UNAVAILABLE
+    assert receipt.recording is RecordingTruth.UNKNOWN
+
+
+def test_persistence_projection_is_cold_until_lifecycle_receipt_then_preserves_unknown_storage() -> None:
+    owner, authority = _persistence_owner()
+    adapter = LiveIntegrityPersistenceAuthority(owner)
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+
+    owner.feed(authority.lifecycle(1, "epoch-1", PersistenceOwnerLifecycle.STARTED))
+    receipt = adapter.snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.storage is AvailabilityTruth.UNKNOWN
+    assert receipt.persisted_revision == 0
+    assert receipt.pending_records == 0
+    assert receipt.dropped_records == 0
+
+
+def test_persistence_projection_maps_owner_counters_and_storage_without_inference() -> None:
+    owner, authority = _persistence_owner()
+    owner.feed(authority.lifecycle(1, "epoch-1", PersistenceOwnerLifecycle.STARTED))
+    owner.feed(authority.durable_append(2, "epoch-1", "append-1", "sqlite-1", 3))
+    owner.feed(
+        authority.materialized(
+            3,
+            "epoch-1",
+            "append-1",
+            "sqlite-1",
+            7,
+            3,
+            append_revision=2,
+        )
+    )
+    receipt = LiveIntegrityPersistenceAuthority(owner).snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.storage is AvailabilityTruth.AVAILABLE
+    assert receipt.persisted_revision == 7
+    assert receipt.pending_records == 3
+    assert receipt.dropped_records == 0
+
+
+def test_storage_unavailable_is_available_authority_evidence() -> None:
+    owner, authority = _persistence_owner()
+    owner.feed(authority.lifecycle(1, "epoch-1", PersistenceOwnerLifecycle.STARTED))
+    owner.feed(authority.lifecycle(2, "epoch-1", PersistenceOwnerLifecycle.STOPPED))
+    receipt = LiveIntegrityPersistenceAuthority(owner).snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.storage is AvailabilityTruth.UNAVAILABLE
+    assert receipt.persisted_revision == 0
+    assert receipt.pending_records == 0
+
+
+def test_persistence_projection_rejects_regression_and_same_revision_equivocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner, authority = _persistence_owner()
+    owner.feed(authority.lifecycle(1, "epoch-1", PersistenceOwnerLifecycle.STARTED))
+    adapter = LiveIntegrityPersistenceAuthority(owner)
+    accepted = adapter.snapshot_for_cut(CUT)
+    assert adapter.snapshot_for_cut(CUT).token == accepted.token
+    snapshot = owner.snapshot()
+
+    monkeypatch.setattr(
+        owner,
+        "_PersistenceAuthorityOwner__snapshot",
+        replace(snapshot, storage=AvailabilityTruth.UNAVAILABLE),
+    )
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+    monkeypatch.setattr(
+        owner,
+        "_PersistenceAuthorityOwner__snapshot",
+        replace(snapshot, revision=0),
+    )
+    assert adapter.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"revision": True},
+        {"receipt_revision": 0},
+        {"pending_count": -1},
+        {"pending_count": MAX_NONNEGATIVE_INT + 1},
+        {"dropped_or_rejected_count": True},
+        {"committed_materialization_revision": -1},
+        {"archive_revision": 0},
+        {"storage": "available"},
+        {"recording_epoch_id": " hostile "},
+        {"recording_epoch_id": "x" * 300},
+        {"reason": "bad\nreason"},
+    ],
+)
+def test_persistence_projection_rejects_corrupt_counts_and_types(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: dict[str, object],
+) -> None:
+    owner, authority = _persistence_owner()
+    owner.feed(authority.lifecycle(1, "epoch-1", PersistenceOwnerLifecycle.STARTED))
+    monkeypatch.setattr(
+        owner,
+        "_PersistenceAuthorityOwner__snapshot",
+        replace(owner.snapshot(), **mutation),
+    )
+    receipt = LiveIntegrityPersistenceAuthority(owner).snapshot_for_cut(CUT)
+    assert receipt.availability is AuthorityAvailability.UNAVAILABLE
+    assert receipt.storage is AvailabilityTruth.UNKNOWN
     assert receipt.persisted_revision is None
-    assert receipt.pending_records is None
-    assert receipt.dropped_records is None
 
 
 def test_live_authority_module_has_no_gui_replay_driver_or_command_imports() -> None:
