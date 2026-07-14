@@ -356,7 +356,7 @@ def _check_deadline(deadline: float) -> None:
 
 
 def _png_dimensions(path: Path) -> tuple[int, int]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     before = path.lstat()
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise PeriodicInputError("renderer PNG is not a regular single-link file")

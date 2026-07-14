@@ -17,6 +17,10 @@ class _AccessDenied(Exception):
     pass
 
 
+class _ZombieProcess(_NoSuchProcess):
+    pass
+
+
 class _TimeoutExpired(Exception):
     pass
 
@@ -66,6 +70,7 @@ class _FakeProcess:
 class _FakePsutil:
     __version__ = "7.2.2"
     NoSuchProcess = _NoSuchProcess
+    ZombieProcess = _ZombieProcess
     AccessDenied = _AccessDenied
     TimeoutExpired = _TimeoutExpired
     STATUS_ZOMBIE = "zombie"
@@ -97,6 +102,56 @@ class _FakePsutil:
         )
         self.processes[pid] = process
         return process
+
+
+@pytest.mark.parametrize("vanished", [_NoSuchProcess, _ZombieProcess])
+def test_descendant_scan_ignores_only_children_that_exit_during_identity_capture(vanished) -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
+
+    def vanished_create_time() -> float:
+        raise vanished(21)
+
+    child.create_time = vanished_create_time  # type: ignore[method-assign]
+    leader.children = lambda *, recursive: [child]  # type: ignore[attr-defined]
+    observer = runner._LockedPsutilObserver(module)
+
+    assert observer.descendants(observer.identity_for_pid(20)) == ()
+
+
+def test_descendant_scan_keeps_access_denial_fail_closed() -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
+
+    def denied_create_time() -> float:
+        raise module.AccessDenied(21)
+
+    child.create_time = denied_create_time  # type: ignore[method-assign]
+    leader.children = lambda *, recursive: [child]  # type: ignore[attr-defined]
+    observer = runner._LockedPsutilObserver(module)
+
+    with pytest.raises(runner._RunnerFoundationError, match="identity is unavailable") as captured:
+        observer.descendants(observer.identity_for_pid(20))
+    assert isinstance(captured.value.__cause__, module.AccessDenied)
+
+
+def test_descendant_scan_settles_child_that_becomes_zombie_after_enumeration() -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    child = _FakeProcess(
+        module,
+        21,
+        created=124.0,
+        parent=20,
+        argv=("python", "child.py"),
+        status=module.STATUS_ZOMBIE,
+    )
+    leader.children = lambda *, recursive: [child]  # type: ignore[attr-defined]
+    observer = runner._LockedPsutilObserver(module)
+
+    assert observer.descendants(observer.identity_for_pid(20)) == ()
 
 
 def test_locked_observer_binds_exact_assistant_identity_signals_and_settles() -> None:

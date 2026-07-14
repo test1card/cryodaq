@@ -660,12 +660,17 @@ def test_input_path_rejects_symlink_and_hardlink(tmp_path: Path) -> None:
     path.parent.mkdir(parents=True)
     target = tmp_path / "target"
     target.write_text("{}", encoding="utf-8")
-    path.symlink_to(target)
     from cryodaq.reporting.periodic_input import read_periodic_input_file
 
-    with pytest.raises(PeriodicInputError):
-        read_periodic_input_file(path, expected_max_input_bytes=65_536)
-    path.unlink()
+    try:
+        path.symlink_to(target)
+    except OSError as exc:
+        if os.name != "nt" or exc.winerror != 1314:
+            raise
+    else:
+        with pytest.raises(PeriodicInputError):
+            read_periodic_input_file(path, expected_max_input_bytes=65_536)
+        path.unlink()
     try:
         os.link(target, path)
     except OSError as exc:
@@ -680,15 +685,21 @@ def test_protocol_directory_creation_is_owner_only_and_rejects_links(tmp_path: P
     input_path = write_periodic_input_file(
         tmp_path / "safe", _payload(), expected_max_input_bytes=65_536
     )
-    assert input_path.parent.stat().st_mode & 0o077 == 0
-    assert input_path.parent.parent.stat().st_mode & 0o077 == 0
+    if os.name == "posix":
+        assert input_path.parent.stat().st_mode & 0o077 == 0
+        assert input_path.parent.parent.stat().st_mode & 0o077 == 0
 
     hostile = tmp_path / "hostile"
     reporting = hostile / "reporting"
     reporting.mkdir(parents=True)
     target = tmp_path / "outside"
     target.mkdir()
-    (reporting / "periodic").symlink_to(target, target_is_directory=True)
+    try:
+        (reporting / "periodic").symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
     with pytest.raises(ReportProcessError, match="unsafe"):
         periodic_failure_result_path(hostile, GENERATION)
     assert list(target.iterdir()) == []
@@ -701,7 +712,12 @@ def test_escaping_render_lock_parent_is_bounded_protocol_failure(tmp_path: Path)
     write_periodic_input_file(tmp_path, _payload(), expected_max_input_bytes=65_536)
     outside = tmp_path.parent / f"{tmp_path.name}-outside-locks"
     outside.mkdir()
-    (tmp_path / ".report-locks").symlink_to(outside, target_is_directory=True)
+    try:
+        (tmp_path / ".report-locks").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
     args = SimpleNamespace(
         generation_id=GENERATION,
         deadline_epoch=str(time.time() + 20),
@@ -721,7 +737,12 @@ def test_contained_symlink_render_lock_parent_is_also_protocol_failure(
     write_periodic_input_file(tmp_path, _payload(), expected_max_input_bytes=65_536)
     contained = tmp_path / "contained-locks"
     contained.mkdir()
-    (tmp_path / ".report-locks").symlink_to(contained, target_is_directory=True)
+    try:
+        (tmp_path / ".report-locks").symlink_to(contained, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
     args = SimpleNamespace(
         generation_id=GENERATION,
         deadline_epoch=str(time.time() + 20),
@@ -865,7 +886,8 @@ def test_failure_side_result_is_atomically_published_by_replace(
     first = side.read_bytes()
     assert observed["final_absent"] is True
     assert observed["temporary"] == first
-    assert observed["mode"] == 0o600
+    if os.name == "posix":
+        assert observed["mode"] == 0o600
     assert read_periodic_result_file(side, require_success=False)["ok"] is False
     assert not side.with_name(f".{side.name}.tmp").exists()
 

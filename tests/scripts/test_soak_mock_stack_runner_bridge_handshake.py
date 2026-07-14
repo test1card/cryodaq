@@ -49,6 +49,7 @@ def test_parser_rejects_missing_duplicate_late_nonce_parent_and_restart() -> Non
             )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="bridge handshake pipe is POSIX-only")
 def test_runner_pipe_owns_exact_inherited_write_end_and_cleans_once(monkeypatch) -> None:
     monkeypatch.setattr(runner.secrets, "token_hex", lambda size: "d" * (size * 2))
     pipe = runner._BridgeHandshakePipe.create()
@@ -71,6 +72,13 @@ def test_runner_pipe_owns_exact_inherited_write_end_and_cleans_once(monkeypatch)
     finally:
         pipe.close()
         pipe.close()
+
+
+@pytest.mark.skipif(os.name == "posix", reason="Windows fail-closed contract")
+def test_windows_rejects_bridge_handshake_pipe_before_allocation(monkeypatch) -> None:
+    monkeypatch.setattr(runner.os, "pipe", lambda: pytest.fail("POSIX pipe allocation was attempted"))
+    with pytest.raises(runner._RunnerActivationDisabled, match="bridge handshake pipe is POSIX-only"):
+        runner._BridgeHandshakePipe.create()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="pass_fds is POSIX-only")

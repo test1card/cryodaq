@@ -578,3 +578,30 @@ worktree after D7.1 is settled.
   remaining channel-name inference removal, generic instrument presentation,
   and acquisition-to-health-display end-to-end evidence remain open. No
   physical or frozen-build gate is closed by this slice.
+
+## 2026-07-14 second hosted CI adjudication
+
+- Exact-SHA run `29299230850` at `ccce8a7` passed Windows/Ubuntu GUI and Ubuntu
+  core, then exposed three later-suite boundaries after 1,000+ tests per shard:
+  a short-lived Ubuntu exact-six descendant became a zombie between enumeration
+  and identity capture; a Windows test invoked the deliberately POSIX-only
+  inherited bridge-handshake pipe; and Windows text-mode PNG header reading
+  translated the PNG signature and failed the real report subprocess protocol.
+- Descendant settlement now treats only typed already-exited zombies and
+  `NoSuchProcess` causes as gone. Invalid timestamps, access denial, PID reuse,
+  unknown observation errors, leader continuity, and exact signaling remain
+  fail-closed. The bridge lifecycle test is POSIX-only and Windows proves typed
+  rejection before pipe allocation; pure parsers and identity guards still run
+  on both hosts.
+- PNG validation now adds the Windows `O_BINARY` flag while retaining no-follow,
+  lstat/fstat identity fences, regular/single-link checks, bounded 24-byte read,
+  and post-read verification. The genuine Windows report subprocess test stays
+  enabled and passes. Symlink security tests skip only WinError 1314 when the
+  account lacks creation privilege; hardlink rejection still executes, and
+  POSIX mode bits are not misrepresented as Windows ACL evidence.
+- Native Windows evidence: H4 process/bridge panel **16 passed, 2 POSIX skips**;
+  periodic child/renderer panel **71 passed, 3 symlink-privilege skips**. Ruff
+  and diff checks passed. Independent H4 and Windows failure-surface reviews:
+  **PASS, no P0-P3** after repair. A new exact-SHA Windows/Ubuntu run remains
+  required; physical, frozen-build, soak-duration, and hardware gates remain
+  open.

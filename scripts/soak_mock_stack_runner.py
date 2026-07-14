@@ -131,6 +131,10 @@ class _RunnerFoundationError(ValueError):
     """Pure validation failed; this never represents production authority."""
 
 
+class _ObservedProcessGone(_RunnerFoundationError):
+    """An enumerated descendant exited before its identity could settle."""
+
+
 class _RunnerActivationDisabled(RuntimeError):
     """Production orchestration remains fused off until R2/R3 integration."""
 
@@ -449,8 +453,10 @@ class _LockedPsutilObserver:
             status = process.status()
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
             raise _RunnerFoundationError("process start identity is unavailable") from exc
-        if not math.isfinite(created) or created <= 0 or (status == self._psutil.STATUS_ZOMBIE and not allow_zombie):
+        if not math.isfinite(created) or created <= 0:
             raise _RunnerFoundationError("process start identity is not live")
+        if status == self._psutil.STATUS_ZOMBIE and not allow_zombie:
+            raise _ObservedProcessGone("process start identity is not live")
         started_ns = int(round(created * 1_000_000_000))
         return _ProcessIdentity(process.pid, f"psutil-{_LOCKED_PSUTIL_VERSION}:ctime-ns={started_ns}")
 
@@ -493,7 +499,17 @@ class _LockedPsutilObserver:
             raise _RunnerFoundationError("owned descendant scan is unavailable") from exc
         if len(children) > 128:
             raise _RunnerFoundationError("owned descendant count exceeds the reviewed bound")
-        return tuple(sorted((self._identity(child) for child in children), key=lambda item: item.pid))
+        identities: list[_ProcessIdentity] = []
+        for child in children:
+            try:
+                identities.append(self._identity(child))
+            except _ObservedProcessGone:
+                continue
+            except _RunnerFoundationError as exc:
+                if isinstance(exc.__cause__, self._psutil.NoSuchProcess):
+                    continue
+                raise
+        return tuple(sorted(identities, key=lambda item: item.pid))
 
     def signal_exact_for_cleanup(self, identity: _ProcessIdentity, signum: int) -> None:
         allowed = {signal.SIGTERM, getattr(signal, "SIGKILL", 9)}
