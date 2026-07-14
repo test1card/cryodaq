@@ -18,6 +18,7 @@ import functools
 import logging
 import math
 import os
+import secrets
 import signal
 import sys
 import time
@@ -92,6 +93,7 @@ from cryodaq.drivers.registry import (
     construct_driver,
     validate_instrument_entries,
 )
+from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
 from cryodaq.engine_wiring.runtime_tasks import (
     _alarm_ring_buffer_loop,
     _alarm_v2_feed_loop,
@@ -1967,6 +1969,113 @@ class EngineCommandContext:
     escalation_service: Any = None
     cooldown_service: Any = None
     zmq_publisher: ZMQPublisher | None = None
+    recording_lifecycle_feed: RecordingLifecycleFeed | None = None
+
+
+def _feed_recording_experiment_lifecycle(
+    context: EngineCommandContext,
+    action: str,
+    result: dict[str, Any],
+) -> None:
+    """Reflect an already-committed experiment result into the dark feed."""
+
+    feed = context.recording_lifecycle_feed
+    if feed is None:
+        return
+    try:
+        snapshot = context.experiment_manager.snapshot_operator_experiment()
+        if action in {"experiment_finalize", "experiment_stop", "experiment_abort"}:
+            experiment_id = result.get("experiment", {}).get("experiment_id")
+            if type(experiment_id) is not str or not experiment_id or snapshot.experiment_id is not None:
+                raise ValueError("terminal experiment result does not match inactive manager truth")
+            if action == "experiment_abort":
+                feed.experiment_aborted(snapshot.revision, experiment_id)
+            else:
+                feed.experiment_finalized(snapshot.revision, experiment_id)
+            return
+
+        result_experiment = result.get("experiment") or result.get("active_experiment")
+        result_id = (
+            snapshot.experiment_id
+            if action == "experiment_advance_phase"
+            else (result_experiment or {}).get("experiment_id")
+        )
+        if (
+            type(result_id) is not str
+            or result_id != snapshot.experiment_id
+            or type(snapshot.experiment_name) is not str
+        ):
+            raise ValueError("active experiment result does not match manager truth")
+        feed.experiment_active(
+            snapshot.revision,
+            result_id,
+            snapshot.experiment_name,
+            snapshot.phase,
+        )
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning("Recording lifecycle feed unavailable after %s: %s", action, exc, exc_info=True)
+
+
+def _seed_recording_lifecycle(
+    feed: RecordingLifecycleFeed,
+    experiment_manager: ExperimentManager,
+) -> None:
+    snapshot = experiment_manager.snapshot_operator_experiment()
+    if snapshot.experiment_id is None:
+        feed.experiment_inactive(snapshot.revision)
+    elif type(snapshot.experiment_name) is str:
+        feed.experiment_active(
+            snapshot.revision,
+            snapshot.experiment_id,
+            snapshot.experiment_name,
+            snapshot.phase,
+        )
+    else:
+        raise ValueError("active experiment snapshot has no exact name")
+
+
+async def _start_scheduler_with_recording_feed(
+    scheduler: Scheduler,
+    feed: RecordingLifecycleFeed,
+    sequence: int,
+) -> int:
+    try:
+        await scheduler.start()
+    except BaseException:
+        sequence += 1
+        try:
+            feed.acquisition_unavailable(sequence)
+        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+            logger.warning("Recording acquisition feed unavailable after scheduler failure: %s", exc, exc_info=True)
+        raise
+    sequence += 1
+    try:
+        feed.acquisition_running(sequence, secrets.token_hex(16))
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning("Recording acquisition feed unavailable after scheduler start: %s", exc, exc_info=True)
+    return sequence
+
+
+async def _stop_scheduler_with_recording_feed(
+    scheduler: Scheduler,
+    feed: RecordingLifecycleFeed,
+    sequence: int,
+) -> int:
+    try:
+        await scheduler.stop()
+    except BaseException:
+        sequence += 1
+        try:
+            feed.acquisition_unavailable(sequence)
+        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+            logger.warning("Recording acquisition feed unavailable after scheduler failure: %s", exc, exc_info=True)
+        raise
+    sequence += 1
+    try:
+        feed.acquisition_stopped(sequence)
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning("Recording acquisition feed unavailable after scheduler stop: %s", exc, exc_info=True)
+    return sequence
 
 
 def _periodic_query_failure(error_code: str) -> dict[str, Any]:
@@ -2225,6 +2334,16 @@ async def _handle_gui_command(
                     raise TimeoutError(f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)") from exc
             else:
                 result = await experiment_call
+            if result.get("ok") and action in {
+                "experiment_start",
+                "experiment_create",
+                "experiment_update",
+                "experiment_finalize",
+                "experiment_stop",
+                "experiment_abort",
+                "experiment_advance_phase",
+            }:
+                _feed_recording_experiment_lifecycle(context, action, result)
             # Hook calibration acquisition on experiment lifecycle
             if result.get("ok") and action in {"experiment_start", "experiment_create"}:
                 await asyncio.to_thread(
@@ -2704,6 +2823,12 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
+    recording_lifecycle_feed = RecordingLifecycleFeed()
+    try:
+        _seed_recording_lifecycle(recording_lifecycle_feed, experiment_manager)
+    except Exception as exc:  # noqa: BLE001 - dark presentation cannot block engine boot
+        logger.warning("Recording lifecycle feed unavailable at engine boot: %s", exc, exc_info=True)
+    acquisition_lifecycle_sequence = 0
 
     # F31: sinks foundation (vault + webhooks). Local override beats base.
     from cryodaq.sinks import SinkRegistry  # local import keeps engine cold-start fast
@@ -2939,6 +3064,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         multiline_burst_auto_stop_meta=_multiline_burst_auto_stop_meta,
         multiline_burst_auto_stop_tasks=_multiline_burst_auto_stop_tasks,
         zmq_publisher=zmq_pub,
+        recording_lifecycle_feed=recording_lifecycle_feed,
     )
     handle_gui_command = functools.partial(
         _handle_gui_command,
@@ -3151,7 +3277,11 @@ async def _run_engine(*, mock: bool = False) -> None:
             _ASSISTANT_RELAY_EVENT_TYPES,
         ),
     )
-    await scheduler.start()
+    acquisition_lifecycle_sequence = await _start_scheduler_with_recording_feed(
+        scheduler,
+        recording_lifecycle_feed,
+        acquisition_lifecycle_sequence,
+    )
     throttle_task = supervisor.spawn(
         "adaptive_throttle_runtime",
         functools.partial(track_runtime_signals, broker, adaptive_throttle),
@@ -3426,7 +3556,11 @@ async def _run_engine(*, mock: bool = False) -> None:
         await asyncio.gather(*_stragglers, return_exceptions=True)
 
     # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
-    await scheduler.stop()
+    acquisition_lifecycle_sequence = await _stop_scheduler_with_recording_feed(
+        scheduler,
+        recording_lifecycle_feed,
+        acquisition_lifecycle_sequence,
+    )
     logger.info("Планировщик остановлен")
 
     await plugin_pipeline.stop()

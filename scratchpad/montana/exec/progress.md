@@ -877,3 +877,18 @@ worktree after D7.1 is settled.
   unwired, so the bridge cannot claim `RECORDING` and production publication is
   not activated. Native Windows bridge plus owner evidence: **66 passed**; Ruff
   check/format and diff check passed. Independent review: **PASS, no P0-P3**.
+- The dark bridge and checkpoint update were committed as `b7b1356`. Exact-SHA
+  run `29340534592` passed all eight agents/core/GUI/remaining jobs on Ubuntu
+  and Windows, including safe SQLite in every job and lint/lock-drift checks in
+  both remaining jobs. This supersedes `33c25dd` as the recorded checkpoint;
+  every newer candidate still requires its own exact-SHA eight-job pass.
+- Engine wiring now seeds the bridge from the immutable ExperimentManager
+  snapshot, feeds successful create/update/phase/finalize/abort outcomes on the
+  engine loop, and brackets scheduler start/stop with a unique acquisition epoch
+  and monotonic sequence. Scheduler failures feed UNAVAILABLE and re-raise the
+  original failure; observational feed failures cannot roll back an already
+  committed experiment result. Persistence, composer, publication, GUI
+  presentation/consumption, shell, and control coupling remain absent. Native
+  Windows relevant evidence:
+  **123 passed**; Ruff check/format and diff check passed. Independent re-review:
+  **PASS, no P0-P3**.

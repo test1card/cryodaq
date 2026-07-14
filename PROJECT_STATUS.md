@@ -2,12 +2,12 @@
 
 **Дата:** 2026-07-14 *(release baseline v0.64.1 + active pre-lab campaign note)*
 **Релизная ветка:** master
-**Активная campaign-ветка:** `feat/montana-phase-a` (последний recorded exact-SHA checkpoint `33c25dd`)
+**Активная campaign-ветка:** `feat/montana-phase-a` (последний recorded exact-SHA checkpoint `b7b1356`)
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
 **CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
-**CI recorded checkpoint:** PASS — sharded exact-SHA run `29330940394` для `33c25dd` завершён зелёным: agents/core/GUI/remaining PASS на Windows и Ubuntu. Safe SQLite verification прошла во всех jobs; lint и requirements-lock drift checks прошли в обоих remaining jobs. Каждый более новый candidate требует свой exact-SHA eight-job PASS. Это не закрывает frozen-build, soak-duration, physical-hardware, F35 frozen-packaging или F36 production-activation gates.
+**CI recorded checkpoint:** PASS — sharded exact-SHA run `29340534592` для `b7b1356` завершён зелёным: agents/core/GUI/remaining PASS на Windows и Ubuntu. Safe SQLite verification прошла во всех jobs; lint и requirements-lock drift checks прошли в обоих remaining jobs. Каждый более новый candidate требует свой exact-SHA eight-job PASS. Это не закрывает frozen-build, soak-duration, physical-hardware, F35 frozen-packaging или F36 production-activation gates.
 **Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
 После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
 F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
@@ -193,7 +193,7 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    запуск со скриншотами каждого достижимого экрана и material state. Visual QA
    проверяет operator scenarios, clipping, focus, stale/disconnected truth,
    non-color cues и соответствие design system; одни скриншоты gate не закрывают.
-5. Recorded exact-SHA CI checkpoint `29330940394` для `33c25dd`: все восемь
+5. Recorded exact-SHA CI checkpoint `29340534592` для `b7b1356`: все восемь
    agents/core/GUI/remaining jobs PASS на Ubuntu и Windows. Safe SQLite
    verification прошла во всех jobs; lint и requirements-lock drift
    checks PASS в обоих remaining jobs. Каждый новый candidate требует
