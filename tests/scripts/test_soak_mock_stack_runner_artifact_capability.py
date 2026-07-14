@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from cryodaq.agents.assistant.soak_periodic_delivery import SoakPeriodicDeliverySession
 from scripts import soak_mock_stack_runner as runner
 
 
@@ -49,3 +50,16 @@ def test_runner_capability_has_no_network_or_path_selection() -> None:
 def test_runner_terminal_activation_remains_fused() -> None:
     with pytest.raises(runner._RunnerActivationDisabled):
         runner._PosixSoakRunner().run()
+
+
+@pytest.mark.skipif(os.name == "posix", reason="Windows fail-closed contract")
+def test_windows_rejects_artifact_sink_and_inherited_session(tmp_path) -> None:
+    left, right = socket.socketpair()
+    try:
+        with pytest.raises(runner._RunnerActivationDisabled, match="artifact receipt sink is POSIX-only"):
+            runner._ArtifactReceiptSink(left, nonce="a" * 64, evidence_dir=tmp_path)
+        with pytest.raises(ValueError, match="POSIX-only"):
+            SoakPeriodicDeliverySession.from_fd(right.fileno(), nonce="a" * 64, assistant_generation=1)
+    finally:
+        left.close()
+        right.close()

@@ -63,6 +63,17 @@ jobs:
       - name: Verify safe SQLite runtime
         run: python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version; print('SQLite', version)"
 
+      - name: Bind H4 reviewed interpreter alias (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [ -e .venv ] || [ -L .venv ]; then
+            echo "refusing to reuse an ambient .venv for H4 evidence" >&2
+            exit 1
+          fi
+          mkdir -m 700 -p .venv/bin
+          ln -s -- "$(command -v python)" .venv/bin/python
+          python -c "from pathlib import Path; alias = Path('.venv/bin/python').resolve(strict=True); running = Path('/proc/self/exe').resolve(strict=True); assert alias == running, (alias, running)"
+
       - name: Lint
         if: matrix.suite == 'remaining'
         run: ruff check src/ tests/

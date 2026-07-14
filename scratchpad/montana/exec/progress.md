@@ -532,3 +532,25 @@ worktree after D7.1 is settled.
   access WSL; root execution supplied the 20-test and full-suite evidence above.
 - Push and GitHub exact-SHA verification remain pending. Physical hardware,
   frozen-build, and soak gates remain open.
+
+## 2026-07-14 hosted POSIX-capability CI repair
+
+- Exact-SHA run `29297856378` at `6a4edb8` proved the safe conda-forge SQLite
+  runtime gate on both hosted operating systems. Windows GUI/core and Ubuntu
+  GUI/core completed successfully. The remaining failures were capability
+  binding errors, not product-behavior failures: Ubuntu H4 could not find its
+  reviewed exact interpreter alias, Windows attempted POSIX directory-descriptor
+  evidence, and Windows attempted inherited AF_UNIX durable artifact delivery.
+- The reviewed repair binds `.venv/bin/python` on Linux only to the currently
+  executing conda interpreter and verifies it against `/proc/self/exe`, while
+  refusing any ambient `.venv`. It does not broaden H4 interpreter authority.
+- `Evidence` and the durable artifact receipt sink now reject non-POSIX hosts
+  before filesystem or socket side effects. Real POSIX tests are selectively
+  platform-marked; pure validators remain cross-platform. No TCP substitute,
+  fake durability, or relaxed safety contract was introduced.
+- Native Windows focused evidence: **64 passed, 84 POSIX-capability skips**.
+  WSL2 Ubuntu 24.04 complementary evidence: **102 passed, 2 Windows-refusal
+  skips**. Ruff check, Ruff format check, workflow YAML parse, and
+  `git diff --check` passed. Independent frozen-diff review: **PASS, no P0-P3**.
+- A new exact-SHA hosted run is still required after publication. Physical
+  hardware, frozen-build, and soak-duration gates remain open.

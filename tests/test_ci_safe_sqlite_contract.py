@@ -24,6 +24,19 @@ def test_supported_test_workflows_use_safe_tracked_runtime() -> None:
         assert "actions/setup-python" not in text
 
 
+def test_main_ci_binds_h4_alias_to_the_running_linux_interpreter_fail_closed() -> None:
+    text = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+    install = text.index("- name: Install dependencies")
+    binding = text.index("- name: Bind H4 reviewed interpreter alias (Linux)")
+    first_test = text.index("- name: Run app-palette tests (isolated)")
+
+    assert install < binding < first_test
+    assert "if: runner.os == 'Linux'" in text[binding:first_test]
+    assert "[ -e .venv ] || [ -L .venv ]" in text[binding:first_test]
+    assert 'ln -s -- "$(command -v python)" .venv/bin/python' in text[binding:first_test]
+    assert "Path('/proc/self/exe').resolve(strict=True)" in text[binding:first_test]
+
+
 def test_pip_lock_preserves_platform_specific_runtime_dependencies() -> None:
     lines = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").splitlines()
     requirements = {

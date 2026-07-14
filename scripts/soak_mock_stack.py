@@ -1352,6 +1352,8 @@ class Evidence:
     """Sealed typed evidence; only internal validation can authorize PASS."""
 
     def __init__(self, directory: Path) -> None:
+        if os.name != "posix":
+            raise EvidenceCapabilityError("evidence capability is POSIX-only")
         directory = directory.absolute()
         self.directory = directory
         directory.mkdir(parents=True, exist_ok=True)
@@ -2206,7 +2208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     selected = profile(args.profile)
     try:
         evidence = Evidence(args.evidence_dir or _default_evidence_dir(selected))
-    except FileExistsError:
+    except (FileExistsError, EvidenceCapabilityError):
         return 2
     lifecycle = Lifecycle(evidence, cleanup=lambda: None)
     previous_handlers: dict[int, Any] = {}

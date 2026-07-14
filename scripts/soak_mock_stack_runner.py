@@ -747,6 +747,8 @@ class _ArtifactReceiptSink:
     def __init__(self, endpoint: socket.socket, *, nonce: str, evidence_dir: Path) -> None:
         from cryodaq.agents.assistant.soak_periodic_delivery import frame_body_limit
 
+        if os.name != "posix":
+            raise _RunnerActivationDisabled("artifact receipt sink is POSIX-only")
         if re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
             raise _RunnerFoundationError("artifact nonce is invalid")
         if endpoint.family != socket.AF_UNIX or endpoint.type & socket.SOCK_STREAM != socket.SOCK_STREAM:

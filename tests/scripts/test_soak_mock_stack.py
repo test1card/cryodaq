@@ -15,6 +15,18 @@ import pytest
 
 from scripts import soak_mock_stack as soak
 
+_POSIX_EVIDENCE = pytest.mark.skipif(os.name != "posix", reason="evidence capability is POSIX-only")
+
+
+@pytest.mark.skipif(os.name == "posix", reason="Windows fail-closed contract")
+def test_windows_rejects_evidence_without_creating_artifacts(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    with pytest.raises(soak.EvidenceCapabilityError, match="evidence capability is POSIX-only"):
+        soak.Evidence(evidence_dir)
+    assert not evidence_dir.exists()
+    assert soak.main(["--evidence-dir", str(evidence_dir)]) == 2
+    assert not evidence_dir.exists()
+
 
 def _snapshot(
     pid: int,
@@ -427,6 +439,7 @@ def _populate_complete(evidence: soak.Evidence) -> None:
     evidence.record_shutdown(_shutdown(samples))
 
 
+@_POSIX_EVIDENCE
 def test_foundation_cannot_authorize_pass_without_execution_provenance(tmp_path: Path) -> None:
     invalid = soak.Evidence(tmp_path / "invalid")
     assert not hasattr(invalid, "finish")
@@ -446,6 +459,7 @@ def test_foundation_cannot_authorize_pass_without_execution_provenance(tmp_path:
         evidence.seal()
 
 
+@_POSIX_EVIDENCE
 def test_manifest_is_write_once_and_no_mutation_after_terminal_failure(tmp_path: Path) -> None:
     invalid = soak.Evidence(tmp_path / "manifest-reuse")
     invalid.write_manifest(_manifest())
@@ -485,6 +499,7 @@ def test_manifest_is_write_once_and_no_mutation_after_terminal_failure(tmp_path:
         ),
     ],
 )
+@_POSIX_EVIDENCE
 def test_missing_duplicate_or_failed_ledger_section_cannot_pass(tmp_path: Path, artifact: str, mutator: object) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
@@ -502,6 +517,7 @@ def test_missing_duplicate_or_failed_ledger_section_cannot_pass(tmp_path: Path, 
         {"git_sha": "b" * 40},
     ],
 )
+@_POSIX_EVIDENCE
 def test_failed_or_wrong_sha_prerequisite_cannot_advance(tmp_path: Path, override: dict[str, object]) -> None:
     evidence = soak.Evidence(tmp_path)
     evidence.write_manifest(_manifest())
@@ -510,6 +526,7 @@ def test_failed_or_wrong_sha_prerequisite_cannot_advance(tmp_path: Path, overrid
     assert evidence.state == soak.RunState.FAIL
 
 
+@_POSIX_EVIDENCE
 def test_dirty_sha_and_failed_recovery_cannot_seal(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path / "dirty")
     evidence.write_manifest(_manifest(dirty=True))
@@ -529,6 +546,7 @@ def test_dirty_sha_and_failed_recovery_cannot_seal(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("entry_kind", ["directory", "symlink"])
+@_POSIX_EVIDENCE
 def test_artifact_tree_rejects_nonregular_entries_and_nested_secret(tmp_path: Path, entry_kind: str) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
@@ -552,6 +570,7 @@ def test_artifact_tree_rejects_nonregular_entries_and_nested_secret(tmp_path: Pa
     )
 
 
+@_POSIX_EVIDENCE
 def test_symlink_inserted_after_topology_check_is_never_opened(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -586,6 +605,7 @@ def test_symlink_inserted_after_topology_check_is_never_opened(
 
 
 @pytest.mark.parametrize("phase", ["manifest", "prerequisites", "seal"])
+@_POSIX_EVIDENCE
 def test_whole_evidence_root_replacement_is_terminal_and_never_touches_external_target(
     tmp_path: Path,
     phase: str,
@@ -631,6 +651,7 @@ def test_whole_evidence_root_replacement_is_terminal_and_never_touches_external_
     assert summary["finished_at"]
 
 
+@_POSIX_EVIDENCE
 def test_closed_owned_descriptor_reports_terminal_summary_unavailable_without_io(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path / "run")
     initial_summary = (evidence.directory / "summary.json").read_bytes()
@@ -646,6 +667,7 @@ def test_closed_owned_descriptor_reports_terminal_summary_unavailable_without_io
     assert not evidence.close()
 
 
+@_POSIX_EVIDENCE
 def test_reused_descriptor_never_writes_or_closes_external_directory(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path / "run")
     initial_summary = (evidence.directory / "summary.json").read_bytes()
@@ -673,6 +695,7 @@ def test_reused_descriptor_never_writes_or_closes_external_directory(tmp_path: P
         os.close(external_fd)
 
 
+@_POSIX_EVIDENCE
 def test_close_is_idempotent_and_all_post_close_mutations_are_io_free(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path / "run")
 
@@ -701,6 +724,7 @@ def test_close_is_idempotent_and_all_post_close_mutations_are_io_free(tmp_path: 
         assert (evidence.directory / "summary.json").read_bytes() == summary
 
 
+@_POSIX_EVIDENCE
 def test_context_manager_and_gc_settle_failure_and_release_descriptors(tmp_path: Path) -> None:
     context_path = tmp_path / "context"
     with soak.Evidence(context_path) as evidence:
@@ -723,6 +747,7 @@ def test_context_manager_and_gc_settle_failure_and_release_descriptors(tmp_path:
     assert json.loads((gc_path / "summary.json").read_text())["status"] == "FAIL"
 
 
+@_POSIX_EVIDENCE
 def test_context_close_after_root_replacement_writes_only_pinned_original(tmp_path: Path) -> None:
     run = tmp_path / "run"
     original = tmp_path / "original"
@@ -752,6 +777,7 @@ def _assert_two_terminal_retries(
         assert (evidence.directory / "summary.json").read_bytes() == summary
 
 
+@_POSIX_EVIDENCE
 def test_huge_shutdown_is_normalized_terminal_and_exactly_two_retries_fail(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     evidence.write_manifest(_manifest())
@@ -770,6 +796,7 @@ def test_huge_shutdown_is_normalized_terminal_and_exactly_two_retries_fail(tmp_p
     )
 
 
+@_POSIX_EVIDENCE
 def test_wrong_prerequisite_container_is_terminal_and_exactly_two_retries_fail(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     evidence.write_manifest(_manifest())
@@ -792,6 +819,7 @@ def test_wrong_prerequisite_container_is_terminal_and_exactly_two_retries_fail(t
         ("samples.jsonl", {"elapsed_s": object(), "wall_time": "x", "roles": {}}),
     ],
 )
+@_POSIX_EVIDENCE
 def test_malformed_public_stream_mutation_is_terminal(
     tmp_path: Path,
     stream: str,
@@ -811,6 +839,7 @@ def test_malformed_public_stream_mutation_is_terminal(
 
 
 @pytest.mark.parametrize("command", [["true"], list(soak.EXACT_SIX_COMMAND)])
+@_POSIX_EVIDENCE
 def test_caller_asserted_exact_six_result_is_never_authority(tmp_path: Path, command: list[str]) -> None:
     invalid = soak.Evidence(tmp_path)
     invalid.write_manifest(_manifest())
@@ -822,6 +851,7 @@ def test_caller_asserted_exact_six_result_is_never_authority(tmp_path: Path, com
     assert not (tmp_path / "exact-six-result.json").exists()
 
 
+@_POSIX_EVIDENCE
 def test_exact_six_result_mutation_is_rejected(tmp_path: Path) -> None:
 
     evidence = soak.Evidence(tmp_path / "mutation")
@@ -841,6 +871,7 @@ def test_exact_six_result_mutation_is_rejected(tmp_path: Path) -> None:
         evidence.seal()
 
 
+@_POSIX_EVIDENCE
 def test_arbitrary_source_command_and_missing_role_fail_terminally(tmp_path: Path) -> None:
     arbitrary = soak.Evidence(tmp_path / "arbitrary")
     manifest = _manifest()
@@ -905,6 +936,7 @@ def test_faults_are_exactly_correlated_to_sample_transitions_and_injection_contr
     assert "launcher or bridge restarted during fault qualification" in errors
 
 
+@_POSIX_EVIDENCE
 def test_fault_and_shutdown_identities_require_exact_positive_integers(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path / "fault")
     evidence.write_manifest(_manifest())
@@ -933,6 +965,7 @@ def test_fault_and_shutdown_identities_require_exact_positive_integers(tmp_path:
     assert invalid_shutdown.state == soak.RunState.FAIL
 
 
+@_POSIX_EVIDENCE
 def test_finish_pass_validation_exception_is_terminal_and_normalized(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
@@ -948,6 +981,7 @@ def test_finish_pass_validation_exception_is_terminal_and_normalized(tmp_path: P
         evidence.finish_pass()
 
 
+@_POSIX_EVIDENCE
 def test_atomic_log_writer_redacts_and_external_secret_is_quarantined(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     evidence.write_manifest(_manifest())
@@ -970,6 +1004,7 @@ def test_atomic_log_writer_redacts_and_external_secret_is_quarantined(tmp_path: 
     assert quarantine["records"][0]["original_sha256"].startswith("sha256:")
 
 
+@_POSIX_EVIDENCE
 def test_evidence_forbids_environment_capture_and_failure_has_typed_metadata(tmp_path: Path) -> None:
     invalid = soak.Evidence(tmp_path / "invalid")
     with pytest.raises(ValueError, match="forbidden"):
@@ -1003,6 +1038,7 @@ def test_evidence_forbids_environment_capture_and_failure_has_typed_metadata(tmp
         ),
     ],
 )
+@_POSIX_EVIDENCE
 def test_external_schema_or_path_tampering_cannot_seal(
     tmp_path: Path,
     artifact: str,
@@ -1032,6 +1068,7 @@ def test_external_schema_or_path_tampering_cannot_seal(
         ),
     ],
 )
+@_POSIX_EVIDENCE
 def test_prerequisites_require_nonempty_typed_identities(
     tmp_path: Path, overrides: dict[str, object], error_marker: str
 ) -> None:
@@ -1047,6 +1084,7 @@ def test_prerequisites_require_nonempty_typed_identities(
 
 @pytest.mark.parametrize("phase", ["setup", "sampling", "injection", "recovery", "shutdown"])
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@_POSIX_EVIDENCE
 def test_lifecycle_interruption_is_atomic_and_idempotent(tmp_path: Path, phase: str, signum: int) -> None:
     evidence = soak.Evidence(tmp_path)
     cleanup_calls: list[str] = []
@@ -1061,12 +1099,14 @@ def test_lifecycle_interruption_is_atomic_and_idempotent(tmp_path: Path, phase: 
     assert not evidence.finish_fail("second finalization")
 
 
+@_POSIX_EVIDENCE
 def test_evidence_rejects_nonempty_run_directory(tmp_path: Path) -> None:
     (tmp_path / "stale.jsonl").write_text("stale")
     with pytest.raises(FileExistsError, match="must be empty"):
         soak.Evidence(tmp_path)
 
 
+@_POSIX_EVIDENCE
 def test_cli_manifest_is_complete_and_records_atomic_gate_failure(tmp_path: Path) -> None:
     run = tmp_path / "run"
     assert soak.main(["--profile", "short", "--evidence-dir", str(run)]) == 1
@@ -1082,6 +1122,7 @@ def test_cli_manifest_is_complete_and_records_atomic_gate_failure(tmp_path: Path
     assert summary["manifest_sha256"].startswith("sha256:")
 
 
+@_POSIX_EVIDENCE
 def test_cli_acknowledgement_cannot_launch_process_or_network(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def forbidden_launch(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("process launch is forbidden in the foundation CLI")
@@ -1107,6 +1148,7 @@ def test_cli_acknowledgement_cannot_launch_process_or_network(monkeypatch: pytes
     assert any(marker in summary["reason"] for marker in ("psutil observer dependency", "non-network H3 transport"))
 
 
+@_POSIX_EVIDENCE
 def test_initial_summary_is_incomplete_fail(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     summary = json.loads((tmp_path / "summary.json").read_text())

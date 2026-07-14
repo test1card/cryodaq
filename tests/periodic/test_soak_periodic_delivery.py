@@ -29,6 +29,8 @@ from scripts.soak_mock_stack_runner import (
     _ProcessIdentity,
 )
 
+_POSIX_ARTIFACT_CAPABILITY = pytest.mark.skipif(os.name != "posix", reason="artifact delivery capability is POSIX-only")
+
 
 def _observation(pid: int, *, parent_pid: int = 42) -> _AssistantProcessObservation:
     return _AssistantProcessObservation(_ProcessIdentity(pid, f"start-{pid}"), parent_pid, "assistant", True)
@@ -73,6 +75,7 @@ def _context(photo: bytes, caption: str = "Сводка") -> PeriodicDeliveryCon
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [None, MAX_PERIODIC_ARTIFACT_BYTES])
+@_POSIX_ARTIFACT_CAPABILITY
 async def test_minimum_and_maximum_artifact_round_trip_via_durable_sink(tmp_path: Path, size: int | None) -> None:
     os.chmod(tmp_path, 0o700)
     client, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -102,6 +105,7 @@ async def test_minimum_and_maximum_artifact_round_trip_via_durable_sink(tmp_path
 
 
 @pytest.mark.asyncio
+@_POSIX_ARTIFACT_CAPABILITY
 async def test_invalid_payload_is_not_sent_and_does_not_consume_sequence() -> None:
     client, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     session = SoakPeriodicDeliverySession(client, "d" * 64, 1, 1234)
@@ -140,6 +144,7 @@ def test_decoder_rejects_truncation_and_one_byte_oversize() -> None:
         decode_frame_body(b"x" * (frame_body_limit() + 1))
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_rejects_wrong_pid_without_file_or_ack(tmp_path: Path) -> None:
     from cryodaq.agents.assistant.soak_periodic_delivery import _frame
 
@@ -165,6 +170,7 @@ def test_runner_rejects_wrong_pid_without_file_or_ack(tmp_path: Path) -> None:
     client.close()
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_rejects_duplicate_generation_sequence_after_one_ack(tmp_path: Path) -> None:
     from cryodaq.agents.assistant.soak_periodic_delivery import _frame
 
@@ -192,6 +198,7 @@ def test_runner_rejects_duplicate_generation_sequence_after_one_ack(tmp_path: Pa
     client.close()
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_rejects_wrong_expected_authority(tmp_path: Path) -> None:
     from cryodaq.agents.assistant.soak_periodic_delivery import _frame
 
@@ -218,6 +225,7 @@ def test_runner_rejects_wrong_expected_authority(tmp_path: Path) -> None:
     client.close()
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_rejects_first_generation_jump(tmp_path: Path) -> None:
     from cryodaq.agents.assistant.soak_periodic_delivery import _frame
 
@@ -244,6 +252,7 @@ def test_runner_rejects_first_generation_jump(tmp_path: Path) -> None:
     client.close()
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_rejects_generation_jump_after_accepted_generation(tmp_path: Path) -> None:
     from cryodaq.agents.assistant.soak_periodic_delivery import _frame
 
@@ -284,6 +293,7 @@ def test_runner_rejects_generation_jump_after_accepted_generation(tmp_path: Path
 
 
 @pytest.mark.parametrize("ledger_kind", ["fifo", "partial", "canonical_but_invalid"])
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_rejects_unsafe_or_corrupt_existing_ledger(tmp_path: Path, ledger_kind: str) -> None:
     from cryodaq.agents.assistant.soak_periodic_delivery import _frame
 
@@ -314,6 +324,7 @@ def test_runner_rejects_unsafe_or_corrupt_existing_ledger(tmp_path: Path, ledger
     client.close()
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_zero_byte_stall_is_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -330,6 +341,7 @@ def test_runner_zero_byte_stall_is_bounded(
     client.close()
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_runner_ack_backpressure_is_bounded_after_durable_acceptance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -368,6 +380,7 @@ def test_runner_ack_backpressure_is_bounded_after_durable_acceptance(
     client.close()
 
 
+@_POSIX_ARTIFACT_CAPABILITY
 def test_evidence_directory_replacement_between_lstat_and_open_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -394,6 +407,7 @@ def test_evidence_directory_replacement_between_lstat_and_open_is_rejected(
 
 
 @pytest.mark.asyncio
+@_POSIX_ARTIFACT_CAPABILITY
 async def test_wrong_ack_is_unknown_and_terminal() -> None:
     client, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     session = SoakPeriodicDeliverySession(client, "d" * 64, 1, 1234)
@@ -416,6 +430,7 @@ async def test_wrong_ack_is_unknown_and_terminal() -> None:
 
 
 @pytest.mark.asyncio
+@_POSIX_ARTIFACT_CAPABILITY
 async def test_cancellation_after_frame_bytes_poison_session() -> None:
     client, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     session = SoakPeriodicDeliverySession(client, "d" * 64, 1, 1234)
@@ -431,6 +446,7 @@ async def test_cancellation_after_frame_bytes_poison_session() -> None:
 
 
 @pytest.mark.asyncio
+@_POSIX_ARTIFACT_CAPABILITY
 async def test_only_one_artifact_may_be_in_flight() -> None:
     client, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     session = SoakPeriodicDeliverySession(client, "d" * 64, 1, 1234)
@@ -448,6 +464,7 @@ async def test_only_one_artifact_may_be_in_flight() -> None:
 
 
 @pytest.mark.asyncio
+@_POSIX_ARTIFACT_CAPABILITY
 async def test_cancellation_before_first_byte_rolls_back_sequence_without_acceptance() -> None:
     client, runner = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     client.setblocking(False)
