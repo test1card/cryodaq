@@ -1,14 +1,14 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-11
+last_updated: 2026-07-14
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-11
-**Session:** Phase UI-1 foundation plus F36 operator-snapshot additions
-**Scope:** Design system v1.2.0 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-07-14
+**Session:** Phase UI-1 foundation, F36 operator snapshots, and F35 D7.2
+**Scope:** Design system v2.0.0 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -200,10 +200,13 @@ Batch 6 — accessibility + governance:
 59. **Destructive Dialog default-focus = Cancel** — operator Enter muscle-memory dismisses safely.
 60. **Shift+Enter keyboard alternative for HoldConfirmButton** — full keyboard accessibility without requiring held-key.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system stays flat tokens through v1.x** — three-layer (primitive→semantic→component) is v2.0 target per UXPM recommendation, not current.
-63. **STONE_* deprecated in v1.0.0, removed in v2.0.0** — ~15 call sites being migrated at each panel's next refactor.
+62. **Design system remains flat-token in v2.0.0** — this major release is
+    scoped to the breaking instrument-identity API; three-layer token migration
+    remains a separately reviewed future change.
+63. **STONE_* remains deprecated/read-only in v2.0.0** — this scoped major
+    does not claim or perform the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
-65. **Architect is singular approval gate for v1.x** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
+65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
 66. **ACCENT ≠ STATUS_OK — Phase III.A decoupling** — per `adr/002-accent-status-decoupling.md`. Primary buttons, mode badges, progress chunks, active tab indicators use ACCENT (UI activation). STATUS_OK reserved for safety / health / channel-OK indicators. `SELECTION_BG` + `FOCUS_RING` added as neutral interaction tokens. Per-theme ACCENT recalibrated to warm-neutral (11 themes; `default_cool` indigo preserved as historical baseline).
 
 F36 operator-snapshot additions:
@@ -222,9 +225,13 @@ F36 operator-snapshot additions:
 78. **Post-commit coherence barrier** — synchronous Qt callbacks cannot silently tear sibling truth; a mismatch permanently replaces the page with a non-authoritative failure barrier.
 79. **Complete bounded attention geometry** — two-line rows remain fully legible, with four visible rows and deterministic scrolling across at most eight projected items.
 80. **Truthful scenario scope** — composition tests do not claim later acknowledgement, recovery, capture, or human-performance tasks; the legacy shell now gates replay mutation, while final POD-to-shell cutover and scenario evidence remain separate gates.
+81. **Descriptor-qualified instrument identity** — the generic instrument-health
+    panel attributes cards only from authoritative connected `DescriptorView`
+    values; missing/refused identity uses fixed bounded Russian text and no
+    vendor, model, channel-name, diagnostic, or payload fallback.
 
 ## Status
 
-**Design system v1.2.0 — F36 atoms and POD composition implemented, external evidence open.** Existing
+**Design system v2.0.0 — descriptor-qualified instrument identity and F36 composition implemented, external evidence open.** Existing
 79 rules and the 142-constant runtime inventory are unchanged. Real Windows ONEDIR DPI/NVDA,
 final POD-to-shell cutover, whole-shell screenshots, operator-performance, and long-session evidence remain open.

@@ -164,9 +164,10 @@ This is feature-branch evidence, not shipped history and not a release claim:
   the canonical descriptor envelope through hot/cold data. The passive
   conformance harness, ASC reference TCP driver, registry adoption, and exact
   frozen-driver allowlist foundation and live D4 wire envelope are committed.
-  D7 removal of remaining name inference and generic presentation,
-  real-localhost/Windows evidence, and one complete acquisition-to-health-display
-  reference-extension proof remain open.
+  D7 descriptor-governed generic instrument-health presentation is complete,
+  without vendor/channel-name identity fallback. Specialized shell routing
+  heuristics, real-localhost/Windows evidence, and one complete
+  acquisition-to-health-display reference-extension proof remain open.
 - F36 now has committed foundations for the snapshot wire contract,
   durable revision allocation, typed common-cut authority receipts, ordered
   composition, publication through the existing publisher, two-SUB bounded
@@ -197,9 +198,10 @@ Execution status: F35.1 registry/capabilities and F35.2 shared-bus contracts
 are committed. Within F35.3, D1 manifest authority, D2 persistence activation,
 D3 committed-receipt publication, D4 live descriptor wire transport, D5 replay
 parity, D6 reporting parity, and D7.1 descriptor-qualified GUI ingress are
-complete on the active branch. D7 removal of remaining channel-name inference,
-design-system-governed generic presentation, and real-localhost lifecycle proof
-remain open. The reusable passive
+complete on the active branch. D7 descriptor-governed generic instrument-health
+presentation is complete without vendor/channel-name identity fallback.
+Specialized shell routing heuristics, real-localhost lifecycle proof, and the
+full end-to-end gate remain open. The reusable passive
 conformance harness, ASC reference TCP driver, registry adoption, and exact
 frozen-driver allowlist are also committed foundations; their real localhost,
 real-Windows packaging, and full acquisition -> persistence -> live wire ->

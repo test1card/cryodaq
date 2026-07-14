@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import time
 from datetime import UTC, datetime
 
@@ -11,6 +12,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.channels.descriptors import (
+    MAX_CATALOG_DESCRIPTORS,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.instruments_panel import (
@@ -23,6 +31,12 @@ from cryodaq.gui.shell.overlays.instruments_panel import (
     _InstrumentCard,
     _StatusIndicator,
     _tint_for_health,
+)
+from cryodaq.gui.state.descriptor_store import (
+    DescriptorDiagnostic,
+    DescriptorView,
+    IdentityStatus,
+    TransportState,
 )
 
 
@@ -84,6 +98,36 @@ def _reading(channel: str, value: float = 1.0, instrument_id: str = "") -> Readi
     )
 
 
+def _view(
+    reading: Reading,
+    *,
+    identity_status: IdentityStatus = IdentityStatus.AUTHORITATIVE,
+    transport_state: TransportState = TransportState.CONNECTED,
+) -> DescriptorView:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=reading.channel,
+        instrument_id=reading.instrument_id,
+        source_key="measurement.primary",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit=reading.unit,
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="generic",
+        display_name="Generic channel",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    return DescriptorView(
+        channel_id=reading.channel,
+        descriptor=descriptor,
+        identity_status=identity_status,
+        transport_state=transport_state,
+        diagnostics=(),
+    )
+
+
 # ----------------------------------------------------------------------
 # Invariants on constants (architect mandate — do NOT tune)
 # ----------------------------------------------------------------------
@@ -118,58 +162,183 @@ def test_poll_timer_not_active_on_construction(app):
 
 
 # ----------------------------------------------------------------------
-# _extract_instrument_id
+# Descriptor-only identity
 # ----------------------------------------------------------------------
 
 
-def test_extract_from_instrument_id_field(app):
-    r = _reading("foo", instrument_id="LakeShore_42")
-    assert InstrumentsPanel._extract_instrument_id(r) == "LakeShore_42"
+@pytest.mark.parametrize("channel", ["Т7 Детектор", "Т12", "Т20", "Keithley_1/smua/voltage"])
+def test_name_patterns_without_descriptor_never_create_card(app, channel):
+    panel = InstrumentsPanel()
+    panel.on_descriptor_reading(_reading(channel, instrument_id="LS218_1"), None)
+    QApplication.processEvents()
+    assert panel.get_instrument_count() == 0
+    assert panel._empty_cards_label.text() == ("Идентификация прибора недоступна: описание канала отклонено")
 
 
-def test_extract_keithley_channel_prefix(app):
-    r = _reading("Keithley_1/smua/voltage")
-    assert InstrumentsPanel._extract_instrument_id(r) == "Keithley_1"
+def test_provider_neutral_authoritative_descriptor_creates_card(app):
+    panel = InstrumentsPanel()
+    reading = _reading("opaque-channel-7", instrument_id="asc-reference-42")
+    panel.on_descriptor_reading(reading, _view(reading))
+    QApplication.processEvents()
+    assert set(panel._cards) == {"asc-reference-42"}
 
 
-def test_extract_lakeshore_t1_to_ls218_1(app):
-    assert InstrumentsPanel._extract_instrument_id(_reading("Т7 Детектор")) == "LS218_1"
-
-
-def test_extract_lakeshore_t9_to_ls218_2(app):
-    assert InstrumentsPanel._extract_instrument_id(_reading("Т12")) == "LS218_2"
-
-
-def test_extract_lakeshore_t17_to_ls218_3(app):
-    assert InstrumentsPanel._extract_instrument_id(_reading("Т20")) == "LS218_3"
-
-
-def test_extract_analytics_channel_dropped(app):
-    """II.8 fix: analytics/* readings must NOT create instrument cards
-    (legacy v1 had a latent bug where startswith("analytics/") ran after the
-    "/" split and was unreachable). Fixed by checking the analytics prefix
-    before the slash split."""
-    r = Reading(
-        timestamp=datetime.now(UTC),
-        instrument_id="",
-        channel="analytics/safety_state",
-        value=0.0,
-        unit="",
-        metadata={},
+def test_legacy_absent_is_visible_but_not_attributed(app):
+    panel = InstrumentsPanel()
+    reading = _reading("opaque-channel", instrument_id="claimed")
+    panel.on_descriptor_reading(
+        reading,
+        _view(reading, identity_status=IdentityStatus.LEGACY_ABSENT),
     )
-    assert InstrumentsPanel._extract_instrument_id(r) == ""
+    QApplication.processEvents()
+    assert panel.get_instrument_count() == 0
+    text = panel._empty_cards_label.text()
+    style = panel._empty_cards_label.styleSheet()
+    assert text == "Идентификация прибора недоступна: описание канала отсутствует"
+    assert len(text.encode("utf-8")) <= 256
+    assert reading.instrument_id not in text
+    assert reading.channel not in text
+    assert theme.FOREGROUND in style
+    assert theme.STATUS_STALE in style
+    assert theme.STATUS_OK not in style
 
 
-def test_extract_bare_analytics_channel_dropped(app):
-    r = Reading(
-        timestamp=datetime.now(UTC),
-        instrument_id="",
-        channel="analytics",
-        value=0.0,
-        unit="",
-        metadata={},
+def test_refused_retained_descriptor_does_not_update_card_and_requalifies(app):
+    panel = InstrumentsPanel()
+    reading = _reading("opaque-channel", instrument_id="asc-reference")
+    panel.on_descriptor_reading(reading, _view(reading))
+    QApplication.processEvents()
+    assert panel._cards["asc-reference"].total_readings == 1
+
+    panel.on_descriptor_reading(
+        reading,
+        _view(reading, identity_status=IdentityStatus.REFUSED),
     )
-    assert InstrumentsPanel._extract_instrument_id(r) == ""
+    QApplication.processEvents()
+    assert panel._cards["asc-reference"].total_readings == 1
+    assert "отклонено" in panel._empty_cards_label.text()
+
+    panel.on_descriptor_reading(reading, _view(reading))
+    QApplication.processEvents()
+    assert panel._cards["asc-reference"].total_readings == 2
+    assert panel._empty_cards_label.isHidden()
+
+
+def test_disconnected_or_mismatched_view_never_attributes(app):
+    panel = InstrumentsPanel()
+    reading = _reading("opaque-channel", instrument_id="asc-reference")
+    panel.on_descriptor_reading(
+        reading,
+        _view(reading, transport_state=TransportState.DISCONNECTED),
+    )
+    mismatched = _view(reading)
+    panel.on_descriptor_reading(
+        reading,
+        DescriptorView(
+            channel_id="different-channel",
+            descriptor=mismatched.descriptor,
+            identity_status=mismatched.identity_status,
+            transport_state=mismatched.transport_state,
+            diagnostics=(),
+        ),
+    )
+    QApplication.processEvents()
+    assert panel.get_instrument_count() == 0
+    assert "отклонено" in panel._empty_cards_label.text()
+
+
+def test_identity_notice_mutates_only_on_state_transitions(app, monkeypatch):
+    panel = InstrumentsPanel()
+    reading = _reading("opaque-channel", instrument_id="asc-reference")
+    panel.on_descriptor_reading(reading, _view(reading))
+    QApplication.processEvents()
+
+    calls = {"style": 0, "text": 0, "visible": 0}
+    label = panel._empty_cards_label
+    original_style = label.setStyleSheet
+    original_text = label.setText
+    original_visible = label.setVisible
+
+    def set_style(value):
+        calls["style"] += 1
+        original_style(value)
+
+    def set_text(value):
+        calls["text"] += 1
+        original_text(value)
+
+    def set_visible(value):
+        calls["visible"] += 1
+        original_visible(value)
+
+    monkeypatch.setattr(label, "setStyleSheet", set_style)
+    monkeypatch.setattr(label, "setText", set_text)
+    monkeypatch.setattr(label, "setVisible", set_visible)
+
+    for _ in range(50):
+        panel._handle_descriptor_reading(reading, _view(reading))
+    assert calls == {"style": 0, "text": 0, "visible": 0}
+
+    refused = _view(reading, identity_status=IdentityStatus.REFUSED)
+    panel._handle_descriptor_reading(reading, refused)
+    transition_calls = dict(calls)
+    assert all(count > 0 for count in transition_calls.values())
+    for _ in range(50):
+        panel._handle_descriptor_reading(reading, refused)
+    assert calls == transition_calls
+
+
+def test_unavailable_notice_is_bounded_russian_noncolor_and_excludes_hostile_text(app):
+    panel = InstrumentsPanel()
+    hostile = "<b>HOSTILE_VENDOR_PAYLOAD_DIAGNOSTIC</b>"
+    reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="hostile-vendor",
+        channel="hostile-channel",
+        value=1.0,
+        unit="K",
+        metadata={"payload": hostile},
+    )
+    refused = _view(reading, identity_status=IdentityStatus.REFUSED)
+    refused = DescriptorView(
+        channel_id=refused.channel_id,
+        descriptor=refused.descriptor,
+        identity_status=refused.identity_status,
+        transport_state=refused.transport_state,
+        diagnostics=(DescriptorDiagnostic(hostile, 1, None),),
+    )
+    panel._handle_descriptor_reading(reading, refused)
+
+    text = panel._empty_cards_label.text()
+    style = panel._empty_cards_label.styleSheet()
+    assert text == "Идентификация прибора недоступна: описание канала отклонено"
+    assert len(text.encode("utf-8")) <= 256
+    assert all(value not in text for value in (hostile, reading.instrument_id, reading.channel))
+    assert theme.FOREGROUND in style
+    assert theme.STATUS_FAULT in style
+    assert theme.STATUS_OK not in style
+
+
+def test_identity_issue_tracking_is_o1_bounded_and_has_no_blocking_io(app, monkeypatch):
+    panel = InstrumentsPanel()
+    for index in range(MAX_CATALOG_DESCRIPTORS):
+        panel._set_identity_issue(f"channel-{index}", IdentityStatus.LEGACY_ABSENT)
+    panel._set_identity_issue("over-capacity", IdentityStatus.REFUSED)
+    assert len(panel._identity_issues) == MAX_CATALOG_DESCRIPTORS
+    assert panel._identity_issue_sticky is True
+    assert panel._refused_identity_count == 0
+
+    reading = _reading("bounded-channel", instrument_id="bounded-instrument")
+    view = _view(reading)
+
+    def blocking_io_forbidden(*args, **kwargs):
+        raise AssertionError("blocking I/O reached descriptor presentation")
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr("builtins.open", blocking_io_forbidden)
+        guarded.setattr(socket, "socket", blocking_io_forbidden)
+        guarded.setattr(time, "sleep", blocking_io_forbidden)
+        panel._handle_descriptor_reading(reading, view)
 
 
 # ----------------------------------------------------------------------
@@ -181,16 +350,14 @@ def test_new_instrument_creates_card(app):
     from PySide6.QtCore import QCoreApplication
 
     panel = InstrumentsPanel()
-    # Drive via public on_reading() — verifies the full Signal routing path.
-    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    reading = _reading("Т1", instrument_id="LS218_1")
+    panel.on_descriptor_reading(reading, _view(reading))
     QCoreApplication.processEvents()
     assert panel.get_instrument_count() == 1
     assert "LS218_1" in panel._cards
     # Card label must display the instrument name.
     card = panel._cards["LS218_1"]
-    assert card._name_label.text() == "LS218_1", (
-        f"Card name label wrong: {card._name_label.text()!r}"
-    )
+    assert card._name_label.text() == "LS218_1", f"Card name label wrong: {card._name_label.text()!r}"
     # Indicator must be present (a _StatusIndicator, not a label).
     assert isinstance(card._indicator, _StatusIndicator)
     # Empty-state overlay must be hidden after the first reading.
@@ -201,26 +368,28 @@ def test_repeated_reading_updates_same_card(app):
     from PySide6.QtCore import QCoreApplication
 
     panel = InstrumentsPanel()
-    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    first = _reading("Т1", instrument_id="LS218_1")
+    panel.on_descriptor_reading(first, _view(first))
     QCoreApplication.processEvents()
-    panel.on_reading(_reading("Т2", instrument_id="LS218_1"))
+    second = _reading("Т2", instrument_id="LS218_1")
+    panel.on_descriptor_reading(second, _view(second))
     QCoreApplication.processEvents()
     assert panel.get_instrument_count() == 1
     assert panel._cards["LS218_1"].total_readings == 2
     # Assert rendered counter text — not just the private total_readings int.
     counter_text = panel._cards["LS218_1"]._counters_label.text()
-    assert counter_text == "Показания: 2 | Ошибки: 0", (
-        f"Counter label text wrong: {counter_text!r}"
-    )
+    assert counter_text == "Показания: 2 | Ошибки: 0", f"Counter label text wrong: {counter_text!r}"
 
 
 def test_two_distinct_instruments_create_two_cards(app):
     from PySide6.QtCore import QCoreApplication
 
     panel = InstrumentsPanel()
-    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    first = _reading("Т1", instrument_id="LS218_1")
+    panel.on_descriptor_reading(first, _view(first))
     QCoreApplication.processEvents()
-    panel.on_reading(_reading("Keithley_1/smua/voltage"))
+    second = _reading("Keithley_1/smua/voltage", instrument_id="Keithley_1")
+    panel.on_descriptor_reading(second, _view(second))
     QCoreApplication.processEvents()
     assert panel.get_instrument_count() == 2
     assert {"LS218_1", "Keithley_1"}.issubset(panel._cards.keys())
@@ -229,19 +398,12 @@ def test_two_distinct_instruments_create_two_cards(app):
     assert panel._cards["Keithley_1"]._name_label.text() == "Keithley_1"
 
 
-def test_reading_without_instrument_id_and_no_prefix_dropped(app):
+def test_malformed_view_is_visible_and_never_attributed(app):
     panel = InstrumentsPanel()
-    panel._handle_reading(
-        Reading(
-            timestamp=datetime.now(UTC),
-            instrument_id="",
-            channel="nontracked",
-            value=1.0,
-            unit="",
-            metadata={},
-        )
-    )
+    panel.on_descriptor_reading(_reading("nontracked", instrument_id="claimed"), object())
+    QApplication.processEvents()
     assert panel.get_instrument_count() == 0
+    assert "отклонено" in panel._empty_cards_label.text()
 
 
 # ----------------------------------------------------------------------
@@ -280,9 +442,7 @@ def test_stale_detection_marks_fault(app):
     card.refresh_liveness()
     assert card.indicator_color == theme.STATUS_FAULT
     # Assert rendered status label text (not just indicator color).
-    assert "Нет связи" in card._status_label.text(), (
-        f"Stale card status label wrong: {card._status_label.text()!r}"
-    )
+    assert "Нет связи" in card._status_label.text(), f"Stale card status label wrong: {card._status_label.text()!r}"
     # Counters must still reflect the one reading.
     assert "Показания: 1" in card._counters_label.text()
 
@@ -292,15 +452,11 @@ def test_fresh_reading_recovers_to_ok(app):
     card._last_reading_time = time.monotonic() - 1000.0
     card.refresh_liveness()
     assert card.indicator_color == theme.STATUS_FAULT
-    assert "Нет связи" in card._status_label.text(), (
-        f"Pre-recovery status label wrong: {card._status_label.text()!r}"
-    )
+    assert "Нет связи" in card._status_label.text(), f"Pre-recovery status label wrong: {card._status_label.text()!r}"
     card.update_from_reading(_reading("x", instrument_id="inst"))
     assert card.indicator_color == theme.STATUS_OK
     # After fresh reading, status must say Норма.
-    assert "Норма" in card._status_label.text(), (
-        f"Post-recovery status label wrong: {card._status_label.text()!r}"
-    )
+    assert "Норма" in card._status_label.text(), f"Post-recovery status label wrong: {card._status_label.text()!r}"
     # Counters must reflect the new reading.
     assert "Показания: 1" in card._counters_label.text()
 
@@ -319,9 +475,7 @@ def test_status_indicator_is_painted_qframe(app):
     # Must NOT be a QLabel (which has a text() method and renders glyphs).
     assert not isinstance(ind, QLabel), "_StatusIndicator must not be a QLabel"
     # Must have no text() method on the instance (painted, no glyph dependency).
-    assert not hasattr(ind, "text"), (
-        "_StatusIndicator must not have text() — it is a painted widget, not a text label"
-    )
+    assert not hasattr(ind, "text"), "_StatusIndicator must not have text() — it is a painted widget, not a text label"
     # Fixed size enforced (circle geometry).
     assert ind.width() > 0 and ind.height() > 0
     assert ind.minimumWidth() == ind.maximumWidth(), "Indicator must have fixed width"
@@ -392,23 +546,15 @@ def test_poll_result_populates_table(app):
 
     # Assert exact channel name in first row (column 0).
     table = panel.sensor_diag_section._table
-    assert table.item(0, 0).text() == "Т1 Plate", (
-        f"Row channel name wrong: {table.item(0, 0).text()!r}"
-    )
+    assert table.item(0, 0).text() == "Т1 Plate", f"Row channel name wrong: {table.item(0, 0).text()!r}"
     # Assert health score in last column (column 6) = "95".
-    assert table.item(0, 6).text() == "95", (
-        f"Health score wrong: {table.item(0, 6).text()!r}"
-    )
+    assert table.item(0, 6).text() == "95", f"Health score wrong: {table.item(0, 6).text()!r}"
     # Health 95 → STATUS_OK color on health column.
     fg = table.item(0, 6).foreground().color().name()
-    assert fg.lower() == theme.STATUS_OK.lower(), (
-        f"Health color wrong for score 95: {fg!r}"
-    )
+    assert fg.lower() == theme.STATUS_OK.lower(), f"Health color wrong for score 95: {fg!r}"
     # Summary chip must show "1 ОК".
     chip_texts = [w.text() for w in panel.sensor_diag_section._chip_widgets]
-    assert any("1 ОК" in t for t in chip_texts), (
-        f"Summary chip '1 ОК' missing; chips: {chip_texts}"
-    )
+    assert any("1 ОК" in t for t in chip_texts), f"Summary chip '1 ОК' missing; chips: {chip_texts}"
 
     panel._diag_poll_timer.stop()
 
@@ -446,10 +592,7 @@ def test_seven_columns_rendered(app):
     assert section._table.columnCount() == 7
     # Assert exact column headers in order (not just count).
     expected_headers = ["Канал", "T (K)", "Шум (мК)", "Дрейф (мК/мин)", "Выбросы", "Корр.", "Здоровье"]
-    actual_headers = [
-        section._table.horizontalHeaderItem(c).text()
-        for c in range(section._table.columnCount())
-    ]
+    actual_headers = [section._table.horizontalHeaderItem(c).text() for c in range(section._table.columnCount())]
     assert actual_headers == expected_headers, (
         f"Column headers mismatch:\n  expected: {expected_headers}\n  got: {actual_headers}"
     )
@@ -595,16 +738,16 @@ def test_disconnect_keeps_diag_rows(app):
     # Health score 40 → FAULT color preserved.
     fg = table.item(0, 6).foreground().color().name()
     from cryodaq.gui import theme as _theme
-    assert fg.lower() == _theme.STATUS_FAULT.lower(), (
-        f"Health color wrong after disconnect: {fg!r}"
-    )
+
+    assert fg.lower() == _theme.STATUS_FAULT.lower(), f"Health color wrong after disconnect: {fg!r}"
 
 
 def test_disconnect_keeps_cards_alive(app):
     from PySide6.QtCore import QCoreApplication
 
     panel = InstrumentsPanel()
-    panel.on_reading(_reading("Т1", instrument_id="LS218_1"))
+    reading = _reading("Т1", instrument_id="LS218_1")
+    panel.on_descriptor_reading(reading, _view(reading))
     QCoreApplication.processEvents()
     panel.set_connected(True)
     panel.set_connected(False)

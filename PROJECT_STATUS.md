@@ -170,8 +170,9 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    committed receipts, D5 replay parity и D6 reporting parity завершены.
    Passive conformance harness, ASC reference TCP driver, registry adoption и
    exact frozen-driver allowlist committed как foundations. D4 live descriptor
-   wire и D7.1 descriptor-qualified GUI ingress committed. Открыты removal of
-   remaining channel-name inference, D7 generic/design-system presentation,
+   wire и D7.1 descriptor-qualified GUI ingress committed. D7 generic
+   instrument-health presentation now attributes cards only from authoritative
+   connected descriptors. Открыты specialized shell-routing heuristics,
    real localhost и Windows evidence, а также полный
    acquisition-to-health-display e2e proof.
 4. F36: committed foundation включает wire envelope, durable revision

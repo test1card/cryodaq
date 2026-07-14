@@ -239,7 +239,7 @@ design-system prose in the same reviewed slice.
 
 ## Token count summary
 
-From `src/cryodaq/gui/theme.py` inventory (v1.2.0, 142 exported uppercase constants):
+From `src/cryodaq/gui/theme.py` inventory (v2.0.0, 142 exported uppercase constants):
 
 | Category | Count | File |
 |---|---:|---|
@@ -260,6 +260,8 @@ From `src/cryodaq/gui/theme.py` inventory (v1.2.0, 142 exported uppercase consta
 
 ## Changelog
 
+- 2026-07-14: Released v2.0.0 for the breaking descriptor-qualified
+  `InstrumentsPanel` ingress contract; tokens and visual anatomy are unchanged.
 - 2026-07-11: Added the F36 snapshot and Primary Operator Display entry points;
   reconciled the root tree and runtime-token inventory with the v1.2.0 corpus.
 - 2026-04-17: Initial version. Written during Phase I.1 after Vladimir visual review revealed cross-surface inconsistency. Based on real `theme.py` token inventory (126 tokens across 5 categories at v1.0.0; expanded to 139 tokens in v1.0.1).

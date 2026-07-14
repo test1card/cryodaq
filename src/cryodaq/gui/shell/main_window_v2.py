@@ -48,7 +48,7 @@ from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
-from cryodaq.gui.state.descriptor_store import DescriptorStore, IngestResult
+from cryodaq.gui.state.descriptor_store import DescriptorStore, DescriptorView, IngestResult
 from cryodaq.gui.zmq_client import ZmqBridge
 
 logger = logging.getLogger(__name__)
@@ -445,6 +445,7 @@ class MainWindowV2(QMainWindow):
             logger.warning("malformed descriptor-qualified reading dropped")
             return
 
+        view: DescriptorView | None = None
         try:
             result = self._descriptor_store.ingest(qualified)
         except RuntimeError:
@@ -461,7 +462,11 @@ class MainWindowV2(QMainWindow):
                     "DescriptorStore capacity exhausted for channel %s; reading still dispatched",
                     qualified.reading.channel,
                 )
+            else:
+                view = self._descriptor_store.view(qualified.reading.channel)
         self._dispatch_reading(qualified.reading)
+        if self._instrument_panel is not None:
+            self._instrument_panel.on_descriptor_reading(qualified.reading, view)
 
     def invalidate_descriptor_transport(self) -> None:
         """Advance the store generation after a bridge death/restart.
@@ -565,8 +570,6 @@ class MainWindowV2(QMainWindow):
                 if self._keithley_panel is not None:
                     ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
                     self._keithley_panel.set_safety_ready(ready, reason_text)
-        if self._instrument_panel is not None:
-            self._instrument_panel.on_reading(reading)
 
     # ------------------------------------------------------------------
     # Analytics channel adapter (B.8 follow-up)

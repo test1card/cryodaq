@@ -4,7 +4,7 @@ keywords: rules, governance, token-naming, versioning, deprecation, RULE-GOV
 applies_to: meta-rules about how the design system itself evolves
 status: canonical
 references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md
-last_updated: 2026-04-17
+last_updated: 2026-07-14
 ---
 
 # Governance Rules
@@ -20,7 +20,7 @@ Each rule is a thin pointer to the authoritative governance document, because th
 Every new token (color, spacing, typography, radius, layout, icon size) follows the naming patterns, prefix registry, and ALL_CAPS Python-constant convention defined in the canonical governance doc. Deviations require an explicit exception per `governance/contribution.md`.
 
 **Canonical source:** `governance/token-naming.md`. Includes:
-- Flat current architecture (v1.x) vs target three-layer (v2.0)
+- Flat current architecture (v2.x) vs a separately approved future-major three-layer candidate
 - Prefix registry (STATUS_*, FONT_*, SPACE_*, etc.)
 - STONE_* legacy alias policy
 - W3C DTCG alignment (future export path)
@@ -44,7 +44,7 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v1.0.1 (post-deep-audit cleanup of v1.0.0 initial release).
+**Current version:** v2.0.0 (descriptor-qualified InstrumentsPanel ingress; flat tokens unchanged).
 
 ## RULE-GOV-003
 
@@ -55,7 +55,7 @@ Lifecycle: Active → Deprecated → Removed. Deprecation window is at least one
 **Canonical source:** `governance/deprecation-policy.md`. Includes:
 - Per-artifact deprecation windows (1 version for tokens, 2-3 for components / full rules)
 - Emergency deprecation exception
-- STONE_* legacy lifecycle (currently deprecated in v1.0.0, removed v2.0.0)
+- STONE_* legacy lifecycle (deprecated since v1.0.0, still available in v2.0.0, removal in a separately approved future major no earlier than v3.0.0)
 - Un-deprecation (reverting deprecations) process
 - What cannot be deprecated (Cyrillic Т, SI units, WCAG AA commitment, persistence-first, TSP-not-SCPI)
 
@@ -75,7 +75,7 @@ Other governance concerns (testing, performance, contribution workflow) are docu
 
 ## Rules applied to themselves
 
-These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v1.0.1 state: all three Active, no pending changes.
+These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v2.0.0 state: all three Active, no pending removals.
 
 ## Related rules and patterns
 
@@ -87,3 +87,4 @@ These three rules are themselves subject to the design system's evolution proces
 ## Changelog
 
 - 2026-04-17: Initial version. Three governance rules as thin pointers to canonical governance documents. Closes forward references to RULE-GOV-001 and RULE-GOV-003 from Batches 1 and 2.
+- 2026-07-14 (v2.0.0): Reconciled the current flat-token architecture and STONE_* deprecation schedule with the scoped descriptor-identity major release.
