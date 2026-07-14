@@ -10,6 +10,11 @@ from cryodaq import launcher
 from cryodaq.gui.zmq_client import ZmqBridge
 from scripts import soak_mock_stack_runner as runner
 
+_POSIX_HANDSHAKE = pytest.mark.skipif(
+    os.name != "posix",
+    reason="requires POSIX descriptor inheritance and filesystem mode semantics",
+)
+
 
 def _install_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[int, int, str]:
     root = tmp_path / "isolated-root"
@@ -24,6 +29,7 @@ def _install_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[i
     return read_fd, write_fd, nonce
 
 
+@_POSIX_HANDSHAKE
 def test_valid_posix_mock_tray_request_emits_one_canonical_record(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -104,6 +110,7 @@ def test_consumed_authority_fd_is_closed_in_real_fork_child(
         os.close(read_fd)
 
 
+@_POSIX_HANDSHAKE
 def test_consumed_authority_closes_if_noninheritability_cannot_be_set(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -131,6 +138,7 @@ def test_consumed_authority_closes_if_noninheritability_cannot_be_set(
         os.close(read_fd)
 
 
+@_POSIX_HANDSHAKE
 def test_consumed_authority_cancel_closes_pipe_and_fork_registry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -201,6 +209,7 @@ def test_partial_cancel_and_unsafe_root_fail_closed_without_descriptor_leak(
 
 
 @pytest.mark.parametrize("mode", [0o000, 0o500, 0o600, 0o701, 0o710, 0o750, 0o770, 0o777])
+@_POSIX_HANDSHAKE
 def test_handshake_requires_exact_root_mode_0700_and_closes_rejections(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -225,6 +234,7 @@ def test_handshake_requires_exact_root_mode_0700_and_closes_rejections(
         os.close(read_fd)
 
 
+@_POSIX_HANDSHAKE
 def test_handshake_rejects_parent_replacement_between_observation_and_resolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

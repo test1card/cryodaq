@@ -57,6 +57,7 @@ def test_launcher_strips_every_soak_descriptor_key() -> None:
     assert launcher._without_soak_bridge_environment(environment) == {"KEEP": "yes"}
 
 
+@pytest.mark.skipif(os.name != "posix", reason="pass_fds is POSIX-only")
 def test_failed_child_grant_may_reuse_candidate_but_committed_replacement_is_newer() -> None:
     runner, retained = socket.socketpair()
     capability = launcher._SoakArtifactCapability(retained.detach(), "b" * 64)

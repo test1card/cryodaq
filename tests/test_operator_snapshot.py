@@ -176,7 +176,7 @@ def test_received_at_documents_producer_order_not_gui_transport_receipt() -> Non
 
 def test_neutral_protocol_import_architecture_has_no_gui_or_qt_dependency() -> None:
     repo = Path(__file__).parents[1]
-    neutral = ast.parse((repo / "src/cryodaq/operator_snapshot.py").read_text())
+    neutral = ast.parse((repo / "src/cryodaq/operator_snapshot.py").read_text(encoding="utf-8"))
     backend_paths = [repo / "src/cryodaq/engine.py", *(repo / "src/cryodaq/replay_engine").glob("*.py")]
 
     def imports(tree: ast.AST) -> set[str]:
@@ -191,7 +191,7 @@ def test_neutral_protocol_import_architecture_has_no_gui_or_qt_dependency() -> N
     forbidden = ("cryodaq.gui", "PySide", "PyQt")
     assert not any(name.startswith(forbidden) for name in imports(neutral))
     for path in backend_paths:
-        assert not any(name.startswith("cryodaq.gui") for name in imports(ast.parse(path.read_text())))
+        assert not any(name.startswith("cryodaq.gui") for name in imports(ast.parse(path.read_text(encoding="utf-8"))))
 
 
 def test_closed_epistemic_enums_and_replay_authority_rules() -> None:

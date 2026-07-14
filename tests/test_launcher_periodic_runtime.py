@@ -580,7 +580,12 @@ def test_windows_assistant_shutdown_rejects_runtime_identity_swap_during_create(
     def swap_then_open(path: Path, flags: int, mode: int) -> int:
         authority.runtime_dir.rename(original_runtime)
         if replacement_kind == "symlink":
-            authority.runtime_dir.symlink_to(outside, target_is_directory=True)
+            try:
+                authority.runtime_dir.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                if os.name == "nt" and exc.winerror == 1314:
+                    pytest.skip("Windows account lacks symlink creation privilege")
+                raise
             redirected = outside / authority.path.name
         else:
             authority.runtime_dir.mkdir()
