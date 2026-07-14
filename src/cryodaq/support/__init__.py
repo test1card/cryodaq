@@ -11,6 +11,7 @@ from .bundle import (
     build_support_bundle,
     plan_bundle_write,
 )
+from .collector import collect_bundle_capture
 
 __all__ = [
     "BundleArtifact",
@@ -21,5 +22,6 @@ __all__ = [
     "SoftwareVersion",
     "SupportBundle",
     "build_support_bundle",
+    "collect_bundle_capture",
     "plan_bundle_write",
 ]
