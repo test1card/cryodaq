@@ -85,7 +85,7 @@ def test_needs_first_run_pending_overrides_existing_done_marker(tmp_path: Path) 
     (tmp_path / cfg.FIRST_RUN_MARKER_NAME).write_text(
         json.dumps({"version": cfg.FIRST_RUN_DONE_VERSION, "txn_id": old_txn})
     )
-    (tmp_path / cfg.FIRST_RUN_PENDING_NAME).write_text("{}")
+    (tmp_path / cfg.FIRST_RUN_PENDING_NAME).write_text("{}", encoding="utf-8")
     assert cfg.needs_first_run(tmp_path) is True
 
 
@@ -329,9 +329,15 @@ def test_established_systemexit_recovers_each_transaction_boundary(
     cfg.recover_pending_setup(tmp_path)
 
     if committed:
-        assert yaml.safe_load((tmp_path / "instruments.local.yaml").read_text())["instruments"][0]["name"] == "new"
-        assert yaml.safe_load((tmp_path / "notifications.local.yaml").read_text())["telegram"]["chat_id"] == 2
-        done = json.loads((tmp_path / cfg.FIRST_RUN_MARKER_NAME).read_text())
+        assert (
+            yaml.safe_load((tmp_path / "instruments.local.yaml").read_text(encoding="utf-8"))["instruments"][0]["name"]
+            == "new"
+        )
+        assert (
+            yaml.safe_load((tmp_path / "notifications.local.yaml").read_text(encoding="utf-8"))["telegram"]["chat_id"]
+            == 2
+        )
+        done = json.loads((tmp_path / cfg.FIRST_RUN_MARKER_NAME).read_text(encoding="utf-8"))
         assert done["txn_id"] != "0" * 32
     else:
         for name, content in originals.items():
@@ -400,7 +406,10 @@ def test_committed_cleanup_failure_never_rolls_back_outputs(tmp_path: Path) -> N
     assert (tmp_path / cfg.FIRST_RUN_PENDING_NAME).exists()
     assert (tmp_path / "instruments.local.yaml").read_bytes() != originals["instruments.local.yaml"]
     cfg.recover_pending_setup(tmp_path)
-    assert yaml.safe_load((tmp_path / "instruments.local.yaml").read_text())["instruments"][0]["name"] == "new"
+    assert (
+        yaml.safe_load((tmp_path / "instruments.local.yaml").read_text(encoding="utf-8"))["instruments"][0]["name"]
+        == "new"
+    )
     assert not (tmp_path / cfg.FIRST_RUN_PENDING_NAME).exists()
 
 
@@ -421,8 +430,13 @@ def test_fresh_committed_cleanup_failure_keeps_new_outputs(tmp_path: Path) -> No
             )
 
     cfg.recover_pending_setup(tmp_path)
-    assert yaml.safe_load((tmp_path / "instruments.local.yaml").read_text())["instruments"][0]["name"] == "new"
-    assert yaml.safe_load((tmp_path / "notifications.local.yaml").read_text())["telegram"]["chat_id"] == 2
+    assert (
+        yaml.safe_load((tmp_path / "instruments.local.yaml").read_text(encoding="utf-8"))["instruments"][0]["name"]
+        == "new"
+    )
+    assert (
+        yaml.safe_load((tmp_path / "notifications.local.yaml").read_text(encoding="utf-8"))["telegram"]["chat_id"] == 2
+    )
     assert (tmp_path / cfg.FIRST_RUN_MARKER_NAME).exists()
     assert not (tmp_path / cfg.FIRST_RUN_PENDING_NAME).exists()
 
@@ -477,7 +491,7 @@ def test_recovery_manifest_and_secret_snapshots_are_owner_only_and_cleaned(tmp_p
         "notifications.local.yaml",
     }
     assert all(target["existed"] and target["snapshot"] for target in manifest["targets"])
-    done = json.loads((tmp_path / cfg.FIRST_RUN_MARKER_NAME).read_text())
+    done = json.loads((tmp_path / cfg.FIRST_RUN_MARKER_NAME).read_text(encoding="utf-8"))
     assert done["txn_id"] == manifest["txn_id"]
     assert manifest_path.stat().st_mode & 0o077 == 0
     snapshots = list(tmp_path.glob(f"{cfg.RECOVERY_SNAPSHOT_PREFIX}*"))
