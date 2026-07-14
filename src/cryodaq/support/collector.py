@@ -6,6 +6,11 @@ a detached, bounded BundleCapture that the pure bundle.py serialiser can
 then redact and seal.
 
 Design constraints:
+- FAIL-CLOSED: every section is collected with section-level atomicity.  If
+  ANY item is omitted, invalid, unrepresentable, fails serialization, or the
+  input exceeds the supported cap, the WHOLE section is discarded and marked
+  explicitly unavailable.  No partial records survive as apparently-complete
+  truth.
 - DEGRADED-SAFE: every section is collected independently.  If the engine
   is down or a section raises, that section is added to unavailable_fields
   and collection continues.  The result is always a valid BundleCapture.
@@ -23,6 +28,8 @@ from typing import TYPE_CHECKING
 
 from .bundle import (
     _UNAVAILABLE_FIELDS,
+    MAX_FINGERPRINTS,
+    MAX_VERSIONS,
     BundleCapture,
     ConfigFingerprint,
     EvidenceRecord,
@@ -136,37 +143,42 @@ def _collect_versions(
     extra: dict[str, str | None] | None,
     unavailable: list[str],
 ) -> None:
+    # Fail-closed: build the complete version list in a staging area; if ANY
+    # item fails (including the core package lookup or any extra entry), discard
+    # the entire staging area and mark the section unavailable.
     try:
+        staging: list[SoftwareVersion] = []
         seen: set[str] = set()
+
         # Core package version via importlib.metadata (works frozen + editable).
         try:
             core_version: str | None = importlib.metadata.version("cryodaq")
         except importlib.metadata.PackageNotFoundError:
             core_version = None
-        _add_version(versions, seen, "cryodaq", core_version)
+        sv = SoftwareVersion("cryodaq", core_version)
+        if sv.component not in seen:
+            staging.append(sv)
+            seen.add(sv.component)
 
         if extra:
+            # Bound check: >MAX_VERSIONS total entries means the section cannot
+            # be represented faithfully; degrade rather than truncate.
+            total = 1 + len(extra)  # 1 for the core cryodaq entry
+            if total > MAX_VERSIONS:
+                _log.warning("bundle-collector: versions section exceeds cap (%s)", type(ValueError()).__name__)
+                _mark_unavailable("versions", unavailable)
+                return
             for component, version in extra.items():
-                _add_version(versions, seen, component, version)
+                sv = SoftwareVersion(component, version)
+                if sv.component not in seen:
+                    staging.append(sv)
+                    seen.add(sv.component)
+
+        versions.extend(staging)
     except Exception as exc:
         _log.warning("bundle-collector: versions section failed (%s)", type(exc).__name__)
         _mark_unavailable("versions", unavailable)
         versions.clear()
-
-
-def _add_version(
-    versions: list[SoftwareVersion],
-    seen: set[str],
-    component: str,
-    version: str | None,
-) -> None:
-    try:
-        sv = SoftwareVersion(component, version)
-        if sv.component not in seen:
-            versions.append(sv)
-            seen.add(sv.component)
-    except Exception as exc:
-        _log.debug("bundle-collector: skipping version (%s)", type(exc).__name__)
 
 
 def _collect_fingerprints(
@@ -176,21 +188,29 @@ def _collect_fingerprints(
 ) -> None:
     if not extra:
         return
+    # Fail-closed: any item failure or exceeding the cap degrades the whole
+    # section; no partial fingerprints survive as apparently-complete truth.
     try:
+        # Bound check before iteration.
+        if len(extra) > MAX_FINGERPRINTS:
+            _log.warning("bundle-collector: config_fingerprints section exceeds cap (%s)", type(ValueError()).__name__)
+            _mark_unavailable("config_fingerprints", unavailable)
+            return
+
+        staging: list[ConfigFingerprint] = []
         seen: set[str] = set()
         for config_id, projection_schema, sha256 in extra:
-            try:
-                fp = ConfigFingerprint(
-                    config_id=config_id,
-                    projection_schema=projection_schema,
-                    provenance="redacted_public_projection",
-                    sha256=sha256,
-                )
-                if fp.config_id not in seen:
-                    fingerprints.append(fp)
-                    seen.add(fp.config_id)
-            except Exception as exc:
-                _log.debug("bundle-collector: skipping fingerprint (%s)", type(exc).__name__)
+            fp = ConfigFingerprint(
+                config_id=config_id,
+                projection_schema=projection_schema,
+                provenance="redacted_public_projection",
+                sha256=sha256,
+            )
+            if fp.config_id not in seen:
+                staging.append(fp)
+                seen.add(fp.config_id)
+
+        fingerprints.extend(staging)
     except Exception as exc:
         _log.warning("bundle-collector: config_fingerprints section failed (%s)", type(exc).__name__)
         _mark_unavailable("config_fingerprints", unavailable)
@@ -202,31 +222,31 @@ def _collect_health(
     records: list[EvidenceRecord],
     unavailable: list[str],
 ) -> None:
+    # Fail-closed: materialise the full iterable into a bounded list before
+    # processing any items.  If the input exceeds the cap, or if ANY item fails
+    # serialization, the entire section is marked unavailable — no earlier
+    # records survive as apparently-complete truth.
     try:
-        added = 0
-        pending: list[EvidenceRecord] = []
-        items_seen = 0
-        for subsystem in snapshot.plant_health.subsystems:
-            items_seen += 1
-            if added >= _MAX_HEALTH_RECORDS:
-                break
-            try:
-                payload: dict[str, object] = {
-                    "source_id": _safe_identifier(subsystem.subsystem_id),
-                    "state": _safe_identifier(subsystem.state.value),
-                }
-                if hasattr(subsystem, "observed_at") and subsystem.observed_at is not None:
-                    payload["observed_at"] = _utc_iso(subsystem.observed_at)
-                rec = EvidenceRecord.from_payload("health", payload)
-                pending.append(rec)
-                added += 1
-            except Exception as exc:
-                _log.debug("bundle-collector: skipping health item (%s)", type(exc).__name__)
-        if items_seen > 0 and not pending:
-            # Every item failed — mark degraded rather than silently emitting zero records.
+        items = list(snapshot.plant_health.subsystems)
+
+        if len(items) > _MAX_HEALTH_RECORDS:
+            _log.warning("bundle-collector: health section exceeds cap (%s)", type(ValueError()).__name__)
             _mark_unavailable("health", unavailable)
-        else:
-            records.extend(pending)
+            return
+
+        pending: list[EvidenceRecord] = []
+        for subsystem in items:
+            payload: dict[str, object] = {
+                "source_id": _safe_identifier(subsystem.subsystem_id),
+                "state": _safe_identifier(subsystem.state.value),
+            }
+            if hasattr(subsystem, "observed_at") and subsystem.observed_at is not None:
+                payload["observed_at"] = _utc_iso(subsystem.observed_at)
+            rec = EvidenceRecord.from_payload("health", payload)
+            pending.append(rec)
+
+        # Only commit if every item succeeded; empty list is valid (no items → no records, no unavailable).
+        records.extend(pending)
     except Exception as exc:
         _log.warning("bundle-collector: health section failed (%s)", type(exc).__name__)
         _mark_unavailable("health", unavailable)
@@ -237,38 +257,38 @@ def _collect_attention(
     records: list[EvidenceRecord],
     unavailable: list[str],
 ) -> None:
+    # Fail-closed: materialise the full iterable into a bounded list before
+    # processing any items.  If the input exceeds the cap, or if ANY item fails
+    # serialization, the entire section is marked unavailable — no earlier
+    # records survive as apparently-complete truth.
     try:
-        added = 0
-        pending: list[EvidenceRecord] = []
-        items_seen = 0
-        for item in snapshot.attention.items:
-            items_seen += 1
-            if added >= _MAX_ATTENTION_RECORDS:
-                break
-            try:
-                # AttentionItem has no severity field; derive it from state.
-                state_val = _safe_identifier(item.state.value)
-                severity = _SEVERITY_FROM_STATE.get(state_val, "warning")
-                payload: dict[str, object] = {
-                    "attention_id": _safe_identifier(item.attention_id),
-                    "severity": severity,
-                    "state": state_val,
-                }
-                # Map first transport reason code to bundle reason_code if present.
-                if item.transport_reason_codes:
-                    payload["reason_code"] = _safe_identifier(item.transport_reason_codes[0])
-                if hasattr(item, "observed_at") and item.observed_at is not None:
-                    payload["observed_at"] = _utc_iso(item.observed_at)
-                rec = EvidenceRecord.from_payload("attention", payload)
-                pending.append(rec)
-                added += 1
-            except Exception as exc:
-                _log.debug("bundle-collector: skipping attention item (%s)", type(exc).__name__)
-        if items_seen > 0 and not pending:
-            # Every item failed — mark degraded rather than silently emitting zero records.
+        items = list(snapshot.attention.items)
+
+        if len(items) > _MAX_ATTENTION_RECORDS:
+            _log.warning("bundle-collector: attention section exceeds cap (%s)", type(ValueError()).__name__)
             _mark_unavailable("attention", unavailable)
-        else:
-            records.extend(pending)
+            return
+
+        pending: list[EvidenceRecord] = []
+        for item in items:
+            # AttentionItem has no severity field; derive it from state.
+            state_val = _safe_identifier(item.state.value)
+            severity = _SEVERITY_FROM_STATE.get(state_val, "warning")
+            payload: dict[str, object] = {
+                "attention_id": _safe_identifier(item.attention_id),
+                "severity": severity,
+                "state": state_val,
+            }
+            # Map first transport reason code to bundle reason_code if present.
+            if item.transport_reason_codes:
+                payload["reason_code"] = _safe_identifier(item.transport_reason_codes[0])
+            if hasattr(item, "observed_at") and item.observed_at is not None:
+                payload["observed_at"] = _utc_iso(item.observed_at)
+            rec = EvidenceRecord.from_payload("attention", payload)
+            pending.append(rec)
+
+        # Only commit if every item succeeded; empty list is valid.
+        records.extend(pending)
     except Exception as exc:
         _log.warning("bundle-collector: attention section failed (%s)", type(exc).__name__)
         _mark_unavailable("attention", unavailable)

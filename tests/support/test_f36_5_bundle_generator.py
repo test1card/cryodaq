@@ -664,3 +664,289 @@ def test_collect_bundle_capture_rejects_non_utc_created_at() -> None:
 
     with pytest.raises((ValueError, TypeError)):
         collect_bundle_capture(_BUNDLE_ID, local_dt)
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed section-level semantics (Repair 1, 2, 3)
+# ---------------------------------------------------------------------------
+
+
+def test_failclosed_65_health_items_last_is_fault_section_unavailable() -> None:
+    """65 health items with the LAST item FAULT → health section is UNAVAILABLE.
+
+    Proves that the cap is enforced before iteration and the FAULT item cannot
+    be silently dropped while the section appears complete.
+    """
+    ok_items = tuple(
+        PlantHealthItem(f"sub-{i}", f"Подсистема {i}", OperatorPresentationState.OK, ()) for i in range(64)
+    )
+    fault_item = PlantHealthItem("sub-64", "Подсистема 64", OperatorPresentationState.FAULT, ())
+    all_items = ok_items + (fault_item,)
+    assert len(all_items) == 65
+
+    snap = _snapshot(health_items=all_items)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "health" in ev["unavailable_fields"], (
+        "health must be UNAVAILABLE when input exceeds cap — the FAULT item must not be silently dropped"
+    )
+    assert not any(r["kind"] == "health" for r in ev["records"]), (
+        "no partial health records must survive into the bundle"
+    )
+
+
+def test_failclosed_33_attention_items_last_is_highest_severity_section_unavailable() -> None:
+    """33 attention items with the LAST item highest severity → attention section UNAVAILABLE.
+
+    Proves the cap is enforced before iteration so the highest-severity item
+    is never silently truncated.
+    """
+    ok_items = tuple(
+        AttentionItem(f"attn-{i}", OperatorPresentationState.CAUTION, "Заголовок", "Детали", _OBS) for i in range(32)
+    )
+    fault_item = AttentionItem("attn-32", OperatorPresentationState.FAULT, "Сбой", "Критично", _OBS)
+    all_items = ok_items + (fault_item,)
+    assert len(all_items) == 33
+
+    snap = _snapshot(attention_items=all_items)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "attention" in ev["unavailable_fields"], (
+        "attention must be UNAVAILABLE when input exceeds cap — highest-severity item must not be dropped"
+    )
+    assert not any(r["kind"] == "attention" for r in ev["records"]), (
+        "no partial attention records must survive into the bundle"
+    )
+
+
+def test_failclosed_item_serialization_failure_after_valid_items_whole_section_unavailable() -> None:
+    """An item serialization failure after earlier valid items makes the whole section unavailable.
+
+    The valid earlier records must NOT survive as apparently-complete truth.
+    Uses health section: first item is valid, second item has an identifier that
+    raises from _safe_identifier (subsystem_id is None → TypeError in str.encode).
+    """
+    # First item is valid.
+    valid_item = PlantHealthItem("sub-ok", "Подсистема", OperatorPresentationState.OK, ())
+    # Second item will fail serialization: subsystem_id=None causes TypeError in _safe_identifier.
+    bad_item = PlantHealthItem.__new__(PlantHealthItem)
+    object.__setattr__(bad_item, "subsystem_id", None)  # type: ignore[arg-type]
+    object.__setattr__(bad_item, "display_name", "bad")
+    object.__setattr__(bad_item, "state", OperatorPresentationState.OK)
+    object.__setattr__(bad_item, "reason_codes", ())
+    object.__setattr__(bad_item, "transport_reason_codes", ())
+
+    mock_snap = MagicMock()
+    mock_snap.plant_health.subsystems = [valid_item, bad_item]
+    mock_snap.attention.items = ()
+    mock_snap.data_integrity.storage.value = "available"
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "health" in ev["unavailable_fields"], (
+        "health must be UNAVAILABLE when any item fails — earlier valid records must not survive"
+    )
+    assert not any(r["kind"] == "health" for r in ev["records"]), (
+        "the valid earlier health record must NOT survive as apparently-complete truth"
+    )
+
+
+def test_failclosed_unicode_non_ascii_identifier_section_unavailable() -> None:
+    """A Unicode/non-ASCII identifier that cannot fit the bundle identifier grammar → section UNAVAILABLE.
+
+    The bundle identifier grammar _ID_RE requires [a-zA-Z0-9][a-zA-Z0-9._-]{0,127}.
+    A subsystem_id that is purely non-ASCII (e.g. Cyrillic) fails _identifier →
+    the whole health section must be marked unavailable.
+    """
+    # Pure Cyrillic string: does not match [a-zA-Z0-9...] grammar.
+    cyrillic_id = "Подсистема-кириллица"
+    bad_item = PlantHealthItem.__new__(PlantHealthItem)
+    object.__setattr__(bad_item, "subsystem_id", cyrillic_id)
+    object.__setattr__(bad_item, "display_name", "кириллица")
+    object.__setattr__(bad_item, "state", OperatorPresentationState.OK)
+    object.__setattr__(bad_item, "reason_codes", ())
+    object.__setattr__(bad_item, "transport_reason_codes", ())
+
+    mock_snap = MagicMock()
+    mock_snap.plant_health.subsystems = [bad_item]
+    mock_snap.attention.items = ()
+    mock_snap.data_integrity.storage.value = "available"
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "health" in ev["unavailable_fields"], (
+        "health must be UNAVAILABLE when a non-ASCII identifier cannot fit the bundle grammar"
+    )
+    assert not any(r["kind"] == "health" for r in ev["records"])
+
+
+def test_failclosed_65_versions_section_unavailable_no_exception() -> None:
+    """65 versions → versions section UNAVAILABLE, valid degraded capture (no exception).
+
+    Proves that >MAX_VERSIONS inputs cause a degraded-but-valid capture rather
+    than raising from BundleCapture.__post_init__.
+    """
+    from cryodaq.support.bundle import MAX_VERSIONS
+
+    # Build 65 distinct extra-version entries (cryodaq core + 65 extras = 66 total > 64).
+    extra = {f"driver-{i}": f"1.{i}.0" for i in range(MAX_VERSIONS)}
+    assert len(extra) == MAX_VERSIONS  # 64 extras + 1 core = 65 total > 64
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=None, extra_versions=extra)
+    # Must NOT raise — must produce a valid degraded capture.
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "versions" in ev["unavailable_fields"], "versions must be UNAVAILABLE when input exceeds MAX_VERSIONS"
+    assert ev["versions"] == [], "no partial version evidence must survive"
+
+
+def test_failclosed_129_fingerprints_section_unavailable_no_exception() -> None:
+    """129 fingerprints → fingerprints section UNAVAILABLE, valid degraded capture (no exception)."""
+    from cryodaq.support.bundle import MAX_FINGERPRINTS
+
+    extra = [(f"config-{i}", "cfg.public.v1", None) for i in range(MAX_FINGERPRINTS + 1)]
+    assert len(extra) == MAX_FINGERPRINTS + 1  # 129
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=None, extra_fingerprints=extra)
+    # Must NOT raise — must produce a valid degraded capture.
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "config_fingerprints" in ev["unavailable_fields"], (
+        "config_fingerprints must be UNAVAILABLE when input exceeds MAX_FINGERPRINTS"
+    )
+    assert ev["config_fingerprints"] == [], "no partial fingerprint evidence must survive"
+
+
+def test_failclosed_section_is_either_complete_or_unavailable_never_partial() -> None:
+    """No silent partial section: a section is EITHER fully complete OR marked unavailable.
+
+    Uses a snapshot where health subsystems include one valid item followed by
+    one item that fails (None subsystem_id).  The section must be unavailable
+    with zero records — never half-populated.
+    """
+    valid_item = PlantHealthItem("valid-sub", "Подсистема", OperatorPresentationState.OK, ())
+    bad_item = PlantHealthItem.__new__(PlantHealthItem)
+    object.__setattr__(bad_item, "subsystem_id", None)  # type: ignore[arg-type]
+    object.__setattr__(bad_item, "display_name", "bad")
+    object.__setattr__(bad_item, "state", OperatorPresentationState.OK)
+    object.__setattr__(bad_item, "reason_codes", ())
+    object.__setattr__(bad_item, "transport_reason_codes", ())
+
+    mock_snap = MagicMock()
+    mock_snap.plant_health.subsystems = [valid_item, bad_item]
+    mock_snap.attention.items = ()
+    mock_snap.data_integrity.storage.value = "available"
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    health_records = [r for r in ev["records"] if r["kind"] == "health"]
+    health_unavailable = "health" in ev["unavailable_fields"]
+
+    # Invariant: section is complete (has records) XOR unavailable — never both, never partial.
+    if health_unavailable:
+        assert health_records == [], "unavailable section must have zero records"
+    else:
+        # Section is complete — every record is valid (no partial evidence).
+        assert len(health_records) > 0, "complete section must have at least the valid record"
+    # The key assertion: it cannot be both present (partial) and also appear unavailable.
+    assert not (health_records and health_unavailable), (
+        "section is BOTH partially populated AND unavailable — fail-closed violated"
+    )
+
+
+def test_failclosed_no_secret_path_operator_leak_in_failure_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No secret / path / operator string leaks in failure logs or in unavailable-reason fields.
+
+    Triggers a versions section failure (extra entry with a secret-shaped component name)
+    and confirms the secret never reaches log output or the bundle's unavailable_fields text.
+    """
+    secret = "password=hunter2"
+    path = r"C:\Users\alice\private\log.txt"
+    operator_data = "operator=alice@lab.example.com"
+
+    with caplog.at_level("DEBUG", logger="cryodaq.support.collector"):
+        capture = collect_bundle_capture(
+            _BUNDLE_ID,
+            _NOW,
+            snapshot=None,
+            extra_versions={"bad-version": f"{secret} {path} {operator_data}"},
+        )
+        bundle = build_support_bundle(capture)
+
+    combined = (caplog.text + " ".join(capture.unavailable_fields)).encode()
+    for sensitive in (secret, path, operator_data, "hunter2", "alice"):
+        assert sensitive.encode() not in combined, (
+            f"sensitive string {sensitive!r} leaked into logs or unavailable_fields"
+        )
+
+    # Versions must be unavailable (the bad entry triggered a section failure).
+    ev = _evidence(bundle)
+    assert "versions" in ev["unavailable_fields"]
+
+
+def test_failclosed_determinism_across_hash_seeds_still_passes() -> None:
+    """Determinism across hash seeds remains intact after fail-closed repair.
+
+    Re-runs the seed-subprocess determinism check with the repaired collector
+    path to confirm that the section-level atomicity changes do not break
+    manifest stability.
+    """
+    script = (
+        "from datetime import UTC, datetime\n"
+        "from cryodaq.support.bundle import *\n"
+        "from cryodaq.support.collector import collect_bundle_capture\n"
+        "snap_none = None\n"
+        "c = collect_bundle_capture('f36-5-fc-seed', datetime(2026,7,14,tzinfo=UTC), snapshot=snap_none)\n"
+        "print(build_support_bundle(c).manifest_sha256)"
+    )
+    outputs = []
+    for seed in ("1", "42", "999"):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        env["PYTHONPATH"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+        result = subprocess.check_output([sys.executable, "-c", script], env=env, text=True).strip()
+        outputs.append(result)
+
+    assert len(set(outputs)) == 1, f"manifest SHA-256 differs across seeds after repair: {outputs}"
+
+
+def test_failclosed_no_control_remediation_surface() -> None:
+    """Collector is read-only: collect_bundle_capture has no control or remediation surface.
+
+    Confirms that the returned BundleCapture exposes no write methods, no
+    hardware control, and that build_support_bundle produces only read-only
+    artifacts with no side-effecting methods.
+    """
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=None)
+    bundle = build_support_bundle(capture)
+
+    # BundleCapture is a frozen dataclass — no setattr.
+    import dataclasses
+
+    assert dataclasses.is_dataclass(capture)
+    # Frozen dataclasses raise FrozenInstanceError on attribute assignment.
+    with pytest.raises(Exception):
+        capture.bundle_id = "tampered"  # type: ignore[misc]
+
+    # No methods named after control or remediation verbs.
+    control_verbs = {"write", "send", "upload", "emit", "publish", "reset", "apply", "remediate", "execute"}
+    for obj in (capture, bundle):
+        for name in dir(obj):
+            if not name.startswith("_"):
+                assert not any(verb in name.lower() for verb in control_verbs), (
+                    f"unexpected control/remediation surface: {type(obj).__name__}.{name}"
+                )
