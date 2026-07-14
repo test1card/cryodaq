@@ -447,12 +447,21 @@ def test_collector_attention_real_item_emits_evidence_record() -> None:
     assert "attention" not in ev["unavailable_fields"]
 
 
-def test_collector_attention_severity_derived_from_state_for_all_non_ok_states() -> None:
-    """severity is derived from state; caution/warning/fault map 1-to-1; others fall back to warning."""
+def test_collector_attention_severity_derivation_covers_all_five_non_ok_states() -> None:
+    """severity is derived from state for all five non-ok presentation states.
+
+    caution/warning/fault map 1-to-1; stale/disconnected fall back to "warning".
+    In all cases the record's `state` field preserves the true state verbatim so
+    no information is lost by the severity derivation.
+    """
     cases = [
         (OperatorPresentationState.CAUTION, "caution"),
         (OperatorPresentationState.WARNING, "warning"),
         (OperatorPresentationState.FAULT, "fault"),
+        # Fallback branch: stale and disconnected map to severity "warning"
+        # but the true state value must still appear in the record unchanged.
+        (OperatorPresentationState.STALE, "warning"),
+        (OperatorPresentationState.DISCONNECTED, "warning"),
     ]
     for state, expected_severity in cases:
         item = AttentionItem("attn-1", state, "Заголовок", "Детали", _OBS)
@@ -462,7 +471,10 @@ def test_collector_attention_severity_derived_from_state_for_all_non_ok_states()
         ev = _evidence(bundle)
         records = [r for r in ev["records"] if r["kind"] == "attention"]
         assert len(records) == 1, f"no attention record for state={state}"
-        assert records[0]["payload"]["severity"] == expected_severity, f"wrong severity for state={state}"
+        payload = records[0]["payload"]
+        assert payload["severity"] == expected_severity, f"wrong severity for state={state}"
+        # The true state must be preserved verbatim — severity derivation must not overwrite it.
+        assert payload["state"] == state.value, f"state field lost for state={state}"
 
 
 def test_collector_attention_empty_queue_emits_no_records_and_no_unavailable() -> None:

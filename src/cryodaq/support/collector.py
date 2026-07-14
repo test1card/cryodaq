@@ -43,6 +43,15 @@ _MAX_INTEGRITY_RECORDS: int = 32
 _MAX_LOG_RECORDS: int = 64
 _MAX_AUDIT_RECORDS: int = 64
 
+# Map AttentionItem.state → bundle attention record severity.
+# caution/warning/fault map 1-to-1; stale/disconnected/any unrecognised state
+# fall back to "warning" so the record is never silently suppressed.
+_SEVERITY_FROM_STATE: dict[str, str] = {
+    "caution": "caution",
+    "warning": "warning",
+    "fault": "fault",
+}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -237,16 +246,8 @@ def _collect_attention(
             if added >= _MAX_ATTENTION_RECORDS:
                 break
             try:
-                # AttentionItem has no severity field.  Derive a bundle severity
-                # from the presentation state: caution/warning/fault map 1-to-1;
-                # stale/disconnected/unknown fall back to "warning" so the record
-                # is never silently suppressed for an unrecognised state.
+                # AttentionItem has no severity field; derive it from state.
                 state_val = _safe_identifier(item.state.value)
-                _SEVERITY_FROM_STATE = {
-                    "caution": "caution",
-                    "warning": "warning",
-                    "fault": "fault",
-                }
                 severity = _SEVERITY_FROM_STATE.get(state_val, "warning")
                 payload: dict[str, object] = {
                     "attention_id": _safe_identifier(item.attention_id),
