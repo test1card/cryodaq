@@ -560,7 +560,8 @@ def test_load_config_succeeds_with_valid_config(tmp_path):
         "  - 'Т1 .*'\n"
         "  - 'Т7 .*'\n"
         "stale_timeout_s: 10.0\n"
-        "heartbeat_timeout_s: 15.0\n"
+        "heartbeat_timeout_s: 15.0\n",
+        encoding="utf-8",
     )
     sm = SafetyManager(SafetyBroker(), mock=True)
     sm.load_config(cfg)
@@ -607,7 +608,10 @@ def test_load_config_fails_on_non_string_pattern(tmp_path):
 def test_load_config_fails_on_non_numeric_timeout(tmp_path):
     """A.4.1 residual: non-numeric stale_timeout_s must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nstale_timeout_s: 'not_a_number'\n")
+    cfg.write_text(
+        "critical_channels:\n  - 'Т1 .*'\nstale_timeout_s: 'not_a_number'\n",
+        encoding="utf-8",
+    )
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -616,7 +620,10 @@ def test_load_config_fails_on_non_numeric_timeout(tmp_path):
 def test_load_config_fails_on_non_dict_source_limits(tmp_path):
     """A.4.1 residual: non-mapping source_limits must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nsource_limits: 'not_a_dict'\n")
+    cfg.write_text(
+        "critical_channels:\n  - 'Т1 .*'\nsource_limits: 'not_a_dict'\n",
+        encoding="utf-8",
+    )
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)
@@ -625,7 +632,10 @@ def test_load_config_fails_on_non_dict_source_limits(tmp_path):
 def test_load_config_fails_on_non_numeric_source_limit_value(tmp_path):
     """A.4.1 residual: non-numeric source limit must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text("critical_channels:\n  - 'Т1 .*'\nsource_limits:\n  max_power_w: [1, 2, 3]\n")
+    cfg.write_text(
+        "critical_channels:\n  - 'Т1 .*'\nsource_limits:\n  max_power_w: [1, 2, 3]\n",
+        encoding="utf-8",
+    )
     sm = SafetyManager(SafetyBroker(), mock=True)
     with pytest.raises(SafetyConfigError, match="invalid config value"):
         sm.load_config(cfg)

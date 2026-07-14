@@ -753,3 +753,64 @@ worktree after D7.1 is settled.
   **PASS, no P0-P3**. Integrated test-only commit: `c150d4c`.
 - A new exact-SHA hosted run is mandatory after publication. Physical hardware,
   frozen-build, and soak-duration gates remain open.
+
+## 2026-07-14 sixth hosted CI adjudication and Windows sentinel hardening
+
+- Exact-SHA run `29309849548` at `95b712f` passed all four Ubuntu jobs plus
+  Windows agents, core, and GUI. Windows remaining reached **1,883 passed, 93
+  skipped** before the genuine launcher lifecycle test exposed a broken-link
+  shutdown-sentinel gap: Windows create-exclusive open followed a pre-existing
+  broken symlink, created its external target, and initially treated the open
+  as sufficient graceful-shutdown authority.
+- The shutdown path now rejects any pre-existing link/reparse/multi-link object
+  before opening. A newly opened object must still match `lstat` and `fstat`
+  identity, be an ordinary single-link file, and remain under the captured
+  data/runtime directory identities before it can authorize the graceful wait.
+  The bounded fallback remains terminate(10 seconds) then kill(5 seconds).
+- Independent review found that the first repair still allowed pathname cleanup
+  to delete a replacement installed during the wait and allowed an unsafe
+  hardlink entry to be removed. The final repair performs no pathname unlink:
+  per-launch UUID sentinel names remain inert, while broken-link targets,
+  hardlinks, and post-validation replacements cannot be deleted by the
+  launcher. Regression tests assert all three properties.
+- Native Windows full launcher-runtime evidence on Python 3.14: **34 passed, 5
+  exact WinError-1314 symlink-privilege skips**. Independent focused evidence:
+  **5 passed, 3 exact privilege skips**. Ruff check/format and `git diff
+  --check` passed. Final sentinel review and documentation review: **PASS, no
+  P0-P3**.
+- The previously used local WSL distro was not registered in this Windows
+  session, and restoration was blocked by the environment installation gate;
+  no Linux result is claimed for this new sentinel slice. A new exact-SHA
+  hosted Ubuntu/Windows run remains mandatory. Physical hardware,
+  frozen-build, and soak-duration gates remain open.
+
+## 2026-07-14 native Windows broad-suite inventory
+
+- A no-`-x` Python 3.14 run reached 60% before its bounded ten-minute stop; after
+  forced termination, the interrupted process reported a Qt/Python access
+  violation, so that attempt is not a suite verdict. A second run stopped
+  normally at 20 failures after **1,973 passed, 2 skipped, 1 deselected** in
+  162 seconds and supplied the bounded first-20-failure inventory.
+- Thirteen failures were exact WinError-1314 symlink-creation privilege
+  artifacts across assistant, archive, and path-jail tests. The affected
+  topologies and combined symlink/hardlink cases were inventoried separately;
+  no broad Windows skip, mock substitute, or production relaxation was added.
+  Hosted agents/core jobs at `95b712f` had already passed these areas, while
+  the local account cannot execute the symlink-specific property without the
+  OS capability.
+- Five SQLite gate assertions were contaminated by the machine's ambient
+  `CRYODAQ_ALLOW_BROKEN_SQLITE=1`. The module fixture now removes that variable
+  only inside each test and restores the caller environment afterward; the
+  explicit override test still sets `1` and proves the warning/override
+  contract. The full module passed **14/14** while launched under a deliberately
+  hostile ambient `1`; production fail-closed logic is unchanged.
+- Four Cyrillic safety YAML fixtures now write explicit UTF-8 to match the
+  production UTF-8 reader. The load-config selection passed **9/9** on native
+  Windows. One cross-kind delivery test replaced a racy 100 x 1 ms poll with
+  the coordinator's lock-serialized `reconcile_once()` barrier while retaining
+  exact `DELIVERY_UNKNOWN`, error-code, and receipt assertions; it passed
+  **20/20** separate repetitions.
+- Ruff check and `git diff --check` passed. Independent SQLite/UTF-8 and
+  delivery-barrier reviews: **PASS, no P0-P3**. These are deterministic
+  test-isolation repairs, not new physical, hardware, frozen-build, or full-CI
+  evidence.
