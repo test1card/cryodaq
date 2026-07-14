@@ -2,10 +2,10 @@
 
 The March-2026 WAL-reset corruption bug affects stdlib-linked SQLite in the
 range ``[3.7.0, 3.51.3)`` (except the backport-safe patch builds 3.44.6 and
-3.50.7). On Linux the lab PC often links an in-range system SQLite. Rather than
-forcing OS surgery or the ``CRYODAQ_ALLOW_BROKEN_SQLITE=1`` bypass, this module
-transparently falls back to the bundled ``pysqlite3-binary`` (a modern,
-statically-linked SQLite) when the stdlib version is unsafe.
+3.50.7). The supported ``environment.yml`` pins Python to a safe SQLite build
+on Windows and Linux. This module may select an independently installed
+``pysqlite3`` only when that implementation also passes the same version gate;
+otherwise startup remains fail-closed.
 
 Selection happens ONCE at import. Every runtime importer must take its sqlite3
 from here::
@@ -19,11 +19,10 @@ DB file would be touched by two different SQLite libraries at once — exactly t
 concurrent-writer hazard the gate exists to prevent. Routing every connection
 through this one chosen module keeps a single SQLite library per DB.
 
-macOS ships no pysqlite3 wheels, so the ``pysqlite3-binary`` dependency is
-Linux-only (see pyproject marker); on macOS the stdlib is used and is expected
-to be safe. If both stdlib and the fallback are unsafe/absent, this module
+If both stdlib and an optional fallback are unsafe or absent, this module
 returns the stdlib module unchanged and the ``SQLiteWriter`` gate hard-fails
-exactly as before.
+exactly as before. CryoDAQ does not install a fallback package by default:
+currently published fallback wheels do not reach the fixed SQLite boundary.
 """
 
 from __future__ import annotations
@@ -69,12 +68,9 @@ def _select(stdlib_version: tuple[int, int, int], pysqlite3_module):
     """
     if is_safe_version(stdlib_version):
         return _stdlib_sqlite3
-    if pysqlite3_module is not None and is_safe_version(
-        tuple(pysqlite3_module.sqlite_version_info)
-    ):
+    if pysqlite3_module is not None and is_safe_version(tuple(pysqlite3_module.sqlite_version_info)):
         logger.info(
-            "SQLite WAL gate: stdlib SQLite %s is in the WAL-reset corruption "
-            "range; using bundled pysqlite3 %s instead.",
+            "SQLite WAL gate: stdlib SQLite %s is in the WAL-reset corruption range; using pysqlite3 %s instead.",
             _fmt(stdlib_version),
             _fmt(tuple(pysqlite3_module.sqlite_version_info)),
         )

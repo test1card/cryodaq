@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if any pyproject dependency lacks a pin in requirements-lock.txt.
+"""Fail if a declared top-level dependency lacks a lockfile pin.
 
 build_scripts/build.sh installs the frozen bundle's transitive deps from
 requirements-lock.txt and then `pip install -e . --no-deps`. So any top-level
@@ -9,7 +9,9 @@ ZoneInfoNotFoundError). This gate catches that drift in CI before a build ships.
 
 Resolves the same dependency set the lock is compiled from
 (`pip-compile --extra=dev --extra=web`): base deps + the dev and web extras.
-stdlib-only (tomllib + regex text parse) — no packaging-library dependency.
+This is a name-coverage gate, not proof of transitive freshness, artifact
+identity, or hashes. stdlib-only (tomllib + regex text parse) — no
+packaging-library dependency.
 """
 
 from __future__ import annotations
@@ -72,13 +74,15 @@ def main(argv: list[str] | None = None) -> int:
 
     missing = find_drift(args.pyproject, args.lock)
     if missing:
-        print("requirements-lock.txt is stale — missing pins for top-level deps:")
+        print("requirements-lock.txt lacks pins for top-level deps:")
         for name in missing:
             print(f"  - {name}")
-        print(f"\nRegenerate: pip-compile --extra=dev --extra=web "
-              f"--output-file={args.lock.name} {args.pyproject.name}")
+        print(f"\nRegenerate: pip-compile --extra=dev --extra=web --output-file={args.lock.name} {args.pyproject.name}")
         return 1
-    print(f"requirements-lock.txt is in sync ({len(pyproject_dep_names(args.pyproject))} top-level deps pinned).")
+    print(
+        "requirements-lock.txt covers declared dependencies "
+        f"({len(pyproject_dep_names(args.pyproject))} top-level deps pinned)."
+    )
     return 0
 
 

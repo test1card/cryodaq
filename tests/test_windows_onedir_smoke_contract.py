@@ -17,8 +17,12 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "runs-on: windows-latest" in text
+    assert '- "environment.yml"' in text
+    assert "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5" in text
+    assert "environment-file: environment.yml" in text
     assert "-r requirements-lock.txt" in text
     assert "pip install --disable-pip-version-check . --no-deps" in text
+    assert "python -m pip check" in text
     assert "PyInstaller build_scripts/cryodaq.spec" in text
     assert "python build_scripts/post_build.py" in text
     assert "windows_onedir_smoke.py check-warnings" in text
@@ -26,6 +30,7 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
     assert "build/cryodaq/warn-cryodaq.txt" in text
     assert "dist/CryoDAQ/" in text
     assert "build/windows-smoke/" in text
+    assert "Verify safe SQLite runtime" in text
     assert "python -m cryodaq" not in text.lower()
     assert '- "src/**"' in text
     assert '- "config/**"' in text

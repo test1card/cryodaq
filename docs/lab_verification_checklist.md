@@ -21,10 +21,12 @@ WAL-reset **`[3.7.0, 3.51.3)`** (март-2026).
 **Команды.**
 
 ```bash
-# Авторитетная проверка — ВЫБРАННАЯ реализация sqlite3 (та, что реально
-# используется движком: stdlib или fallback pysqlite3). Гейт проверяет именно
-# её, а не сырой stdlib:
-.venv/bin/python -c "from cryodaq.storage._sqlite import sqlite_version_info; print(sqlite_version_info())"
+# Создать/обновить поддерживаемый runtime с фиксированным безопасным SQLite:
+conda env update --file environment.yml --prune
+conda activate cryodaq
+
+# Авторитетная проверка — реализация sqlite3, реально используемая движком:
+python -c "from cryodaq.storage._sqlite import sqlite_version_info; print(sqlite_version_info())"
 
 # Дополнительная диагностика — сырой stdlib sqlite3 (до возможного fallback):
 python -c "import sqlite3; print(sqlite3.sqlite_version)"
@@ -37,16 +39,14 @@ sqlite3 --version
 
 - Безопасно: выбранная реализация сообщает `≥ 3.51.3` **или**
   backport-safe `3.44.6` / `3.50.7`.
-- В диапазоне `[3.7.0, 3.51.3)`: на Linux гейт **самовосстанавливается** —
-  `storage/_sqlite.py` при импорте прозрачно переключается на bundled
-  `pysqlite3-binary` (базовая зависимость с маркером `sys_platform == "linux"`),
-  и движок пишет как обычно.
+- В диапазоне `[3.7.0, 3.51.3)` запуск **запрещён**: обновить tracked Conda
+  environment и повторить проверку. Небезопасный runtime нельзя выдавать за
+  пройденный software gate.
 
-**Если версия плохая.** Ручное вмешательство нужно **только если небезопасны/
-отсутствуют ОБА** — и stdlib, и fallback `pysqlite3` (на Linux — установлен ли
-пакет из lock/`pip install`). На не-Linux платформах fallback-зависимость не
-ставится; если выбранный stdlib SQLite попал в опасный диапазон, поставить
-Python, слинкованный с безопасным SQLite, и запускать движок им.
+**Если версия плохая.** Пересоздать runtime строго из `environment.yml` и
+проверить, что активирован именно `cryodaq`. Опциональный сторонний fallback
+допустим только если выбранная им версия сама проходит F25; по умолчанию такой
+пакет не устанавливается.
 `CRYODAQ_ALLOW_BROKEN_SQLITE=1` — только крайняя мера-подтверждение
 (осознанный обход), **не** исправление.
 

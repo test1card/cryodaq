@@ -24,6 +24,7 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         "core/descriptor_transport.py",
         "core/zmq_bridge.py",
         "core/zmq_subprocess.py",
+        "gui/state/descriptor_store.py",
         "gui/zmq_client.py",
         "storage/channel_descriptors.py",
         "storage/descriptor_archive.py",

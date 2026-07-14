@@ -27,9 +27,17 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-REM Установка из requirements-lock.txt + `-e . --no-deps` (не голый extras-install):
-REM так два ПК, установленные с разницей в месяц, получают побитово одинаковые
-REM зависимости (см. docs/deployment.md, "Reproducible builds via lockfile").
+REM Поддерживаемая установка требует Python, связанный с безопасным SQLite.
+python -c "import sqlite3,sys; v=tuple(sqlite3.sqlite_version_info); print(' SQLite:', sqlite3.sqlite_version); sys.exit(0 if v in ((3,44,6),(3,50,7)) or v >= (3,51,3) else 1)" 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo  ОШИБКА: Python связан с небезопасной версией SQLite.
+    echo  Создайте и активируйте environment.yml по docs/deployment.md.
+    pause
+    exit /b 1
+)
+
+REM Установка version-pinned Python dependencies из requirements-lock.txt,
+REM затем проекта без повторного dependency resolution.
 if not exist requirements-lock.txt (
     echo  ОШИБКА: requirements-lock.txt не найден рядом с install.bat.
     pause
@@ -49,6 +57,13 @@ pip install -e . --no-deps >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo  ОШИБКА: pip install -e . завершился с ошибкой.
     echo  Попробуйте: pip install -e . --no-deps
+    pause
+    exit /b 1
+)
+pip check >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo  ОШИБКА: установленный набор зависимостей несовместим.
+    echo  Выполните установку заново по docs/deployment.md в environment cryodaq.
     pause
     exit /b 1
 )

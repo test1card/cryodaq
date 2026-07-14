@@ -1,13 +1,13 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-07-13 *(release baseline v0.64.1 + active pre-lab campaign note)*
+**Дата:** 2026-07-14 *(release baseline v0.64.1 + active pre-lab campaign note)*
 **Релизная ветка:** master
-**Активная campaign-ветка:** `feat/montana-phase-a` (текущий pushed candidate `c1e26e2`)
+**Активная campaign-ветка:** `feat/montana-phase-a` (текущий remote candidate `dc06892`; следующий exact-SHA candidate готовится локально)
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
 **CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
-**CI активного кандидата:** OPEN — exact-SHA run `29251698616` для `c1e26e2`: Windows FAIL на periodic PNG crash-recovery, диагностика явно отложена до работы Владимира на Windows/WSL; Ubuntu в последнем зафиксированном состоянии ещё выполнялся. Исторический зелёный v0.64 не переносится на текущую feature-ветку; гейт закроется только после PASS Ubuntu + Windows на одном финальном SHA.
+**CI активного кандидата:** OPEN — sharded exact-SHA run `29295156595` для `dc06892` завершён: core/gui PASS на Windows и Ubuntu; agents/remaining FAIL выявили Windows durability-контракт periodic state, небезопасный SQLite runtime Ubuntu и D7 import allowlist. Исправления находятся в reviewed local slices; новый exact-SHA run ещё не запущен. Исторический зелёный v0.64 не переносится на feature-ветку; гейт закроется только после PASS всех Windows + Ubuntu jobs на одном финальном SHA.
 **Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
 После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
 F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
@@ -79,7 +79,7 @@ F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
 23. **Verified-off fail-closed (v0.57 / v0.58 / v0.64).** `emergency_off()` возвращает `bool`; неподтверждённый OFF (ошибка записи или readback = «включено») эскалирует в `FAULT_LATCHED`, а не в ложный `SAFE_OFF`. Тот же контракт на `stop_source`, interlock-трипе и `connect()` force-OFF (readback-verified, неудача ставит блокирующее RUN-предусловие).
 24. **NaN-доктрина (v0.59).** `Reading.is_usable()` — единый предикат (usable ⟺ `status == OK` и значение finite); `status` дискриминатор на каждом слое. Non-finite пишутся единым finite sentinel (`-8.888e88`, `storage/sentinel.py`); каждый reader декодирует пары `(value, status)` на read-boundary — sentinel или legacy `±inf` не всплывёт числом. Устойчиво non-usable readings на интерлок-каналах эскалируют debounced (≥5 подряд ≥10 s → `on_interlock_dead_channel`, латч только в RUNNING).
 25. **Rate-clock robustness (v0.57 / v0.59).** Защита 5 K/мин взводится по временно́му охвату (`min_span_s=30`), не по числу точек. Clock-jump guard: backward-шаг или forward-gap >4× медианного периода чистит буфер и якорится на текущем сэмпле (reset-not-drop, слепота ≤ ~30 s).
-26. **SQLite self-heal (v0.64).** `storage/_sqlite.py` выбирает реализацию sqlite3 один раз на импорте: безопасная stdlib, иначе bundled `pysqlite3-binary` (базовая зависимость, маркер Linux-only). Гейт F25 проверяет **выбранную** реализацию; лабораторный Ubuntu и ubuntu-CI проходят из коробки. Все runtime-импортёры берут sqlite3 из шима — одна библиотека на БД.
+26. **SQLite fail-closed runtime (v0.64 + pre-lab hardening).** `environment.yml` фиксирует Python 3.14 и безопасный SQLite 3.53.2 для Windows/Linux; F25 проверяет реально выбранную реализацию и запрещает запуск в диапазоне WAL-reset corruption. Опциональный `pysqlite3` принимается только если сам проходит тот же гейт; небезопасного bundled fallback больше нет. Все runtime-импортёры берут sqlite3 из шима — одна библиотека на БД.
 27. **Cold-storage archive layer (v0.61 / v0.63).** `ArchiveReader` объединяет горячий SQLite и холодный Parquet (`query_rows`, end-exclusive, union+dedup на overlap-днях). `ColdRotationService` включён по умолчанию (`cold_rotation.enabled: true`), раз в сутки в `schedule_time`; данные старше 30 дней остаются видны в GUI-истории, журнале оператора, отчётах, экспорте, replay и калибровке. Retention не трогает дневные БД при включённой ротации.
 28. **REST-периметр (v0.58 / v0.60).** `/api/v1` — read-only GET-фасад (Pydantic-модели как field-whitelist) плюс ровно два authenticated write-endpoint (`POST /log` append, `POST /alarms/{id}/ack`) за `require_write_token` (токен в gitignored `config/web.local.yaml`, fail-closed default). Loopback-only bind; `zmq_bridge` отбивает wildcard-bind.
 29. **Path jail (v0.58).** Все operator-supplied пути импорта/экспорта калибровки confined через `core/path_jail.resolve_within()` (realpath + commonpath + normcase); escape → `{ok: false}`.
@@ -149,7 +149,7 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 - **v0.61.0 — final sweep.** ME-16: удалён осиротевший v1-виджетный слой (−6634 LOC); собран контур холодного хранения (`ColdRotationService` + `ArchiveReader.query_rows`, CSV/XLSX/HDF5/отчёты через архивный слой); `ultimate_vacuum` в cooldown-fingerprint; GUI steady-state-фиды под NaN-доктриной.
 - **v0.62.0 — TSP watchdog operator-selected mode.** `off | best_effort | required`; неблокирующий lua; latch-протокол чтения защёлки до загрузки скрипта.
 - **v0.63.0 — Known Limitations закрыты.** Все исторические читатели переведены на архивный слой; холодная ротация впервые включена по умолчанию; громкая PDF-деградация; добавлен `docs/lab_verification_checklist.md`.
-- **v0.64.0 — excellence-прогон.** Safety-ядро: дисциплина verified-off end-to-end (две fail-open дыры закрыты); retention больше не душит cold rotation (legacy `.db.gz` спасаются); SQLite auto-fallback (self-heal); opt-in эскалация `VacuumGuard` в SafetyManager; чистота event loop + целостность SafetyBroker; config/docs когерентность. CI впервые полностью зелёный на ubuntu + windows.
+- **v0.64.0 — excellence-прогон.** Safety-ядро: дисциплина verified-off end-to-end (две fail-open дыры закрыты); retention больше не душит cold rotation (legacy `.db.gz` спасаются); тогда был добавлен SQLite auto-fallback (позже удалён pre-lab hardening из-за небезопасной bundled-версии); opt-in эскалация `VacuumGuard` в SafetyManager; чистота event loop + целостность SafetyBroker; config/docs когерентность. CI впервые полностью зелёный на ubuntu + windows.
 
 ---
 
@@ -196,7 +196,7 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 лабораторным ПК — полный turnkey-протокол в
 `docs/lab_verification_checklist.md`:
 
-1. **Гейт версии SQLite на лабораторном Ubuntu ПК** — подтвердить, что движок линкуется с безопасной версией (или срабатывает self-heal fallback).
+1. **Гейт версии SQLite на лабораторном Ubuntu ПК** — создать tracked `environment.yml`, подтвердить выбранную безопасную версию и отказ запуска вне неё; bundled self-heal не считается доказательством.
 2. **Верификация H5 / ZMQ idle-death** на текущем лабораторном ПК (регрессионный гейт `diag_zmq_direct_req.py`, 180 s без зависаний).
 3. **Runtime-калибровка LakeShore на реальном железе** — per-channel KRDG/SRDG, консервативный откат на KRDG вне диапазона.
 4. **Keithley A8a–A8e, не один armed-mode checkbox** — A8a (upload/version/
@@ -228,7 +228,7 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 11. **Calibration state deferral** — `prepare_srdg_readings` считает pending state, `on_srdg_persisted` применяет атомарно после успешной записи.
 12. **Design system v1.0.1 canonical** — `docs/design-system/**` — единственный источник правды по UI. Значения токенов берутся ТОЛЬКО из `theme.py`.
 13. **Mnemonic shortcuts canonical per AD-002** — `Ctrl+L/E/A/K/M/R/C/D`. Владелец биндингов — `main_window_v2.py` после ретайра v1-shell (Phase II.13).
-14. **SQLite self-heal** — реализация sqlite3 выбирается один раз на импорте; bundled `pysqlite3-binary` fallback на Linux. Bypass-флаг `CRYODAQ_ALLOW_BROKEN_SQLITE=1` — крайняя мера-подтверждение, не исправление.
+14. **SQLite fail-closed runtime** — `environment.yml` фиксирует безопасный Python-linked SQLite для Windows/Linux; shim выбирает реализацию один раз и F25 проверяет её до записи. Bypass-флаг `CRYODAQ_ALLOW_BROKEN_SQLITE=1` — крайняя мера-подтверждение, не исправление.
 15. **Cold-storage lossless** — архивный Parquet хранит сырые пары `(value, status)`; маскирование делают reader-ы на чтении; ротация идемпотентна (index пишется до удаления; sweep удаляет только байт-идентичный оригинал по `source_md5`).
 16. **REST write-поверхность — ровно два endpoint-а** (log append, alarm ack) by design; source control, setpoint-ы, OFF-пути, калибровка и lifecycle эксперимента через REST недостижимы.
 17. **REP trust-model** — unauthenticated loopback REP by-design для single-operator lab (D7.2 accepted); LAN-доступ только через SSH-туннель, никогда bind 0.0.0.0.
@@ -243,7 +243,11 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 ## Команды
 
 ```bash
-pip install -e ".[dev,web]"    # runtime + dev + web extras (pyarrow в base с IV.4)
+conda env create --file environment.yml
+conda activate cryodaq
+pip install -r requirements-lock.txt
+pip install -e . --no-deps
+pip check
 cryodaq                        # operator launcher
 cryodaq-engine --mock          # mock engine
 cryodaq-gui                    # GUI only (нуждается в engine на ZMQ)

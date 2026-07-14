@@ -24,15 +24,26 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONUTF8: "1"
+    defaults:
+      run:
+        shell: bash -el {0}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
-          python-version: "3.14"
+          activate-environment: cryodaq
+          environment-file: environment.yml
+          channel-priority: strict
 
       - name: Install dependencies
-        run: pip install -e ".[dev,web]"
+        run: |
+          pip install -r requirements-lock.txt
+          pip install -e . --no-deps
+          pip check
+
+      - name: Verify safe SQLite runtime
+        run: python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version; print('SQLite', version)"
 
       - name: Golden replay lane
         # Selects by marker (not path) so any future golden-marked test
@@ -44,15 +55,26 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONUTF8: "1"
+    defaults:
+      run:
+        shell: bash -el {0}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
-          python-version: "3.14"
+          activate-environment: cryodaq
+          environment-file: environment.yml
+          channel-priority: strict
 
       - name: Install dependencies
-        run: pip install -e ".[dev,web]"
+        run: |
+          pip install -r requirements-lock.txt
+          pip install -e . --no-deps
+          pip check
+
+      - name: Verify safe SQLite runtime
+        run: python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version; print('SQLite', version)"
 
       - name: Bounded mock soak
         # CI-feasible bounded window, NOT the literal 72h from the roadmap —

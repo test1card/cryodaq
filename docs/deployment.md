@@ -23,28 +23,27 @@ cd cryodaq
 
 ## 3. Установка пакета
 
-С IV.4 F1 `pyarrow` входит в базовые зависимости, extra `[archive]`
-сохранён как no-op alias для обратной совместимости со старыми
-install-строками. На Linux базовая установка также подтягивает
-`pysqlite3-binary`: если системный SQLite попадает в опасный WAL-диапазон,
-runtime автоматически выбирает bundled SQLite через `cryodaq.storage._sqlite`.
+Поддерживаемая установка Windows/Linux начинается с tracked Conda environment:
 
-```powershell
-pip install -e ".[dev,web]"
+```bash
+conda env create --file environment.yml
+conda activate cryodaq
+pip install -r requirements-lock.txt
+pip install -e . --no-deps
+pip check
 ```
 
-Минимальная runtime-установка без dev/web extras:
+`environment.yml` фиксирует безопасную версию SQLite, с которой связан Python.
+`requirements-lock.txt` фиксирует версии Python-пакетов для поддерживаемого
+набора base + dev + web. Это version-pinned inputs, но не побитовый artifact
+lock: файл не содержит hashes, а Conda environment не фиксирует Python patch,
+build strings и все transitive Conda artifacts.
 
-```powershell
-pip install -e .                     # Parquet поддержка в базе
-pip install -e ".[dev,web,archive]"  # старая строка — по-прежнему работает
-```
-
-Если нужен только web dashboard, используйте:
-
-```powershell
-pip install -e ".[web]"
-```
+`pyarrow` входит в базовые зависимости; extra `[archive]` сохранён как no-op
+alias. `pysqlite3-binary` не устанавливается: опубликованные wheel-версии не
+достигают исправленной SQLite-границы. Голый `pip install -e ".[dev,web]"`
+допустим только как developer convenience внутри независимо проверенного
+безопасного Python/SQLite environment и не является lab deployment path.
 
 Эта установка подтягивает и GUI dependencies, включая:
 
@@ -54,12 +53,14 @@ pip install -e ".[web]"
 - `openpyxl`
 - `scipy`
 
-Именно этот install path считается поддерживаемым и для локального тестирования. Запуск `pytest` по произвольной распакованной копии исходников без предварительного `pip install -e ...` не считается гарантированным сценарием.
+Именно Conda + lock + `--no-deps` path считается поддерживаемым для локального
+тестирования и развёртывания. Запуск `pytest` из произвольной распакованной
+копии без установки проекта не считается гарантированным сценарием.
 
-Windows helper `install.bat` проверяет Python 3.12+, устанавливает зависимости
-из `requirements-lock.txt`, затем выполняет `pip install -e . --no-deps` (см.
-раздел "Reproducible builds via lockfile" ниже) и вызывает `create_shortcut.py`
-для ярлыка на рабочем столе.
+Windows helper `install.bat` предполагает уже активированный безопасный runtime,
+устанавливает version-pinned Python dependencies из `requirements-lock.txt`,
+выполняет `pip install -e . --no-deps` и `pip check`, затем вызывает
+`create_shortcut.py` для ярлыка на рабочем столе.
 
 ### Bootstrap predictor model
 
@@ -265,7 +266,9 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Запускайте эти команды из корня репозитория в том же environment, где выполнен `pip install -e ".[dev,web]"` (или старая строка `.[dev,web,archive]` — работает так же, extra-alias без эффекта). GUI tests требуют установленного `PySide6` и `pyqtgraph`. Web dashboard в этот smoke-набор не входит и требует отдельного `.[web]` install path.
+Запускайте эти команды из корня репозитория в поддерживаемом `cryodaq`
+environment, установленном по разделу 3. GUI tests требуют `PySide6` и
+`pyqtgraph`; web dependencies уже входят в tracked lock.
 
 Если установка выполняется для операторской машины без dev workflow, достаточно убедиться, что эти команды проходили до развёртывания, а локальный smoke check ограничить запуском engine + GUI + mock mode.
 
@@ -276,14 +279,23 @@ history readers + reporting + web dashboard). Due to a WAL-reset race
 condition documented at https://www.sqlite.org/wal.html, the runtime must use
 a safe SQLite implementation.
 
-### Linux
+### Windows and Linux
 
-On Linux, `pyproject.toml` includes `pysqlite3-binary>=0.5.4` as a base
-dependency. `cryodaq.storage._sqlite` selects the implementation once at
-import time:
+Create the supported runtime from the tracked environment before installing
+CryoDAQ. It pins the Python-linked SQLite library to a known-safe version on both
+laboratory platforms:
+
+```bash
+conda env create --file environment.yml
+conda activate cryodaq
+pip install -r requirements-lock.txt
+pip install -e . --no-deps
+```
+
+`cryodaq.storage._sqlite` selects the implementation once at import time:
 
 - safe stdlib SQLite → use stdlib
-- unsafe stdlib SQLite + safe `pysqlite3` → use bundled `pysqlite3`
+- unsafe stdlib SQLite + independently installed safe `pysqlite3` → use it
 - both unsafe/absent → `SQLiteWriter` hard-fails at startup unless the operator
   explicitly sets `CRYODAQ_ALLOW_BROKEN_SQLITE=1`
 
@@ -292,12 +304,6 @@ same DB. All runtime readers/writers must go through `cryodaq.storage._sqlite`.
 `CRYODAQ_SQLITE_SYNC=FULL` remains an emergency throughput tradeoff, not the
 normal deployment path.
 
-### Windows 11
-
-No `pysqlite3-binary` dependency is installed by default. The stdlib SQLite is
-used; if a future platform build falls into the unsafe range, the same
-`SQLiteWriter` gate refuses startup.
-
 ### macOS — dev-only, not a lab runtime target
 
 CryoDAQ's supported lab platforms are Windows 10/11 and Linux (see Section 1).
@@ -305,20 +311,23 @@ macOS is dev-only: the engine never runs near real hardware on Darwin, so it is
 deliberately absent from both the deployment requirements and the CI matrix
 (`ubuntu-latest` + `windows-latest` only — no `macos-latest` leg).
 
-The `pysqlite3-binary` WAL-reset remedy above is Linux-only by design: macOS
-ships no `pysqlite3` wheels, so the fallback package is simply not installed
-there (`sys_platform == 'linux'` marker in `pyproject.toml`; see the rationale
-in `src/cryodaq/storage/_sqlite.py:22-27`). On macOS the stdlib SQLite is used
-as-is and assumed safe — acceptable only because macOS is a dev sandbox, not
-where the WAL-concurrency hazard actually gets exercised against lab hardware.
+No fallback package is installed by default. On macOS the stdlib SQLite is used
+as-is and must still pass the same startup gate; macOS remains a development
+sandbox rather than a supported lab runtime.
 
-## Reproducible builds via lockfile
+## Version-pinned dependency inputs
 
-CryoDAQ pins all runtime dependencies in `requirements-lock.txt`, generated
-via `pip-compile` from `pyproject.toml`. Production bundle builds install
-from this lockfile so two operators building on different days get the
-exact same transitive dependencies — important for safety-critical lab
-deployments where a silent transitive bump can change behaviour.
+CryoDAQ pins resolved Python package versions in `requirements-lock.txt`,
+generated via `pip-compile` from `pyproject.toml`. Production bundle builds
+install from this file and then install CryoDAQ with `--no-deps`, avoiding a
+second unconstrained resolution. The Python-linked SQLite version is pinned by
+`environment.yml`.
+
+These files define the supported version-pinned inputs; they do not claim a
+bit-for-bit reproducible environment. The pip lock has no artifact hashes and
+the Conda file intentionally leaves Python patch/build and transitive artifacts
+to the solver. CI plus `pip check` verifies the resolved environment actually
+satisfies the project before tests or packaging.
 
 ### Regenerating the lockfile
 
@@ -327,6 +336,7 @@ After changing `pyproject.toml` dependencies:
 ```bash
 pip install pip-tools
 pip-compile --extra=dev --extra=web --output-file=requirements-lock.txt pyproject.toml
+pytest -q tests/test_ci_safe_sqlite_contract.py tests/test_lock_drift.py
 git add requirements-lock.txt
 git commit -m "deps: update lockfile"
 ```
@@ -337,7 +347,10 @@ The build scripts (`build.sh` / `build.bat`) install from
 ## Frozen-app build (PyInstaller)
 
 ```bash
-pip install -e ".[dev,web]"   # ensures pyinstaller is installed
+conda activate cryodaq
+pip install -r requirements-lock.txt
+pip install -e . --no-deps
+pip check
 ./build_scripts/build.sh       # Linux / macOS
 build_scripts\build.bat        # Windows
 ```

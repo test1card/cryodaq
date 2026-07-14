@@ -109,9 +109,9 @@ Fully functional in v0.64.0:
   see rotated days. The only kill-switch is `cold_rotation.enabled`; rotation
   is idempotent and the stranded-DB sweep deletes only a byte-identical
   original (`source_md5`).
-- **SQLite self-heal on Linux:** all runtime DB connections go through
-  `storage/_sqlite.py`; if the stdlib SQLite is in the unsafe WAL-reset range,
-  the shim falls back to the bundled Linux `pysqlite3-binary`.
+- **SQLite fail-closed runtime:** all runtime DB connections go through
+  `storage/_sqlite.py`. The supported Windows/Linux environment pins a safe
+  SQLite version; an unsafe selected implementation blocks startup.
 - **Leak-rate estimation (F13):** `LeakRateEstimator` — a rolling window, OLS
   regression without numpy, history in `data/leak_rate_history.json`. Commands:
   `leak_rate_start` / `leak_rate_stop` (ZMQ). Requires `chamber.volume_l` in
@@ -168,16 +168,24 @@ safety state of `fault` / `fault_latched`.
 ### Install
 
 ```bash
+conda env create --file environment.yml
+conda activate cryodaq
+pip install -r requirements-lock.txt
+pip install -e . --no-deps
+pip check
+```
+
+The tracked environment pins the supported Python/SQLite runtime. The pip lock
+pins resolved Python package versions but is not a hashed, bit-for-bit artifact
+lock. A bare editable extras install is a developer convenience only and is
+supported only inside an independently verified safe SQLite runtime:
+
+```bash
 pip install -e ".[dev,web]"
 ```
 
-Minimal runtime install:
-
-```bash
-pip install -e .
-```
-
-Supported workflow: install from the repository root into an active venv.
+Supported workflow: install from the repository root into the active `cryodaq`
+environment.
 Running `pytest` without `pip install -e ...` is not supported.
 
 Key runtime dependencies: `PySide6`, `pyqtgraph`, `pyvisa`, `pyserial-asyncio`,
@@ -319,10 +327,9 @@ python -m pytest tests/gui -q
 python -m pytest tests/reporting -q
 ```
 
-Run after `pip install -e ".[dev,web]"`. GUI tests require `PySide6` +
-`pyqtgraph`. Some storage tests require `CRYODAQ_ALLOW_BROKEN_SQLITE=1` on
-machines whose selected SQLite falls in `[3.7.0, 3.51.3)`, except the
-backport-safe versions 3.44.6 and 3.50.7.
+Run after the supported installation above. GUI tests require `PySide6` +
+`pyqtgraph`. Do not use `CRYODAQ_ALLOW_BROKEN_SQLITE=1` to claim storage-test or
+deployment evidence; an unsafe runtime must be replaced.
 
 ## Local Operator-Query Service
 
@@ -397,12 +404,10 @@ As of v0.64.0. The lab-only checks below are collected as a turnkey protocol in
 
 - **SQLite WAL gate:** the engine hard-fails on startup on SQLite versions in the
   range `[3.7.0, 3.51.3)` (F25). Backport-safe: 3.44.6, 3.50.7 (pass without the
-  variable). On Linux this self-heals: `storage/_sqlite.py` transparently falls
-  back to the bundled `pysqlite3-binary` (a base dependency) when the linked
-  SQLite is in-range, so the gate passes out of the box. Manual remediation
-  (`CRYODAQ_ALLOW_BROKEN_SQLITE=1`, or a Python linked against a safe SQLite) is
-  only needed if BOTH the stdlib and the fallback are unsafe/absent. macOS ships
-  no pysqlite3 wheels; its stdlib is expected safe.
+  variable). The supported Windows/Linux installation uses `environment.yml`
+  to pin a safe SQLite version. No fallback package is installed by default;
+  an unsafe or absent implementation remains a startup failure. The bypass is
+  emergency acknowledgement only and is not acceptable deployment evidence.
 - **Lab Ubuntu PC verification:** the H5 ZMQ fix from v0.39.0 was verified only on
   macOS. Physical access to the lab PC is pending (see the checklist).
 - **Engine shutdown warning:** one `Unclosed client session` ERROR can appear at

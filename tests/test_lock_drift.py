@@ -11,15 +11,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 LOCK = REPO_ROOT / "requirements-lock.txt"
 
-_spec = importlib.util.spec_from_file_location(
-    "check_lock_drift", REPO_ROOT / "scripts" / "check_lock_drift.py"
-)
+_spec = importlib.util.spec_from_file_location("check_lock_drift", REPO_ROOT / "scripts" / "check_lock_drift.py")
 drift = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drift)
 
 
-def test_current_lock_is_in_sync():
-    """The regenerated lock pins every top-level pyproject dep."""
+def test_current_lock_covers_declared_top_level_dependencies():
+    """The lock pins every declared top-level dependency name."""
     assert drift.find_drift(PYPROJECT, LOCK) == []
 
 
