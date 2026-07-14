@@ -18,8 +18,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.core.descriptor_transport import DescriptorEnvelopeIssue, DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+from cryodaq.gui.state.descriptor_store import DescriptorStore
 
 
 def _app() -> QApplication:
@@ -42,6 +50,27 @@ def _k_reading(channel: str, value: float = 1.0, instrument_id: str = "") -> Rea
         value=value,
         unit="K",
         metadata={},
+    )
+
+
+def _qualified(reading: Reading) -> DescriptorQualifiedReading:
+    return DescriptorQualifiedReading(
+        reading=reading,
+        descriptor=ChannelDescriptorV1(
+            schema_version=1,
+            channel_id=reading.channel,
+            instrument_id=reading.instrument_id,
+            source_key="measurement.primary",
+            quantity=ChannelQuantity.TEMPERATURE,
+            unit=reading.unit,
+            role=ChannelRole.PRIMARY_MEASUREMENT,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="generic",
+            display_name="Generic channel",
+            visible_by_default=True,
+            display_order=1,
+            descriptor_revision=1,
+        ),
     )
 
 
@@ -84,58 +113,69 @@ def test_tick_sets_overlay_connected_false_when_stale():
 # ----------------------------------------------------------------------
 
 
-def test_lakeshore_reading_creates_card():
+def test_provider_neutral_qualified_reading_creates_card():
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("instruments")
-        w._dispatch_reading(_k_reading("Т7", instrument_id="LS218_1"))
+        reading = _k_reading("opaque-channel", instrument_id="asc-reference-42")
+        w.dispatch_qualified_reading(_qualified(reading))
         QCoreApplication.processEvents()
         assert w._instrument_panel.get_instrument_count() == 1
-        assert "LS218_1" in w._instrument_panel._cards
+        assert "asc-reference-42" in w._instrument_panel._cards
         # Visible contract: the rendered card shows the instrument name label.
-        card = w._instrument_panel._cards["LS218_1"]
-        assert card._name_label.text() == "LS218_1"
+        card = w._instrument_panel._cards["asc-reference-42"]
+        assert card._name_label.text() == "asc-reference-42"
+        assert card.total_readings == 1
     finally:
         _stop_timers(w)
 
 
-def test_keithley_reading_creates_card():
+def test_bare_reading_with_vendor_shaped_channel_does_not_create_card():
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("instruments")
-        w._dispatch_reading(_k_reading("Keithley_1/smua/voltage"))
+        w._dispatch_reading(_k_reading("Keithley_1/smua/voltage", instrument_id="Keithley_1"))
         QCoreApplication.processEvents()
-        assert "Keithley_1" in w._instrument_panel._cards
-        # Visible contract: rendered card shows the instrument name label.
-        card = w._instrument_panel._cards["Keithley_1"]
-        assert card._name_label.text() == "Keithley_1"
+        assert w._instrument_panel.get_instrument_count() == 0
     finally:
         _stop_timers(w)
 
 
-def test_analytics_reading_does_not_create_card():
-    """II.8: analytics/* readings must not create instrument
-    cards. _extract_instrument_id drops analytics prefix before the "/"
-    split."""
+def test_refused_descriptor_is_visible_and_does_not_create_card():
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("instruments")
-        w._dispatch_reading(
-            Reading(
-                timestamp=datetime.now(UTC),
-                instrument_id="",
-                channel="analytics/safety_state",
-                value=0.0,
-                unit="",
-                metadata={},
+        reading = _k_reading("opaque-channel", instrument_id="claimed")
+        w.dispatch_qualified_reading(
+            DescriptorQualifiedReading(
+                reading=reading,
+                descriptor=None,
+                descriptor_issue=DescriptorEnvelopeIssue.MALFORMED,
             )
         )
         QCoreApplication.processEvents()
-        assert "analytics" not in w._instrument_panel._cards
         assert w._instrument_panel.get_instrument_count() == 0
+        assert "отклонено" in w._instrument_panel._empty_cards_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_descriptor_store_capacity_exhaustion_is_visible_and_never_attributed():
+    _app()
+    w = MainWindowV2()
+    try:
+        w._descriptor_store = DescriptorStore(max_entries=1)
+        w._ensure_overlay("instruments")
+        first = _k_reading("channel-one", instrument_id="instrument-one")
+        second = _k_reading("channel-two", instrument_id="instrument-two")
+        w.dispatch_qualified_reading(_qualified(first))
+        w.dispatch_qualified_reading(_qualified(second))
+        QCoreApplication.processEvents()
+        assert set(w._instrument_panel._cards) == {"instrument-one"}
+        assert "отклонено" in w._instrument_panel._empty_cards_label.text()
     finally:
         _stop_timers(w)
 

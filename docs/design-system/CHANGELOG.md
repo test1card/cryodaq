@@ -1,7 +1,7 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-07-12
+last_updated: 2026-07-14
 ---
 
 # Design System Changelog
@@ -11,6 +11,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [2.0.0] — 2026-07-14
+
+### Changed
+
+- Replaced the public `InstrumentsPanel.on_reading(reading)` API with
+  `on_descriptor_reading(reading, view)`. Generic instrument cards now require
+  an exact authoritative, connected `DescriptorView` matching the Reading
+  identity tuple. This is a deliberate caller-breaking identity hardening.
+- Missing, refused, malformed, mismatched, and capacity-exhausted identity now
+  renders fixed bounded Russian unavailable/fault text with foreground text
+  plus status border; raw channel, vendor, diagnostic, and payload text is
+  never echoed or used as identity.
+- Identity-notice presentation is transition-driven. Steady authoritative or
+  refused readings do not repeat label text, visibility, or stylesheet work.
+
+### Removed
+
+- Removed bare-Reading instrument attribution, slash-prefix extraction, and
+  LakeShore `Т1…Т24` range inference from the generic InstrumentsPanel.
+
+### Security
+
+- Refused or retained descriptors cannot update a named/green instrument card;
+  only later authoritative requalification can restore current attribution.
+
+### Evidence
+
+- Automated tests cover fixed non-color Russian cues, hostile-text exclusion,
+  transition-only QSS mutation, the 4,096-entry descriptor bound, O(1) issue
+  bookkeeping, and absence of blocking file/network/sleep calls on ingress.
+- Real Windows ONEDIR DPI/NVDA, operator task timing, full-shell screenshots,
+  and long-session performance remain open physical/external gates.
 
 ## [1.2.0] — 2026-07-11
 

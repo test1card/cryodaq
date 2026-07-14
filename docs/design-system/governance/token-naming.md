@@ -6,7 +6,7 @@ status: canonical
 closes_forward_ref: RULE-GOV-001
 references: tokens/*, rules/color-rules.md, rules/surface-rules.md
 external_reference: UI UX Pro Max v2.5.0 design-system skill (three-layer architecture); W3C Design Tokens Community Group
-last_updated: 2026-04-17
+last_updated: 2026-07-14
 ---
 
 # Token Naming
@@ -15,7 +15,7 @@ Conventions for naming design tokens — the source-of-truth values that all vis
 
 ## Current state: flat token architecture
 
-CryoDAQ ships v1.0.0 with a **flat token structure** — all tokens live as attributes of the `theme` module (`src/cryodaq/gui/theme.py`), named by category + role without intermediate layers:
+CryoDAQ v2.0.0 retains a **flat token structure** — all tokens live as attributes of the `theme` module (`src/cryodaq/gui/theme.py`), named by category + role without intermediate layers:
 
 ```python
 # theme.py — current structure
@@ -31,9 +31,9 @@ SPACE_2 = 8
 
 No primitive-vs-semantic distinction at the naming level. One layer. This is the reality; this document normalizes the naming conventions applied to it.
 
-## Target state: three-layer architecture (future v2.0)
+## Candidate future-major state: three-layer architecture
 
-The UI UX Pro Max skill recommends a three-layer token system (primitive → semantic → component) for theme-switchability and component customization. CryoDAQ v2.0 (future, when light theme or accent-theming is added) will migrate to this structure:
+The UI UX Pro Max skill recommends a three-layer token system (primitive → semantic → component) for theme-switchability and component customization. A separately approved future major may migrate to this structure when light theme or accent theming is actually selected. The scoped v2.0.0 identity release did not approve or implement this migration:
 
 ```
 ┌─────────────────────────────────────────┐
@@ -48,7 +48,7 @@ The UI UX Pro Max skill recommends a three-layer token system (primitive → sem
 └─────────────────────────────────────────┘
 ```
 
-v1.0 is single-layer (primitive+semantic collapsed). Migration path documented in `governance/deprecation-policy.md`.
+Current v2.0.0 remains single-layer (primitive+semantic collapsed). Any migration requires its own compatibility analysis and an approved major-release plan documented in `governance/deprecation-policy.md`.
 
 ## Naming format
 
@@ -172,7 +172,7 @@ GRID_GAP = 8               # BentoGrid inter-tile gap
 
 ## Category prefix registry
 
-Current registered prefixes — every token in `theme.py` belongs to one. Counts reflect the shipped state of `src/cryodaq/gui/theme.py` as of v1.0.1 (verify via the audit script in `governance/testing-strategy.md`).
+Current registered prefixes — every token in `theme.py` belongs to one. Counts reflect the shipped flat-token state of `src/cryodaq/gui/theme.py` in v2.0.0 (verify via the audit script in `governance/testing-strategy.md`).
 
 ### Root color / role tokens (no prefix)
 
@@ -253,13 +253,13 @@ New prefix proposals go through `governance/contribution.md` review.
 During Phase 0 rename from the older "stone" palette to the current forest-green palette, the old names were kept as aliases for one version cycle. Current theme.py still ships 13 STONE_* aliases (`STONE_0`, `STONE_50`, `STONE_100`, `STONE_150`, `STONE_200`, `STONE_300`, `STONE_400`, `STONE_500`, `STONE_600`, `STONE_700`, `STONE_800`, `STONE_900`, `STONE_1000`):
 
 ```python
-# Backward-compat aliases — DEPRECATED, will be removed in v2.0
+# Backward-compat aliases — DEPRECATED; removal requires a future major
 STONE_50  = BACKGROUND       # alias for backward compat
 STONE_900 = FOREGROUND       # alias
 # ... etc
 ```
 
-These are **deprecated** but not yet removed. See `governance/deprecation-policy.md` for removal schedule.
+These remain **deprecated and available in v2.0.0**. Removal is not part of this scoped identity release and requires a separately approved future major, v3.0.0 at the earliest. See `governance/deprecation-policy.md`.
 
 Rule: **no new code uses STONE_***. Existing call sites migrate to canonical names during the panel's next modification. External audit flags any new STONE_* reference.
 
@@ -304,7 +304,7 @@ coldHighlight            # camelCase conflicts with constants convention
 Do NOT invent tokens with these prefixes without explicit governance:
 
 - `THEME_*` — reserved for future theme-switching mechanism
-- `DARK_*` / `LIGHT_*` — reserved for light-theme companion tokens (future v2.0)
+- `DARK_*` / `LIGHT_*` — reserved for a separately approved future-major light-theme migration
 - `DEFAULT_*` — ambiguous; use concrete role name
 - `MAIN_*` / `PRIMARY_*` — ambiguous; use ACCENT or FOREGROUND as appropriate
 
@@ -418,5 +418,6 @@ Minimum requirements for adding a new token (reviewed per `governance/contributi
 
 ## Changelog
 
-- 2026-04-17: Initial version. Closes RULE-GOV-001. Documents current flat-architecture state + target three-layer architecture for future v2.0. Prefix registry. STONE_* legacy alias policy. W3C DTCG alignment (future).
+- 2026-04-17: Initial version. Closes RULE-GOV-001. Documents the flat architecture and the then-proposed future-v2 three-layer target, superseded by the scoped v2.0.0 decision below. Prefix registry. STONE_* legacy alias policy. W3C DTCG alignment (future).
 - 2026-04-17 (v1.0.1): Rebuilt prefix registry from actual `theme.py` reality (FR-012). Added `SURFACE_`, `TEXT_`, `TRANSITION_`, `QUANTITY_`, `QDARKTHEME_`, `ACCENT_`, `BORDER_`, `CARD_`, `MUTED_`, `SUCCESS_`, `WARNING_`, `DANGER_` prefixes that were previously undocumented. Corrected spacing scale to `SPACE_0`…`SPACE_6` (7 steps shipped, not 9). Moved `OVERLAY_` and `ICON_SIZE_` to the proposed-prefixes table — neither is in theme.py yet. Updated STONE_* count to actual 13 aliases.
+- 2026-07-14 (v2.0.0): Scoped the major release to descriptor-qualified instrument identity. Flat tokens and deprecated STONE_* aliases remain current; three-layer, alias-removal, and light-theme work require a separately approved future major.

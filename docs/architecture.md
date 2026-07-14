@@ -189,6 +189,15 @@ the raw label an instrument happens to emit. It is distinct from `channels.yaml`
 Loader: `src/cryodaq/storage/channel_descriptors.py`
 (`load_live_channel_descriptor_catalog`).
 
+The shell's generic instrument-health presentation consumes the frozen
+GUI-owned `DescriptorView` produced after qualified ingress. It attributes a
+card only while identity is authoritative and transport is connected; a bare
+`Reading.instrument_id`, vendor/model text, channel prefix, or LakeShore
+channel range is never a presentation identity fallback. Missing or refused
+identity remains visible as bounded operator text and grants no control
+authority. Specialized legacy feature routing elsewhere in the shell still
+uses channel/unit adapters and is tracked separately.
+
 ---
 
 ## Test architecture

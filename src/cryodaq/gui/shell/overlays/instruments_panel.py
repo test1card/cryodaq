@@ -30,7 +30,7 @@ Key design decisions:
 
 Public API:
 
-- ``on_reading(reading)`` — reading sink; routes to card grid.
+- ``on_descriptor_reading(reading, view)`` — qualified card-grid sink.
 - ``set_connected(bool)`` — pauses/resumes 10 s diag polling.
 - ``update_diagnostics(payload)`` — direct path for tests / host.
 - ``get_instrument_count()`` / ``get_sensor_summary_text()`` —
@@ -61,10 +61,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.channels.descriptors import MAX_CATALOG_DESCRIPTORS, ChannelDescriptorV1
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase, is_stale
 from cryodaq.gui.shell.overlays.alarm_panel import SeverityChip
+from cryodaq.gui.state.descriptor_store import DescriptorView, IdentityStatus, TransportState
 from cryodaq.gui.zmq_client import ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
@@ -264,18 +266,14 @@ class _InstrumentCard(QFrame):
 
         self._name_label = QLabel(self._name)
         self._name_label.setFont(_card_name_font())
-        self._name_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-        )
+        self._name_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         header.addWidget(self._name_label)
         header.addStretch()
         layout.addLayout(header)
 
         self._status_label = QLabel("Статус: ожидание данных")
         self._status_label.setFont(_body_font())
-        self._status_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-        )
+        self._status_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(self._status_label)
 
         self._last_response_label = QLabel("Последний ответ: —")
@@ -287,9 +285,7 @@ class _InstrumentCard(QFrame):
 
         self._counters_label = QLabel("Показания: 0 | Ошибки: 0")
         self._counters_label.setFont(_mono_font())
-        self._counters_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._counters_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(self._counters_label)
         layout.addStretch()
 
@@ -352,9 +348,7 @@ class _InstrumentCard(QFrame):
                 time_text = f"{elapsed / 60:.0f} мин назад"
             self._last_response_label.setText(f"Последний ответ: {time_text}")
 
-        self._counters_label.setText(
-            f"Показания: {self._total_readings} | Ошибки: {self._error_count}"
-        )
+        self._counters_label.setText(f"Показания: {self._total_readings} | Ошибки: {self._error_count}")
 
     def _update_style(self, color: str) -> None:
         self._indicator.set_color(color)
@@ -410,19 +404,13 @@ class _SensorDiagSection(QFrame):
         header.setSpacing(theme.SPACE_2)
         title = QLabel("ДИАГНОСТИКА ДАТЧИКОВ")
         title.setFont(_section_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         header.addWidget(title)
         header.addStretch()
 
         self._summary_label = QLabel("—")
         self._summary_label.setFont(_label_font())
-        self._summary_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._summary_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         header.addWidget(self._summary_label)
 
         self._summary_chip_container = QWidget()
@@ -518,9 +506,7 @@ class _SensorDiagSection(QFrame):
                 (_fmt(float(data.get("drift_mK_per_min", float("nan")))), True, False),
                 (str(int(data.get("outlier_count", 0))), True, False),
                 (
-                    _fmt(float(data["correlation"]), 2)
-                    if data.get("correlation") is not None
-                    else "—",
+                    _fmt(float(data["correlation"]), 2) if data.get("correlation") is not None else "—",
                     True,
                     False,
                 ),
@@ -579,12 +565,16 @@ class _SensorDiagSection(QFrame):
 class InstrumentsPanel(OverlayPanelBase, QWidget):
     """Phase II.8 instruments + sensor diagnostics overlay (K2-critical)."""
 
-    _reading_signal = Signal(object)
+    _reading_signal = Signal(object, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)  # OverlayPanelBase: _connected, _workers
 
         self._cards: dict[str, _InstrumentCard] = {}
+        self._identity_issues: dict[str, IdentityStatus] = {}
+        self._refused_identity_count = 0
+        self._identity_issue_sticky = False
+        self._identity_notice_state: str | None = None
         self._diag_poll_in_flight: bool = False
 
         self.setObjectName("instrumentsPanel")
@@ -592,7 +582,8 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
         self.setStyleSheet(f"#instrumentsPanel {{ background-color: {theme.SURFACE_WINDOW}; }}")
 
         self._build_ui()
-        self._reading_signal.connect(self._handle_reading)
+        self._identity_notice_state = "waiting"
+        self._reading_signal.connect(self._handle_descriptor_reading)
 
         self._liveness_timer = QTimer(self)
         self._liveness_timer.setInterval(1000)
@@ -640,17 +631,13 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
 
         section_title = QLabel("Приборы")
         section_title.setFont(_section_title_font())
-        section_title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-        )
+        section_title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         cards_layout.addWidget(section_title)
 
         self._empty_cards_label = QLabel("Ожидание данных приборов…")
         self._empty_cards_label.setFont(_body_font())
         self._empty_cards_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_3}px;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_3}px;"
         )
         cards_layout.addWidget(self._empty_cards_label)
 
@@ -677,11 +664,7 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
         layout.setSpacing(theme.SPACE_2)
         title = QLabel("ПРИБОРЫ И ДИАГНОСТИКА")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -690,8 +673,10 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def on_reading(self, reading: Reading) -> None:
-        self._reading_signal.emit(reading)
+    def on_descriptor_reading(self, reading: Reading, view: DescriptorView | None) -> None:
+        """Present only identity qualified by the GUI-owned descriptor store."""
+
+        self._reading_signal.emit(reading, view)
 
     def set_connected(self, connected: bool) -> None:
         if not super().set_connected(connected):
@@ -740,57 +725,101 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
     # Reading path
     # ------------------------------------------------------------------
 
-    @Slot(object)
-    def _handle_reading(self, reading: Reading) -> None:
-        instrument_id = self._extract_instrument_id(reading)
-        if not instrument_id:
+    @Slot(object, object)
+    def _handle_descriptor_reading(self, reading: object, view: object) -> None:
+        if type(reading) is not Reading or type(view) is not DescriptorView:
+            self._identity_issue_sticky = True
+            self._refresh_identity_notice()
             return
 
+        descriptor = view.descriptor
+        if (
+            type(view.channel_id) is not str
+            or type(view.identity_status) is not IdentityStatus
+            or type(view.transport_state) is not TransportState
+            or type(descriptor) is not ChannelDescriptorV1
+        ):
+            self._identity_issue_sticky = True
+            self._refresh_identity_notice()
+            return
+        identity_matches = (
+            view.channel_id == reading.channel
+            and descriptor.channel_id == reading.channel
+            and descriptor.instrument_id == reading.instrument_id
+            and descriptor.unit == reading.unit
+        )
+        if (
+            view.identity_status is not IdentityStatus.AUTHORITATIVE
+            or view.transport_state is not TransportState.CONNECTED
+            or not identity_matches
+        ):
+            status = view.identity_status
+            if status is IdentityStatus.AUTHORITATIVE:
+                status = IdentityStatus.REFUSED
+            self._set_identity_issue(view.channel_id, status)
+            self._refresh_identity_notice()
+            return
+
+        self._clear_identity_issue(view.channel_id)
+        instrument_id = descriptor.instrument_id
         if instrument_id not in self._cards:
             card = _InstrumentCard(instrument_id)
             self._cards[instrument_id] = card
             idx = len(self._cards) - 1
             row, col = divmod(idx, 3)
             self._grid.addWidget(card, row, col)
-            self._empty_cards_label.setVisible(False)
 
         self._cards[instrument_id].update_from_reading(reading)
+        self._refresh_identity_notice()
 
-    @staticmethod
-    def _extract_instrument_id(reading: Reading) -> str:
-        """Extract the instrument_id for a Reading.
+    def _set_identity_issue(self, channel_id: str, status: IdentityStatus) -> None:
+        previous = self._identity_issues.get(channel_id)
+        if previous is status:
+            return
+        if previous is IdentityStatus.REFUSED:
+            self._refused_identity_count -= 1
+        if previous is None and len(self._identity_issues) >= MAX_CATALOG_DESCRIPTORS:
+            self._identity_issue_sticky = True
+            return
+        self._identity_issues[channel_id] = status
+        if status is IdentityStatus.REFUSED:
+            self._refused_identity_count += 1
 
-        Priority:
-        1. ``reading.instrument_id`` (first-class field).
-        2. Drop ``analytics/*`` channels (they are not instruments) — this
-           guard runs before the prefix split so analytics readings do
-           not create bogus "analytics" cards. Legacy v1 split first and
-           then checked startswith, which was an unreachable branch and
-           a latent bug.
-        3. Channel prefix before "/" (Keithley style).
-        4. LakeShore T-channel → LS218 number mapping.
-        """
-        inst_id = reading.instrument_id
-        if inst_id:
-            return inst_id
+    def _clear_identity_issue(self, channel_id: str) -> None:
+        if self._identity_issues.pop(channel_id, None) is IdentityStatus.REFUSED:
+            self._refused_identity_count -= 1
 
-        channel = reading.channel
-        if channel.startswith("analytics/") or channel == "analytics":
-            return ""
-        if "/" in channel:
-            return channel.split("/")[0]
-        if channel.startswith("Т"):
-            try:
-                num = int(channel[1:].split(" ")[0])
-                if 1 <= num <= 8:
-                    return "LS218_1"
-                if 9 <= num <= 16:
-                    return "LS218_2"
-                if 17 <= num <= 24:
-                    return "LS218_3"
-            except (ValueError, IndexError):
-                pass
-        return ""
+    def _refresh_identity_notice(self) -> None:
+        if self._identity_issue_sticky or self._refused_identity_count:
+            state = "refused"
+        elif self._identity_issues:
+            state = "absent"
+        elif self._cards:
+            state = "hidden"
+        else:
+            state = "waiting"
+        if state == self._identity_notice_state:
+            return
+        self._identity_notice_state = state
+
+        if state == "refused":
+            self._empty_cards_label.setText("Идентификация прибора недоступна: описание канала отклонено")
+            color = theme.STATUS_FAULT
+        elif state == "absent":
+            self._empty_cards_label.setText("Идентификация прибора недоступна: описание канала отсутствует")
+            color = theme.STATUS_STALE
+        else:
+            self._empty_cards_label.setText("Ожидание данных приборов…")
+            self._empty_cards_label.setVisible(state == "waiting")
+            self._empty_cards_label.setStyleSheet(
+                f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_3}px;"
+            )
+            return
+        self._empty_cards_label.setVisible(True)
+        self._empty_cards_label.setStyleSheet(
+            f"color: {theme.FOREGROUND}; background: transparent;"
+            f" border: none; border-left: 2px solid {color}; padding: {theme.SPACE_3}px;"
+        )
 
     @Slot()
     def _refresh_all_liveness(self) -> None:

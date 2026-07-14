@@ -5,7 +5,7 @@ applies_to: how tokens, rules, components, and patterns are deprecated and event
 status: canonical
 closes_forward_ref: RULE-GOV-003
 references: governance/token-naming.md, governance/versioning.md
-last_updated: 2026-04-17
+last_updated: 2026-07-14
 ---
 
 # Deprecation Policy
@@ -51,7 +51,7 @@ When a token is renamed or superseded:
 # New canonical token
 FOREGROUND = "#e8eaf0"
 
-# Deprecated alias — still works, to be removed in v2.0
+# Deprecated alias — still works, removal requires a separately approved future major
 STONE_50 = FOREGROUND  # @deprecated v1.0.0 — use FOREGROUND
 
 def __getattr__(name):
@@ -74,7 +74,7 @@ _DEPRECATED_TOKENS = {
 
 Deprecated tokens work identically (Python magic returns the new value); the only difference is the warning.
 
-**Current deprecated tokens (v1.0.0):** the entire `STONE_*` prefix family (palette rename from Phase 0).
+**Deprecated since v1.0.0:** the entire `STONE_*` prefix family (palette rename from Phase 0). The aliases remain deprecated and available in current v2.0.0.
 
 ### Rule deprecation
 
@@ -136,7 +136,7 @@ Minimum windows before removal:
 
 | Artifact | Deprecation window | Removal |
 |---|---|---|
-| Token (e.g., STONE_*) | 1 minor version | Next major (v2.0) |
+| Token (e.g., STONE_*) | 1 minor version | Separately announced future major |
 | Component variant | 2 minor versions | Next major |
 | Full component | 3 minor versions | Next major |
 | Rule | 2 minor versions | Next major |
@@ -197,11 +197,11 @@ External audit flags any remaining `STONE_*` reference. Replace during the panel
 
 ## STONE_* specific lifecycle
 
-**Deprecated in:** v1.0.0 (shipping state)
-**Removed in:** v2.0.0 (when light theme or palette restructure happens)
-**Current state:** ~15 call sites still use STONE_* in legacy panels; being migrated as each panel is refactored
+**Deprecated in:** v1.0.0
+**Removed in:** a separately approved future major, v3.0.0 at the earliest; no removal version is committed yet
+**Current state in v2.0.0:** the aliases remain deprecated and available; legacy-panel call sites migrate as each panel is reviewed
 
-Migration effort: part of Phase II ongoing work. Not blocking v1.x releases.
+Migration effort: part of Phase II ongoing work. It is not bundled into the scoped v2.0.0 instrument-identity release and does not block v2.x releases.
 
 ## Emergency deprecation
 
@@ -229,7 +229,7 @@ Do not silently revert — document the reversal.
 
 ## What cannot be deprecated
 
-Certain foundational items are locked and cannot be deprecated in v1.x:
+Certain foundational items are locked and cannot be deprecated in the current release line:
 
 - **Cyrillic Т (U+0422)** for channel IDs — domain vocabulary, not a design decision
 - **SI unit symbols** — mandated by physics / international convention
@@ -274,3 +274,4 @@ Changes to these are architecture / safety topics, not design deprecations.
 ## Changelog
 
 - 2026-04-17: Initial version. Closes RULE-GOV-003. Three-state lifecycle (Active → Deprecated → Removed). Per-artifact deprecation windows (1-3 minor versions). Emergency deprecation exception. STONE_* lifecycle documented as current case.
+- 2026-07-14 (v2.0.0): Recorded the scoped identity-API major-release exception. STONE_* remains deprecated and available; removal and three-layer/light-theme migration now require a separately approved future major, v3.0.0 at the earliest.

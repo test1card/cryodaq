@@ -4,7 +4,7 @@ keywords: instruments, sensor diagnostics, liveness, adaptive timeout, health sc
 applies_to: Instrument card grid + sensor diagnostics overlay (merged)
 status: active
 implements: src/cryodaq/gui/shell/overlays/instruments_panel.py (Phase II.8); legacy src/cryodaq/gui/widgets/instrument_status.py and sensor_diag_panel.py retained (DEPRECATED) until Phase II.13
-last_updated: 2026-04-18
+last_updated: 2026-07-14
 references: rules/data-display-rules.md, rules/color-rules.md, cryodaq-primitives/alarm-panel.md (SeverityChip reuse), components/card.md
 ---
 
@@ -34,11 +34,19 @@ Adaptive liveness constants are unchanged (verified against real hardware — do
 - `_DEFAULT_TIMEOUT_S = 300.0`
 - `_MIN_READINGS_FOR_ADAPTIVE = 3`
 
-`_extract_instrument_id` priority is preserved verbatim:
+Instrument cards use the GUI-thread-owned `DescriptorStore` as their sole
+identity authority. A card is created or updated only from an exact
+`DescriptorView` whose identity is `authoritative`, transport is `connected`,
+and `(channel_id, instrument_id, unit)` exactly matches the `Reading`.
+`Reading.instrument_id` remains driver provenance and a descriptor-integrity
+check; by itself it never attributes a card. Channel prefixes, vendor/model
+names, and LakeShore `Т1…Т24` ranges are not identity fallbacks.
 
-1. `reading.instrument_id` first-class field.
-2. Channel prefix before `/` (Keithley style: `Keithley_1/smua/voltage` → `Keithley_1`).
-3. LakeShore T-number mapping (`Т1–8` → `LS218_1`, `Т9–16` → `LS218_2`, `Т17–24` → `LS218_3`).
+Descriptor absence is shown as «Идентификация прибора недоступна:
+описание канала отсутствует». A refused, malformed, mismatched, or
+capacity-exhausted identity is shown as «Идентификация прибора
+недоступна: описание канала отклонено». Both strings are fixed and
+bounded: raw channel, vendor, diagnostic, and payload text is never echoed.
 
 ## Tokens
 
@@ -89,7 +97,9 @@ No hardcoded hex outside DS tokens. No emoji (including `⬤ ✓ ⚠ ✘`). No d
 
 ```python
 class InstrumentsPanel(QWidget):
-    def on_reading(self, reading: Reading) -> None: ...
+    def on_descriptor_reading(
+        self, reading: Reading, view: DescriptorView | None
+    ) -> None: ...
     def set_connected(self, connected: bool) -> None: ...
 
     # Sensor diag — tests / host can bypass polling
@@ -108,9 +118,43 @@ class InstrumentsPanel(QWidget):
 1. Lazy construction via `_OVERLAY_FACTORIES["instruments"]`.
 2. `_tick_status` mirror into `set_connected(bool)`.
 3. `_ensure_overlay("instruments")` replay — sets the connected flag from `_last_reading_time` on first open.
-4. `_dispatch_reading` → `self._instrument_panel.on_reading(reading)` (no filter).
+4. `dispatch_qualified_reading` ingests the descriptor, reads the resulting
+   frozen `DescriptorView`, dispatches the bare reading to legacy sinks exactly
+   once, then calls `on_descriptor_reading(reading, view)` exactly once.
+   `_dispatch_reading` never feeds the instrument-card grid directly.
 
 See `src/cryodaq/gui/shell/main_window_v2.py` for the canonical wiring.
+
+## Accessibility evidence
+
+- Unavailable and refused states use fixed Russian text in `FOREGROUND` plus a
+  `STATUS_STALE` or `STATUS_FAULT` left border. Status is therefore conveyed by
+  text and shape/color, never color alone (RULE-A11Y-002/003).
+- Both messages are at most 256 UTF-8 bytes and contain no raw channel, vendor,
+  diagnostic, metadata, or payload text. Hostile markup cannot enter the label.
+- The notice is static, contains no motion, and keeps the existing body-font
+  minimum. Real Windows ONEDIR DPI/NVDA evidence remains open.
+
+## Performance evidence
+
+- Notice text, visibility, and QSS are mutated only when presentation changes
+  among `waiting | hidden | absent | refused`; steady accepted/refused readings
+  perform no repeated notice stylesheet work.
+- Per-reading identity bookkeeping uses bounded dictionary `get`/assignment/
+  `pop` and a cached refused count: O(1) expected work with at most
+  `MAX_CATALOG_DESCRIPTORS == 4096` issue entries.
+- Descriptor presentation performs no file, database, socket, network, or
+  sleep call. It remains synchronous on the GUI owner thread and only mutates
+  existing Qt state. Full lab-PC frame timing and long-session memory evidence
+  remain open.
+
+## v1 to v2 migration
+
+This is a v2.0.0 breaking API change. Callers must replace
+`on_reading(reading)` with `on_descriptor_reading(reading, view)` where `view`
+comes from the GUI-owned `DescriptorStore` after qualified ingress. Restoring a
+bare-reading compatibility adapter would restore the unsafe identity fallback
+and is prohibited.
 
 ## Rules cross-reference
 
@@ -120,12 +164,19 @@ See `src/cryodaq/gui/shell/main_window_v2.py` for the canonical wiring.
 - `rules/data-display-rules.md` RULE-TABLE-002 — monospace numeric cells with tabular figures.
 - `rules/interaction-rules.md` RULE-INTERACT-001 — connection-dependent operations (diag polling) explicitly gated.
 
-## Fail-OPEN
+## Fail-conservative identity
 
 - Disconnect pauses polling but leaves diag rows + summary chips in place.
 - Cards continue drawing; adaptive liveness reacts to the silent feed on its own (transitions to `STATUS_FAULT` after `timeout_s`).
 - Engine error in poll result preserves the prior diag map (no wipe).
+- Absent/refused identity leaves existing last-known cards visible but cannot
+  create or update an attributed card; the fixed unavailable notice remains
+  visible until that channel is requalified by an authoritative connected view.
+- Descriptors and their views grant no control authority.
 
 ## Changelog
 
 - **2026-04-18 (Phase II.8)** — merged rebuild landed. Unicode circle indicator replaced by painted widget; summary emoji replaced by `SeverityChip`; `apply_panel_frame_style` + deprecated `TEXT_*` tokens removed.
+- **2026-07-14 (F35 D7.2)** — removed vendor/channel-name identity inference;
+  instrument cards now consume only authoritative connected descriptor views,
+  with bounded Russian unavailable/refused presentation.

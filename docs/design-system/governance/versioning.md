@@ -5,7 +5,7 @@ applies_to: how design-system releases are numbered and what changes go into eac
 status: canonical
 references: governance/deprecation-policy.md, governance/contribution.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-07-12
+last_updated: 2026-07-14
 ---
 
 # Versioning
@@ -20,7 +20,7 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `1.2.0` — operator-truth, replay-gating, and POD composition update (see `CHANGELOG.md`).
+**Current version:** `2.0.0` — descriptor-qualified InstrumentsPanel ingress (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
@@ -211,12 +211,15 @@ Design-system: v1.1.0 (adds ShiftHandover widget, SHIFT_* tokens)
 6. Tag release in git
 7. Announce to operator team + any external consumers
 
-## Post-1.0.0 trajectory
+## Current trajectory
 
 Anticipated versions:
 
-- **v1.x** (2026-2027): iterations of current design language; component additions; accessibility refinements; operator-feedback-driven tweaks
-- **v2.0** (2027+): light theme introduction OR three-layer token migration OR major palette shift. Timing depends on product need.
+- **v2.0.0** (2026): breaking descriptor-qualified instrument identity API;
+  visual tokens and component anatomy otherwise remain unchanged.
+- **Later releases:** light theme, three-layer token migration, or palette
+  restructuring require their own compatibility analysis and release notes;
+  they are not implied by the v2.0.0 identity cutover.
 
 ## Rules applied
 
@@ -250,3 +253,6 @@ Anticipated versions:
 - 2026-04-17: Initial version. SemVer 2.0.0 baseline with CryoDAQ-specific definitions of "breaking". Release cadence expectations. Independence from CryoDAQ package version. Post-1.0.0 trajectory anticipated.
 - 2026-04-17 (v1.0.1): Created the `VERSION` and `CHANGELOG.md` artifacts that this document was referencing but which did not previously exist (FR-013). No process changes — the described release process is now actually wired up.
 - 2026-07-12 (v1.2.0): Reconciled canonical version metadata with the operator-truth, replay-gating, and POD composition contract.
+- 2026-07-14 (v2.0.0): Removed the public bare-reading InstrumentsPanel
+  ingress in favor of descriptor-qualified identity, a caller-breaking API
+  change under this policy.
