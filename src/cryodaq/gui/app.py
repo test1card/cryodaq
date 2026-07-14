@@ -86,8 +86,7 @@ def _load_bundled_fonts() -> None:
     for required in (theme.FONT_BODY, theme.FONT_DISPLAY):
         if required not in all_families:
             logger.warning(
-                "Required font '%s' not found after registration. "
-                "Design system will use system fallback.",
+                "Required font '%s' not found after registration. Design system will use system fallback.",
                 required,
             )
 
@@ -274,13 +273,14 @@ def main() -> None:
     timer.setInterval(10)  # 100 Hz
 
     def _tick() -> None:
-        for reading in bridge.poll_readings():
-            window._dispatch_reading(reading)
+        for qualified in bridge.poll_readings_with_descriptor():
+            window.dispatch_qualified_reading(qualified)
         snapshot_ingress.pump()
 
         # Auto-restart subprocess if it dies or stops sending heartbeats
         if not bridge.is_healthy():
             snapshot_ingress.invalidate_transport()
+            window.invalidate_descriptor_transport()
             if bridge.is_alive():
                 logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
                 bridge.shutdown()
@@ -290,6 +290,7 @@ def main() -> None:
             return
         if bridge.data_flow_stalled():
             snapshot_ingress.invalidate_transport()
+            window.invalidate_descriptor_transport()
             logger.warning("ZMQ bridge not healthy (no readings), restarting...")
             bridge.shutdown()
             bridge.start()

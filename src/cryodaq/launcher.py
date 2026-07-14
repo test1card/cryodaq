@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
 from cryodaq.instance_lock import release_lock, try_acquire_lock
@@ -1229,6 +1228,8 @@ class LauncherWindow(QMainWindow):
         time.sleep(1)
         self._engine_external = False
         self._start_engine()
+        if self._main_window is not None:
+            self._main_window.invalidate_descriptor_transport()
         self._bridge.start()
         self._data_timer.start()
         self._health_timer.start()
@@ -1935,8 +1936,8 @@ class LauncherWindow(QMainWindow):
     @Slot()
     def _poll_bridge_data(self) -> None:
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
-        for reading in self._bridge.poll_readings():
-            self._on_reading_qt(reading)
+        for qualified in self._bridge.poll_readings_with_descriptor():
+            self._on_reading_qt(qualified)
 
         unhealthy = not self._bridge.is_healthy()
         # data_flow_stalled only matters when heartbeats are otherwise healthy
@@ -1961,6 +1962,8 @@ class LauncherWindow(QMainWindow):
             else:
                 logger.warning("ZMQ bridge not healthy (no readings), restarting...")
                 self._bridge.shutdown()
+            if self._main_window is not None:
+                self._main_window.invalidate_descriptor_transport()
             self._bridge.start()
             return
         # IV.6 B1 fix: command-channel watchdog. Detects the case where
@@ -1977,16 +1980,27 @@ class LauncherWindow(QMainWindow):
                 logger.warning("ZMQ bridge: command channel unhealthy (recent command timeout). Restarting bridge.")
                 self._last_cmd_watchdog_restart = now
                 self._bridge.shutdown()
+                if self._main_window is not None:
+                    self._main_window.invalidate_descriptor_transport()
                 self._bridge.start()
                 return
 
     @Slot(object)
-    def _on_reading_qt(self, reading: Reading) -> None:
+    def _on_reading_qt(self, qualified: object) -> None:
+        # D7.1b: qualified is a DescriptorQualifiedReading from poll_readings_with_descriptor().
+        from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
+
+        if not isinstance(qualified, DescriptorQualifiedReading):
+            logger.warning(
+                "_on_reading_qt received non-qualified object of type %s; dropped",
+                type(qualified).__name__,
+            )
+            return
         self._reading_count += 1
         self._last_reading_time = time.monotonic()
         # Route to embedded MainWindow (if not tray-only)
         if self._main_window is not None:
-            self._main_window._dispatch_reading(reading)
+            self._main_window.dispatch_qualified_reading(qualified)
 
     @Slot()
     def _on_open_web(self) -> None:
