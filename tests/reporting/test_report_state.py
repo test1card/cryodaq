@@ -446,7 +446,8 @@ def test_generation_files_and_directories_are_fsynced_before_selection(
 
     module._fsync_generation(staging)
 
-    assert len(calls) >= 3  # report file, assets directory, staging directory
+    expected_directory_flushes = 0 if module.os.name == "nt" else 2
+    assert len(calls) == 1 + expected_directory_flushes
 
 
 def test_lock_name_never_contains_raw_experiment_id() -> None:

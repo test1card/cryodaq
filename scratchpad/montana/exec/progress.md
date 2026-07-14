@@ -662,3 +662,49 @@ worktree after D7.1 is settled.
   evidence was introduced; the POSIX rename semantic is paired with the
   Windows replacement-denial proof. Physical hardware, frozen-build, and
   soak-duration gates remain open.
+
+## 2026-07-14 fourth hosted CI adjudication, D7.2, and full-shard hardening
+
+- Exact-SHA run `29303819142` at `a19e92c` passed Windows/Ubuntu core and GUI
+  plus Ubuntu remaining. Windows agents failed after 1,129 passes because a
+  test required POSIX directory-descriptor opens on a host where `os.stat`
+  lacks `dir_fd`; Windows remaining failed after 1,819 passes because a test
+  required POSIX unlink-and-replace semantics while the open lock correctly
+  held Windows sharing authority. Ubuntu agents remained anomalously in
+  progress for hours; four prior safe-WSL runs and the post-repair run below
+  complete the same shard in about 50 seconds, so the hosted job is not treated
+  as passing evidence.
+- Report-artifact tests now require real POSIX replacement detection on POSIX
+  and real WinError 5/32 replacement denial followed by verified original-byte
+  completion on Windows. Directory-descriptor fault tests run only where both
+  required APIs support `dir_fd`; fallback-path fault coverage remains active
+  on Windows. Lock tests make the same explicit split while preserving
+  identity-checked acquisition and `unlink=False` ownership on the Windows
+  no-replacement branch. Symlink skips remain limited to local WinError 1314.
+- A no-`-x` native-Windows agent/reporting run exposed three additional test
+  portability defects without changing product behavior: a Cyrillic vault
+  fixture now writes explicit UTF-8; the generation flush test requires one
+  file flush on Windows and the same file plus two directory flushes on POSIX;
+  and the genuine 10 MiB+1 invalid PNG case uses a bounded pytest ID so
+  `PYTEST_CURRENT_TEST` cannot exceed Windows' environment limit. Two recovery
+  tests now use the coordinator's serialized `reconcile_once()` barrier instead
+  of a racy 100 ms scheduler poll; the three-node boundary repeated **20/20**
+  for **60 passes** after a pre-fix failure reproduced on repeat 11.
+- Native Windows evidence: report-process plus instance-lock modules **64
+  passed, 13 intentional platform/privilege skips**; the new portability nodes
+  **5 passed**; the expanded shard reached **1,445 passed, 35 skipped, 1
+  deselected**, with only 17 local WinError-1314 symlink-creation failures plus
+  the then-unfixed sibling timing poll. The repaired recovery boundary then
+  supplied the 60-pass repeat above. Safe WSL2 Ubuntu 24.04 evidence: report
+  process **64 passed**, instance lock **13 passed**, new portability nodes **5
+  passed**, and the full agent/reporting shard **1,494 passed, 4 skipped, 1
+  deselected** in 49.75 seconds. Ruff and `git diff --check` passed.
+- Independent report, lock, portability, and final frozen-diff reviews: **PASS,
+  no P0-P3**. The reviewed patch ID is
+  `974b8c88ec2baf43deb6028c5862933974abfb2d`. A new exact-SHA hosted run remains
+  mandatory after publication.
+- D7.2 removes inferred vendor/channel identity from GUI presentation. Exact
+  descriptor tuple authority, bounded unavailable/fault states, cached
+  transition-only styling, design-system governance, focused **56-pass** main
+  evidence, and the independent **PASS, no P0-P3** verdict are integrated as
+  local commit `dcf1a82`; no physical or hardware gate is closed by it.

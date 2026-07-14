@@ -267,7 +267,12 @@ def test_persistent_lock_is_reacquired_after_process_death(lock_name):
 def test_lock_rejects_symlink_without_truncating_target(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.write_text("do-not-touch", encoding="utf-8")
-    (tmp_path / ".unsafe.lock").symlink_to(target)
+    try:
+        (tmp_path / ".unsafe.lock").symlink_to(target)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows account lacks symlink creation privilege")
+        raise
 
     assert try_acquire_lock(".unsafe.lock", lock_dir=tmp_path) is None
     assert target.read_text(encoding="utf-8") == "do-not-touch"
@@ -293,22 +298,40 @@ def test_lock_rejects_path_replacement_during_open(tmp_path: Path, monkeypatch: 
     path = tmp_path / ".replaced.lock"
     path.write_text("old", encoding="ascii")
     real_open = module.os.open
+    blocked: list[int | None] = []
 
     def replacing_open(raw_path: str, flags: int, mode: int = 0o777) -> int:
         fd = real_open(raw_path, flags, mode)
-        path.unlink()
-        path.write_text("attacker", encoding="ascii")
+        try:
+            path.unlink()
+            path.write_text("attacker", encoding="ascii")
+        except PermissionError as exc:
+            if os.name != "nt":
+                raise
+            blocked.append(exc.winerror)
         return fd
 
     monkeypatch.setattr(module.os, "open", replacing_open)
-    assert try_acquire_lock(path.name, lock_dir=tmp_path) is None
-    assert path.read_text(encoding="ascii") == "attacker"
+    fd = try_acquire_lock(path.name, lock_dir=tmp_path)
+    if os.name == "nt":
+        assert fd is not None
+        assert blocked and set(blocked) <= {5, 32}
+        release_lock(fd, path.name, lock_dir=tmp_path, unlink=False)
+        assert path.read_text(encoding="ascii") != "attacker"
+    else:
+        assert fd is None
+        assert path.read_text(encoding="ascii") == "attacker"
 
 
 def test_lock_rejects_symlinked_parent_even_when_target_is_contained(tmp_path: Path) -> None:
     contained = tmp_path / "contained"
     contained.mkdir()
-    (tmp_path / ".report-locks").symlink_to(contained, target_is_directory=True)
+    try:
+        (tmp_path / ".report-locks").symlink_to(contained, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows account lacks symlink creation privilege")
+        raise
 
     with pytest.raises(ValueError, match="real directory"):
         try_acquire_lock(".report-locks/periodic.lock", lock_dir=tmp_path)
@@ -319,9 +342,14 @@ def test_release_never_unlinks_replacement_path(tmp_path: Path) -> None:
     path = tmp_path / ".release.lock"
     fd = try_acquire_lock(path.name, lock_dir=tmp_path)
     assert fd is not None
-    path.unlink()
-    path.write_text("attacker", encoding="ascii")
-
-    release_lock(fd, path.name, lock_dir=tmp_path)
-
-    assert path.read_text(encoding="ascii") == "attacker"
+    if os.name == "nt":
+        with pytest.raises(PermissionError) as captured:
+            path.unlink()
+        assert captured.value.winerror in {5, 32}
+        release_lock(fd, path.name, lock_dir=tmp_path, unlink=False)
+        assert path.is_file()
+    else:
+        path.unlink()
+        path.write_text("attacker", encoding="ascii")
+        release_lock(fd, path.name, lock_dir=tmp_path)
+        assert path.read_text(encoding="ascii") == "attacker"

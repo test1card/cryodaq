@@ -98,7 +98,7 @@ def test_load_vault_notes_parses_frontmatter(tmp_path):
         "\n"
         "Body content here.\n"
     )
-    (tmp_path / "test.md").write_text(md)
+    (tmp_path / "test.md").write_text(md, encoding="utf-8")
     chunks = load_vault_notes(tmp_path)
     assert len(chunks) >= 1
     assert chunks[0].metadata.get("experiment_id") == "abc12345"

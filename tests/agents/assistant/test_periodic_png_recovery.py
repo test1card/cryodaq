@@ -1541,12 +1541,9 @@ async def test_ordinary_generate_failure_recovers_then_consumes_fixed_attempt(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
-            active = (await _load_stable(tmp_path)).payload["active"]
-            if active["status"] == "FAILED":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         active = (await _load_stable(tmp_path)).payload["active"]
+        assert active is not None
         assert active["status"] == "FAILED"
         assert active["retryable"] is True
         assert active["error_code"] == "render_failed"
@@ -1584,12 +1581,9 @@ async def test_ordinary_generate_failure_adopts_promoted_final_before_retry(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["last_terminal"] is not None:
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         terminal = (await _load_stable(tmp_path)).payload["last_terminal"]
+        assert terminal is not None
         assert terminal["status"] == "SUCCEEDED"
         assert promoted.statuses == ["RENDERING"]
     finally:

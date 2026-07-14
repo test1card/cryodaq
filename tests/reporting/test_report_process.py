@@ -97,6 +97,7 @@ def test_content_file_opens_use_binary_mode_without_affecting_directory_opens(
     written = tmp_path / "written.bin"
     calls: list[tuple[str, int, int | None]] = []
     original_open = module.os.open
+    has_dirfd_stat = module.os.stat in module.os.supports_dir_fd
 
     def capture_open(
         path: str | Path,
@@ -144,7 +145,7 @@ def test_content_file_opens_use_binary_mode_without_affecting_directory_opens(
         }
     ]
     assert len(content_calls) == 4
-    assert len(directory_calls) == 5
+    assert len(directory_calls) == (5 if has_dirfd_stat else 0)
     assert all(
         flags & binary_flag for flags in content_calls
     )
@@ -217,27 +218,37 @@ def test_periodic_artifact_reader_rejects_replacement_during_fd_read(
     artifact, png, raw = _install_periodic_artifact(tmp_path)
     real_read = module.os.read
     replaced = False
+    blocked: list[int | None] = []
 
     def replace_after_read(fd: int, amount: int) -> bytes:
         nonlocal replaced
         chunk = real_read(fd, amount)
         if chunk and not replaced:
             replaced = True
-            if replacement == "file":
-                candidate = png.with_name("replacement.png")
-                candidate.write_bytes(raw)
-                os.replace(candidate, png)
-            else:
-                final = png.parent
-                moved = final.with_name(f"{final.name}.moved")
-                final.rename(moved)
-                final.mkdir()
-                (final / "periodic.png").write_bytes(raw)
+            try:
+                if replacement == "file":
+                    candidate = png.with_name("replacement.png")
+                    candidate.write_bytes(raw)
+                    os.replace(candidate, png)
+                else:
+                    final = png.parent
+                    moved = final.with_name(f"{final.name}.moved")
+                    final.rename(moved)
+                    final.mkdir()
+                    (final / "periodic.png").write_bytes(raw)
+            except PermissionError as exc:
+                if os.name != "nt":
+                    raise
+                blocked.append(exc.winerror)
         return chunk
 
     monkeypatch.setattr(module.os, "read", replace_after_read)
-    with pytest.raises(ReportProcessError, match="changed"):
-        read_periodic_artifact_bytes(tmp_path, artifact)
+    if os.name == "nt":
+        assert read_periodic_artifact_bytes(tmp_path, artifact) == raw
+        assert blocked and set(blocked) <= {5, 32}
+    else:
+        with pytest.raises(ReportProcessError, match="changed"):
+            read_periodic_artifact_bytes(tmp_path, artifact)
     assert replaced is True
 
 
@@ -281,6 +292,7 @@ def test_periodic_artifact_reader_fallback_still_rejects_generation_replacement(
     monkeypatch.setattr(module.os, "supports_dir_fd", set())
     real_read = module.os.read
     replaced = False
+    blocked: list[int | None] = []
 
     def replace_generation_during_read(fd: int, amount: int) -> bytes:
         nonlocal replaced
@@ -288,14 +300,23 @@ def test_periodic_artifact_reader_fallback_still_rejects_generation_replacement(
         if chunk and not replaced:
             replaced = True
             final = png.parent
-            final.rename(final.with_name(f"{final.name}.moved"))
-            final.mkdir()
-            (final / "periodic.png").write_bytes(raw)
+            try:
+                final.rename(final.with_name(f"{final.name}.moved"))
+                final.mkdir()
+                (final / "periodic.png").write_bytes(raw)
+            except PermissionError as exc:
+                if os.name != "nt":
+                    raise
+                blocked.append(exc.winerror)
         return chunk
 
     monkeypatch.setattr(module.os, "read", replace_generation_during_read)
-    with pytest.raises(ReportProcessError, match="changed"):
-        read_periodic_artifact_bytes(tmp_path, artifact)
+    if os.name == "nt":
+        assert read_periodic_artifact_bytes(tmp_path, artifact) == raw
+        assert blocked and set(blocked) <= {5, 32}
+    else:
+        with pytest.raises(ReportProcessError, match="changed"):
+            read_periodic_artifact_bytes(tmp_path, artifact)
     assert replaced is True
 
 
@@ -326,6 +347,10 @@ def _assert_fixed_artifact_io_failure(error: ReportProcessError) -> None:
 
 @pytest.mark.parametrize(
     "fault", ["read", "post_read_fstat", "post_read_stat", "directory_verify", "close"]
+)
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd,
+    reason="requires POSIX dir_fd support",
 )
 def test_periodic_artifact_reader_normalizes_dirfd_io_faults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
@@ -671,7 +696,9 @@ def test_parent_recovers_nonzero_child_after_manifest_commit(
 
     report = runner.generate_experiment("exp-1")
 
-    assert report["docx_path"].endswith("reports/generations/generation-token-0001/report_editable.docx")
+    assert Path(report["docx_path"]).relative_to(experiment_root) == (
+        Path("reports") / "generations" / generation_id / "report_editable.docx"
+    )
 
 
 def test_parent_does_not_recover_nonzero_without_valid_manifest(
@@ -751,7 +778,9 @@ def test_parent_nonzero_always_trusts_matching_manifest_over_result_file(
     monkeypatch.setattr(runner, "_run_process", nonzero_with_result)
 
     report = runner.generate_experiment("exp-1")
-    assert report["docx_path"].endswith("reports/generations/generation-token-0001/report_editable.docx")
+    assert Path(report["docx_path"]).relative_to(experiment_root) == (
+        Path("reports") / "generations" / generation_id / "report_editable.docx"
+    )
 
 
 def test_forced_parent_surfaces_audit_failure_after_manifest_commit(

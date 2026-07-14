@@ -377,7 +377,11 @@ async def test_tls_verified_default_and_false_warning_and_connector(
     assert all(TOKEN not in record.getMessage() for record in caplog.records)
 
 
-@pytest.mark.parametrize("photo", [bytearray(_png()), b"x" * 32, b"x" * (10 * 1024 * 1024 + 1)])
+@pytest.mark.parametrize(
+    "photo",
+    [bytearray(_png()), b"x" * 32, b"x" * (10 * 1024 * 1024 + 1)],
+    ids=("mutable", "too-small", "too-large"),
+)
 async def test_png_size_boundaries_and_mutable_input_rejected(photo: object) -> None:
     transport = ScriptedTransport(_accepted())
     client = PeriodicTelegramClient(_config(), _transport=transport)
