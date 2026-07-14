@@ -18,10 +18,12 @@ import os
 import subprocess
 import sys
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+import cryodaq.support.collector as collector_module
 from cryodaq.support.bundle import (
     BundleCapture,
     ConfigFingerprint,
@@ -300,6 +302,57 @@ def test_degraded_engine_partial_snapshot_failure_marks_section_unavailable() ->
     # health and integrity should NOT be in unavailable (they succeeded).
     assert "health" not in ev["unavailable_fields"]
     assert "integrity" not in ev["unavailable_fields"]
+
+
+def test_collector_secret_inputs_and_exception_are_absent_from_bundle_and_logs(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Collector failures never expose hostile inputs through either output channel."""
+    token = "Bearer planted-token-abcdefghijklmnopqrstuvwxyz0123456789"
+    credential = "password=planted-credential"
+    absolute_path = r"C:\Users\alice\private\planted.txt"
+    hostile = "hostile\x00\u202evalue"
+    forced_error = f"{token} {credential} {absolute_path} {hostile}"
+
+    def fail_version(*args: object, **kwargs: object) -> None:
+        raise RuntimeError(forced_error)
+
+    monkeypatch.setattr(collector_module.importlib.metadata, "version", fail_version)
+    with caplog.at_level("DEBUG", logger="cryodaq.support.collector"):
+        capture = collect_bundle_capture(
+            _BUNDLE_ID,
+            _NOW,
+            snapshot=MagicMock(),
+            extra_versions={"bad path": absolute_path, "bad credential": credential, "bad token": token},
+            extra_fingerprints=[(hostile, "bad.schema", None)],
+        )
+        bundle = build_support_bundle(capture)
+
+    output = b"".join(artifact.content for artifact in bundle.artifacts) + caplog.text.encode()
+    for secret in (token, credential, absolute_path, hostile, forced_error):
+        assert secret.encode() not in output
+
+
+def test_collector_rolls_back_partial_health_iteration_and_preserves_other_sections() -> None:
+    """A mid-iteration health failure degrades only health and keeps integrity."""
+    first = SimpleNamespace(subsystem_id="first", state=SimpleNamespace(value="ok"))
+
+    def broken_subsystems():
+        yield first
+        raise RuntimeError("collector iteration failed")
+
+    snapshot = MagicMock()
+    snapshot.plant_health.subsystems = broken_subsystems()
+    snapshot.attention.items = ()
+    snapshot.data_integrity.storage.value = "available"
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
+    bundle = build_support_bundle(capture)
+    ev = _evidence(bundle)
+
+    assert "health" in ev["unavailable_fields"]
+    assert not any(record["kind"] == "health" for record in ev["records"])
+    assert any(record["kind"] == "integrity" for record in ev["records"])
 
 
 def test_degraded_engine_bundle_still_contains_versions_when_engine_absent() -> None:

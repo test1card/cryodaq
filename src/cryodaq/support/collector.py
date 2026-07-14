@@ -97,6 +97,9 @@ def collect_bundle_capture(
     else:
         _collect_health(snapshot, records, unavailable)
         _collect_attention(snapshot, records, unavailable)
+        # The v1 snapshot has no audit/log evidence fields; absence is explicit.
+        _mark_unavailable("audit", unavailable)
+        _mark_unavailable("log", unavailable)
         _collect_integrity(snapshot, records, unavailable)
 
     return BundleCapture(
@@ -137,7 +140,7 @@ def _collect_versions(
             for component, version in extra.items():
                 _add_version(versions, seen, component, version)
     except Exception as exc:
-        _log.warning("bundle-collector: versions section failed: %s", exc)
+        _log.warning("bundle-collector: versions section failed (%s)", type(exc).__name__)
         _mark_unavailable("versions", unavailable)
         versions.clear()
 
@@ -154,7 +157,7 @@ def _add_version(
             versions.append(sv)
             seen.add(sv.component)
     except Exception as exc:
-        _log.debug("bundle-collector: skipping version %r: %s", component, exc)
+        _log.debug("bundle-collector: skipping version (%s)", type(exc).__name__)
 
 
 def _collect_fingerprints(
@@ -178,9 +181,9 @@ def _collect_fingerprints(
                     fingerprints.append(fp)
                     seen.add(fp.config_id)
             except Exception as exc:
-                _log.debug("bundle-collector: skipping fingerprint %r: %s", config_id, exc)
+                _log.debug("bundle-collector: skipping fingerprint (%s)", type(exc).__name__)
     except Exception as exc:
-        _log.warning("bundle-collector: config_fingerprints section failed: %s", exc)
+        _log.warning("bundle-collector: config_fingerprints section failed (%s)", type(exc).__name__)
         _mark_unavailable("config_fingerprints", unavailable)
         fingerprints.clear()
 
@@ -192,6 +195,7 @@ def _collect_health(
 ) -> None:
     try:
         added = 0
+        pending: list[EvidenceRecord] = []
         for subsystem in snapshot.plant_health.subsystems:
             if added >= _MAX_HEALTH_RECORDS:
                 break
@@ -203,12 +207,13 @@ def _collect_health(
                 if hasattr(subsystem, "observed_at") and subsystem.observed_at is not None:
                     payload["observed_at"] = _utc_iso(subsystem.observed_at)
                 rec = EvidenceRecord.from_payload("health", payload)
-                records.append(rec)
+                pending.append(rec)
                 added += 1
             except Exception as exc:
-                _log.debug("bundle-collector: skipping health item: %s", exc)
+                _log.debug("bundle-collector: skipping health item (%s)", type(exc).__name__)
+        records.extend(pending)
     except Exception as exc:
-        _log.warning("bundle-collector: health section failed: %s", exc)
+        _log.warning("bundle-collector: health section failed (%s)", type(exc).__name__)
         _mark_unavailable("health", unavailable)
 
 
@@ -219,6 +224,7 @@ def _collect_attention(
 ) -> None:
     try:
         added = 0
+        pending: list[EvidenceRecord] = []
         for item in snapshot.attention.items:
             if added >= _MAX_ATTENTION_RECORDS:
                 break
@@ -231,12 +237,13 @@ def _collect_attention(
                 if hasattr(item, "observed_at") and item.observed_at is not None:
                     payload["observed_at"] = _utc_iso(item.observed_at)
                 rec = EvidenceRecord.from_payload("attention", payload)
-                records.append(rec)
+                pending.append(rec)
                 added += 1
             except Exception as exc:
-                _log.debug("bundle-collector: skipping attention item: %s", exc)
+                _log.debug("bundle-collector: skipping attention item (%s)", type(exc).__name__)
+        records.extend(pending)
     except Exception as exc:
-        _log.warning("bundle-collector: attention section failed: %s", exc)
+        _log.warning("bundle-collector: attention section failed (%s)", type(exc).__name__)
         _mark_unavailable("attention", unavailable)
 
 
@@ -258,7 +265,7 @@ def _collect_integrity(
         rec = EvidenceRecord.from_payload("integrity", payload)
         records.append(rec)
     except Exception as exc:
-        _log.warning("bundle-collector: integrity section failed: %s", exc)
+        _log.warning("bundle-collector: integrity section failed (%s)", type(exc).__name__)
         _mark_unavailable("integrity", unavailable)
 
 
