@@ -708,3 +708,48 @@ worktree after D7.1 is settled.
   transition-only styling, design-system governance, focused **56-pass** main
   evidence, and the independent **PASS, no P0-P3** verdict are integrated as
   local commit `dcf1a82`; no physical or hardware gate is closed by it.
+
+## 2026-07-14 fifth hosted CI adjudication and reviewed D7.4 integration
+
+- Exact-SHA run `29305772213` at `fb420b0` passed Windows/Ubuntu agents, core,
+  and GUI. This closes the prior Windows portability failures and the anomalous
+  hosted Ubuntu agent stall at that SHA. Both remaining jobs stopped at the
+  same architecture guard after **310 passed, 2 skipped**: D7.2's passive
+  instruments panel intentionally imports the canonical descriptor contract,
+  but the exact approved-importer set had not been updated. The guard now names
+  only that observational adapter; it grants no source or control authority.
+- A native-Windows no-`-x` remaining shard reached **2,173 passed, 83 skipped**
+  and exposed the later host-contract cluster in one run. Five
+  positive POSIX pipe/mode/replacement handshake tests and one POSIX `pass_fds`
+  capability test now carry exact host markers; cross-platform denial, partial
+  environment, descriptor stripping, and PID-hint validators remain active.
+  Architecture source reads use explicit UTF-8. A Windows symlink setup skips
+  only WinError 1314; the real-directory lost-authority proof remains active.
+- Focused native Windows evidence for the remaining-shard repair: **12 passed
+  including the two importer guards, 18 intentional capability/privilege
+  skips**. Safe WSL2 Ubuntu 24.04 focused evidence: **30 passed** including the
+  two importer guards. The full safe-WSL remaining shard reached **2,266
+  passed, 11 skipped**; its only two failures were `_RunnerActivationDisabled`
+  because the local checkout deliberately lacked the workflow-created and
+  verified `.venv/bin/python` alias. With that exact alias temporarily bound to
+  the same safe interpreter, both strict exact-six nodes passed **2/2**, and the
+  alias was removed afterward. No H4 interpreter authority was relaxed. Ruff
+  check/format and `git diff --check` passed. Independent final review: **PASS,
+  no P0-P3**.
+- Claude delivered D7.4 as a test-only real-localhost ZeroMQ suite. Direct
+  cherry-pick of its original `be50f07` onto current main produced **14 passed,
+  5 failed** because that branch carried stale D7.1 wiring. No stale production
+  commit was imported. The suite was adapted to current production seams: the
+  real app drain helper, the real private launcher invalidation wrapper, exact
+  branch-level AST checks, and OS-uptime-independent watchdog triggering.
+- The adapted D7.4 suite exercises real `ZMQPublisher`, real `ZmqBridge`
+  subprocesses, canonical descriptor envelopes, mixed qualified/legacy/
+  malformed/capacity batches, all three launcher restart paths with
+  invalidate-before-start capture, both GUI launch paths, and repeated socket
+  shutdown/rebind. Engine/timer pieces alone are stubbed; app closure restart
+  branches remain honestly static plus shared-invariant evidence. Native
+  Windows passed **19/19** three consecutive times; safe WSL passed **19/19**.
+  Ruff check/format and diff check passed. Independent adaptation review:
+  **PASS, no P0-P3**. Integrated test-only commit: `c150d4c`.
+- A new exact-SHA hosted run is mandatory after publication. Physical hardware,
+  frozen-build, and soak-duration gates remain open.
