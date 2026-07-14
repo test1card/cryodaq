@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
@@ -1222,6 +1223,7 @@ class LauncherWindow(QMainWindow):
         self._config_error_modal_shown = False
         self._restart_pending = False
         self._clear_engine_down_banner()
+        self._invalidate_descriptor_transport()
         self._data_timer.stop()
         self._health_timer.stop()
         self._bridge.shutdown()
@@ -1889,6 +1891,7 @@ class LauncherWindow(QMainWindow):
             logger.exception("theme: assistant stop failed; aborting re-exec")
             self._shutdown_requested = False
             raise
+        self._invalidate_descriptor_transport()
         # With the assistant settled, shut down the bridge before the engine
         # so no REQ is mid-flight. Same sequence as _do_shutdown but without
         # QApplication.quit().
@@ -1935,8 +1938,8 @@ class LauncherWindow(QMainWindow):
     @Slot()
     def _poll_bridge_data(self) -> None:
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
-        for reading in self._bridge.poll_readings():
-            self._on_reading_qt(reading)
+        for qualified in self._bridge.poll_readings_with_descriptor():
+            self._on_reading_qt(qualified)
 
         unhealthy = not self._bridge.is_healthy()
         # data_flow_stalled only matters when heartbeats are otherwise healthy
@@ -1952,6 +1955,7 @@ class LauncherWindow(QMainWindow):
             if now - last_restart < 60.0:
                 return
             self._last_health_watchdog_restart = now
+            self._invalidate_descriptor_transport()
             if unhealthy:
                 if self._bridge.is_alive():
                     logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
@@ -1976,17 +1980,29 @@ class LauncherWindow(QMainWindow):
             if now - last_cmd_restart >= 60.0:
                 logger.warning("ZMQ bridge: command channel unhealthy (recent command timeout). Restarting bridge.")
                 self._last_cmd_watchdog_restart = now
+                self._invalidate_descriptor_transport()
                 self._bridge.shutdown()
                 self._bridge.start()
                 return
 
     @Slot(object)
-    def _on_reading_qt(self, reading: Reading) -> None:
+    def _on_reading_qt(self, qualified: object) -> None:
+        if type(qualified) is not DescriptorQualifiedReading or type(qualified.reading) is not Reading:
+            logger.warning(
+                "_on_reading_qt received malformed qualified reading of type %s; dropped",
+                type(qualified).__name__,
+            )
+            return
         self._reading_count += 1
         self._last_reading_time = time.monotonic()
         # Route to embedded MainWindow (if not tray-only)
         if self._main_window is not None:
-            self._main_window._dispatch_reading(reading)
+            self._main_window.dispatch_qualified_reading(qualified)
+
+    def _invalidate_descriptor_transport(self) -> None:
+        """Invalidate descriptor authority before transport or engine turnover."""
+        if self._main_window is not None:
+            self._main_window.invalidate_descriptor_transport()
 
     @Slot()
     def _on_open_web(self) -> None:
@@ -2054,6 +2070,7 @@ class LauncherWindow(QMainWindow):
             self._status_timer.stop()
         self._async_timer.stop()
         self._tray.hide()
+        self._invalidate_descriptor_transport()
 
         first_error: Exception | None = None
 
@@ -2123,6 +2140,8 @@ class LauncherWindow(QMainWindow):
         if self._shutdown_requested:
             return
 
+        self._invalidate_descriptor_transport()
+
         from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
 
         returncode: int | None = None
@@ -2185,6 +2204,7 @@ class LauncherWindow(QMainWindow):
             if not self._restart_pending:
                 return
             self._restart_pending = False
+            self._invalidate_descriptor_transport()
             self._start_engine(wait=False)
 
         QTimer.singleShot(delay_s * 1000, _do_restart)

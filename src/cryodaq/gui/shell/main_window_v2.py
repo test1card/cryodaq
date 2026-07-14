@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.channel_manager import get_channel_manager
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
@@ -47,6 +48,7 @@ from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
+from cryodaq.gui.state.descriptor_store import DescriptorStore, IngestResult
 from cryodaq.gui.zmq_client import ZmqBridge
 
 logger = logging.getLogger(__name__)
@@ -113,6 +115,8 @@ class MainWindowV2(QMainWindow):
         self.setMinimumSize(1280, 800)
 
         self._channel_mgr = get_channel_manager()
+        # D7.1b: descriptor identity store — GUI-thread-owned, lives for one session.
+        self._descriptor_store = DescriptorStore()
         self._build_ui()
         self._reading_received.connect(self._dispatch_reading)
 
@@ -425,6 +429,48 @@ class MainWindowV2(QMainWindow):
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
     # ------------------------------------------------------------------
+
+    def dispatch_qualified_reading(self, qualified: DescriptorQualifiedReading) -> None:
+        """Qualified-ingress entry point — D7.1b Option C.
+
+        Called synchronously on the GUI thread for every reading drained via
+        ``poll_readings_with_descriptor()``.  Atomically per reading:
+
+        1. Updates the descriptor store (authoritative / legacy_absent / refused).
+           Capacity-exhausted result is logged but never raises.
+        2. Delegates the bare reading to all legacy sinks exactly once via
+           ``_dispatch_reading()``.  No double dispatch.
+        """
+        if type(qualified) is not DescriptorQualifiedReading or type(qualified.reading) is not Reading:
+            logger.warning("malformed descriptor-qualified reading dropped")
+            return
+
+        try:
+            result = self._descriptor_store.ingest(qualified)
+        except RuntimeError:
+            raise
+        except Exception:
+            logger.warning(
+                "descriptor ingest failed for channel %s; reading dispatched to legacy sinks",
+                qualified.reading.channel,
+                exc_info=True,
+            )
+        else:
+            if result is IngestResult.CAPACITY_EXHAUSTED:
+                logger.debug(
+                    "DescriptorStore capacity exhausted for channel %s; reading still dispatched",
+                    qualified.reading.channel,
+                )
+        self._dispatch_reading(qualified.reading)
+
+    def invalidate_descriptor_transport(self) -> None:
+        """Advance the store generation after a bridge death/restart.
+
+        Call this whenever the bridge is known to have died or restarted so
+        that stale legacy-absent readings arriving in the new session cannot
+        silently restore authoritative identity status.
+        """
+        self._descriptor_store.invalidate_transport()
 
     @Slot(object)
     def _dispatch_reading(self, reading: Reading) -> None:

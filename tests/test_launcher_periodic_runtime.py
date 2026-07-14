@@ -620,6 +620,7 @@ def test_theme_reexec_settles_assistant_between_bridge_and_engine(
         _bridge=SimpleNamespace(shutdown=lambda: events.append("bridge")),
         _assistant_proc=process,
         _stop_engine=lambda: events.append("engine"),
+        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
         _engine_external=True,
         _lock_fd=None,
     )
@@ -636,6 +637,7 @@ def test_theme_reexec_settles_assistant_between_bridge_and_engine(
     assert events == [
         "assistant.terminate",
         "assistant.wait:10",
+        "descriptor",
         "bridge",
         "engine",
         "exec",
@@ -682,6 +684,7 @@ def test_shutdown_settles_assistant_before_engine_and_quit() -> None:
         _bridge=SimpleNamespace(shutdown=lambda: events.append("bridge")),
         _assistant_proc=_LifecycleProcess(events),
         _stop_engine=lambda: events.append("engine"),
+        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
         _loop=SimpleNamespace(close=lambda: events.append("loop.close")),
         _lock_fd=None,
         _app=SimpleNamespace(quit=lambda: events.append("quit")),
@@ -692,6 +695,7 @@ def test_shutdown_settles_assistant_before_engine_and_quit() -> None:
 
     assert window._assistant_proc is None
     assert events == [
+        "descriptor",
         "assistant.terminate",
         "assistant.wait:10",
         "bridge",
@@ -721,6 +725,7 @@ def test_shutdown_attempts_every_owner_and_quit_before_reraising_first_error(
         _data_timer=SimpleNamespace(stop=lambda: None),
         _async_timer=SimpleNamespace(stop=lambda: None),
         _tray=SimpleNamespace(hide=lambda: None),
+        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
         _stop_assistant=lambda: step("assistant"),
         _bridge=SimpleNamespace(shutdown=lambda: step("bridge")),
         _stop_engine=lambda: step("engine"),
@@ -736,7 +741,7 @@ def test_shutdown_attempts_every_owner_and_quit_before_reraising_first_error(
     with pytest.raises(RuntimeError, match=f"{failing_step} failed"):
         LauncherWindow._do_shutdown(window)  # type: ignore[arg-type]
 
-    assert events == ["assistant", "bridge", "engine", "loop", "lock", "quit"]
+    assert events == ["descriptor", "assistant", "bridge", "engine", "loop", "lock", "quit"]
     if failing_step == "lock":
         assert window._lock_fd == 73
     else:

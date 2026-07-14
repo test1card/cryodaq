@@ -554,3 +554,27 @@ worktree after D7.1 is settled.
   `git diff --check` passed. Independent frozen-diff review: **PASS, no P0-P3**.
 - A new exact-SHA hosted run is still required after publication. Physical
   hardware, frozen-build, and soak-duration gates remain open.
+
+## 2026-07-14 reviewed D7.1 descriptor-qualified GUI ingress
+
+- The two production GUI drains now consume only
+  `poll_readings_with_descriptor()`. One GUI-thread-owned descriptor store
+  ingests exact qualified carriers before each valid bare reading reaches the
+  existing sinks exactly once. Malformed carriers are dropped; store
+  thread-ownership violations remain fatal instead of being hidden.
+- Descriptor authority is invalidated before every data-plane restart and
+  teardown, including engine exit, delayed auto-restart, command/data
+  watchdogs, standalone shutdown, theme re-exec, and normal launcher shutdown.
+  The delayed callback invalidates again immediately before restart so queued
+  old-session data cannot regain authority during backoff.
+- Production-executing regressions cover both app and launcher drains,
+  valid/malformed/valid ordering, exactly-once delivery, all shutdown paths,
+  and no late dispatch after timer settlement. Independent final review:
+  **PASS, no P0-P3**. Main-worktree focused evidence: **81 passed, 5 deselected**;
+  the deselected tests require Windows symlink privilege unavailable to this
+  account and are unrelated to D7 behavior. Ruff check/format and diff check
+  passed.
+- D7 is not complete: real localhost ZeroMQ mixed-batch/restart/shutdown proof,
+  remaining channel-name inference removal, generic instrument presentation,
+  and acquisition-to-health-display end-to-end evidence remain open. No
+  physical or frozen-build gate is closed by this slice.

@@ -169,9 +169,11 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    F35.3 D1 manifest authority, D2 persistence activation, D3 owner-issued
    committed receipts, D5 replay parity и D6 reporting parity завершены.
    Passive conformance harness, ASC reference TCP driver, registry adoption и
-   exact frozen-driver allowlist committed как foundations. Открыты live D4
-   descriptor wire, D7 generic/design-system GUI routing, real localhost и
-   Windows evidence, а также полный acquisition-to-health-display e2e proof.
+   exact frozen-driver allowlist committed как foundations. D4 live descriptor
+   wire и D7.1 descriptor-qualified GUI ingress committed. Открыты removal of
+   remaining channel-name inference, D7 generic/design-system presentation,
+   real localhost и Windows evidence, а также полный
+   acquisition-to-health-display e2e proof.
 4. F36: committed foundation включает wire envelope, durable revision
    allocator, typed authority receipts, ordered composer, replay-compatible
    publisher, отдельный snapshot SUB, один GUI-thread Store, pure replay session
