@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, ${{ matrix.suite }})
     runs-on: ${{ matrix.os }}
     # Runner-level backstop: a native hang (Qt/C-level block) is invisible to
     # pytest's thread-method --timeout, so without this a stuck test runs to the
@@ -30,6 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        suite: [core, gui, agents, remaining]
     env:
       # Force CPython UTF-8 Mode so file I/O defaults to UTF-8 on Windows
       # (default is cp1252, which raises UnicodeError on the project's Cyrillic
@@ -52,15 +53,18 @@ jobs:
         run: pip install -e ".[dev,web]"
 
       - name: Lint
+        if: matrix.suite == 'remaining'
         run: ruff check src/ tests/
 
       - name: Check requirements-lock drift
+        if: matrix.suite == 'remaining'
         # The frozen Windows build installs transitive deps from
         # requirements-lock.txt then `pip install -e . --no-deps`. Any
         # top-level dep missing from the lock is absent from the bundle.
         run: python scripts/check_lock_drift.py
 
       - name: Run app-palette tests (isolated)
+        if: matrix.suite == 'gui'
         # test_app_palette mutates the *global* QApplication stylesheet. Run in
         # its own process so there are no leaked widgets from earlier tests to
         # re-polish — re-polishing a large accumulated widget tree under the
@@ -69,6 +73,7 @@ jobs:
         run: pytest tests/gui/test_app_palette.py --tb=short -v --timeout=120 --timeout-method=thread
 
       - name: Run operator ownership tests (isolated)
+        if: matrix.suite == 'gui'
         # These tests intentionally delete owned Qt children and wait for
         # queued button activation to prove fail-closed behavior. In the
         # monolithic GUI process, either operation also drains deferred
@@ -78,9 +83,24 @@ jobs:
         # lifetime contamination.
         run: pytest tests/gui/shell/operator_components/test_freshness_and_card.py tests/gui/shell/views/test_operator_display.py --tb=short -v --timeout=120 --timeout-method=thread
 
-      - name: Run tests
+      - name: Run core tests
+        if: matrix.suite == 'core'
+        run: pytest tests/core tests/health tests/engine_wiring -x --tb=short -v --timeout=120 --timeout-method=thread
+
+      - name: Run GUI tests
+        if: matrix.suite == 'gui'
         # -v names the running test (a Qt segfault on Windows prints no
         # traceback); --timeout turns a hang into a faulthandler dump. -x stops
         # at the first failure for the fastest completing signal; the job-level
         # timeout-minutes above backstops any native hang -x/--timeout can't kill.
-        run: pytest tests/ --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py -x --tb=short -v --timeout=120 --timeout-method=thread
+        run: pytest tests/gui --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py -x --tb=short -v --timeout=120 --timeout-method=thread
+
+      - name: Run agent and reporting tests
+        if: matrix.suite == 'agents'
+        run: pytest tests/agents tests/periodic tests/reporting tests/notifications -x --tb=short -v --timeout=120 --timeout-method=thread
+
+      - name: Run remaining tests
+        if: matrix.suite == 'remaining'
+        # This complement keeps new top-level test areas covered by default.
+        # Named shards are ignored here so every non-isolated test runs once.
+        run: pytest tests/ --ignore=tests/core --ignore=tests/health --ignore=tests/engine_wiring --ignore=tests/gui --ignore=tests/agents --ignore=tests/periodic --ignore=tests/reporting --ignore=tests/notifications -x --tb=short -v --timeout=120 --timeout-method=thread
