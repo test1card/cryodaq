@@ -723,6 +723,31 @@ def test_failclosed_33_attention_items_last_is_highest_severity_section_unavaila
     )
 
 
+@pytest.mark.parametrize(
+    ("section", "cap"),
+    [("health", collector_module._MAX_HEALTH_RECORDS), ("attention", collector_module._MAX_ATTENTION_RECORDS)],
+)
+def test_failclosed_live_section_overflow_consumes_only_cap_plus_one(section: str, cap: int) -> None:
+    consumed = 0
+
+    def oversized():
+        nonlocal consumed
+        for _ in range(1_000):
+            consumed += 1
+            yield MagicMock()
+
+    snapshot = MagicMock()
+    snapshot.plant_health.subsystems = oversized() if section == "health" else ()
+    snapshot.attention.items = oversized() if section == "attention" else ()
+    snapshot.data_integrity.storage.value = "available"
+
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
+
+    assert consumed == cap + 1
+    assert section in capture.unavailable_fields
+    assert not any(record.kind == section for record in capture.records)
+
+
 def test_failclosed_item_serialization_failure_after_valid_items_whole_section_unavailable() -> None:
     """An item serialization failure after earlier valid items makes the whole section unavailable.
 

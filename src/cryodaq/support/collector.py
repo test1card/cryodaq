@@ -22,6 +22,7 @@ Design constraints:
 from __future__ import annotations
 
 import importlib.metadata
+import itertools
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -227,7 +228,7 @@ def _collect_health(
     # serialization, the entire section is marked unavailable — no earlier
     # records survive as apparently-complete truth.
     try:
-        items = list(snapshot.plant_health.subsystems)
+        items = tuple(itertools.islice(snapshot.plant_health.subsystems, _MAX_HEALTH_RECORDS + 1))
 
         if len(items) > _MAX_HEALTH_RECORDS:
             _log.warning("bundle-collector: health section exceeds cap (%s)", type(ValueError()).__name__)
@@ -262,7 +263,7 @@ def _collect_attention(
     # serialization, the entire section is marked unavailable — no earlier
     # records survive as apparently-complete truth.
     try:
-        items = list(snapshot.attention.items)
+        items = tuple(itertools.islice(snapshot.attention.items, _MAX_ATTENTION_RECORDS + 1))
 
         if len(items) > _MAX_ATTENTION_RECORDS:
             _log.warning("bundle-collector: attention section exceeds cap (%s)", type(ValueError()).__name__)
