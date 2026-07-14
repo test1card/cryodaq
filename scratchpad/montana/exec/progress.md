@@ -843,3 +843,23 @@ worktree after D7.1 is settled.
   separately with real localhost lifecycle. Mock TCP, real hardware, and
   Windows ONEDIR/frozen evidence remain open; rendered report channel content is
   not claimed beyond the proven replay-to-projection/binding semantics.
+
+## 2026-07-14 exact-SHA F35 checkpoint and F36.4 hardening
+
+- Exact-SHA GitHub Actions run `29327748049` at `9c079b3` passed all eight
+  agents/core/GUI/remaining jobs on Ubuntu and Windows. Safe SQLite verification
+  passed in every job; lint and requirements-lock drift checks passed in both
+  remaining jobs. Every newer candidate still requires its own exact-SHA
+  eight-job pass.
+- Independent frozen-diff review rejected the initial F36.4 bridge in `4cab968`:
+  structural reader admission bypassed factory issuance, FAULT evidence was
+  downgraded, arbitrary readers were polled in the no-await cut, and tokens did
+  not bind source evidence. A focused follow-up now accepts only exact issued
+  readers, presamples outside the cut, projects immutable cached evidence, ages
+  it at each cut from OK through STALE to DISCONNECTED, preserves canonical
+  alarm/metric severity, rejects replay/duplicates, and binds tokens to cut,
+  source evidence, and projected nodes.
+- Native Windows focused evidence for the repaired F36.4 bridge: **13 passed**;
+  Ruff check/format and `git diff --check` passed. Independent re-review:
+  **PASS, no P0-P3**. This is a dark read-only authority bridge, not production
+  shell activation or a physical/frozen/soak gate.

@@ -149,7 +149,7 @@ This is feature-branch evidence, not shipped history and not a release claim:
   remains in active implementation for the launcher-owned socketpair,
   bounded framed transfer, durable runner ledger, and ACK authority. The
   short and 72-hour soaks and real-Windows ONEDIR evidence remain open.
-- Recorded exact-SHA GitHub Actions checkpoint `29321460151` at `cd208a2`
+- Recorded exact-SHA GitHub Actions checkpoint `29327748049` at `9c079b3`
   passed all eight Ubuntu/Windows agents, core, GUI, and remaining
   jobs. Safe SQLite verification passed in every job; both remaining jobs also
   passed lint and requirements-lock drift checks. Any newer candidate requires
@@ -443,8 +443,8 @@ safety boundaries.
 - **F36 is not deferred.** Complete its safe software and operator-scenario
   gates before laboratory validation; keep its hazardous-control non-goals and
   physical acceptance gates open.
-- **F18 — CI/CD residuals.** Recorded exact-SHA run `29321460151` closes the
-  Ubuntu/Windows matrix gate at checkpoint `cd208a2`; every newer candidate
+- **F18 — CI/CD residuals.** Recorded exact-SHA run `29327748049` closes the
+  Ubuntu/Windows matrix gate at checkpoint `9c079b3`; every newer candidate
   still requires its own eight-job pass. Coverage publishing, release
   automation, and binary artifacts remain optional.
 - **F-Y — Diagnostic mode rework.** Re-spec only if lab operation produces
