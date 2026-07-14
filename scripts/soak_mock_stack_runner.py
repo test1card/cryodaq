@@ -485,6 +485,12 @@ class _LockedPsutilObserver:
                     members.append(self._identity(process))
             except (ProcessLookupError, self._psutil.NoSuchProcess):
                 continue
+            except _ObservedProcessGone:
+                continue
+            except _RunnerFoundationError as exc:
+                if isinstance(exc.__cause__, self._psutil.NoSuchProcess):
+                    continue
+                raise
             except (PermissionError, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
                 raise _RunnerFoundationError("process-group membership cannot be proven") from exc
         return tuple(sorted(members, key=lambda item: item.pid))

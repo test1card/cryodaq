@@ -214,8 +214,9 @@ async def test_ephemeral_child_preserves_manual_schema_and_selects_generation(
     assert Path(report["docx_path"]).is_file()  # noqa: ASYNC240 - child completed
     manifest = load_current_manifest(tmp_path / "experiments" / exp_id)
     assert manifest is not None
-    assert report["docx_path"].endswith(
-        f"reports/generations/{manifest['generation_id']}/report_editable.docx"
+    report_path = Path(report["docx_path"])
+    assert report_path.relative_to(tmp_path / "experiments" / exp_id) == (
+        Path("reports") / "generations" / manifest["generation_id"] / "report_editable.docx"
     )
     archive = manager.get_archive_item(exp_id)
     assert archive is not None

@@ -84,6 +84,9 @@ class _FakePsutil:
         except KeyError:
             raise self.NoSuchProcess(pid) from None
 
+    def process_iter(self):
+        return tuple(self.processes.values())
+
     def add_assistant(
         self,
         *,
@@ -152,6 +155,58 @@ def test_descendant_scan_settles_child_that_becomes_zombie_after_enumeration() -
     observer = runner._LockedPsutilObserver(module)
 
     assert observer.descendants(observer.identity_for_pid(20)) == ()
+
+
+def test_group_scan_ignores_exited_zombie_but_retains_exact_live_leader(monkeypatch) -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    module.processes[21] = _FakeProcess(
+        module,
+        21,
+        created=124.0,
+        parent=20,
+        argv=("python", "child.py"),
+        status=module.STATUS_ZOMBIE,
+    )
+    monkeypatch.setattr(runner.os, "getpgid", lambda _pid: leader.pid, raising=False)
+    observer = runner._LockedPsutilObserver(module)
+
+    assert observer.group_members(leader.pid) == (observer.identity_for_pid(leader.pid),)
+
+
+@pytest.mark.parametrize("vanished", [_NoSuchProcess, _ZombieProcess])
+def test_group_scan_ignores_process_that_exits_after_pgid_probe(monkeypatch, vanished) -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
+
+    def vanished_create_time() -> float:
+        raise vanished(21)
+
+    child.create_time = vanished_create_time  # type: ignore[method-assign]
+    module.processes[child.pid] = child
+    monkeypatch.setattr(runner.os, "getpgid", lambda _pid: leader.pid, raising=False)
+    observer = runner._LockedPsutilObserver(module)
+
+    assert observer.group_members(leader.pid) == (observer.identity_for_pid(leader.pid),)
+
+
+def test_group_scan_keeps_post_pgid_access_denial_fail_closed(monkeypatch) -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
+
+    def denied_create_time() -> float:
+        raise module.AccessDenied(21)
+
+    child.create_time = denied_create_time  # type: ignore[method-assign]
+    module.processes[child.pid] = child
+    monkeypatch.setattr(runner.os, "getpgid", lambda _pid: leader.pid, raising=False)
+    observer = runner._LockedPsutilObserver(module)
+
+    with pytest.raises(runner._RunnerFoundationError) as captured:
+        observer.group_members(leader.pid)
+    assert isinstance(captured.value.__cause__, module.AccessDenied)
 
 
 def test_locked_observer_binds_exact_assistant_identity_signals_and_settles() -> None:

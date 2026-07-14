@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 _MAX_DESCRIPTOR_REFERENCE_ROWS = 10_000_000
 
 
+def _identity_change_time_ns(info: os.stat_result) -> int:
+    if os.name == "nt":
+        return getattr(info, "st_birthtime_ns", info.st_ctime_ns)
+    return info.st_ctime_ns
+
+
 def _ts_sort_key(raw: object) -> float:
     """Epoch-float sort key for mixed REAL/legacy-ISO timestamp values."""
     try:
@@ -695,7 +701,7 @@ class ArchiveReader:
             raise OSError("invalid index authority")
         if before.st_size > maximum:
             raise _IndexOversizeError("index exceeds bound")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(index_path, flags)
         try:
             opened = os.fstat(descriptor)
@@ -706,7 +712,7 @@ class ArchiveReader:
                 before.st_nlink,
                 before.st_size,
                 before.st_mtime_ns,
-                before.st_ctime_ns,
+                _identity_change_time_ns(before),
             )
             opened_identity = (
                 opened.st_dev,
@@ -715,7 +721,7 @@ class ArchiveReader:
                 opened.st_nlink,
                 opened.st_size,
                 opened.st_mtime_ns,
-                opened.st_ctime_ns,
+                _identity_change_time_ns(opened),
             )
             if opened_identity != before_identity:
                 raise OSError("index identity changed before read")
@@ -738,7 +744,7 @@ class ArchiveReader:
             after.st_nlink,
             after.st_size,
             after.st_mtime_ns,
-            after.st_ctime_ns,
+            _identity_change_time_ns(after),
         )
         after_path_identity = (
             after_path.st_dev,
@@ -747,11 +753,12 @@ class ArchiveReader:
             after_path.st_nlink,
             after_path.st_size,
             after_path.st_mtime_ns,
-            after_path.st_ctime_ns,
+            _identity_change_time_ns(after_path),
         )
         if (
             after_identity != opened_identity
             or after_path_identity != opened_identity
+            or after.st_ctime_ns != opened.st_ctime_ns
             or len(payload) != opened.st_size
         ):
             raise OSError("index changed while reading")
@@ -1200,7 +1207,7 @@ class ArchiveReader:
         if time.monotonic() >= deadline_monotonic:
             raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
         path_identity = self._identity(source.path)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(source.path, flags)
         handle: BinaryIO | None = None
         try:
@@ -1466,7 +1473,7 @@ class ArchiveReader:
             raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_CATALOG_MISSING) from exc
         except OSError as exc:
             raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH) from exc
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = -1
         handle: BinaryIO | None = None
         try:

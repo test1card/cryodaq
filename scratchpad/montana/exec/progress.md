@@ -627,3 +627,38 @@ worktree after D7.1 is settled.
   until actual loop-owned feeds and a truthful persistence architecture are
   activated. Atomic shell cutover, all 12 operator scenarios, real localhost,
   frozen-build, hardware, and physical gates remain open.
+
+## 2026-07-14 third hosted CI adjudication and Windows/WSL repair
+
+- Exact-SHA run `29301178065` at `80b844b` passed Windows/Ubuntu core and GUI.
+  The later shards exposed three deterministic boundaries: Ubuntu process-group
+  enumeration wrapped an already-exited process in the typed foundation error;
+  a Windows report assertion compared a POSIX separator string; and Windows
+  archive reads compared incompatible path/handle `ctime` semantics before
+  hashing binary Parquet bytes through CRT text mode.
+- Process-group settlement now skips only typed gone/zombie observations or a
+  foundation error directly caused by locked `psutil.NoSuchProcess`; access
+  denial, unrelated OS/type/value errors, live descendants, missing leaders,
+  PID reuse, and exact pre-signal identity checks remain fail-closed. Report
+  selection now proves the exact platform-native relative path under the
+  experiment root.
+- Archive index path/handle identity uses Windows birth time only for the
+  cross-API comparison, while same-handle `ctime` still fences mutation. All
+  raw archive descriptors open with `O_BINARY` on Windows. POSIX retains the
+  rename-open-inode race proof; Windows separately proves WinError 32 blocks
+  replacement of the open descriptor authority and then completes both hashes
+  and the verified read.
+- Native Windows evidence across the bounded archive, H4 process, and report
+  target: **64 passed, 1 intentional POSIX skip, 1 local symlink-privilege
+  deselection**. Native WSL2 Ubuntu 24.04 H4 evidence: **21 passed, 1
+  Windows-only skip**. The full safe-SQLite agent/reporting shard passed once
+  verbosely and then three consecutive repeats: **1494 passed, 4 skips, 1
+  deselection** each repeat, all in about 49-51 seconds. This adjudicates the
+  hosted Ubuntu agent-shard 40-minute cancellation as non-reproduced; a new
+  exact-SHA hosted run remains mandatory.
+- Ruff check, applicable Ruff format checks, and `git diff --check` passed.
+  Independent expanded-diff reviews: **PASS, no P0-P3**. No timeout increase,
+  unjustified skip, assertion weakening, SQLite safety bypass, or fake hardware
+  evidence was introduced; the POSIX rename semantic is paired with the
+  Windows replacement-denial proof. Physical hardware, frozen-build, and
+  soak-duration gates remain open.

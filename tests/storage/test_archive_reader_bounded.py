@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -627,6 +628,33 @@ def test_index_same_size_mutation_during_fd_read_fails_closed(tmp_path: Path, mo
     assert {issue.code for issue in result.issues} == {BoundedReadIssueCode.ARCHIVE_INDEX_INVALID}
 
 
+@pytest.mark.skipif(archive_reader_module.os.name != "nt", reason="Windows stat contract")
+def test_index_accepts_stable_windows_handle_ctime_distinct_from_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    index = archive / "index.json"
+    index.write_text('{"files": []}', encoding="utf-8")
+    path_ctime_ns = index.lstat().st_ctime_ns
+    original_fstat = archive_reader_module.os.fstat
+
+    class HandleStat:
+        def __init__(self, source: os.stat_result) -> None:
+            self._source = source
+            self.st_ctime_ns = path_ctime_ns + 1
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._source, name)
+
+    def windows_fstat(descriptor: int) -> HandleStat:
+        return HandleStat(original_fstat(descriptor))
+
+    monkeypatch.setattr(archive_reader_module.os, "fstat", windows_fstat)
+
+    assert ArchiveReader._read_bounded_index(index) == {"files": []}
+
+
 def test_index_growth_during_fd_read_is_bounded_and_classified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     archive = tmp_path / "archive"
@@ -930,6 +958,7 @@ def test_compressed_sidecar_bomb_is_rejected_from_metadata_before_decode(
     assert BoundedReadIssueCode.DESCRIPTOR_OVERSIZED in {issue.code for issue in result.issues}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permits renaming an open inode")
 def test_sidecar_replace_read_restore_cannot_change_opened_inode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -962,6 +991,48 @@ def test_sidecar_replace_read_restore_cannot_change_opened_inode(
     assert result.complete is True
     assert len(result.rows) == 1
     assert calls == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows denies replacing an open file")
+def test_sidecar_open_handle_blocks_replacement_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = datetime(2026, 7, 10, tzinfo=UTC)
+    archive = tmp_path / "archive"
+    _readings, sidecar, _entry = _descriptor_cold(archive, "2026-07-10", start)
+    saved = sidecar.with_suffix(".saved")
+    real_hash = ArchiveReader._hash_open_file
+    calls = 0
+    blocked: list[int | None] = []
+
+    def attempt_replace_during_hash(descriptor: int, *, deadline_monotonic: float) -> str:
+        nonlocal calls
+        calls += 1
+        result = real_hash(descriptor, deadline_monotonic=deadline_monotonic)
+        if calls == 1:
+            try:
+                sidecar.replace(saved)
+            except PermissionError as exc:
+                blocked.append(exc.winerror)
+            else:
+                pytest.fail("Windows replaced an open descriptor authority")
+        return result
+
+    monkeypatch.setattr(ArchiveReader, "_hash_open_file", staticmethod(attempt_replace_during_hash))
+    result = _query(
+        ArchiveReader(tmp_path / "data", archive),
+        start,
+        start + timedelta(seconds=1),
+    )
+
+    assert result.complete is True
+    assert len(result.rows) == 1
+    assert result.issues == ()
+    assert calls == 2
+    assert blocked == [32]
+    assert sidecar.is_file()
+    assert saved.exists() is False
 
 
 def test_slow_sidecar_hash_observes_bounded_deadline(
