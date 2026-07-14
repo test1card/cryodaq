@@ -231,6 +231,8 @@ _SOAK_ASSISTANT_GENERATION_ENV = "CRYODAQ_SOAK_ASSISTANT_GENERATION"
 _SOAK_BRIDGE_SCHEMA = "cryodaq.soak.bridge-identity"
 _SOAK_BRIDGE_VERSION = 1
 _SOAK_BRIDGE_MAX_BYTES = 512
+_SOAK_BRIDGE_DATA_SCHEMA = "cryodaq.soak.bridge-data"
+_SOAK_BRIDGE_DATA_MIN_INTERVAL_S = 1.0
 _SOAK_BRIDGE_ACTIVE_FDS: set[int] = set()
 _SOAK_BRIDGE_AT_FORK_REGISTERED = False
 
@@ -259,12 +261,14 @@ def _guard_soak_bridge_fd_from_descendants(fd: int) -> None:
 
 @dataclass(slots=True)
 class _SoakBridgeHandshake:
-    """One-shot runner pipe owned only by an isolated POSIX mock launcher."""
+    """Runner-owned pathless evidence stream for an isolated POSIX mock launcher."""
 
     fd: int
     nonce: str
     _closed: bool = False
     _emitted: bool = False
+    _data_sequence: int = 0
+    _last_data_emit: float = 0.0
 
     def close(self) -> None:
         if self._closed:
@@ -299,16 +303,61 @@ class _SoakBridgeHandshake:
         payload = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
         if len(payload) > _SOAK_BRIDGE_MAX_BYTES:
             raise RuntimeError("soak bridge handshake exceeds its bound")
-        try:
-            offset = 0
-            while offset < len(payload):
-                written = os.write(self.fd, payload[offset:])
-                if written <= 0:
-                    raise RuntimeError("soak bridge handshake write did not progress")
-                offset += written
-            self._emitted = True
-        finally:
+        written = os.write(self.fd, payload)
+        if written != len(payload):
+            raise RuntimeError("soak bridge handshake write did not complete atomically")
+        self._emitted = True
+
+    def emit_data_observed(self, *, bridge_pid: int | None, restart_count: int) -> bool:
+        """Best-effort bounded fact that the launcher consumed bridge data.
+
+        The inherited pipe is nonblocking.  Backpressure drops this advisory
+        fact instead of stalling the GUI thread; the runner requires a later
+        sequence after fault injection before accepting recovery.
+        """
+
+        if self._closed or not self._emitted:
+            return False
+        if (
+            not isinstance(bridge_pid, int)
+            or isinstance(bridge_pid, bool)
+            or bridge_pid <= 0
+            or bridge_pid == os.getpid()
+            or type(restart_count) is not int
+            or restart_count != 1
+        ):
             self.close()
+            raise RuntimeError("bridge identity changed after positive handshake")
+        now = time.monotonic()
+        if now - self._last_data_emit < _SOAK_BRIDGE_DATA_MIN_INTERVAL_S:
+            return False
+        sequence = self._data_sequence + 1
+        record = {
+            "schema": _SOAK_BRIDGE_DATA_SCHEMA,
+            "version": _SOAK_BRIDGE_VERSION,
+            "nonce": self.nonce,
+            "launcher_pid": os.getpid(),
+            "bridge_pid": bridge_pid,
+            "restart_count": restart_count,
+            "sequence": sequence,
+        }
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+        if len(payload) > _SOAK_BRIDGE_MAX_BYTES:
+            self.close()
+            raise RuntimeError("soak bridge data fact exceeds its bound")
+        try:
+            written = os.write(self.fd, payload)
+        except BlockingIOError:
+            return False
+        except OSError:
+            self.close()
+            return False
+        if written != len(payload):
+            self.close()
+            raise RuntimeError("soak bridge data fact write was partial")
+        self._data_sequence = sequence
+        self._last_data_emit = now
+        return True
 
 
 def _without_soak_bridge_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -470,6 +519,7 @@ def _consume_soak_bridge_handshake(
 
         if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_WRONLY:
             raise RuntimeError("soak bridge handshake descriptor is not write-only")
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
         root_text = os.environ.get("CRYODAQ_ROOT")
         if not root_text:
             raise RuntimeError("soak bridge handshake requires isolated CRYODAQ_ROOT")
@@ -2017,6 +2067,12 @@ class LauncherWindow(QMainWindow):
             return
         self._reading_count += 1
         self._last_reading_time = time.monotonic()
+        soak_bridge = self._soak_bridge_handshake
+        if soak_bridge is not None:
+            soak_bridge.emit_data_observed(
+                bridge_pid=self._bridge.process_pid(),
+                restart_count=self._bridge.restart_count(),
+            )
         # Route to embedded MainWindow (if not tray-only)
         if self._main_window is not None:
             self._main_window.dispatch_qualified_reading(qualified)
@@ -2106,6 +2162,9 @@ class LauncherWindow(QMainWindow):
                     first_error = exc
 
         attempt("assistant", self._stop_assistant)
+        soak_bridge = getattr(self, "_soak_bridge_handshake", None)
+        if soak_bridge is not None:
+            attempt("soak_bridge", soak_bridge.close)
         soak_capability = getattr(self, "_soak_artifact_capability", None)
         if soak_capability is not None:
             attempt("soak_artifact", soak_capability.close)

@@ -133,6 +133,40 @@ def test_parser_rejects_noncanonical_or_unexpected_record_without_pid_eliminatio
             )
 
 
+def test_bridge_data_parser_requires_exact_epoch_and_monotonic_sequence() -> None:
+    value = {
+        "schema": runner._BRIDGE_DATA_SCHEMA,
+        "version": runner._BRIDGE_HANDSHAKE_VERSION,
+        "nonce": "a" * 64,
+        "launcher_pid": 100,
+        "bridge_pid": 101,
+        "restart_count": 1,
+        "sequence": 2,
+    }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    assert (
+        runner._parse_bridge_data(
+            payload,
+            expected_nonce="a" * 64,
+            expected_launcher_pid=100,
+            expected_bridge_pid=101,
+            after_sequence=1,
+        ).sequence
+        == 2
+    )
+    for changes in ({"sequence": 1}, {"bridge_pid": 102}, {"restart_count": 2}, {"nonce": "b" * 64}):
+        attack = {**value, **changes}
+        encoded = json.dumps(attack, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        with pytest.raises(runner._RunnerFoundationError):
+            runner._parse_bridge_data(
+                encoded,
+                expected_nonce="a" * 64,
+                expected_launcher_pid=100,
+                expected_bridge_pid=101,
+                after_sequence=1,
+            )
+
+
 def test_r2_foundation_still_has_no_runner_activation_or_pid_fallback() -> None:
     with pytest.raises(runner._RunnerActivationDisabled):
         runner._PosixSoakRunner().run()

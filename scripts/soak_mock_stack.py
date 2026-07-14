@@ -996,6 +996,15 @@ class SecrecyLedger:
 
 
 @dataclass(frozen=True, slots=True)
+class PeriodicDeliveryLedger:
+    artifact: str
+    sha256: str
+    receipt_ledger: str
+    receipt_count: int
+    validation: str
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactRecord:
     name: str
     bytes: int
@@ -1011,6 +1020,7 @@ class AcceptanceLedger:
     logs: LogLedger
     shutdown: ShutdownLedger
     secrecy: SecrecyLedger
+    periodic_delivery: PeriodicDeliveryLedger
     artifacts: tuple[ArtifactRecord, ...]
 
     def payload(self) -> dict[str, Any]:
@@ -1647,6 +1657,52 @@ class Evidence:
         self._assert_directory_path()
 
     @_terminal_mutation("running")
+    def _accept_periodic_delivery_result(self, authority: object) -> None:
+        """Consume the one runner-issued proof of the durable H3 cutover."""
+
+        from scripts import soak_mock_stack_runner as runner
+
+        self._require(RunState.RUNNING)
+        if type(authority) is not runner._DeliveryEvidenceAuthority:
+            self.finish_fail(
+                "forged periodic-delivery authority rejected",
+                phase="running",
+                error_type="AuthorityError",
+            )
+            raise RuntimeError("periodic delivery requires execution-produced runner authority")
+        payload = runner._consume_periodic_delivery_authority(authority, self)
+        expected_top = {"schema", "status", "pre_fault", "post_fault"}
+        expected_record = {
+            "assistant_pid",
+            "assistant_start_identity",
+            "assistant_generation",
+            "sequence",
+            "receipt_id",
+            "artifact_sha256",
+            "artifact_name",
+            "acknowledgement_sha256",
+            "ledger_record_sha256",
+            "destination_fingerprint",
+            "state_updated_at",
+            "health_updated_at",
+        }
+        if (
+            type(payload) is not dict
+            or set(payload) != expected_top
+            or payload.get("schema") != "cryodaq-soak-periodic-delivery-result/v1"
+            or payload.get("status") != "PASS"
+        ):
+            raise ValueError("periodic-delivery result schema is invalid")
+        records = (payload.get("pre_fault"), payload.get("post_fault"))
+        if any(type(record) is not dict or set(record) != expected_record for record in records):
+            raise ValueError("periodic-delivery result record schema is invalid")
+        try:
+            _atomic_json_at(self._directory_fd, "periodic-delivery-result.json", payload, replace=False)
+        except FileExistsError:
+            raise RuntimeError("periodic-delivery result is write-once") from None
+        self._assert_directory_path()
+
+    @_terminal_mutation("running")
     def begin_run(self) -> None:
         self._require(RunState.PREREQUISITES_VERIFIED)
         self._assert_directory_path()
@@ -1794,6 +1850,8 @@ class Evidence:
             "faults.jsonl",
             "log_capture.json",
             "shutdown.json",
+            "periodic-delivery-result.json",
+            "periodic-receipts.jsonl",
         }
         missing: list[str] = []
         for name in sorted(required):
@@ -1811,6 +1869,8 @@ class Evidence:
             faults = self._json_lines("faults.jsonl")
             log_index = json.loads(self._text("log_capture.json"))
             shutdown = json.loads(self._text("shutdown.json"))
+            periodic_delivery = json.loads(self._text("periodic-delivery-result.json"))
+            periodic_receipts = self._json_lines("periodic-receipts.jsonl")
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return None, [f"artifact parse failed: {type(exc).__name__}"]
         if _has_forbidden_capture_key({"manifest": manifest, "prerequisites": prerequisites, "shutdown": shutdown}):
@@ -1856,13 +1916,40 @@ class Evidence:
             if not isinstance(manifest.get(field), str) or not manifest[field].strip():
                 errors.append(f"manifest {field} is invalid")
         errors += _validate_prerequisite_payload(prerequisites, git_sha)
-        errors.append("execution-produced exact-six runner authority is unavailable")
         if not isinstance(exact_six_result, Mapping):
             errors.append("exact-six result artifact is not an object")
         else:
             errors += _validate_exact_six_result(exact_six_result, git_sha)
         if prerequisites.get("exact_six", {}).get("result_sha256") != self._sha256("exact-six-result.json"):
             errors.append("exact-six result artifact hash does not match prerequisite ledger")
+        if (
+            not isinstance(periodic_delivery, Mapping)
+            or periodic_delivery.get("schema") != "cryodaq-soak-periodic-delivery-result/v1"
+            or periodic_delivery.get("status") != "PASS"
+            or len(periodic_receipts) != 2
+        ):
+            errors.append("periodic-delivery evidence is absent or incomplete")
+        else:
+            for label, ledger_record in zip(("pre_fault", "post_fault"), periodic_receipts, strict=True):
+                result_record = periodic_delivery.get(label)
+                if not isinstance(result_record, Mapping):
+                    errors.append(f"periodic-delivery {label} record is invalid")
+                    continue
+                ledger_hash = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(ledger_record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+                    ).hexdigest()
+                )
+                if result_record.get("ledger_record_sha256") != ledger_hash:
+                    errors.append(f"periodic-delivery {label} ledger hash differs")
+                artifact_name = result_record.get("artifact_name")
+                artifact_sha = result_record.get("artifact_sha256")
+                try:
+                    if not isinstance(artifact_name, str) or self._sha256(artifact_name) != artifact_sha:
+                        errors.append(f"periodic-delivery {label} artifact hash differs")
+                except (OSError, ValueError):
+                    errors.append(f"periodic-delivery {label} artifact is absent or unsafe")
         sample_errors = evaluate_resources(samples, selected)
         errors += [f"samples: {error}" for error in sample_errors]
         fault_errors = _validate_faults(faults, selected, samples)
@@ -1928,6 +2015,11 @@ class Evidence:
         if retained:
             errors.append("final secrecy scan retained findings")
         accepted_names = required | set(str(name) for name in log_names)
+        if isinstance(periodic_delivery, Mapping):
+            for label in ("pre_fault", "post_fault"):
+                record = periodic_delivery.get(label)
+                if isinstance(record, Mapping) and isinstance(record.get("artifact_name"), str):
+                    accepted_names.add(str(record["artifact_name"]))
         if self._exists("quarantine.json"):
             accepted_names.add("quarantine.json")
         for name in self._names():
@@ -1991,6 +2083,13 @@ class Evidence:
             ),
             shutdown=ShutdownLedger(True, True, float(shutdown["elapsed_s"]), len(observed_identities), 0),
             secrecy=SecrecyLedger(str(manifest["capture_policy"]), "PASS", 0, tuple(self._quarantines)),
+            periodic_delivery=PeriodicDeliveryLedger(
+                "periodic-delivery-result.json",
+                self._sha256("periodic-delivery-result.json"),
+                "periodic-receipts.jsonl",
+                len(periodic_receipts),
+                "PASS",
+            ),
             artifacts=artifacts,
         )
         return ledger, []
