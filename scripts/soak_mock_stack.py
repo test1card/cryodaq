@@ -43,6 +43,12 @@ EXACT_SIX_COMMAND = (
     ".venv/bin/python",
     "-m",
     "pytest",
+    "-p",
+    "pytest_asyncio.plugin",
+    "-p",
+    "pytest_timeout",
+    "-p",
+    "no:cacheprovider",
     "-q",
     "tests/integration/test_periodic_png_multiprocess.py",
 )
@@ -813,7 +819,7 @@ def secret_findings(directory: Path) -> list[str]:
     return findings
 
 
-def _atomic_bytes_at(directory_fd: int, name: str, payload: bytes) -> None:
+def _atomic_bytes_at(directory_fd: int, name: str, payload: bytes, *, replace: bool = True) -> None:
     name = _flat_basename(name)
     temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
     fd: int | None = None
@@ -833,12 +839,21 @@ def _atomic_bytes_at(directory_fd: int, name: str, payload: bytes) -> None:
         os.fsync(fd)
         os.close(fd)
         fd = None
-        os.replace(
-            temporary_name,
-            name,
-            src_dir_fd=directory_fd,
-            dst_dir_fd=directory_fd,
-        )
+        if replace:
+            os.replace(
+                temporary_name,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        else:
+            os.link(
+                temporary_name,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
         os.fsync(directory_fd)
     finally:
         if fd is not None:
@@ -849,9 +864,15 @@ def _atomic_bytes_at(directory_fd: int, name: str, payload: bytes) -> None:
             pass
 
 
-def _atomic_json_at(directory_fd: int, name: str, payload: Mapping[str, Any]) -> None:
+def _atomic_json_at(
+    directory_fd: int,
+    name: str,
+    payload: Mapping[str, Any],
+    *,
+    replace: bool = True,
+) -> None:
     encoded = (json.dumps(redact(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
-    _atomic_bytes_at(directory_fd, name, encoded)
+    _atomic_bytes_at(directory_fd, name, encoded, replace=replace)
 
 
 def atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -1587,6 +1608,41 @@ class Evidence:
             error_type="AuthorityError",
         )
         raise RuntimeError("exact-six result requires execution-produced runner authority")
+
+    @_terminal_mutation("prerequisites")
+    def _accept_exact_six_result(self, authority: object) -> None:
+        """Consume one runner-issued, Evidence-bound exact-six result."""
+
+        from scripts import soak_mock_stack_runner as runner
+
+        self._require(RunState.MANIFEST_FINALIZED)
+        if type(authority) is not runner._ExactSixAuthority:
+            self.finish_fail(
+                "forged exact-six runner authority rejected",
+                phase="prerequisites",
+                error_type="AuthorityError",
+            )
+            raise RuntimeError("exact-six result requires execution-produced runner authority")
+        payload = runner._consume_exact_six_authority(authority, self)
+        manifest = json.loads(self._text("manifest.json"))
+        errors = _validate_exact_six_result(payload, str(manifest.get("git_sha", "")))
+        if errors:
+            self.finish_fail(
+                "execution-produced exact-six result rejected",
+                phase="prerequisites",
+                error_type="ValidationError",
+            )
+            raise ValueError("; ".join(errors))
+        try:
+            _atomic_json_at(self._directory_fd, "exact-six-result.json", payload, replace=False)
+        except FileExistsError:
+            self.finish_fail(
+                "exact-six result artifact already exists",
+                phase="prerequisites",
+                error_type="WriteOnceError",
+            )
+            raise RuntimeError("exact-six result artifact is write-once")
+        self._assert_directory_path()
 
     @_terminal_mutation("running")
     def begin_run(self) -> None:

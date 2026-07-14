@@ -9,27 +9,40 @@ locked observer and integrated short-run acceptance are reviewed together.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
 import re
 import secrets
+import selectors
 import signal
 import socket
 import stat
 import struct
 import subprocess
+import sys
+import tarfile
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol
 
+_REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 _TEST_FILE: Final = "tests/integration/test_periodic_png_multiprocess.py"
 _COLLECTION_ARGV: Final = (
     ".venv/bin/python",
     "-m",
     "pytest",
+    "-p",
+    "pytest_asyncio.plugin",
+    "-p",
+    "pytest_timeout",
+    "-p",
+    "no:cacheprovider",
     "--collect-only",
     "-q",
     _TEST_FILE,
@@ -38,6 +51,12 @@ _EXECUTION_ARGV: Final = (
     ".venv/bin/python",
     "-m",
     "pytest",
+    "-p",
+    "pytest_asyncio.plugin",
+    "-p",
+    "pytest_timeout",
+    "-p",
+    "no:cacheprovider",
     "-q",
     _TEST_FILE,
 )
@@ -56,6 +75,43 @@ _COLLECTION_SUMMARY_RE = re.compile(r"6 tests collected in [0-9]+(?:\.[0-9]+)?s\
 _PROGRESS_RE = re.compile(r"\.{6}\s+\[100%\]\Z")
 _FORBIDDEN_PYTEST_MARKERS: Final = (" skipped", " deselected", " xfailed", " xpassed", " error")
 _MAX_STREAM_BYTES: Final = 8 * 1024 * 1024
+_MAX_SNAPSHOT_ARCHIVE_BYTES: Final = 32 * 1024 * 1024
+_EXACT_SIX_TIMEOUT_S: Final = 300.0
+_PROCESS_GROUP_GRACE_S: Final = 2.0
+_STATUS_STRUCT: Final = struct.Struct("!i")
+_SUPERVISOR_CODE: Final = """\
+import ctypes, os, select, struct, sys
+if sys.platform != "linux" or ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+    raise SystemExit(126)
+status_fd = int(sys.argv[1])
+release_fd = int(sys.argv[2])
+start_fd = int(sys.argv[3])
+argv = sys.argv[4:]
+if os.read(start_fd, 1) != b"G":
+    raise SystemExit(125)
+os.close(start_fd)
+child = os.fork()
+if child == 0:
+    os.close(status_fd)
+    os.close(release_fd)
+    os.execve("/proc/self/exe", argv, os.environ)
+os.close(1)
+os.close(2)
+_, status = os.waitpid(child, 0)
+exit_code = os.waitstatus_to_exitcode(status)
+os.write(status_fd, struct.pack("!i", exit_code))
+os.close(status_fd)
+while True:
+    try:
+        while os.waitpid(-1, os.WNOHANG)[0] > 0:
+            pass
+    except ChildProcessError:
+        pass
+    if select.select([release_fd], [], [], 0.05)[0]:
+        os.read(release_fd, 1)
+        break
+os.close(release_fd)
+"""
 _MAX_START_IDENTITY_BYTES: Final = 128
 _BRIDGE_HANDSHAKE_SCHEMA: Final = "cryodaq.soak.bridge-identity"
 _BRIDGE_HANDSHAKE_VERSION: Final = 1
@@ -129,6 +185,183 @@ class _WorktreeImportProof:
         object.__setattr__(self, "cryodaq_import", imported)
 
 
+def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns)
+
+
+def _hash_regular_file(path: Path) -> str:
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode):
+        raise _RunnerFoundationError("worktree interpreter is not a regular file")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            opened = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise _RunnerFoundationError("worktree interpreter hash is unavailable") from exc
+    after = path.stat()
+    if _file_identity(before) != _file_identity(opened) or _file_identity(before) != _file_identity(after):
+        raise _RunnerFoundationError("worktree interpreter changed while hashing")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _copy_running_executable(expected: Path, destination: Path) -> str:
+    """Copy the already-open Linux process image without reopening its pathname."""
+
+    source_fd: int | None = None
+    destination_fd: int | None = None
+    digest = hashlib.sha256()
+    try:
+        source_fd = os.open("/proc/self/exe", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        source_before = os.fstat(source_fd)
+        if not stat.S_ISREG(source_before.st_mode):
+            raise _RunnerFoundationError("running interpreter is not a regular file")
+        if Path(f"/proc/self/fd/{source_fd}").resolve(strict=True) != expected.resolve(strict=True):
+            raise _RunnerActivationDisabled("runner is not executing under the exact worktree .venv interpreter")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o500,
+        )
+        while chunk := os.read(source_fd, 1024 * 1024):
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                if written <= 0:
+                    raise _RunnerFoundationError("sealed interpreter copy made no progress")
+                view = view[written:]
+        os.fsync(destination_fd)
+        source_after = os.fstat(source_fd)
+    except OSError as exc:
+        raise _RunnerActivationDisabled("running interpreter capture is unavailable") from exc
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+        if source_fd is not None:
+            os.close(source_fd)
+    if _file_identity(source_before) != _file_identity(source_after):
+        raise _RunnerFoundationError("running interpreter changed while being captured")
+    captured = f"sha256:{digest.hexdigest()}"
+    if _hash_regular_file(destination) != captured:
+        raise _RunnerFoundationError("sealed interpreter copy contradicts its source")
+    return captured
+
+
+def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[str, str]:
+    root = Path(repo_root).resolve()
+    return {
+        "HOME": "/nonexistent",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": os.pathsep.join((str(root / "src"), str(root), str(site_packages.resolve()))),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "TMPDIR": "/tmp",
+        "TZ": "UTC",
+        "XDG_CACHE_HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": "/nonexistent",
+    }
+
+
+def _controlled_git_environment() -> dict[str, str]:
+    return {"HOME": "/nonexistent", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutionSnapshot:
+    root: Path
+    interpreter: Path
+    environment: dict[str, str]
+    tree_sha256: str
+
+    def assert_sealed(self) -> None:
+        if _tree_sha256(self.root) != self.tree_sha256:
+            raise _RunnerFoundationError("sealed exact-six snapshot changed during execution")
+
+
+def _tree_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix().encode()
+        if path.is_symlink():
+            digest.update(b"L\0" + relative + b"\0" + os.readlink(path).encode() + b"\0")
+        elif path.is_file():
+            digest.update(b"F\0" + relative + b"\0")
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+@contextmanager
+def _sealed_execution_snapshot(git_sha: str):
+    interpreter = _REPO_ROOT / ".venv/bin/python"
+    try:
+        resolved = interpreter.resolve(strict=True)
+    except OSError as exc:
+        raise _RunnerActivationDisabled("exact worktree .venv interpreter is unavailable") from exc
+    try:
+        archive = subprocess.run(
+            ("git", "archive", "--format=tar", git_sha),
+            cwd=_REPO_ROOT,
+            env=_controlled_git_environment(),
+            check=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _RunnerActivationDisabled("sealed exact-six snapshot is unavailable") from exc
+    if len(archive) > _MAX_SNAPSHOT_ARCHIVE_BYTES:
+        raise _RunnerActivationDisabled("sealed exact-six snapshot exceeds the reviewed bound")
+    site_packages = (
+        Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    ).resolve()
+    if not site_packages.is_dir():
+        raise _RunnerActivationDisabled("exact worktree site-packages is unavailable")
+    with tempfile.TemporaryDirectory(prefix="cryodaq-exact-six-") as temporary:
+        root = Path(temporary)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+                bundle.extractall(root, filter="data")
+            snapshot_interpreter = root / ".venv/bin/python"
+            snapshot_interpreter.parent.mkdir(parents=True)
+            _copy_running_executable(resolved, snapshot_interpreter)
+            environment = _controlled_test_environment(root, site_packages)
+            code = "from pathlib import Path; import cryodaq; print(Path(cryodaq.__file__).resolve())"
+            imported = subprocess.run(
+                (str(snapshot_interpreter), "-c", code),
+                cwd=root,
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if imported.stderr.strip() or len(imported.stdout.splitlines()) != 1:
+                raise _RunnerFoundationError("sealed exact-six import proof output is invalid")
+            if not Path(imported.stdout.strip()).resolve().is_relative_to((root / "src/cryodaq").resolve()):
+                raise _RunnerFoundationError("sealed exact-six import escaped the snapshot")
+            for path in root.rglob("*"):
+                if path.is_file() and path != snapshot_interpreter:
+                    path.chmod(0o400)
+                elif path.is_dir():
+                    path.chmod(0o500)
+            root.chmod(0o500)
+            snapshot = _ExecutionSnapshot(root, snapshot_interpreter, environment, _tree_sha256(root))
+            yield snapshot
+            snapshot.assert_sealed()
+        finally:
+            root.chmod(0o700)
+            for path in root.rglob("*"):
+                if path.is_dir():
+                    path.chmod(0o700)
+
+
 @dataclass(frozen=True, slots=True)
 class _CleanShaObservation:
     boundary: _ShaBoundary
@@ -146,8 +379,10 @@ class _CleanShaObservation:
 
 def _validate_clean_sha_chain(
     observations: tuple[_CleanShaObservation, ...],
+    *,
+    expected: tuple[_ShaBoundary, ...] = tuple(_ShaBoundary),
 ) -> str:
-    if tuple(item.boundary for item in observations) != tuple(_ShaBoundary):
+    if tuple(item.boundary for item in observations) != expected:
         raise _RunnerFoundationError("clean SHA observations are incomplete or out of order")
     if any(not item.clean for item in observations):
         raise _RunnerFoundationError("worktree drift is terminal")
@@ -208,19 +443,67 @@ class _LockedPsutilObserver:
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied) as exc:
             raise _RunnerFoundationError("process identity is unavailable") from exc
 
-    def _identity(self, process: Any) -> _ProcessIdentity:
+    def _identity(self, process: Any, *, allow_zombie: bool = False) -> _ProcessIdentity:
         try:
             created = float(process.create_time())
             status = process.status()
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
             raise _RunnerFoundationError("process start identity is unavailable") from exc
-        if not math.isfinite(created) or created <= 0 or status == self._psutil.STATUS_ZOMBIE:
+        if not math.isfinite(created) or created <= 0 or (status == self._psutil.STATUS_ZOMBIE and not allow_zombie):
             raise _RunnerFoundationError("process start identity is not live")
         started_ns = int(round(created * 1_000_000_000))
         return _ProcessIdentity(process.pid, f"psutil-{_LOCKED_PSUTIL_VERSION}:ctime-ns={started_ns}")
 
     def identity_for_pid(self, pid: int) -> _ProcessIdentity:
         return self._identity(self._process(pid))
+
+    def recheck_exact(self, expected: _ProcessIdentity) -> None:
+        """Prove PID/start continuity even after the owned leader is a zombie."""
+
+        if not isinstance(expected, _ProcessIdentity):
+            raise TypeError("expected identity must be a _ProcessIdentity")
+        if self._identity(self._process(expected.pid), allow_zombie=True) != expected:
+            raise _RunnerFoundationError("PID/start identity changed; refusing process operation")
+
+    def group_members(self, process_group_id: int) -> tuple[_ProcessIdentity, ...]:
+        members: list[_ProcessIdentity] = []
+        if not hasattr(self._psutil, "process_iter"):
+            raise _RunnerFoundationError("process-group observer API is unavailable")
+        try:
+            processes = tuple(self._psutil.process_iter())
+        except (self._psutil.AccessDenied, OSError) as exc:
+            raise _RunnerFoundationError("process-group membership is unavailable") from exc
+        for process in processes:
+            try:
+                if os.getpgid(process.pid) == process_group_id:
+                    members.append(self._identity(process))
+            except (ProcessLookupError, self._psutil.NoSuchProcess):
+                continue
+            except (PermissionError, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+                raise _RunnerFoundationError("process-group membership cannot be proven") from exc
+        return tuple(sorted(members, key=lambda item: item.pid))
+
+    def descendants(self, leader: _ProcessIdentity) -> tuple[_ProcessIdentity, ...]:
+        process = self._process(leader.pid)
+        if self._identity(process, allow_zombie=True) != leader:
+            raise _RunnerFoundationError("PID/start identity changed; refusing descendant scan")
+        try:
+            children = tuple(process.children(recursive=True))
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError) as exc:
+            raise _RunnerFoundationError("owned descendant scan is unavailable") from exc
+        if len(children) > 128:
+            raise _RunnerFoundationError("owned descendant count exceeds the reviewed bound")
+        return tuple(sorted((self._identity(child) for child in children), key=lambda item: item.pid))
+
+    def signal_exact_for_cleanup(self, identity: _ProcessIdentity, signum: int) -> None:
+        allowed = {signal.SIGTERM, getattr(signal, "SIGKILL", 9)}
+        if isinstance(signum, bool) or not isinstance(signum, int) or signum not in allowed:
+            raise _RunnerFoundationError("cleanup signal is outside the reviewed allowlist")
+        process = self._recheck(identity)
+        try:
+            process.send_signal(signum)
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError) as exc:
+            raise _RunnerFoundationError("exact-identity cleanup signal failed") from exc
 
     def _recheck(self, expected: _ProcessIdentity) -> Any:
         if not isinstance(expected, _ProcessIdentity):
@@ -326,6 +609,7 @@ class _CleanShaCollector:
             sha = subprocess.run(
                 ("git", "rev-parse", "HEAD"),
                 cwd=self._repo_root,
+                env=_controlled_git_environment(),
                 check=True,
                 capture_output=True,
                 text=True,
@@ -334,6 +618,7 @@ class _CleanShaCollector:
             status = subprocess.run(
                 ("git", "status", "--porcelain=v1", "--untracked-files=all"),
                 cwd=self._repo_root,
+                env=_controlled_git_environment(),
                 check=True,
                 capture_output=True,
                 text=True,
@@ -1307,6 +1592,330 @@ def _validate_exact_execution(
     lines = tuple(line.strip() for line in out.splitlines() if line.strip())
     if len(lines) != 2 or _PROGRESS_RE.fullmatch(lines[0]) is None or _SUMMARY_RE.fullmatch(lines[1]) is None:
         raise _RunnerFoundationError("execution output is not the exact six-pass result")
+
+
+@dataclass(frozen=True, slots=True)
+class _CompletedCommand:
+    stdout_evidence: _StreamEvidence
+    stdout: bytes
+    stderr_evidence: _StreamEvidence
+    stderr: bytes
+    exit_code: int
+
+
+def _require_posix_exact_six() -> None:
+    if os.name != "posix" or sys.platform != "linux":
+        raise _RunnerActivationDisabled("exact-six execution authority requires Linux subreaper ownership")
+
+
+def _settle_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    observer: _LockedPsutilObserver,
+    expected: _ProcessIdentity,
+) -> None:
+    """Boundedly terminate the runner-owned session and reap its leader."""
+
+    pid = process.pid
+    sigkill = getattr(signal, "SIGKILL", 9)
+
+    def recheck() -> None:
+        try:
+            observer.recheck_exact(expected)
+        except AttributeError:
+            if observer.identity_for_pid(pid) != expected:
+                raise _RunnerFoundationError("exact-six process identity changed; refusing numeric PGID") from None
+
+    def group_exists() -> bool:
+        recheck()
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    recheck()
+    if os.getpgid(pid) != pid:
+        raise _RunnerFoundationError("exact-six child no longer owns its process group")
+    recheck()
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
+    while group_exists() and time.monotonic() < deadline:
+        time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
+    if group_exists():
+        recheck()
+        try:
+            os.killpg(pid, sigkill)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=_PROCESS_GROUP_GRACE_S)
+    except subprocess.TimeoutExpired as exc:
+        raise _RunnerFoundationError("exact-six process leader did not settle") from exc
+
+
+def _settle_owned_tree_once(
+    process: subprocess.Popen[bytes],
+    *,
+    observer: _LockedPsutilObserver,
+    expected: _ProcessIdentity,
+) -> None:
+    descendants = observer.descendants(expected)
+    for identity in reversed(descendants):
+        observer.signal_exact_for_cleanup(identity, signal.SIGTERM)
+    deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
+    while descendants and time.monotonic() < deadline:
+        time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
+        descendants = observer.descendants(expected)
+    for identity in reversed(descendants):
+        observer.signal_exact_for_cleanup(identity, getattr(signal, "SIGKILL", 9))
+    deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
+    while descendants and time.monotonic() < deadline:
+        time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
+        descendants = observer.descendants(expected)
+    if descendants:
+        raise _RunnerFoundationError("owned exact-six descendants did not settle")
+    _settle_process_group(process, observer=observer, expected=expected)
+
+
+def _settle_owned_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    observer: _LockedPsutilObserver,
+    expected: _ProcessIdentity,
+) -> None:
+    """Retry settlement once if cancellation interrupts cleanup, then propagate it."""
+
+    interrupted: BaseException | None = None
+    try:
+        _settle_owned_tree_once(process, observer=observer, expected=expected)
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            raise
+        interrupted = exc
+    finally:
+        if interrupted is not None:
+            _settle_owned_tree_once(process, observer=observer, expected=expected)
+    if interrupted is not None:
+        raise interrupted
+
+
+def _execute_bounded_process(
+    argv: tuple[str, ...],
+    *,
+    observer: _LockedPsutilObserver,
+    snapshot: _ExecutionSnapshot,
+    timeout_s: float = _EXACT_SIX_TIMEOUT_S,
+) -> _CompletedCommand:
+    """Run one fixed pytest command with bounded output and session cleanup."""
+
+    _require_posix_exact_six()
+    if argv not in {_COLLECTION_ARGV, _EXECUTION_ARGV}:
+        raise _RunnerFoundationError("runner command is not fixed exact-six argv")
+    if type(timeout_s) not in {int, float} or not math.isfinite(float(timeout_s)) or not 0 < timeout_s <= 300:
+        raise _RunnerFoundationError("exact-six timeout is outside the reviewed bound")
+    status_read, status_write = os.pipe()
+    release_read, release_write = os.pipe()
+    start_read, start_write = os.pipe()
+    supervisor_argv = (
+        str(snapshot.interpreter),
+        "-I",
+        "-c",
+        _SUPERVISOR_CODE,
+        str(status_write),
+        str(release_read),
+        str(start_read),
+        *argv,
+    )
+    try:
+        process = subprocess.Popen(
+            supervisor_argv,
+            cwd=snapshot.root,
+            env=snapshot.environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=(status_write, release_read, start_read),
+            start_new_session=True,
+        )
+    except BaseException:
+        for fd in (status_read, status_write, release_read, release_write, start_read, start_write):
+            os.close(fd)
+        raise
+    os.close(status_write)
+    os.close(release_read)
+    os.close(start_read)
+    try:
+        identity = observer.identity_for_pid(process.pid)
+    except BaseException:
+        os.close(start_write)
+        os.close(release_write)
+        os.close(status_read)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        try:
+            process.wait(timeout=_PROCESS_GROUP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    try:
+        os.write(start_write, b"G")
+    except BaseException:
+        os.close(start_write)
+        _settle_owned_tree(process, observer=observer, expected=identity)
+        os.close(release_write)
+        os.close(status_read)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        raise
+    else:
+        os.close(start_write)
+    if process.stdout is None or process.stderr is None:
+        _settle_owned_tree(process, observer=observer, expected=identity)
+        raise _RunnerFoundationError("exact-six pipes are unavailable")
+    stdout_digest = _BoundedStreamDigest()
+    stderr_digest = _BoundedStreamDigest()
+    stdout = bytearray()
+    stderr = bytearray()
+    status = bytearray()
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + float(timeout_s)
+    try:
+        if observer.identity_for_pid(process.pid) != identity:
+            raise _RunnerFoundationError("exact-six process identity changed before PGID probe")
+        if os.getpgid(process.pid) != process.pid:
+            raise _RunnerFoundationError("exact-six child does not own its process group")
+        selector.register(process.stdout, selectors.EVENT_READ, ("stream", stdout_digest, stdout))
+        selector.register(process.stderr, selectors.EVENT_READ, ("stream", stderr_digest, stderr))
+        selector.register(status_read, selectors.EVENT_READ, ("status", None, status))
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _RunnerFoundationError("exact-six command timed out")
+            for key, _events in selector.select(min(remaining, 0.25)):
+                chunk = os.read(key.fd, 64 * 1024)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                kind, digest, retained = key.data
+                if kind == "status" and len(retained) + len(chunk) > _STATUS_STRUCT.size:
+                    raise _RunnerFoundationError("exact-six supervisor status is oversized")
+                if digest is not None:
+                    digest.feed(chunk)
+                retained.extend(chunk)
+        if len(status) != _STATUS_STRUCT.size:
+            raise _RunnerFoundationError("exact-six supervisor status is incomplete")
+        exit_code = _STATUS_STRUCT.unpack(status)[0]
+        quiescence_deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
+        descendants = observer.descendants(identity)
+        while descendants and time.monotonic() < quiescence_deadline:
+            time.sleep(min(0.05, max(0.001, quiescence_deadline - time.monotonic())))
+            descendants = observer.descendants(identity)
+        if descendants:
+            raise _RunnerFoundationError("exact-six child left owned descendants")
+        if observer.group_members(process.pid) != (identity,):
+            raise _RunnerFoundationError("exact-six child left process-group survivors")
+    except BaseException:
+        _settle_owned_tree(process, observer=observer, expected=identity)
+        raise
+    else:
+        _settle_owned_tree(process, observer=observer, expected=identity)
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+        os.close(status_read)
+        os.close(release_write)
+    return _CompletedCommand(
+        stdout_digest.finalize(),
+        bytes(stdout),
+        stderr_digest.finalize(),
+        bytes(stderr),
+        exit_code,
+    )
+
+
+class _ExactSixAuthority:
+    __slots__ = ()
+
+    def __new__(cls) -> _ExactSixAuthority:
+        del cls
+        raise _RunnerFoundationError("exact-six authority cannot be caller-constructed")
+
+
+class _ExactSixExecutionRegistry:
+    """Own completion registration; calling execute necessarily runs both commands."""
+
+    __slots__ = ("_records",)
+
+    def __init__(self) -> None:
+        self._records: dict[int, tuple[_ExactSixAuthority, Any, dict[str, object]]] = {}
+
+    def execute(self, evidence: Any) -> dict[str, object]:
+        _require_posix_exact_six()
+        try:
+            import psutil
+        except ImportError as exc:
+            raise _RunnerActivationDisabled("locked psutil observer is unavailable") from exc
+        observer = _LockedPsutilObserver(psutil)
+        collector = _CleanShaCollector(_REPO_ROOT)
+        git_sha = collector.observe(_ShaBoundary.BEFORE_COLLECTION).git_sha
+        with _sealed_execution_snapshot(git_sha) as snapshot:
+            collection = _execute_bounded_process(_COLLECTION_ARGV, observer=observer, snapshot=snapshot)
+            _parse_exact_collection(
+                stdout_evidence=collection.stdout_evidence,
+                stdout=collection.stdout,
+                stderr_evidence=collection.stderr_evidence,
+                stderr=collection.stderr,
+                exit_code=collection.exit_code,
+            )
+            snapshot.assert_sealed()
+            execution = _execute_bounded_process(_EXECUTION_ARGV, observer=observer, snapshot=snapshot)
+            _validate_exact_execution(
+                stdout_evidence=execution.stdout_evidence,
+                stdout=execution.stdout,
+                stderr_evidence=execution.stderr_evidence,
+                stderr=execution.stderr,
+                exit_code=execution.exit_code,
+            )
+            snapshot.assert_sealed()
+        payload: dict[str, object] = {
+            "schema": "cryodaq-exact-six-result/v1",
+            "command": list(_EXECUTION_ARGV),
+            "test_identity": f"{_TEST_FILE}::exact-six",
+            "git_sha": git_sha,
+            "exit_code": execution.exit_code,
+            "status": "PASS",
+        }
+        authority = object.__new__(_ExactSixAuthority)
+        self._records[id(authority)] = (authority, evidence, payload)
+        evidence._accept_exact_six_result(authority)
+        return payload
+
+    def consume(self, authority: object, evidence: Any) -> dict[str, object]:
+        record = self._records.get(id(authority))
+        if record is None or record[0] is not authority or record[1] is not evidence:
+            raise _RunnerFoundationError("exact-six authority is unregistered, spent, or bound to another Evidence")
+        del self._records[id(authority)]
+        return record[2]
+
+
+_EXACT_SIX_EXECUTIONS = _ExactSixExecutionRegistry()
+
+
+def _collect_and_execute_exact_six(evidence: Any) -> dict[str, object]:
+    return _EXACT_SIX_EXECUTIONS.execute(evidence)
+
+
+def _consume_exact_six_authority(authority: object, evidence: Any) -> dict[str, object]:
+    return _EXACT_SIX_EXECUTIONS.consume(authority, evidence)
 
 
 class _CleanupPhase(StrEnum):
