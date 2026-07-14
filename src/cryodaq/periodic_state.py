@@ -8,6 +8,7 @@ persist it with :func:`write_periodic_state`.
 from __future__ import annotations
 
 import copy
+import ctypes
 import hashlib
 import json
 import math
@@ -1893,13 +1894,26 @@ def _atomic_write_state_strict(path: Path, content: str) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace_state_file_strict(Path(temporary), path)
     except BaseException:
         try:
             os.unlink(temporary)
         except OSError:
             pass
         raise
+
+
+def _replace_state_file_strict(source: Path, destination: Path) -> None:
+    if os.name != "nt":
+        os.replace(source, destination)
+        return
+
+    move_file_ex = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+    move_file_ex.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong)
+    move_file_ex.restype = ctypes.c_int
+    flags = 0x1 | 0x8  # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    if not move_file_ex(os.fspath(source), os.fspath(destination), flags):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def _fsync_directory_strict(path: Path) -> None:

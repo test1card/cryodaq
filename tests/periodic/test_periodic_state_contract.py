@@ -525,6 +525,7 @@ def test_file_fsync_failure_is_not_reported_as_durable(tmp_path: Path, monkeypat
     assert not periodic_state_path(data).exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a write-through replace")
 def test_directory_fsync_failure_surfaces_after_valid_replace(tmp_path: Path, monkeypatch) -> None:
     data = tmp_path / "data"
     real_fsync = periodic_state_module.os.fsync
@@ -544,6 +545,7 @@ def test_directory_fsync_failure_surfaces_after_valid_replace(tmp_path: Path, mo
     assert load_periodic_state(data).payload["active"] is not None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a write-through replace")
 def test_directory_open_failure_is_not_silenced(tmp_path: Path, monkeypatch) -> None:
     data = tmp_path / "data"
     reporting = data / "reporting"
@@ -558,6 +560,85 @@ def test_directory_open_failure_is_not_silenced(tmp_path: Path, monkeypatch) -> 
     with pytest.raises(PeriodicIOError, match="could not be persisted"):
         write_periodic_state(data, _pending(tmp_path))
     assert periodic_state_path(data).exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through contract")
+def test_windows_replace_uses_write_through_flags(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple[str, str, int]] = []
+
+    class FakeMoveFileEx:
+        argtypes = None
+        restype = None
+
+        def __call__(self, source: str, destination: str, flags: int) -> int:
+            calls.append((source, destination, flags))
+            return 1
+
+    move_file_ex = FakeMoveFileEx()
+    kernel32 = type("Kernel32", (), {"MoveFileExW": move_file_ex})()
+
+    def load_kernel32(name: str, *, use_last_error: bool):
+        assert name == "kernel32"
+        assert use_last_error is True
+        return kernel32
+
+    monkeypatch.setattr(periodic_state_module.ctypes, "WinDLL", load_kernel32)
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+
+    periodic_state_module._replace_state_file_strict(source, destination)
+
+    assert calls == [(os.fspath(source), os.fspath(destination), 0x1 | 0x8)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through contract")
+def test_windows_replace_api_failure_surfaces(tmp_path: Path, monkeypatch) -> None:
+    class FailedMoveFileEx:
+        argtypes = None
+        restype = None
+
+        def __call__(self, _source: str, _destination: str, _flags: int) -> int:
+            return 0
+
+    kernel32 = type("Kernel32", (), {"MoveFileExW": FailedMoveFileEx()})()
+
+    def load_kernel32(_name: str, *, use_last_error: bool):
+        assert use_last_error is True
+        return kernel32
+
+    monkeypatch.setattr(periodic_state_module.ctypes, "WinDLL", load_kernel32)
+    monkeypatch.setattr(periodic_state_module.ctypes, "get_last_error", lambda: 5)
+
+    with pytest.raises(OSError) as captured:
+        periodic_state_module._replace_state_file_strict(
+            tmp_path / "source",
+            tmp_path / "destination",
+        )
+    assert captured.value.winerror == 5
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through contract")
+def test_windows_replace_failure_surfaces_after_valid_replace(tmp_path: Path, monkeypatch) -> None:
+    data = tmp_path / "data"
+
+    def replace_then_fail(source: Path, destination: Path) -> None:
+        os.replace(source, destination)
+        raise OSError("simulated write-through completion ambiguity")
+
+    monkeypatch.setattr(periodic_state_module, "_replace_state_file_strict", replace_then_fail)
+    with pytest.raises(PeriodicIOError, match="could not be persisted"):
+        write_periodic_state(data, _pending(tmp_path))
+    assert load_periodic_state(data).payload["active"] is not None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through contract")
+def test_windows_write_through_state_round_trip(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    expected = _pending(tmp_path)
+
+    write_periodic_state(data, expected)
+
+    assert load_periodic_state(data) == expected
 
 
 def test_writer_refuses_high_water_rollback(tmp_path: Path) -> None:
