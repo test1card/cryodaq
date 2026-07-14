@@ -863,3 +863,17 @@ worktree after D7.1 is settled.
   Ruff check/format and `git diff --check` passed. Independent re-review:
   **PASS, no P0-P3**. This is a dark read-only authority bridge, not production
   shell activation or a physical/frozen/soak gate.
+- The reviewed hardening and checkpoint documents were committed as `33c25dd`.
+  Exact-SHA GitHub Actions run `29330940394` then passed all eight
+  agents/core/GUI/remaining jobs on Ubuntu and Windows; safe SQLite verification
+  passed in every job, with lint and requirements-lock drift checks passing in
+  both remaining jobs. This supersedes `9c079b3` as the recorded checkpoint
+  only; every newer candidate still requires its own exact-SHA eight-job pass.
+- The new dark `RecordingLifecycleFeed` owns experiment/acquisition presentation
+  feed authority on the creating process/thread/running loop and exposes only an
+  immutable snapshot. ExperimentManager source revisions and loop-owned
+  acquisition sequences provide fixed-O(1) replay/regression/equivocation
+  fencing; the raw owner is not exposed. Persistence remains deliberately
+  unwired, so the bridge cannot claim `RECORDING` and production publication is
+  not activated. Native Windows bridge plus owner evidence: **66 passed**; Ruff
+  check/format and diff check passed. Independent review: **PASS, no P0-P3**.
