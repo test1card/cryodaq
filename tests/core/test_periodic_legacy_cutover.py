@@ -726,10 +726,10 @@ def test_inbound_notifications_and_llm_relay_contracts_remain_in_engine() -> Non
     bot_start = source.index("await telegram_bot.start()")
     photo_start = source.index("await _photo_handler.start()")
     relay_start = source.index('supervisor.spawn(\n        "assistant_event_relay"')
-    scheduler_start = source.index("await scheduler.start()")
+    scheduler_start = source.index("acquisition_lifecycle_sequence = await _start_scheduler_with_recording_feed(")
     assert bot_start < photo_start < relay_start < scheduler_start
 
-    scheduler_stop = source.index("await scheduler.stop()")
+    scheduler_stop = source.index("acquisition_lifecycle_sequence = await _stop_scheduler_with_recording_feed(")
     relay_stop = source.index('event_bus.unsubscribe("assistant_zmq_relay")')
     photo_stop = source.index("await _photo_handler.stop()")
     bot_stop = source.index("await telegram_bot.stop()")
