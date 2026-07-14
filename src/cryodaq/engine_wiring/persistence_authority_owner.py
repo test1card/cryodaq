@@ -88,6 +88,8 @@ def _validate_common(receipt: object) -> None:
 
 @dataclass(frozen=True, slots=True)
 class DurableAppendReceipt:
+    """Durable acceptance whose signed ``revision`` is the append incarnation."""
+
     issuer_id: str
     generation_id: str
     revision: int
@@ -111,6 +113,7 @@ class MaterializationCommitReceipt:
     revision: int
     recording_epoch_id: str
     append_id: str
+    append_revision: int
     destination_id: str
     materialization_revision: int
     record_count: int
@@ -119,6 +122,7 @@ class MaterializationCommitReceipt:
     def __post_init__(self) -> None:
         _validate_common(self)
         object.__setattr__(self, "append_id", _text(self.append_id, field="append_id"))
+        _revision(self.append_revision, field="append_revision")
         object.__setattr__(self, "destination_id", _text(self.destination_id, field="destination_id"))
         _revision(self.materialization_revision, field="materialization_revision")
         _record_count(self.record_count)
@@ -131,6 +135,7 @@ class SpoolAcknowledgementReceipt:
     revision: int
     recording_epoch_id: str
     append_id: str
+    append_revision: int
     destination_id: str
     materialization_revision: int
     record_count: int
@@ -139,13 +144,16 @@ class SpoolAcknowledgementReceipt:
     def __post_init__(self) -> None:
         _validate_common(self)
         object.__setattr__(self, "append_id", _text(self.append_id, field="append_id"))
+        _revision(self.append_revision, field="append_revision")
         object.__setattr__(self, "destination_id", _text(self.destination_id, field="destination_id"))
         _revision(self.materialization_revision, field="materialization_revision")
         _record_count(self.record_count)
 
 
 class PersistenceFailureKind(StrEnum):
+    MATERIALIZATION_DEFERRED = "materialization_deferred"
     FAILURE = "failure"
+    LOSS = "loss"
     REJECTION = "rejection"
 
 
@@ -158,6 +166,7 @@ class PersistenceFailureReceipt:
     failure_id: str
     kind: PersistenceFailureKind
     append_id: str | None
+    append_revision: int | None
     reason: str
     record_count: int
     provenance: str
@@ -169,8 +178,20 @@ class PersistenceFailureReceipt:
             raise TypeError("kind must be an exact PersistenceFailureKind")
         if self.append_id is not None:
             object.__setattr__(self, "append_id", _text(self.append_id, field="append_id"))
-        if self.kind is PersistenceFailureKind.FAILURE and self.append_id is None:
-            raise ValueError("failure must identify its pending durable append")
+        if self.append_revision is not None:
+            _revision(self.append_revision, field="append_revision")
+        if (self.append_id is None) != (self.append_revision is None):
+            raise ValueError("append identity and revision must be present together")
+        if (
+            self.kind
+            in {
+                PersistenceFailureKind.MATERIALIZATION_DEFERRED,
+                PersistenceFailureKind.FAILURE,
+                PersistenceFailureKind.LOSS,
+            }
+            and self.append_id is None
+        ):
+            raise ValueError("materialization failure or loss must identify its pending durable append")
         object.__setattr__(self, "reason", _text(self.reason, field="reason", limit=MAX_REASON_UTF8_BYTES))
         _record_count(self.record_count)
 
@@ -294,6 +315,8 @@ class PersistenceOutcomeAuthority:
         destination: str,
         materialization_revision: int,
         record_count: int = 1,
+        *,
+        append_revision: int,
     ) -> MaterializationCommitReceipt:
         return self.__issue(
             MaterializationCommitReceipt,
@@ -301,6 +324,7 @@ class PersistenceOutcomeAuthority:
             revision,
             epoch,
             append_id,
+            append_revision,
             destination,
             materialization_revision,
             record_count,
@@ -314,6 +338,8 @@ class PersistenceOutcomeAuthority:
         destination: str,
         materialization_revision: int,
         record_count: int = 1,
+        *,
+        append_revision: int,
     ) -> SpoolAcknowledgementReceipt:
         return self.__issue(
             SpoolAcknowledgementReceipt,
@@ -321,6 +347,7 @@ class PersistenceOutcomeAuthority:
             revision,
             epoch,
             append_id,
+            append_revision,
             destination,
             materialization_revision,
             record_count,
@@ -335,6 +362,8 @@ class PersistenceOutcomeAuthority:
         append_id: str | None,
         reason: str,
         record_count: int = 1,
+        *,
+        append_revision: int | None = None,
     ) -> PersistenceFailureReceipt:
         return self.__issue(
             PersistenceFailureReceipt,
@@ -344,6 +373,7 @@ class PersistenceOutcomeAuthority:
             failure_id,
             kind,
             append_id,
+            append_revision,
             reason,
             record_count,
         )  # type: ignore[return-value]
@@ -423,7 +453,8 @@ class PersistenceAuthorityOwner:
         "__revision",
         "__snapshot",
         "__storage",
-        "__used_append_ids",
+        "__terminal_unavailable_reason",
+        "__unavailable_append_revisions",
         "__used_epoch_ids",
         "__used_failure_ids",
     )
@@ -445,14 +476,15 @@ class PersistenceAuthorityOwner:
         self.__active = False
         self.__materialization_revision = 0
         self.__archive_revision: int | None = None
-        self.__pending: dict[str, tuple[str, int]] = {}
+        self.__pending: dict[str, tuple[int, str, int]] = {}
         self.__pending_count = 0
-        self.__materialized: dict[str, tuple[str, int, int]] = {}
-        self.__used_append_ids: set[str] = set()
+        self.__materialized: dict[str, tuple[int, str, int, int]] = {}
         self.__used_epoch_ids: set[str] = set()
         self.__used_failure_ids: set[str] = set()
         self.__dropped = 0
         self.__storage = AvailabilityTruth.UNKNOWN
+        self.__terminal_unavailable_reason: str | None = None
+        self.__unavailable_append_revisions: set[int] = set()
         self.__snapshot = self.__make_snapshot("not_initialized")
 
     def __copy__(self) -> PersistenceAuthorityOwner:
@@ -507,6 +539,12 @@ class PersistenceAuthorityOwner:
         self.__revision += 1
         self.__snapshot = self.__make_snapshot(reason)
 
+    def __fail_terminal_capacity(self, receipt: PersistenceOutcome, reason: str) -> None:
+        self.__storage = AvailabilityTruth.UNAVAILABLE
+        self.__terminal_unavailable_reason = reason
+        self.__accept(receipt, reason)
+        raise OverflowError(reason)
+
     def __epoch_matches(self, receipt: PersistenceOutcome) -> None:
         if receipt.recording_epoch_id != self.__epoch:
             raise ValueError("receipt recording epoch does not match current owner epoch")
@@ -521,7 +559,10 @@ class PersistenceAuthorityOwner:
             PersistenceLifecycleReceipt,
         }:
             raise TypeError("receipt must be an exact persistence outcome")
-        if not self.__preflight(receipt):
+        is_new = self.__preflight(receipt)
+        if self.__terminal_unavailable_reason is not None:
+            raise OverflowError(self.__terminal_unavailable_reason)
+        if not is_new:
             return
         if type(receipt) is PersistenceLifecycleReceipt:
             self.__feed_lifecycle(receipt)
@@ -552,6 +593,7 @@ class PersistenceAuthorityOwner:
             self.__materialization_revision = 0
             self.__archive_revision = None
             self.__materialized.clear()
+            self.__unavailable_append_revisions.clear()
             self.__dropped = 0
             self.__storage = AvailabilityTruth.UNKNOWN
             self.__accept(receipt, "epoch_started_no_storage_proof")
@@ -568,41 +610,62 @@ class PersistenceAuthorityOwner:
 
     def __feed_append(self, receipt: DurableAppendReceipt) -> None:
         self.__require_active()
-        if receipt.append_id in self.__used_append_ids:
-            raise ValueError("append identity was already used by this owner lifetime")
-        if len(self.__used_append_ids) >= MAX_TRACKED_IDENTITIES:
-            raise OverflowError("append identity capacity exhausted")
+        # The signed owner-global receipt revision is the replay/equivocation
+        # fence and is carried by every downstream receipt as the exact append
+        # incarnation. Only unsettled identities need retention; completed
+        # tombstones would impose a false lifetime limit on a healthy spool.
+        if receipt.append_id in self.__pending:
+            raise ValueError("append identity is already pending")
         if self.__pending_count > MAX_NONNEGATIVE_INT - receipt.record_count:
-            raise OverflowError("pending append count exhausted")
-        self.__used_append_ids.add(receipt.append_id)
-        self.__pending[receipt.append_id] = (receipt.destination_id, receipt.record_count)
+            self.__fail_terminal_capacity(receipt, "pending append count capacity exhausted")
+        if len(self.__pending) >= MAX_TRACKED_IDENTITIES:
+            self.__pending_count += receipt.record_count
+            self.__fail_terminal_capacity(receipt, "pending append identity capacity exhausted")
+        self.__pending[receipt.append_id] = (receipt.revision, receipt.destination_id, receipt.record_count)
         self.__pending_count += receipt.record_count
-        self.__storage = AvailabilityTruth.AVAILABLE
+        self.__storage = (
+            AvailabilityTruth.UNAVAILABLE if self.__unavailable_append_revisions else AvailabilityTruth.AVAILABLE
+        )
         self.__accept(receipt, "durable_append_proven")
 
     def __feed_materialized(self, receipt: MaterializationCommitReceipt) -> None:
         pending = self.__pending.get(receipt.append_id)
-        if pending is None or pending != (receipt.destination_id, receipt.record_count):
+        if pending is None or pending != (
+            receipt.append_revision,
+            receipt.destination_id,
+            receipt.record_count,
+        ):
             raise ValueError("materialization lacks a matching pending destination proof")
         if receipt.materialization_revision <= self.__materialization_revision:
             raise ValueError("materialization revision must advance monotonically")
         self.__materialization_revision = receipt.materialization_revision
         self.__materialized[receipt.append_id] = (
+            receipt.append_revision,
             receipt.destination_id,
             receipt.materialization_revision,
             receipt.record_count,
         )
-        if self.__active:
+        self.__unavailable_append_revisions.discard(receipt.append_revision)
+        if self.__active and not self.__unavailable_append_revisions:
             self.__storage = AvailabilityTruth.AVAILABLE
             reason = "materialization_committed"
         else:
             self.__storage = AvailabilityTruth.UNAVAILABLE
-            reason = "materialization_committed_after_stop"
+            reason = (
+                "materialization_committed_integrity_unavailable"
+                if self.__active
+                else "materialization_committed_after_stop"
+            )
         self.__accept(receipt, reason)
 
     def __feed_ack(self, receipt: SpoolAcknowledgementReceipt) -> None:
         expected = self.__materialized.get(receipt.append_id)
-        if self.__pending.get(receipt.append_id) != (receipt.destination_id, receipt.record_count) or expected != (
+        if self.__pending.get(receipt.append_id) != (
+            receipt.append_revision,
+            receipt.destination_id,
+            receipt.record_count,
+        ) or expected != (
+            receipt.append_revision,
             receipt.destination_id,
             receipt.materialization_revision,
             receipt.record_count,
@@ -613,34 +676,49 @@ class PersistenceAuthorityOwner:
         if self.__pending_count < receipt.record_count:
             raise RuntimeError("pending record count invariant violated")
         self.__pending_count -= receipt.record_count
-        if self.__active:
+        self.__unavailable_append_revisions.discard(receipt.append_revision)
+        if self.__active and not self.__unavailable_append_revisions:
             self.__storage = AvailabilityTruth.AVAILABLE
             reason = "spool_acknowledged"
         else:
             self.__storage = AvailabilityTruth.UNAVAILABLE
-            reason = "spool_acknowledged_after_stop"
+            reason = "spool_acknowledged_integrity_unavailable" if self.__active else "spool_acknowledged_after_stop"
         self.__accept(receipt, reason)
 
     def __feed_failure(self, receipt: PersistenceFailureReceipt) -> None:
         if receipt.failure_id in self.__used_failure_ids:
             raise ValueError("failure identity was already used by this owner lifetime")
         if len(self.__used_failure_ids) >= MAX_TRACKED_IDENTITIES:
-            raise OverflowError("failure identity capacity exhausted")
-        if self.__dropped > MAX_NONNEGATIVE_INT - receipt.record_count:
-            raise OverflowError("dropped/rejected count exhausted")
+            self.__fail_terminal_capacity(receipt, "failure identity capacity exhausted")
+        retained_pending = receipt.kind in {
+            PersistenceFailureKind.MATERIALIZATION_DEFERRED,
+            PersistenceFailureKind.FAILURE,
+        }
+        if not retained_pending and self.__dropped > MAX_NONNEGATIVE_INT - receipt.record_count:
+            self.__fail_terminal_capacity(receipt, "dropped/rejected count capacity exhausted")
         if receipt.append_id is not None:
+            append_revision = receipt.append_revision
+            if append_revision is None:
+                raise RuntimeError("validated failure receipt lost its append incarnation")
             pending = self.__pending.get(receipt.append_id)
-            if pending is None or pending[1] != receipt.record_count:
+            if pending is None or pending[0] != append_revision or pending[2] != receipt.record_count:
                 raise ValueError("failure does not match a pending durable append")
-            del self.__pending[receipt.append_id]
-            self.__materialized.pop(receipt.append_id, None)
-            if self.__pending_count < receipt.record_count:
-                raise RuntimeError("pending record count invariant violated")
-            self.__pending_count -= receipt.record_count
+            if retained_pending:
+                if receipt.append_id in self.__materialized:
+                    raise ValueError("materialization failure cannot follow a committed materialization")
+                self.__unavailable_append_revisions.add(append_revision)
+            else:
+                del self.__pending[receipt.append_id]
+                self.__materialized.pop(receipt.append_id, None)
+                self.__unavailable_append_revisions.discard(append_revision)
+                if self.__pending_count < receipt.record_count:
+                    raise RuntimeError("pending record count invariant violated")
+                self.__pending_count -= receipt.record_count
         else:
             self.__require_active()
+        if not retained_pending:
+            self.__dropped += receipt.record_count
         self.__used_failure_ids.add(receipt.failure_id)
-        self.__dropped += receipt.record_count
         self.__storage = AvailabilityTruth.UNAVAILABLE
         self.__accept(receipt, receipt.reason)
 
@@ -649,7 +727,9 @@ class PersistenceAuthorityOwner:
         if self.__archive_revision is not None and receipt.archive_revision <= self.__archive_revision:
             raise ValueError("archive revision must advance monotonically")
         self.__archive_revision = receipt.archive_revision
-        self.__storage = AvailabilityTruth.AVAILABLE
+        self.__storage = (
+            AvailabilityTruth.UNAVAILABLE if self.__unavailable_append_revisions else AvailabilityTruth.AVAILABLE
+        )
         self.__accept(receipt, "archive_index_committed")
 
     def snapshot(self) -> PersistenceAuthoritySnapshot:

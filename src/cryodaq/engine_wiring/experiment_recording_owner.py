@@ -66,8 +66,10 @@ def _new_generation_id() -> str:
 
 
 class ExperimentOperation(StrEnum):
+    INACTIVE = "inactive"
     ACTIVE = "active"
     FINALIZED = "finalized"
+    UNAVAILABLE = "unavailable"
 
 
 class AcquisitionLifecycle(StrEnum):
@@ -95,7 +97,7 @@ class ExperimentOperationOutcome:
     revision: int
     operation_id: str
     operation: ExperimentOperation
-    experiment_id: str
+    experiment_id: str | None
     experiment_name: str | None
     phase: str | None
     provenance: str
@@ -110,7 +112,9 @@ class ExperimentOperationOutcome:
         if type(self.operation) is not ExperimentOperation:
             raise TypeError("operation must be an exact ExperimentOperation")
         object.__setattr__(
-            self, "experiment_id", _bounded_text(self.experiment_id, field="experiment_id", limit=MAX_ID_UTF8_BYTES)
+            self,
+            "experiment_id",
+            _bounded_text(self.experiment_id, field="experiment_id", limit=MAX_ID_UTF8_BYTES, optional=True),
         )
         object.__setattr__(
             self,
@@ -120,12 +124,18 @@ class ExperimentOperationOutcome:
         object.__setattr__(
             self, "phase", _bounded_text(self.phase, field="phase", limit=MAX_ID_UTF8_BYTES, optional=True)
         )
-        if self.operation is ExperimentOperation.ACTIVE and self.experiment_name is None:
-            raise ValueError("active experiment outcome requires experiment_name")
+        if self.operation is ExperimentOperation.ACTIVE and (
+            self.experiment_id is None or self.experiment_name is None
+        ):
+            raise ValueError("active experiment outcome requires experiment identity and name")
         if self.operation is ExperimentOperation.FINALIZED and (
-            self.experiment_name is not None or self.phase is not None
+            self.experiment_id is None or self.experiment_name is not None or self.phase is not None
         ):
             raise ValueError("finalized experiment outcome carries identity only")
+        if self.operation in {ExperimentOperation.INACTIVE, ExperimentOperation.UNAVAILABLE} and (
+            self.experiment_id is not None or self.experiment_name is not None or self.phase is not None
+        ):
+            raise ValueError("inactive or unavailable experiment outcome carries no experiment identity")
         if type(self.provenance) is not str or _PROVENANCE_RE.fullmatch(self.provenance) is None:
             raise ValueError("provenance must use the feed-v1 digest contract")
 
@@ -276,7 +286,7 @@ class RecordingFeedAuthority:
         revision: int,
         operation_id: str,
         operation: ExperimentOperation,
-        experiment_id: str,
+        experiment_id: str | None = None,
         experiment_name: str | None = None,
         phase: str | None = None,
     ) -> ExperimentOperationOutcome:
@@ -340,6 +350,7 @@ class ExperimentRecordingSnapshot:
     persistence_revision: int
     acquisition_epoch_id: str | None
     persistence_epoch_id: str | None
+    experiment_operation: ExperimentOperation
     experiment_id: str | None
     experiment_name: str | None
     phase: str | None
@@ -362,6 +373,7 @@ class ExperimentRecordingOwner:
         "__experiment_token",
         "__acquisition_token",
         "__persistence_token",
+        "__experiment_operation",
         "__experiment_id",
         "__experiment_name",
         "__phase",
@@ -411,6 +423,7 @@ class ExperimentRecordingOwner:
         self.__experiment_token: str | None = None
         self.__acquisition_token: str | None = None
         self.__persistence_token: str | None = None
+        self.__experiment_operation = ExperimentOperation.INACTIVE
         self.__experiment_id: str | None = None
         self.__experiment_name: str | None = None
         self.__phase: str | None = None
@@ -432,6 +445,7 @@ class ExperimentRecordingOwner:
             self.__persistence_revision,
             self.__acquisition_epoch_id,
             self.__persistence_epoch_id,
+            self.__experiment_operation,
             self.__experiment_id,
             self.__experiment_name,
             self.__phase,
@@ -474,9 +488,15 @@ class ExperimentRecordingOwner:
         ):
             return
         self.__ensure_capacity()
+        if outcome.operation is ExperimentOperation.FINALIZED and (
+            self.__experiment_operation is not ExperimentOperation.ACTIVE
+            or self.__experiment_id != outcome.experiment_id
+        ):
+            raise ValueError("finalization requires the exact active experiment")
         replacement = self.__experiment_id is not None and self.__experiment_id != outcome.experiment_id
         self.__experiment_revision, self.__experiment_token = outcome.revision, outcome.provenance
         if outcome.operation is ExperimentOperation.ACTIVE:
+            self.__experiment_operation = ExperimentOperation.ACTIVE
             self.__experiment_id, self.__experiment_name, self.__phase = (
                 outcome.experiment_id,
                 outcome.experiment_name,
@@ -485,11 +505,17 @@ class ExperimentRecordingOwner:
             if replacement:
                 self.__end_session()
             reason = "experiment_replaced" if replacement else "experiment_active"
-        else:
+        elif outcome.operation is ExperimentOperation.FINALIZED:
+            self.__experiment_operation = ExperimentOperation.FINALIZED
             if self.__experiment_id == outcome.experiment_id:
                 self.__experiment_id = self.__experiment_name = self.__phase = None
             self.__end_session()
             reason = "experiment_finalized"
+        else:
+            self.__experiment_operation = outcome.operation
+            self.__experiment_id = self.__experiment_name = self.__phase = None
+            self.__end_session()
+            reason = f"experiment_{outcome.operation.value}"
         self.__publish(reason)
 
     def feed_acquisition(self, receipt: AcquisitionLifecycleReceipt) -> None:

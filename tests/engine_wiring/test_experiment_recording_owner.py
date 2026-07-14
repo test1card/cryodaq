@@ -70,6 +70,45 @@ def test_active_experiment_alone_never_means_recording(
     assert owner.begin_recording_epoch() is False
 
 
+def test_cold_start_is_honestly_inactive_and_unavailable_is_explicit() -> None:
+    authority = RecordingFeedAuthority("cold-feed", KEY)
+    owner = ExperimentRecordingOwner("cold-owner", authority.generation_id, authority)
+    cold = owner.snapshot()
+    assert cold.experiment_operation is ExperimentOperation.INACTIVE
+    assert cold.experiment_id is None
+    assert cold.recording is RecordingTruth.NOT_RECORDING
+
+    owner.feed_experiment(authority.experiment(1, "operation-unavailable", ExperimentOperation.UNAVAILABLE))
+    unavailable = owner.snapshot()
+    assert unavailable.experiment_operation is ExperimentOperation.UNAVAILABLE
+    assert unavailable.experiment_id is None
+    assert unavailable.recording is RecordingTruth.NOT_RECORDING
+    assert unavailable.reason == "experiment_unavailable"
+
+    owner.feed_experiment(_active(authority, 2))
+    assert owner.snapshot().experiment_operation is ExperimentOperation.ACTIVE
+
+
+@pytest.mark.parametrize("operation", [ExperimentOperation.INACTIVE, ExperimentOperation.UNAVAILABLE])
+def test_no_active_or_unavailable_ends_recording_and_recovery_never_auto_resumes(
+    owner: ExperimentRecordingOwner,
+    authority: RecordingFeedAuthority,
+    operation: ExperimentOperation,
+) -> None:
+    _ready(owner, authority)
+    assert owner.begin_recording_epoch() is True
+    owner.feed_experiment(authority.experiment(2, "operation-ended", operation))
+    snapshot = owner.snapshot()
+    assert snapshot.experiment_operation is operation
+    assert snapshot.experiment_id is None
+    assert snapshot.recording is RecordingTruth.NOT_RECORDING
+    assert snapshot.reason == f"experiment_{operation.value}"
+
+    owner.feed_experiment(_active(authority, 3))
+    assert owner.snapshot().recording is RecordingTruth.NOT_RECORDING
+    assert owner.begin_recording_epoch() is True
+
+
 def test_recording_requires_explicit_epoch_after_all_current_receipts(
     owner: ExperimentRecordingOwner,
     authority: RecordingFeedAuthority,
@@ -132,8 +171,47 @@ def test_experiment_replacement_and_finalize_end_epoch(
     assert owner.begin_recording_epoch() is True
     owner.feed_experiment(authority.experiment(3, "finalize-3", ExperimentOperation.FINALIZED, "exp-2"))
     finalized = owner.snapshot()
+    assert finalized.experiment_operation is ExperimentOperation.FINALIZED
     assert finalized.experiment_id is None
     assert finalized.recording is RecordingTruth.NOT_RECORDING
+
+
+def test_mismatched_finalization_is_rejected_without_partial_mutation(
+    owner: ExperimentRecordingOwner,
+    authority: RecordingFeedAuthority,
+) -> None:
+    owner.feed_experiment(_active(authority))
+    before = owner.snapshot()
+    with pytest.raises(ValueError, match="requires the exact active"):
+        owner.feed_experiment(authority.experiment(2, "finalize-other", ExperimentOperation.FINALIZED, "other"))
+    assert owner.snapshot() is before
+    owner.feed_experiment(_active(authority, 2, "exp-2"))
+    assert owner.snapshot().experiment_id == "exp-2"
+
+
+@pytest.mark.parametrize("prior", ["cold", "inactive", "unavailable", "finalized"])
+def test_finalization_requires_exact_current_active_state(prior: str) -> None:
+    authority = RecordingFeedAuthority(f"{prior}-feed", KEY)
+    owner = ExperimentRecordingOwner(f"{prior}-owner", authority.generation_id, authority)
+    revision = 1
+    if prior in {"inactive", "unavailable"}:
+        operation = ExperimentOperation.INACTIVE if prior == "inactive" else ExperimentOperation.UNAVAILABLE
+        owner.feed_experiment(authority.experiment(revision, f"{prior}-state", operation))
+        revision += 1
+    elif prior == "finalized":
+        owner.feed_experiment(_active(authority, revision))
+        revision += 1
+        owner.feed_experiment(
+            authority.experiment(revision, "finalize-current", ExperimentOperation.FINALIZED, "exp-1")
+        )
+        revision += 1
+
+    before = owner.snapshot()
+    with pytest.raises(ValueError, match="requires the exact active"):
+        owner.feed_experiment(authority.experiment(revision, "stale-finalize", ExperimentOperation.FINALIZED, "exp-1"))
+    assert owner.snapshot() is before
+    owner.feed_experiment(_active(authority, revision))
+    assert owner.snapshot().experiment_operation is ExperimentOperation.ACTIVE
 
 
 def test_running_or_lossless_epoch_replacement_ends_old_session(
@@ -244,6 +322,15 @@ def test_experiment_outcome_mutation_matrix_rejects_non_contract_values(
 ) -> None:
     with pytest.raises((TypeError, ValueError, UnicodeError)):
         replace(_active(authority), **mutation)
+
+
+@pytest.mark.parametrize("operation", [ExperimentOperation.INACTIVE, ExperimentOperation.UNAVAILABLE])
+def test_identity_free_operations_reject_fabricated_identity(
+    authority: RecordingFeedAuthority,
+    operation: ExperimentOperation,
+) -> None:
+    with pytest.raises(ValueError, match="carries no experiment identity"):
+        authority.experiment(1, "operation", operation, "fabricated")
 
 
 @pytest.mark.parametrize(
