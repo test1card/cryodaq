@@ -64,7 +64,7 @@
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
 | F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, replay/report parity, conformance/reference driver, and exact packaging foundations committed; live wire, generic GUI, and full end-to-end extension proof open | L | H |
-| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot plane and live safety authority committed; production recording/integrity authorities and atomic shell cutover open | L | H |
+| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot plane, live safety authority, and fail-conservative recording/integrity projections committed; production activation and atomic shell cutover open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -173,8 +173,9 @@ This is feature-branch evidence, not shipped history and not a release claim:
   ingress, one GUI-thread Store, conservative pure replay sessions, and
   conservative live adapters. The SafetyManager cache and live safety/readiness
   authority are committed and fail conservative when proof is absent. Pure
-  recording and persistence-authority contracts exist, but their actual
-  loop-owned experiment/acquisition/persistence integration is still open;
+  recording/persistence owners and their fail-conservative live projections
+  are committed, but actual loop-owned experiment/acquisition/persistence
+  integration is still open;
   production recording therefore remains `UNKNOWN` and data integrity remains
   unavailable. Atomic shell cutover, all operator scenarios, and
   screenshot/visual QA remain open.
@@ -310,9 +311,10 @@ Pure replay sessions and conservative live adapters preserve explicit
 unavailability rather than inventing authority. The committed SafetyManager
 cache and live safety/readiness authority now provide truthful live safety
 facts, including conservative UNKNOWN/disconnected behavior when evidence is
-missing. Pure recording and persistence-authority owners are also committed,
-but they are not yet integrated with the actual loop-owned experiment,
-acquisition, and persistence feeds. Until that integration lands, production
+missing. Pure recording/persistence owners and fail-conservative live
+projections are also committed, but they are not yet integrated with the actual
+loop-owned experiment, acquisition, and persistence feeds. Until that
+integration lands, production
 recording remains `UNKNOWN`, data integrity remains unavailable, and optional
 F36.3-F36.5 authorities are not synthesized.
 

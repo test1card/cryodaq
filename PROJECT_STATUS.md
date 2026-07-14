@@ -178,10 +178,11 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    allocator, typed authority receipts, ordered composer, replay-compatible
    publisher, отдельный snapshot SUB, один GUI-thread Store, pure replay session
    и conservative live adapters. SafetyManager cache + live safety/readiness
-   authority доступны и fail-conservative. Pure recording и persistence
-   authority owners committed, но их actual loop-owned experiment/acquisition/
-   persistence integration открыта; production recording=`UNKNOWN`, integrity
-   unavailable. Открыты atomic shell cutover, все 12 operator scenarios и
+   authority доступны и fail-conservative. Pure recording/persistence owners и
+   их fail-conservative live projections committed, но actual loop-owned
+   experiment/acquisition/persistence integration открыта; production
+   recording=`UNKNOWN`, integrity unavailable. Открыты atomic shell cutover,
+   все 12 operator scenarios и
    связанные accessibility/performance gates.
    После интеграции frontend в реальный shell обязателен isolated mock/replay
    запуск со скриншотами каждого достижимого экрана и material state. Visual QA

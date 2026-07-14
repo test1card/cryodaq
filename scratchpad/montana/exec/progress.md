@@ -605,3 +605,25 @@ worktree after D7.1 is settled.
   **PASS, no P0-P3** after repair. A new exact-SHA Windows/Ubuntu run remains
   required; physical, frozen-build, soak-duration, and hardware gates remain
   open.
+
+## 2026-07-14 reviewed Linux H4 and F36 projection evidence
+
+- A clean native WSL2 Ubuntu 24.04 snapshot at `7f67631` repeated the exact
+  failure-prone six-command execution boundary **20/20 passes**. The full H4
+  process/handshake/artifact capability panel then passed **60 tests with 3
+  expected host-selection skips**. This supplements, but does not replace, the
+  required hosted exact-SHA Ubuntu job and does not close a soak-duration gate.
+- F36 now has exact-owner live recording and persistence projection adapters.
+  Cold, incomplete, corrupt, regressed, or equivocated cuts remain unavailable;
+  storage failure is represented separately from authority unavailability.
+  The existing identity-only adapter remains intact and no engine/app/shell
+  activation occurred. Direct SQLite commit truth was not relabeled as durable
+  spool/materialization/ACK evidence.
+- F36 focused/adjacent evidence: **168 passed**; the 47-test live-authority
+  module repeated 20 times for **940 passes**. Ruff check/format and diff check
+  passed. Independent review initially found and repaired one P1 invalid
+  cross-domain revision comparison; final verdict **PASS, no P0-P2**.
+- Production recording remains `UNKNOWN` and production integrity unavailable
+  until actual loop-owned feeds and a truthful persistence architecture are
+  activated. Atomic shell cutover, all 12 operator scenarios, real localhost,
+  frozen-build, hardware, and physical gates remain open.
