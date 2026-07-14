@@ -1,25 +1,14 @@
-"""D7.1b Option-C production cutover tests.
-
-Verifies:
-- app.py _tick drain calls poll_readings_with_descriptor and routes via
-  dispatch_qualified_reading (not poll_readings).
-- launcher._poll_bridge_data drain calls poll_readings_with_descriptor and
-  routes via dispatch_qualified_reading (not poll_readings).
-- A descriptor-bearing qualified reading updates the store AND delegates
-  the bare reading to _dispatch_reading legacy sinks exactly once.
-- A legacy (descriptor=None) qualified reading still delegates the bare
-  reading to legacy sinks exactly once.
-- Production source files contain no poll_readings() caller in the two
-  cut sites.
-"""
+"""Production-level tests for descriptor-qualified GUI ingress."""
 
 from __future__ import annotations
 
-import ast
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -33,21 +22,17 @@ from cryodaq.channels.descriptors import (
 )
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.gui.app import _drain_bridge_readings, _shutdown_gui_runtime
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
-from cryodaq.gui.state.descriptor_store import IdentityStatus
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_WT = Path(__file__).parents[3]  # worktree root
+from cryodaq.gui.state.descriptor_store import IdentityStatus, TransportState
+from cryodaq.launcher import LauncherWindow
 
 
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
-def _make_reading(channel: str = "Т01 Тест", unit: str = "K") -> Reading:
+def _reading(channel: str = "T01", unit: str = "K") -> Reading:
     return Reading(
         timestamp=datetime.fromtimestamp(0, tz=UTC),
         instrument_id="test_inst",
@@ -58,15 +43,7 @@ def _make_reading(channel: str = "Т01 Тест", unit: str = "K") -> Reading:
     )
 
 
-def _make_qualified(
-    reading: Reading,
-    descriptor: ChannelDescriptorV1 | None = None,
-) -> DescriptorQualifiedReading:
-    return DescriptorQualifiedReading(reading=reading, descriptor=descriptor)
-
-
-def _make_descriptor(reading: Reading) -> ChannelDescriptorV1:
-    """Build a minimal valid ChannelDescriptorV1 matching the reading tuple."""
+def _descriptor(reading: Reading) -> ChannelDescriptorV1:
     return ChannelDescriptorV1(
         schema_version=1,
         channel_id=reading.channel,
@@ -84,241 +61,159 @@ def _make_descriptor(reading: Reading) -> ChannelDescriptorV1:
     )
 
 
-# ---------------------------------------------------------------------------
-# 1. MainWindowV2 has _descriptor_store and dispatch_qualified_reading
-# ---------------------------------------------------------------------------
-
-
-def test_main_window_has_descriptor_store() -> None:
-    _app()
-    w = MainWindowV2()
-    assert hasattr(w, "_descriptor_store"), "_descriptor_store must exist on MainWindowV2"
-    assert hasattr(w, "dispatch_qualified_reading"), "dispatch_qualified_reading must exist"
-    assert hasattr(w, "invalidate_descriptor_transport"), "invalidate_descriptor_transport must exist"
-
-
-# ---------------------------------------------------------------------------
-# 2. Descriptor-bearing qualified reading updates store AND hits legacy sink
-# ---------------------------------------------------------------------------
-
-
-def test_dispatch_qualified_reading_authoritative_updates_store_and_legacy_sink() -> None:
-    _app()
-    w = MainWindowV2()
-    reading = _make_reading(channel="Т01")  # no internal space: descriptor channel_id constraint
-    descriptor = _make_descriptor(reading)
-    qualified = _make_qualified(reading, descriptor)
-
-    dispatched: list[Reading] = []
-    original_dispatch = w._dispatch_reading
-
-    def _capture(r: Reading) -> None:
-        dispatched.append(r)
-        original_dispatch(r)
-
-    with patch.object(w, "_dispatch_reading", side_effect=_capture):
-        w.dispatch_qualified_reading(qualified)
-
-    # Store updated
-    status = w._descriptor_store.identity_status(reading.channel)
-    assert status is IdentityStatus.AUTHORITATIVE, f"Expected AUTHORITATIVE, got {status}"
-
-    # Legacy sink called exactly once with the bare reading
-    assert len(dispatched) == 1
-    assert dispatched[0] is reading
-
-
-# ---------------------------------------------------------------------------
-# 3. Legacy (descriptor=None) qualified reading still reaches legacy sinks once
-# ---------------------------------------------------------------------------
-
-
-def test_dispatch_qualified_reading_legacy_absent_still_dispatches() -> None:
-    _app()
-    w = MainWindowV2()
-    reading = _make_reading(channel="Т02 Legacy", unit="K")
-    qualified = _make_qualified(reading, descriptor=None)
-
-    dispatched: list[Reading] = []
-    original_dispatch = w._dispatch_reading
-
-    def _capture(r: Reading) -> None:
-        dispatched.append(r)
-        original_dispatch(r)
-
-    with patch.object(w, "_dispatch_reading", side_effect=_capture):
-        w.dispatch_qualified_reading(qualified)
-
-    # Store updated to LEGACY_ABSENT
-    status = w._descriptor_store.identity_status(reading.channel)
-    assert status is IdentityStatus.LEGACY_ABSENT, f"Expected LEGACY_ABSENT, got {status}"
-
-    # Legacy sink called exactly once
-    assert len(dispatched) == 1
-    assert dispatched[0] is reading
-
-
-# ---------------------------------------------------------------------------
-# 4. No double dispatch — _dispatch_reading called exactly once per qualified
-# ---------------------------------------------------------------------------
-
-
-def test_no_double_dispatch() -> None:
-    _app()
-    w = MainWindowV2()
-    reading = _make_reading(channel="Т03")  # no internal space: descriptor channel_id constraint
-    descriptor = _make_descriptor(reading)
-    qualified = _make_qualified(reading, descriptor)
-
-    call_count = 0
-    original_dispatch = w._dispatch_reading
-
-    def _count(r: Reading) -> None:
-        nonlocal call_count
-        call_count += 1
-        original_dispatch(r)
-
-    with patch.object(w, "_dispatch_reading", side_effect=_count):
-        w.dispatch_qualified_reading(qualified)
-
-    assert call_count == 1, f"_dispatch_reading must be called exactly once; got {call_count}"
-
-
-# ---------------------------------------------------------------------------
-# 5. invalidate_descriptor_transport advances store generation
-# ---------------------------------------------------------------------------
-
-
-def test_invalidate_descriptor_transport_marks_entries_disconnected() -> None:
-    from cryodaq.gui.state.descriptor_store import TransportState
-
-    _app()
-    w = MainWindowV2()
-    reading = _make_reading(channel="Т04 Inval")
-    qualified = _make_qualified(reading)
-    w.dispatch_qualified_reading(qualified)  # creates entry, CONNECTED
-
-    view_before = w._descriptor_store.view(reading.channel)
-    assert view_before is not None
-    assert view_before.transport_state is TransportState.CONNECTED
-
-    w.invalidate_descriptor_transport()
-
-    view_after = w._descriptor_store.view(reading.channel)
-    assert view_after is not None
-    assert view_after.transport_state is TransportState.DISCONNECTED
-
-
-# ---------------------------------------------------------------------------
-# 6. app.py _tick drain: uses poll_readings_with_descriptor, not poll_readings
-# ---------------------------------------------------------------------------
-
-
-def test_app_tick_drain_uses_poll_readings_with_descriptor() -> None:
-    """Verify app.py _tick calls poll_readings_with_descriptor and routes via
-    dispatch_qualified_reading. Uses a fake bridge and fake window to avoid Qt."""
-    reading = _make_reading(channel="Т05 AppTick")
-    qualified = _make_qualified(reading)
-
-    fake_bridge = MagicMock()
-    fake_bridge.poll_readings_with_descriptor.return_value = [qualified]
-    fake_bridge.is_healthy.return_value = True
-    fake_bridge.data_flow_stalled.return_value = False
-
-    dispatched_qualified: list[DescriptorQualifiedReading] = []
-
-    fake_window = MagicMock()
-    fake_window.dispatch_qualified_reading.side_effect = dispatched_qualified.append
-
-    fake_snapshot_ingress = MagicMock()
-
-    # Reconstruct the _tick closure from app.py logic inline (same structure)
-    def _tick() -> None:
-        for q in fake_bridge.poll_readings_with_descriptor():
-            fake_window.dispatch_qualified_reading(q)
-        fake_snapshot_ingress.pump()
-
-    _tick()
-
-    fake_bridge.poll_readings_with_descriptor.assert_called_once()
-    fake_bridge.poll_readings.assert_not_called()
-    assert len(dispatched_qualified) == 1
-    assert dispatched_qualified[0] is qualified
-
-
-# ---------------------------------------------------------------------------
-# 7. launcher _poll_bridge_data drain: uses poll_readings_with_descriptor
-# ---------------------------------------------------------------------------
-
-
-def test_launcher_poll_bridge_data_uses_poll_readings_with_descriptor() -> None:
-    """Verify launcher._poll_bridge_data drains poll_readings_with_descriptor
-    and routes each item through dispatch_qualified_reading."""
-    reading = _make_reading(channel="Т06 LaunchTick")
-    qualified = _make_qualified(reading)
-
-    dispatched: list[DescriptorQualifiedReading] = []
-
-    fake_bridge = MagicMock()
-    fake_bridge.poll_readings_with_descriptor.return_value = [qualified]
-    fake_bridge.is_healthy.return_value = True
-    fake_bridge.data_flow_stalled.return_value = False
-    fake_bridge.command_channel_stalled.return_value = False
-
-    fake_window = MagicMock()
-    fake_window.dispatch_qualified_reading.side_effect = dispatched.append
-
-    # Simulate the launcher's _poll_bridge_data logic (same structure)
-    def _poll_bridge_data() -> None:
-        for q in fake_bridge.poll_readings_with_descriptor():
-            # mirrors _on_reading_qt routing
-            fake_window.dispatch_qualified_reading(q)
-
-        unhealthy = not fake_bridge.is_healthy()
-        stalled = fake_bridge.data_flow_stalled() if not unhealthy else False
-        if unhealthy or stalled:
-            return
-        if fake_bridge.command_channel_stalled(timeout_s=10.0):
-            return
-
-    _poll_bridge_data()
-
-    fake_bridge.poll_readings_with_descriptor.assert_called_once()
-    fake_bridge.poll_readings.assert_not_called()
-    assert len(dispatched) == 1
-    assert dispatched[0] is qualified
-
-
-# ---------------------------------------------------------------------------
-# 8. Source-scan: no production poll_readings() call in app.py or launcher.py
-# ---------------------------------------------------------------------------
-
-
-def _find_poll_readings_calls(source: str) -> list[int]:
-    """Return line numbers of bare poll_readings() calls (not _with_descriptor)."""
-    tree = ast.parse(source)
-    hits = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "poll_readings":
-            hits.append(node.lineno)
-    return hits
-
-
-def test_app_py_has_no_production_poll_readings_call() -> None:
-    app_py = _WT / "src" / "cryodaq" / "gui" / "app.py"
-    source = app_py.read_text(encoding="utf-8")
-    hits = _find_poll_readings_calls(source)
-    assert hits == [], (
-        f"app.py still calls poll_readings() at line(s) {hits}; "
-        "must use poll_readings_with_descriptor() after D7.1b cutover"
+def _qualified(reading: Reading, *, described: bool = False) -> DescriptorQualifiedReading:
+    return DescriptorQualifiedReading(
+        reading=reading,
+        descriptor=_descriptor(reading) if described else None,
     )
 
 
-def test_launcher_py_has_no_production_poll_readings_call() -> None:
-    launcher_py = _WT / "src" / "cryodaq" / "launcher.py"
-    source = launcher_py.read_text(encoding="utf-8")
-    hits = _find_poll_readings_calls(source)
-    assert hits == [], (
-        f"launcher.py still calls poll_readings() at line(s) {hits}; "
-        "must use poll_readings_with_descriptor() after D7.1b cutover"
+@pytest.mark.parametrize("described", [False, True])
+def test_main_window_ingests_then_dispatches_valid_reading_once(described: bool) -> None:
+    _app()
+    window = MainWindowV2()
+    reading = _reading()
+    qualified = _qualified(reading, described=described)
+
+    with patch.object(window, "_dispatch_reading") as dispatch:
+        window.dispatch_qualified_reading(qualified)
+
+    assert window._descriptor_store.identity_status(reading.channel) is (
+        IdentityStatus.AUTHORITATIVE if described else IdentityStatus.LEGACY_ABSENT
     )
+    dispatch.assert_called_once_with(reading)
+
+
+def test_main_window_drops_malformed_carrier_before_store_or_legacy_sinks() -> None:
+    _app()
+    window = MainWindowV2()
+    malformed = DescriptorQualifiedReading(reading=object(), descriptor=None)  # type: ignore[arg-type]
+
+    with (
+        patch.object(window._descriptor_store, "ingest") as ingest,
+        patch.object(window, "_dispatch_reading") as dispatch,
+    ):
+        window.dispatch_qualified_reading(malformed)
+
+    ingest.assert_not_called()
+    dispatch.assert_not_called()
+
+
+def test_main_window_preserves_valid_reading_after_unexpected_ingest_failure() -> None:
+    _app()
+    window = MainWindowV2()
+    qualified = _qualified(_reading())
+
+    with (
+        patch.object(window._descriptor_store, "ingest", side_effect=ValueError("broken")),
+        patch.object(window, "_dispatch_reading") as dispatch,
+    ):
+        window.dispatch_qualified_reading(qualified)
+
+    dispatch.assert_called_once_with(qualified.reading)
+
+
+def test_main_window_never_hides_store_thread_ownership_violation() -> None:
+    _app()
+    window = MainWindowV2()
+    qualified = _qualified(_reading())
+
+    with (
+        patch.object(window, "_dispatch_reading") as dispatch,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        future = executor.submit(window.dispatch_qualified_reading, qualified)
+        with pytest.raises(RuntimeError, match="owning GUI thread"):
+            future.result()
+
+    dispatch.assert_not_called()
+
+
+def test_transport_invalidation_marks_existing_identity_disconnected() -> None:
+    _app()
+    window = MainWindowV2()
+    qualified = _qualified(_reading())
+    with patch.object(window, "_dispatch_reading"):
+        window.dispatch_qualified_reading(qualified)
+
+    window.invalidate_descriptor_transport()
+
+    view = window._descriptor_store.view(qualified.reading.channel)
+    assert view is not None
+    assert view.transport_state is TransportState.DISCONNECTED
+
+
+def test_app_drain_preserves_mixed_batch_order_and_drops_malformed() -> None:
+    first = _qualified(_reading("T01"))
+    malformed = DescriptorQualifiedReading(reading=object(), descriptor=None)  # type: ignore[arg-type]
+    second = _qualified(_reading("T02"))
+    bridge = MagicMock()
+    bridge.poll_readings_with_descriptor.return_value = [first, malformed, second]
+    _app()
+    window = MainWindowV2()
+
+    with patch.object(window, "_dispatch_reading") as dispatch:
+        _drain_bridge_readings(bridge, window)
+
+    bridge.poll_readings_with_descriptor.assert_called_once_with()
+    bridge.poll_readings.assert_not_called()
+    assert [call.args[0] for call in dispatch.call_args_list] == [first.reading, second.reading]
+
+
+def test_launcher_drain_calls_production_method_and_exact_type_guard() -> None:
+    first = _qualified(_reading("T01"))
+    malformed = DescriptorQualifiedReading(reading=object(), descriptor=None)  # type: ignore[arg-type]
+    second = _qualified(_reading("T02"))
+    bridge = MagicMock()
+    bridge.poll_readings_with_descriptor.return_value = [first, malformed, second]
+    bridge.is_healthy.return_value = True
+    bridge.data_flow_stalled.return_value = False
+    bridge.command_channel_stalled.return_value = False
+    window = MagicMock()
+    launcher = SimpleNamespace(
+        _bridge=bridge,
+        _main_window=window,
+        _reading_count=0,
+        _last_reading_time=0.0,
+        _on_reading_qt=lambda item: LauncherWindow._on_reading_qt(launcher, item),
+        _invalidate_descriptor_transport=lambda: None,
+    )
+
+    LauncherWindow._poll_bridge_data(launcher)
+    bridge.poll_readings_with_descriptor.assert_called_once_with()
+    bridge.poll_readings.assert_not_called()
+    assert [call.args[0] for call in window.dispatch_qualified_reading.call_args_list] == [first, second]
+    assert launcher._reading_count == 2
+
+
+def test_standalone_shutdown_stops_timer_before_invalidation_and_no_late_drain() -> None:
+    qualified = _qualified(_reading())
+    bridge = MagicMock()
+    bridge.poll_readings_with_descriptor.return_value = [qualified]
+    window = MagicMock()
+    calls: list[str] = []
+
+    class _Timer:
+        active = True
+
+        def stop(self) -> None:
+            calls.append("timer.stop")
+            self.active = False
+
+        def fire(self) -> None:
+            if self.active:
+                _drain_bridge_readings(bridge, window)
+
+    timer = _Timer()
+    snapshot = MagicMock()
+    snapshot.stop.side_effect = lambda: calls.append("snapshot.stop")
+    window.invalidate_descriptor_transport.side_effect = lambda: calls.append("invalidate")
+
+    timer.fire()
+    window.dispatch_qualified_reading.reset_mock()
+    with patch("cryodaq.gui.app.shutdown", side_effect=lambda: calls.append("shutdown")):
+        _shutdown_gui_runtime(timer, snapshot, window)
+    timer.fire()
+
+    assert calls == ["timer.stop", "invalidate", "snapshot.stop", "shutdown"]
+    window.dispatch_qualified_reading.assert_not_called()

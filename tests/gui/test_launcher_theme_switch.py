@@ -34,6 +34,7 @@ def _make_window(lock_fd: int | None = 42, engine_external: bool = False) -> obj
     stub._assistant_proc = None
     stub._stop_assistant = MagicMock(name="stop_assistant")
     stub._stop_engine = MagicMock(name="stop_engine")
+    stub._main_window = MagicMock(name="main_window")
     stub._lock_fd = lock_fd
     stub._engine_external = engine_external
     return stub
@@ -147,6 +148,7 @@ def test_theme_switch_order_assistant_then_bridge_then_engine() -> None:
     stub = _make_window()
     stub._bridge.shutdown = MagicMock(side_effect=lambda: calls.append("bridge"))
     stub._stop_assistant = MagicMock(side_effect=lambda: calls.append("assistant"))
+    stub._main_window.invalidate_descriptor_transport.side_effect = lambda: calls.append("invalidate")
     stub._stop_engine = MagicMock(side_effect=lambda: calls.append("engine"))
     # Log the port-wait in the same ordered log AND avoid the real 5s poll on
     # a busy port. Returns True (ports free) so the method proceeds.
@@ -171,8 +173,8 @@ def test_theme_switch_order_assistant_then_bridge_then_engine() -> None:
     # Full concrete teardown order — every step in ONE ordered log so a
     # reordering (e.g. releasing the lock or re-execing before the engine is
     # stopped) is caught, not just the bridge/engine pair.
-    assert calls == ["assistant", "bridge", "engine", "wait", "release", "execv"], (
-        f"teardown must be assistant→bridge→engine→wait→lock-release→execv; got {calls}"
+    assert calls == ["assistant", "invalidate", "bridge", "engine", "wait", "release", "execv"], (
+        f"teardown must invalidate before bridge→engine→wait→lock-release→execv; got {calls}"
     )
 
 

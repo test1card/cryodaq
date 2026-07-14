@@ -273,8 +273,7 @@ def main() -> None:
     timer.setInterval(10)  # 100 Hz
 
     def _tick() -> None:
-        for qualified in bridge.poll_readings_with_descriptor():
-            window.dispatch_qualified_reading(qualified)
+        _drain_bridge_readings(bridge, window)
         snapshot_ingress.pump()
 
         # Auto-restart subprocess if it dies or stops sending heartbeats
@@ -304,13 +303,29 @@ def main() -> None:
     exit_code = app.exec()
 
     # --- Корректное завершение ---
-    timer.stop()
-    snapshot_ingress.stop()
-    shutdown()
+    _shutdown_gui_runtime(timer, snapshot_ingress, window)
     release_lock(lock_fd, ".gui.lock")
     logger.info("GUI завершён")
 
     sys.exit(exit_code)
+
+
+def _drain_bridge_readings(bridge: ZmqBridge, window: MainWindow) -> None:
+    """Drain one qualified batch through the production GUI ingress."""
+    for qualified in bridge.poll_readings_with_descriptor():
+        window.dispatch_qualified_reading(qualified)
+
+
+def _shutdown_gui_runtime(
+    timer: QTimer,
+    snapshot_ingress: OperatorSnapshotIngressOwner,
+    window: MainWindow,
+) -> None:
+    """Stop ingress and invalidate identity before transport teardown."""
+    timer.stop()
+    window.invalidate_descriptor_transport()
+    snapshot_ingress.stop()
+    shutdown()
 
 
 if __name__ == "__main__":

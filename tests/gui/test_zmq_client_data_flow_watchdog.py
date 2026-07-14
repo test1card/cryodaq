@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.zmq_client import ZmqBridge
 
@@ -134,9 +135,7 @@ def test_poll_readings_updates_last_reading_time():
         }
     )
     before = bridge._last_reading_time
-    readings = _drain_poll_readings_until(
-        bridge, lambda b: b._last_reading_time > before
-    )
+    readings = _drain_poll_readings_until(bridge, lambda b: b._last_reading_time > before)
     assert len(readings) == 1
     r = readings[0]
     assert r.channel == "T1"
@@ -327,7 +326,7 @@ def test_command_channel_stalled_after_recent_timeout():
             self.shutdown_calls = 0
             self.start_calls = 0
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             return []
 
         def is_healthy(self) -> bool:
@@ -355,6 +354,9 @@ def test_command_channel_stalled_after_recent_timeout():
         def _on_reading_qt(self, item) -> None:  # pragma: no cover
             pass
 
+        def _invalidate_descriptor_transport(self) -> None:
+            pass
+
     dummy = _Dummy()
     LauncherWindow._poll_bridge_data(dummy)
 
@@ -370,9 +372,7 @@ def test_command_channel_not_stalled_after_window_expires(monkeypatch):
     now = time.monotonic()
     bridge._last_cmd_timeout = now
 
-    monkeypatch.setattr(
-        "cryodaq.gui.zmq_client.time.monotonic", lambda: now + 15.0
-    )
+    monkeypatch.setattr("cryodaq.gui.zmq_client.time.monotonic", lambda: now + 15.0)
     assert bridge.command_channel_stalled(timeout_s=10.0) is False
 
 
@@ -389,9 +389,7 @@ def test_poll_readings_handles_cmd_timeout_type():
             "message": "REP timeout on safety_status (test)",
         }
     )
-    readings = _drain_poll_readings_until(
-        bridge, lambda b: b._last_cmd_timeout > 0.0
-    )
+    readings = _drain_poll_readings_until(bridge, lambda b: b._last_cmd_timeout > 0.0)
 
     assert readings == [], "cmd_timeout envelope must not surface as a Reading"
     assert bridge._last_cmd_timeout > 0.0
@@ -402,16 +400,17 @@ def test_launcher_poll_drains_before_data_stall_restart():
     from cryodaq.launcher import LauncherWindow
 
     reading = Reading.now(channel="T1", value=4.2, unit="K", instrument_id="mock")
-    dispatched: list[Reading] = []
+    qualified = DescriptorQualifiedReading(reading=reading, descriptor=None)
+    dispatched: list[DescriptorQualifiedReading] = []
 
     class _FakeBridge:
         def __init__(self) -> None:
             self.restarted = False
             self._polled = False
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             self._polled = True
-            return [reading]
+            return [qualified]
 
         def is_healthy(self) -> bool:
             return True
@@ -438,10 +437,13 @@ def test_launcher_poll_drains_before_data_stall_restart():
         def _on_reading_qt(self, item) -> None:
             dispatched.append(item)
 
+        def _invalidate_descriptor_transport(self) -> None:
+            pass
+
     dummy = _Dummy()
     LauncherWindow._poll_bridge_data(dummy)
 
-    assert dispatched == [reading]
+    assert dispatched == [qualified]
     assert dummy._bridge.restarted is False
 
 
@@ -457,7 +459,7 @@ def test_health_watchdog_cooldown_prevents_restart_storm():
             self.shutdown_calls = 0
             self.start_calls = 0
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             return []
 
         def is_healthy(self) -> bool:
@@ -483,6 +485,9 @@ def test_health_watchdog_cooldown_prevents_restart_storm():
             self._bridge = bridge
 
         def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+        def _invalidate_descriptor_transport(self) -> None:
             pass
 
     bridge = _AlwaysUnhealthyBridge()
@@ -515,7 +520,7 @@ def test_launcher_poll_reason_distinct_per_stall_type(caplog):
             self.shutdown_calls = 0
             self.start_calls = 0
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             return []
 
         def is_healthy(self) -> bool:
@@ -541,6 +546,9 @@ def test_launcher_poll_reason_distinct_per_stall_type(caplog):
             self._bridge = bridge
 
         def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+        def _invalidate_descriptor_transport(self) -> None:
             pass
 
     # name -> (bridge kwargs, token that MUST be present, tokens that MUST be absent)
@@ -573,13 +581,9 @@ def test_launcher_poll_reason_distinct_per_stall_type(caplog):
         assert bridge.shutdown_calls == 1, f"{name}: expected exactly one shutdown"
         assert bridge.start_calls == 1, f"{name}: expected exactly one start (restart)"
         log = " ".join(caplog.messages).lower()
-        assert present in log, (
-            f"{name}: expected reason token '{present}' in log, got: {caplog.messages}"
-        )
+        assert present in log, f"{name}: expected reason token '{present}' in log, got: {caplog.messages}"
         for tok in absent:
-            assert tok not in log, (
-                f"{name}: unexpected token '{tok}' in {name} log: {caplog.messages}"
-            )
+            assert tok not in log, f"{name}: unexpected token '{tok}' in {name} log: {caplog.messages}"
         messages[name] = log
 
     # All three normalized reason messages must be mutually distinct.
@@ -597,7 +601,7 @@ def test_launcher_restarts_bridge_on_command_channel_stalled():
             self.shutdown_calls = 0
             self.start_calls = 0
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             return []
 
         def is_healthy(self) -> bool:
@@ -625,6 +629,9 @@ def test_launcher_restarts_bridge_on_command_channel_stalled():
         def _on_reading_qt(self, item) -> None:  # pragma: no cover
             pass
 
+        def _invalidate_descriptor_transport(self) -> None:
+            pass
+
     dummy = _Dummy()
     LauncherWindow._poll_bridge_data(dummy)
 
@@ -640,7 +647,7 @@ def test_launcher_watchdog_cooldown_blocks_repeat_restart(monkeypatch):
             self.shutdown_calls = 0
             self.start_calls = 0
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             return []
 
         def is_healthy(self):
@@ -668,6 +675,7 @@ def test_launcher_watchdog_cooldown_blocks_repeat_restart(monkeypatch):
             "_bridge": _Bridge(),
             "_last_cmd_watchdog_restart": 100.0,
             "_on_reading_qt": lambda self, item: None,
+            "_invalidate_descriptor_transport": lambda self: None,
         },
     )()
 
@@ -686,7 +694,7 @@ def test_launcher_watchdog_cooldown_allows_restart_after_60s(monkeypatch):
             self.shutdown_calls = 0
             self.start_calls = 0
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             return []
 
         def is_healthy(self):
@@ -714,6 +722,7 @@ def test_launcher_watchdog_cooldown_allows_restart_after_60s(monkeypatch):
             "_bridge": _Bridge(),
             "_last_cmd_watchdog_restart": 100.0,
             "_on_reading_qt": lambda self, item: None,
+            "_invalidate_descriptor_transport": lambda self: None,
         },
     )()
 
@@ -735,7 +744,7 @@ def test_launcher_does_not_restart_on_healthy_bridge():
             self.shutdown_calls = 0
             self.start_calls = 0
 
-        def poll_readings(self):
+        def poll_readings_with_descriptor(self):
             return []
 
         def is_healthy(self) -> bool:
@@ -761,6 +770,9 @@ def test_launcher_does_not_restart_on_healthy_bridge():
             self._bridge = _HealthyBridge()
 
         def _on_reading_qt(self, item) -> None:  # pragma: no cover
+            pass
+
+        def _invalidate_descriptor_transport(self) -> None:
             pass
 
     dummy = _Dummy()

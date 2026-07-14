@@ -441,8 +441,14 @@ class MainWindowV2(QMainWindow):
         2. Delegates the bare reading to all legacy sinks exactly once via
            ``_dispatch_reading()``.  No double dispatch.
         """
+        if type(qualified) is not DescriptorQualifiedReading or type(qualified.reading) is not Reading:
+            logger.warning("malformed descriptor-qualified reading dropped")
+            return
+
         try:
             result = self._descriptor_store.ingest(qualified)
+        except RuntimeError:
+            raise
         except Exception:
             logger.warning(
                 "descriptor ingest failed for channel %s; reading dispatched to legacy sinks",
