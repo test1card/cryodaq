@@ -279,3 +279,31 @@ def test_joined_receipts_cannot_remove_the_activation_fuse(tmp_path: Path) -> No
     runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
     with pytest.raises(runner._RunnerActivationDisabled):
         runner._PosixSoakRunner().run()
+
+
+def test_forged_prepost_cannot_mint_delivery_pass(tmp_path: Path) -> None:
+    valid = runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
+    forged = runner._PrePostReceiptEvidence(valid.pre_fault, valid.post_fault)
+    assert forged.pre_fault == valid.pre_fault
+    assert forged.post_fault == valid.post_fault
+    assert not hasattr(runner, "_publish_periodic_delivery_result")
+    assert not hasattr(runner, "_validate_and_publish_periodic_delivery_result")
+    assert not hasattr(runner._DELIVERY_EVIDENCE, "validate_and_issue")
+
+
+def test_constructed_delivery_bundle_and_fake_evidence_cannot_persist_pass(tmp_path: Path) -> None:
+    runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
+    persisted = tmp_path / "periodic-delivery-result.json"
+
+    class EvidenceProbe:
+        def _accept_periodic_delivery_result(self, authority: object) -> None:
+            persisted.write_text('{"status":"PASS"}', encoding="utf-8")
+
+    evidence = EvidenceProbe()
+    forged_authority = object.__new__(runner._DeliveryEvidenceAuthority)
+    for candidate_evidence in (evidence, object()):
+        with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
+            runner._consume_periodic_delivery_authority(forged_authority, candidate_evidence)
+    with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
+        runner._consume_periodic_delivery_authority(forged_authority, evidence)
+    assert not persisted.exists()

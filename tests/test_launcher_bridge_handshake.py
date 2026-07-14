@@ -30,7 +30,7 @@ def _install_request(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[i
 
 
 @_POSIX_HANDSHAKE
-def test_valid_posix_mock_tray_request_emits_one_canonical_record(
+def test_valid_posix_mock_tray_request_emits_bounded_identity_and_data_stream(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -57,8 +57,20 @@ def test_valid_posix_mock_tray_request_emits_one_canonical_record(
         )
         assert record.bridge_pid == os.getpid() + 1000
         assert record.restart_count == 1
-        with pytest.raises(RuntimeError, match="already closed or emitted"):
-            authority.emit(bridge_pid=os.getpid() + 1000, restart_count=1)
+        assert authority.emit_data_observed(bridge_pid=os.getpid() + 1000, restart_count=1)
+        data = os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+        assert (
+            runner._parse_bridge_data(
+                data,
+                expected_nonce=nonce,
+                expected_launcher_pid=os.getpid(),
+                expected_bridge_pid=os.getpid() + 1000,
+                after_sequence=0,
+            ).sequence
+            == 1
+        )
+        assert not authority.emit_data_observed(bridge_pid=os.getpid() + 1000, restart_count=1)
+        authority.close()
         with pytest.raises(OSError):
             os.fstat(write_fd)
     finally:

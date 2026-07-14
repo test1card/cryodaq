@@ -114,6 +114,7 @@ os.close(release_fd)
 """
 _MAX_START_IDENTITY_BYTES: Final = 128
 _BRIDGE_HANDSHAKE_SCHEMA: Final = "cryodaq.soak.bridge-identity"
+_BRIDGE_DATA_SCHEMA: Final = "cryodaq.soak.bridge-data"
 _BRIDGE_HANDSHAKE_VERSION: Final = 1
 _MAX_BRIDGE_HANDSHAKE_BYTES: Final = 512
 _BRIDGE_FD_ENV: Final = "CRYODAQ_SOAK_BRIDGE_FD"
@@ -665,6 +666,15 @@ class _BridgeHandshakeRecord:
     launcher_pid: int
     bridge_pid: int
     restart_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _BridgeDataRecord:
+    nonce: str
+    launcher_pid: int
+    bridge_pid: int
+    restart_count: int
+    sequence: int
 
 
 class _BridgeHandshakePipe:
@@ -1328,6 +1338,37 @@ class _PrePostReceiptEvidence:
     post_fault: _JoinedReceiptEvidence
 
 
+class _DeliveryEvidenceAuthority:
+    __slots__ = ()
+
+    def __new__(cls) -> _DeliveryEvidenceAuthority:
+        del cls
+        raise _RunnerFoundationError("delivery evidence authority cannot be caller-constructed")
+
+
+class _DeliveryEvidenceRegistry:
+    """Fail closed until the runner-owned execution issuer is integrated.
+
+    R3b deliberately exposes no registration or issuance seam.  Receipt and
+    process observations are caller-shaped validation inputs; only the future
+    integrated runner that owns launch, fault injection, observation, joining,
+    and cleanup may replace this fused-off consumer with one-shot records.
+    """
+
+    __slots__ = ()
+
+    def consume(self, authority: object, evidence: Any) -> dict[str, object]:
+        del authority, evidence
+        raise _RunnerFoundationError("delivery authority is unregistered, spent, or bound to another Evidence")
+
+
+_DELIVERY_EVIDENCE = _DeliveryEvidenceRegistry()
+
+
+def _consume_periodic_delivery_authority(authority: object, evidence: Any) -> dict[str, object]:
+    return _DELIVERY_EVIDENCE.consume(authority, evidence)
+
+
 def _validate_pre_post_receipts(
     *,
     pre_ledger_record: dict[str, object],
@@ -1510,6 +1551,57 @@ def _parse_bridge_handshake(
     if type(restart_count) is not int or restart_count != 1:
         raise _RunnerFoundationError("bridge restarted before positive identity acceptance")
     return _BridgeHandshakeRecord(nonce, launcher_pid, bridge_pid, restart_count)
+
+
+def _parse_bridge_data(
+    payload: bytes,
+    *,
+    expected_nonce: str,
+    expected_launcher_pid: int,
+    expected_bridge_pid: int,
+    after_sequence: int,
+) -> _BridgeDataRecord:
+    """Parse one bounded launcher-observed bridge-data fact."""
+
+    if not payload or len(payload) > _MAX_BRIDGE_HANDSHAKE_BYTES or not payload.endswith(b"\n"):
+        raise _RunnerFoundationError("bridge data fact is incomplete or oversized")
+    try:
+        value = json.loads(payload[:-1].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _RunnerFoundationError("bridge data fact is not canonical JSON") from exc
+    expected = {
+        "schema",
+        "version",
+        "nonce",
+        "launcher_pid",
+        "bridge_pid",
+        "restart_count",
+        "sequence",
+    }
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+    if type(value) is not dict or set(value) != expected or canonical != payload:
+        raise _RunnerFoundationError("bridge data fact schema is invalid")
+    sequence = value["sequence"]
+    if (
+        value["schema"] != _BRIDGE_DATA_SCHEMA
+        or type(value["version"]) is not int
+        or value["version"] != _BRIDGE_HANDSHAKE_VERSION
+        or value["nonce"] != expected_nonce
+        or value["launcher_pid"] != expected_launcher_pid
+        or value["bridge_pid"] != expected_bridge_pid
+        or type(value["restart_count"]) is not int
+        or value["restart_count"] != 1
+        or type(sequence) is not int
+        or sequence <= after_sequence
+    ):
+        raise _RunnerFoundationError("bridge data fact contradicts the accepted epoch")
+    return _BridgeDataRecord(
+        expected_nonce,
+        expected_launcher_pid,
+        expected_bridge_pid,
+        1,
+        sequence,
+    )
 
 
 @dataclass(frozen=True, slots=True)
