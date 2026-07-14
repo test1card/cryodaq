@@ -184,13 +184,18 @@ def test_windows_assistant_spawn_rejects_link_backed_sentinel_directory(
 
     outside = tmp_path / "outside"
     outside.mkdir()
-    if link_data_root:
-        unsafe_root = tmp_path / "linked-data"
-        unsafe_root.symlink_to(outside, target_is_directory=True)
-    else:
-        unsafe_root = tmp_path / "data"
-        unsafe_root.mkdir()
-        (unsafe_root / "runtime").symlink_to(outside, target_is_directory=True)
+    try:
+        if link_data_root:
+            unsafe_root = tmp_path / "linked-data"
+            unsafe_root.symlink_to(outside, target_is_directory=True)
+        else:
+            unsafe_root = tmp_path / "data"
+            unsafe_root.mkdir()
+            (unsafe_root / "runtime").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows account lacks symlink creation privilege")
+        raise
     popen = MagicMock()
     window = SimpleNamespace(
         _assistant_experiment_mode=True,
@@ -527,10 +532,10 @@ def test_windows_assistant_shutdown_uses_graceful_then_terminate_then_kill(
     ]
     assert window._assistant_proc is None
     assert window._assistant_shutdown_path is None
-    assert shutdown_path.exists() is False
+    assert shutdown_path.is_file()
 
 
-@pytest.mark.parametrize("candidate_kind", ["symlink", "broken-symlink", "directory"])
+@pytest.mark.parametrize("candidate_kind", ["symlink", "broken-symlink", "hardlink", "directory"])
 def test_windows_assistant_shutdown_never_trusts_unsafe_existing_sentinel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -543,11 +548,20 @@ def test_windows_assistant_shutdown_never_trusts_unsafe_existing_sentinel(
     shutdown_path = authority.path
     if candidate_kind == "directory":
         shutdown_path.mkdir()
+    elif candidate_kind == "hardlink":
+        target = tmp_path / "target"
+        target.touch()
+        os.link(target, shutdown_path)
     else:
         target = tmp_path / ("target" if candidate_kind == "symlink" else "missing")
         if candidate_kind == "symlink":
             target.touch()
-        shutdown_path.symlink_to(target)
+        try:
+            shutdown_path.symlink_to(target)
+        except OSError as exc:
+            if os.name == "nt" and exc.winerror == 1314:
+                pytest.skip("Windows account lacks symlink creation privilege")
+            raise
     process = _WindowsLifecycleProcess(events, [0])
     window = SimpleNamespace(
         _assistant_proc=process,
@@ -561,6 +575,46 @@ def test_windows_assistant_shutdown_never_trusts_unsafe_existing_sentinel(
     assert events == ["assistant.terminate", "assistant.wait:10"]
     assert window._assistant_proc is None
     assert window._assistant_shutdown_path is None
+    if candidate_kind == "broken-symlink":
+        assert target.exists() is False
+    elif candidate_kind == "hardlink":
+        assert shutdown_path.exists()
+        assert target.exists()
+
+
+def test_windows_assistant_shutdown_never_unlinks_replacement_after_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.launcher as module
+
+    authority = module._new_assistant_shutdown_authority(tmp_path)
+    shutdown_path = authority.path
+    replacement = tmp_path / "replacement"
+    replacement.write_text("preserve", encoding="utf-8")
+    events: list[str] = []
+
+    class _ReplacingProcess(_WindowsLifecycleProcess):
+        def wait(self, *, timeout: float) -> int:
+            if not events:
+                shutdown_path.unlink()
+                replacement.replace(shutdown_path)
+                events.append(f"assistant.wait:{timeout:g}")
+                raise subprocess.TimeoutExpired("assistant", timeout)
+            return super().wait(timeout=timeout)
+
+    process = _ReplacingProcess(events, [0])
+    window = SimpleNamespace(
+        _assistant_proc=process,
+        _assistant_shutdown_path=shutdown_path,
+        _assistant_shutdown_authority=authority,
+    )
+    monkeypatch.setattr(module.sys, "platform", "win32")
+
+    module.LauncherWindow._stop_assistant(window)  # type: ignore[arg-type]
+
+    assert shutdown_path.read_text(encoding="utf-8") == "preserve"
+    assert events == ["assistant.wait:10", "assistant.terminate", "assistant.wait:10"]
 
 
 @pytest.mark.parametrize("replacement_kind", ["symlink", "real-directory"])

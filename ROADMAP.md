@@ -63,7 +63,7 @@
 | F32 | Knowledge-base indexer | ✅ DONE (v0.54.0; integration hardening v0.55.x) | M | M |
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
-| F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, replay/report parity, conformance/reference driver, and exact packaging foundations committed; live wire, generic GUI, and full end-to-end extension proof open | L | H |
+| F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, generic GUI, real-localhost descriptor-ingress lifecycle, conformance/reference driver, and exact packaging foundations committed; full acquisition-to-display and frozen-build extension proof open | L | H |
 | F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot plane, live safety authority, and fail-conservative recording/integrity projections committed; production activation and atomic shell cutover open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
@@ -150,11 +150,11 @@ This is feature-branch evidence, not shipped history and not a release claim:
   bounded framed transfer, durable runner ledger, and ACK authority. The
   short and 72-hour soaks and real-Windows ONEDIR evidence remain open.
 - GitHub CI was historically green for the v0.64 release line on Ubuntu and
-  Windows. The exact pushed candidate is now `c1e26e2` in Actions run
-  `29251698616`: Windows failed the periodic PNG crash-recovery node and is
-  explicitly deferred to Vladimir's real Windows/WSL diagnosis; Ubuntu was
-  last known still running. This is an open exact-SHA gate, not a green
-  candidate claim.
+  Windows. Exact-SHA run `29309849548` at `95b712f` passed all four Ubuntu jobs
+  plus Windows agents, core, and GUI. Windows remaining reached 1,883 passed /
+  93 skipped, then exposed a broken-symlink sentinel identity gap. The reviewed
+  post-open path/descriptor fence is pending a new exact-SHA run. This remains
+  an open CI gate, not a green candidate claim.
 - The bounded persistence spool is committed with FIFO, physical-cap and
   integrity gates, receipt-authorized acknowledgement, cancellation, and
   close settlement.
@@ -165,8 +165,10 @@ This is feature-branch evidence, not shipped history and not a release claim:
   conformance harness, ASC reference TCP driver, registry adoption, and exact
   frozen-driver allowlist foundation and live D4 wire envelope are committed.
   D7 descriptor-governed generic instrument-health presentation is complete,
-  without vendor/channel-name identity fallback. Specialized shell routing
-  heuristics, real-localhost/Windows evidence, and one complete
+  without vendor/channel-name identity fallback. D7.4 proves descriptor-qualified
+  ingress, launcher restart invalidation ordering, and shutdown/rebind over real
+  localhost ZeroMQ on native Windows and WSL source runs. Specialized shell
+  routing heuristics, real-Windows ONEDIR/frozen packaging, and one complete
   acquisition-to-health-display reference-extension proof remain open.
 - F36 now has committed foundations for the snapshot wire contract,
   durable revision allocation, typed common-cut authority receipts, ordered
@@ -199,12 +201,14 @@ are committed. Within F35.3, D1 manifest authority, D2 persistence activation,
 D3 committed-receipt publication, D4 live descriptor wire transport, D5 replay
 parity, D6 reporting parity, and D7.1 descriptor-qualified GUI ingress are
 complete on the active branch. D7 descriptor-governed generic instrument-health
-presentation is complete without vendor/channel-name identity fallback.
-Specialized shell routing heuristics, real-localhost lifecycle proof, and the
-full end-to-end gate remain open. The reusable passive
+presentation is complete without vendor/channel-name identity fallback. D7.4
+proves the descriptor-qualified ingress, restart invalidation ordering, and
+shutdown/rebind lifecycle over real localhost ZeroMQ on native Windows and WSL.
+Specialized shell routing heuristics and the full end-to-end gate remain open.
+The reusable passive
 conformance harness, ASC reference TCP driver, registry adoption, and exact
-frozen-driver allowlist are also committed foundations; their real localhost,
-real-Windows packaging, and full acquisition -> persistence -> live wire ->
+frozen-driver allowlist are also committed foundations; their real-Windows
+frozen packaging and full acquisition -> persistence -> live wire ->
 replay/report -> instrument-health-display end-to-end proof remain open. F35
 therefore remains partial without understating the completed foundations.
 

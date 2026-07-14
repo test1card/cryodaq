@@ -172,9 +172,10 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    exact frozen-driver allowlist committed как foundations. D4 live descriptor
    wire и D7.1 descriptor-qualified GUI ingress committed. D7 generic
    instrument-health presentation now attributes cards only from authoritative
-   connected descriptors. Открыты specialized shell-routing heuristics,
-   real localhost и Windows evidence, а также полный
-   acquisition-to-health-display e2e proof.
+   connected descriptors. D7.4 proves real-localhost descriptor ingress,
+   restart invalidation ordering и shutdown/rebind on native Windows and WSL.
+   Открыты specialized shell-routing heuristics, Windows ONEDIR evidence и
+   полный acquisition-to-health-display e2e proof.
 4. F36: committed foundation включает wire envelope, durable revision
    allocator, typed authority receipts, ordered composer, replay-compatible
    publisher, отдельный snapshot SUB, один GUI-thread Store, pure replay session
@@ -189,10 +190,12 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    запуск со скриншотами каждого достижимого экрана и material state. Visual QA
    проверяет operator scenarios, clipping, focus, stale/disconnected truth,
    non-color cues и соответствие design system; одни скриншоты gate не закрывают.
-5. Exact-SHA CI run `29251698616` для `c1e26e2`: Windows FAIL отложен до
-   воспроизведения на Windows/WSL Владимира; Ubuntu last-known running. Ubuntu +
-   Windows должны стать зелёными на одном финальном кандидате; зелёный релизный
-   v0.64 — только историческая baseline evidence.
+5. Exact-SHA CI run `29309849548` для `95b712f`: все четыре Ubuntu jobs и
+   Windows agents/core/GUI PASS. Windows remaining дошёл до 1 883 passed /
+   93 skipped и выявил broken-symlink sentinel identity gap; reviewed post-open
+   path/descriptor fence ожидает новый exact-SHA run. Ubuntu + Windows должны
+   стать зелёными на одном финальном кандидате; зелёный релизный v0.64 — только
+   историческая baseline evidence.
 6. Готовые точные Windows/physical evidence procedures с thresholds,
    abort/rollback и ожидаемыми артефактами.
 

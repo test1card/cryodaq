@@ -521,12 +521,35 @@ def _is_real_regular_file(path: Path) -> bool:
         metadata = path.lstat()
     except OSError:
         return False
+    return _is_real_single_link_regular_metadata(metadata)
+
+
+def _is_real_single_link_regular_metadata(metadata: os.stat_result) -> bool:
+    """Accept only one ordinary, single-link, non-reparse filesystem object."""
+
     reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     file_attributes = getattr(metadata, "st_file_attributes", 0)
     return bool(
         stat_module.S_ISREG(metadata.st_mode)
         and not stat_module.S_ISLNK(metadata.st_mode)
         and not (reparse_flag and file_attributes & reparse_flag)
+        and metadata.st_nlink == 1
+    )
+
+
+def _opened_real_regular_file_matches(path: Path, descriptor: int) -> bool:
+    """Bind an opened sentinel descriptor to the exact safe path object."""
+
+    try:
+        path_metadata = path.lstat()
+        descriptor_metadata = os.fstat(descriptor)
+    except OSError:
+        return False
+    return bool(
+        _is_real_single_link_regular_metadata(path_metadata)
+        and stat_module.S_ISREG(descriptor_metadata.st_mode)
+        and descriptor_metadata.st_nlink == 1
+        and os.path.samestat(path_metadata, descriptor_metadata)
     )
 
 
@@ -1332,7 +1355,6 @@ class LauncherWindow(QMainWindow):
         logger.info("Остановка cryodaq-assistant (PID=%d)...", process.pid)
         shutdown_path = getattr(self, "_assistant_shutdown_path", None)
         shutdown_authority = getattr(self, "_assistant_shutdown_authority", None)
-        cleanup_authorized = isinstance(shutdown_authority, _AssistantShutdownAuthority)
         try:
             if (
                 sys.platform == "win32"
@@ -1342,21 +1364,27 @@ class LauncherWindow(QMainWindow):
                 and shutdown_authority.directories_match()
             ):
                 sentinel_ready = False
-                try:
-                    descriptor = os.open(shutdown_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                except FileExistsError:
+                if os.path.lexists(shutdown_path):
                     # Accept an earlier request only if the exact observed
                     # object is still an ordinary file, never a link/reparse.
                     sentinel_ready = shutdown_authority.directories_match() and _is_real_regular_file(shutdown_path)
-                except OSError:
-                    logger.exception("Не удалось запросить мягкую остановку cryodaq-assistant")
                 else:
                     try:
-                        sentinel_ready = shutdown_authority.directories_match()
-                    finally:
-                        os.close(descriptor)
-                    if not sentinel_ready:
-                        cleanup_authorized = False
+                        descriptor = os.open(shutdown_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    except FileExistsError:
+                        # A concurrent creator won the race. Revalidate the
+                        # exact observed object instead of opening it again.
+                        sentinel_ready = shutdown_authority.directories_match() and _is_real_regular_file(shutdown_path)
+                    except OSError:
+                        logger.exception("Не удалось запросить мягкую остановку cryodaq-assistant")
+                    else:
+                        try:
+                            sentinel_ready = (
+                                shutdown_authority.directories_match()
+                                and _opened_real_regular_file_matches(shutdown_path, descriptor)
+                            )
+                        finally:
+                            os.close(descriptor)
                 if sentinel_ready:
                     try:
                         process.wait(timeout=10)
@@ -1374,16 +1402,10 @@ class LauncherWindow(QMainWindow):
                 process.kill()
                 process.wait(timeout=5)
         finally:
-            if (
-                cleanup_authorized
-                and shutdown_path is not None
-                and isinstance(shutdown_authority, _AssistantShutdownAuthority)
-                and shutdown_authority.directories_match()
-            ):
-                try:
-                    shutdown_path.unlink(missing_ok=True)
-                except OSError:
-                    logger.exception("Не удалось удалить сигнал остановки cryodaq-assistant")
+            # Do not unlink by pathname: Windows has no portable atomic
+            # checked-unlink operation, so an attacker could replace the
+            # validated object while the launcher waits for process exit.
+            # Per-launch UUID names make a retained empty sentinel inert.
             self._assistant_shutdown_path = None
             self._assistant_shutdown_authority = None
         self._assistant_proc = None
