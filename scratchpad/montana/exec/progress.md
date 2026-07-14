@@ -814,3 +814,32 @@ worktree after D7.1 is settled.
   delivery-barrier reviews: **PASS, no P0-P3**. These are deterministic
   test-isolation repairs, not new physical, hardware, frozen-build, or full-CI
   evidence.
+
+## 2026-07-14 exact-SHA CI closure and F35 software reference chain
+
+- Exact-SHA GitHub Actions run `29321460151` at checkpoint `cd208a2`
+  passed all eight agents/core/GUI/remaining jobs on Ubuntu and Windows. Safe
+  SQLite verification passed in every job; lint and requirements-lock drift
+  checks passed in both remaining jobs. This closes the gate only for that
+  exact checkpoint; it does not cover the repaired F35 chain below, which
+  requires its own eight-job run after publication. Frozen-build,
+  soak-duration, physical-hardware, and F36 activation gates remain open.
+- Claude's initial focused F35.6 display leg passed CI but independent review
+  correctly rejected it as full-chain evidence: it manually joined a fresh
+  mock-driver result to Store/Panel and could not prove one continuous artifact
+  across persistence, replay, reporting, and shell dispatch. No production code
+  had been weakened.
+- The repaired acceptance test now follows one scheduler-produced reference
+  reading and its exact SQLite/descriptor artifact through persistence and
+  publisher framing, subprocess decode and GUI bridge join, replay from that
+  same database, descriptor-qualified report projection/binding, real
+  `MainWindowV2.dispatch_qualified_reading`, and real `InstrumentsPanel`
+  presentation. Exact descriptor hash, quantity, role, safety class, display
+  group, anchor, raw-label exclusion, and observational/no-control boundaries
+  are pinned.
+- Native Windows evidence for the two F35 files: **9 passed**; Ruff
+  check/format and `git diff --check` passed. Independent repaired-chain review:
+  **PASS, no P0-P2**. Fake socket replaces only OS transport, which D7.4 covers
+  separately with real localhost lifecycle. Mock TCP, real hardware, and
+  Windows ONEDIR/frozen evidence remain open; rendered report channel content is
+  not claimed beyond the proven replay-to-projection/binding semantics.

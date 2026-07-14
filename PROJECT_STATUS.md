@@ -2,12 +2,12 @@
 
 **Дата:** 2026-07-14 *(release baseline v0.64.1 + active pre-lab campaign note)*
 **Релизная ветка:** master
-**Активная campaign-ветка:** `feat/montana-phase-a` (текущий remote candidate `dc06892`; следующий exact-SHA candidate готовится локально)
+**Активная campaign-ветка:** `feat/montana-phase-a` (последний recorded exact-SHA checkpoint `cd208a2`)
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
 **CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
-**CI активного кандидата:** OPEN — sharded exact-SHA run `29295156595` для `dc06892` завершён: core/gui PASS на Windows и Ubuntu; agents/remaining FAIL выявили Windows durability-контракт periodic state, небезопасный SQLite runtime Ubuntu и D7 import allowlist. Исправления находятся в reviewed local slices; новый exact-SHA run ещё не запущен. Исторический зелёный v0.64 не переносится на feature-ветку; гейт закроется только после PASS всех Windows + Ubuntu jobs на одном финальном SHA.
+**CI recorded checkpoint:** PASS — sharded exact-SHA run `29321460151` для `cd208a2` завершён зелёным: agents/core/GUI/remaining PASS на Windows и Ubuntu. Safe SQLite verification прошла во всех jobs; lint и requirements-lock drift checks прошли в обоих remaining jobs. Каждый более новый candidate требует свой exact-SHA eight-job PASS. Это не закрывает frozen-build, soak-duration, physical-hardware, F35 frozen-packaging или F36 production-activation gates.
 **Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
 После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
 F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
@@ -174,8 +174,11 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    instrument-health presentation now attributes cards only from authoritative
    connected descriptors. D7.4 proves real-localhost descriptor ingress,
    restart invalidation ordering и shutdown/rebind on native Windows and WSL.
-   Открыты specialized shell-routing heuristics, Windows ONEDIR evidence и
-   полный acquisition-to-health-display e2e proof.
+   Software reference-extension e2e proof замыкает один
+   scheduler-produced artifact через persistence/live wire,
+   replay/report projection, real shell dispatch и instrument-health display.
+   Открыты specialized shell-routing heuristics и Windows ONEDIR/frozen
+   evidence; mock TCP не закрывает physical/hardware gate.
 4. F36: committed foundation включает wire envelope, durable revision
    allocator, typed authority receipts, ordered composer, replay-compatible
    publisher, отдельный snapshot SUB, один GUI-thread Store, pure replay session
@@ -190,12 +193,13 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    запуск со скриншотами каждого достижимого экрана и material state. Visual QA
    проверяет operator scenarios, clipping, focus, stale/disconnected truth,
    non-color cues и соответствие design system; одни скриншоты gate не закрывают.
-5. Exact-SHA CI run `29309849548` для `95b712f`: все четыре Ubuntu jobs и
-   Windows agents/core/GUI PASS. Windows remaining дошёл до 1 883 passed /
-   93 skipped и выявил broken-symlink sentinel identity gap; reviewed post-open
-   path/descriptor fence ожидает новый exact-SHA run. Ubuntu + Windows должны
-   стать зелёными на одном финальном кандидате; зелёный релизный v0.64 — только
-   историческая baseline evidence.
+5. Recorded exact-SHA CI checkpoint `29321460151` для `cd208a2`: все восемь
+   agents/core/GUI/remaining jobs PASS на Ubuntu и Windows. Safe SQLite
+   verification прошла во всех jobs; lint и requirements-lock drift
+   checks PASS в обоих remaining jobs. Каждый новый candidate требует
+   свой exact-SHA eight-job PASS;
+   frozen-build, soak-duration, physical-hardware, F35 frozen-packaging и F36
+   production-activation gates остаются открыты.
 6. Готовые точные Windows/physical evidence procedures с thresholds,
    abort/rollback и ожидаемыми артефактами.
 

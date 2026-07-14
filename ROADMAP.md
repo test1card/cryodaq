@@ -63,7 +63,7 @@
 | F32 | Knowledge-base indexer | ✅ DONE (v0.54.0; integration hardening v0.55.x) | M | M |
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
-| F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, generic GUI, real-localhost descriptor-ingress lifecycle, conformance/reference driver, and exact packaging foundations committed; full acquisition-to-display and frozen-build extension proof open | L | H |
+| F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, generic GUI, real-localhost lifecycle, conformance/reference driver, and continuous acquisition-to-display software proof committed; specialized shell routing and frozen-build extension proof open | L | H |
 | F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot plane, live safety authority, and fail-conservative recording/integrity projections committed; production activation and atomic shell cutover open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
@@ -138,7 +138,7 @@ The irreducible hardware milestone then remains:
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
-### Active evidence checkpoint — 2026-07-13
+### Active evidence checkpoint — 2026-07-14
 
 This is feature-branch evidence, not shipped history and not a release claim:
 
@@ -149,12 +149,13 @@ This is feature-branch evidence, not shipped history and not a release claim:
   remains in active implementation for the launcher-owned socketpair,
   bounded framed transfer, durable runner ledger, and ACK authority. The
   short and 72-hour soaks and real-Windows ONEDIR evidence remain open.
-- GitHub CI was historically green for the v0.64 release line on Ubuntu and
-  Windows. Exact-SHA run `29309849548` at `95b712f` passed all four Ubuntu jobs
-  plus Windows agents, core, and GUI. Windows remaining reached 1,883 passed /
-  93 skipped, then exposed a broken-symlink sentinel identity gap. The reviewed
-  post-open path/descriptor fence is pending a new exact-SHA run. This remains
-  an open CI gate, not a green candidate claim.
+- Recorded exact-SHA GitHub Actions checkpoint `29321460151` at `cd208a2`
+  passed all eight Ubuntu/Windows agents, core, GUI, and remaining
+  jobs. Safe SQLite verification passed in every job; both remaining jobs also
+  passed lint and requirements-lock drift checks. Any newer candidate requires
+  its own exact-SHA eight-job pass before acceptance. This checkpoint does not
+  close frozen-build, soak-duration, physical-hardware, F35 frozen-packaging,
+  or F36 production-activation gates.
 - The bounded persistence spool is committed with FIFO, physical-cap and
   integrity gates, receipt-authorized acknowledgement, cancellation, and
   close settlement.
@@ -168,8 +169,10 @@ This is feature-branch evidence, not shipped history and not a release claim:
   without vendor/channel-name identity fallback. D7.4 proves descriptor-qualified
   ingress, launcher restart invalidation ordering, and shutdown/rebind over real
   localhost ZeroMQ on native Windows and WSL source runs. Specialized shell
-  routing heuristics, real-Windows ONEDIR/frozen packaging, and one complete
-  acquisition-to-health-display reference-extension proof remain open.
+  routing heuristics and real-Windows ONEDIR/frozen packaging remain open. One
+  scheduler-produced reference-extension artifact is now proven continuously
+  through persistence/live wire, replay/report projection, real shell dispatch,
+  and instrument-health display; mock TCP does not close physical evidence.
 - F36 now has committed foundations for the snapshot wire contract,
   durable revision allocation, typed common-cut authority receipts, ordered
   composition, publication through the existing publisher, two-SUB bounded
@@ -204,13 +207,16 @@ complete on the active branch. D7 descriptor-governed generic instrument-health
 presentation is complete without vendor/channel-name identity fallback. D7.4
 proves the descriptor-qualified ingress, restart invalidation ordering, and
 shutdown/rebind lifecycle over real localhost ZeroMQ on native Windows and WSL.
-Specialized shell routing heuristics and the full end-to-end gate remain open.
+The software reference-extension end-to-end gate is complete: one
+scheduler-produced artifact is followed through persistence/live wire,
+replay/report projection, real shell dispatch, and instrument-health display.
+Specialized shell routing heuristics remain open.
 The reusable passive
 conformance harness, ASC reference TCP driver, registry adoption, and exact
-frozen-driver allowlist are also committed foundations; their real-Windows
-frozen packaging and full acquisition -> persistence -> live wire ->
-replay/report -> instrument-health-display end-to-end proof remain open. F35
-therefore remains partial without understating the completed foundations.
+frozen-driver allowlist are also committed foundations; real-Windows frozen
+packaging remains open. Mock TCP/source evidence does not close hardware or
+physical gates. F35 therefore remains partial without understating the
+completed software foundations.
 
 Scope and acceptance criteria:
 
@@ -431,16 +437,16 @@ safety boundaries.
   model and explicit go/no-go before implementation.
 - **F15 — Linux packaging.** Deployment convenience after lab verification.
 - **F16 — Plugin SDK/examples.** Documentation/examples work, not core runtime.
-- **F35 is not deferred.** Implement it after the current lab-readiness
-  integration/frozen gates and before calling CryoDAQ a multi-lab ASC
-  platform or adding another safety-critical source family.
+- **F35 is not deferred.** Complete its frozen-build evidence before calling
+  CryoDAQ a multi-lab ASC platform or adding another safety-critical source
+  family.
 - **F36 is not deferred.** Complete its safe software and operator-scenario
   gates before laboratory validation; keep its hazardous-control non-goals and
   physical acceptance gates open.
-- **F18 — CI/CD residuals.** The matrix and green full suite are historical
-  v0.64 release-line evidence only; the active candidate exact-SHA CI remains
-  open. Coverage publishing, release automation, and binary artifacts remain
-  optional.
+- **F18 — CI/CD residuals.** Recorded exact-SHA run `29321460151` closes the
+  Ubuntu/Windows matrix gate at checkpoint `cd208a2`; every newer candidate
+  still requires its own eight-job pass. Coverage publishing, release
+  automation, and binary artifacts remain optional.
 - **F-Y — Diagnostic mode rework.** Re-spec only if lab operation produces
   concrete diagnostic decisions that the current alarm/overlay path cannot
   support.

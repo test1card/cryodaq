@@ -27,12 +27,18 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import os
 import textwrap
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 
 import cryodaq.engine as engine
 from cryodaq.channels.descriptors import (
@@ -54,6 +60,7 @@ from cryodaq.drivers.passive_extensions.asc_reference_tcp import (
     ASCReferenceChannel,
     ASCReferenceTCP,
 )
+from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.zmq_client import ReadingWithDescriptor, ZmqBridge
 from cryodaq.reporting.data import ReportDataset
 from cryodaq.reporting.descriptor_projection import (
@@ -64,6 +71,7 @@ from cryodaq.reporting.generator import ReportGenerator
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.broker_replay import (
     DescriptorReplayBatch,
+    DescriptorReplayReader,
     DescriptorReplayReading,
 )
 from cryodaq.storage.channel_descriptors import (
@@ -180,6 +188,14 @@ def _poll_gui_descriptor_readings(
         if not readings:
             time.sleep(0.01)
     return readings
+
+
+def _stop_window_timers(window: MainWindowV2) -> None:
+    for timer in window.findChildren(QTimer):
+        try:
+            timer.stop()
+        except RuntimeError:
+            pass
 
 
 def test_engine_opts_in_only_the_zmq_publisher_for_descriptor_envelopes() -> None:
@@ -313,6 +329,57 @@ async def test_f35_full_chain_scheduler_drives_canonical_identity_through_d4(
     assert gui_readings[0].descriptor.instrument_id == published_reading.instrument_id
     assert gui_readings[0].descriptor.unit == published_reading.unit
     assert bridge.descriptor_malformed_count == 0
+
+    # --- LEG 5: replay the exact SQLite artifact produced above ---
+    reader = DescriptorReplayReader(tmp_path)
+    replay_batch = await reader.read_window(
+        start=published_reading.timestamp - timedelta(seconds=1),
+        end=published_reading.timestamp + timedelta(seconds=1),
+        channels=(CANONICAL_CHANNEL_ID,),
+    )
+    assert replay_batch.complete is True
+    assert len(replay_batch.readings) == 1
+    replayed = replay_batch.readings[0]
+    assert replayed.channel_id == CANONICAL_CHANNEL_ID
+    assert replayed.descriptor.descriptor_hash == descriptor.descriptor_hash
+    assert replayed.descriptor.quantity == ChannelQuantity.TEMPERATURE.value
+    assert replayed.descriptor.role == ChannelRole.PRIMARY_MEASUREMENT.value
+    assert replayed.descriptor.safety_class == ChannelSafetyClass.OBSERVATIONAL.value
+    assert replayed.descriptor.display_group == descriptor.display_group
+
+    # --- LEG 6: report from that same replay batch ---
+    projection = project_descriptor_replay(replay_batch)
+    dataset = ReportDataset(metadata={"experiment": {"custom_fields": {}}, "template": {}})
+    bound = bind_descriptor_projection(dataset, projection)
+    assert bound.descriptor_complete is True
+    report_root = tmp_path / "continuous-report"
+    document = ReportGenerator(report_root)._build_document(
+        bound,
+        report_root / "assets",
+        ("experiment_metadata_section",),
+    )
+    document_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert RAW_EMITTED_LABEL not in document_text
+
+    # --- LEG 7: real shell dispatch and instrument-health presentation ---
+    app = QApplication.instance() or QApplication([])
+    window = MainWindowV2()
+    try:
+        window._ensure_overlay("instruments")
+        window.dispatch_qualified_reading(gui_readings[0])
+        app.processEvents()
+        assert set(window._instrument_panel._cards) == {INSTRUMENT_ID}
+        card = window._instrument_panel._cards[INSTRUMENT_ID]
+        assert card._name_label.text() == descriptor.instrument_id
+        assert card.total_readings == 1
+        view = window._descriptor_store.view(CANONICAL_CHANNEL_ID)
+        assert view is not None
+        assert view.descriptor.anchor == descriptor.anchor
+    finally:
+        _stop_window_timers(window)
+
+    assert replay_batch.grants_control_authority is False
+    assert projection.grants_control_authority is False
 
 
 # ===================================================================

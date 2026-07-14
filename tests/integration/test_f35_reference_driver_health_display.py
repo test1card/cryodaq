@@ -1,23 +1,24 @@
-"""F35.6 acceptance leg: ASC reference driver -> instrument-health display.
+"""F35.6 focused leg: ASC reference driver -> instrument-health display.
 
 Drives ``ASCReferenceTCP(mock=True)`` -- the canonical passive reference
 driver -- through the REAL D7 instrument-health presentation
 (``DescriptorStore`` -> ``InstrumentsPanel`` card grid; commit dcf1a82,
 "Remove inferred instrument identity from GUI") and proves the descriptor
-ANCHOR ``(channel_id, instrument_id, source_key)`` is the sole identity
-authority for instrument health:
+ANCHOR ``(channel_id, instrument_id, source_key)`` is accepted by the
+descriptor-authoritative presentation path:
 
-- Identity + health are attributed from the descriptor anchor, NEVER from
-  channel-name (Т1..Т24, T-prefix), unit ("K"), or vendor/model substrings.
+- Identity/card attribution comes from the descriptor anchor, NEVER from
+  channel-name (Т1..Т24, T-prefix), unit ("K"), or vendor/model substrings;
+  reading status and liveness determine health.
   The canonical id "stage_temp" defeats every naming heuristic.
 - A reading WITHOUT an authoritative descriptor is stale/unavailable --
   never optimistic green ("no-descriptor -> stale-not-green").
 - No control authority is granted anywhere on the presentation path
   (``grants_control_authority is False``).
 
-LEGS 1-6 (acquisition -> bind -> persistence -> D4 wire envelope -> replay
--> report) live in ``test_f35_reference_driver_e2e.py``; this is the
-instrument-health-display leg required by roadmap §6.
+The continuous acquisition -> persistence -> wire -> replay -> report -> shell
+display chain lives in ``test_f35_reference_driver_e2e.py``. This file keeps
+focused positive/negative presentation regressions around that acceptance gate.
 """
 
 from __future__ import annotations
@@ -144,21 +145,22 @@ async def _canonical_bound_reading() -> tuple[Reading, ChannelDescriptorV1]:
 
 
 # ===================================================================
-# LEG 7a: descriptor anchor -> healthy green card (anti-heuristic)
+# LEG 7a: descriptor anchor -> attributed card (anti-heuristic)
 # ===================================================================
 
 
 async def test_f35_health_display_attributes_identity_from_descriptor_anchor(
     app: QApplication,
 ) -> None:
-    """LEG 7a: instrument identity + health in the D7 panel are attributed
-    from the descriptor ANCHOR ``(channel_id, instrument_id, source_key)``,
-    never from channel-name/unit/vendor substrings.
+    """LEG 7a: identity/card attribution in the D7 panel comes from the
+    descriptor ANCHOR ``(channel_id, instrument_id, source_key)``, never from
+    channel-name/unit/vendor substrings; reading status/liveness drive health.
 
     The canonical ``channel_id`` ``"stage_temp"`` has no Т/T prefix and no
     ``/smua/`` substring; the unit is ``"K"``.  Any naming heuristic would
     fail to identify this channel -- only the descriptor anchor can, and
-    only an AUTHORITATIVE descriptor yields a healthy (green) card.
+    only an AUTHORITATIVE descriptor yields an attributed card. The reading's
+    status and liveness determine the card's health colour.
     """
 
     reading, descriptor = await _canonical_bound_reading()
@@ -191,8 +193,8 @@ async def test_f35_health_display_attributes_identity_from_descriptor_anchor(
         card = panel._cards[INSTRUMENT_ID]
         assert card._name_label.text() == INSTRUMENT_ID
 
-        # Health is green ONLY because an authoritative descriptor anchored
-        # the identity.  The raw label never leaks into the card.
+        # The descriptor authorizes attribution; this current, OK reading then
+        # determines the green health state. The raw label never leaks.
         assert card.indicator_color == theme.STATUS_OK
         assert card.total_readings == 1
 
@@ -265,9 +267,8 @@ async def test_f35_health_display_reading_without_descriptor_is_stale_not_green(
 
 def test_f35_health_display_descriptor_anchor_is_exact_tuple() -> None:
     """Structural pin: the descriptor anchor is the exact identity tuple
-    ``(channel_id, instrument_id, source_key)`` -- the only basis the D7
-    presentation may attribute health from.  No name/unit/vendor field
-    appears in the anchor."""
+    ``(channel_id, instrument_id, source_key)`` consumed by the D7 presentation
+    for identity. No name/unit/vendor field appears in the anchor."""
 
     descriptor = _descriptor()
     assert descriptor.anchor == (
