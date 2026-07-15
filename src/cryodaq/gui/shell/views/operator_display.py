@@ -89,6 +89,7 @@ class _DisplayPlan:
     expected_failed_closed: bool
     expected_presentation: tuple[object, ...]
     attention_height: int
+    attention_visible: bool
 
 
 class _ComposedSnapshotCard(SnapshotCardShell):
@@ -287,6 +288,7 @@ class OperatorDisplay(QScrollArea):
         attention_list = self._sections["attention"].attention_list
         assert attention_list is not None
         attention_list.setFixedHeight(theme.ROW_HEIGHT * 2 + attention_list.frameWidth() * 2)
+        attention_list.setVisible(False)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -414,6 +416,7 @@ class OperatorDisplay(QScrollArea):
                 theme.ROW_HEIGHT * 2 * max(1, min(ATTENTION_VISIBLE_ROWS, len(projected_attention.items)))
                 + attention_list.frameWidth() * 2
             ),
+            attention_visible=bool(projected_attention.items),
         )
 
     def _can_commit(self, plan: _DisplayPlan) -> None:
@@ -440,6 +443,7 @@ class OperatorDisplay(QScrollArea):
             attention_list = self._sections["attention"].attention_list
             assert attention_list is not None
             attention_list.setFixedHeight(plan.attention_height)
+            attention_list.setVisible(plan.attention_visible)
             set_prepared_label(self.provenance_label, plan.provenance)
             set_prepared_label(self.banner_label, plan.banner_text)
             if plan.banner_state is None:
@@ -499,6 +503,9 @@ class OperatorDisplay(QScrollArea):
             or (plan.banner_state is not None and self.banner_status.state is not plan.banner_state)
             or self.next_action.intent != plan.next_intent
             or self.accessibleDescription() != plan.accessible_description
+            or self._sections["attention"].attention_list is None
+            or (not self._sections["attention"].attention_list.isHidden()) != plan.attention_visible
+            or self._sections["attention"].attention_list.height() != plan.attention_height
         ):
             raise RuntimeError("operator display root coherence failed after commit")
 
@@ -539,6 +546,10 @@ class OperatorDisplay(QScrollArea):
             self.banner_label.accessibleDescription(),
             self.next_action.intent,
             self.accessibleDescription(),
+            (
+                not self._sections["attention"].attention_list.isHidden(),
+                self._sections["attention"].attention_list.height(),
+            ),
             tuple(
                 (
                     name,

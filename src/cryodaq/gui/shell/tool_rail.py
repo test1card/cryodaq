@@ -114,7 +114,7 @@ _ICONS_DIR = Path(__file__).parent.parent / "resources" / "icons"
 
 # (name, icon_filename, label) — order matches wireframe section 4
 _TOP_ITEMS = [
-    ("home", "home.svg", "Дашборд"),
+    ("home", "home.svg", "Сводка смены"),
 ]
 _NEW_ITEMS = [
     ("new_experiment", "plus.svg", "Новый эксперимент"),
@@ -246,8 +246,7 @@ class ToolRail(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
         self.setStyleSheet(
-            f"#ToolRail {{ background-color: {theme.SURFACE_PANEL}; "
-            f"border-right: 1px solid {theme.BORDER_SUBTLE}; }}"
+            f"#ToolRail {{ background-color: {theme.SURFACE_PANEL}; border-right: 1px solid {theme.BORDER_SUBTLE}; }}"
         )
 
         self._buttons: dict[str, ToolRailButton] = {}

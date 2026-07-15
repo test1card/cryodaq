@@ -364,12 +364,13 @@ def test_stale_threshold_is_exact_finite_and_positive(qapp, threshold: Any) -> N
         OperatorSnapshotIngressOwner(_Bridge(), stale_after_s=threshold)
 
 
-def test_app_composition_root_has_one_owner_and_no_visible_shell_cutover() -> None:
+def test_app_composition_root_has_one_owner_and_visible_pod_cutover() -> None:
     root = Path(__file__).resolve().parents[3]
     app_path = root / "src/cryodaq/gui/app.py"
     owner_path = root / "src/cryodaq/gui/state/operator_snapshot_ingress.py"
-    app_tree = ast.parse(app_path.read_text())
-    owner_tree = ast.parse(owner_path.read_text())
+    app_source = app_path.read_text(encoding="utf-8")
+    app_tree = ast.parse(app_source)
+    owner_tree = ast.parse(owner_path.read_text(encoding="utf-8"))
 
     constructions = [
         node
@@ -379,7 +380,8 @@ def test_app_composition_root_has_one_owner_and_no_visible_shell_cutover() -> No
         and node.func.id == "OperatorSnapshotIngressOwner"
     ]
     assert len(constructions) == 1
-    assert "OperatorSnapshotStore" not in app_path.read_text()
+    assert "OperatorSnapshotStore" not in app_source
+    assert "snapshot_ingress.snapshot_changed.connect(window.render_operator_snapshot)" in app_source
     imports = {
         node.module for node in ast.walk(owner_tree) if isinstance(node, ast.ImportFrom) and node.module is not None
     }

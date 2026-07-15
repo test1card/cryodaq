@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
+from cryodaq.gui.state.operator_snapshot_ingress import OperatorSnapshotIngressOwner
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 
@@ -1661,6 +1662,12 @@ class LauncherWindow(QMainWindow):
             embedded=True,
             replay_mode=self._replay_source is not None,
         )
+        self._snapshot_ingress = OperatorSnapshotIngressOwner(
+            self._bridge,
+            parent=self._main_window,
+        )
+        self._snapshot_ingress.snapshot_changed.connect(self._main_window.render_operator_snapshot)
+        self._snapshot_ingress.start()
         # Phase UI-1 v2: shell v2 has its own BottomStatusBar; hide
         # launcher's status bar entirely.
         self.statusBar().setVisible(False)
@@ -2012,6 +2019,9 @@ class LauncherWindow(QMainWindow):
         """Poll readings from ZMQ bridge subprocess and dispatch to GUI."""
         for qualified in self._bridge.poll_readings_with_descriptor():
             self._on_reading_qt(qualified)
+        snapshot_ingress = getattr(self, "_snapshot_ingress", None)
+        if snapshot_ingress is not None:
+            snapshot_ingress.pump()
 
         unhealthy = not self._bridge.is_healthy()
         # data_flow_stalled only matters when heartbeats are otherwise healthy
@@ -2081,6 +2091,9 @@ class LauncherWindow(QMainWindow):
         """Invalidate descriptor authority before transport or engine turnover."""
         if self._main_window is not None:
             self._main_window.invalidate_descriptor_transport()
+        snapshot_ingress = getattr(self, "_snapshot_ingress", None)
+        if snapshot_ingress is not None:
+            snapshot_ingress.invalidate_transport()
 
     @Slot()
     def _on_open_web(self) -> None:
@@ -2161,6 +2174,9 @@ class LauncherWindow(QMainWindow):
                 if first_error is None:
                     first_error = exc
 
+        snapshot_ingress = getattr(self, "_snapshot_ingress", None)
+        if snapshot_ingress is not None:
+            attempt("operator_snapshot_ingress", snapshot_ingress.stop)
         attempt("assistant", self._stop_assistant)
         soak_bridge = getattr(self, "_soak_bridge_handshake", None)
         if soak_bridge is not None:

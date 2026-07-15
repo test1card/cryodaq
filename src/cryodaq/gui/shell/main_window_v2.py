@@ -54,6 +54,7 @@ from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
+from cryodaq.gui.shell.views.operator_display import OperatorDisplay
 from cryodaq.gui.state.descriptor_store import (
     DescriptorStore,
     DescriptorView,
@@ -172,12 +173,13 @@ class MainWindowV2(QMainWindow):
     }
 
     def _build_ui(self) -> None:
-        # Eager: dashboard (always visible) and AlarmPanel (feeds watch
-        # bar count). All other overlays are lazy via _OVERLAY_FACTORIES.
-        # DashboardView is the home surface (5-zone dashboard). The
-        # _overview_panel attribute name is retained for call-site stability.
+        # Eager: the one-cut operator display is home. The legacy dashboard
+        # remains a read-model consumer for existing specialist flows while
+        # operators reach those panels as drill-down destinations.
         self._overview_panel = DashboardView(self._channel_mgr)
+        self._overview_panel.setParent(self)
         self._overview_panel.set_read_only(self._replay_mode)
+        self._operator_display = OperatorDisplay()
         self._alarm_panel = AlarmPanel()
         self._alarm_panel.set_read_only(self._replay_mode)
         # Lazy panel slots — populated on first overlay open
@@ -215,8 +217,8 @@ class MainWindowV2(QMainWindow):
         self._bottom_bar = BottomStatusBar()
         self._overlay = OverlayContainer()
 
-        # Register dashboard immediately
-        self._overlay.register("home", self._overview_panel)
+        # F36: home consumes only complete immutable operator snapshots.
+        self._overlay.register("home", self._operator_display)
         # AlarmPanel needs a stack page but is not visible by default
         self._overlay.register("alarms", self._alarm_panel)
         self._overlay.show_dashboard()
@@ -224,6 +226,7 @@ class MainWindowV2(QMainWindow):
 
         # Wire signals
         self._tool_rail.tool_clicked.connect(self._on_tool_clicked)
+        self._operator_display.route_requested.connect(self._on_tool_clicked)
         self._top_bar.experiment_clicked.connect(self._on_experiment_clicked)
         self._top_bar.alarms_clicked.connect(lambda: self._on_tool_clicked("alarms"))
 
@@ -259,6 +262,11 @@ class MainWindowV2(QMainWindow):
     # ------------------------------------------------------------------
     # Tool rail handler
     # ------------------------------------------------------------------
+
+    @Slot(object)
+    def render_operator_snapshot(self, snapshot: object) -> None:
+        """Present one ingress-qualified cut through the POD transaction."""
+        self._operator_display.render(snapshot)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:

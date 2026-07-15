@@ -2,9 +2,9 @@
 title: Primary Operator Display Composition
 keywords: F36, POD, shift briefing, atomic composition, attention, replay, navigation
 applies_to: composing all eight operator-snapshot summaries into the Primary Operating Display
-status: implemented composition; shell and operator evidence open
+status: implemented composition and shell cutover; operator evidence open
 implements: src/cryodaq/gui/shell/views/operator_display.py
-last_updated: 2026-07-11
+last_updated: 2026-07-15
 references: patterns/operator-snapshot-presentation.md, patterns/information-hierarchy.md, accessibility/keyboard-navigation.md, governance/performance-budget.md
 ---
 
@@ -86,8 +86,10 @@ bounded detail. The viewport always fits at least the complete most-urgent
 row, shows at most four complete rows, and scrolls for items five through
 eight. The adjacent count states both projected and total queue size.
 
-Detail is never removed merely to reduce card height. Full hostile text remains
-available through the atom's accessible text and safe tooltip boundary.
+An empty queue collapses its list viewport while the backend summary and explicit
+zero-item fact remain visible; the POD never reserves a blank list void. Detail is
+never removed merely to reduce card height. Full hostile text remains available
+through the atom's accessible text and safe tooltip boundary.
 
 ## Navigation, replay, and handover
 
@@ -154,6 +156,11 @@ selected only when the accepted attention summary includes
 
 ## Changelog
 
+- 2026-07-15: Made the POD the MainWindowV2 home surface and wired the
+  standalone and embedded-launcher snapshot ingress owners directly to its
+  one-cut render slot; specialist panels remain navigation-only drill-downs.
+  Empty attention queues now collapse their viewport atomically without hiding
+  the backend summary or explicit zero-item fact.
 - 2026-07-11 (v1.2.0): Initial composed POD contract with root ownership,
   post-commit coherence, irreversible failure barrier, complete attention-row
   geometry, honest scenario scope, and explicit replay shell-cutover gate.

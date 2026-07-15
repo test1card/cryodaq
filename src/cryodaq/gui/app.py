@@ -265,6 +265,7 @@ def main() -> None:
     # --- MainWindow ---
     window = MainWindow(bridge=bridge)
     snapshot_ingress = OperatorSnapshotIngressOwner(bridge, parent=window)
+    snapshot_ingress.snapshot_changed.connect(window.render_operator_snapshot)
     snapshot_ingress.start()
     window.show()
 
