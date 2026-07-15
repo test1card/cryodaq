@@ -1410,62 +1410,50 @@ class _DeliveryEvidenceAuthority:
         raise _RunnerFoundationError("delivery evidence authority cannot be caller-constructed")
 
 
-class _IntegratedRunAuthority:
-    __slots__ = ()
-
-    def __new__(cls) -> _IntegratedRunAuthority:
-        del cls
-        raise _RunnerFoundationError("integrated run authority cannot be caller-constructed")
+@dataclass(frozen=True, slots=True)
+class _OwnedRunResult:
+    pre_ledger_record: dict[str, object]
+    pre_state_payload: dict[str, object]
+    pre_artifact_bytes: bytes
+    pre_assistant_observation: _AssistantProcessObservation
+    post_ledger_record: dict[str, object]
+    post_state_payload: dict[str, object]
+    post_artifact_bytes: bytes
+    post_assistant_observation: _AssistantProcessObservation
+    expected_launcher_pid: int
+    ledger_records: tuple[dict[str, object], ...]
+    observations: tuple[Any, ...]
+    survivors: tuple[Any, ...]
+    graceful: bool
+    shutdown_elapsed: float
+    collector: _CleanShaCollector
 
 
 class _DeliveryEvidenceRegistry:
     """One-shot Evidence-bound records created by the integrated owner."""
 
-    __slots__ = ("_records", "_runs")
+    __slots__ = ("_records",)
 
     def __init__(self) -> None:
         self._records: dict[int, tuple[_DeliveryEvidenceAuthority, Any, dict[str, object]]] = {}
-        self._runs: dict[int, tuple[_IntegratedRunAuthority, Any, Any]] = {}
 
-    def _begin_runner(self, runner: Any, evidence: Any) -> _IntegratedRunAuthority:
+    def run(self, runner: Any, evidence: Any) -> None:
         if type(runner) is not _PosixSoakRunner or runner._used is not True:
             raise _RunnerFoundationError("delivery run is not owned by the active runner")
-        authority = object.__new__(_IntegratedRunAuthority)
-        self._runs[id(authority)] = (authority, runner, evidence)
-        return authority
-
-    def _complete_runner(
-        self,
-        run_authority: object,
-        runner: Any,
-        evidence: Any,
-        *,
-        pre_ledger_record: dict[str, object],
-        pre_state_payload: dict[str, object],
-        pre_artifact_bytes: bytes,
-        pre_assistant_observation: _AssistantProcessObservation,
-        post_ledger_record: dict[str, object],
-        post_state_payload: dict[str, object],
-        post_artifact_bytes: bytes,
-        post_assistant_observation: _AssistantProcessObservation,
-        expected_launcher_pid: int,
-        ledger_records: tuple[dict[str, object], ...],
-    ) -> None:
-        run = self._runs.get(id(run_authority))
-        if run is None or run[0] is not run_authority or run[1] is not runner or run[2] is not evidence:
-            raise _RunnerFoundationError("integrated run authority is unregistered, spent, or rebound")
-        del self._runs[id(run_authority)]
+        result = _PosixSoakRunner._run_owned(runner, evidence)
+        if type(result) is not _OwnedRunResult:
+            raise _RunnerFoundationError("owned runner returned an invalid private result")
         proof = _validate_pre_post_receipts(
-            pre_ledger_record=pre_ledger_record,
-            pre_state_payload=pre_state_payload,
-            pre_artifact_bytes=pre_artifact_bytes,
-            pre_assistant_observation=pre_assistant_observation,
-            post_ledger_record=post_ledger_record,
-            post_state_payload=post_state_payload,
-            post_artifact_bytes=post_artifact_bytes,
-            post_assistant_observation=post_assistant_observation,
-            expected_launcher_pid=expected_launcher_pid,
-            ledger_records=ledger_records,
+            pre_ledger_record=result.pre_ledger_record,
+            pre_state_payload=result.pre_state_payload,
+            pre_artifact_bytes=result.pre_artifact_bytes,
+            pre_assistant_observation=result.pre_assistant_observation,
+            post_ledger_record=result.post_ledger_record,
+            post_state_payload=result.post_state_payload,
+            post_artifact_bytes=result.post_artifact_bytes,
+            post_assistant_observation=result.post_assistant_observation,
+            expected_launcher_pid=result.expected_launcher_pid,
+            ledger_records=result.ledger_records,
         )
 
         def encode(item: _JoinedReceiptEvidence) -> dict[str, object]:
@@ -1499,6 +1487,7 @@ class _DeliveryEvidenceRegistry:
         except BaseException:
             self._records.pop(id(authority), None)
             raise
+        _PosixSoakRunner._finish_owned(runner, evidence, result)
 
     def consume(self, authority: object, evidence: Any) -> dict[str, object]:
         record = self._records.get(id(authority))
@@ -1506,11 +1495,6 @@ class _DeliveryEvidenceRegistry:
             raise _RunnerFoundationError("delivery authority is unregistered, spent, or bound to another Evidence")
         del self._records[id(authority)]
         return record[2]
-
-    def _abandon_runner(self, run_authority: object) -> None:
-        record = self._runs.get(id(run_authority))
-        if record is not None and record[0] is run_authority:
-            del self._runs[id(run_authority)]
 
 
 _DELIVERY_EVIDENCE = _DeliveryEvidenceRegistry()
@@ -2357,13 +2341,9 @@ class _PosixSoakRunner:
         if type(evidence) is not soak.Evidence:
             raise TypeError("evidence must be the exact Evidence type")
         self._used = True
-        run_authority = _DELIVERY_EVIDENCE._begin_runner(self, evidence)
-        try:
-            self._run_owned(evidence, run_authority)
-        finally:
-            _DELIVERY_EVIDENCE._abandon_runner(run_authority)
+        _DELIVERY_EVIDENCE.run(self, evidence)
 
-    def _run_owned(self, evidence: Any, run_authority: _IntegratedRunAuthority) -> None:
+    def _run_owned(self, evidence: Any) -> _OwnedRunResult:
         """Run, validate, seal, and publish one short-soak terminal result."""
 
         import platform
@@ -2708,10 +2688,8 @@ class _PosixSoakRunner:
             bridge_pipe.close()
 
         collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
-        _DELIVERY_EVIDENCE._complete_runner(
-            run_authority,
-            self,
-            evidence,
+        survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)
+        return _OwnedRunResult(
             pre_ledger_record=receipt_cuts[0][0],
             pre_state_payload=receipt_cuts[0][1],
             pre_artifact_bytes=receipt_cuts[0][2],
@@ -2722,25 +2700,31 @@ class _PosixSoakRunner:
             post_assistant_observation=receipt_cuts[1][3],
             expected_launcher_pid=launcher_identity.pid,
             ledger_records=(receipt_cuts[0][0], receipt_cuts[1][0]),
+            observations=tuple(observations),
+            survivors=tuple(survivors),
+            graceful=graceful,
+            shutdown_elapsed=shutdown_elapsed,
+            collector=collector,
         )
-        survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)
+
+    def _finish_owned(self, evidence: Any, result: _OwnedRunResult) -> None:
         evidence.record_shutdown(
             {
                 "graceful_requested": True,
-                "launcher_exited": graceful,
-                "elapsed_s": shutdown_elapsed,
+                "launcher_exited": result.graceful,
+                "elapsed_s": result.shutdown_elapsed,
                 "observed_identities": [
                     {"pid": item.pid, "started_ns": item.started_ns}
-                    for item in sorted(observations, key=lambda value: (value.pid, value.started_ns))
+                    for item in sorted(result.observations, key=lambda value: (value.pid, value.started_ns))
                 ],
                 "survivors": [
                     {"pid": item.pid, "started_ns": item.started_ns}
-                    for item in sorted(survivors, key=lambda value: (value.pid, value.started_ns))
+                    for item in sorted(result.survivors, key=lambda value: (value.pid, value.started_ns))
                 ],
             }
         )
-        collector.observe(_ShaBoundary.BEFORE_TERMINAL_ACCEPTANCE)
-        _validate_clean_sha_chain(collector.observations)
+        result.collector.observe(_ShaBoundary.BEFORE_TERMINAL_ACCEPTANCE)
+        _validate_clean_sha_chain(result.collector.observations)
         evidence.seal()
         evidence.finish_pass()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -292,10 +293,12 @@ def test_forged_prepost_cannot_mint_delivery_pass(tmp_path: Path) -> None:
     assert not hasattr(runner, "_validate_and_publish_periodic_delivery_result")
     assert not hasattr(runner._DELIVERY_EVIDENCE, "validate_and_issue")
     assert not hasattr(runner._DELIVERY_EVIDENCE, "_register_from_runner")
+    assert not hasattr(runner._DELIVERY_EVIDENCE, "_begin_runner")
+    assert not hasattr(runner._DELIVERY_EVIDENCE, "_complete_runner")
+    assert not hasattr(runner._DELIVERY_EVIDENCE, "_abandon_runner")
 
 
-def test_constructed_delivery_bundle_and_fake_evidence_cannot_persist_pass(tmp_path: Path) -> None:
-    proof = runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
+def test_caller_cannot_mint_without_triggering_owned_execution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     persisted = tmp_path / "periodic-delivery-result.json"
 
     class EvidenceProbe:
@@ -304,7 +307,6 @@ def test_constructed_delivery_bundle_and_fake_evidence_cannot_persist_pass(tmp_p
 
     evidence = EvidenceProbe()
     forged_authority = object.__new__(runner._DeliveryEvidenceAuthority)
-    forged_run_authority = object.__new__(runner._IntegratedRunAuthority)
     owner = runner._PosixSoakRunner()
     owner._used = True
     for candidate_evidence in (evidence, object()):
@@ -312,26 +314,29 @@ def test_constructed_delivery_bundle_and_fake_evidence_cannot_persist_pass(tmp_p
             runner._consume_periodic_delivery_authority(forged_authority, candidate_evidence)
     with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
         runner._consume_periodic_delivery_authority(forged_authority, evidence)
-    with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
-        runner._DELIVERY_EVIDENCE._complete_runner(
-            forged_run_authority,
-            owner,
-            evidence,
-            **_pre_post_kwargs(tmp_path),
-        )
-    valid_authority = runner._DELIVERY_EVIDENCE._begin_runner(owner, evidence)
+    assert tuple(inspect.signature(runner._DELIVERY_EVIDENCE.run).parameters) == ("runner", "evidence")
     with pytest.raises(TypeError, match="unexpected keyword"):
-        runner._DELIVERY_EVIDENCE._complete_runner(  # type: ignore[call-arg]
-            valid_authority,
+        runner._DELIVERY_EVIDENCE.run(  # type: ignore[call-arg]
             owner,
             evidence,
-            proof=proof,
+            result=runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path)),
         )
-    runner._DELIVERY_EVIDENCE._abandon_runner(valid_authority)
+    executions: list[object] = []
+
+    def execution_harness(self: object, candidate: object) -> runner._OwnedRunResult:
+        executions.extend((self, candidate))
+        raise RuntimeError("owned execution reached")
+
+    monkeypatch.setattr(runner._PosixSoakRunner, "_run_owned", execution_harness)
+    with pytest.raises(RuntimeError, match="owned execution reached"):
+        runner._DELIVERY_EVIDENCE.run(owner, evidence)
+    assert executions == [owner, evidence]
     assert not persisted.exists()
 
 
-def test_integrated_owner_issues_one_exact_evidence_bound_terminal_result(tmp_path: Path) -> None:
+def test_integrated_owner_private_execution_harness_issues_one_exact_evidence_bound_terminal_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     accepted: list[dict[str, object]] = []
 
     class EvidenceProbe:
@@ -341,12 +346,35 @@ def test_integrated_owner_issues_one_exact_evidence_bound_terminal_result(tmp_pa
     evidence = EvidenceProbe()
     owner = runner._PosixSoakRunner()
     owner._used = True
-    authority = runner._DELIVERY_EVIDENCE._begin_runner(owner, evidence)
     kwargs = _pre_post_kwargs(tmp_path)
-    runner._DELIVERY_EVIDENCE._complete_runner(authority, owner, evidence, **kwargs)
+    executions: list[tuple[object, object]] = []
+    finalizations: list[tuple[object, object, object]] = []
+
+    class Collector:
+        observations: tuple[object, ...] = ()
+
+    private_result = runner._OwnedRunResult(
+        **kwargs,
+        observations=(),
+        survivors=(),
+        graceful=True,
+        shutdown_elapsed=0.1,
+        collector=Collector(),  # type: ignore[arg-type]
+    )
+
+    def execution_harness(self: object, candidate: object) -> runner._OwnedRunResult:
+        executions.append((self, candidate))
+        return private_result
+
+    def finish_harness(self: object, candidate: object, result: object) -> None:
+        finalizations.append((self, candidate, result))
+
+    monkeypatch.setattr(runner._PosixSoakRunner, "_run_owned", execution_harness)
+    monkeypatch.setattr(runner._PosixSoakRunner, "_finish_owned", finish_harness)
+    runner._DELIVERY_EVIDENCE.run(owner, evidence)
     assert len(accepted) == 1
+    assert executions == [(owner, evidence)]
+    assert finalizations == [(owner, evidence, private_result)]
     assert accepted[0]["status"] == "PASS"
     assert accepted[0]["pre_fault"]["receipt_id"] == "g1:s1"  # type: ignore[index]
     assert accepted[0]["post_fault"]["receipt_id"] == "g2:s1"  # type: ignore[index]
-    with pytest.raises(runner._RunnerFoundationError, match="spent"):
-        runner._DELIVERY_EVIDENCE._complete_runner(authority, owner, evidence, **kwargs)
