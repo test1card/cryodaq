@@ -201,10 +201,10 @@ Batch 6 — accessibility + governance:
 59. **Destructive Dialog default-focus = Cancel** — operator Enter muscle-memory dismisses safely.
 60. **Shift+Enter keyboard alternative for HoldConfirmButton** — full keyboard accessibility without requiring held-key.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in current v3.0.0** — the v2.0.0
+62. **Design system remains flat-token in the current v3.0.x line** — the v2.0.0
     instrument-identity major and v3.0.0 composition-contract major did not
     perform the separately reviewed future three-layer token migration.
-63. **STONE_* remains deprecated/read-only in current v3.0.0** — neither
+63. **STONE_* remains deprecated/read-only in the current v3.0.x line** — neither
     major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
@@ -234,5 +234,6 @@ F36 operator-snapshot additions:
 ## Status
 
 **Design system v3.0.1 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; descriptor-qualified identity, F36 composition, and software POD home cutover are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
-79 rules and the 142-constant runtime inventory are unchanged. Real Windows ONEDIR DPI/NVDA,
-real Windows whole-shell screenshots, operator-performance, and long-session evidence remain open.
+79 rules and the 142-constant runtime inventory are unchanged. Real Windows
+ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
+remain open.

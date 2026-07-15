@@ -20,7 +20,7 @@ Each rule is a thin pointer to the authoritative governance document, because th
 Every new token (color, spacing, typography, radius, layout, icon size) follows the naming patterns, prefix registry, and ALL_CAPS Python-constant convention defined in the canonical governance doc. Deviations require an explicit exception per `governance/contribution.md`.
 
 **Canonical source:** `governance/token-naming.md`. Includes:
-- Flat current architecture (v3.0.0) vs a separately approved future-major three-layer candidate
+- Flat current architecture (v3.0.x) vs a separately approved future-major three-layer candidate
 - Prefix registry (STATUS_*, FONT_*, SPACE_*, etc.)
 - STONE_* legacy alias policy
 - W3C DTCG alignment (future export path)
@@ -44,7 +44,7 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v3.0.0 (corpus-wide informative/beautiful composition gate; flat tokens unchanged).
+**Current version:** v3.0.1 (corpus-wide informative/beautiful composition gate; flat tokens unchanged).
 
 ## RULE-GOV-003
 
@@ -55,7 +55,7 @@ Lifecycle: Active → Deprecated → Removed. Deprecation window is at least one
 **Canonical source:** `governance/deprecation-policy.md`. Includes:
 - Per-artifact deprecation windows (1 version for tokens, 2-3 for components / full rules)
 - Emergency deprecation exception
-- STONE_* legacy lifecycle (deprecated since v1.0.0, still available in v3.0.0, removal only in a separately approved future major)
+- STONE_* legacy lifecycle (deprecated since v1.0.0, still available in v3.0.x, removal only in a separately approved future major)
 - Un-deprecation (reverting deprecations) process
 - What cannot be deprecated (Cyrillic Т, SI units, WCAG AA commitment, persistence-first, TSP-not-SCPI)
 
@@ -75,7 +75,7 @@ Other governance concerns (testing, performance, contribution workflow) are docu
 
 ## Rules applied to themselves
 
-These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v3.0.0 state: all three Active, no pending removals.
+These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v3.0.x state: all three Active, no pending removals.
 
 ## Related rules and patterns
 

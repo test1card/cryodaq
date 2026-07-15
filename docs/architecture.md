@@ -43,11 +43,13 @@ state. Key responsibilities:
 
 ### cryodaq-gui (Qt desktop client)
 
-Connects to the engine via ZMQ subprocess bridge. Restartable without
-stopping data acquisition. Sole surface: `MainWindowV2` — shell chrome
-(TopWatchBar + ToolRail + BottomStatusBar) around a 5-zone dashboard and
-an overlay system. The legacy 10-tab `MainWindow` was retired in
-Phase II.13; there is no v1 fallback.
+Connects to the engine via ZMQ subprocess bridge. Restartable without stopping
+data acquisition. `MainWindowV2` owns one snapshot-ingress composition: the
+Primary Operator Display is the sole home/current-truth surface, while
+specialist functions remain explicit overlays. Ingress drains newest coherent
+revisions into the GUI-thread Store and settles before normal shutdown or theme
+re-exec. The legacy 10-tab `MainWindow` was retired in Phase II.13; there is no
+v1 fallback.
 
 ### cryodaq.web.server (optional FastAPI)
 
@@ -85,6 +87,15 @@ complete cut validates, and sends the cut on the existing PUB socket. Cold or
 disconnected mandatory authorities publish nothing; stale or ambiguous
 persistence publishes explicit `NOT_RECORDING`/unavailable-storage truth. The
 lane has no command, driver, actuator, or fallback-writer capability.
+
+### Source-mode soak execution
+
+The integrated short-soak runner is enabled only for the POSIX source profile.
+Its registry is the sole authority that invokes the exact owned execution path,
+validates the process/artifact/receipt cut, issues and consumes opaque evidence,
+and settles cleanup. Unsupported platforms fail closed. This architecture does
+not itself satisfy the final-SHA 15-minute run, the 12/72-hour duration gates,
+or Windows ONEDIR evidence.
 
 ---
 
@@ -209,8 +220,11 @@ card only while identity is authoritative and transport is connected; a bare
 `Reading.instrument_id`, vendor/model text, channel prefix, or LakeShore
 channel range is never a presentation identity fallback. Missing or refused
 identity remains visible as bounded operator text and grants no control
-authority. Specialized legacy feature routing elsewhere in the shell still
-uses channel/unit adapters and is tracked separately.
+authority. Specialist calibration, conductivity, analytics, Keithley readback,
+pressure, cold-stage, and MultiLine routing likewise consumes authoritative
+descriptor quantity, role, safety class, identity, and display metadata. Bare,
+refused, or capacity-exhausted readings remain visible through generic paths
+but gain no specialist authority.
 
 ---
 

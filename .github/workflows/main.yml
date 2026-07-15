@@ -78,6 +78,10 @@ jobs:
         if: matrix.suite == 'remaining'
         run: ruff check src/ tests/
 
+      - name: Check formatting
+        if: matrix.suite == 'remaining'
+        run: ruff format --check src/ tests/
+
       - name: Check requirements-lock drift
         if: matrix.suite == 'remaining'
         # The frozen Windows build installs transitive deps from

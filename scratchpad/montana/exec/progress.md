@@ -925,3 +925,36 @@ worktree after D7.1 is settled.
   `docs/design-system/GUI_MIGRATION_INVENTORY.md`; every production-visible
   surface starts pending and can move to accepted only with linked scenario,
   accessibility, performance, visual-composition, and truth-semantics evidence.
+
+## 2026-07-15 integrated software readiness checkpoint
+
+- F35 specialist routing is integrated at `abbbdc8`. Calibration,
+  conductivity, analytics, Keithley readback, pressure, cold-stage, and
+  MultiLine dispatch now requires canonical descriptor semantics; bare,
+  refused, and capacity-exhausted readings acquire no specialist authority.
+  The previously reviewed continuous reference-extension chain remains intact.
+- F36 production snapshot publication is integrated at `94296c9`; independent
+  review passed with no P0-P3 findings. The software POD home chain is integrated
+  through `b85c5f5`, `155e3ee`, `2eb5dd3`, and `5935575`; final independent
+  review passed with no P0-P3 findings. Both production launch roots retain one
+  ingress owner, deliver newest coherent cuts to the real POD, and make ingress
+  settlement the first irreversible theme-reexec step. Reviewer evidence was
+  7 focused lifecycle/runtime passes; the pinned integrated Windows rerun was
+  28 passed / 37 deselected, and source-mode 1280x800 visual QA passed. This is
+  software/source evidence, not operator or frozen-build acceptance.
+- H4 source-runner activation is integrated through `9907a84`, `df233ca`, and
+  `b6b5f4d`; final independent review passed with no P0-P3 findings. The registry
+  alone invokes the POSIX short-profile execution, validates the exact joined
+  evidence cut, issues/consumes opaque proof, and settles cleanup. Windows stays
+  fail-closed unsupported for this runner.
+- Final-candidate evidence is pending: do not copy historical counts or CI SHA.
+  The Ubuntu/Windows `remaining` CI jobs now require
+  `ruff format --check src/ tests/`; the first exact local invocation exposed
+  pre-existing formatting debt (326 files would be reformatted, 474 already
+  formatted), so the final CI gate remains honestly red/pending until that
+  separately reviewed mechanical migration lands.
+  A clean final-SHA 15-minute source soak, 12/72-hour duration evidence,
+  real-Windows ONEDIR, all 12 operator scenarios, keyboard/DPI/NVDA,
+  startup/frame/memory/long-session evidence, and every dummy-load,
+  independent-final-element, and physical-laboratory gate remain open until
+  their prescribed evidence exists.

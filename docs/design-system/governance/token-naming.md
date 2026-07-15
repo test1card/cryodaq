@@ -15,7 +15,7 @@ Conventions for naming design tokens — the source-of-truth values that all vis
 
 ## Current state: flat token architecture
 
-CryoDAQ v3.0.0 retains a **flat token structure** — all tokens live as attributes of the `theme` module (`src/cryodaq/gui/theme.py`), named by category + role without intermediate layers:
+CryoDAQ v3.0.x retains a **flat token structure** — all tokens live as attributes of the `theme` module (`src/cryodaq/gui/theme.py`), named by category + role without intermediate layers:
 
 ```python
 # theme.py — current structure
@@ -48,7 +48,7 @@ The UI UX Pro Max skill recommends a three-layer token system (primitive → sem
 └─────────────────────────────────────────┘
 ```
 
-Current v3.0.0 remains single-layer (primitive+semantic collapsed). Any migration requires its own compatibility analysis and an approved major-release plan documented in `governance/deprecation-policy.md`.
+Current v3.0.x remains single-layer (primitive+semantic collapsed). Any migration requires its own compatibility analysis and an approved major-release plan documented in `governance/deprecation-policy.md`.
 
 ## Naming format
 
@@ -172,7 +172,7 @@ GRID_GAP = 8               # BentoGrid inter-tile gap
 
 ## Category prefix registry
 
-Current registered prefixes — every token in `theme.py` belongs to one. Counts reflect the shipped flat-token state of `src/cryodaq/gui/theme.py` in v3.0.0 (verify via the audit script in `governance/testing-strategy.md`).
+Current registered prefixes — every token in `theme.py` belongs to one. Counts reflect the shipped flat-token state of `src/cryodaq/gui/theme.py` in the v3.0.x line (verify via the audit script in `governance/testing-strategy.md`).
 
 ### Root color / role tokens (no prefix)
 
@@ -259,7 +259,7 @@ STONE_900 = FOREGROUND       # alias
 # ... etc
 ```
 
-These remain **deprecated and available in current v3.0.0**. Removal is not part of this composition-contract release and requires a separately approved future major. See `governance/deprecation-policy.md`.
+These remain **deprecated and available in the current v3.0.x line**. Removal is not part of this composition-contract release and requires a separately approved future major. See `governance/deprecation-policy.md`.
 
 Rule: **no new code uses STONE_***. Existing call sites migrate to canonical names during the panel's next modification. External audit flags any new STONE_* reference.
 

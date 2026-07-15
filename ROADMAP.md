@@ -32,7 +32,7 @@ The complete existing GUI corpus is in scope: previously token-compliant
 generic surfaces are not grandfathered. Each touched surface migrates in its
 reviewed slice, and the untouched remainder stays in the canonical enumerated
 `docs/design-system/GUI_MIGRATION_INVENTORY.md` backlog under design-system
-v3.0.0 rather than being silently called complete.
+v3.0.1 rather than being silently called complete.
 
 If reachable production behavior shows that a design-system rule is stale,
 the same reviewed slice corrects the canonical rule and its examples/tests;
@@ -91,8 +91,8 @@ screenshot alone cannot satisfy this gate.
 | F32 | Knowledge-base indexer | ✅ DONE (v0.54.0; integration hardening v0.55.x) | M | M |
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
-| F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, generic GUI, real-localhost lifecycle, conformance/reference driver, and continuous acquisition-to-display software proof committed; specialized shell routing and frozen-build extension proof open | L | H |
-| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — backend snapshot production path and live safety/recording/integrity authority activated; atomic shell cutover and operator gates open | L | H |
+| F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, descriptor-qualified generic and specialist GUI routing, real-localhost lifecycle, conformance/reference driver, and continuous acquisition-to-display software proof committed; real-Windows frozen-build extension proof open | L | H |
+| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — backend snapshot production and software POD home cutover activated; operator, accessibility, performance, ONEDIR, and physical gates open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -162,28 +162,33 @@ The irreducible hardware milestone then remains:
    independent terminal V/I/P + trip-time, and independent final-element /
    common-cause proof remain physical blockers. Phase C stays blocked until
    all are evidenced; see the lab checklist for the full matrix.
-5. Windows frozen-build smoke (`install.bat`, shortcut, launcher).
+5. Windows source-install/shortcut smoke and, separately, a genuine packaged
+   ONEDIR smoke. The editable `install.bat` path cannot close the frozen gate.
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
-### Active evidence checkpoint — 2026-07-14
+### Active evidence checkpoint — 2026-07-15
 
 This is feature-branch evidence, not shipped history and not a release claim:
 
 - The integrated H3/H4 runtime/lifecycle slice is committed at `026bf50`.
   Its detached clean-SHA gate completed with 4,939 passed, 11 skipped, and
   1 deselected. H4 R3a is also committed: periodic delivery now has a
-  provider-neutral receipt contract and durable state-v2 migration. H4 R3b
-  remains in active implementation for the launcher-owned socketpair,
-  bounded framed transfer, durable runner ledger, and ACK authority. The
-  short and 72-hour soaks and real-Windows ONEDIR evidence remain open.
+  provider-neutral receipt contract and durable state-v2 migration. H4 R3b is
+  activated for the POSIX source-mode short profile: the registry alone invokes
+  the exact owned execution path, validates the process/artifact/receipt cut,
+  issues and consumes opaque evidence, and settles cleanup before returning.
+  Windows retains a fail-closed unsupported branch. A clean integrated
+  15-minute run on the final SHA, 12/72-hour duration evidence, and
+  real-Windows ONEDIR evidence remain open.
 - Recorded exact-SHA GitHub Actions checkpoint `29340534592` at `b7b1356`
   passed all eight Ubuntu/Windows agents, core, GUI, and remaining
   jobs. Safe SQLite verification passed in every job; both remaining jobs also
   passed lint and requirements-lock drift checks. Any newer candidate requires
   its own exact-SHA eight-job pass before acceptance. This checkpoint does not
   close frozen-build, soak-duration, physical-hardware, F35 frozen-packaging,
-  or F36 production-activation gates.
+  or F36 operator/accessibility/performance/external gates. Final-candidate
+  exact-SHA CI evidence is pending and must replace this historical checkpoint.
 - The bounded persistence spool is committed with FIFO, physical-cap and
   integrity gates, receipt-authorized acknowledgement, cancellation, and
   close settlement.
@@ -196,8 +201,11 @@ This is feature-branch evidence, not shipped history and not a release claim:
   D7 descriptor-governed generic instrument-health presentation is complete,
   without vendor/channel-name identity fallback. D7.4 proves descriptor-qualified
   ingress, launcher restart invalidation ordering, and shutdown/rebind over real
-  localhost ZeroMQ on native Windows and WSL source runs. Specialized shell
-  routing heuristics and real-Windows ONEDIR/frozen packaging remain open. One
+  localhost ZeroMQ on native Windows and WSL source runs. Specialist
+  calibration, conductivity, analytics, Keithley readback, pressure,
+  cold-stage, and MultiLine routing now consumes authoritative descriptors;
+  bare or refused readings gain no specialist authority. Real-Windows
+  ONEDIR/frozen packaging remains open. One
   scheduler-produced reference-extension artifact is now proven continuously
   through persistence/live wire, replay/report projection, real shell dispatch,
   and instrument-health display; mock TCP does not close physical evidence.
@@ -206,13 +214,14 @@ This is feature-branch evidence, not shipped history and not a release claim:
   composition, publication through the existing publisher, two-SUB bounded
   ingress, one GUI-thread Store, conservative pure replay sessions, and
   conservative live adapters. The SafetyManager cache and live safety/readiness
-  authority are committed and fail conservative when proof is absent. Pure
-  recording/persistence owners and their fail-conservative live projections
-  are committed, but actual loop-owned experiment/acquisition/persistence
-  integration is still open;
-  production recording therefore remains `UNKNOWN` and data integrity remains
-  unavailable. Atomic shell cutover, all operator scenarios, and
-  screenshot/visual QA remain open.
+  authority are committed and fail conservative when proof is absent. The
+  supervised production path consumes the actual loop-owned experiment,
+  acquisition, and direct-SQLite persistence feeds. Both production launch
+  roots retain one snapshot-ingress owner, pump newest coherent cuts into the
+  real POD, and settle ingress before normal shutdown or theme re-exec. A
+  reviewed 1280x800 source-mode POD visual exists. The 12 operator scenarios,
+  keyboard/NVDA, DPI/ONEDIR, startup/frame/memory/long-session, and physical
+  gates remain open; the screenshot alone closes none of them.
 - No software, mock, replay, CI, soak, or screenshot evidence closes a real
   Windows, dummy-load, independent-final-element, or physical-laboratory gate.
 
@@ -220,12 +229,12 @@ This is feature-branch evidence, not shipped history and not a release claim:
 
 ## ASC scalability milestone — F35
 
-CryoDAQ must remain usable beyond the current stand. The existing
-`InstrumentDriver -> Scheduler -> SQLite -> DataBroker` path is a strong
-module boundary, but adding a new instrument type still requires central
-`engine.py` edits and several GUI paths infer semantics from deployed model or
-channel names. F35 turns that internal modularity into a supported extension
-contract for other ASC laboratories.
+CryoDAQ must remain usable beyond the current stand. Historically, adding an
+instrument required central engine edits and name-based GUI routing. The active
+branch now uses the allowlisted registry, canonical descriptor authority, and
+descriptor-qualified generic and specialist routing. F35 turns that
+implementation into a supported extension contract for other ASC laboratories,
+with frozen-package and physical evidence still outstanding.
 
 Execution status: F35.1 registry/capabilities and F35.2 shared-bus contracts
 are committed. Within F35.3, D1 manifest authority, D2 persistence activation,
@@ -238,7 +247,10 @@ shutdown/rebind lifecycle over real localhost ZeroMQ on native Windows and WSL.
 The software reference-extension end-to-end gate is complete: one
 scheduler-produced artifact is followed through persistence/live wire,
 replay/report projection, real shell dispatch, and instrument-health display.
-Specialized shell routing heuristics remain open.
+Specialist calibration, conductivity, analytics, Keithley readback, pressure,
+cold-stage, and MultiLine routing accepts only authoritative descriptor
+semantics; bare, refused, and capacity-exhausted readings gain no specialist
+authority.
 The reusable passive
 conformance harness, ASC reference TCP driver, registry adoption, and exact
 frozen-driver allowlist are also committed foundations; real-Windows frozen
@@ -386,9 +398,12 @@ conformance. Screenshot approval is evidence input, not a substitute for the
 scenario, accessibility, performance, or backend-truth gates.
 
 Current boundary: the reusable operating-display, navigation, backend-truth
-models, snapshot transport, Store, and production engine publication path
-exist. The atomic shell cutover is still open, so the legacy shell is not yet
-retired and no screenshot or operator-scenario closure is claimed.
+models, snapshot transport, Store, production engine publication path, and
+software POD home cutover exist. Both production launch roots retain one
+snapshot-ingress owner and settle it before normal shutdown or theme re-exec.
+A reviewed source-mode POD screenshot is evidence input only; no operator,
+accessibility, performance, ONEDIR, long-session, or physical acceptance is
+claimed.
 
 ### F36.3 — Cooldown mission and durable attention history
 

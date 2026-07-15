@@ -74,7 +74,7 @@ _DEPRECATED_TOKENS = {
 
 Deprecated tokens work identically (Python magic returns the new value); the only difference is the warning.
 
-**Deprecated since v1.0.0:** the entire `STONE_*` prefix family (palette rename from Phase 0). The aliases remain deprecated and available in current v3.0.0.
+**Deprecated since v1.0.0:** the entire `STONE_*` prefix family (palette rename from Phase 0). The aliases remain deprecated and available in the current v3.0.x line.
 
 ### Rule deprecation
 
@@ -199,7 +199,7 @@ External audit flags any remaining `STONE_*` reference. Replace during the panel
 
 **Deprecated in:** v1.0.0
 **Removed in:** a separately approved future major; no removal version is committed yet
-**Current state in v3.0.0:** the aliases remain deprecated and available; legacy-panel call sites migrate as each panel is reviewed
+**Current state in v3.0.x:** the aliases remain deprecated and available; legacy-panel call sites migrate as each panel is reviewed
 
 Migration effort: part of Phase II ongoing work. It is not bundled into the v3.0.0 composition-contract release.
 

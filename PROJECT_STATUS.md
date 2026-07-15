@@ -7,7 +7,8 @@
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
 **CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
-**CI recorded checkpoint:** PASS — sharded exact-SHA run `29340534592` для `b7b1356` завершён зелёным: agents/core/GUI/remaining PASS на Windows и Ubuntu. Safe SQLite verification прошла во всех jobs; lint и requirements-lock drift checks прошли в обоих remaining jobs. Каждый более новый candidate требует свой exact-SHA eight-job PASS. Это не закрывает frozen-build, soak-duration, physical-hardware, F35 frozen-packaging или F36 production-activation gates.
+**CI recorded checkpoint:** PASS — sharded exact-SHA run `29340534592` для `b7b1356` завершён зелёным: agents/core/GUI/remaining PASS на Windows и Ubuntu. Safe SQLite verification прошла во всех jobs; lint и requirements-lock drift checks прошли в обоих remaining jobs. Каждый более новый candidate требует свой exact-SHA eight-job PASS. Это не закрывает frozen-build, soak-duration, physical-hardware, F35 frozen-packaging или F36 operator/accessibility/performance/external gates.
+**Final-candidate evidence:** pending — для текущего кандидата ещё нужны полный локальный прогон и собственный exact-SHA eight-job CI PASS; старые числа и SHA не переносятся по умолчанию.
 **Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
 После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
 F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
@@ -160,9 +161,11 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 1. H3/H4: integrated runtime/lifecycle slice `026bf50` прошёл detached
    clean-SHA gate (4 939 passed / 11 skipped / 1 deselected). H4 R3a
    provider-neutral delivery receipt и durable state-v2 committed. H4 R3b
-   (launcher-owned socketpair, bounded PNG/caption frames, runner ledger before
-   ACK) остаётся в работе; short soak, 72-hour soak и реальный Windows ONEDIR
-   evidence открыты.
+   активирован для POSIX source-mode short profile: registry единолично
+   запускает owned execution, проверяет process/artifact/receipt cut, выдаёт и
+   поглощает opaque evidence и завершает cleanup. Windows-ветка остаётся
+   fail-closed unsupported. Открыты чистый integrated 15-minute run на финальном
+   SHA, 12/72-hour duration evidence и реальный Windows ONEDIR.
 2. Persistence P1A committed: FIFO, physical-cap и integrity gates,
    receipt-authorized ack, cancellation и close settlement сохраняются.
 3. F35: F35.1 registry/capability и F35.2 shared-bus contracts committed.
@@ -177,8 +180,11 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    Software reference-extension e2e proof замыкает один
    scheduler-produced artifact через persistence/live wire,
    replay/report projection, real shell dispatch и instrument-health display.
-   Открыты specialized shell-routing heuristics и Windows ONEDIR/frozen
-   evidence; mock TCP не закрывает physical/hardware gate.
+   Specialized calibration/conductivity/analytics/Keithley/pressure/cold-stage/
+   MultiLine routing теперь принимает только authoritative descriptors; bare и
+   refused readings не получают specialist authority. Открыты Windows
+   ONEDIR/frozen evidence и physical reference-hardware evidence; mock TCP не
+   закрывает physical/hardware gate.
 4. F36: committed foundation включает wire envelope, durable revision
    allocator, typed authority receipts, ordered composer, replay-compatible
    publisher, отдельный snapshot SUB, один GUI-thread Store, pure replay session
@@ -187,20 +193,20 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    теперь использует actual loop-owned experiment/acquisition/direct-SQLite
    persistence feeds, один durable revision allocator и sole PUB socket;
    cold/disconnected cuts fail-dark, а stale/ambiguous persistence остаётся
-   явно NOT_RECORDING/unavailable без fallback writer. Открыты atomic shell cutover,
-   все 12 operator scenarios и
-   связанные accessibility/performance gates.
-   После интеграции frontend в реальный shell обязателен isolated mock/replay
-   запуск со скриншотами каждого достижимого экрана и material state. Visual QA
-   проверяет operator scenarios, clipping, focus, stale/disconnected truth,
-   non-color cues и соответствие design system; одни скриншоты gate не закрывают.
+   явно NOT_RECORDING/unavailable без fallback writer. Software POD home
+   cutover завершён: оба production launch root удерживают одного ingress owner,
+   передают newest coherent cuts в реальный POD и завершают ingress до normal
+   shutdown или theme re-exec. Reviewed source-mode 1280x800 POD visual QA
+   собран. Открыты все 12 operator scenarios, keyboard/NVDA, DPI/ONEDIR,
+   startup/frame/memory/long-session и physical gates; один скриншот их не
+   закрывает.
 5. Recorded exact-SHA CI checkpoint `29340534592` для `b7b1356`: все восемь
    agents/core/GUI/remaining jobs PASS на Ubuntu и Windows. Safe SQLite
    verification прошла во всех jobs; lint и requirements-lock drift
    checks PASS в обоих remaining jobs. Каждый новый candidate требует
    свой exact-SHA eight-job PASS;
    frozen-build, soak-duration, physical-hardware, F35 frozen-packaging и F36
-   production-activation gates остаются открыты.
+   operator/accessibility/performance/external gates остаются открыты.
 6. Готовые точные Windows/physical evidence procedures с thresholds,
    abort/rollback и ожидаемыми артефактами.
 
@@ -217,7 +223,9 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    (независимые terminal V/I/P + trip time) и A8e (внешний final element +
    common-cause proof) остаются физическими блокерами. Ни один подпункт не
    заменяет другой; Phase C заблокирована до A8c–A8e.
-5. **Smoke frozen-сборки на Windows** — `install.bat` + ярлык + запуск лаунчера. Снимает ручной гейт Windows frozen-build smoke.
+5. **Windows source-install smoke** — `install.bat` + ярлык + source launcher;
+   отдельно требуется настоящий ONEDIR/frozen smoke. Editable install не снимает
+   frozen-build gate.
 
 ### Известная проблема
 
