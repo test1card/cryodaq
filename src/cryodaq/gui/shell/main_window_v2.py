@@ -258,6 +258,7 @@ class MainWindowV2(QMainWindow):
 
         root.addWidget(self._bottom_bar)
         self.setCentralWidget(central)
+        self._set_home_truth_surface(True)
 
     # ------------------------------------------------------------------
     # Tool rail handler
@@ -267,6 +268,11 @@ class MainWindowV2(QMainWindow):
     def render_operator_snapshot(self, snapshot: object) -> None:
         """Present one ingress-qualified cut through the POD transaction."""
         self._operator_display.render(snapshot)
+
+    def _set_home_truth_surface(self, home: bool) -> None:
+        """Keep the POD as the only visible current-truth owner on home."""
+        self._top_bar.setVisible(not home)
+        self._bottom_bar.setVisible(not home)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -296,11 +302,14 @@ class MainWindowV2(QMainWindow):
         if name == "home":
             self._overlay.show_dashboard()
             self._tool_rail.set_active("home")
+            self._set_home_truth_surface(True)
             return
         # Lazy-construct overlay panel on first open
         self._ensure_overlay(name)
         self._overlay.show_overlay(name)
         self._tool_rail.set_active(name)
+        if self._overlay.current_overlay == name:
+            self._set_home_truth_surface(False)
 
     def _ensure_overlay(self, name: str) -> None:
         """Build the overlay panel and register it on first access."""

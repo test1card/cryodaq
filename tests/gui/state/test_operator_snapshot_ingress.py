@@ -8,10 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QThread
+from PySide6.QtCore import QCoreApplication, QObject, QThread
 from PySide6.QtWidgets import QApplication
 
-from cryodaq.gui.state.operator_snapshot_ingress import OperatorSnapshotIngressOwner
+from cryodaq.gui.state.operator_snapshot_ingress import (
+    OperatorSnapshotIngressOwner,
+    start_operator_snapshot_ingress,
+)
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.operator_snapshot import (
     AttentionQueue,
@@ -367,21 +370,23 @@ def test_stale_threshold_is_exact_finite_and_positive(qapp, threshold: Any) -> N
 def test_app_composition_root_has_one_owner_and_visible_pod_cutover() -> None:
     root = Path(__file__).resolve().parents[3]
     app_path = root / "src/cryodaq/gui/app.py"
+    launcher_path = root / "src/cryodaq/launcher.py"
     owner_path = root / "src/cryodaq/gui/state/operator_snapshot_ingress.py"
     app_source = app_path.read_text(encoding="utf-8")
+    launcher_source = launcher_path.read_text(encoding="utf-8")
     app_tree = ast.parse(app_source)
     owner_tree = ast.parse(owner_path.read_text(encoding="utf-8"))
 
-    constructions = [
+    compositions = [
         node
         for node in ast.walk(app_tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "OperatorSnapshotIngressOwner"
+        and node.func.id == "start_operator_snapshot_ingress"
     ]
-    assert len(constructions) == 1
+    assert len(compositions) == 1
+    assert "start_operator_snapshot_ingress(self._bridge, self._main_window)" in launcher_source
     assert "OperatorSnapshotStore" not in app_source
-    assert "snapshot_ingress.snapshot_changed.connect(window.render_operator_snapshot)" in app_source
     imports = {
         node.module for node in ast.walk(owner_tree) if isinstance(node, ast.ImportFrom) and node.module is not None
     }
@@ -401,4 +406,27 @@ def test_app_composition_root_has_one_owner_and_visible_pod_cutover() -> None:
         for node in ast.walk(owner_tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert not {"start", "shutdown", "send_command", "data_flow_stalled"} & calls
+    assert not {"shutdown", "send_command", "data_flow_stalled"} & calls
+
+
+def test_shared_launch_composition_pumps_newest_typed_cut_once(qapp) -> None:
+    class Window(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rendered: list[OperatorSnapshot] = []
+
+        def render_operator_snapshot(self, snapshot: OperatorSnapshot) -> None:
+            self.rendered.append(snapshot)
+
+    bridge = _Bridge()
+    bridge.snapshots = [_snapshot(1), _snapshot(2)]
+    window = Window()
+    owner = start_operator_snapshot_ingress(bridge, window)
+
+    owner.pump()
+    _events_until(lambda: owner.snapshot is not None)
+
+    assert owner.parent() is window
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut == _snapshot(2).cut
+    assert window.rendered == [owner.snapshot]

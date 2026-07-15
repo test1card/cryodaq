@@ -12,6 +12,21 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
+## [3.0.1] — 2026-07-15
+
+### Changed
+
+- Completed the software POD home cutover for both launch roots through one
+  shared ingress composition and settled it before theme re-exec.
+- Made POD the only visible current-truth surface on home, flattened normal
+  cards, consolidated visual provenance, and retained canonical non-color
+  exception cues.
+
+### Open evidence
+
+- Real Windows ONEDIR DPI/NVDA, keyboard-only whole-shell traversal, operator
+  task timing, long-session memory, and physical/laboratory gates.
+
 ## [3.0.0] — 2026-07-14
 
 ### Added

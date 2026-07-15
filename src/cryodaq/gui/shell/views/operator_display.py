@@ -147,6 +147,8 @@ class _ComposedSnapshotCard(SnapshotCardShell):
                 self._content._commit_render(plan.body, self._owner_token)
             self.footer._commit_render(plan.footer, self._owner_token)
             self.status_label.set_state(plan.summary.state)
+            self.surface.set_quiet(plan.summary.state is OperatorPresentationState.OK)
+            self.status_label.setVisible(plan.summary.state is not OperatorPresentationState.OK)
             set_prepared_label(self.summary_label, plan.summary_text)
             self.setAccessibleDescription(plan.accessible_description)
             self._revision = plan.summary.revision
@@ -154,7 +156,10 @@ class _ComposedSnapshotCard(SnapshotCardShell):
             self._has_presentation = True
             if self._content is not None:
                 self._content_host.setVisible(True)
-            self.footer.setVisible(True)
+            # The POD owns one shared cut provenance line. Card provenance
+            # remains in accessible descriptions without repeating Tier-3
+            # diagnostics across the primary visual scan path.
+            self.footer.setVisible(False)
         except Exception:
             self._failed_closed = True
             self._has_presentation = False
@@ -470,6 +475,8 @@ class OperatorDisplay(QScrollArea):
                 card.revision != plan.snapshot.cut.revision
                 or card._summary != card_plan.summary
                 or card.status_label.state is not card_plan.summary.state
+                or card.surface._quiet != (card_plan.summary.state is OperatorPresentationState.OK)
+                or (not card.status_label.isHidden()) != (card_plan.summary.state is not OperatorPresentationState.OK)
                 or card.summary_label.text() != card_plan.summary_text.visible
                 or card.summary_label.accessibleDescription() != card_plan.summary_text.accessible
                 or card.accessibleDescription() != card_plan.accessible_description
@@ -481,6 +488,7 @@ class OperatorDisplay(QScrollArea):
                 or card.footer.provenance_label.text() != card_plan.footer.provenance.visible
                 or card.footer.age_label.text() != card_plan.footer.age.visible
                 or card.footer.accessibleDescription() != card_plan.footer.accessible_description
+                or not card.footer.isHidden()
             ):
                 raise RuntimeError("operator display card coherence failed after commit")
             if card_plan.body is not None:

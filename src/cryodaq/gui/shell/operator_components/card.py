@@ -68,9 +68,20 @@ class _CardRenderPlan:
 
 
 class _CardSurface(QFrame):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._quiet = False
+
+    def set_quiet(self, quiet: bool) -> None:
+        self._quiet = bool(quiet)
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: ANN001 - Qt override
         del event
         painter = QPainter(self)
+        if self._quiet:
+            painter.fillRect(self.rect(), QColor(theme.BACKGROUND))
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setBrush(QColor(theme.SURFACE_CARD))
         painter.setPen(QPen(QColor(theme.BORDER), 1))

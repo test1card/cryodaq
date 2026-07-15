@@ -8,7 +8,7 @@ last_updated: 2026-07-14
 
 **Generated:** 2026-07-14
 **Session:** Phase UI-1 foundation, F36 operator snapshots, and F35 D7.2
-**Scope:** Design system v3.0.0 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Scope:** Design system v3.0.1 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -225,7 +225,7 @@ F36 operator-snapshot additions:
 77. **Root-owned POD composition** — all eight composed cards reject standalone render; one root transaction rechecks and commits their exact immutable cut.
 78. **Post-commit coherence barrier** — synchronous Qt callbacks cannot silently tear sibling truth; a mismatch permanently replaces the page with a non-authoritative failure barrier.
 79. **Complete bounded attention geometry** — two-line rows remain fully legible, with four visible rows and deterministic scrolling across at most eight projected items.
-80. **Truthful scenario scope** — composition tests do not claim later acknowledgement, recovery, capture, or human-performance tasks; the legacy shell now gates replay mutation, while final POD-to-shell cutover and scenario evidence remain separate gates.
+80. **Truthful scenario scope** — composition tests do not claim later acknowledgement, recovery, capture, or human-performance tasks; software POD cutover and replay mutation gates are implemented, while scenario and external evidence remain open.
 81. **Descriptor-qualified instrument identity** — the generic instrument-health
     panel attributes cards only from authoritative connected `DescriptorView`
     values; missing/refused identity uses fixed bounded Russian text and no
@@ -233,6 +233,6 @@ F36 operator-snapshot additions:
 
 ## Status
 
-**Design system v3.0.0 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; descriptor-qualified instrument identity and F36 composition are implemented, the remaining GUI migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+**Design system v3.0.1 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; descriptor-qualified identity, F36 composition, and software POD home cutover are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
 79 rules and the 142-constant runtime inventory are unchanged. Real Windows ONEDIR DPI/NVDA,
-final POD-to-shell cutover, whole-shell screenshots, operator-performance, and long-session evidence remain open.
+real Windows whole-shell screenshots, operator-performance, and long-session evidence remain open.

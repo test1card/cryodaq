@@ -680,6 +680,7 @@ def test_theme_reexec_settles_assistant_between_bridge_and_engine(
         _assistant_proc=process,
         _stop_engine=lambda: events.append("engine"),
         _invalidate_descriptor_transport=lambda: events.append("descriptor"),
+        _snapshot_ingress=SimpleNamespace(stop=lambda: events.append("snapshot.stop")),
         _engine_external=True,
         _lock_fd=None,
     )
@@ -697,6 +698,7 @@ def test_theme_reexec_settles_assistant_between_bridge_and_engine(
         "assistant.terminate",
         "assistant.wait:10",
         "descriptor",
+        "snapshot.stop",
         "bridge",
         "engine",
         "exec",

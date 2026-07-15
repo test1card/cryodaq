@@ -31,9 +31,9 @@ actually exercise.
 2. `Можно ли продолжать?`, `Что происходит?`, and the highest-priority
    attention reason form the first scan path. Backend-owned fault or warning
    truth outranks normal cards.
-3. Data integrity, plant, infrastructure, cooldown, and support evidence stay
-   visible as supporting cards. Provenance remains subordinate but never
-   hover-only.
+3. Data integrity, plant, infrastructure, cooldown, and support evidence follow
+   as supporting cards. One page-level source/revision line keeps provenance
+   visible; full provenance remains in each card's accessible description.
 4. `Следующий безопасный шаг` is a typed navigation intent. It never performs
    the destination action.
 
@@ -100,7 +100,7 @@ recording is insufficient.
 
 Replay keeps the prominent archive banner and chooses analysis as the next
 inspection step. Section routes intentionally remain navigation-only in this
-composition. Before shell cutover, every replay destination must prove that
+composition. Every replay destination must prove that
 live acknowledgement or control affordances are disabled or explicitly
 observational. The POD alone does not make those destination panels safe.
 
@@ -110,6 +110,8 @@ observational. The POD alone does not make those destination panels safe.
 - Every navigation control has persistent Russian copy, an accessible name,
   visible focus, and Enter/Space behavior from the shared atom.
 - State uses canonical text and painted shape in addition to color.
+- Normal card status ornaments are visually suppressed; every exception keeps
+  canonical text, shape, and color, and every accessible state remains.
 - Bidi/control characters are visible rather than allowed to alter layout.
 - Attention uses model/view virtualization and a hard eight-item projection.
 - The local 2,000-item projection/render regression requires a median below
@@ -156,6 +158,8 @@ selected only when the accepted attention summary includes
 
 ## Changelog
 
+- 2026-07-15 (v3.0.1): Made POD the only visible home truth owner,
+  consolidated repeated visual provenance, and quieted normal card chrome.
 - 2026-07-15: Made the POD the MainWindowV2 home surface and wired the
   standalone and embedded-launcher snapshot ingress owners directly to its
   one-cut render slot; specialist panels remain navigation-only drill-downs.

@@ -24,7 +24,10 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 # import. See gui/theme.py docstring for the contract.
 import cryodaq.gui.theme as theme  # noqa: F401 (side-effect import)
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
-from cryodaq.gui.state.operator_snapshot_ingress import OperatorSnapshotIngressOwner
+from cryodaq.gui.state.operator_snapshot_ingress import (
+    OperatorSnapshotIngressOwner,
+    start_operator_snapshot_ingress,
+)
 from cryodaq.gui.zmq_client import ZmqBridge, set_bridge, shutdown
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 
@@ -264,9 +267,7 @@ def main() -> None:
 
     # --- MainWindow ---
     window = MainWindow(bridge=bridge)
-    snapshot_ingress = OperatorSnapshotIngressOwner(bridge, parent=window)
-    snapshot_ingress.snapshot_changed.connect(window.render_operator_snapshot)
-    snapshot_ingress.start()
+    snapshot_ingress = start_operator_snapshot_ingress(bridge, window)
     window.show()
 
     # --- QTimer для опроса данных из subprocess ---

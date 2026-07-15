@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
-from cryodaq.gui.state.operator_snapshot_ingress import OperatorSnapshotIngressOwner
+from cryodaq.gui.state.operator_snapshot_ingress import start_operator_snapshot_ingress
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 
@@ -1662,12 +1662,7 @@ class LauncherWindow(QMainWindow):
             embedded=True,
             replay_mode=self._replay_source is not None,
         )
-        self._snapshot_ingress = OperatorSnapshotIngressOwner(
-            self._bridge,
-            parent=self._main_window,
-        )
-        self._snapshot_ingress.snapshot_changed.connect(self._main_window.render_operator_snapshot)
-        self._snapshot_ingress.start()
+        self._snapshot_ingress = start_operator_snapshot_ingress(self._bridge, self._main_window)
         # Phase UI-1 v2: shell v2 has its own BottomStatusBar; hide
         # launcher's status bar entirely.
         self.statusBar().setVisible(False)
@@ -1971,6 +1966,14 @@ class LauncherWindow(QMainWindow):
             self._shutdown_requested = False
             raise
         self._invalidate_descriptor_transport()
+        snapshot_ingress = getattr(self, "_snapshot_ingress", None)
+        if snapshot_ingress is not None:
+            try:
+                snapshot_ingress.stop()
+            except Exception:
+                logger.exception("theme: operator snapshot ingress stop failed; aborting re-exec")
+                self._shutdown_requested = False
+                raise
         # With the assistant settled, shut down the bridge before the engine
         # so no REQ is mid-flight. Same sequence as _do_shutdown but without
         # QApplication.quit().

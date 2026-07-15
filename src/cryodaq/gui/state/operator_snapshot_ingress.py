@@ -232,6 +232,14 @@ class OperatorSnapshotIngressOwner(QObject):
             raise RuntimeError("operator snapshot store mutation requires its GUI thread")
 
 
+def start_operator_snapshot_ingress(bridge: Any, window: Any) -> OperatorSnapshotIngressOwner:
+    """Compose the one GUI-thread snapshot owner used by either launch root."""
+    owner = OperatorSnapshotIngressOwner(bridge, parent=window)
+    owner.snapshot_changed.connect(window.render_operator_snapshot)
+    owner.start()
+    return owner
+
+
 def _positive_number(value: object, *, field: str) -> float:
     normalized = _nonnegative_number(value, field=field)
     if normalized == 0:

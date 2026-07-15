@@ -9,7 +9,7 @@ status: canonical
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `3.0.0`
+**Current design-system version:** `3.0.1`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
@@ -276,6 +276,9 @@ From `src/cryodaq/gui/theme.py` inventory (v3.0.0, 142 exported uppercase consta
 
 ## Changelog
 
+- 2026-07-15: Released v3.0.1: completed the software POD home cutover with
+  one visible truth owner, consolidated provenance, and quiet-normal cards;
+  physical, DPI/NVDA, long-session, and operator evidence remain open.
 - 2026-07-14: Released v3.0.0: made informative and intentionally beautiful
   composition jointly mandatory across the complete GUI corpus, and explicitly
   rejected generic LabVIEW-style dashboard assembly. Safety truth, legibility,

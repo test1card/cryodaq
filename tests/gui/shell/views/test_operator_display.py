@@ -414,6 +414,7 @@ def test_one_snapshot_commits_all_eight_cards_at_one_revision(qapp):
     assert display.snapshot is snapshot
     assert {section.card.revision for section in display._sections.values()} == {42}
     assert not display.banner.isVisible()
+    assert all(section.card.surface._quiet for section in display._sections.values())
     attention = display._sections["attention"].attention_list
     assert attention is not None and attention.isHidden()
     text = _visible_text(display)
@@ -436,6 +437,7 @@ def test_attention_projection_is_bounded_and_ordered_by_urgency(qapp):
     assert not attention.isHidden()
 
     assert attention.model().rowCount() == TOP_ATTENTION_LIMIT
+    assert not display._sections["attention"].card.surface._quiet
     first = attention.model().index(0, 0).data(Qt.ItemDataRole.AccessibleTextRole)
     assert "Авария" in first
     assert "Показано по срочности: 8 из 12 · ещё: 4" in display._sections["attention"].facts_label.text()
