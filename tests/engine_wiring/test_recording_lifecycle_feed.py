@@ -197,6 +197,12 @@ async def test_bridge_is_noncloneable_and_has_no_async_or_control_surface(
         "experiment_finalized",
         "experiment_inactive",
         "grants_control_authority",
+        "persistence_ambiguous",
+        "persistence_committed",
+        "persistence_rejected",
+        "persistence_snapshot",
+        "persistence_started",
+        "persistence_stopped",
         "snapshot",
     }
     assert not any(inspect.iscoroutinefunction(value) for value in RecordingLifecycleFeed.__dict__.values())

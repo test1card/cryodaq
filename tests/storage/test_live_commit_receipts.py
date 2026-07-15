@@ -88,6 +88,7 @@ async def test_commit_receipt_is_issued_only_after_exact_transaction_commit(tmp_
     assert writer.owns_commit(receipt)
     assert receipt is not None
     assert receipt.grants_control_authority is False
+    assert receipt.commit_revision == 1
     assert len(receipt.entries) == 1
     entry = receipt.entries[0]
     assert type(entry) is CommittedReadingReceipt
@@ -295,6 +296,7 @@ async def test_concurrent_commits_return_only_their_owned_readings(
     )
 
     assert all(receipt is not None and writer.owns_commit(receipt) for receipt in receipts)
+    assert [receipt.commit_revision for receipt in receipts if receipt] == [1, 2]
     assert [writer.readings_from_commit(receipt)[0].value for receipt in receipts if receipt] == [1.0, 2.0]
     conn = _db(tmp_path)
     try:
@@ -304,6 +306,26 @@ async def test_concurrent_commits_return_only_their_owned_readings(
         ]
     finally:
         conn.close()
+    await writer.stop()
+
+
+async def test_commit_revision_is_integrity_bound_and_advances_only_for_issued_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path, channel_catalog=_owner())
+    first = await writer.write_committed([_reading(value=1.0)])
+    assert first is not None
+    monkeypatch.setattr(writer, "_write_day_batch", lambda _conn, _batch: False)
+    assert await writer.write_committed([_reading(value=2.0)]) is None
+    monkeypatch.undo()
+    second = await writer.write_committed([_reading(value=3.0)])
+    assert second is not None
+
+    assert (first.commit_revision, second.commit_revision) == (1, 2)
+    object.__setattr__(first, "commit_revision", 2)
+    assert not writer.owns_commit(first)
+    assert writer.owns_commit(second)
     await writer.stop()
 
 

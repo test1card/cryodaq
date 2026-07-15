@@ -574,6 +574,30 @@ def test_forged_and_subclass_receipts_are_rejected_without_mutation(
     assert owner.snapshot() is before
 
 
+def test_direct_and_spool_evidence_cannot_be_mixed_within_one_epoch() -> None:
+    direct_authority = PersistenceOutcomeAuthority("direct-feed", KEY)
+    direct_owner = PersistenceAuthorityOwner(
+        "direct-owner",
+        direct_authority.generation_id,
+        direct_authority,
+    )
+    _start(direct_owner, direct_authority)
+    direct_owner.feed(direct_authority.direct_commit(2, EPOCH, 1, "sqlite", 2))
+    direct_snapshot = direct_owner.snapshot()
+    with pytest.raises(ValueError, match="spool append cannot follow direct commit"):
+        direct_owner.feed(direct_authority.durable_append(3, EPOCH, "a", "spool"))
+    assert direct_owner.snapshot() is direct_snapshot
+
+    spool_authority = PersistenceOutcomeAuthority("spool-feed", KEY)
+    spool_owner = PersistenceAuthorityOwner("spool-owner", spool_authority.generation_id, spool_authority)
+    _start(spool_owner, spool_authority)
+    spool_owner.feed(spool_authority.durable_append(2, EPOCH, "a", "spool"))
+    spool_snapshot = spool_owner.snapshot()
+    with pytest.raises(ValueError, match="direct commit cannot coexist with spool evidence"):
+        spool_owner.feed(spool_authority.direct_commit(3, EPOCH, 1, "sqlite", 1))
+    assert spool_owner.snapshot() is spool_snapshot
+
+
 def test_same_loop_permutations_reject_out_of_order_without_partial_mutation() -> None:
     for order in permutations(("append", "materialize", "ack")):
         authority = PersistenceOutcomeAuthority("feed", KEY)

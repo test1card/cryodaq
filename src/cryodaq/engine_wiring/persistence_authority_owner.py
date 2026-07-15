@@ -107,6 +107,26 @@ class DurableAppendReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class DirectCommitReceipt:
+    """One descriptor-authoritative SQLite batch proven committed directly."""
+
+    issuer_id: str
+    generation_id: str
+    revision: int
+    recording_epoch_id: str
+    source_commit_revision: int
+    destination_id: str
+    record_count: int
+    provenance: str
+
+    def __post_init__(self) -> None:
+        _validate_common(self)
+        _revision(self.source_commit_revision, field="source_commit_revision")
+        object.__setattr__(self, "destination_id", _text(self.destination_id, field="destination_id"))
+        _record_count(self.record_count)
+
+
+@dataclass(frozen=True, slots=True)
 class MaterializationCommitReceipt:
     issuer_id: str
     generation_id: str
@@ -235,6 +255,7 @@ class PersistenceLifecycleReceipt:
 
 PersistenceOutcome = (
     DurableAppendReceipt
+    | DirectCommitReceipt
     | MaterializationCommitReceipt
     | SpoolAcknowledgementReceipt
     | PersistenceFailureReceipt
@@ -306,6 +327,24 @@ class PersistenceOutcomeAuthority:
         self, revision: int, epoch: str, append_id: str, destination: str, record_count: int = 1
     ) -> DurableAppendReceipt:
         return self.__issue(DurableAppendReceipt, "append", revision, epoch, append_id, destination, record_count)  # type: ignore[return-value]
+
+    def direct_commit(
+        self,
+        revision: int,
+        epoch: str,
+        source_commit_revision: int,
+        destination: str,
+        record_count: int,
+    ) -> DirectCommitReceipt:
+        return self.__issue(
+            DirectCommitReceipt,
+            "direct_commit",
+            revision,
+            epoch,
+            source_commit_revision,
+            destination,
+            record_count,
+        )  # type: ignore[return-value]
 
     def materialized(
         self,
@@ -387,6 +426,8 @@ class PersistenceOutcomeAuthority:
             return "lifecycle"
         if type(receipt) is DurableAppendReceipt:
             return "append"
+        if type(receipt) is DirectCommitReceipt:
+            return "direct_commit"
         if type(receipt) is MaterializationCommitReceipt:
             return "materialized"
         if type(receipt) is SpoolAcknowledgementReceipt:
@@ -441,6 +482,7 @@ class PersistenceAuthorityOwner:
         "__archive_revision",
         "__authority",
         "__dropped",
+        "__direct_commit_revision",
         "__epoch",
         "__generation_id",
         "__last_token",
@@ -452,6 +494,7 @@ class PersistenceAuthorityOwner:
         "__receipt_revision",
         "__revision",
         "__snapshot",
+        "__spool_seen",
         "__storage",
         "__terminal_unavailable_reason",
         "__unavailable_append_revisions",
@@ -482,7 +525,9 @@ class PersistenceAuthorityOwner:
         self.__used_epoch_ids: set[str] = set()
         self.__used_failure_ids: set[str] = set()
         self.__dropped = 0
+        self.__direct_commit_revision = 0
         self.__storage = AvailabilityTruth.UNKNOWN
+        self.__spool_seen = False
         self.__terminal_unavailable_reason: str | None = None
         self.__unavailable_append_revisions: set[int] = set()
         self.__snapshot = self.__make_snapshot("not_initialized")
@@ -552,6 +597,7 @@ class PersistenceAuthorityOwner:
     def feed(self, receipt: PersistenceOutcome) -> None:
         if type(receipt) not in {
             DurableAppendReceipt,
+            DirectCommitReceipt,
             MaterializationCommitReceipt,
             SpoolAcknowledgementReceipt,
             PersistenceFailureReceipt,
@@ -570,6 +616,8 @@ class PersistenceAuthorityOwner:
             self.__epoch_matches(receipt)
             if type(receipt) is DurableAppendReceipt:
                 self.__feed_append(receipt)
+            elif type(receipt) is DirectCommitReceipt:
+                self.__feed_direct_commit(receipt)
             elif type(receipt) is MaterializationCommitReceipt:
                 self.__feed_materialized(receipt)
             elif type(receipt) is SpoolAcknowledgementReceipt:
@@ -595,7 +643,9 @@ class PersistenceAuthorityOwner:
             self.__materialized.clear()
             self.__unavailable_append_revisions.clear()
             self.__dropped = 0
+            self.__direct_commit_revision = 0
             self.__storage = AvailabilityTruth.UNKNOWN
+            self.__spool_seen = False
             self.__accept(receipt, "epoch_started_no_storage_proof")
             return
         self.__epoch_matches(receipt)
@@ -610,6 +660,8 @@ class PersistenceAuthorityOwner:
 
     def __feed_append(self, receipt: DurableAppendReceipt) -> None:
         self.__require_active()
+        if self.__direct_commit_revision:
+            raise ValueError("spool append cannot follow direct commit evidence in one epoch")
         # The signed owner-global receipt revision is the replay/equivocation
         # fence and is carried by every downstream receipt as the exact append
         # incarnation. Only unsettled identities need retention; completed
@@ -622,11 +674,24 @@ class PersistenceAuthorityOwner:
             self.__pending_count += receipt.record_count
             self.__fail_terminal_capacity(receipt, "pending append identity capacity exhausted")
         self.__pending[receipt.append_id] = (receipt.revision, receipt.destination_id, receipt.record_count)
+        self.__spool_seen = True
         self.__pending_count += receipt.record_count
         self.__storage = (
             AvailabilityTruth.UNAVAILABLE if self.__unavailable_append_revisions else AvailabilityTruth.AVAILABLE
         )
         self.__accept(receipt, "durable_append_proven")
+
+    def __feed_direct_commit(self, receipt: DirectCommitReceipt) -> None:
+        self.__require_active()
+        if self.__spool_seen:
+            raise ValueError("direct commit cannot coexist with spool evidence in one epoch")
+        if receipt.source_commit_revision <= self.__direct_commit_revision:
+            raise ValueError("direct commit source revision must advance monotonically")
+        self.__direct_commit_revision = receipt.source_commit_revision
+        self.__materialization_revision = receipt.source_commit_revision
+        self.__storage = AvailabilityTruth.AVAILABLE if self.__dropped == 0 else AvailabilityTruth.UNAVAILABLE
+        reason = "direct_sqlite_commit" if self.__storage is AvailabilityTruth.AVAILABLE else "direct_commit_after_loss"
+        self.__accept(receipt, reason)
 
     def __feed_materialized(self, receipt: MaterializationCommitReceipt) -> None:
         pending = self.__pending.get(receipt.append_id)
@@ -739,6 +804,7 @@ class PersistenceAuthorityOwner:
 
 __all__ = [
     "ArchiveIndexCommitReceipt",
+    "DirectCommitReceipt",
     "DurableAppendReceipt",
     "MAX_TRACKED_IDENTITIES",
     "MaterializationCommitReceipt",

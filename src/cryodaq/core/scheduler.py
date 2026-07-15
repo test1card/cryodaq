@@ -132,6 +132,9 @@ class Scheduler:
         drain_timeout_s: float = 5.0,
         shared_bus_clock: Callable[[], float] | None = None,
         shared_bus_sleep: Callable[[float], Awaitable[None]] | None = None,
+        persistence_commit_observer: Callable[[object], None] | None = None,
+        persistence_rejection_observer: Callable[[int, str], None] | None = None,
+        persistence_ambiguity_observer: Callable[[], None] | None = None,
     ) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
@@ -142,6 +145,9 @@ class Scheduler:
         self._drain_timeout_s = drain_timeout_s
         self._shared_bus_clock = shared_bus_clock
         self._shared_bus_sleep = shared_bus_sleep
+        self._persistence_commit_observer = persistence_commit_observer
+        self._persistence_rejection_observer = persistence_rejection_observer
+        self._persistence_ambiguity_observer = persistence_ambiguity_observer
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
         self._shared_bus_tasks: dict[str, asyncio.Task[None]] = {}
@@ -642,15 +648,25 @@ class Scheduler:
         if self._sqlite_writer is not None and combined:
             try:
                 if getattr(self._sqlite_writer, "descriptor_authoritative", False) is True:
-                    receipt = await self._sqlite_writer.write_committed(combined)
+                    try:
+                        receipt = await self._sqlite_writer.write_committed(combined)
+                    except asyncio.CancelledError:
+                        self._observe_persistence_ambiguity()
+                        raise
+                    except Exception:
+                        self._observe_persistence_ambiguity()
+                        raise
                     if receipt is None:
+                        self._observe_persistence_rejection(len(combined), "descriptor_commit_refused")
                         return
                     entries = self._sqlite_writer.entries_from_commit(receipt)
                     if len(entries) != len(combined):
+                        self._observe_persistence_ambiguity()
                         raise RuntimeError("commit receipt cardinality disagrees with persisted batch")
                     committed_publish_readings = [entry.reading for entry in entries[: len(persisted_readings)]]
                     descriptor_envelopes = [entry.descriptor_envelope for entry in entries[: len(persisted_readings)]]
                     persisted = True
+                    self._observe_persistence_commit(receipt)
                 else:
                     persisted = await self._sqlite_writer.write_immediate(combined)
             except Exception:
@@ -691,6 +707,35 @@ class Scheduler:
             )
         if self._safety_broker is not None:
             await self._safety_broker.publish_batch(readings)
+
+    def _observe_persistence_commit(self, receipt: object) -> None:
+        observer = self._persistence_commit_observer
+        if observer is None:
+            return
+        try:
+            observer(receipt)
+        except Exception:
+            logger.exception("Direct persistence observation failed after a proven SQLite commit")
+            self._observe_persistence_ambiguity()
+
+    def _observe_persistence_rejection(self, record_count: int, reason: str) -> None:
+        observer = self._persistence_rejection_observer
+        if observer is None:
+            return
+        try:
+            observer(record_count, reason)
+        except Exception:
+            logger.exception("Direct persistence rejection observation failed")
+            self._observe_persistence_ambiguity()
+
+    def _observe_persistence_ambiguity(self) -> None:
+        observer = self._persistence_ambiguity_observer
+        if observer is None:
+            return
+        try:
+            observer()
+        except Exception:
+            logger.exception("Direct persistence ambiguity observation failed")
 
     async def _handle_error(self, state: _InstrumentState) -> None:
         """При 3+ ошибках подряд — переподключение с backoff."""

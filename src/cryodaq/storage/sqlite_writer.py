@@ -45,6 +45,8 @@ from cryodaq.storage.sentinel import decode, encode, is_sentinel
 
 logger = logging.getLogger(__name__)
 
+_MAX_COMMIT_REVISION = 2**63 - 1
+
 SCHEMA_READINGS = """
 CREATE TABLE IF NOT EXISTS readings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -227,6 +229,7 @@ class CommittedBatchReceipt:
     """Atomic post-commit carrier issued by one exact SQLiteWriter owner."""
 
     entries: tuple[CommittedReadingReceipt, ...]
+    commit_revision: int
     _owner_key: object
     _provenance: object
     _integrity_token: object
@@ -239,11 +242,13 @@ class CommittedBatchReceipt:
         cls,
         entries: tuple[CommittedReadingReceipt, ...],
         *,
+        commit_revision: int,
         owner_key: object,
         integrity_token: object,
     ) -> CommittedBatchReceipt:
         issued = object.__new__(cls)
         object.__setattr__(issued, "entries", entries)
+        object.__setattr__(issued, "commit_revision", commit_revision)
         object.__setattr__(issued, "_owner_key", owner_key)
         object.__setattr__(issued, "_provenance", _COMMIT_RECEIPT_PROVENANCE)
         object.__setattr__(issued, "_integrity_token", integrity_token)
@@ -258,6 +263,7 @@ class CommittedBatchReceipt:
 class _CommitReceiptIntegrity:
     entries: tuple[CommittedReadingReceipt, ...]
     entry_values: tuple[tuple[str, str, int, bytes, DescriptorBoundReading], ...]
+    commit_revision: int
     token: object
 
 
@@ -301,6 +307,7 @@ class SQLiteWriter:
         else:
             self._channel_catalog = None if channel_catalog is None else snapshot_catalog(channel_catalog)
         self._commit_owner_key = object()
+        self._commit_revision = 0
         self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
 
         # Disk-full graceful degradation (Phase 2a H.1).
@@ -566,18 +573,24 @@ class SQLiteWriter:
         owner = self._live_channel_catalog
         if owner is None or not bound or any(not owner.owns(item) for item in bound):
             raise RuntimeError("cannot issue a commit receipt for foreign descriptor bindings")
+        if self._commit_revision >= _MAX_COMMIT_REVISION:
+            raise OverflowError("committed batch receipt revision exhausted after SQLite commit")
         entries = tuple(CommittedReadingReceipt._issue(item) for item in bound)
+        commit_revision = self._commit_revision + 1
         token = object()
         receipt = CommittedBatchReceipt._issue(
             entries,
+            commit_revision=commit_revision,
             owner_key=self._commit_owner_key,
             integrity_token=token,
         )
         self._issued_commits[receipt] = _CommitReceiptIntegrity(
             entries=entries,
             entry_values=tuple(self._receipt_entry_value(entry) for entry in entries),
+            commit_revision=commit_revision,
             token=token,
         )
+        self._commit_revision = commit_revision
         return receipt
 
     def owns_commit(self, candidate: object) -> bool:
@@ -594,6 +607,7 @@ class SQLiteWriter:
                 candidate._provenance is _COMMIT_RECEIPT_PROVENANCE
                 and candidate._owner_key is self._commit_owner_key
                 and candidate._integrity_token is integrity.token
+                and candidate.commit_revision == integrity.commit_revision
                 and candidate.entries is integrity.entries
                 and candidate.entries
                 and tuple(self._receipt_entry_value(entry) for entry in candidate.entries) == integrity.entry_values

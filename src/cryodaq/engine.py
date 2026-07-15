@@ -2039,9 +2039,22 @@ async def _start_scheduler_with_recording_feed(
     feed: RecordingLifecycleFeed,
     sequence: int,
 ) -> int:
+    epoch_id = secrets.token_hex(16)
+    try:
+        feed.persistence_started(epoch_id)
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning("Recording persistence feed unavailable before scheduler start: %s", exc, exc_info=True)
+        try:
+            feed.persistence_ambiguous()
+        except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
+            logger.warning("Recording persistence feed could not be terminalized: %s", terminal_exc, exc_info=True)
     try:
         await scheduler.start()
     except BaseException:
+        try:
+            feed.persistence_ambiguous()
+        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+            logger.warning("Recording persistence feed unavailable after scheduler failure: %s", exc, exc_info=True)
         sequence += 1
         try:
             feed.acquisition_unavailable(sequence)
@@ -2050,7 +2063,7 @@ async def _start_scheduler_with_recording_feed(
         raise
     sequence += 1
     try:
-        feed.acquisition_running(sequence, secrets.token_hex(16))
+        feed.acquisition_running(sequence, epoch_id)
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
         logger.warning("Recording acquisition feed unavailable after scheduler start: %s", exc, exc_info=True)
     return sequence
@@ -2064,6 +2077,10 @@ async def _stop_scheduler_with_recording_feed(
     try:
         await scheduler.stop()
     except BaseException:
+        try:
+            feed.persistence_ambiguous()
+        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+            logger.warning("Recording persistence feed unavailable after scheduler failure: %s", exc, exc_info=True)
         sequence += 1
         try:
             feed.acquisition_unavailable(sequence)
@@ -2075,6 +2092,19 @@ async def _stop_scheduler_with_recording_feed(
         feed.acquisition_stopped(sequence)
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
         logger.warning("Recording acquisition feed unavailable after scheduler stop: %s", exc, exc_info=True)
+        sequence += 1
+        try:
+            feed.acquisition_unavailable(sequence)
+        except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
+            logger.warning("Recording acquisition feed could not be terminalized: %s", terminal_exc, exc_info=True)
+    try:
+        feed.persistence_stopped()
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning("Recording persistence feed unavailable after scheduler stop: %s", exc, exc_info=True)
+        try:
+            feed.persistence_ambiguous()
+        except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
+            logger.warning("Recording persistence feed could not be terminalized: %s", terminal_exc, exc_info=True)
     return sequence
 
 
@@ -2746,6 +2776,18 @@ async def _run_engine(*, mock: bool = False) -> None:
     writer.set_event_loop(asyncio.get_running_loop())
     writer.set_persistence_failure_callback(safety_manager.on_persistence_failure)
     safety_manager.set_persistence_failure_clear(writer.clear_disk_full)
+    persistence_freshness_s = min(
+        259_200.0,
+        max(1.0, 3.0 * max((config.poll_interval_s for config in driver_configs), default=10.0)),
+    )
+    try:
+        recording_lifecycle_feed = RecordingLifecycleFeed(
+            writer,
+            persistence_freshness_s=persistence_freshness_s,
+        )
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning("Direct SQLite recording feed unavailable at engine boot: %s", exc, exc_info=True)
+        recording_lifecycle_feed = RecordingLifecycleFeed()
 
     # H.6: wire safety fault → operator_log machine event. Dependencies that
     # are created later are filled on this stable context before manager start.
@@ -2775,6 +2817,9 @@ async def _run_engine(*, mock: bool = False) -> None:
         calibration_acquisition=calibration_acquisition,
         reviewed_source_disconnect=safety_manager.disconnect_reviewed_source,
         drain_timeout_s=safety_manager._config.scheduler_drain_timeout_s,
+        persistence_commit_observer=recording_lifecycle_feed.persistence_committed,
+        persistence_rejection_observer=recording_lifecycle_feed.persistence_rejected,
+        persistence_ambiguity_observer=recording_lifecycle_feed.persistence_ambiguous,
     )
     for cfg in driver_configs:
         scheduler.add(cfg)
@@ -2823,7 +2868,6 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
-    recording_lifecycle_feed = RecordingLifecycleFeed()
     try:
         _seed_recording_lifecycle(recording_lifecycle_feed, experiment_manager)
     except Exception as exc:  # noqa: BLE001 - dark presentation cannot block engine boot

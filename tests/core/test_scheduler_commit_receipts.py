@@ -68,13 +68,15 @@ async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading(
 
     writer = _Writer()
     driver = _Driver("probe", mock=True)
-    scheduler = Scheduler(broker, sqlite_writer=writer)
+    observed: list[object] = []
+    scheduler = Scheduler(broker, sqlite_writer=writer, persistence_commit_observer=observed.append)
     state = _InstrumentState(InstrumentConfig(driver=driver))
 
     await scheduler._process_readings(state, [original])
 
     delivered = queue.get_nowait()
     assert writer.written == [original]
+    assert observed == [receipt]
     assert delivered.value == 2.0
     assert delivered.raw == 102.0
     assert delivered.metadata == {
@@ -102,12 +104,18 @@ async def test_descriptor_scheduler_publishes_nothing_without_commit_receipt() -
         def entries_from_commit(self, _candidate: object) -> list[_Entry]:
             raise AssertionError("no receipt must never be interpreted")
 
-    scheduler = Scheduler(broker, sqlite_writer=_Writer())
+    rejected: list[tuple[int, str]] = []
+    scheduler = Scheduler(
+        broker,
+        sqlite_writer=_Writer(),
+        persistence_rejection_observer=lambda count, reason: rejected.append((count, reason)),
+    )
     state = _InstrumentState(InstrumentConfig(driver=_Driver("probe", mock=True)))
 
     await scheduler._process_readings(state, [_reading(1.0)])
 
     assert queue.empty()
+    assert rejected == [(1, "descriptor_commit_refused")]
 
 
 async def test_descriptor_scheduler_rejects_receipt_cardinality_and_publishes_nothing() -> None:
@@ -124,7 +132,12 @@ async def test_descriptor_scheduler_rejects_receipt_cardinality_and_publishes_no
         def entries_from_commit(self, _candidate: object) -> list[_Entry]:
             return []
 
-    scheduler = Scheduler(broker, sqlite_writer=_Writer())
+    ambiguous: list[bool] = []
+    scheduler = Scheduler(
+        broker,
+        sqlite_writer=_Writer(),
+        persistence_ambiguity_observer=lambda: ambiguous.append(True),
+    )
     state = _InstrumentState(InstrumentConfig(driver=_Driver("probe", mock=True)))
 
     await scheduler._process_readings(state, [_reading(1.0)])
@@ -132,3 +145,40 @@ async def test_descriptor_scheduler_rejects_receipt_cardinality_and_publishes_no
     assert queue.empty()
     assert state.consecutive_errors == 1
     assert state.total_errors == 1
+    assert ambiguous == [True]
+
+
+async def test_observation_failure_does_not_suppress_proven_commit_publication() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("observer")
+    receipt = object()
+
+    class _Writer:
+        descriptor_authoritative = True
+        is_disk_full = False
+
+        async def write_committed(self, _readings: list[Reading]) -> object:
+            return receipt
+
+        def entries_from_commit(self, candidate: object) -> list[_Entry]:
+            assert candidate is receipt
+            return [_Entry(_reading(2.0))]
+
+    ambiguous: list[bool] = []
+
+    def broken_observer(_receipt: object) -> None:
+        raise RuntimeError("observation failed")
+
+    scheduler = Scheduler(
+        broker,
+        sqlite_writer=_Writer(),
+        persistence_commit_observer=broken_observer,
+        persistence_ambiguity_observer=lambda: ambiguous.append(True),
+    )
+    state = _InstrumentState(InstrumentConfig(driver=_Driver("probe", mock=True)))
+
+    await scheduler._process_readings(state, [_reading(1.0)])
+
+    assert queue.get_nowait().value == 2.0
+    assert ambiguous == [True]
+    assert state.total_errors == 0

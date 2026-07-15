@@ -142,18 +142,64 @@ async def test_scheduler_feed_follows_success_and_uses_one_bounded_epoch() -> No
     scheduler.start = AsyncMock(side_effect=lambda: events.append("start"))
     scheduler.stop = AsyncMock(side_effect=lambda: events.append("stop"))
     feed = MagicMock()
+    feed.persistence_started.side_effect = lambda *_args: events.append("persistence_started")
     feed.acquisition_running.side_effect = lambda *_args: events.append("running")
     feed.acquisition_stopped.side_effect = lambda *_args: events.append("stopped")
+    feed.persistence_stopped.side_effect = lambda *_args: events.append("persistence_stopped")
 
     sequence = await _start_scheduler_with_recording_feed(scheduler, feed, 0)
     sequence = await _stop_scheduler_with_recording_feed(scheduler, feed, sequence)
 
     assert sequence == 2
-    assert events == ["start", "running", "stop", "stopped"]
+    assert events == ["persistence_started", "start", "running", "stop", "stopped", "persistence_stopped"]
     epoch = feed.acquisition_running.call_args.args[1]
     assert len(epoch) == 32
     assert all(character in "0123456789abcdef" for character in epoch)
+    feed.persistence_started.assert_called_once_with(epoch)
     feed.acquisition_stopped.assert_called_once_with(2)
+
+
+async def test_persistence_feed_failure_cannot_block_scheduler_start(caplog: pytest.LogCaptureFixture) -> None:
+    scheduler = MagicMock()
+    scheduler.start = AsyncMock()
+    feed = MagicMock()
+    feed.persistence_started.side_effect = RuntimeError("dark feed failed")
+
+    sequence = await _start_scheduler_with_recording_feed(scheduler, feed, 0)
+
+    assert sequence == 1
+    scheduler.start.assert_awaited_once_with()
+    feed.acquisition_running.assert_called_once()
+    feed.persistence_ambiguous.assert_called_once_with()
+    assert "dark feed failed" in caplog.text
+
+
+async def test_stop_callbacks_are_isolated_and_acquisition_failure_is_terminalized() -> None:
+    scheduler = MagicMock()
+    scheduler.stop = AsyncMock()
+    feed = MagicMock()
+    feed.acquisition_stopped.side_effect = RuntimeError("acquisition observer failed")
+
+    sequence = await _stop_scheduler_with_recording_feed(scheduler, feed, 1)
+
+    assert sequence == 3
+    feed.acquisition_stopped.assert_called_once_with(2)
+    feed.acquisition_unavailable.assert_called_once_with(3)
+    feed.persistence_stopped.assert_called_once_with()
+
+
+async def test_persistence_stop_failure_cannot_skip_its_terminal_fallback() -> None:
+    scheduler = MagicMock()
+    scheduler.stop = AsyncMock()
+    feed = MagicMock()
+    feed.persistence_stopped.side_effect = RuntimeError("persistence observer failed")
+
+    sequence = await _stop_scheduler_with_recording_feed(scheduler, feed, 1)
+
+    assert sequence == 2
+    feed.acquisition_stopped.assert_called_once_with(2)
+    feed.persistence_stopped.assert_called_once_with()
+    feed.persistence_ambiguous.assert_called_once_with()
 
 
 @pytest.mark.parametrize(("operation", "sequence"), [("start", 0), ("stop", 1)])
@@ -171,13 +217,16 @@ async def test_scheduler_failure_feeds_unavailable_and_preserves_failure(operati
 
     assert caught.value is original
     feed.acquisition_unavailable.assert_called_once_with(sequence + 1)
+    feed.persistence_ambiguous.assert_called_once_with()
     feed.acquisition_running.assert_not_called()
     feed.acquisition_stopped.assert_not_called()
 
 
-def test_production_wiring_is_dark_and_has_no_persistence_or_publication_coupling() -> None:
+def test_production_wiring_uses_direct_persistence_observation_without_publication_or_control() -> None:
     source = inspect.getsource(_run_engine)
-    assert source.index("RecordingLifecycleFeed()") < source.index("EngineCommandContext(")
+    assert source.index("recording_lifecycle_feed = RecordingLifecycleFeed(") < source.index("EngineCommandContext(")
+    assert "persistence_freshness_s=persistence_freshness_s" in source
+    assert "persistence_commit_observer=recording_lifecycle_feed.persistence_committed" in source
     assert "_start_scheduler_with_recording_feed(" in source
     assert "_stop_scheduler_with_recording_feed(" in source
 
@@ -189,5 +238,7 @@ def test_production_wiring_is_dark_and_has_no_persistence_or_publication_couplin
             _stop_scheduler_with_recording_feed,
         )
     )
-    for forbidden in ("persistence", "publisher", "zmq", "gui", "control"):
+    assert "persistence_started" in bridge_source
+    assert "persistence_stopped" in bridge_source
+    for forbidden in ("publisher", "zmq", "gui", "control"):
         assert forbidden not in bridge_source.lower()
