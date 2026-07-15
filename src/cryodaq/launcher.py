@@ -1968,10 +1968,16 @@ class LauncherWindow(QMainWindow):
                 raise
         try:
             self._stop_assistant()
-        except Exception:
+        except Exception as assistant_error:
             logger.exception("theme: assistant stop failed; aborting re-exec")
+            try:
+                if snapshot_ingress is not None:
+                    snapshot_ingress.start()
+            except Exception as recovery_error:
+                logger.exception("theme: operator snapshot ingress recovery failed")
+                raise RuntimeError("assistant stop and operator snapshot ingress recovery failed") from recovery_error
             self._shutdown_requested = False
-            raise
+            raise assistant_error
         self._invalidate_descriptor_transport()
         # With the assistant settled, shut down the bridge before the engine
         # so no REQ is mid-flight. Same sequence as _do_shutdown but without
