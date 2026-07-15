@@ -1,7 +1,7 @@
 # CryoDAQ Architecture
 
-**Version:** v0.64.0
-**Date:** 2026-07-08
+**Version:** v0.64.1
+**Date:** 2026-07-15
 
 ---
 
@@ -38,6 +38,8 @@ state. Key responsibilities:
 - Run sensor diagnostics pipeline (MAD + cross-channel correlation)
 - Serve ZMQ REP/REQ command plane for GUI + Telegram bot commands
 - Publish ZMQ PUB telemetry for GUI + archive
+- Compose and publish one revisioned observational operator snapshot from the
+  SafetyManager and loop-owned recording/persistence feeds
 
 ### cryodaq-gui (Qt desktop client)
 
@@ -71,6 +73,18 @@ Instrument
 ZMQ IPC:
 - PUB `:5555` — msgpack telemetry (readings, events, status)
 - REP `:5556` — JSON commands (GUI → engine, Telegram bot → engine)
+
+---
+
+### Operator snapshot publication
+
+The operator-snapshot lane is observational and has one engine-loop lifecycle
+owner. It samples the cached SafetyManager proof and the exact
+`RecordingLifecycleFeed`, allocates one durable global revision only after a
+complete cut validates, and sends the cut on the existing PUB socket. Cold or
+disconnected mandatory authorities publish nothing; stale or ambiguous
+persistence publishes explicit `NOT_RECORDING`/unavailable-storage truth. The
+lane has no command, driver, actuator, or fallback-writer capability.
 
 ---
 

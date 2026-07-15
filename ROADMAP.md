@@ -92,7 +92,7 @@ screenshot alone cannot satisfy this gate.
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
 | F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, generic GUI, real-localhost lifecycle, conformance/reference driver, and continuous acquisition-to-display software proof committed; specialized shell routing and frozen-build extension proof open | L | H |
-| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — snapshot plane, live safety authority, and fail-conservative recording/integrity projections committed; production activation and atomic shell cutover open | L | H |
+| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — backend snapshot production path and live safety/recording/integrity authority activated; atomic shell cutover and operator gates open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -351,12 +351,14 @@ Pure replay sessions and conservative live adapters preserve explicit
 unavailability rather than inventing authority. The committed SafetyManager
 cache and live safety/readiness authority now provide truthful live safety
 facts, including conservative UNKNOWN/disconnected behavior when evidence is
-missing. Pure recording/persistence owners and fail-conservative live
-projections are also committed, but they are not yet integrated with the actual
-loop-owned experiment, acquisition, and persistence feeds. Until that
-integration lands, production
-recording remains `UNKNOWN`, data integrity remains unavailable, and optional
-F36.3-F36.5 authorities are not synthesized.
+missing. The production engine now owns one supervised composer/publication
+path. It samples the exact loop-owned experiment, acquisition, direct-SQLite
+persistence, and SafetyManager feeds, allocates one durable revision only after
+the complete cut validates, and publishes through the sole existing PUB
+socket. Missing mandatory authority remains fail-dark; stale or ambiguous
+persistence remains explicitly NOT_RECORDING/unavailable. No fallback writer
+or control coupling exists, and optional F36.3-F36.5 authorities are not
+synthesized.
 
 ### F36.2 — Primary Operating Display, preflight, and recovery — 🔧 PARTIAL
 
@@ -384,9 +386,9 @@ conformance. Screenshot approval is evidence input, not a substitute for the
 scenario, accessibility, performance, or backend-truth gates.
 
 Current boundary: the reusable operating-display, navigation, backend-truth
-models, snapshot transport, and Store foundations exist. Production server/live
-activation and the atomic shell cutover are still open, so the legacy shell is
-not yet retired and no screenshot or operator-scenario closure is claimed.
+models, snapshot transport, Store, and production engine publication path
+exist. The atomic shell cutover is still open, so the legacy shell is not yet
+retired and no screenshot or operator-scenario closure is claimed.
 
 ### F36.3 — Cooldown mission and durable attention history
 

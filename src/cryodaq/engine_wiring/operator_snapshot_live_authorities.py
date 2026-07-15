@@ -32,6 +32,7 @@ from cryodaq.engine_wiring.persistence_authority_owner import (
     PersistenceAuthorityOwner,
     PersistenceAuthoritySnapshot,
 )
+from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
 from cryodaq.operator_snapshot import (
     MAX_ID_UTF8_BYTES,
     MAX_NONNEGATIVE_INT,
@@ -235,9 +236,9 @@ class LiveRecordingExperimentAuthority:
 
     __slots__ = ("__owner", "__last_revision", "__last_token")
 
-    def __init__(self, owner: ExperimentRecordingOwner) -> None:
-        if type(owner) is not ExperimentRecordingOwner:
-            raise TypeError("owner must be an exact ExperimentRecordingOwner")
+    def __init__(self, owner: ExperimentRecordingOwner | RecordingLifecycleFeed) -> None:
+        if type(owner) not in (ExperimentRecordingOwner, RecordingLifecycleFeed):
+            raise TypeError("owner must be an exact ExperimentRecordingOwner or exact RecordingLifecycleFeed")
         self.__owner = owner
         self.__last_revision = 0
         self.__last_token: str | None = None
@@ -331,16 +332,20 @@ class LiveIntegrityPersistenceAuthority:
 
     __slots__ = ("__owner", "__last_revision", "__last_token")
 
-    def __init__(self, owner: PersistenceAuthorityOwner) -> None:
-        if type(owner) is not PersistenceAuthorityOwner:
-            raise TypeError("owner must be an exact PersistenceAuthorityOwner")
+    def __init__(self, owner: PersistenceAuthorityOwner | RecordingLifecycleFeed) -> None:
+        if type(owner) not in (PersistenceAuthorityOwner, RecordingLifecycleFeed):
+            raise TypeError("owner must be an exact PersistenceAuthorityOwner or exact RecordingLifecycleFeed")
         self.__owner = owner
         self.__last_revision = 0
         self.__last_token: str | None = None
 
     def snapshot_for_cut(self, cut: CommonCut) -> IntegrityPersistenceReceipt:
         try:
-            snapshot = self.__owner.snapshot()
+            snapshot = (
+                self.__owner.persistence_snapshot()
+                if type(self.__owner) is RecordingLifecycleFeed
+                else self.__owner.snapshot()
+            )
             if type(snapshot) is not PersistenceAuthoritySnapshot:
                 raise TypeError("wrong persistence snapshot type")
             revision = _exact_revision(snapshot.revision, minimum=1)

@@ -93,6 +93,7 @@ from cryodaq.drivers.registry import (
     construct_driver,
     validate_instrument_entries,
 )
+from cryodaq.engine_wiring.operator_snapshot_production import build_operator_snapshot_publication_service
 from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
 from cryodaq.engine_wiring.runtime_tasks import (
     _alarm_ring_buffer_loop,
@@ -3280,6 +3281,16 @@ async def _run_engine(*, mock: bool = False) -> None:
         alarm_dispatch_tasks=_alarm_dispatch_tasks,
         logger_=logger,
     )
+    operator_snapshot_service = None
+    try:
+        operator_snapshot_service = build_operator_snapshot_publication_service(
+            safety_owner=safety_manager,
+            recording_feed=recording_lifecycle_feed,
+            publisher=zmq_pub,
+            data_root=_DATA_DIR,
+        )
+    except Exception as exc:  # noqa: BLE001 - observational publication is fail-dark
+        logger.warning("Operator snapshot publication unavailable at engine boot: %s", exc, exc_info=True)
 
     # safety_collect/safety_monitor уже созданы SafetyManager.start(); надзираем
     # за ними снаружи, не трогая safety_manager.py. Перезапуск повторно запускает
@@ -3326,6 +3337,11 @@ async def _run_engine(*, mock: bool = False) -> None:
         recording_lifecycle_feed,
         acquisition_lifecycle_sequence,
     )
+    if operator_snapshot_service is not None:
+        supervisor.spawn(
+            "operator_snapshot_publication",
+            operator_snapshot_service.run,
+        )
     throttle_task = supervisor.spawn(
         "adaptive_throttle_runtime",
         functools.partial(track_runtime_signals, broker, adaptive_throttle),
@@ -3499,6 +3515,16 @@ async def _run_engine(*, mock: bool = False) -> None:
     # A2: гасим надзор до отмены задач — иначе done-callback перезапустит
     # только что отменённую задачу прямо во время завершения.
     supervisor.stop()
+    if operator_snapshot_service is not None:
+        operator_snapshot_service.request_stop()
+        operator_snapshot_task = supervisor.supervised_tasks.get("operator_snapshot_publication")
+        if operator_snapshot_task is not None:
+            try:
+                await operator_snapshot_task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - presentation failure cannot block shutdown
+                logger.warning("Operator snapshot publication stopped with failure: %s", exc, exc_info=True)
 
     # F31 H3: drain in-flight sink dispatches before downstream teardown.
     # _alarm_dispatch_tasks holds vault-write and webhook-POST tasks

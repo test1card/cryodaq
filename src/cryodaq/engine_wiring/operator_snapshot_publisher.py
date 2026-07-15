@@ -138,7 +138,6 @@ class OperatorSnapshotPublicationService:
         if self._owner_task is not None:
             raise RuntimeError("operator snapshot publication already has an owner")
         self._owner_task = task
-        self._stop_requested.clear()
         try:
             self._next_due = self._monotonic_now()
             while not self._stop_requested.is_set():
