@@ -197,6 +197,65 @@ async def test_windows_shutdown_sentinel_reaches_ordered_runtime_cleanup(
     assert _FakeCoordinator.stopped.is_set()
 
 
+async def test_windows_signal_wait_ticks_until_handler_runs_and_restores_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    previous = object()
+    signal_mock = MagicMock(return_value=previous)
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.signal, "SIGBREAK", 21, raising=False)
+    monkeypatch.setattr(module.signal, "signal", signal_mock)
+    monkeypatch.setattr(module, "ReportCoordinator", _FakeCoordinator)
+    original_wait = module.asyncio.wait
+    timeouts: list[float | None] = []
+
+    async def recording_wait(tasks, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        if len(timeouts) == 1:
+            return set(), set(tasks)
+        signal_mock.call_args_list[0].args[1](21, None)
+        return await original_wait(tasks, timeout=1, return_when=kwargs["return_when"])
+
+    monkeypatch.setattr(module.asyncio, "wait", recording_wait)
+    await module.run(config_dir=tmp_path, data_dir=tmp_path)
+
+    assert timeouts == [0.1, 0.1]
+    assert signal_mock.call_args_list[-1].args == (21, previous)
+    assert _FakeCoordinator.stopped.is_set()
+
+
+async def test_posix_signal_wait_remains_unbounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.agents.assistant_bootstrap as module
+
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module, "ReportCoordinator", _FakeCoordinator)
+    loop = asyncio.get_running_loop()
+    handlers: dict[int, object] = {}
+    removed: list[int] = []
+    monkeypatch.setattr(loop, "add_signal_handler", lambda signum, handler: handlers.setdefault(signum, handler))
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda signum: removed.append(signum) or True)
+    original_wait = module.asyncio.wait
+    timeouts: list[float | None] = []
+
+    async def recording_wait(tasks, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        handlers[module.signal.SIGINT]()
+        return await original_wait(tasks, timeout=1, return_when=kwargs["return_when"])
+
+    monkeypatch.setattr(module.asyncio, "wait", recording_wait)
+    await module.run(config_dir=tmp_path, data_dir=tmp_path)
+
+    assert timeouts == [None]
+    assert removed == [module.signal.SIGINT, module.signal.SIGTERM]
+    assert _FakeCoordinator.stopped.is_set()
+
+
 @pytest.mark.parametrize(
     "candidate_kind",
     ["symlink", "broken-symlink", "directory"],

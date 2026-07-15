@@ -439,7 +439,13 @@ async def run(
         if llm_task is not None:
             watched.add(llm_task)
         while True:
-            done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                watched,
+                timeout=0.1 if installed_windows_signal is not None else None,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                continue
             if coordinator_task is not None and coordinator_task in done:
                 await coordinator_task
                 raise RuntimeError("automatic report coordinator stopped unexpectedly")

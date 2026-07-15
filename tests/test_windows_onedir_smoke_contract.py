@@ -52,6 +52,17 @@ def test_required_warning_filter_is_exact_and_prefix_aware() -> None:
     ]
 
 
+def test_reviewed_optional_and_nonmodule_warnings_are_exactly_exempt() -> None:
+    reviewed = sorted(smoke._KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS)
+    exact = "\n".join(f"missing module named '{name}' - imported by x" for name in reviewed)
+    near_misses = [f"{name}.unexpected" for name in reviewed]
+    unknown = ["pyarrow.unknown_required", "zmq.unknown_required"]
+    unsafe = "\n".join(f"missing module named '{name}' - imported by x" for name in near_misses + unknown)
+
+    assert smoke.required_missing_modules(exact) == []
+    assert smoke.required_missing_modules(unsafe) == sorted(near_misses + unknown)
+
+
 def test_missing_warning_file_fails_closed_with_evidence(tmp_path: Path) -> None:
     evidence = tmp_path / "warning.json"
 

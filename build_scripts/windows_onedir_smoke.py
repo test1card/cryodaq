@@ -42,6 +42,24 @@ _REQUIRED_FROZEN_MODULES = (
     "tzdata",
     "zmq",
 )
+_KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS = frozenset(
+    {
+        "pyarrow._azurefs",
+        "pyarrow._cuda",
+        "pyarrow.gandiva",
+        "zmq.ZMQError",
+        "zmq.backend.Context",
+        "zmq.backend.Frame",
+        "zmq.backend.Socket",
+        "zmq.backend.proxy",
+        "zmq.backend.strerror",
+        "zmq.backend.zmq_errno",
+        "zmq.backend.zmq_poll",
+        "zmq.backend.zmq_version_info",
+        "zmq.zmq_version",
+        "zmq.zmq_version_info",
+    }
+)
 _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
 
@@ -77,6 +95,8 @@ def required_missing_modules(warning_text: str) -> list[str]:
         if match is None:
             continue
         candidate = match.group(1)
+        if candidate in _KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS:
+            continue
         if any(candidate == required or candidate.startswith(required + ".") for required in _REQUIRED_FROZEN_MODULES):
             missing.add(candidate)
     return sorted(missing)
