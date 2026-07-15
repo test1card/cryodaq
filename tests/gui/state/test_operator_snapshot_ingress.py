@@ -331,6 +331,26 @@ def test_stop_cancels_queued_epoch_drains_bridge_and_leaves_store_disconnected(q
     assert all("transport_disconnected" in summary.transport_reason_codes for summary in owner.snapshot.summaries())
 
 
+def test_stop_failure_keeps_owner_active_and_epoch_current(qapp, monkeypatch) -> None:
+    bridge = _Bridge()
+    owner = OperatorSnapshotIngressOwner(bridge)
+    owner.start()
+    owner._apply_snapshot(owner._epoch, _snapshot(1))
+    epoch = owner._epoch
+    monkeypatch.setattr(
+        owner,
+        "_degrade_current",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("render failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        owner.stop()
+
+    assert owner.active is True
+    assert owner._epoch == epoch
+    assert bridge.poll_calls == 1
+
+
 def test_cold_start_and_inactive_pump_never_synthesize_backend_truth(qapp) -> None:
     bridge = _Bridge()
     bridge.snapshots = [_snapshot(1)]

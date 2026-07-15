@@ -695,10 +695,10 @@ def test_theme_reexec_settles_assistant_between_bridge_and_engine(
 
     assert window._shutdown_requested is True
     assert events == [
+        "snapshot.stop",
         "assistant.terminate",
         "assistant.wait:10",
         "descriptor",
-        "snapshot.stop",
         "bridge",
         "engine",
         "exec",
@@ -729,6 +729,35 @@ def test_theme_reexec_aborts_if_assistant_cannot_settle(
 
     assert window._shutdown_requested is False
     assert events == []
+    execv.assert_not_called()
+
+
+def test_theme_reexec_ingress_failure_leaves_live_launcher_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.launcher import LauncherWindow
+
+    events: list[str] = []
+    window = SimpleNamespace(
+        _shutdown_requested=False,
+        _snapshot_ingress=SimpleNamespace(
+            stop=lambda: (events.append("snapshot.stop"), (_ for _ in ()).throw(RuntimeError("render failed")))[1]
+        ),
+        _stop_assistant=lambda: events.append("assistant"),
+        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
+        _bridge=SimpleNamespace(shutdown=lambda: events.append("bridge")),
+        _stop_engine=lambda: events.append("engine"),
+        _engine_external=True,
+        _lock_fd=None,
+    )
+    execv = MagicMock()
+    monkeypatch.setattr("cryodaq.launcher.os.execv", execv)
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        LauncherWindow._restart_gui_with_theme_change(window)  # type: ignore[arg-type]
+
+    assert window._shutdown_requested is False
+    assert events == ["snapshot.stop"]
     execv.assert_not_called()
 
 

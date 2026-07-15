@@ -130,14 +130,13 @@ class OperatorSnapshotIngressOwner(QObject):
         self._require_owner_thread()
         if not self._active:
             return
-        self._epoch += 1
-        self._active = False
         try:
             self._bridge.poll_operator_snapshots()
         except Exception:
             pass
-        finally:
-            self._degrade_current(connected=False)
+        self._degrade_current(connected=False)
+        self._epoch += 1
+        self._active = False
 
     @Slot(int, object)
     def _apply_snapshot_batch(self, epoch: int, candidate: object) -> None:

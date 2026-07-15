@@ -1954,18 +1954,10 @@ class LauncherWindow(QMainWindow):
         bridge queued behind the stranded reply and timed out. Cold-start
         everything from scratch is the only robust path.
         """
-        logger.info("theme: stopping assistant + bridge + engine before exec")
+        logger.info("theme: stopping ingress + assistant + bridge + engine before exec")
         self._shutdown_requested = True
-        # Fail before touching the engine/bridge if the assistant/H3 owner
-        # cannot be settled.  This prevents both a duplicate owner after exec
-        # and a half-shut-down current launcher after an aborted exec.
-        try:
-            self._stop_assistant()
-        except Exception:
-            logger.exception("theme: assistant stop failed; aborting re-exec")
-            self._shutdown_requested = False
-            raise
-        self._invalidate_descriptor_transport()
+        # Stop the GUI ingress before any other irreversible teardown.  If its
+        # fail-closed degradation cannot be published, keep this launcher live.
         snapshot_ingress = getattr(self, "_snapshot_ingress", None)
         if snapshot_ingress is not None:
             try:
@@ -1974,6 +1966,13 @@ class LauncherWindow(QMainWindow):
                 logger.exception("theme: operator snapshot ingress stop failed; aborting re-exec")
                 self._shutdown_requested = False
                 raise
+        try:
+            self._stop_assistant()
+        except Exception:
+            logger.exception("theme: assistant stop failed; aborting re-exec")
+            self._shutdown_requested = False
+            raise
+        self._invalidate_descriptor_transport()
         # With the assistant settled, shut down the bridge before the engine
         # so no REQ is mid-flight. Same sequence as _do_shutdown but without
         # QApplication.quit().
