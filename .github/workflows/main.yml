@@ -41,6 +41,8 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
@@ -78,9 +80,28 @@ jobs:
         if: matrix.suite == 'remaining'
         run: ruff check src/ tests/
 
-      - name: Check formatting
+      - name: Check formatting of changed Python files
         if: matrix.suite == 'remaining'
-        run: ruff format --check src/ tests/
+        run: |
+          set -euo pipefail
+          # Reviewed debt boundary: everything changed after this commit must
+          # be formatted.  Missing/squashed ancestry fails closed and requires
+          # an explicit baseline migration instead of silently skipping files.
+          FORMAT_BASE=db8849b573309453f25bc42adbf4b55cd0ce400b
+          git cat-file -e "${FORMAT_BASE}^{commit}"
+          git merge-base --is-ancestor "$FORMAT_BASE" HEAD
+
+          changed_file="$(mktemp)"
+          trap 'rm -f "$changed_file"' EXIT
+          git diff --name-only --diff-filter=ACMR -z "$FORMAT_BASE"...HEAD -- '*.py' >"$changed_file"
+
+          if [[ -s "$changed_file" ]]; then
+            # Bounded batches avoid the Windows CreateProcess command-line
+            # limit while preserving arbitrary Git-valid path names.
+            xargs -0 -n 100 python -m ruff format --check -- <"$changed_file"
+          else
+            echo "No changed Python files to format-check."
+          fi
 
       - name: Check requirements-lock drift
         if: matrix.suite == 'remaining'

@@ -355,9 +355,7 @@ class MultiLinePanel(QWidget):
         self._select_channels_btn.clicked.connect(self._on_select_channels_clicked)
         toolbar.addWidget(self._select_channels_btn)
         self._reset_all_btn = QPushButton("Сбросить базу для всех")
-        self._reset_all_btn.setToolTip(
-            "Установить текущие значения как новую базу для всех каналов"
-        )
+        self._reset_all_btn.setToolTip("Установить текущие значения как новую базу для всех каналов")
         self._reset_all_btn.clicked.connect(self._on_reset_all_clicked)
         toolbar.addWidget(self._reset_all_btn)
         root.addLayout(toolbar)
@@ -427,19 +425,14 @@ class MultiLinePanel(QWidget):
         burst_row.addStretch(1)
         self._burst_status_label = QLabel("Готов")
         self._burst_status_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; "
-            f"font-family: '{theme.FONT_MONO}'; "
-            f"font-feature-settings: 'tnum';"
+            f"color: {theme.MUTED_FOREGROUND}; font-family: '{theme.FONT_MONO}'; font-feature-settings: 'tnum';"
         )
         burst_row.addWidget(self._burst_status_label)
         root.addLayout(burst_row)
 
         # --- Footer ---
         self._footer_label = QLabel("Нет данных.")
-        self._footer_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; "
-            f"font-size: {tfont.pointSize() - 2}pt;"
-        )
+        self._footer_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; font-size: {tfont.pointSize() - 2}pt;")
         root.addWidget(self._footer_label)
 
     def _make_env_label(self, prefix: str, value: str) -> QLabel:
@@ -769,12 +762,8 @@ class MultiLinePanel(QWidget):
             default=0.0,
         )
         if latest > 0.0:
-            ts_str = (
-                datetime.fromtimestamp(latest, tz=UTC).astimezone().strftime("%H:%M:%S")
-            )
-            self._footer_label.setText(
-                f"Каналов: {ch_count}. Последнее обновление: {ts_str}."
-            )
+            ts_str = datetime.fromtimestamp(latest, tz=UTC).astimezone().strftime("%H:%M:%S")
+            self._footer_label.setText(f"Каналов: {ch_count}. Последнее обновление: {ts_str}.")
         else:
             self._footer_label.setText("Нет данных.")
 
@@ -787,8 +776,7 @@ class MultiLinePanel(QWidget):
             res = QMessageBox.question(
                 self,
                 "Сброс базы",
-                f"Установить базу для канала {ch_num}? "
-                f"Текущее значение станет новой базой.",
+                f"Установить базу для канала {ch_num}? Текущее значение станет новой базой.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -801,8 +789,7 @@ class MultiLinePanel(QWidget):
             res = QMessageBox.question(
                 self,
                 "Сброс базы для всех каналов",
-                "Установить базу для всех каналов? "
-                "Текущие значения станут новой базой.",
+                "Установить базу для всех каналов? Текущие значения станут новой базой.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -827,9 +814,7 @@ class MultiLinePanel(QWidget):
         # panel hasn't seen anything yet, the dialog opens empty and
         # the operator picks fresh.
         current = sorted(self._states.keys())
-        dialog = MultiLineChannelSelectorDialog(
-            current_selection=current, parent=self
-        )
+        dialog = MultiLineChannelSelectorDialog(current_selection=current, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         new_channels = dialog.selected_channels()
@@ -856,11 +841,7 @@ class MultiLinePanel(QWidget):
     def _on_select_channels_response(self, result: dict) -> None:
         try:
             if not isinstance(result, dict) or not result.get("ok"):
-                err = (
-                    str(result.get("error", "ошибка"))
-                    if isinstance(result, dict)
-                    else "engine не ответил"
-                )
+                err = str(result.get("error", "ошибка")) if isinstance(result, dict) else "engine не ответил"
                 QMessageBox.warning(
                     self,
                     "Не удалось применить выбор каналов",
@@ -880,9 +861,7 @@ class MultiLinePanel(QWidget):
                 )
         finally:
             # Drop finished worker; reset button state.
-            self._select_channels_workers = [
-                w for w in self._select_channels_workers if w.isRunning()
-            ]
+            self._select_channels_workers = [w for w in self._select_channels_workers if w.isRunning()]
             self._select_channels_btn.setEnabled(True)
             self._select_channels_btn.setText("Выбрать каналы…")
 
@@ -904,11 +883,7 @@ class MultiLinePanel(QWidget):
             if row is not None:
                 self._table.removeRow(row)
             # Drop history buffers + curves whose channel index matches.
-            doomed = [
-                name
-                for name, idx in self._channel_name_to_index.items()
-                if idx == ch_num
-            ]
+            doomed = [name for name, idx in self._channel_name_to_index.items() if idx == ch_num]
             for name in doomed:
                 self._buffers.pop(name, None)
                 self._channel_name_to_index.pop(name, None)
@@ -941,9 +916,7 @@ class MultiLinePanel(QWidget):
         # Capture command in lambda so the response handler knows which
         # branch to interpret. Workers retained on self._burst_workers
         # to defeat Qt's QThread GC race.
-        worker.finished.connect(
-            lambda result, c=action: self._on_burst_response(c, result)
-        )
+        worker.finished.connect(lambda result, c=action: self._on_burst_response(c, result))
         self._burst_workers.append(worker)
         worker.start()
 
@@ -974,9 +947,7 @@ class MultiLinePanel(QWidget):
             self._burst_duration_spin.setEnabled(False)
             duration = result.get("duration_s")
             if duration is not None:
-                self._burst_status_label.setText(
-                    f"Запись (авто-стоп через {int(float(duration))} с)…"
-                )
+                self._burst_status_label.setText(f"Запись (авто-стоп через {int(float(duration))} с)…")
             else:
                 self._burst_status_label.setText("Запись (без авто-стопа)…")
             if not self._burst_poll_timer.isActive():
@@ -989,9 +960,7 @@ class MultiLinePanel(QWidget):
             self._burst_duration_spin.setEnabled(True)
             self._burst_poll_timer.stop()
             if result.get("saved") and result.get("path"):
-                self._burst_status_label.setText(
-                    f"Сохранено: {result['path']}"
-                )
+                self._burst_status_label.setText(f"Сохранено: {result['path']}")
             else:
                 self._burst_status_label.setText("Цикла не было — пусто")
             return
@@ -1001,9 +970,7 @@ class MultiLinePanel(QWidget):
             elapsed_s = float(result.get("elapsed_s", 0.0) or 0.0)
             if active:
                 self._burst_active_server = True
-                self._burst_status_label.setText(
-                    f"Запись {elapsed_s:.1f} с, {cycle_count} кадров"
-                )
+                self._burst_status_label.setText(f"Запись {elapsed_s:.1f} с, {cycle_count} кадров")
             else:
                 # Active flipped server-side (likely auto-stop fired);
                 # request the path via burst_stop so the operator gets
@@ -1013,9 +980,7 @@ class MultiLinePanel(QWidget):
                     self._burst_button.setText("Записать")
                     self._burst_duration_spin.setEnabled(True)
                     self._burst_poll_timer.stop()
-                    self._burst_status_label.setText(
-                        f"Авто-стоп ({cycle_count} кадров) — запись..."
-                    )
+                    self._burst_status_label.setText(f"Авто-стоп ({cycle_count} кадров) — запись...")
                     self._send_burst_command("multiline.burst_stop", {})
 
     def _poll_burst_status(self) -> None:

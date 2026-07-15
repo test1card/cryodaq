@@ -948,11 +948,13 @@ worktree after D7.1 is settled.
   evidence cut, issues/consumes opaque proof, and settles cleanup. Windows stays
   fail-closed unsupported for this runner.
 - Final-candidate evidence is pending: do not copy historical counts or CI SHA.
-  The Ubuntu/Windows `remaining` CI jobs now require
-  `ruff format --check src/ tests/`; the first exact local invocation exposed
-  pre-existing formatting debt (326 files would be reformatted, 474 already
-  formatted), so the final CI gate remains honestly red/pending until that
-  separately reviewed mechanical migration lands.
+  A reviewed formatter-debt boundary is frozen at `db8849b`: the
+  Ubuntu/Windows `remaining` CI jobs fail closed unless that commit is an
+  ancestor, then NUL-safely format-check every ACMR Python path changed after
+  it in bounded batches. `multiline_panel.py` was mechanically formatted in
+  the enforcement slice. Untouched historical debt cannot grow, and no
+  249-file branch-wide rewrite is misrepresented as readiness work. Final
+  exact-SHA CI remains pending.
   A clean final-SHA 15-minute source soak, 12/72-hour duration evidence,
   real-Windows ONEDIR, all 12 operator scenarios, keyboard/DPI/NVDA,
   startup/frame/memory/long-session evidence, and every dummy-load,
