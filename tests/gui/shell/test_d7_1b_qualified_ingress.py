@@ -175,6 +175,7 @@ def test_launcher_drain_calls_production_method_and_exact_type_guard() -> None:
         _main_window=window,
         _reading_count=0,
         _last_reading_time=0.0,
+        _soak_bridge_handshake=None,
         _on_reading_qt=lambda item: LauncherWindow._on_reading_qt(launcher, item),
         _invalidate_descriptor_transport=lambda: None,
     )

@@ -457,6 +457,7 @@ def test_t2_launcher_path_real_drain(zmq_harness: ZmqHarness) -> None:  # noqa: 
             _main_window=w,
             _reading_count=0,
             _last_reading_time=0.0,
+            _soak_bridge_handshake=None,
             _last_health_watchdog_restart=0.0,
             _last_cmd_watchdog_restart=0.0,
         )
