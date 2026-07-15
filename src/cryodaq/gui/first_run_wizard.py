@@ -8,110 +8,435 @@ launcher's existing startup path untouched (see ``maybe_show_first_run_wizard``
 
 from __future__ import annotations
 
+import copy
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
-from PySide6.QtGui import QIntValidator
+import yaml
+from PySide6.QtCore import QEvent
+from PySide6.QtGui import QFont, QIntValidator
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
     QWizard,
     QWizardPage,
 )
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+from yaml.tokens import AliasToken, AnchorToken
 
+from cryodaq.drivers.registry import (
+    ConfigField,
+    DriverAuthority,
+    DriverRegistryError,
+    ValueKind,
+    get_driver_spec,
+    validate_instrument_entries,
+)
 from cryodaq.gui import first_run_config as cfg
 from cryodaq.gui import theme
 from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
-_INSTRUMENT_LABELS = {
-    "lakeshore_218s": "LakeShore 218S",
-    "keithley_2604b": "Keithley 2604B",
-    "thyracont_vsp63d": "Thyracont VSP63D",
+_MISSING = object()
+_COMPOUND_KINDS = {
+    ValueKind.STRING_MAP,
+    ValueKind.INTEGER_LIST,
+    ValueKind.ASC_REFERENCE_CHANNELS,
 }
+_MAX_COMPOUND_UTF8_BYTES = 16_384
+_MAX_COMPOUND_NODES = 256
+_MAX_COMPOUND_DEPTH = 8
+_REVIEWED_SOURCE_SETUP_FIELDS = frozenset(
+    {
+        "name",
+        "resource",
+        "poll_interval_s",
+        "connect_timeout_s",
+        "read_timeout_s",
+    }
+)
+_FIELD_LABELS = {
+    "name": "Имя прибора",
+    "resource": "Адрес подключения",
+    "poll_interval_s": "Интервал опроса, с",
+    "connect_timeout_s": "Таймаут подключения, с",
+    "read_timeout_s": "Таймаут чтения, с",
+    "host": "Сетевой узел",
+    "port": "Сетевой порт",
+    "channels": "Каналы",
+    "channel_count": "Количество каналов",
+    "baudrate": "Скорость порта, бод",
+    "address": "Адрес прибора",
+    "validate_checksum": "Проверять контрольную сумму",
+    "mode": "Режим",
+    "target_rate_hz": "Целевая частота, Гц",
+    "close_timeout_s": "Таймаут закрытия, с",
+    "max_frame_bytes": "Максимальный размер кадра, байт",
+}
+_DRIVER_TITLES = {
+    "lakeshore_218s": "Термометр Lake Shore 218S",
+    "thyracont_vsp63d": "Вакуумметр Thyracont VSP63D",
+    "etalon_multiline": "Многоканальный измеритель Etalon",
+    "asc_reference_tcp": "Эталонный канал ASC",
+    "keithley_2604b": "Источник-измеритель Keithley 2604B",
+}
+_DRIVER_DESCRIPTIONS = {
+    DriverAuthority.PASSIVE_MEASUREMENT: "Пассивное измерение: мастер меняет только параметры опроса и подключения.",
+    DriverAuthority.PASSIVE_EXTENSION: "Пассивное расширение: управление оборудованием не предоставляется.",
+    DriverAuthority.REVIEWED_SOURCE: (
+        "Источник с отдельным контуром безопасности: здесь доступны только параметры подключения и опроса."
+    ),
+}
+
+SetupWidget = QLineEdit | QPlainTextEdit | QCheckBox
+
+
+def _field_label(key: str) -> str:
+    try:
+        return _FIELD_LABELS[key]
+    except KeyError as exc:
+        raise DriverRegistryError(f"для параметра {key!r} нет проверенной русской подписи") from exc
+
+
+def _style_setup_widget(widget: SetupWidget, accessible_name: str) -> None:
+    """Apply the established input rhythm and keyboard focus contract."""
+
+    widget.setAccessibleName(accessible_name)
+    # DESIGN: RULE-SPACE-007, RULE-INTER-001, RULE-COLOR-001
+    height = theme.ROW_HEIGHT * 3 if isinstance(widget, QPlainTextEdit) else theme.ROW_HEIGHT
+    widget.setFixedHeight(height)
+    widget.setStyleSheet(
+        f"QLineEdit, QPlainTextEdit, QCheckBox {{"
+        f"background: {theme.SURFACE_CARD}; border: 1px solid {theme.BORDER};"
+        f"border-radius: {theme.RADIUS_SM}px; color: {theme.FOREGROUND};"
+        f"padding: 0 {theme.SPACE_2}px; }}"
+        f"QLineEdit:focus, QPlainTextEdit:focus, QCheckBox:focus {{"
+        f"border: 2px solid {theme.ACCENT}; }}"
+    )
+
+
+def _plain_schema_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _plain_schema_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_schema_value(item) for item in value]
+    return value
+
+
+def _format_field_value(value: object, schema: ConfigField) -> str:
+    if value is _MISSING or value is None:
+        return ""
+    if schema.kind in _COMPOUND_KINDS:
+        return yaml.safe_dump(
+            _plain_schema_value(value),
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        ).strip()
+    return str(value)
+
+
+def _bounded_compound_value(text: str, kind: ValueKind) -> object:
+    """Parse one small alias-free YAML value after bounding its syntax tree."""
+
+    if len(text.encode("utf-8")) > _MAX_COMPOUND_UTF8_BYTES:
+        raise DriverRegistryError("структурированное значение превышает допустимый размер")
+    tokens = yaml.scan(text, Loader=yaml.SafeLoader)
+    if any(isinstance(token, (AliasToken, AnchorToken)) for token in tokens):
+        raise DriverRegistryError("YAML-ссылки и псевдонимы в мастере запрещены")
+    node = yaml.compose(text, Loader=yaml.SafeLoader)
+    if node is None:
+        return None
+
+    node_count = 0
+
+    def inspect(current: Node, depth: int) -> None:
+        nonlocal node_count
+        node_count += 1
+        if node_count > _MAX_COMPOUND_NODES:
+            raise DriverRegistryError("структурированное значение содержит слишком много элементов")
+        if depth > _MAX_COMPOUND_DEPTH:
+            raise DriverRegistryError("структурированное значение имеет слишком большую вложенность")
+        if isinstance(current, MappingNode):
+            for key_node, value_node in current.value:
+                inspect(key_node, depth + 1)
+                inspect(value_node, depth + 1)
+        elif isinstance(current, SequenceNode):
+            for item in current.value:
+                inspect(item, depth + 1)
+
+    inspect(node, 1)
+    if kind is ValueKind.STRING_MAP:
+        if not isinstance(node, MappingNode) or any(
+            not isinstance(key, ScalarNode) or not isinstance(value, ScalarNode) for key, value in node.value
+        ):
+            raise DriverRegistryError("ожидается плоский словарь строк")
+    elif kind is ValueKind.INTEGER_LIST:
+        if not isinstance(node, SequenceNode) or any(not isinstance(item, ScalarNode) for item in node.value):
+            raise DriverRegistryError("ожидается плоский список номеров каналов")
+    elif kind is ValueKind.ASC_REFERENCE_CHANNELS:
+        if not isinstance(node, SequenceNode) or any(
+            not isinstance(item, MappingNode)
+            or any(not isinstance(key, ScalarNode) or not isinstance(value, ScalarNode) for key, value in item.value)
+            for item in node.value
+        ):
+            raise DriverRegistryError("ожидается список плоских описаний каналов ASC")
+    return yaml.safe_load(text)
+
+
+def _parse_field_value(widget: SetupWidget, schema: ConfigField) -> object:
+    if schema.kind is ValueKind.BOOLEAN:
+        assert isinstance(widget, QCheckBox)
+        return widget.isChecked()
+    assert isinstance(widget, (QLineEdit, QPlainTextEdit))
+    text = (widget.text() if isinstance(widget, QLineEdit) else widget.toPlainText()).strip()
+    if not text:
+        return _MISSING
+    if schema.kind is ValueKind.STRING:
+        return text
+    if schema.kind is ValueKind.INTEGER:
+        return int(text)
+    if schema.kind is ValueKind.NUMBER:
+        return float(text.replace(",", "."))
+    return _bounded_compound_value(text, schema.kind)
+
+
+def _apply_schema_overrides(data: dict, overrides: dict[str, dict[str, object]]) -> dict:
+    """Patch only registry-rendered leaves while preserving the source file."""
+
+    result = copy.deepcopy(data)
+    for entry in result.get("instruments") or []:
+        if isinstance(entry, dict):
+            for key, value in overrides.get(entry.get("name"), {}).items():
+                if value is _MISSING:
+                    entry.pop(key, None)
+                else:
+                    entry[key] = value
+    return result
 
 
 class _InstrumentsPage(QWizardPage):
-    """Page (a): GPIB/VISA/COM addresses, defaulted from instruments.yaml."""
+    """Page (a): registry-declared setup fields from instruments.yaml."""
 
     def __init__(self, config_dir: Path, parent: QWidget | None = None, *, prefer_local: bool = False) -> None:
         super().__init__(parent)
         self.setTitle("Приборы")
         source_name = "instruments.local.yaml" if prefer_local else "instruments.yaml"
         self.setSubTitle(
-            f"Адреса приборов из config/{source_name}. Отредактируйте под фактический ПК или оставьте как есть."
+            f"Параметры приборов из config/{source_name}. Проверьте их для этого ПК или оставьте без изменений."
         )
-        self._defaults = cfg.extract_instrument_defaults(
-            cfg.load_instruments_config(config_dir, prefer_local=prefer_local)
-        )
+        data = cfg.load_instruments_config(config_dir, prefer_local=prefer_local)
+        entries = data.get("instruments") or []
+        if not isinstance(entries, list):
+            raise DriverRegistryError("instruments must be a sequence")
+        self._defaults: dict[str, dict[str, object]] = {}
+        self._specs = {}
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise DriverRegistryError(f"instruments[{index}] must be a mapping")
+            spec = get_driver_spec(entry.get("type"))
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                raise DriverRegistryError(f"instruments[{index}].name must be a non-empty string")
+            if name in self._defaults:
+                raise DriverRegistryError(f"instruments[{index}].name duplicates {name!r}")
+            preserved_secrets = sorted(
+                key for key, field in spec.config_fields.items() if field.secret and key in entry
+            )
+            if preserved_secrets:
+                raise DriverRegistryError(
+                    f"{name}: мастер не может переносить секретные параметры в instruments.local.yaml: "
+                    f"{', '.join(preserved_secrets)}"
+                )
+            self._defaults[name] = entry
+            self._specs[name] = spec
+        self._field_widgets: dict[str, dict[str, SetupWidget]] = {}
+        self._initial_values: dict[str, dict[str, object]] = {}
+        self._multiline_widgets: set[QPlainTextEdit] = set()
         self._resource_edits: dict[str, QLineEdit] = {}
         self._baudrate_edits: dict[str, QLineEdit] = {}
 
         root = QVBoxLayout(self)
         root.setSpacing(theme.SPACE_3)
 
-        form = QFormLayout()
-        form.setSpacing(theme.SPACE_2)
-        for name, fields in self._defaults.items():
-            type_label = _INSTRUMENT_LABELS.get(fields["type"], fields["type"])
-            resource_edit = QLineEdit(str(fields.get("resource", "")))
-            self._resource_edits[name] = resource_edit
-            form.addRow(f"{name} ({type_label}):", resource_edit)
-            if "baudrate" in fields:
-                baud_edit = QLineEdit(str(fields["baudrate"]))
-                baud_edit.setValidator(QIntValidator(1, 4_000_000, baud_edit))
-                baud_edit.textChanged.connect(self._update_validation)
-                self._baudrate_edits[name] = baud_edit
-                form.addRow(f"{name} baudrate:", baud_edit)
-        root.addLayout(form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        form = QVBoxLayout(content)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(theme.SPACE_5)
+        for name, entry in self._defaults.items():
+            spec = self._specs[name]
+            if spec.authority is DriverAuthority.REVIEWED_SOURCE:
+                forbidden = sorted(
+                    key
+                    for key, schema in spec.config_fields.items()
+                    if schema.setup_visible and key not in _REVIEWED_SOURCE_SETUP_FIELDS
+                )
+                if forbidden:
+                    raise DriverRegistryError(
+                        f"{name}: мастер не может показывать управляющие параметры источника: {', '.join(forbidden)}"
+                    )
+            widgets: dict[str, SetupWidget] = {}
+            self._field_widgets[name] = widgets
+            self._initial_values[name] = {}
+            section = QFrame()
+            section.setObjectName("instrumentSetupCard")
+            section.setAccessibleName(f"Настройка прибора {name}")
+            # DESIGN: RULE-SURF-001, RULE-COLOR-001 - one quiet card per instrument.
+            section.setStyleSheet(
+                "QFrame#instrumentSetupCard {"
+                f"background: {theme.SURFACE_ELEVATED}; border: 1px solid {theme.BORDER};"
+                f"border-radius: {theme.RADIUS_MD}px; }}"
+            )
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(theme.SPACE_4, theme.SPACE_4, theme.SPACE_4, theme.SPACE_4)
+            section_layout.setSpacing(theme.SPACE_3)
+            eyebrow = QLabel("ПРИБОР И ПОДКЛЮЧЕНИЕ")
+            eyebrow.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+            section_layout.addWidget(eyebrow)
+            heading = QLabel(f"{_DRIVER_TITLES[spec.type_name]} — {name}")
+            heading_font = QFont(theme.FONT_BODY, theme.FONT_HEADING_SIZE)
+            heading_font.setWeight(QFont.Weight(theme.FONT_HEADING_WEIGHT))
+            heading.setFont(heading_font)
+            section_layout.addWidget(heading)
+            technical = QLabel(f"Тип драйвера: {spec.type_name} · класс {spec.class_name}")
+            technical.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+            section_layout.addWidget(technical)
+            authority_note = QLabel(_DRIVER_DESCRIPTIONS[spec.authority])
+            authority_note.setWordWrap(True)
+            authority_note.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+            section_layout.addWidget(authority_note)
+            for key, schema in spec.config_fields.items():
+                if not schema.setup_visible or schema.secret:
+                    continue
+                current = entry.get(key, _MISSING)
+                initial = schema.default if current is _MISSING else current
+                if schema.kind is ValueKind.BOOLEAN:
+                    if type(initial) is not bool:
+                        raise DriverRegistryError(f"{name}.{key}: логическое значение должно быть задано явно")
+                    widget = QCheckBox()
+                    widget.setChecked(initial)
+                    widget.toggled.connect(self._update_validation)
+                elif schema.kind in _COMPOUND_KINDS:
+                    widget = QPlainTextEdit(_format_field_value(initial, schema))
+                    widget.setTabChangesFocus(True)
+                    self._multiline_widgets.add(widget)
+                    widget.installEventFilter(self)
+                else:
+                    widget = QLineEdit(_format_field_value(initial, schema))
+                    if schema.secret:
+                        widget.setEchoMode(QLineEdit.EchoMode.Password)
+                    if schema.kind is ValueKind.INTEGER:
+                        minimum = int(schema.minimum) if schema.minimum is not None else -2_147_483_648
+                        maximum = int(schema.maximum) if schema.maximum is not None else 2_147_483_647
+                        widget.setValidator(QIntValidator(minimum, maximum, widget))
+                    widget.editingFinished.connect(self._update_validation)
+                widgets[key] = widget
+                accessible_name = f"{name}: {_field_label(key)}"
+                _style_setup_widget(widget, accessible_name)
+                self._initial_values[name][key] = _parse_field_value(widget, schema)
+                field_box = QWidget()
+                field_layout = QVBoxLayout(field_box)
+                field_layout.setContentsMargins(0, 0, 0, 0)
+                field_layout.setSpacing(theme.SPACE_1)
+                label = QLabel(_field_label(key))
+                label_font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
+                label_font.setWeight(QFont.Weight(theme.FONT_LABEL_WEIGHT))
+                label.setFont(label_font)
+                label.setBuddy(widget)
+                field_layout.addWidget(label)
+                field_layout.addWidget(widget)
+                section_layout.addWidget(field_box)
+                if key == "resource" and isinstance(widget, QLineEdit):
+                    self._resource_edits[name] = widget
+                if key == "baudrate" and isinstance(widget, QLineEdit):
+                    self._baudrate_edits[name] = widget
+            form.addWidget(section)
+        form.addStretch()
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
 
         self._skip_check = QCheckBox("Пропустить — не создавать instruments.local.yaml сейчас")
+        _style_setup_widget(self._skip_check, "Пропустить настройку приборов")
         self._skip_check.toggled.connect(self._update_validation)
         root.addWidget(self._skip_check)
         self._validation_label = QLabel()
         self._validation_label.setWordWrap(True)
-        self._validation_label.setStyleSheet("color: #ff6b6b;")
+        # DESIGN: RULE-A11Y-003 - readable body text; the message names the error.
+        self._validation_label.setStyleSheet(f"color: {theme.FOREGROUND};")
         root.addWidget(self._validation_label)
         self._update_validation()
 
-    def _invalid_baud_names(self) -> list[str]:
-        if self._skip_check.isChecked():
-            return []
-        return [
-            name for name, edit in self._baudrate_edits.items() if edit.text().strip() and not edit.hasAcceptableInput()
-        ]
+    def _candidate_entries(self) -> list[dict[str, object]]:
+        candidates: list[dict[str, object]] = []
+        for name, original in self._defaults.items():
+            spec = self._specs[name]
+            candidate = copy.deepcopy(original)
+            for key, widget in self._field_widgets[name].items():
+                try:
+                    value = _parse_field_value(widget, spec.config_fields[key])
+                except (TypeError, ValueError, yaml.YAMLError) as exc:
+                    raise DriverRegistryError(f"{name}.{key}: недопустимое значение") from exc
+                if value is _MISSING:
+                    candidate.pop(key, None)
+                else:
+                    candidate[key] = value
+            candidates.append(candidate)
+        return candidates
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if watched in self._multiline_widgets and event.type() is QEvent.Type.FocusOut:
+            self._update_validation()
+        return super().eventFilter(watched, event)
+
+    def _validation_error(self) -> str:
+        try:
+            entries = (
+                [copy.deepcopy(entry) for entry in self._defaults.values()]
+                if self._skip_check.isChecked()
+                else self._candidate_entries()
+            )
+            validate_instrument_entries(entries)
+        except (DriverRegistryError, TypeError, ValueError, yaml.YAMLError) as exc:
+            return str(exc)
+        return ""
 
     def _update_validation(self) -> None:
-        invalid = self._invalid_baud_names()
-        self._validation_label.setText(f"Некорректный baudrate: {', '.join(invalid)}" if invalid else "")
+        error = self._validation_error()
+        self._validation_label.setText(f"Некорректная настройка: {error}" if error else "")
         self.completeChanged.emit()
 
-    def isComplete(self) -> bool:  # noqa: N802 — Qt override
-        return not self._invalid_baud_names()
+    def isComplete(self) -> bool:  # noqa: N802 - Qt override
+        return not self._validation_error()
 
-    def get_overrides(self) -> dict[str, dict]:
-        """Return per-instrument overrides, or {} if the operator skipped this page."""
+    def get_overrides(self) -> dict[str, dict[str, object]]:
+        """Return changed schema fields, or {} when the operator skips."""
+
         if self._skip_check.isChecked():
+            validate_instrument_entries([copy.deepcopy(entry) for entry in self._defaults.values()])
             return {}
-        overrides: dict[str, dict] = {}
-        for name in self._defaults:
-            resource = self._resource_edits[name].text().strip()
-            patch: dict = {}
-            if resource:
-                patch["resource"] = resource
-            if name in self._baudrate_edits:
-                raw_baud = self._baudrate_edits[name].text().strip()
-                if raw_baud:
-                    if not self._baudrate_edits[name].hasAcceptableInput():
-                        raise ValueError(f"invalid baudrate for {name}")
-                    patch["baudrate"] = int(raw_baud)
+        candidates = self._candidate_entries()
+        validate_instrument_entries(candidates)
+        overrides: dict[str, dict[str, object]] = {}
+        for (name, _original), candidate in zip(self._defaults.items(), candidates, strict=True):
+            patch = {}
+            for key, widget in self._field_widgets[name].items():
+                current = _parse_field_value(widget, self._specs[name].config_fields[key])
+                if current != self._initial_values[name][key]:
+                    patch[key] = candidate.get(key, _MISSING)
             if patch:
                 overrides[name] = patch
         return overrides
@@ -134,7 +459,7 @@ class _SafetyPage(QWizardPage):
         form.setSpacing(theme.SPACE_2)
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color: #ff6b6b;")
+        self._error_label.setStyleSheet(f"color: {theme.FOREGROUND};")
         try:
             summary = cfg.read_safety_summary(config_dir)
         except cfg.FirstRunConfigError as exc:
@@ -161,6 +486,7 @@ class _SafetyPage(QWizardPage):
         root.addLayout(form)
 
         self._ack_check = QCheckBox("Я прочитал(а) и понимаю")
+        _style_setup_widget(self._ack_check, "Подтвердить чтение параметров безопасности")
         self._ack_check.setEnabled(self._safety_valid)
         self._ack_check.stateChanged.connect(self.completeChanged)
         root.addWidget(self._ack_check)
@@ -186,17 +512,26 @@ class _TelegramPage(QWizardPage):
         self._chat_id_edit.setPlaceholderText("chat_id (ненулевое число)")
         self._validation_label = QLabel()
         self._validation_label.setWordWrap(True)
-        self._validation_label.setStyleSheet("color: #ff6b6b;")
+        _style_setup_widget(self._token_edit, "Telegram: токен бота")
+        _style_setup_widget(self._chat_id_edit, "Telegram: идентификатор чата")
+        self._validation_label.setStyleSheet(f"color: {theme.FOREGROUND};")
 
         root = QVBoxLayout(self)
-        form = QFormLayout()
-        form.setSpacing(theme.SPACE_2)
-        form.addRow("Bot token:", self._token_edit)
-        form.addRow("Chat ID:", self._chat_id_edit)
+        form = QVBoxLayout()
+        form.setSpacing(theme.SPACE_1)
+        token_label = QLabel("Токен бота")
+        token_label.setBuddy(self._token_edit)
+        chat_label = QLabel("Идентификатор чата")
+        chat_label.setBuddy(self._chat_id_edit)
+        form.addWidget(token_label)
+        form.addWidget(self._token_edit)
+        form.addSpacing(theme.SPACE_3)
+        form.addWidget(chat_label)
+        form.addWidget(self._chat_id_edit)
         root.addLayout(form)
         root.addWidget(self._validation_label)
-        self._token_edit.textChanged.connect(self._update_validation)
-        self._chat_id_edit.textChanged.connect(self._update_validation)
+        self._token_edit.editingFinished.connect(self._update_validation)
+        self._chat_id_edit.editingFinished.connect(self._update_validation)
         self._update_validation()
 
     def _validation_error(self) -> str:
@@ -256,7 +591,7 @@ class FirstRunWizard(QWizard):
         instrument_overrides = self._instruments_page.get_overrides()
         if instrument_overrides:
             base = cfg.load_instruments_config(self._config_dir, prefer_local=self._force)
-            patched = cfg.apply_instrument_overrides(base, instrument_overrides)
+            patched = _apply_schema_overrides(base, instrument_overrides)
             if patched != base:
                 instruments_data = patched
 
