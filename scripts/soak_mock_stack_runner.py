@@ -1,10 +1,4 @@
-"""Hard-disabled POSIX soak runner foundation with an R3b receipt sink.
-
-The inherited AF_UNIX endpoint may durably capture isolated periodic-artifact
-evidence, but the runner still cannot launch a source process or publish a
-successful qualification. Activation and terminal PASS remain fused until the
-locked observer and integrated short-run acceptance are reviewed together.
-"""
+"""POSIX source-mode short-soak runner and durable R3b receipt authority."""
 
 from __future__ import annotations
 
@@ -126,6 +120,10 @@ _ARTIFACT_IO_TIMEOUT_S: Final = 10.0
 _MAX_RECEIPT_LEDGER_BYTES: Final = 8 * 1024 * 1024
 _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 _LOCKED_PSUTIL_VERSION: Final = "7.2.2"
+_SOURCE_ARGV: Final = (sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray")
+_SOURCE_START_TIMEOUT_S: Final = 30.0
+_RECOVERY_TIMEOUT_S: Final = 60.0
+_SHUTDOWN_TIMEOUT_S: Final = 20.0
 
 
 class _RunnerFoundationError(ValueError):
@@ -549,6 +547,25 @@ class _LockedPsutilObserver:
         _bind_positive_assistant_identity(observation, expected_launcher_pid=expected_launcher_pid)
         return observation
 
+    def observe_bridge(self, pid: int, *, expected_launcher_pid: int) -> _BridgeProcessObservation:
+        process = self._process(pid)
+        identity = self._identity(process)
+        try:
+            parent_pid = int(process.ppid())
+            argv = tuple(process.cmdline())
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+            raise _RunnerFoundationError("bridge process observation is unavailable") from exc
+        try:
+            _exact_child_role(argv)
+        except _RunnerFoundationError:
+            pass
+        else:
+            raise _RunnerFoundationError("positive bridge identity collides with another child role")
+        observation = _BridgeProcessObservation(identity, parent_pid, "zmq_bridge", True)
+        if parent_pid != expected_launcher_pid:
+            raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+        return observation
+
     def signal_exact(self, identity: _ProcessIdentity, signum: int) -> None:
         if isinstance(signum, bool) or not isinstance(signum, int) or signum != signal.SIGTERM:
             raise _RunnerFoundationError("qualification permits only exact-identity SIGTERM")
@@ -614,7 +631,7 @@ def _exact_child_role(argv: tuple[str, ...]) -> str:
 class _CleanShaCollector:
     """Collect ordered clean-SHA observations from fixed Git commands."""
 
-    __slots__ = ("_next", "_repo_root", "_sha")
+    __slots__ = ("_next", "_observations", "_repo_root", "_sha")
 
     def __init__(self, repo_root: Path) -> None:
         root = Path(repo_root).resolve()
@@ -622,6 +639,7 @@ class _CleanShaCollector:
             raise _RunnerFoundationError("runner root is not a Git worktree")
         self._repo_root = root
         self._next = 0
+        self._observations: list[_CleanShaObservation] = []
         self._sha: str | None = None
 
     def observe(self, boundary: _ShaBoundary) -> _CleanShaObservation:
@@ -657,7 +675,12 @@ class _CleanShaCollector:
         elif sha != self._sha:
             raise _RunnerFoundationError("clean SHA changed across runner boundaries")
         self._next += 1
+        self._observations.append(observation)
         return observation
+
+    @property
+    def observations(self) -> tuple[_CleanShaObservation, ...]:
+        return tuple(self._observations)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1346,20 +1369,87 @@ class _DeliveryEvidenceAuthority:
         raise _RunnerFoundationError("delivery evidence authority cannot be caller-constructed")
 
 
-class _DeliveryEvidenceRegistry:
-    """Fail closed until the runner-owned execution issuer is integrated.
-
-    R3b deliberately exposes no registration or issuance seam.  Receipt and
-    process observations are caller-shaped validation inputs; only the future
-    integrated runner that owns launch, fault injection, observation, joining,
-    and cleanup may replace this fused-off consumer with one-shot records.
-    """
-
+class _IntegratedRunAuthority:
     __slots__ = ()
 
+    def __new__(cls) -> _IntegratedRunAuthority:
+        del cls
+        raise _RunnerFoundationError("integrated run authority cannot be caller-constructed")
+
+
+class _DeliveryEvidenceRegistry:
+    """One-shot Evidence-bound records created by the integrated owner."""
+
+    __slots__ = ("_records", "_runs")
+
+    def __init__(self) -> None:
+        self._records: dict[int, tuple[_DeliveryEvidenceAuthority, Any, dict[str, object]]] = {}
+        self._runs: dict[int, tuple[_IntegratedRunAuthority, Any, Any]] = {}
+
+    def _begin_runner(self, runner: Any, evidence: Any) -> _IntegratedRunAuthority:
+        if type(runner) is not _PosixSoakRunner or runner._used is not True:
+            raise _RunnerFoundationError("delivery run is not owned by the active runner")
+        authority = object.__new__(_IntegratedRunAuthority)
+        self._runs[id(authority)] = (authority, runner, evidence)
+        return authority
+
+    def _register_from_runner(
+        self,
+        run_authority: object,
+        runner: Any,
+        evidence: Any,
+        proof: _PrePostReceiptEvidence,
+    ) -> None:
+        run = self._runs.get(id(run_authority))
+        if run is None or run[0] is not run_authority or run[1] is not runner or run[2] is not evidence:
+            raise _RunnerFoundationError("integrated run authority is unregistered, spent, or rebound")
+        if type(proof) is not _PrePostReceiptEvidence:
+            raise _RunnerFoundationError("delivery proof is not runner-joined evidence")
+        del self._runs[id(run_authority)]
+
+        def encode(item: _JoinedReceiptEvidence) -> dict[str, object]:
+            return {
+                "assistant_pid": item.assistant.pid,
+                "assistant_start_identity": item.assistant.start_identity,
+                "assistant_generation": item.assistant_generation,
+                "sequence": item.sequence,
+                "receipt_id": item.receipt_id,
+                "artifact_sha256": item.artifact_sha256,
+                "artifact_name": (
+                    f"periodic-g{item.assistant_generation}-s{item.sequence}-{item.artifact_sha256[7:]}.png"
+                ),
+                "acknowledgement_sha256": item.acknowledgement_sha256,
+                "ledger_record_sha256": item.ledger_record_sha256,
+                "destination_fingerprint": item.destination_fingerprint,
+                "state_updated_at": item.state_updated_at,
+                "health_updated_at": item.health_updated_at,
+            }
+
+        payload: dict[str, object] = {
+            "schema": "cryodaq-soak-periodic-delivery-result/v1",
+            "status": "PASS",
+            "pre_fault": encode(proof.pre_fault),
+            "post_fault": encode(proof.post_fault),
+        }
+        authority = object.__new__(_DeliveryEvidenceAuthority)
+        self._records[id(authority)] = (authority, evidence, payload)
+        try:
+            evidence._accept_periodic_delivery_result(authority)
+        except BaseException:
+            self._records.pop(id(authority), None)
+            raise
+
     def consume(self, authority: object, evidence: Any) -> dict[str, object]:
-        del authority, evidence
-        raise _RunnerFoundationError("delivery authority is unregistered, spent, or bound to another Evidence")
+        record = self._records.get(id(authority))
+        if record is None or record[0] is not authority or record[1] is not evidence:
+            raise _RunnerFoundationError("delivery authority is unregistered, spent, or bound to another Evidence")
+        del self._records[id(authority)]
+        return record[2]
+
+    def _abandon_runner(self, run_authority: object) -> None:
+        record = self._runs.get(id(run_authority))
+        if record is not None and record[0] is run_authority:
+            del self._runs[id(run_authority)]
 
 
 _DELIVERY_EVIDENCE = _DeliveryEvidenceRegistry()
@@ -1974,14 +2064,14 @@ class _ExactSixExecutionRegistry:
     def __init__(self) -> None:
         self._records: dict[int, tuple[_ExactSixAuthority, Any, dict[str, object]]] = {}
 
-    def execute(self, evidence: Any) -> dict[str, object]:
+    def execute(self, evidence: Any, *, collector: _CleanShaCollector | None = None) -> dict[str, object]:
         _require_posix_exact_six()
         try:
             import psutil
         except ImportError as exc:
             raise _RunnerActivationDisabled("locked psutil observer is unavailable") from exc
         observer = _LockedPsutilObserver(psutil)
-        collector = _CleanShaCollector(_REPO_ROOT)
+        collector = collector or _CleanShaCollector(_REPO_ROOT)
         git_sha = collector.observe(_ShaBoundary.BEFORE_COLLECTION).git_sha
         with _sealed_execution_snapshot(git_sha) as snapshot:
             collection = _execute_bounded_process(_COLLECTION_ARGV, observer=observer, snapshot=snapshot)
@@ -1992,6 +2082,7 @@ class _ExactSixExecutionRegistry:
                 stderr=collection.stderr,
                 exit_code=collection.exit_code,
             )
+            collector.observe(_ShaBoundary.BETWEEN_COLLECTION_AND_EXECUTION)
             snapshot.assert_sealed()
             execution = _execute_bounded_process(_EXECUTION_ARGV, observer=observer, snapshot=snapshot)
             _validate_exact_execution(
@@ -2002,6 +2093,7 @@ class _ExactSixExecutionRegistry:
                 exit_code=execution.exit_code,
             )
             snapshot.assert_sealed()
+        collector.observe(_ShaBoundary.AFTER_EXECUTION)
         payload: dict[str, object] = {
             "schema": "cryodaq-exact-six-result/v1",
             "command": list(_EXECUTION_ARGV),
@@ -2117,13 +2209,445 @@ class _CancellationCleanupContract:
 
 
 class _PosixSoakRunner:
-    """Non-runnable shell retained until integrated short-run acceptance."""
+    """Single-use owner of the real Linux source-mode short qualification."""
 
-    def run(self) -> None:
-        raise _RunnerActivationDisabled(
-            "H4 runner activation requires R2/R3 integration, the locked observer, "
-            "and reviewed real POSIX short-run evidence"
+    __slots__ = ("_used",)
+
+    def __init__(self) -> None:
+        self._used = False
+
+    @staticmethod
+    def require_platform() -> None:
+        _require_posix_exact_six()
+
+    @staticmethod
+    def _pipe_records(pipe: _BridgeHandshakePipe, retained: bytearray) -> list[bytes]:
+        os.set_blocking(pipe.read_fd, False)
+        while True:
+            try:
+                chunk = os.read(pipe.read_fd, _MAX_BRIDGE_HANDSHAKE_BYTES)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            retained.extend(chunk)
+            if len(retained) > 64 * _MAX_BRIDGE_HANDSHAKE_BYTES:
+                raise _RunnerFoundationError("bridge evidence stream is oversized")
+        records: list[bytes] = []
+        while b"\n" in retained:
+            index = retained.index(b"\n") + 1
+            records.append(bytes(retained[:index]))
+            del retained[:index]
+        return records
+
+    @staticmethod
+    def _load_roles(observer: Any, launcher: Any, bridge: Any) -> tuple[dict[str, Any], dict[Any, Any]]:
+        from scripts import soak_mock_stack as soak
+
+        snapshots = tuple(observer.snapshot())
+        tree = soak.descendants(snapshots, launcher)
+        return soak.classify_tree(tree, launcher, bridge_identity=bridge), tree
+
+    @staticmethod
+    def _periodic_cut(data_dir: Path) -> dict[str, object] | None:
+        from cryodaq.periodic_state import load_periodic_state
+
+        try:
+            payload = load_periodic_state(data_dir).payload
+        except (OSError, TypeError, ValueError):
+            return None
+        active = payload.get("active")
+        return payload if type(active) is dict else None
+
+    def run(self, evidence: Any) -> None:
+        """Run, validate, seal, and publish one short-soak terminal result."""
+
+        self.require_platform()
+        if self._used:
+            raise _RunnerFoundationError("POSIX soak runner is single-use")
+        self._used = True
+        import platform
+        from datetime import UTC, datetime
+
+        import psutil
+
+        from scripts import soak_mock_stack as soak
+
+        if type(evidence) is not soak.Evidence:
+            raise TypeError("evidence must be the exact Evidence type")
+        selected = soak.profile("short")
+        if selected.name != "short":
+            raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
+        locked = _LockedPsutilObserver(psutil)
+        collector = _CleanShaCollector(_REPO_ROOT)
+        sha = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=_REPO_ROOT,
+            env=_controlled_git_environment(),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        evidence.write_manifest(
+            {
+                "profile": "short",
+                "git_sha": sha,
+                "dirty": False,
+                "platform": platform.platform(),
+                "python": sys.version,
+                "source_command": list(_SOURCE_ARGV),
+                "thresholds": soak.effective_thresholds(selected),
+                "fatal_log_allowlist": [],
+                "capture_policy": "allowlisted metadata only; environment values forbidden",
+            }
         )
+        exact = _EXACT_SIX_EXECUTIONS.execute(evidence, collector=collector)
+        evidence.write_prerequisites(
+            {
+                "exact_six": {
+                    "command": exact["command"],
+                    "git_sha": exact["git_sha"],
+                    "exit_code": exact["exit_code"],
+                    "status": exact["status"],
+                    "result_artifact": "exact-six-result.json",
+                    "result_sha256": evidence._sha256("exact-six-result.json"),
+                },
+                "observer": {"identity": "psutil/create_time", "version": _LOCKED_PSUTIL_VERSION, "locked": True},
+                "local_publisher": {
+                    "identity": "inherited-af-unix-periodic-artifact/v1",
+                    "reviewed": True,
+                    "transport": "local-only",
+                },
+                "bridge_identity": {"capability": "launcher-inherited-pipe/v1", "positive": True},
+            }
+        )
+        collector.observe(_ShaBoundary.BEFORE_SOURCE_LAUNCH)
+        evidence.begin_run()
+        os.chmod(evidence.directory, 0o700)
+        broad = soak.PsutilObserver(psutil)
+        observations: set[Any] = set()
+        receipt_cuts: list[tuple[dict[str, object], dict[str, object], bytes, _AssistantProcessObservation]] = []
+        process: subprocess.Popen[bytes] | None = None
+        launcher_identity: _ProcessIdentity | None = None
+        bridge_pipe = _BridgeHandshakePipe.create()
+        artifact_pair = _ArtifactCapabilityPair.create()
+        sink = _ArtifactReceiptSink(artifact_pair.runner, nonce=artifact_pair.nonce, evidence_dir=evidence.directory)
+        bridge_buffer = bytearray()
+        log_path: Path | None = None
+        graceful = False
+        shutdown_elapsed = 0.0
+        try:
+            with tempfile.TemporaryDirectory(prefix="cryodaq-source-soak-") as temporary:
+                root = Path(temporary).resolve()
+                root.chmod(0o700)
+                config_dir = root / "config"
+                data_dir = root / "data"
+                config_dir.mkdir(mode=0o700)
+                data_dir.mkdir(mode=0o700)
+                (config_dir / "agent.yaml").write_text(
+                    "agent:\n  enabled: false\nreporting:\n  automatic_enabled: true\n",
+                    encoding="utf-8",
+                )
+                (config_dir / "notifications.yaml").write_text(
+                    "telegram:\n  bot_token: '123456:abcdefghijklmnopqrstuvwxyz'\n  chat_id: -100123\n"
+                    "periodic_report:\n  enabled: true\n  report_interval_s: 60\n",
+                    encoding="utf-8",
+                )
+                log_path = root / "launcher.log"
+                environment = {
+                    **os.environ,
+                    "CRYODAQ_ROOT": str(root),
+                    "PYTHONPATH": os.pathsep.join((str(_REPO_ROOT / "src"), str(_REPO_ROOT))),
+                    "PYTHONUNBUFFERED": "1",
+                    "QT_QPA_PLATFORM": os.environ.get("QT_QPA_PLATFORM", "offscreen"),
+                    **bridge_pipe.child_environment(),
+                    **artifact_pair.child_environment(),
+                }
+                with log_path.open("wb") as log:
+                    process = subprocess.Popen(
+                        _SOURCE_ARGV,
+                        cwd=_REPO_ROOT,
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        close_fds=True,
+                        pass_fds=bridge_pipe.child_pass_fds() + artifact_pair.child_pass_fds(),
+                        start_new_session=True,
+                    )
+                    launcher_identity = locked.identity_for_pid(process.pid)
+                    bridge_pipe.close_parent_write_end()
+                    artifact_pair.close_launcher_end()
+                    launcher = soak.ProcessIdentity(
+                        process.pid,
+                        int(launcher_identity.start_identity.rsplit("=", 1)[1]),
+                    )
+                    deadline = time.monotonic() + _SOURCE_START_TIMEOUT_S
+                    handshake: _BridgeHandshakeRecord | None = None
+                    bridge = None
+                    bridge_guard: _BridgeEpochGuard | None = None
+                    bridge_sequence = 0
+                    roles: dict[str, Any] | None = None
+                    while time.monotonic() < deadline and roles is None:
+                        for raw in self._pipe_records(bridge_pipe, bridge_buffer):
+                            if handshake is None:
+                                handshake = _parse_bridge_handshake(
+                                    raw,
+                                    expected_nonce=bridge_pipe.nonce,
+                                    expected_launcher_pid=process.pid,
+                                    received_before_deadline=True,
+                                )
+                                bridge_observation = locked.observe_bridge(
+                                    handshake.bridge_pid,
+                                    expected_launcher_pid=process.pid,
+                                )
+                                bridge_identity = _bind_positive_bridge_identity(handshake, bridge_observation)
+                                bridge_guard = _BridgeEpochGuard(bridge_identity, handshake.restart_count)
+                                bridge = soak.ProcessIdentity(
+                                    bridge_identity.pid,
+                                    int(bridge_identity.start_identity.rsplit("=", 1)[1]),
+                                )
+                            else:
+                                data = _parse_bridge_data(
+                                    raw,
+                                    expected_nonce=handshake.nonce,
+                                    expected_launcher_pid=process.pid,
+                                    expected_bridge_pid=handshake.bridge_pid,
+                                    after_sequence=bridge_sequence,
+                                )
+                                bridge_sequence = data.sequence
+                        if bridge is not None:
+                            try:
+                                roles, _tree = self._load_roles(broad, launcher, bridge)
+                            except ValueError:
+                                roles = None
+                        if roles is None:
+                            time.sleep(0.1)
+                    if roles is None or handshake is None or bridge is None or bridge_guard is None:
+                        raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
+
+                    start = time.monotonic()
+                    next_sample = 0.0
+                    event_index = 0
+                    epochs = {role: 0 for role in soak.ROLES}
+                    current = dict(roles)
+                    last_state: dict[str, object] | None = None
+                    last_health = 0.0
+                    while True:
+                        now = time.monotonic()
+                        elapsed = now - start
+                        for raw in self._pipe_records(bridge_pipe, bridge_buffer):
+                            data = _parse_bridge_data(
+                                raw,
+                                expected_nonce=handshake.nonce,
+                                expected_launcher_pid=process.pid,
+                                expected_bridge_pid=handshake.bridge_pid,
+                                after_sequence=bridge_sequence,
+                            )
+                            bridge_sequence = data.sequence
+                            bridge_guard.observe(
+                                locked.identity_for_pid(data.bridge_pid),
+                                restart_count=data.restart_count,
+                            )
+                        if elapsed >= next_sample or (
+                            event_index < len(selected.events) and elapsed >= selected.events[event_index].at_s
+                        ):
+                            current, tree = self._load_roles(broad, launcher, bridge)
+                            role_rows = {}
+                            for role, identity in current.items():
+                                observations.add(identity)
+                                role_rows[role] = (epochs[role], tree[identity])
+                            evidence.append(
+                                "samples.jsonl",
+                                soak.stack_sample(
+                                    elapsed,
+                                    role_rows,
+                                    wall_time=datetime.now(UTC).isoformat(),
+                                ),
+                            )
+                            next_sample = max(next_sample + soak.SAMPLE_INTERVAL_S, elapsed + 0.001)
+
+                        state = self._periodic_cut(data_dir)
+                        active = None if state is None else state["active"]
+                        if type(active) is dict and active["status"] == "DELIVERING" and len(receipt_cuts) < 2:
+                            assistant_id = current["assistant"]
+                            assistant_observation = locked.observe_assistant(
+                                assistant_id.pid,
+                                expected_launcher_pid=process.pid,
+                            )
+                            artifact = active["artifact"]
+                            sink.accept_one(
+                                assistant_observation=assistant_observation,
+                                expected_launcher_pid=process.pid,
+                                expected_assistant_generation=len(receipt_cuts) + 1,
+                                expected_slot_id=active["slot_id"],
+                                expected_generation_id=active["generation_id"],
+                                expected_owner_token=active["owner_token"],
+                                expected_artifact_sha256=artifact["sha256"],
+                            )
+                            success_deadline = time.monotonic() + _ARTIFACT_IO_TIMEOUT_S
+                            while time.monotonic() < success_deadline:
+                                last_state = self._periodic_cut(data_dir)
+                                if last_state is not None and last_state["active"]["status"] == "SUCCEEDED":
+                                    break
+                                time.sleep(0.05)
+                            if last_state is None or last_state["active"]["status"] != "SUCCEEDED":
+                                raise _RunnerFoundationError("ACK did not reach durable successful periodic state")
+                            ledger = evidence._json_lines("periodic-receipts.jsonl")[-1]
+                            photo, _metadata = evidence._read(ledger["filename"])
+                            receipt_cuts.append((dict(ledger), last_state, photo, assistant_observation))
+                            last_health = float(last_state["health"]["updated_at"])
+
+                        if event_index < len(selected.events) and elapsed >= selected.events[event_index].at_s:
+                            event = selected.events[event_index]
+                            if event.target == "assistant" and len(receipt_cuts) != 1:
+                                raise _RunnerFoundationError(
+                                    "assistant fault is not preceded by exactly one durable receipt"
+                                )
+                            old = current[event.target]
+                            expected = locked.identity_for_pid(old.pid)
+                            locked.signal_exact(expected, signal.SIGTERM)
+                            recovery_start = elapsed
+                            prior_bridge_sequence = bridge_sequence
+                            prior_health = last_health
+                            recovery_deadline = time.monotonic() + _RECOVERY_TIMEOUT_S
+                            replacement_roles = None
+                            replacement_tree = None
+                            while time.monotonic() < recovery_deadline:
+                                for raw in self._pipe_records(bridge_pipe, bridge_buffer):
+                                    data = _parse_bridge_data(
+                                        raw,
+                                        expected_nonce=handshake.nonce,
+                                        expected_launcher_pid=process.pid,
+                                        expected_bridge_pid=handshake.bridge_pid,
+                                        after_sequence=bridge_sequence,
+                                    )
+                                    bridge_sequence = data.sequence
+                                try:
+                                    candidate, candidate_tree = self._load_roles(broad, launcher, bridge)
+                                except ValueError:
+                                    time.sleep(0.1)
+                                    continue
+                                if candidate[event.target] != old:
+                                    if event.target == "engine" and bridge_sequence <= prior_bridge_sequence:
+                                        time.sleep(0.1)
+                                        continue
+                                    if event.target == "assistant":
+                                        health_state = self._periodic_cut(data_dir)
+                                        if (
+                                            health_state is None
+                                            or health_state["health"]["status"] != "ready"
+                                            or float(health_state["health"]["updated_at"]) <= prior_health
+                                        ):
+                                            time.sleep(0.1)
+                                            continue
+                                    replacement_roles, replacement_tree = candidate, candidate_tree
+                                    break
+                                time.sleep(0.1)
+                            if replacement_roles is None or replacement_tree is None:
+                                raise _RunnerFoundationError(
+                                    "faulted child did not recover within the reviewed ceiling"
+                                )
+                            epochs[event.target] += 1
+                            current = replacement_roles
+                            recovered_elapsed = time.monotonic() - start
+                            role_rows = {
+                                role: (epochs[role], replacement_tree[identity]) for role, identity in current.items()
+                            }
+                            evidence.append(
+                                "samples.jsonl",
+                                soak.stack_sample(
+                                    recovered_elapsed,
+                                    role_rows,
+                                    wall_time=datetime.now(UTC).isoformat(),
+                                ),
+                            )
+                            new_state = self._periodic_cut(data_dir)
+                            new_health = 0.0 if new_state is None else float(new_state["health"]["updated_at"])
+                            replacement = current[event.target]
+                            evidence.append(
+                                "faults.jsonl",
+                                {
+                                    "target": event.target,
+                                    "scheduled_s": float(event.at_s),
+                                    "observed_s": recovery_start,
+                                    "pre_pid": old.pid,
+                                    "pre_started_ns": old.started_ns,
+                                    "recheck_pid": expected.pid,
+                                    "recheck_started_ns": old.started_ns,
+                                    "replacement_pid": replacement.pid,
+                                    "replacement_started_ns": replacement.started_ns,
+                                    "ready": True,
+                                    "recovery_s": recovered_elapsed - recovery_start,
+                                    "bridge_data_resumed": (
+                                        event.target != "engine" or bridge_sequence > prior_bridge_sequence
+                                    ),
+                                    "newer_h3_health": event.target != "assistant" or new_health > prior_health,
+                                    "signal": soak.FAULT_SIGNAL,
+                                    "injection_method": soak.FAULT_INJECTION_METHOD,
+                                },
+                            )
+                            event_index += 1
+                            next_sample = max(next_sample, recovered_elapsed + 0.001)
+                        if elapsed >= selected.duration_s:
+                            break
+                        time.sleep(min(0.1, max(0.001, next_sample - (time.monotonic() - start))))
+
+                    if len(receipt_cuts) != 2:
+                        raise _RunnerFoundationError("short qualification lacks exact pre/post fault receipts")
+                    shutdown_start = time.monotonic()
+                    locked.signal_exact(launcher_identity, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=_SHUTDOWN_TIMEOUT_S)
+                    except subprocess.TimeoutExpired:
+                        _settle_owned_tree(process, observer=locked, expected=launcher_identity)
+                        raise _RunnerFoundationError("source launcher exceeded graceful shutdown ceiling") from None
+                    shutdown_elapsed = time.monotonic() - shutdown_start
+                    graceful = process.returncode == 0 and shutdown_elapsed <= _SHUTDOWN_TIMEOUT_S
+                evidence.write_log("log-launcher.txt", log_path.read_text(encoding="utf-8", errors="replace"))
+        finally:
+            if process is not None and process.poll() is None and launcher_identity is not None:
+                _settle_owned_tree(process, observer=locked, expected=launcher_identity)
+            sink.close()
+            artifact_pair.close()
+            bridge_pipe.close()
+
+        collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
+        proof = _validate_pre_post_receipts(
+            pre_ledger_record=receipt_cuts[0][0],
+            pre_state_payload=receipt_cuts[0][1],
+            pre_artifact_bytes=receipt_cuts[0][2],
+            pre_assistant_observation=receipt_cuts[0][3],
+            post_ledger_record=receipt_cuts[1][0],
+            post_state_payload=receipt_cuts[1][1],
+            post_artifact_bytes=receipt_cuts[1][2],
+            post_assistant_observation=receipt_cuts[1][3],
+            expected_launcher_pid=launcher_identity.pid,
+            ledger_records=(receipt_cuts[0][0], receipt_cuts[1][0]),
+        )
+        run_authority = _DELIVERY_EVIDENCE._begin_runner(self, evidence)
+        _DELIVERY_EVIDENCE._register_from_runner(run_authority, self, evidence, proof)
+        survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)
+        evidence.record_shutdown(
+            {
+                "graceful_requested": True,
+                "launcher_exited": graceful,
+                "elapsed_s": shutdown_elapsed,
+                "observed_identities": [
+                    {"pid": item.pid, "started_ns": item.started_ns}
+                    for item in sorted(observations, key=lambda value: (value.pid, value.started_ns))
+                ],
+                "survivors": [
+                    {"pid": item.pid, "started_ns": item.started_ns}
+                    for item in sorted(survivors, key=lambda value: (value.pid, value.started_ns))
+                ],
+            }
+        )
+        collector.observe(_ShaBoundary.BEFORE_TERMINAL_ACCEPTANCE)
+        _validate_clean_sha_chain(collector.observations)
+        evidence.seal()
+        evidence.finish_pass()
 
 
 __all__: tuple[str, ...] = ()

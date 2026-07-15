@@ -275,10 +275,10 @@ def test_fabricated_joined_carriers_cannot_enter_pre_post_gate(tmp_path: Path) -
         )
 
 
-def test_joined_receipts_cannot_remove_the_activation_fuse(tmp_path: Path) -> None:
+def test_joined_receipts_cannot_bypass_the_activation_platform_gate(tmp_path: Path) -> None:
     runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
     with pytest.raises(runner._RunnerActivationDisabled):
-        runner._PosixSoakRunner().run()
+        runner._PosixSoakRunner().run(None)
 
 
 def test_forged_prepost_cannot_mint_delivery_pass(tmp_path: Path) -> None:
@@ -292,7 +292,7 @@ def test_forged_prepost_cannot_mint_delivery_pass(tmp_path: Path) -> None:
 
 
 def test_constructed_delivery_bundle_and_fake_evidence_cannot_persist_pass(tmp_path: Path) -> None:
-    runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
+    proof = runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
     persisted = tmp_path / "periodic-delivery-result.json"
 
     class EvidenceProbe:
@@ -301,9 +301,40 @@ def test_constructed_delivery_bundle_and_fake_evidence_cannot_persist_pass(tmp_p
 
     evidence = EvidenceProbe()
     forged_authority = object.__new__(runner._DeliveryEvidenceAuthority)
+    forged_run_authority = object.__new__(runner._IntegratedRunAuthority)
+    owner = runner._PosixSoakRunner()
+    owner._used = True
     for candidate_evidence in (evidence, object()):
         with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
             runner._consume_periodic_delivery_authority(forged_authority, candidate_evidence)
     with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
         runner._consume_periodic_delivery_authority(forged_authority, evidence)
+    with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
+        runner._DELIVERY_EVIDENCE._register_from_runner(
+            forged_run_authority,
+            owner,
+            evidence,
+            proof,
+        )
     assert not persisted.exists()
+
+
+def test_integrated_owner_issues_one_exact_evidence_bound_terminal_result(tmp_path: Path) -> None:
+    proof = runner._validate_pre_post_receipts(**_pre_post_kwargs(tmp_path))
+    accepted: list[dict[str, object]] = []
+
+    class EvidenceProbe:
+        def _accept_periodic_delivery_result(self, authority: object) -> None:
+            accepted.append(runner._consume_periodic_delivery_authority(authority, self))
+
+    evidence = EvidenceProbe()
+    owner = runner._PosixSoakRunner()
+    owner._used = True
+    authority = runner._DELIVERY_EVIDENCE._begin_runner(owner, evidence)
+    runner._DELIVERY_EVIDENCE._register_from_runner(authority, owner, evidence, proof)
+    assert len(accepted) == 1
+    assert accepted[0]["status"] == "PASS"
+    assert accepted[0]["pre_fault"]["receipt_id"] == "g1:s1"  # type: ignore[index]
+    assert accepted[0]["post_fault"]["receipt_id"] == "g2:s1"  # type: ignore[index]
+    with pytest.raises(runner._RunnerFoundationError, match="spent"):
+        runner._DELIVERY_EVIDENCE._register_from_runner(authority, owner, evidence, proof)

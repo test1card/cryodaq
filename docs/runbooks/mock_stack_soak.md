@@ -7,31 +7,25 @@ mock engine, GUI ZMQ bridge, assistant child, and H3 coordinator. It is
 separate from `scripts/soak_mock_engine.py`: the existing engine-only nightly
 lane remains useful and must not be reported as whole-stack evidence.
 
-The harness foundation currently fails closed before launching. Three reviewed
-prerequisites are intentionally still open:
+The integrated runner supports the Linux source-mode `short` profile only. It
+owns the locked `psutil` observer, positive launcher bridge handshake, inherited
+AF_UNIX periodic-artifact capability, exact-six execution, source process
+session, scheduled fault injection, joined receipts, and bounded cleanup. It
+rejects Windows and non-Linux POSIX hosts before creating an evidence bundle.
 
-1. `psutil` is not in CryoDAQ's locked development dependencies. The harness
-   provides an injected observer contract and an optional `PsutilObserver`, but
-   does not replace it with global name matching or bespoke `/proc`/WMI code.
-2. H3 has no reviewed non-network soak transport. A synthetic Telegram token
-   is syntactically runnable and could still create outbound delivery attempts
-   during 12/72-hour runs. The harness will not enable H3 until a dependency-
-   injected local sink proves the coordinator path without network authority.
-3. The launcher does not expose a positive bridge PID/start-identity handshake.
-   A bridge cannot be inferred merely because it is the one unexplained child;
-   the evidence runner stays blocked until the launcher supplies its identity.
-
-Running the command now is safe and produces `manifest.json` plus an atomic
-`summary.json` with `status: FAIL` and the missing prerequisites:
+Run the qualification only from an exact clean SHA under the worktree's
+`.venv/bin/python`:
 
 ```bash
 PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
   --profile short --evidence-dir artifacts/mock-stack-soak/preflight
 ```
 
-Do not use `--acknowledge-runtime-prerequisites` until all prerequisites are
-actually present in the reviewed SHA. The option is an assertion, not a bypass;
-the implementation still verifies them and fails if any is absent.
+There is no acknowledgement or caller-supplied prerequisite/PASS option. The
+12-hour and 72-hour profiles remain validation contracts and open duration
+gates; the active runner refuses them until separately reviewed activation.
+The short-profile activation gate also remains open until this candidate is
+committed at a clean SHA and the real Linux run completes with a sealed PASS.
 
 ## Profiles
 
@@ -96,9 +90,9 @@ directory, the in-memory state becomes terminal `FAIL`,
 is attempted, so the last owned on-disk summary honestly remains the initial
 `FAIL/incomplete` record rather than claiming a terminal update that could not
 be provenance-bound.
-The current foundation cannot reach `EVIDENCE_SEALED` or `PASS`: a future
-reviewed runner must inject an internal execution-produced exact-six result
-capability. A public mapping, JSON/result file, asserted exit code, or arbitrary
+Only the integrated runner can reach `EVIDENCE_SEALED` or `PASS`; it injects an
+internal execution-produced exact-six result capability. A public mapping,
+JSON/result file, asserted exit code, or arbitrary
 command such as `true` is never acceptance authority. The foundation's public
 `write_exact_six_result()` entry point therefore terminates the run as `FAIL`;
 it exists only to make the rejection boundary explicit until the runner lands.
@@ -206,7 +200,7 @@ replace simultaneous-contender evidence.
 
 ## Honest gate boundary
 
-A future PASS proves source-mode, no-hardware integrated endurance only for the
+A PASS proves source-mode, no-hardware integrated endurance only for the
 named OS and SHA. It does not prove the frozen Windows ONEDIR launcher tree,
 hidden-child sentinel/Job Object behavior under the real launcher, Unicode
 installed paths, or any VISA/GPIB/serial instrument and watchdog behavior.

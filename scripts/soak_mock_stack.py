@@ -13,7 +13,6 @@ import hashlib
 import json
 import math
 import os
-import platform
 import re
 import signal
 import stat
@@ -2298,59 +2297,45 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CryoDAQ source-mode mock-stack soak")
     parser.add_argument("--profile", choices=tuple(PROFILES), default="short")
     parser.add_argument("--evidence-dir", type=Path)
-    parser.add_argument("--acknowledge-runtime-prerequisites", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     selected = profile(args.profile)
+    from scripts import soak_mock_stack_runner as runner
+
+    try:
+        runner._PosixSoakRunner.require_platform()
+    except runner._RunnerActivationDisabled:
+        return 2
+    if selected.name != "short":
+        return 2
     try:
         evidence = Evidence(args.evidence_dir or _default_evidence_dir(selected))
     except (FileExistsError, EvidenceCapabilityError):
         return 2
-    lifecycle = Lifecycle(evidence, cleanup=lambda: None)
     previous_handlers: dict[int, Any] = {}
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[signum] = signal.signal(signum, lifecycle.interrupt)
-        lifecycle.set_phase("manifest")
-        sha, dirty = _git_metadata()
-        evidence.write_manifest(
-            {
-                "profile": selected.name,
-                "git_sha": sha,
-                "dirty": dirty,
-                "platform": platform.platform(),
-                "python": sys.version,
-                "source_command": scrub_command([sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray"]),
-                "thresholds": effective_thresholds(selected),
-                "fatal_log_allowlist": [],
-                "capture_policy": "allowlisted metadata only; environment values forbidden",
-            }
-        )
-        lifecycle.set_phase("prerequisite_gate")
-        if not args.acknowledge_runtime_prerequisites:
-            raise RuntimeError(
-                "integrated execution blocked: locked psutil, reviewed non-network H3 transport, "
-                "and positive bridge identity are unavailable"
+            previous_handlers[signum] = signal.signal(
+                signum,
+                lambda received, _frame: (_ for _ in ()).throw(RunInterrupted(received)),
             )
-        try:
-            import psutil  # type: ignore[import-not-found]
-        except ModuleNotFoundError:
-            raise RuntimeError("psutil observer dependency is unavailable") from None
-        PsutilObserver(psutil)
-        raise RuntimeError("reviewed non-network H3 transport and positive bridge identity remain unavailable")
+        runner._PosixSoakRunner().run(evidence)
+        return 0
     except RunInterrupted as exc:
+        evidence.finish_fail(
+            f"interrupted by signal {exc.signum}",
+            phase="runner",
+            interrupted=True,
+        )
         return 128 + exc.signum
     except KeyboardInterrupt:
-        try:
-            lifecycle.interrupt(signal.SIGINT)
-        except RunInterrupted:
-            return 130
-        return 130  # pragma: no cover
+        evidence.finish_fail("interrupted by signal 2", phase="runner", interrupted=True)
+        return 130
     except BaseException as exc:
-        lifecycle.fail(str(exc), error_type=type(exc).__name__)
+        evidence.finish_fail(str(exc), phase="runner", error_type=type(exc).__name__)
         return 1
     finally:
         for signum, previous in previous_handlers.items():
