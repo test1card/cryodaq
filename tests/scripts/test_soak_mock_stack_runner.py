@@ -5,6 +5,9 @@ import hashlib
 import inspect
 import json
 import os
+import signal
+import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -277,12 +280,16 @@ def test_exact_six_execution_writes_one_runner_owned_result(monkeypatch: pytest.
     payload = runner._collect_and_execute_exact_six(evidence)
 
     assert seen_commands == [runner._COLLECTION_ARGV, runner._EXECUTION_ARGV]
-    assert seen_boundaries == [runner._ShaBoundary.BEFORE_COLLECTION]
+    assert seen_boundaries == [
+        runner._ShaBoundary.BEFORE_COLLECTION,
+        runner._ShaBoundary.BETWEEN_COLLECTION_AND_EXECUTION,
+        runner._ShaBoundary.AFTER_EXECUTION,
+    ]
     assert json.loads((evidence.directory / "exact-six-result.json").read_text()) == payload
     assert evidence.state is soak.RunState.MANIFEST_FINALIZED
-    assert "execution-produced exact-six runner authority is unavailable" in inspect.getsource(
-        soak.Evidence._build_ledger
-    )
+    fabricated = object.__new__(runner._ExactSixProvenance)
+    with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
+        runner._consume_exact_six_provenance(fabricated, evidence)
 
 
 @pytest.mark.parametrize(
@@ -472,6 +479,23 @@ def test_cleanup_retries_to_settlement_before_propagating_cancellation(
     assert group_calls >= 1
 
 
+def test_cleanup_completes_after_second_run_interruption(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.soak_mock_stack import RunInterrupted
+
+    attempts: list[int] = []
+
+    def settle_once(*_args: object, **_kwargs: object) -> None:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) <= 2:
+            raise RunInterrupted(signal.SIGINT if len(attempts) == 1 else signal.SIGTERM)
+
+    monkeypatch.setattr(runner, "_settle_owned_tree_once", settle_once)
+    with pytest.raises(RunInterrupted) as caught:
+        runner._settle_owned_tree(object(), observer=object(), expected=object())  # type: ignore[arg-type]
+    assert caught.value.signum == signal.SIGINT
+    assert attempts == [1, 2, 3]
+
+
 def test_native_windows_exact_six_authority_is_fail_closed(tmp_path: Path) -> None:
     if runner.os.name != "nt":
         pytest.skip("native Windows contract")
@@ -509,6 +533,62 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
         "XDG_CONFIG_HOME",
     }
     assert environment["PYTHONPATH"] == os.pathsep.join((str(root / "src"), str(root), str(site_packages)))
+
+
+def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypatch, tmp_path: Path) -> None:
+    hostile = {
+        "AWS_SECRET_ACCESS_KEY": "secret",
+        "CRYODAQ_CONFIG_DIR": "hostile-config",
+        "LD_PRELOAD": "hostile.so",
+        "PYTHONINSPECT": "1",
+        "QT_PLUGIN_PATH": "hostile-plugins",
+    }
+    for name, value in hostile.items():
+        monkeypatch.setenv(name, value)
+    root = tmp_path / "isolated"
+    root.mkdir(mode=0o700)
+    environment = runner._source_environment(
+        root,
+        bridge_grant={runner._BRIDGE_FD_ENV: "11", runner._BRIDGE_NONCE_ENV: "a" * 64},
+        artifact_grant={runner._ARTIFACT_FD_ENV: "12", runner._ARTIFACT_NONCE_ENV: "b" * 64},
+    )
+    probe = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            "import json,os; print(json.dumps(dict(os.environ), sort_keys=True))",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=10,
+    )
+    observed = json.loads(probe.stdout)
+    assert not hostile.keys() & observed.keys()
+    assert observed["CRYODAQ_ROOT"] == str(root.resolve())
+    assert observed[runner._BRIDGE_NONCE_ENV] == "a" * 64
+    assert observed[runner._ARTIFACT_NONCE_ENV] == "b" * 64
+    assert set(environment) == {
+        "CRYODAQ_ROOT",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONNOUSERSITE",
+        "PYTHONPATH",
+        "PYTHONUNBUFFERED",
+        "QT_QPA_PLATFORM",
+        "TMPDIR",
+        "TZ",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        runner._BRIDGE_FD_ENV,
+        runner._BRIDGE_NONCE_ENV,
+        runner._ARTIFACT_FD_ENV,
+        runner._ARTIFACT_NONCE_ENV,
+    }
 
 
 def test_sealed_snapshot_detects_executable_content_race(tmp_path: Path) -> None:
@@ -801,6 +881,7 @@ def test_nonce_provenance_is_immutable_validated_and_non_authoritative() -> None
     assert not hasattr(runner, "Evidence")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows activation refusal")
 def test_runner_activation_rejects_windows_before_evidence_or_allocation(monkeypatch) -> None:
     monkeypatch.setattr(runner, "_ArtifactCapabilityPair", None)
     with pytest.raises(runner._RunnerActivationDisabled, match="Linux subreaper"):

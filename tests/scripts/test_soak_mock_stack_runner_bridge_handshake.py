@@ -167,6 +167,7 @@ def test_bridge_data_parser_requires_exact_epoch_and_monotonic_sequence() -> Non
             )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows activation refusal")
 def test_windows_runner_activation_has_no_pid_fallback() -> None:
     with pytest.raises(runner._RunnerActivationDisabled):
         runner._PosixSoakRunner().run(None)

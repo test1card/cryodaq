@@ -47,6 +47,7 @@ def test_runner_capability_has_no_network_or_path_selection() -> None:
         capability.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows activation refusal")
 def test_runner_terminal_activation_remains_posix_only() -> None:
     with pytest.raises(runner._RunnerActivationDisabled):
         runner._PosixSoakRunner().run(None)

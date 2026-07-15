@@ -275,6 +275,47 @@ def _controlled_git_environment() -> dict[str, str]:
     return {"HOME": "/nonexistent", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"}
 
 
+def _source_environment(
+    root: Path,
+    *,
+    bridge_grant: dict[str, str],
+    artifact_grant: dict[str, str],
+) -> dict[str, str]:
+    """Build the closed source-child environment without ambient inheritance."""
+
+    resolved = Path(root).resolve(strict=True)
+    if not resolved.is_absolute() or resolved == _REPO_ROOT or resolved.is_relative_to(_REPO_ROOT):
+        raise _RunnerFoundationError("source root is not isolated from the repository")
+    if set(bridge_grant) != {_BRIDGE_FD_ENV, _BRIDGE_NONCE_ENV}:
+        raise _RunnerFoundationError("bridge capability grant fields are not exact")
+    if set(artifact_grant) != {_ARTIFACT_FD_ENV, _ARTIFACT_NONCE_ENV}:
+        raise _RunnerFoundationError("artifact capability grant fields are not exact")
+    home = resolved / "home"
+    temporary = resolved / "tmp"
+    cache = resolved / "cache"
+    config = resolved / "xdg-config"
+    for path in (home, temporary, cache, config):
+        path.mkdir(mode=0o700)
+    return {
+        "CRYODAQ_ROOT": str(resolved),
+        "HOME": str(home),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": os.pathsep.join((str(_REPO_ROOT / "src"), str(_REPO_ROOT))),
+        "PYTHONUNBUFFERED": "1",
+        "QT_QPA_PLATFORM": "offscreen",
+        "TMPDIR": str(temporary),
+        "TZ": "UTC",
+        "XDG_CACHE_HOME": str(cache),
+        "XDG_CONFIG_HOME": str(config),
+        **bridge_grant,
+        **artifact_grant,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class _ExecutionSnapshot:
     root: Path
@@ -1393,19 +1434,39 @@ class _DeliveryEvidenceRegistry:
         self._runs[id(authority)] = (authority, runner, evidence)
         return authority
 
-    def _register_from_runner(
+    def _complete_runner(
         self,
         run_authority: object,
         runner: Any,
         evidence: Any,
-        proof: _PrePostReceiptEvidence,
+        *,
+        pre_ledger_record: dict[str, object],
+        pre_state_payload: dict[str, object],
+        pre_artifact_bytes: bytes,
+        pre_assistant_observation: _AssistantProcessObservation,
+        post_ledger_record: dict[str, object],
+        post_state_payload: dict[str, object],
+        post_artifact_bytes: bytes,
+        post_assistant_observation: _AssistantProcessObservation,
+        expected_launcher_pid: int,
+        ledger_records: tuple[dict[str, object], ...],
     ) -> None:
         run = self._runs.get(id(run_authority))
         if run is None or run[0] is not run_authority or run[1] is not runner or run[2] is not evidence:
             raise _RunnerFoundationError("integrated run authority is unregistered, spent, or rebound")
-        if type(proof) is not _PrePostReceiptEvidence:
-            raise _RunnerFoundationError("delivery proof is not runner-joined evidence")
         del self._runs[id(run_authority)]
+        proof = _validate_pre_post_receipts(
+            pre_ledger_record=pre_ledger_record,
+            pre_state_payload=pre_state_payload,
+            pre_artifact_bytes=pre_artifact_bytes,
+            pre_assistant_observation=pre_assistant_observation,
+            post_ledger_record=post_ledger_record,
+            post_state_payload=post_state_payload,
+            post_artifact_bytes=post_artifact_bytes,
+            post_assistant_observation=post_assistant_observation,
+            expected_launcher_pid=expected_launcher_pid,
+            ledger_records=ledger_records,
+        )
 
         def encode(item: _JoinedReceiptEvidence) -> dict[str, object]:
             return {
@@ -1893,18 +1954,24 @@ def _settle_owned_tree(
     observer: _LockedPsutilObserver,
     expected: _ProcessIdentity,
 ) -> None:
-    """Retry settlement once if cancellation interrupts cleanup, then propagate it."""
+    """Finish settlement despite two interruptions, then propagate the first."""
 
     interrupted: BaseException | None = None
-    try:
-        _settle_owned_tree_once(process, observer=observer, expected=expected)
-    except BaseException as exc:
-        if isinstance(exc, Exception):
-            raise
-        interrupted = exc
-    finally:
-        if interrupted is not None:
+    completed = False
+    for _attempt in range(3):
+        try:
             _settle_owned_tree_once(process, observer=observer, expected=expected)
+        except BaseException as exc:
+            is_interruption = isinstance(exc, (KeyboardInterrupt, SystemExit)) or type(exc).__name__ == "RunInterrupted"
+            if not is_interruption:
+                raise
+            if interrupted is None:
+                interrupted = exc
+        else:
+            completed = True
+            break
+    if not completed:
+        raise _RunnerFoundationError("owned-tree cleanup was interrupted at every bounded attempt") from interrupted
     if interrupted is not None:
         raise interrupted
 
@@ -2056,13 +2123,22 @@ class _ExactSixAuthority:
         raise _RunnerFoundationError("exact-six authority cannot be caller-constructed")
 
 
+class _ExactSixProvenance:
+    __slots__ = ()
+
+    def __new__(cls) -> _ExactSixProvenance:
+        del cls
+        raise _RunnerFoundationError("exact-six provenance cannot be caller-constructed")
+
+
 class _ExactSixExecutionRegistry:
     """Own completion registration; calling execute necessarily runs both commands."""
 
-    __slots__ = ("_records",)
+    __slots__ = ("_provenance", "_records")
 
     def __init__(self) -> None:
         self._records: dict[int, tuple[_ExactSixAuthority, Any, dict[str, object]]] = {}
+        self._provenance: dict[int, tuple[_ExactSixProvenance, Any, bool]] = {}
 
     def execute(self, evidence: Any, *, collector: _CleanShaCollector | None = None) -> dict[str, object]:
         _require_posix_exact_six()
@@ -2107,12 +2183,21 @@ class _ExactSixExecutionRegistry:
         evidence._accept_exact_six_result(authority)
         return payload
 
-    def consume(self, authority: object, evidence: Any) -> dict[str, object]:
+    def consume(self, authority: object, evidence: Any) -> tuple[dict[str, object], _ExactSixProvenance]:
         record = self._records.get(id(authority))
         if record is None or record[0] is not authority or record[1] is not evidence:
             raise _RunnerFoundationError("exact-six authority is unregistered, spent, or bound to another Evidence")
         del self._records[id(authority)]
-        return record[2]
+        provenance = object.__new__(_ExactSixProvenance)
+        self._provenance[id(provenance)] = (provenance, evidence, False)
+        return record[2], provenance
+
+    def consume_provenance(self, provenance: object, evidence: Any) -> None:
+        record = self._provenance.get(id(provenance))
+        if record is None or record[0] is not provenance or record[1] is not evidence:
+            raise _RunnerFoundationError("exact-six provenance is unregistered or bound to another Evidence")
+        if not record[2]:
+            self._provenance[id(provenance)] = (record[0], record[1], True)
 
 
 _EXACT_SIX_EXECUTIONS = _ExactSixExecutionRegistry()
@@ -2122,8 +2207,12 @@ def _collect_and_execute_exact_six(evidence: Any) -> dict[str, object]:
     return _EXACT_SIX_EXECUTIONS.execute(evidence)
 
 
-def _consume_exact_six_authority(authority: object, evidence: Any) -> dict[str, object]:
+def _consume_exact_six_authority(authority: object, evidence: Any) -> tuple[dict[str, object], _ExactSixProvenance]:
     return _EXACT_SIX_EXECUTIONS.consume(authority, evidence)
+
+
+def _consume_exact_six_provenance(provenance: object, evidence: Any) -> None:
+    _EXACT_SIX_EXECUTIONS.consume_provenance(provenance, evidence)
 
 
 class _CleanupPhase(StrEnum):
@@ -2260,12 +2349,23 @@ class _PosixSoakRunner:
         return payload if type(active) is dict else None
 
     def run(self, evidence: Any) -> None:
-        """Run, validate, seal, and publish one short-soak terminal result."""
-
         self.require_platform()
         if self._used:
             raise _RunnerFoundationError("POSIX soak runner is single-use")
+        from scripts import soak_mock_stack as soak
+
+        if type(evidence) is not soak.Evidence:
+            raise TypeError("evidence must be the exact Evidence type")
         self._used = True
+        run_authority = _DELIVERY_EVIDENCE._begin_runner(self, evidence)
+        try:
+            self._run_owned(evidence, run_authority)
+        finally:
+            _DELIVERY_EVIDENCE._abandon_runner(run_authority)
+
+    def _run_owned(self, evidence: Any, run_authority: _IntegratedRunAuthority) -> None:
+        """Run, validate, seal, and publish one short-soak terminal result."""
+
         import platform
         from datetime import UTC, datetime
 
@@ -2273,8 +2373,6 @@ class _PosixSoakRunner:
 
         from scripts import soak_mock_stack as soak
 
-        if type(evidence) is not soak.Evidence:
-            raise TypeError("evidence must be the exact Evidence type")
         selected = soak.profile("short")
         if selected.name != "short":
             raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
@@ -2355,15 +2453,11 @@ class _PosixSoakRunner:
                     encoding="utf-8",
                 )
                 log_path = root / "launcher.log"
-                environment = {
-                    **os.environ,
-                    "CRYODAQ_ROOT": str(root),
-                    "PYTHONPATH": os.pathsep.join((str(_REPO_ROOT / "src"), str(_REPO_ROOT))),
-                    "PYTHONUNBUFFERED": "1",
-                    "QT_QPA_PLATFORM": os.environ.get("QT_QPA_PLATFORM", "offscreen"),
-                    **bridge_pipe.child_environment(),
-                    **artifact_pair.child_environment(),
-                }
+                environment = _source_environment(
+                    root,
+                    bridge_grant=bridge_pipe.child_environment(),
+                    artifact_grant=artifact_pair.child_environment(),
+                )
                 with log_path.open("wb") as log:
                     process = subprocess.Popen(
                         _SOURCE_ARGV,
@@ -2614,7 +2708,10 @@ class _PosixSoakRunner:
             bridge_pipe.close()
 
         collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
-        proof = _validate_pre_post_receipts(
+        _DELIVERY_EVIDENCE._complete_runner(
+            run_authority,
+            self,
+            evidence,
             pre_ledger_record=receipt_cuts[0][0],
             pre_state_payload=receipt_cuts[0][1],
             pre_artifact_bytes=receipt_cuts[0][2],
@@ -2626,8 +2723,6 @@ class _PosixSoakRunner:
             expected_launcher_pid=launcher_identity.pid,
             ledger_records=(receipt_cuts[0][0], receipt_cuts[1][0]),
         )
-        run_authority = _DELIVERY_EVIDENCE._begin_runner(self, evidence)
-        _DELIVERY_EVIDENCE._register_from_runner(run_authority, self, evidence, proof)
         survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)
         evidence.record_shutdown(
             {
