@@ -88,10 +88,10 @@ jobs:
           # be formatted.  Missing/squashed ancestry fails closed and requires
           # an explicit baseline migration instead of silently skipping files.
           FORMAT_BASE=db8849b573309453f25bc42adbf4b55cd0ce400b
-          git cat-file -e "${FORMAT_BASE}^{commit}"
+          test "$(git cat-file -t "$FORMAT_BASE")" = commit
           git merge-base --is-ancestor "$FORMAT_BASE" HEAD
 
-          changed_file="$(mktemp)"
+          changed_file="${RUNNER_TEMP:?}/cryodaq-format-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}.paths"
           trap 'rm -f "$changed_file"' EXIT
           git diff --name-only --diff-filter=ACMR -z "$FORMAT_BASE"...HEAD -- '*.py' >"$changed_file"
 
