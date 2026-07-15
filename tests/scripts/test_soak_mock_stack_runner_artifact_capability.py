@@ -47,9 +47,9 @@ def test_runner_capability_has_no_network_or_path_selection() -> None:
         capability.close()
 
 
-def test_runner_terminal_activation_remains_fused() -> None:
+def test_runner_terminal_activation_remains_posix_only() -> None:
     with pytest.raises(runner._RunnerActivationDisabled):
-        runner._PosixSoakRunner().run()
+        runner._PosixSoakRunner().run(None)
 
 
 @pytest.mark.skipif(os.name == "posix", reason="Windows fail-closed contract")

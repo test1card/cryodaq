@@ -167,9 +167,9 @@ def test_bridge_data_parser_requires_exact_epoch_and_monotonic_sequence() -> Non
             )
 
 
-def test_r2_foundation_still_has_no_runner_activation_or_pid_fallback() -> None:
+def test_windows_runner_activation_has_no_pid_fallback() -> None:
     with pytest.raises(runner._RunnerActivationDisabled):
-        runner._PosixSoakRunner().run()
+        runner._PosixSoakRunner().run(None)
     assert not hasattr(runner, "_RunnerAuthority")
 
 

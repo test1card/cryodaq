@@ -801,18 +801,17 @@ def test_nonce_provenance_is_immutable_validated_and_non_authoritative() -> None
     assert not hasattr(runner, "Evidence")
 
 
-def test_runner_activation_remains_hard_disabled_and_module_has_no_execution_imports() -> None:
-    with pytest.raises(runner._RunnerActivationDisabled, match="R2/R3"):
-        runner._PosixSoakRunner().run()
+def test_runner_activation_rejects_windows_before_evidence_or_allocation(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "_ArtifactCapabilityPair", None)
+    with pytest.raises(runner._RunnerActivationDisabled, match="Linux subreaper"):
+        runner._PosixSoakRunner().run(None)
 
     source = Path("scripts/soak_mock_stack_runner.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names} | {
         node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     }
-    # The activation prerequisite may collect Git/process identity and perform
-    # exact-identity cleanup. CLI, network transports, and terminal PASS stay
-    # fused until the complete executor is accepted.
+    # Qualification has no CLI or network transport in its authority module.
     assert not imports & {"argparse", "urllib", "requests", "httpx", "aiohttp"}
     assert runner.__all__ == ()
     assert not hasattr(runner, "main")

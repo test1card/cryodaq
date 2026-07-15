@@ -6,8 +6,6 @@ import json
 import math
 import os
 import signal
-import socket
-import subprocess
 import sys
 from pathlib import Path
 
@@ -1107,7 +1105,31 @@ def test_evidence_rejects_nonempty_run_directory(tmp_path: Path) -> None:
 
 
 @_POSIX_EVIDENCE
-def test_cli_manifest_is_complete_and_records_atomic_gate_failure(tmp_path: Path) -> None:
+def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, tmp_path: Path) -> None:
+    from scripts import soak_mock_stack_runner as runner
+
+    class FakeRunner:
+        @staticmethod
+        def require_platform() -> None:
+            return None
+
+        def run(self, evidence: soak.Evidence) -> None:
+            evidence.write_manifest(
+                {
+                    "profile": "short",
+                    "git_sha": "a" * 40,
+                    "dirty": False,
+                    "platform": "test-posix",
+                    "python": sys.version,
+                    "source_command": [sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray"],
+                    "thresholds": soak.effective_thresholds(soak.profile("short")),
+                    "fatal_log_allowlist": [],
+                    "capture_policy": "allowlisted metadata only; environment values forbidden",
+                }
+            )
+            raise RuntimeError("deterministic runner stop")
+
+    monkeypatch.setattr(runner, "_PosixSoakRunner", FakeRunner)
     run = tmp_path / "run"
     assert soak.main(["--profile", "short", "--evidence-dir", str(run)]) == 1
     manifest = json.loads((run / "manifest.json").read_text())
@@ -1123,15 +1145,9 @@ def test_cli_manifest_is_complete_and_records_atomic_gate_failure(tmp_path: Path
 
 
 @_POSIX_EVIDENCE
-def test_cli_acknowledgement_cannot_launch_process_or_network(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    def forbidden_launch(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("process launch is forbidden in the foundation CLI")
-
-    monkeypatch.setattr(soak, "_git_metadata", lambda: ("a" * 40, False))
-    monkeypatch.setattr(subprocess, "Popen", forbidden_launch)
-    monkeypatch.setattr(socket, "socket", forbidden_launch)
+def test_cli_has_no_caller_acknowledgement_bypass(tmp_path: Path) -> None:
     run = tmp_path / "acknowledged"
-    assert (
+    with pytest.raises(SystemExit):
         soak.main(
             [
                 "--profile",
@@ -1141,11 +1157,7 @@ def test_cli_acknowledgement_cannot_launch_process_or_network(monkeypatch: pytes
                 "--acknowledge-runtime-prerequisites",
             ]
         )
-        == 1
-    )
-    summary = json.loads((run / "summary.json").read_text())
-    assert summary["status"] == "FAIL"
-    assert any(marker in summary["reason"] for marker in ("psutil observer dependency", "non-network H3 transport"))
+    assert not run.exists()
 
 
 @_POSIX_EVIDENCE
