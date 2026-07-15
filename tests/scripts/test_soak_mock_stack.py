@@ -424,6 +424,46 @@ def _shutdown(samples: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def _write_periodic_artifacts(evidence: soak.Evidence) -> None:
+    ledger: list[dict[str, object]] = []
+    result: dict[str, object] = {
+        "schema": "cryodaq-soak-periodic-delivery-result/v1",
+        "status": "PASS",
+    }
+    for label, generation in (("pre_fault", 1), ("post_fault", 2)):
+        artifact = b"\x89PNG\r\n\x1a\nfixture" + bytes((generation,))
+        artifact_sha = "sha256:" + hashlib.sha256(artifact).hexdigest()
+        artifact_name = f"periodic-g{generation}-s1-{artifact_sha[7:]}.png"
+        (evidence.directory / artifact_name).write_bytes(artifact)
+        ledger_record = {"receipt_id": f"g{generation}:s1", "assistant_generation": generation}
+        ledger.append(ledger_record)
+        ledger_sha = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(ledger_record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+            ).hexdigest()
+        )
+        result[label] = {
+            "assistant_pid": 100 + generation,
+            "assistant_start_identity": f"fixture-{generation}",
+            "assistant_generation": generation,
+            "sequence": 1,
+            "receipt_id": f"g{generation}:s1",
+            "artifact_sha256": artifact_sha,
+            "artifact_name": artifact_name,
+            "acknowledgement_sha256": "sha256:" + "a" * 64,
+            "ledger_record_sha256": ledger_sha,
+            "destination_fingerprint": "sha256:" + "b" * 64,
+            "state_updated_at": float(generation),
+            "health_updated_at": float(generation),
+        }
+    (evidence.directory / "periodic-receipts.jsonl").write_text(
+        "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in ledger),
+        encoding="ascii",
+    )
+    soak.atomic_json(evidence.directory / "periodic-delivery-result.json", result)
+
+
 def _populate_complete(evidence: soak.Evidence) -> None:
     evidence.write_manifest(_manifest())
     _write_prerequisites(evidence)
@@ -434,6 +474,7 @@ def _populate_complete(evidence: soak.Evidence) -> None:
     for fault in _faults():
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
+    _write_periodic_artifacts(evidence)
     evidence.record_shutdown(_shutdown(samples))
 
 
@@ -864,6 +905,7 @@ def test_exact_six_result_mutation_is_rejected(tmp_path: Path) -> None:
     for fault in _faults():
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
+    _write_periodic_artifacts(evidence)
     evidence.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="exact-six"):
         evidence.seal()
@@ -883,6 +925,7 @@ def test_arbitrary_source_command_and_missing_role_fail_terminally(tmp_path: Pat
     for fault in _faults():
         arbitrary.append("faults.jsonl", fault)
     arbitrary.write_log("log-launcher.txt", "INFO │ healthy\n")
+    _write_periodic_artifacts(arbitrary)
     arbitrary.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="canonical current-interpreter launcher"):
         arbitrary.seal()
@@ -948,6 +991,7 @@ def test_fault_and_shutdown_identities_require_exact_positive_integers(tmp_path:
     for fault in faults:
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
+    _write_periodic_artifacts(evidence)
     evidence.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="positive integer"):
         evidence.seal()

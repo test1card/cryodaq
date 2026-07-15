@@ -1382,6 +1382,7 @@ class Evidence:
             raise
         self.state = RunState.INITIAL_FAIL
         self._manifest_sha256: str | None = None
+        self._exact_six_provenance: object | None = None
         self._quarantines: list[Mapping[str, Any]] = []
         self._atomic_json(
             "summary.json",
@@ -1634,7 +1635,7 @@ class Evidence:
                 error_type="AuthorityError",
             )
             raise RuntimeError("exact-six result requires execution-produced runner authority")
-        payload = runner._consume_exact_six_authority(authority, self)
+        payload, provenance = runner._consume_exact_six_authority(authority, self)
         manifest = json.loads(self._text("manifest.json"))
         errors = _validate_exact_six_result(payload, str(manifest.get("git_sha", "")))
         if errors:
@@ -1654,6 +1655,7 @@ class Evidence:
             )
             raise RuntimeError("exact-six result artifact is write-once")
         self._assert_directory_path()
+        self._exact_six_provenance = provenance
 
     @_terminal_mutation("running")
     def _accept_periodic_delivery_result(self, authority: object) -> None:
@@ -1841,6 +1843,12 @@ class Evidence:
 
     def _build_ledger(self) -> tuple[AcceptanceLedger | None, list[str]]:
         errors: list[str] = []
+        from scripts import soak_mock_stack_runner as runner
+
+        try:
+            runner._consume_exact_six_provenance(self._exact_six_provenance, self)
+        except runner._RunnerFoundationError:
+            errors.append("execution-produced exact-six runner authority is unavailable")
         required = {
             "manifest.json",
             "prerequisites.json",
