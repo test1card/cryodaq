@@ -47,6 +47,17 @@ def _safety_reading(state: str, reason: str = "") -> Reading:
     )
 
 
+def _source_state_reading(channel: str, state: str) -> Reading:
+    return Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="safety_manager",
+        channel=f"analytics/keithley_channel_state/{channel}",
+        value=0.0,
+        unit="",
+        metadata={"state": state},
+    )
+
+
 # ----------------------------------------------------------------------
 # Pure helper tests — no Qt needed
 # ----------------------------------------------------------------------
@@ -155,6 +166,23 @@ def test_keithley_overlay_receives_safety_state_via_dispatch():
         assert w._keithley_panel._safety_ready is False
         assert "test reason" in w._keithley_panel._gate_reason_label.text()
         assert "Управление заблокировано" in w._keithley_panel._gate_reason_label.text()
+    finally:
+        _stop_timers(w)
+
+
+def test_exact_internal_source_state_event_updates_real_panel():
+    _app()
+    w = MainWindowV2()
+    try:
+        w._ensure_overlay("source")
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "off"
+
+        w._dispatch_reading(_source_state_reading("smua", "on"))
+        assert block._channel_state == "on"
+
+        w._dispatch_reading(_source_state_reading("smua_extra", "fault"))
+        assert block._channel_state == "on"
     finally:
         _stop_timers(w)
 

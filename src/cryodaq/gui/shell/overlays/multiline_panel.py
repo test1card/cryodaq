@@ -57,6 +57,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
@@ -86,6 +92,42 @@ _COL_RESET = 4
 _COLS = ("Канал", "Значение, мм", "Δ от базы, мм", "Окно (мин..макс), мм", "Сброс")
 
 _LENGTH_CH_RE = re.compile(r"/length_ch(\d+)$")
+
+
+def is_manifest_multiline_descriptor(descriptor: ChannelDescriptorV1) -> bool:
+    """Match only the canonical MultiLine_1 descriptor family in the manifest."""
+
+    if (
+        type(descriptor) is not ChannelDescriptorV1
+        or descriptor.instrument_id != "MultiLine_1"
+        or descriptor.safety_class is not ChannelSafetyClass.OBSERVATIONAL
+    ):
+        return False
+    if descriptor.quantity is ChannelQuantity.LENGTH:
+        prefix, separator, suffix = descriptor.source_key.partition(".")
+        return (
+            prefix == "length"
+            and separator == "."
+            and suffix.isdecimal()
+            and 1 <= int(suffix) <= 32
+            and descriptor.channel_id == f"MultiLine_1/length_ch{int(suffix)}"
+            and descriptor.unit == "mm"
+            and descriptor.role is ChannelRole.PRIMARY_MEASUREMENT
+            and descriptor.display_group == "интерферометр"
+        )
+    expected_environment = {
+        ChannelQuantity.TEMPERATURE: ("env_temperature", "env.temperature", "°C"),
+        ChannelQuantity.PRESSURE: ("env_pressure", "env.pressure", "hPa"),
+        ChannelQuantity.RELATIVE_HUMIDITY: ("env_humidity", "env.humidity", "%"),
+    }.get(descriptor.quantity)
+    return (
+        expected_environment is not None
+        and descriptor.channel_id == f"MultiLine_1/{expected_environment[0]}"
+        and descriptor.source_key == expected_environment[1]
+        and descriptor.unit == expected_environment[2]
+        and descriptor.role is ChannelRole.ENVIRONMENT
+        and descriptor.display_group == "окружение"
+    )
 
 
 def _is_length_channel(channel: str) -> bool:
@@ -419,32 +461,73 @@ class MultiLinePanel(QWidget):
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
+        """Legacy ingress; retain the exact historical channel-name filter."""
+
         if reading is None:
             return
         channel = getattr(reading, "channel", "") or ""
         if not self._channel_belongs_to_panel(channel):
             return
+        if _is_length_channel(channel):
+            self._ingest_classified(reading, channel_number=_channel_number(channel))
+        elif _is_env_channel(channel):
+            self._ingest_classified(reading, environment_kind=_env_kind(channel))
+
+    def on_descriptor_reading(
+        self,
+        reading: Reading,
+        descriptor: ChannelDescriptorV1,
+    ) -> None:
+        """Ingest one shell-qualified MultiLine reading by descriptor semantics."""
+
+        if type(reading) is not Reading or type(descriptor) is not ChannelDescriptorV1:
+            return
+        if (
+            not is_manifest_multiline_descriptor(descriptor)
+            or descriptor.channel_id != reading.channel
+            or descriptor.instrument_id != reading.instrument_id
+            or descriptor.unit != reading.unit
+        ):
+            return
+        if descriptor.quantity is ChannelQuantity.LENGTH:
+            prefix, separator, suffix = descriptor.source_key.partition(".")
+            if prefix != "length" or separator != "." or not suffix.isdecimal():
+                return
+            channel_number = int(suffix)
+            if not 1 <= channel_number <= 32:
+                return
+            self._ingest_classified(reading, channel_number=channel_number)
+            return
+        if descriptor.role is not ChannelRole.ENVIRONMENT:
+            return
+        environment_kind = {
+            ChannelQuantity.TEMPERATURE: "temperature",
+            ChannelQuantity.PRESSURE: "pressure",
+            ChannelQuantity.RELATIVE_HUMIDITY: "humidity",
+        }.get(descriptor.quantity)
+        if environment_kind is not None:
+            self._ingest_classified(reading, environment_kind=environment_kind)
+
+    def _ingest_classified(
+        self,
+        reading: Reading,
+        *,
+        channel_number: int | None = None,
+        environment_kind: str | None = None,
+    ) -> None:
         try:
             value = float(reading.value)
         except (TypeError, ValueError):
             return
+        channel = reading.channel
         ts_unix = self._reading_ts(reading)
         self._last_reading_mono = time.monotonic()
-
-        if _is_length_channel(channel):
-            ch_num = _channel_number(channel)
-            if ch_num is None:
-                return
-            self._absorb_length(channel, ch_num, ts_unix, value)
+        if channel_number is not None:
+            self._absorb_length(channel, channel_number, ts_unix, value)
             self._update_footer()
-            return
-
-        if _is_env_channel(channel):
-            kind = _env_kind(channel)
-            unit = getattr(reading, "unit", "") or ""
-            if kind is not None:
-                self._env_latest[kind] = (value, unit)
-                self._refresh_env_labels()
+        elif environment_kind is not None:
+            self._env_latest[environment_kind] = (value, reading.unit)
+            self._refresh_env_labels()
 
     def set_connected(self, connected: bool) -> None:
         was_connected = self._connected

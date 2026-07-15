@@ -28,6 +28,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
@@ -43,18 +49,36 @@ from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
-from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel
+from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel, is_manifest_multiline_descriptor
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
-from cryodaq.gui.state.descriptor_store import DescriptorStore, DescriptorView, IngestResult
+from cryodaq.gui.state.descriptor_store import (
+    DescriptorStore,
+    DescriptorView,
+    IdentityStatus,
+    IngestResult,
+)
 from cryodaq.gui.zmq_client import ZmqBridge
 
 logger = logging.getLogger(__name__)
 
 _SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
 _SAFETY_REASON_MAX_CHARS = 120
+
+
+def _is_manifest_cold_stage_descriptor(descriptor: ChannelDescriptorV1) -> bool:
+    return (
+        descriptor.channel_id == "Т12"
+        and descriptor.instrument_id == "LS218_2"
+        and descriptor.source_key == "input.4.temperature"
+        and descriptor.quantity is ChannelQuantity.TEMPERATURE
+        and descriptor.unit == "K"
+        and descriptor.role is ChannelRole.PRIMARY_MEASUREMENT
+        and descriptor.safety_class is ChannelSafetyClass.SAFETY_CRITICAL_INPUT
+        and descriptor.display_group == "компрессор"
+    )
 
 
 def _map_safety_state(state: str | None, reason: str) -> tuple[bool, str]:
@@ -176,7 +200,7 @@ class MainWindowV2(QMainWindow):
         # opened after readings start arriving still gets a populated
         # table on the very first refresh, instead of needing a fresh
         # cycle from the engine to populate.
-        self._multiline_snapshot: dict[str, Reading] = {}
+        self._multiline_snapshot: dict[str, tuple[Reading, ChannelDescriptorV1]] = {}
         # Track active experiment ID to detect boundaries for cache invalidation.
         self._analytics_last_exp_id: str | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
@@ -330,9 +354,8 @@ class MainWindowV2(QMainWindow):
             # v0.55.15 (audit SCOPE 5 finding 5.7) — replay every
             # cached MultiLine reading so the panel's table populates
             # immediately rather than waiting for the next engine cycle.
-            for ch, reading in self._multiline_snapshot.items():
-                if widget.channel_belongs_to_panel(ch):
-                    widget.on_reading(reading)
+            for reading, descriptor in self._multiline_snapshot.values():
+                widget.on_descriptor_reading(reading, descriptor)
         # v0.55.6: knowledge-base overlay only needs the chip-style
         # connected state for its embedded chat panel; no readings flow.
         if name == "knowledge_base":
@@ -446,6 +469,7 @@ class MainWindowV2(QMainWindow):
             return
 
         view: DescriptorView | None = None
+        result: IngestResult | None = None
         try:
             result = self._descriptor_store.ingest(qualified)
         except RuntimeError:
@@ -465,6 +489,13 @@ class MainWindowV2(QMainWindow):
             else:
                 view = self._descriptor_store.view(qualified.reading.channel)
         self._dispatch_reading(qualified.reading)
+        if (
+            result is IngestResult.ACCEPTED
+            and qualified.descriptor is not None
+            and view is not None
+            and view.identity_status is IdentityStatus.AUTHORITATIVE
+        ):
+            self._dispatch_descriptor_reading(qualified.reading, view.descriptor)
         if self._instrument_panel is not None:
             self._instrument_panel.on_descriptor_reading(qualified.reading, view)
 
@@ -497,58 +528,15 @@ class MainWindowV2(QMainWindow):
         # B.8.0.2: route log entries to overlay for live timeline
         if channel == "analytics/operator_log_entry" and self._experiment_overlay is not None:
             self._experiment_overlay.on_reading(reading)
-        if reading.unit == "K" and self._calibration_panel is not None:
-            self._calibration_panel.on_reading(reading)
-        if channel.startswith("\u0422") and reading.unit == "K" and self._conductivity_panel is not None:
-            self._conductivity_panel.on_reading(reading)
-        # v0.55.6 \u2014 Etalon MultiLine length + environment readings. Filter
-        # is intentionally pre-MultiLinePanel to avoid wasted slot calls
-        # on every \u0422* reading. The panel itself also filters internally,
-        # but doing it here keeps the dispatch hot path tight.
-        # v0.55.15 (audit SCOPE 5 finding 5.1) — record into the
-        # replay cache so a panel opened later sees the recent history,
-        # then forward to the live panel via its public scoping helper.
-        if "MultiLine" in channel:
-            self._multiline_snapshot[channel] = reading
-            if self._multiline_panel is not None and self._multiline_panel.channel_belongs_to_panel(channel):
-                self._multiline_panel.on_reading(reading)
-        # F3-Cycle2: route temperature readings to analytics view + shell cache.
-        # This is intentional parallel routing — calibration_panel and analytics_view
-        # are independent consumers: calibration uses readings for curve fitting;
-        # analytics uses them for TemperatureTrajectoryWidget live stream.
-        if reading.unit == "K":
-            self._analytics_temperature_snapshot[channel] = reading
-            if self._analytics_view is not None:
-                self._analytics_view.set_temperature_readings({channel: reading})
-            # F-MockPredictor: also route the canonical cold-stage channel
-            # through the cooldown widget's SteadyStatePredictor so the
-            # asymptote can render in IDLE / mock streams. CooldownData
-            # carries no actual_trajectory by contract — this is the live
-            # data feed.
-            short_id = channel.split(" ", 1)[0] if " " in channel else channel
-            if short_id == "Т12":
-                self._push_analytics("set_cold_temperature_reading", reading)
-        if "/smua/" in channel or "/smub/" in channel or channel.startswith("analytics/keithley_channel_state/"):
-            if self._keithley_panel is not None:
-                self._keithley_panel.on_reading(reading)
-            if channel.endswith("/power") and self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
-            # F4: accumulate Keithley power readings into analytics snapshot.
-            # Must guard on SMU sub-path explicitly — the outer condition also
-            # matches analytics/keithley_channel_state/* channels which lack
-            # the smua/smub segment KeithleyPowerWidget expects at parts[-2].
-            if ("/smua/" in channel or "/smub/" in channel) and channel.split("/")[-1] in (
-                "voltage",
-                "current",
-                "power",
-            ):
-                self._analytics_keithley_snapshot[channel] = reading
-                if self._analytics_view is not None:
-                    self._analytics_view.set_keithley_readings({channel: reading})
-        # F4: route pressure gauge readings to analytics view + shell cache.
-        # VSP63D publishes on channels ending with /pressure, unit мбар.
-        if reading.unit in ("мбар", "mbar") and channel.endswith("/pressure"):
-            self._push_analytics("set_pressure_reading", reading)
+        if (
+            channel
+            in {
+                "analytics/keithley_channel_state/smua",
+                "analytics/keithley_channel_state/smub",
+            }
+            and self._keithley_panel is not None
+        ):
+            self._keithley_panel.on_reading(reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (B.5.5 F3)
@@ -570,6 +558,57 @@ class MainWindowV2(QMainWindow):
                 if self._keithley_panel is not None:
                     ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
                     self._keithley_panel.set_safety_ready(ready, reason_text)
+
+    def _dispatch_descriptor_reading(
+        self,
+        reading: Reading,
+        descriptor: ChannelDescriptorV1,
+    ) -> None:
+        """Route authoritative readings to metadata-selected specialist sinks.
+
+        Bare, legacy, refused, or capacity-exhausted readings never enter this
+        path. They remain visible through the eager generic sinks and the
+        descriptor-aware instrument panel, without acquiring control authority.
+        """
+        quantity = descriptor.quantity
+
+        if quantity is ChannelQuantity.RAW_SENSOR and self._calibration_panel is not None:
+            self._calibration_panel.on_reading(reading)
+
+        if quantity is ChannelQuantity.TEMPERATURE:
+            if self._conductivity_panel is not None:
+                self._conductivity_panel.on_reading(reading)
+            self._analytics_temperature_snapshot[descriptor.channel_id] = reading
+            if self._analytics_view is not None:
+                self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
+
+            if _is_manifest_cold_stage_descriptor(descriptor):
+                self._push_analytics("set_cold_temperature_reading", reading)
+        is_source_readback = (
+            descriptor.role is ChannelRole.SOURCE_READBACK
+            and descriptor.safety_class is ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK
+        )
+        if is_source_readback:
+            if self._keithley_panel is not None:
+                self._keithley_panel.on_reading(reading)
+            if quantity is ChannelQuantity.POWER and self._conductivity_panel is not None:
+                self._conductivity_panel.on_reading(reading)
+            if quantity in {
+                ChannelQuantity.VOLTAGE,
+                ChannelQuantity.CURRENT,
+                ChannelQuantity.POWER,
+            }:
+                self._analytics_keithley_snapshot[descriptor.channel_id] = reading
+                if self._analytics_view is not None:
+                    self._analytics_view.set_keithley_readings({descriptor.channel_id: reading})
+
+        if quantity is ChannelQuantity.PRESSURE:
+            self._push_analytics("set_pressure_reading", reading)
+
+        if is_manifest_multiline_descriptor(descriptor):
+            self._multiline_snapshot[descriptor.channel_id] = (reading, descriptor)
+            if self._multiline_panel is not None:
+                self._multiline_panel.on_descriptor_reading(reading, descriptor)
 
     # ------------------------------------------------------------------
     # Analytics channel adapter (B.8 follow-up)

@@ -25,6 +25,13 @@ from unittest.mock import MagicMock
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.shell.views.analytics_view import CooldownData
@@ -66,7 +73,7 @@ def _pressure_reading(value: float = 1e-5) -> Reading:
         instrument_id="VSP63D_1",
         channel="VSP63D_1/pressure",
         value=value,
-        unit="мбар",
+        unit="mbar",
         status=ChannelStatus.OK,
         metadata={},
     )
@@ -78,10 +85,40 @@ def _keithley_reading(measurement: str = "voltage", value: float = 1.5) -> Readi
         instrument_id="KEITHLEY_2604B_1",
         channel=f"KEITHLEY_2604B_1/smua/{measurement}",
         value=value,
-        unit="В",
+        unit={
+            "voltage": "V",
+            "current": "A",
+            "resistance": "Ohm",
+            "power": "W",
+        }[measurement],
         status=ChannelStatus.OK,
         metadata={},
     )
+
+
+def _dispatch_described(
+    w: MainWindowV2,
+    reading: Reading,
+    quantity: ChannelQuantity,
+    *,
+    source: bool = False,
+) -> None:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=reading.channel,
+        instrument_id=reading.instrument_id,
+        source_key=f"test.{quantity.value}",
+        quantity=quantity,
+        unit=reading.unit,
+        role=ChannelRole.SOURCE_READBACK if source else ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=(ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK if source else ChannelSafetyClass.OBSERVATIONAL),
+        display_group="test",
+        display_name="Test described channel",
+        visible_by_default=True,
+        display_order=0,
+        descriptor_revision=1,
+    )
+    w.dispatch_qualified_reading(DescriptorQualifiedReading(reading=reading, descriptor=descriptor))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -145,10 +182,12 @@ def test_phase_replayed_into_view_on_first_open():
     w = MainWindowV2()
     _stop_timers(w)
 
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id": "exp_001"},
-        "current_phase": "cooldown",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_001"},
+            "current_phase": "cooldown",
+        }
+    )
     assert w._analytics_view is None
 
     w._on_tool_clicked("analytics")
@@ -227,10 +266,12 @@ def test_new_experiment_clears_cooldown_cache():
     assert "set_cooldown" in w._analytics_snapshot
 
     # New experiment arrives with a different ID.
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_002"},
-        "current_phase": "preparation",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_002"},
+            "current_phase": "preparation",
+        }
+    )
     assert "set_cooldown" not in w._analytics_snapshot
 
 
@@ -243,10 +284,12 @@ def test_experiment_end_clears_cooldown_cache():
     _stop_timers(w)
 
     # Start experiment + cooldown data.
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_abc"},
-        "current_phase": "cooldown",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_abc"},
+            "current_phase": "cooldown",
+        }
+    )
     w._dispatch_reading(_cooldown_reading(t_hours=1.5))
     assert "set_cooldown" in w._analytics_snapshot
 
@@ -266,10 +309,12 @@ def test_experiment_id_change_clears_all_scoped_caches():
     _stop_timers(w)
 
     # Establish exp_old and populate all experiment-scoped caches.
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_old"},
-        "current_phase": "cooldown",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_old"},
+            "current_phase": "cooldown",
+        }
+    )
     w._dispatch_reading(_cooldown_reading(t_hours=5.0))
     w._analytics_temperature_snapshot["Т1"] = Reading(
         timestamp=datetime.now(UTC),
@@ -280,17 +325,24 @@ def test_experiment_id_change_clears_all_scoped_caches():
         status=ChannelStatus.OK,
         metadata={},
     )
-    w._dispatch_reading(_keithley_reading(measurement="voltage", value=0.9))
+    _dispatch_described(
+        w,
+        _keithley_reading(measurement="voltage", value=0.9),
+        ChannelQuantity.VOLTAGE,
+        source=True,
+    )
 
     assert "set_cooldown" in w._analytics_snapshot
     assert w._analytics_temperature_snapshot
     assert w._analytics_keithley_snapshot
 
     # New experiment starts — exp_new replaces exp_old.
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_new"},
-        "current_phase": "preparation",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_new"},
+            "current_phase": "preparation",
+        }
+    )
 
     assert "set_cooldown" not in w._analytics_snapshot, "cooldown must clear on exp change"
     assert not w._analytics_temperature_snapshot, "temperature snapshot must clear on exp change"
@@ -305,17 +357,21 @@ def test_same_experiment_id_does_not_clear_cache():
     w = MainWindowV2()
     _stop_timers(w)
 
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_keep"},
-        "current_phase": "warmup",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_keep"},
+            "current_phase": "warmup",
+        }
+    )
     w._dispatch_reading(_cooldown_reading(t_hours=9.0))
 
     # Same experiment, different phase — cache must survive.
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_keep"},
-        "current_phase": "measurement",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_keep"},
+            "current_phase": "measurement",
+        }
+    )
     assert "set_cooldown" in w._analytics_snapshot
     assert w._analytics_snapshot["set_cooldown"][0].t_hours == 9.0
 
@@ -343,10 +399,12 @@ def test_temperature_cache_cleared_on_experiment_change():
     w._analytics_temperature_snapshot["Т1"] = fake_reading
     assert w._analytics_temperature_snapshot
 
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"new_exp"},
-        "current_phase": "cooldown",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "new_exp"},
+            "current_phase": "cooldown",
+        }
+    )
     assert not w._analytics_temperature_snapshot
 
 
@@ -358,10 +416,12 @@ def test_keithley_cache_cleared_on_experiment_change():
     _stop_timers(w)
 
     # Establish an active experiment so the ID transition is tracked.
-    w._on_experiment_status_received({
-        "active_experiment": {"experiment_id":"exp_keithley"},
-        "current_phase": "measurement",
-    })
+    w._on_experiment_status_received(
+        {
+            "active_experiment": {"experiment_id": "exp_keithley"},
+            "current_phase": "measurement",
+        }
+    )
     w._analytics_keithley_snapshot["KEITHLEY_2604B_1/smua/voltage"] = _keithley_reading()
     assert w._analytics_keithley_snapshot
 
@@ -398,7 +458,7 @@ def test_pressure_cache_holds_only_last_value():
     _stop_timers(w)
 
     for v in (1e-3, 1e-4, 1e-5):
-        w._dispatch_reading(_pressure_reading(value=v))
+        _dispatch_described(w, _pressure_reading(value=v), ChannelQuantity.PRESSURE)
 
     assert "set_pressure_reading" in w._analytics_snapshot
     assert w._analytics_snapshot["set_pressure_reading"][0].value == 1e-5
@@ -417,7 +477,7 @@ def test_pressure_reading_cached_and_forwarded_to_open_view():
     _stop_timers(w)
 
     w._ensure_overlay("analytics")
-    w._dispatch_reading(_pressure_reading(value=5e-6))
+    _dispatch_described(w, _pressure_reading(value=5e-6), ChannelQuantity.PRESSURE)
 
     assert "set_pressure_reading" in w._analytics_snapshot
     assert w._analytics_view._last_pressure_reading is not None
@@ -432,7 +492,7 @@ def test_pressure_replayed_on_view_open():
     w = MainWindowV2()
     _stop_timers(w)
 
-    w._dispatch_reading(_pressure_reading(value=2e-5))
+    _dispatch_described(w, _pressure_reading(value=2e-5), ChannelQuantity.PRESSURE)
     assert w._analytics_view is None
 
     w._ensure_overlay("analytics")
@@ -449,7 +509,7 @@ def test_keithley_voltage_cached_when_view_not_open():
     _stop_timers(w)
 
     r = _keithley_reading(measurement="voltage", value=2.1)
-    w._dispatch_reading(r)
+    _dispatch_described(w, r, ChannelQuantity.VOLTAGE, source=True)
 
     assert w._analytics_view is None
     assert "KEITHLEY_2604B_1/smua/voltage" in w._analytics_keithley_snapshot
@@ -465,7 +525,8 @@ def test_keithley_snapshot_replayed_on_view_open():
     _stop_timers(w)
 
     for measurement, value in [("voltage", 1.0), ("current", 0.01), ("power", 0.01)]:
-        w._dispatch_reading(_keithley_reading(measurement=measurement, value=value))
+        quantity = ChannelQuantity(measurement)
+        _dispatch_described(w, _keithley_reading(measurement=measurement, value=value), quantity, source=True)
 
     w._ensure_overlay("analytics")
     readings = w._analytics_view._last_keithley_readings
@@ -502,7 +563,7 @@ def test_k_reading_routes_to_analytics_temperature_snapshot():
         status=ChannelStatus.OK,
         metadata={},
     )
-    w._dispatch_reading(k_reading)
+    _dispatch_described(w, k_reading, ChannelQuantity.TEMPERATURE)
 
     assert "Т1" in w._analytics_temperature_snapshot
     assert w._analytics_temperature_snapshot["Т1"].value == 77.0
@@ -531,7 +592,7 @@ def test_k_reading_forwarded_to_analytics_view_when_open():
         status=ChannelStatus.OK,
         metadata={},
     )
-    w._dispatch_reading(k_reading)
+    _dispatch_described(w, k_reading, ChannelQuantity.TEMPERATURE)
 
     assert "Т2" in w._analytics_view._last_temperature_readings
     # Assert exact forwarded value — proves correct channel + value routing.
@@ -548,8 +609,8 @@ def test_set_fault_never_added_to_snapshot():
 
     # Simulate all normal dispatch paths.
     w._dispatch_reading(_cooldown_reading())
-    w._dispatch_reading(_pressure_reading())
-    w._dispatch_reading(_keithley_reading())
+    _dispatch_described(w, _pressure_reading(), ChannelQuantity.PRESSURE)
+    _dispatch_described(w, _keithley_reading(), ChannelQuantity.VOLTAGE, source=True)
 
     assert "set_fault" not in w._analytics_snapshot
 
@@ -616,7 +677,4 @@ def test_experiment_status_forwarded_to_analytics_view_when_open():
     w._on_experiment_status_received(_EXPERIMENT_STATUS)
 
     assert w._analytics_view._last_experiment_status is not None
-    assert (
-        w._analytics_view._last_experiment_status["active_experiment"]["experiment_id"]
-        == "exp_001"
-    )
+    assert w._analytics_view._last_experiment_status["active_experiment"]["experiment_id"] == "exp_001"
