@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Fail if a declared top-level dependency lacks a lockfile pin.
 
-build_scripts/build.sh installs the frozen bundle's transitive deps from
-requirements-lock.txt and then `pip install -e . --no-deps`. So any top-level
-dependency missing from the lock is simply absent from the frozen build
+Supported build paths install the frozen dependency set from
+requirements-lock.txt and then use `pip install ... --no-build-isolation`.
+So any top-level runtime or build dependency missing from the lock is simply
+absent from the frozen build
 (e.g. lancedb -> RAG ImportError, tzdata -> Windows parquet
 ZoneInfoNotFoundError). This gate catches that drift in CI before a build ships.
 
 Resolves the same dependency set the lock is compiled from
-(`pip-compile --extra=dev --extra=web`): base deps + the dev and web extras.
+(`pip-compile --all-build-deps --extra=dev --extra=web`): PEP 517 build
+requirements, base deps, and the dev and web extras.
 This is a name-coverage gate, not proof of transitive freshness, artifact
 identity, or hashes. stdlib-only (tomllib + regex text parse) — no
 packaging-library dependency.
@@ -39,8 +41,9 @@ def _canon(name: str) -> str:
 
 def pyproject_dep_names(pyproject: Path, extras: tuple[str, ...] = LOCK_EXTRAS) -> set[str]:
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    specs = list(data.get("build-system", {}).get("requires", []))
     project = data["project"]
-    specs = list(project.get("dependencies", []))
+    specs.extend(project.get("dependencies", []))
     optional = project.get("optional-dependencies", {})
     for extra in extras:
         specs.extend(optional.get(extra, []))
@@ -77,7 +80,12 @@ def main(argv: list[str] | None = None) -> int:
         print("requirements-lock.txt lacks pins for top-level deps:")
         for name in missing:
             print(f"  - {name}")
-        print(f"\nRegenerate: pip-compile --extra=dev --extra=web --output-file={args.lock.name} {args.pyproject.name}")
+        print(
+            "\nRegenerate platform candidates with pip-compile --all-build-deps "
+            "--extra=dev --extra=web, then reconcile Windows, Linux, and macOS "
+            f"markers into {args.lock.name}; a single-host output is not the "
+            "supported cross-platform lock."
+        )
         return 1
     print(
         "requirements-lock.txt covers declared dependencies "

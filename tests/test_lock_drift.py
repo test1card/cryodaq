@@ -27,7 +27,7 @@ def test_main_passes_on_current_lock():
 
 def test_synthetic_stale_lock_flags_missing(tmp_path):
     """A lock missing the frozen-build-critical pins must be flagged."""
-    dropped = {"lancedb", "pypdf", "tzdata", "httpx"}
+    dropped = {"hatchling", "lancedb", "pypdf", "tzdata", "httpx"}
     kept = [
         line
         for line in LOCK.read_text(encoding="utf-8").splitlines()
@@ -50,6 +50,20 @@ def test_name_normalization():
     """PEP 503: underscores/dots/case fold to the same canonical name."""
     assert drift._canon("PyPDF") == drift._canon("pypdf") == "pypdf"
     assert drift._canon("pytest_timeout") == "pytest-timeout"
+
+
+def test_lock_contains_resolved_build_backend_closure():
+    assert {"hatchling", "editables", "pathspec", "trove-classifiers"} <= drift.locked_names(LOCK)
+
+
+def test_drift_failure_guides_cross_platform_reconciliation(tmp_path, capsys):
+    stale = tmp_path / "requirements-lock.txt"
+    stale.write_text("numpy==2.4.4\n", encoding="utf-8")
+
+    assert drift.main(["--pyproject", str(PYPROJECT), "--lock", str(stale)]) == 1
+    output = capsys.readouterr().out
+    assert "Windows, Linux, and macOS" in output
+    assert "single-host output is not the supported cross-platform lock" in output
 
 
 if __name__ == "__main__":

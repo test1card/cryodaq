@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +23,7 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
     assert "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5" in text
     assert "environment-file: environment.yml" in text
     assert "-r requirements-lock.txt" in text
-    assert "pip install --disable-pip-version-check . --no-deps" in text
+    assert "pip install --disable-pip-version-check . --no-deps --no-build-isolation" in text
     assert "python -m pip check" in text
     assert "PyInstaller build_scripts/cryodaq.spec" in text
     assert "python build_scripts/post_build.py" in text
@@ -35,6 +37,46 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
     assert '- "src/**"' in text
     assert '- "config/**"' in text
     assert '- "tsp/**"' in text
+
+
+def test_windows_source_installer_is_ascii_and_reproducible() -> None:
+    raw = (ROOT / "install.bat").read_bytes()
+    assert raw.isascii()
+    text = raw.decode("ascii")
+    assert "python -m pip install -r requirements-lock.txt" in text
+    assert "python -m pip install -e . --no-deps --no-build-isolation" in text
+    assert "if errorlevel 1" in text
+    assert "%ERRORLEVEL%" not in text
+
+
+def test_local_build_scripts_require_the_lock_and_fail_closed() -> None:
+    batch = (ROOT / "build_scripts" / "build.bat").read_text(encoding="utf-8")
+    shell = (ROOT / "build_scripts" / "build.sh").read_text(encoding="utf-8")
+
+    assert "if not exist requirements-lock.txt" in batch
+    assert 'cd /d "%~dp0\\.."\nif errorlevel 1 exit /b 1' in batch.replace("\r\n", "\n")
+    assert "python -m PyInstaller" in batch
+    assert "python build_scripts\\post_build.py\nif errorlevel 1 exit /b 1" in batch.replace("\r\n", "\n")
+    assert "if [ ! -f requirements-lock.txt ]" in shell
+    assert "python -m PyInstaller" in shell
+
+
+def test_shortcut_failure_is_visible_and_powershell_literals_are_escaped(tmp_path, monkeypatch) -> None:
+    shortcut = importlib.import_module("create_shortcut")
+    desktop = tmp_path / "O'Brien"
+    monkeypatch.setattr(shortcut.sys, "platform", "win32")
+    monkeypatch.setattr(shortcut, "_get_desktop_path", lambda: desktop)
+    monkeypatch.setattr(shortcut, "_get_pythonw", lambda: tmp_path / "pythonw.exe")
+    calls = []
+
+    def fail(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=1, stderr="denied")
+
+    monkeypatch.setattr(shortcut.subprocess, "run", fail)
+
+    assert shortcut.create_shortcut() == 1
+    assert "O''Brien" in calls[0][-1]
 
 
 def test_required_warning_filter_is_exact_and_prefix_aware() -> None:

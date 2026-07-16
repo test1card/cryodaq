@@ -27,6 +27,8 @@ def _ann_ack(engine: str, activation: str) -> dict[str, str]:
 
 
 def _context(*, alarms: AlarmStateManager, safety: object, registry: AnnunciationRegistry) -> EngineCommandContext:
+    writer = MagicMock()
+    writer.append_operator_log = AsyncMock()
     return EngineCommandContext(
         safety_manager=safety,
         event_logger=MagicMock(),
@@ -44,7 +46,7 @@ def _context(*, alarms: AlarmStateManager, safety: object, registry: Annunciatio
         vacuum_guard=None,
         alarm_dispatch_tasks=set(),
         calibration_store=MagicMock(),
-        writer=MagicMock(),
+        writer=writer,
         drivers_by_name={},
         sensor_diag=None,
         vacuum_trend=None,
@@ -190,6 +192,62 @@ async def test_safety_audio_ack_never_calls_recovery_or_control() -> None:
     assert result["ok"] is True
     assert after["activations"][0]["acknowledged"] is True
     safety.acknowledge_fault.assert_not_called()
+    context.writer.append_operator_log.assert_awaited_once_with(
+        message=(
+            '{"activation_id": "'
+            f"{activation['activation_id']}"
+            '", "event": "safety_audio_ack_request", "reason": "observed"}'
+        ),
+        author="operator",
+        source="operator",
+        experiment_id=context.experiment_manager.active_experiment_id,
+        tags=("safety_audio_ack", "safety_fault"),
+    )
+
+
+async def test_safety_audio_ack_fails_closed_when_audit_persistence_fails() -> None:
+    alarms = AlarmStateManager()
+    safety = MagicMock()
+    safety.get_status.return_value = {
+        "state": "fault_latched",
+        "fault_revision": 7,
+        "fault_activated_at": 12.0,
+    }
+    registry = AnnunciationRegistry(engine_instance_id="engine-a")
+    context = _context(alarms=alarms, safety=safety, registry=registry)
+    context.writer.append_operator_log.side_effect = RuntimeError("disk full")
+    status = await _handle_gui_command({"cmd": "annunciation_status"}, context=context)
+    activation = status["activations"][0]
+
+    result = await _handle_gui_command(
+        _ann_ack("engine-a", activation["activation_id"]),
+        context=context,
+    )
+    after = await _handle_gui_command({"cmd": "annunciation_status"}, context=context)
+
+    assert result == {"ok": False, "error": "audit_persistence_failed"}
+    assert after["activations"][0]["acknowledged"] is False
+
+
+@pytest.mark.parametrize("field,value", [("operator", ""), ("reason", "line one\nline two")])
+async def test_annunciation_ack_rejects_missing_or_control_character_attribution(field: str, value: str) -> None:
+    alarms = AlarmStateManager()
+    alarms.process("a", _event("a"), {})
+    safety = MagicMock()
+    safety.get_status.return_value = {"state": "safe_off", "fault_revision": 0}
+    context = _context(
+        alarms=alarms,
+        safety=safety,
+        registry=AnnunciationRegistry(engine_instance_id="engine-a"),
+    )
+    status = await _handle_gui_command({"cmd": "annunciation_status"}, context=context)
+    command = _ann_ack("engine-a", status["activations"][0]["activation_id"])
+    command[field] = value
+
+    result = await _handle_gui_command(command, context=context)
+
+    assert result == {"ok": False, "error": "invalid_annunciation_command"}
+    assert alarms.get_active()["a"].acknowledged is False
 
 
 async def test_safety_manager_allocates_one_revision_per_latch() -> None:

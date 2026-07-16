@@ -188,7 +188,7 @@ This is feature-branch evidence, not shipped history and not a release claim:
   Windows retains a fail-closed unsupported branch. A clean integrated
   15-minute run on the final SHA, 12/72-hour duration evidence, and
   real-Windows ONEDIR evidence remain open.
-- Recorded exact-SHA GitHub Actions checkpoint `29340534592` at `b7b1356`
+- Recorded exact-SHA GitHub Actions checkpoint `29468630626` at `f5946b9`
   passed all eight Ubuntu/Windows agents, core, GUI, and remaining
   jobs. Safe SQLite verification passed in every job; both remaining jobs also
   passed lint and requirements-lock drift checks. Any newer candidate requires
@@ -508,8 +508,8 @@ safety boundaries.
 - **F36 is not deferred.** Complete its safe software and operator-scenario
   gates before laboratory validation; keep its hazardous-control non-goals and
   physical acceptance gates open.
-- **F18 — CI/CD residuals.** Recorded exact-SHA run `29340534592` closes the
-  Ubuntu/Windows matrix gate at checkpoint `b7b1356`; every newer candidate
+- **F18 — CI/CD residuals.** Recorded exact-SHA run `29468630626` closes the
+  Ubuntu/Windows matrix gate at checkpoint `f5946b9`; every newer candidate
   still requires its own eight-job pass. Coverage publishing, release
   automation, and binary artifacts remain optional.
 - **F-Y — Diagnostic mode rework.** Re-spec only if lab operation produces

@@ -62,9 +62,7 @@ def _read(path: Path) -> str:
 
 def test_console_scripts_documented_in_quickstart_or_operator_manual():
     scripts = sorted(_pyproject()["project"]["scripts"])
-    text = _read(REPO_ROOT / "docs" / "quickstart.md") + _read(
-        REPO_ROOT / "docs" / "operator_manual.md"
-    )
+    text = _read(REPO_ROOT / "docs" / "quickstart.md") + _read(REPO_ROOT / "docs" / "operator_manual.md")
     missing = [s for s in scripts if not re.search(rf"(?<![\w-]){re.escape(s)}(?![\w-])", text)]
     assert not missing, (
         "Console scripts from pyproject.toml [project.scripts] not documented "
@@ -84,15 +82,11 @@ def test_console_scripts_documented_in_quickstart_or_operator_manual():
 
 def test_top_level_config_yaml_mentioned_in_some_doc():
     tracked = _tracked_files()
-    config_yaml = sorted(
-        p for p in tracked if p.startswith("config/") and p.count("/") == 1 and p.endswith(".yaml")
-    )
+    config_yaml = sorted(p for p in tracked if p.startswith("config/") and p.count("/") == 1 and p.endswith(".yaml"))
     assert config_yaml, "expected at least one top-level config/*.yaml file"
     all_docs_text = "".join(_read(REPO_ROOT / p) for p in tracked if p.endswith(".md"))
     missing = [c for c in config_yaml if c not in all_docs_text]
-    assert not missing, "config/*.yaml files not mentioned in any tracked doc:\n" + "\n".join(
-        missing
-    )
+    assert not missing, "config/*.yaml files not mentioned in any tracked doc:\n" + "\n".join(missing)
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +102,7 @@ def test_changelog_top_version_matches_pyproject():
     assert versions, "CHANGELOG.md has no '## [X.Y.Z]' version heading"
     pyproject_version = _pyproject()["project"]["version"]
     assert versions[0] == pyproject_version, (
-        f"CHANGELOG.md top version [{versions[0]}] != pyproject.toml version "
-        f"[{pyproject_version}]"
+        f"CHANGELOG.md top version [{versions[0]}] != pyproject.toml version [{pyproject_version}]"
     )
 
 
@@ -178,3 +171,15 @@ def test_no_dead_repo_paths_referenced_in_docs():
     assert not dead, "Dead repo-relative paths referenced in docs:\n" + "\n".join(
         f"{path!r} in {sorted(set(srcs))}" for path, srcs in sorted(dead.items())
     )
+
+
+def test_architecture_manifest_excludes_generated_outputs(monkeypatch):
+    import tools.generate_montana_architecture_svgs as generator
+
+    tracked = "src/cryodaq/core/engine.py\ndocs/refactor/architecture-before-all-files.svg"
+    monkeypatch.setattr(generator, "run", lambda *_args: tracked)
+
+    paths = generator.target_paths()
+
+    assert "src/cryodaq/core/engine.py" in paths
+    assert not any(generator._is_generated_output(path) for path in paths)

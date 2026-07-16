@@ -3,7 +3,7 @@
 **Document status:** living report for the `feat/montana-phase-a` campaign
 **Comparison baseline:** pinned commit `f5d6434d20dffae62c9f03fbc12f68b03f48351b`
 (CryoDAQ v0.64.1)
-**Measurement target:** final candidate worktree immediately before sealing; tracked checkpoint `7138efb` plus the explicitly owned final slice
+**Measurement target:** final candidate worktree immediately before sealing; tracked checkpoint `f5946b9` plus the explicitly owned final slice
 **Report date:** 2026-07-16
 **Audience:** cryogenic engineers, operators, maintainers, reviewers, and future extension authors
 
@@ -64,12 +64,12 @@ flows:
 - the design system is now an operator-safety contract as well as a visual system.
 
 Measured from `f5d6434` to the candidate source inventory, the campaign changes
-**488 files**, with **133,560 inserted lines** and **9,442 deleted lines**, or a
-**net increase of 124,118 lines**. These figures are Git line-change statistics,
-not "133,560 new production lines." The baseline repository had **188,539 text
+**489 files**, with **133,961 inserted lines** and **9,522 deleted lines**, or a
+**net increase of 124,439 lines**. These figures are Git line-change statistics,
+not "133,961 new production lines." The baseline repository had **188,539 text
 lines**, including **68,857 lines of production Python** and **80,529 lines of test
-Python**. The candidate source inventory has **312,657 text lines**, including
-**111,787 production-Python lines** and **145,229 test-Python lines**.
+Python**. The candidate source inventory has **312,978 text lines**, including
+**111,809 production-Python lines** and **145,456 test-Python lines**.
 Much of the growth is deliberate executable evidence: tests, fixtures, process
 harnesses, protocol contracts, and documentation. These figures measure the final
 candidate worktree immediately before sealing. Release evidence must record the
@@ -253,24 +253,24 @@ The following table distinguishes three numbers that are easy to confuse:
 | Measure | Value | Meaning |
 |---|---:|---|
 | Baseline production Python | 68,857 lines | Python under `src/cryodaq` at `f5d6434`. |
-| Git insertions in the campaign | 133,560 lines | Lines added across the intended source inventory: tracked source plus the explicitly owned final additions, excluding the four generated architecture SVGs. Not all are net-new production code. |
-| Git deletions in the campaign | 9,442 lines | Lines removed or replaced. |
-| Net source-inventory growth | 124,118 lines | Insertions minus deletions. |
-| Delivered-tree Git churn | 139,113 insertions / 9,442 deletions / 129,671 net | Source inventory plus the four regenerated architecture SVGs. |
+| Git insertions in the campaign | 133,961 lines | Lines added across the intended source inventory: tracked source plus the explicitly owned final additions, excluding the four generated architecture SVGs. Not all are net-new production code. |
+| Git deletions in the campaign | 9,522 lines | Lines removed or replaced. |
+| Net source-inventory growth | 124,439 lines | Insertions minus deletions. |
+| Delivered-tree Git churn | 139,514 insertions / 9,522 deletions / 129,992 net | Source inventory plus the four regenerated architecture SVGs. |
 | Baseline repository text | 188,539 lines | Measured text inventory across the baseline tree. |
-| Candidate source-inventory text | 312,657 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the four generated architecture SVGs. |
-| Delivered-tree text | 318,210 lines | Final source inventory plus the four regenerated architecture SVGs. |
+| Candidate source-inventory text | 312,978 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the four generated architecture SVGs. |
+| Delivered-tree text | 318,531 lines | Final source inventory plus the four regenerated architecture SVGs. |
 | Baseline test Python | 80,529 lines | Python under `tests`. |
-| Candidate production Python | 111,787 lines | Candidate `src/cryodaq` inventory, not 133,560. |
-| Candidate test Python | 145,229 lines | Candidate `tests` inventory. |
-| Paths changed in candidate comparison | 488 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
-| Paths changed in delivered comparison | 492 | Candidate comparison plus four generated architecture SVG paths. |
+| Candidate production Python | 111,809 lines | Candidate `src/cryodaq` inventory, not 133,961. |
+| Candidate test Python | 145,456 lines | Candidate `tests` inventory. |
+| Paths changed in candidate comparison | 489 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
+| Paths changed in delivered comparison | 493 | Candidate comparison plus four generated architecture SVG paths. |
 | Baseline repository files | 779 | Inventory at `f5d6434`. |
 | Architecture source manifest | 1,035 | Every intended source file except the four self-referential generated `docs/refactor/architecture-*.svg` outputs. |
 | Delivered-tree files | 1,039 | Source manifest plus the four regenerated architecture SVGs. |
-| Commits from baseline to sealed checkpoint | 164 | Commit count before the final working slice is sealed. |
+| Commits from baseline to sealed checkpoint | 166 | Commit count including the final working slice. |
 
-The repository added **42,930 lines of production Python** and **64,700
+The repository added **42,952 lines of production Python** and **64,927
 lines of test Python** by inventory. This is a healthier explanation of the
 campaign than saying the project "added 130k lines of code": most growth is not
 application logic alone, and test growth exceeds production growth.
@@ -300,8 +300,10 @@ text files and 12 binary files (3,878,632 bytes)** in the baseline, and **1,023
 text files and the same 12 binary files** in the candidate source inventory.
 Untracked test artifacts, caches, local outputs, and machine-local configuration
 are not part of either inventory. Binary files and Git's `-` numstat entries must
-be reported separately. The companion SVG generator records the pinned baseline,
-target checkpoint, manifest, and content fingerprints in its metadata.
+be reported separately. The companion SVG generator records the pinned baseline
+plus manifest and content fingerprints in its metadata. The candidate commit is
+recorded in external exact-SHA CI evidence so generated files remain byte-stable
+after they are committed.
 
 ### 4.3 Why so much code was added
 
@@ -400,7 +402,7 @@ The architecture deliberately separates observational and controlling paths:
 
 `src/cryodaq/engine.py` remains large because it is the composition root, but it
 no longer has to implement every lifecycle internally. Its physical length changed
-from **4,103 to 4,046 lines** across the measured comparison; more
+from **4,103 to 4,068 lines** across the measured comparison; more
 importantly, the `_run_engine` body fell from approximately **1,945 to 1,011
 lines**, and measured outbound dependencies fell from **69 to 52**. A raw total-LOC
 metric would miss that architectural improvement.
@@ -748,7 +750,7 @@ narrow contracts.
 
 | File or area | Baseline load | Montana change | Current interpretation |
 |---|---|---|---|
-| `src/cryodaq/engine.py` | 4,103 lines; `_run_engine` 1,945; 69 local-module imports | 1,969 insertions / 2,026 deletions; 4,046 lines; `_run_engine` 1,011; 52 local-module imports | Still the composition root, but lifecycle implementation is distributed to tested owners. Further reduction should be incremental. |
+| `src/cryodaq/engine.py` | 4,103 lines; `_run_engine` 1,945; 69 local-module imports | 1,987 insertions / 2,022 deletions; 4,068 lines; `_run_engine` 1,011; 52 local-module imports | Still the composition root, but lifecycle implementation is distributed to tested owners. Further reduction should be incremental. |
 | historical core alarm module | ~625-line legacy alarm path | Removed; alarm v2 is canonical | One active alarm architecture avoids dual truth. |
 | `src/cryodaq/core/safety_manager.py` | Central safety FSM and source coordination | ~761 additions / 175 deletions plus exact state/readiness adapters and hardened disconnect paths | Large by necessity; changes demand safety-focused review and deterministic tests. |
 | `src/cryodaq/core/scheduler.py` | Acquisition and publication coupling | ~528 additions / 181 deletions; receipts, descriptors, cadence contracts | Scheduler remains the order-enforcing point, but does not own driver semantics. |
@@ -757,7 +759,7 @@ narrow contracts.
 | `src/cryodaq/agents/assistant/periodic_png.py` | Periodic report behavior intertwined with assistant/runtime | New ~2,045-line coordination surface | Behavior is extensively tested, but physical size is high; the surrounding coordinator/runtime/projection split limits authority. Consolidation can follow stable evidence. |
 | `src/cryodaq/periodic_state.py` | No equivalent strict durable-state owner | New ~1,948-line state contract | Size reflects hostile-input and replacement semantics; should remain isolated from control. |
 | `scripts/soak_mock_stack_runner.py` | No equivalent exact evidence owner | New ~2,791-line runner | Test/evidence tool, not production acquisition logic; intentionally explicit but should avoid becoming a second launcher. |
-| `scripts/soak_mock_stack.py` | Simpler soak behavior | New/expanded ~2,369 lines | Evidence orchestration only; bounded scope and receipts matter more than brevity. |
+| `scripts/soak_mock_stack.py` | Simpler soak behavior | New/expanded 2,377 lines | Evidence orchestration only; bounded scope and receipts matter more than brevity. |
 | `src/cryodaq/storage/channel_descriptors.py` and `_windows_secure_read.py` | Channel semantics distributed across labels/config/consumers | New 1,367-line authority loader plus a 366-line handle-relative Windows reader | High validation load is centralized intentionally; downstream code becomes simpler and safer. The native helper isolates reparse/rename-race handling from schema validation. |
 | `src/cryodaq/storage/persistence_spool.py` | No bounded receipt-authorized spool | New ~1,329 lines | Contains backpressure/failure complexity behind one contract. |
 | `src/cryodaq/operator_snapshot.py` | Panels assembled current state independently | New ~1,319-line protocol/view-model core | Central observational contract; no control authority. |
@@ -833,7 +835,7 @@ sequence at report-authoring time.
 
 ### 9.1 Test architecture
 
-The test tree grew from **80,529 to 145,229 lines of Python**. It
+The test tree grew from **80,529 to 145,456 lines of Python**. It
 mirrors production subsystems and adds substantial contract, integration, E2E,
 process, and platform coverage.
 
@@ -867,17 +869,21 @@ when that is not what ran.
 
 ### 9.3 Recorded evidence and its limits
 
-A historical exact-SHA checkpoint, GitHub Actions run `29340534592` at `b7b1356`,
-passed all eight Windows/Ubuntu agents, core, GUI, and remaining jobs. Safe SQLite
-verification passed in every job; lint and requirements-lock checks passed in the
-remaining jobs.
+The latest historical exact-SHA checkpoint, GitHub Actions run `29468630626` at
+`f5946b9`, passed all eight Windows/Ubuntu agents, core, GUI, and remaining jobs.
+Safe SQLite verification passed in every job; lint and requirements-lock checks
+passed in the remaining jobs. The exact `f5946b9` WSL archive
+`21FD239EFF747A3C02BC653D1056EC7036CA7C3A6D38E1BEAF6E86F29BB6A20E`
+matched 1,039/1,039 paths with zero blob mismatches and passed the recorded
+Ubuntu/WSL core, agent, H4, POSIX, and real-ZMQ checks.
 
 Subsequent candidate work has focused evidence including GUI, design-system,
 storage, periodic, WSL, alarm-acknowledgement, Ruff, formatter, and diff checks.
-Those passes are useful but cannot be carried forward automatically. The final
-sealed candidate requires its **own** full local verdict and **own** eight-job CI
-pass. This report intentionally does not freeze a final count before that run is
-complete.
+Those passes are useful but cannot be carried forward automatically from
+`f5946b9`. The final sealed candidate requires its **own** full local verdict,
+15-minute clean-SHA soak, combined Windows ONEDIR smoke, and **own** eight-job CI
+pass. This report intentionally does not freeze a final count before those runs
+are complete.
 
 ### 9.4 Windows-specific hardening
 
@@ -1231,7 +1237,7 @@ full-suite failure. Skips must name a genuinely unavailable host capability.
 
 ## 16. Commit-theme appendix
 
-The 164-commit campaign is easier to understand as themes than as internal work
+The 166-commit campaign is easier to understand as themes than as internal work
 codes:
 
 | Theme | Representative outcomes |
@@ -1384,9 +1390,9 @@ beautiful, but it must preserve the panoramic truth that experienced cryogenic
 operators depend on. Summary surfaces are useful only when they remain additive,
 provenance-rich, and honest about what they do not know.
 
-The campaign is large: 488 paths changed in the candidate source comparison, 164 commits before
-final sealing, 133,560 insertions, and a source inventory that grew from 188,539
-to 312,657 text lines. The delivered tree contains 1,039 files and 318,210 text
+The campaign is large: 489 paths changed in the candidate source comparison, 166 commits through
+final sealing, 133,961 insertions, and a source inventory that grew from 188,539
+to 312,978 text lines. The delivered tree contains 1,039 files and 318,531 text
 lines. That scale justifies this report, the companion architecture graphs, strict
 review, and a deliberate release boundary. It also creates a future obligation:
 maintainers must prevent the new contracts and evidence harnesses from becoming a

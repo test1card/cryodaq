@@ -65,7 +65,12 @@ def base_paths() -> list[str]:
 
 
 def target_paths() -> list[str]:
-    return sorted(set(run("git", "ls-files").splitlines()) | set(INTENDED_ADDITIONS))
+    paths = set(run("git", "ls-files").splitlines()) | set(INTENDED_ADDITIONS)
+    return sorted(path for path in paths if not _is_generated_output(path))
+
+
+def _is_generated_output(path: str) -> bool:
+    return PurePosixPath(path).match("docs/refactor/architecture-*.svg")
 
 
 _BASE_CONTENTS: dict[str, bytes] | None = None
@@ -202,7 +207,6 @@ def metadata(snapshot: str, paths: list[str], edge_count: int, reader) -> str:
         "generator": "tools/generate_montana_architecture_svgs.py",
         "base_ref": BASE_REF,
         "base_sha": BASE_SHA,
-        "target_head_sha": run("git", "rev-parse", "HEAD").strip(),
         "snapshot": snapshot,
         "manifest_file_count": len(paths),
         "edge_count": edge_count,
@@ -297,7 +301,7 @@ def all_files_svg(snapshot: str, paths: list[str], reader, destination: Path) ->
             f'<g class="file-node" data-path="{esc(p)}" data-loc="{lines}" data-degree="{d}" data-churn="{delta}" role="group" aria-label="{esc(tooltip)}"><title>{esc(tooltip)}</title><desc>Full repository path: {esc(p)}</desc><rect x="{x}" y="{y}" width="{w}" height="{h}" rx="5" fill="{fill}" stroke="{border}" stroke-width="{2 if delta >= 100 else 1}"/><text x="{x + 8}" y="{y + 14}" fill="{ink}">{esc(display)}</text><text x="{x + 8}" y="{y + 28}" fill="#a9b6c5">{esc(metric)}</text><circle cx="{x + w - 12}" cy="{y + h / 2}" r="{radius:.1f}" fill="#69b9e8"><title>Dependency load: {d}</title></circle></g>'
         )
     out.extend(("</g>", "</svg>"))
-    destination.write_text("\n".join(out), encoding="utf-8")
+    destination.write_text("\n".join(out), encoding="utf-8", newline="\n")
 
 
 IMPORTANT_BEFORE = (
@@ -455,13 +459,15 @@ def important_svg(snapshot: str, paths: list[str], reader, destination: Path) ->
             f'<g class="file-node" data-path="{esc(p)}" role="group" aria-label="{esc(tooltip)}"><title>{esc(tooltip)}</title><rect x="{x}" y="{y}" width="{card_w}" height="{card_h}" rx="11" fill="#142230" stroke="{border}" stroke-width="2"/><text x="{x + 14}" y="{y + 27}" fill="#f1f5f9" font-size="12" font-weight="700">{esc(PurePosixPath(p).name)}</text><text x="{x + 14}" y="{y + 48}" fill="#aebaca" font-size="9.5">{esc(str(PurePosixPath(p).parent))}</text><text x="{x + 14}" y="{y + 72}" fill="#7dd3fc" font-size="11">{lines} LOC · degree {d}{f" · Δ {delta}" if delta else ""}</text></g>'
         )
     out.extend(("</g>", "</svg>"))
-    destination.write_text("\n".join(out), encoding="utf-8")
+    destination.write_text("\n".join(out), encoding="utf-8", newline="\n")
 
 
 def verify(path: Path, expected: list[str], exhaustive: bool) -> None:
     root = ET.parse(path).getroot()
     nodes = [e for e in root.iter() if e.tag.endswith("g") and e.attrib.get("class") == "file-node"]
     represented = [e.attrib["data-path"] for e in nodes]
+    if any(_is_generated_output(item) for item in represented):
+        raise RuntimeError(f"generated output included in {path}")
     if len(represented) != len(set(represented)):
         raise RuntimeError(f"duplicate nodes in {path}")
     if exhaustive and represented != expected:

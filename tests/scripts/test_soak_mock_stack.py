@@ -6,6 +6,7 @@ import json
 import math
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1186,6 +1187,112 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
     assert manifest["source_command"][-2:] == ["--mock", "--tray"]
     assert summary["status"] == "FAIL"
     assert summary["manifest_sha256"].startswith("sha256:")
+
+
+@_POSIX_EVIDENCE
+def test_module_entrypoint_preserves_exact_evidence_type(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    hook_dir = tmp_path / "hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        """
+from scripts import soak_mock_stack_runner as runner
+
+class FakeRunner:
+    @staticmethod
+    def require_platform():
+        return None
+
+    def run(self, evidence):
+        from scripts import soak_mock_stack as soak
+        if type(evidence) is not soak.Evidence:
+            raise TypeError("evidence must be the exact Evidence type")
+        raise RuntimeError("subprocess-entrypoint-sentinel")
+
+runner._PosixSoakRunner = FakeRunner
+""".lstrip(),
+        encoding="utf-8",
+    )
+    evidence_dir = tmp_path / "entrypoint-evidence"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(hook_dir), str(repo_root / "src"), str(repo_root)))
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "scripts.soak_mock_stack",
+            "--profile",
+            "short",
+            "--evidence-dir",
+            str(evidence_dir),
+        ),
+        cwd=repo_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    summary = json.loads((evidence_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["reason"] == "subprocess-entrypoint-sentinel"
+
+
+@_POSIX_EVIDENCE
+def test_module_entrypoint_rejects_preloaded_canonical_module(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    hook_dir = tmp_path / "preload-hook"
+    hook_dir.mkdir()
+    (hook_dir / "sitecustomize.py").write_text(
+        """
+import os
+from pathlib import Path
+
+from scripts import soak_mock_stack
+from scripts import soak_mock_stack_runner as runner
+
+class MustNotRun:
+    @staticmethod
+    def require_platform():
+        Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("require-platform")
+
+    def run(self, evidence):
+        Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("run")
+
+runner._PosixSoakRunner = MustNotRun
+""".lstrip(),
+        encoding="utf-8",
+    )
+    evidence_dir = tmp_path / "preloaded-evidence"
+    marker = tmp_path / "runner-called"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(hook_dir), str(repo_root / "src"), str(repo_root)))
+    environment["CRYODAQ_PRELOAD_MARKER"] = str(marker)
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "scripts.soak_mock_stack",
+            "--profile",
+            "short",
+            "--evidence-dir",
+            str(evidence_dir),
+        ),
+        cwd=repo_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode != 0
+    assert "canonical soak module is already loaded" in completed.stderr
+    assert not marker.exists()
+    assert not evidence_dir.exists()
 
 
 @_POSIX_EVIDENCE

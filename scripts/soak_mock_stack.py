@@ -28,6 +28,14 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Protocol
 
+if __name__ == "__main__":
+    # Keep the runbook's ``python -m`` entry point and the runner's defensive
+    # exact-type checks bound to one module instance.
+    existing = sys.modules.get("scripts.soak_mock_stack")
+    if existing is not None and existing is not sys.modules[__name__]:
+        raise RuntimeError("canonical soak module is already loaded")
+    sys.modules["scripts.soak_mock_stack"] = sys.modules[__name__]
+
 SCHEMA = "cryodaq-mock-stack-soak/v1"
 SAMPLE_INTERVAL_S = 5.0
 MAX_CADENCE_GAP_S = 7.5

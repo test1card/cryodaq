@@ -38,9 +38,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements-lock.txt
-          pip install -e . --no-deps
-          pip check
+          python -m pip install -r requirements-lock.txt
+          python -m pip install -e . --no-deps --no-build-isolation
+          python -m pip check
 
       - name: Verify safe SQLite runtime
         run: python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version; print('SQLite', version)"
@@ -69,9 +69,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements-lock.txt
-          pip install -e . --no-deps
-          pip check
+          python -m pip install -r requirements-lock.txt
+          python -m pip install -e . --no-deps --no-build-isolation
+          python -m pip check
 
       - name: Verify safe SQLite runtime
         run: python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version; print('SQLite', version)"

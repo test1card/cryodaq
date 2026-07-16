@@ -29,8 +29,11 @@ Windows, воспроизводимая установка из lockfile (рек
 install.bat
 ```
 
-Делает: проверяет Python 3.12+, ставит `pip install -r requirements-lock.txt`,
-затем `pip install -e . --no-deps`, создаёт ярлык `CryoDAQ` на рабочем столе.
+Делает: проверяет Python 3.12+, запускает
+`python -m pip install -r requirements-lock.txt`, затем
+`python -m pip install -e . --no-deps --no-build-isolation` и создаёт ярлык
+`CryoDAQ` на рабочем столе. Командный слой batch-файла намеренно ASCII-only для
+надёжного запуска в штатном `cmd.exe`; русские инструкции находятся здесь.
 
 Ручная установка (Windows/Linux, dev-окружение):
 

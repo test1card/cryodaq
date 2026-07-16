@@ -58,9 +58,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements-lock.txt
-          pip install -e . --no-deps
-          pip check
+          python -m pip install -r requirements-lock.txt
+          python -m pip install -e . --no-deps --no-build-isolation
+          python -m pip check
 
       - name: Verify safe SQLite runtime
         run: python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version; print('SQLite', version)"
@@ -106,7 +106,8 @@ jobs:
       - name: Check requirements-lock drift
         if: matrix.suite == 'remaining'
         # The frozen Windows build installs transitive deps from
-        # requirements-lock.txt then `pip install -e . --no-deps`. Any
+        # requirements-lock.txt then install with --no-deps and
+        # --no-build-isolation. Any
         # top-level dep missing from the lock is absent from the bundle.
         run: python scripts/check_lock_drift.py
 

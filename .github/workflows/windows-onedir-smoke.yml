@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check -r requirements-lock.txt
-          python -m pip install --disable-pip-version-check . --no-deps
+          python -m pip install --disable-pip-version-check . --no-deps --no-build-isolation
           python -m pip check
           python scripts/check_lock_drift.py
 

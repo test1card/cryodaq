@@ -171,9 +171,12 @@ safety state of `fault` / `fault_latched`.
 conda env create --file environment.yml
 conda activate cryodaq
 pip install -r requirements-lock.txt
-pip install -e . --no-deps
+pip install -e . --no-deps --no-build-isolation
 pip check
 ```
+
+The lock includes the PEP 517 build-backend closure. The supported path disables
+a second runtime or build resolver when installing the project itself.
 
 The tracked environment pins the supported Python/SQLite runtime. The pip lock
 pins resolved Python package versions but is not a hashed, bit-for-bit artifact

@@ -29,13 +29,13 @@ cd cryodaq
 conda env create --file environment.yml
 conda activate cryodaq
 pip install -r requirements-lock.txt
-pip install -e . --no-deps
+pip install -e . --no-deps --no-build-isolation
 pip check
 ```
 
 `environment.yml` фиксирует безопасную версию SQLite, с которой связан Python.
 `requirements-lock.txt` фиксирует версии Python-пакетов для поддерживаемого
-набора base + dev + web. Это version-pinned inputs, но не побитовый artifact
+набора build backend + base + dev + web. Это version-pinned inputs, но не побитовый artifact
 lock: файл не содержит hashes, а Conda environment не фиксирует Python patch,
 build strings и все transitive Conda artifacts.
 
@@ -59,7 +59,8 @@ alias. `pysqlite3-binary` не устанавливается: опублико�
 
 Windows helper `install.bat` предполагает уже активированный безопасный runtime,
 устанавливает version-pinned Python dependencies из `requirements-lock.txt`,
-выполняет `pip install -e . --no-deps` и `pip check`, затем вызывает
+выполняет `python -m pip install -e . --no-deps --no-build-isolation` и
+`python -m pip check`, затем вызывает
 `create_shortcut.py` для ярлыка на рабочем столе.
 
 ### Bootstrap predictor model
@@ -313,7 +314,7 @@ laboratory platforms:
 conda env create --file environment.yml
 conda activate cryodaq
 pip install -r requirements-lock.txt
-pip install -e . --no-deps
+pip install -e . --no-deps --no-build-isolation
 ```
 
 `cryodaq.storage._sqlite` selects the implementation once at import time:
@@ -342,9 +343,10 @@ sandbox rather than a supported lab runtime.
 ## Version-pinned dependency inputs
 
 CryoDAQ pins resolved Python package versions in `requirements-lock.txt`,
-generated via `pip-compile` from `pyproject.toml`. Production bundle builds
-install from this file and then install CryoDAQ with `--no-deps`, avoiding a
-second unconstrained resolution. The Python-linked SQLite version is pinned by
+generated via `pip-compile --all-build-deps` from `pyproject.toml`. Production
+bundle builds install from this file and then install CryoDAQ with `--no-deps
+--no-build-isolation`, avoiding a second unconstrained runtime or build-backend
+resolution. The Python-linked SQLite version is pinned by
 `environment.yml`.
 
 These files define the supported version-pinned inputs; they do not claim a
@@ -359,8 +361,21 @@ After changing `pyproject.toml` dependencies:
 
 ```bash
 pip install pip-tools
-pip-compile --extra=dev --extra=web --output-file=requirements-lock.txt pyproject.toml
+pip-compile --all-build-deps --extra=dev --extra=web --output-file=requirements-lock.windows.txt pyproject.toml
+pip-compile --all-build-deps --extra=dev --extra=web --output-file=requirements-lock.linux.txt pyproject.toml
+pip-compile --all-build-deps --extra=dev --extra=web --output-file=requirements-lock.macos.txt pyproject.toml
+```
+
+Run the candidate command on its named operating system. Reconcile the three
+candidate files into the tracked `requirements-lock.txt`: keep one reviewed
+version per package and preserve the canonical PEP 508 platform markers for
+Windows, Linux, and macOS. Never replace the tracked lock with raw output from
+one host, because that can silently remove dependencies needed by another
+supported platform. Then verify the reconciled lock:
+
+```bash
 pytest -q tests/test_ci_safe_sqlite_contract.py tests/test_lock_drift.py
+python scripts/check_lock_drift.py
 git add requirements-lock.txt
 git commit -m "deps: update lockfile"
 ```
@@ -373,7 +388,7 @@ The build scripts (`build.sh` / `build.bat`) install from
 ```bash
 conda activate cryodaq
 pip install -r requirements-lock.txt
-pip install -e . --no-deps
+pip install -e . --no-deps --no-build-isolation
 pip check
 ./build_scripts/build.sh       # Linux / macOS
 build_scripts\build.bat        # Windows

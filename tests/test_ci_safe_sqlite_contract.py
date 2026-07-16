@@ -17,9 +17,9 @@ def test_supported_test_workflows_use_safe_tracked_runtime() -> None:
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert PINNED_MINICONDA in text
         assert "environment-file: environment.yml" in text
-        assert "pip install -r requirements-lock.txt" in text
-        assert "pip install -e . --no-deps" in text
-        assert "pip check" in text
+        assert "python -m pip install -r requirements-lock.txt" in text
+        assert "python -m pip install -e . --no-deps --no-build-isolation" in text
+        assert "python -m pip check" in text
         assert "Verify safe SQLite runtime" in text
         assert "actions/setup-python" not in text
 
@@ -39,6 +39,7 @@ def test_main_ci_binds_h4_alias_to_the_running_linux_interpreter_fail_closed() -
 
 def test_pip_lock_preserves_platform_specific_runtime_dependencies() -> None:
     lines = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").splitlines()
+    assert "--all-build-deps" in "\n".join(lines[:8])
     requirements = {
         requirement.name.lower(): requirement
         for line in lines

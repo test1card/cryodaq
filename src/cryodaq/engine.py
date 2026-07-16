@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import math
 import os
@@ -2240,6 +2241,8 @@ async def _handle_gui_command(
                 return {"ok": False, "error": "invalid_annunciation_command"}
             if not cmd["engine_instance_id"] or not cmd["activation_id"]:
                 return {"ok": False, "error": "invalid_annunciation_command"}
+            if any(not cmd[key].strip() or not cmd[key].isprintable() for key in ("operator", "reason")):
+                return {"ok": False, "error": "invalid_annunciation_command"}
             if annunciation_registry is None:
                 return {"ok": False, "error": "annunciation_unavailable"}
             try:
@@ -2280,6 +2283,25 @@ async def _handle_gui_command(
                 )
                 event_emitted = True
             elif target.source == "safety_fault" and not target.acknowledged:
+                try:
+                    await writer.append_operator_log(
+                        message=json.dumps(
+                            {
+                                "activation_id": target.activation_id,
+                                "event": "safety_audio_ack_request",
+                                "reason": cmd["reason"].strip(),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        author=cmd["operator"].strip(),
+                        source="operator",
+                        experiment_id=experiment_manager.active_experiment_id,
+                        tags=("safety_audio_ack", "safety_fault"),
+                    )
+                except Exception:
+                    logger.error("Safety-audio acknowledgement audit persistence failed", exc_info=True)
+                    return {"ok": False, "error": "audit_persistence_failed"}
                 if not annunciation_registry.acknowledge_safety_audio(target.activation_id):
                     return {"ok": False, "error": "activation_changed"}
             return {

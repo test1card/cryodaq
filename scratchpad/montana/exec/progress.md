@@ -294,7 +294,8 @@ The live branch/CI/roadmap direction was independently rechecked after push
 configuration documentation, review/publication accounting, and recommended
 green-CI -> D4 -> F36 -> soak sequence are here:
 
-**[Strategic coordinator review — 2026-07-13](reviews/STRATEGIC_COORDINATOR_REVIEW_2026-07-13.md)**
+Strategic coordinator review artifact from 2026-07-13 is unavailable in this
+worktree; the conclusions below remain historical context.
 
 Headline: architecture is moving in the right direction, but actual GitHub run
 `29207903245` is red on both Ubuntu and Windows. Close the target-OS and docs
@@ -310,7 +311,8 @@ runtime check against a selected local descriptor manifest, current
 ROADMAP/PROJECT_STATUS drift, and the now-resolved provider-specific
 `CLAUDE.md` governance decision:
 
-**[Current coordinator insight — 2026-07-13](reviews/CURRENT_COORDINATOR_INSIGHT_2026-07-13.md)**
+Current-coordinator insight artifact from 2026-07-13 is unavailable in this
+worktree; the conclusions below remain historical context.
 
 User clarification: the Claude-specific orchestra in `CLAUDE.md` is
 intentional and authorized. Claude may keep ecosystem-specific routing there;
@@ -429,7 +431,7 @@ handoff now exists for a lower-capability worker to re-run the frozen gate,
 commit the isolated diff, cherry-pick only if the main checkout is exactly at
 `ac65aa4`, verify, record evidence, and stop:
 
-**[Cheap-worker D4 landing handoff](CHEAP_WORKER_HANDOFF_D4_LANDING_2026-07-13.md)**
+The cheap-worker D4 landing handoff artifact is unavailable in this worktree.
 
 Do not let the cheap worker implement D7, persistence-authority activation,
 F36 composition/publication, soak activation, or conflict resolution. Those
@@ -460,8 +462,8 @@ remain strong-coordinator work.
   delivery, a GUI-owner-thread descriptor Store, monotonic revisions with
   equivocation/regression refusal, bounded absent-vs-refused diagnostics, and
   no visual redesign yet.
-- The next F36 backend sequence is frozen in the
-  **[F36 live-activation blueprint](F36_LIVE_ACTIVATION_BLUEPRINT_2026-07-13.md)**.
+- The historical F36 live-activation blueprint artifact is unavailable in this
+  worktree.
   Key finding: the live path currently proves direct SQLite commit, while
   `PersistenceAuthorityOwner` claims durable spool/materialization/ACK truth;
   those must be honestly integrated, not relabeled into fake green integrity.
@@ -1032,3 +1034,28 @@ worktree after D7.1 is settled.
   15-minute soak, 12/72-hour duration, all 12 operator scenarios,
   keyboard/NVDA/DPI/performance/long-session, dummy-load,
   independent-final-element, and physical-laboratory gates remain **OPEN**.
+
+## 2026-07-16 exact f594 checkpoint and final hardening
+
+- Exact GitHub Actions run `29468630626` passed all eight Ubuntu/Windows
+  agents/core/GUI/remaining jobs at `f5946b9`. Safe SQLite, lint, and lock
+  drift gates passed where configured.
+- Exact `f5946b9` WSL archive SHA-256 is
+  `21FD239EFF747A3C02BC653D1056EC7036CA7C3A6D38E1BEAF6E86F29BB6A20E`.
+  Archive comparison found 1,039/1,039 paths and zero blob mismatches.
+- An isolated Windows ONEDIR build with the final packaging patch passed the
+  warning gate and all seven frozen smoke cells. The combined final sealed SHA
+  still requires its own rebuild and smoke.
+- The current final hardening slice makes the canonical soak module entrypoint
+  type-stable, excludes generated SVGs from their own architecture manifest,
+  makes source and bundle installation use the pinned build-backend closure,
+  makes local build helpers fail closed without the lock, and persists bounded
+  operator attribution before exact safety-audio acknowledgement.
+- Before sealing, code/docs were frozen, report metrics recomputed, SVGs
+  regenerated deterministically, the combined focused/static gates passed, and
+  independent diff reviews closed without open P0-P3. After sealing: run the
+  clean final-SHA 15-minute WSL soak, combined Windows
+  ONEDIR smoke, exact-SHA hosted CI, PR audit, and external Fable review.
+- The 12/72-hour elapsed soak, operator/accessibility/performance/DPI evidence,
+  dummy-load, independent final element, real cryogenic hardware, and physical
+  laboratory acceptance remain open and cannot be closed by software tests.

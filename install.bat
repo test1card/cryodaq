@@ -1,97 +1,63 @@
 @echo off
-chcp 65001 >nul 2>&1
+setlocal
+cd /d "%~dp0"
+if errorlevel 1 exit /b 1
+
+REM Keep this command layer ASCII-only: stock cmd.exe does not reliably parse
+REM UTF-8 Cyrillic batch text. Russian operator guidance lives in quickstart.
 echo.
-echo  ╔═══════════════════════════════════════════════╗
-echo  ║   Установка CryoDAQ — АКЦ ФИАН              ║
-echo  ╚═══════════════════════════════════════════════╝
-echo.
-
-REM Проверка Python
-python --version >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo  ОШИБКА: Python не найден.
-    echo  Установите Python 3.12+ с https://python.org
-    echo  При установке отметьте "Add Python to PATH".
-    pause
-    exit /b 1
-)
-
-for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
-echo  Python: %PYVER%
-
-REM Проверка версии >= 3.12
-python -c "import sys; exit(0 if sys.version_info >= (3, 12) else 1)" 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo  ОШИБКА: Требуется Python 3.12 или новее. Установлен: %PYVER%
-    pause
-    exit /b 1
-)
-
-REM Поддерживаемая установка требует Python, связанный с безопасным SQLite.
-python -c "import sqlite3,sys; v=tuple(sqlite3.sqlite_version_info); print(' SQLite:', sqlite3.sqlite_version); sys.exit(0 if v in ((3,44,6),(3,50,7)) or v >= (3,51,3) else 1)" 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo  ОШИБКА: Python связан с небезопасной версией SQLite.
-    echo  Создайте и активируйте environment.yml по docs/deployment.md.
-    pause
-    exit /b 1
-)
-
-REM Установка version-pinned Python dependencies из requirements-lock.txt,
-REM затем проекта без повторного dependency resolution.
-if not exist requirements-lock.txt (
-    echo  ОШИБКА: requirements-lock.txt не найден рядом с install.bat.
-    pause
-    exit /b 1
-)
-
-echo  Устанавливаю зависимости из requirements-lock.txt...
-pip install -r requirements-lock.txt >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo  ОШИБКА: pip install завершился с ошибкой.
-    echo  Попробуйте: pip install -r requirements-lock.txt
-    pause
-    exit /b 1
-)
-
-pip install -e . --no-deps >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo  ОШИБКА: pip install -e . завершился с ошибкой.
-    echo  Попробуйте: pip install -e . --no-deps
-    pause
-    exit /b 1
-)
-pip check >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo  ОШИБКА: установленный набор зависимостей несовместим.
-    echo  Выполните установку заново по docs/deployment.md в environment cryodaq.
-    pause
-    exit /b 1
-)
-echo  Зависимости установлены.
+echo CryoDAQ installation
 echo.
 
-REM Создание ярлыка на рабочем столе
-echo  Создаю ярлык на рабочем столе...
+python --version
+if errorlevel 1 goto :python_missing
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"
+if errorlevel 1 goto :python_old
+python -c "import sqlite3; v=tuple(sqlite3.sqlite_version_info); print('SQLite:', sqlite3.sqlite_version); raise SystemExit(0 if v in ((3,44,6),(3,50,7)) or v >= (3,51,3) else 1)"
+if errorlevel 1 goto :sqlite_unsafe
+if not exist requirements-lock.txt goto :lock_missing
+
+echo Installing the version-pinned dependency set...
+python -m pip install -r requirements-lock.txt
+if errorlevel 1 goto :dependency_failed
+python -m pip install -e . --no-deps --no-build-isolation
+if errorlevel 1 goto :project_failed
+python -m pip check
+if errorlevel 1 goto :dependency_check_failed
 python create_shortcut.py
-echo.
+if errorlevel 1 goto :shortcut_failed
 
-REM Подсказка о локальной конфигурации
-echo  ═══════════════════════════════════════════════
 echo.
-echo  Установка завершена!
-echo.
-echo  Следующие шаги:
-echo    1. Скопируйте config\instruments.local.yaml.example
-echo       в config\instruments.local.yaml
-echo       и укажите адреса ваших приборов.
-echo.
-echo    2. Скопируйте config\notifications.local.yaml.example
-echo       в config\notifications.local.yaml
-echo       и укажите токен Telegram-бота.
-echo.
-echo    3. Дважды кликните по ярлыку CryoDAQ на рабочем столе.
-echo.
-echo  Для тестирования без приборов:
-echo    cryodaq-engine --mock
+echo Installation complete. See docs\quickstart.md for Russian setup guidance.
+echo For a no-instrument check: cryodaq-engine --mock
 echo.
 pause
+exit /b 0
+
+:python_missing
+echo ERROR: Python was not found. Install Python 3.12 or newer.
+goto :failed
+:python_old
+echo ERROR: Python 3.12 or newer is required.
+goto :failed
+:sqlite_unsafe
+echo ERROR: this Python uses an unsafe SQLite build. See docs\deployment.md.
+goto :failed
+:lock_missing
+echo ERROR: requirements-lock.txt is missing beside install.bat.
+goto :failed
+:dependency_failed
+echo ERROR: the pinned dependency installation failed.
+goto :failed
+:project_failed
+echo ERROR: the no-isolation editable project installation failed.
+goto :failed
+:dependency_check_failed
+echo ERROR: python -m pip check reported an incompatible environment.
+goto :failed
+:shortcut_failed
+echo ERROR: the CryoDAQ desktop shortcut could not be created.
+:failed
+echo Installation did not complete. See docs\deployment.md.
+pause
+exit /b 1
