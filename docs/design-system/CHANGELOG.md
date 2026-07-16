@@ -12,6 +12,39 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
+## [4.0.0] — 2026-07-15
+
+### Changed
+
+- Restored panoramic observability as a mandatory property of the primary
+  operating surface. Curated summaries and prioritization are additive and may
+  not hide comprehensive channel, trend, experiment, provenance, or state
+  evidence.
+- Added a mandatory per-change tradeoff record: operator benefit, operator
+  cost, safety/workflow justification, mitigation/evidence, and revert trigger.
+- Reclassified the atomic «Сводка смены» as a supplemental briefing rather
+  than the sole home truth surface.
+- Recorded laboratory operator decisions for information retention, a
+  three-step `safe | caution | fault` severity ladder, orthogonal state axes,
+  acknowledgement responsibility, the current audible-alarm behavior and its
+  open single-owner consolidation gate, 2 Hz
+  display cadence, manual plot windows, cross-channel skew, DPI-aware automatic
+  reflow, and deferred 100+ sensor/4K projector mode.
+- Hardened alarm acknowledgement around exact engine-instance and activation
+  identity. Delayed, restarted-engine, name-only, and out-of-order actions fail
+  closed; rows remain visible as evidence. Acknowledgement changes
+  attention/audible responsibility only and cannot clear a hazard, start safety
+  recovery, or acquire control authority. REST clients must migrate from an
+  empty/name-only ACK body to the identity returned by the accepted alarms GET
+  snapshot.
+
+## [3.0.2] — 2026-07-15
+
+### Changed
+
+- Aligned the ToolRail home destination, tooltip, and exact contract test with
+  the Primary Operator Display term «Сводка смены».
+
 ## [3.0.1] — 2026-07-15
 
 ### Changed

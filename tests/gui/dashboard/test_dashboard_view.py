@@ -9,10 +9,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from datetime import UTC
 
 import pytest
-from PySide6.QtWidgets import QApplication, QFrame
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QFrame, QScrollArea
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.gui.dashboard import DashboardView
+from cryodaq.gui.dashboard.dashboard_view import _PRESENTATION_INTERVAL_MS
 
 
 @pytest.fixture(scope="module")
@@ -28,6 +30,14 @@ def test_dashboard_view_constructs(app):
     assert view is not None
 
 
+def test_dashboard_presentation_tick_is_bounded_to_two_hz(app):
+    mgr = ChannelManager()
+    view = DashboardView(mgr)
+
+    assert _PRESENTATION_INTERVAL_MS == 500
+    assert view._refresh_timer.interval() == _PRESENTATION_INTERVAL_MS
+
+
 def test_dashboard_view_has_five_zones(app):
     """All five placeholder zones are present with expected object names."""
     mgr = ChannelManager()
@@ -35,6 +45,26 @@ def test_dashboard_view_has_five_zones(app):
     expected = {"phaseZone", "tempPlotZone", "pressurePlotZone", "sensorGridZone", "quickLogZone"}
     actual = {c.objectName() for c in view.findChildren(QFrame) if c.objectName() in expected}
     assert expected == actual, f"Missing: {expected - actual}"
+
+
+def test_dashboard_scrolls_vertically_without_horizontal_clipping_or_sensor_hiding(app):
+    mgr = ChannelManager()
+    mgr._channels = {f"Т{index}": {"name": f"Датчик {index}", "visible": True} for index in range(1, 13)}
+    view = DashboardView(mgr)
+    view.resize(720, 360)
+    view.show()
+    app.processEvents()
+
+    assert isinstance(view, QScrollArea)
+    assert view.accessibleName() == "Панель мониторинга"
+    assert view.focusPolicy() is Qt.FocusPolicy.StrongFocus
+    assert view.horizontalScrollBarPolicy() is Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert view.horizontalScrollBar().maximum() == 0
+    assert view.verticalScrollBar().maximum() > 0
+    assert tuple(view._sensor_grid._cells) == tuple(f"Т{index}" for index in range(1, 13))
+    assert view._sensor_grid._grid_layout.count() == 12
+    assert view._sensor_grid.height() >= view._sensor_grid.minimumSizeHint().height()
+    assert view._sensor_grid._grid_widget.geometry().bottom() <= view._sensor_grid.contentsRect().bottom()
 
 
 def test_dashboard_view_on_reading_accepts(app):
@@ -76,6 +106,58 @@ def test_on_reading_temperature_stores_short_id(app):
     last = view._buffer_store.get_last("\u04221")
     assert last is not None
     assert last[1] == 77.5
+
+
+def test_coalescing_preserves_every_sample_in_full_rate_buffer(app):
+    from datetime import datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    mgr = ChannelManager()
+    view = DashboardView(mgr)
+    for value, status in (
+        (77.0, ChannelStatus.OK),
+        (500.0, ChannelStatus.OVERRANGE),
+        (78.0, ChannelStatus.OK),
+    ):
+        view.on_reading(
+            Reading(
+                channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+                value=value,
+                unit="K",
+                timestamp=datetime.now(UTC),
+                status=status,
+                instrument_id="lakeshore_218s",
+            ),
+            IdentityStatus.AUTHORITATIVE,
+        )
+
+    assert [value for _, value in view._buffer_store.get_history("\u04221")] == [
+        77.0,
+        500.0,
+        78.0,
+    ]
+    assert view._sensor_grid is not None
+    pending = view._sensor_grid._pending_readings["\u04221"]
+    assert pending.count == 3
+    assert pending.minimum[0].value == 77.0
+    assert pending.maximum[0].value == 500.0
+    assert pending.last[0].value == 78.0
+    assert pending.status_evidence[0].status is ChannelStatus.OVERRANGE
+
+    view._refresh_plots()
+
+    assert view._temp_plot is not None
+    plotted = view._temp_plot._plot_items["\u04221"]
+    assert list(plotted.yData) == [77.0, 500.0, 78.0]
+    cell = view._sensor_grid._cells["\u04221"]
+    assert cell._value_widget.text() == "78.00"
+    assert cell._status_hint_widget.text() == "Перегрузка (за интервал)"
+
+    view._sensor_grid.refresh()
+
+    assert cell._status_hint_widget.text() == "Норма"
 
 
 def test_on_reading_pressure_stores_full_id(app):

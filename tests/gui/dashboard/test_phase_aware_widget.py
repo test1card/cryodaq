@@ -42,8 +42,7 @@ def test_phase_labels_complete():
         assert PHASE_LABELS_RU[phase], f"Empty label for phase {phase!r}"
         if phase in expected:
             assert PHASE_LABELS_RU[phase] == expected[phase], (
-                f"Label for {phase!r}: got {PHASE_LABELS_RU[phase]!r}, "
-                f"expected {expected[phase]!r}"
+                f"Label for {phase!r}: got {PHASE_LABELS_RU[phase]!r}, expected {expected[phase]!r}"
             )
 
 
@@ -124,7 +123,9 @@ def test_widget_phase_change(app):
     assert "ОТКАЧКА" in label_text.upper()
     prep_ss = w._stepper._pills["preparation"].styleSheet()
     vac_ss = w._stepper._pills["vacuum"].styleSheet()
-    assert theme.STATUS_OK in prep_ss
+    assert theme.STATUS_OK not in prep_ss
+    assert theme.BORDER in prep_ss
+    assert theme.ACCENT in vac_ss
     assert theme.ACCENT in vac_ss
 
 
@@ -172,9 +173,7 @@ def test_back_disabled_at_first_phase(app):
             "phase_started_at": 1000.0,
         }
     )
-    assert w._back_btn.isEnabled() is False, (
-        "back btn must be disabled at first phase (preparation)"
-    )
+    assert w._back_btn.isEnabled() is False, "back btn must be disabled at first phase (preparation)"
 
 
 # HIGH: assert button is disabled at last phase (teardown per PHASE_ORDER)
@@ -188,9 +187,7 @@ def test_forward_disabled_at_last_phase(app):
             "phase_started_at": 1000.0,
         }
     )
-    assert w._forward_btn.isEnabled() is False, (
-        f"forward btn must be disabled at last phase ({last_phase!r})"
-    )
+    assert w._forward_btn.isEnabled() is False, f"forward btn must be disabled at last phase ({last_phase!r})"
 
 
 def test_format_duration_seconds():
@@ -302,7 +299,7 @@ def test_context_label_shows_eta_when_cooldown_eta_received(app):
     # on_reading: channel ending with /cooldown_eta, value in hours → * 3600
     reading = Reading(
         channel="analytics/cooldown_predictor/cooldown_eta",
-        value=12.5,   # hours; code does value * 3600 → 45000 s → "12ч 30мин"
+        value=12.5,  # hours; code does value * 3600 → 45000 s → "12ч 30мин"
         unit="h",
         timestamp=datetime.now(UTC),
         status=ChannelStatus.OK,
@@ -312,9 +309,7 @@ def test_context_label_shows_eta_when_cooldown_eta_received(app):
     w.on_reading(reading)
     label_text = w._context_label.text()
     assert "ETA" in label_text
-    assert "12ч 30мин" in label_text, (
-        f"Expected '12ч 30мин' in label text, got: {label_text!r}"
-    )
+    assert "12ч 30мин" in label_text, f"Expected '12ч 30мин' in label text, got: {label_text!r}"
 
 
 def test_context_label_omits_eta_when_not_received(app):

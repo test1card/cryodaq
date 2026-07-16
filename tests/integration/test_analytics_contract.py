@@ -1,9 +1,9 @@
 """Analytics tab structural contract tests (T8 — v0.52.6).
 
-End-to-end coverage of the dispatch path::
+End-to-end coverage of the descriptor-qualified dispatch path::
 
-    MainWindowV2._reading_received.emit(reading)
-        → _dispatch_reading(reading)
+    MainWindowV2.dispatch_qualified_reading(qualified)
+        → _dispatch_descriptor_reading(reading, descriptor)
         → AnalyticsView.set_*(...)
         → concrete widget internal state
 
@@ -41,6 +41,13 @@ import pytest
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.shell.views import analytics_widgets as aw
@@ -68,6 +75,30 @@ def _stop_timers(w: MainWindowV2) -> None:
             pass
 
 
+def _qualified(
+    reading: Reading,
+    quantity: ChannelQuantity,
+    *,
+    display_name: str | None = None,
+) -> DescriptorQualifiedReading:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=reading.channel,
+        instrument_id=reading.instrument_id,
+        source_key=f"test.{quantity.value}",
+        quantity=quantity,
+        unit=reading.unit,
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="analytics",
+        display_name=display_name or reading.channel,
+        visible_by_default=True,
+        display_order=0,
+        descriptor_revision=1,
+    )
+    return DescriptorQualifiedReading(reading=reading, descriptor=descriptor)
+
+
 def _temperature_reading(channel: str, value: float, *, ts: float | None = None) -> Reading:
     timestamp = datetime.fromtimestamp(ts, tz=UTC) if ts is not None else datetime.now(UTC)
     return Reading(
@@ -88,7 +119,7 @@ def _pressure_reading(value: float, *, ts: float | None = None) -> Reading:
         instrument_id="VSP63D_1",
         channel="VSP63D_1/pressure",
         value=value,
-        unit="мбар",
+        unit="mbar",
         status=ChannelStatus.OK,
         metadata={},
     )
@@ -129,30 +160,30 @@ def test_temperature_panel_receives_data_in_cooldown_phase(qt_app):
         _stop_timers(w)
         try:
             w._ensure_overlay("analytics")
-            w._on_experiment_status_received(
-                {"active_experiment": {}, "current_phase": "cooldown"}
-            )
+            w._on_experiment_status_received({"active_experiment": {}, "current_phase": "cooldown"})
             now = time.time()
             for i in range(5):
-                reading = _temperature_reading(
-                    "Т1 Криостат верх", 295.0 - 5.0 * i, ts=now + i
+                reading = _temperature_reading("stage_temp", 295.0 - 5.0 * i, ts=now + i)
+                w.dispatch_qualified_reading(
+                    _qualified(
+                        reading,
+                        ChannelQuantity.TEMPERATURE,
+                        display_name="Т1 Криостат верх",
+                    )
                 )
-                w._reading_received.emit(reading)
                 qt_app.processEvents()
 
             # In cooldown, top_right is temperature_overview.
             slots = w._analytics_view.active_widgets()
             top_right = slots.get("top_right")
             assert isinstance(top_right, aw.TemperatureOverviewWidget)
-            series = top_right._series.get("Т1 Криостат верх")
+            series = top_right._series.get("stage_temp")
             assert series is not None and len(series.xs) >= 5
 
             # X-axis right edge must be in the recent past, not 1970.
             pi = top_right._plot.getPlotItem()
             x_lo, x_hi = pi.getViewBox().viewRange()[0]
-            assert x_hi > now - 2 * 24 * 3600, (
-                f"X-axis right edge {x_hi} is older than 2 days; expected ~now"
-            )
+            assert x_hi > now - 2 * 24 * 3600, f"X-axis right edge {x_hi} is older than 2 days; expected ~now"
         finally:
             w.close()
 
@@ -169,12 +200,11 @@ def test_pressure_panel_renders_in_vacuum_phase(qt_app):
         _stop_timers(w)
         try:
             w._ensure_overlay("analytics")
-            w._on_experiment_status_received(
-                {"active_experiment": {}, "current_phase": "vacuum"}
-            )
+            w._on_experiment_status_received({"active_experiment": {}, "current_phase": "vacuum"})
             now = time.time()
             for i in range(5):
-                w._reading_received.emit(_pressure_reading(1e-5 * (i + 1), ts=now + i))
+                reading = _pressure_reading(1e-5 * (i + 1), ts=now + i)
+                w.dispatch_qualified_reading(_qualified(reading, ChannelQuantity.PRESSURE))
                 qt_app.processEvents()
 
             # In vacuum, pressure_current is bottom_right.
@@ -186,9 +216,7 @@ def test_pressure_panel_renders_in_vacuum_phase(qt_app):
             # PressurePlot X range right-edge must be at "now" (T5 fix).
             pi = pressure._plot.plot_item.getPlotItem()
             _, x_hi = pi.getViewBox().viewRange()[0]
-            assert x_hi >= now - 10, (
-                f"PressurePlot X right edge {x_hi} is frozen earlier than now ({now})"
-            )
+            assert x_hi >= now - 10, f"PressurePlot X right edge {x_hi} is frozen earlier than now ({now})"
         finally:
             w.close()
 
@@ -205,9 +233,7 @@ def test_cooldown_widget_no_1970_epoch_in_xaxis(qt_app):
         _stop_timers(w)
         try:
             w._ensure_overlay("analytics")
-            w._on_experiment_status_received(
-                {"active_experiment": {}, "current_phase": "cooldown"}
-            )
+            w._on_experiment_status_received({"active_experiment": {}, "current_phase": "cooldown"})
             reading = _cooldown_reading([0.5, 1.0, 1.5])
             w._reading_received.emit(reading)
             qt_app.processEvents()
@@ -219,9 +245,7 @@ def test_cooldown_widget_no_1970_epoch_in_xaxis(qt_app):
             # T4: predicted trajectory entries are absolute Unix seconds.
             assert inner._central, "central prediction must be populated"
             min_ts = min(t for t, _ in inner._central)
-            assert min_ts > 1_500_000_000, (
-                f"Cooldown central trajectory contains pre-2017 timestamp {min_ts}"
-            )
+            assert min_ts > 1_500_000_000, f"Cooldown central trajectory contains pre-2017 timestamp {min_ts}"
             # T3: viewBox X range must not include the Unix epoch.
             pi = inner._plot.getPlotItem()
             x_lo, _ = pi.getViewBox().viewRange()[0]
@@ -237,9 +261,7 @@ def test_cooldown_widget_no_1970_epoch_in_xaxis(qt_app):
 
 def test_set_fault_not_present_on_analytics_view(qt_app):
     view = AnalyticsView()
-    assert not hasattr(view, "set_fault"), (
-        "AnalyticsView must no longer expose set_fault — it was deleted in T1."
-    )
+    assert not hasattr(view, "set_fault"), "AnalyticsView must no longer expose set_fault — it was deleted in T1."
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -282,9 +304,7 @@ def test_phase_swap_preserves_series_count_in_temperature_overview(qt_app):
         view = AnalyticsView()
         # Vacuum: top_right == temperature_overview.
         view.set_phase("vacuum")
-        readings_batch = {
-            "Т1 Криостат верх": _temperature_reading("Т1 Криостат верх", 80.0)
-        }
+        readings_batch = {"Т1 Криостат верх": _temperature_reading("Т1 Криостат верх", 80.0)}
         for _ in range(10):
             view.set_temperature_readings(readings_batch)
 
@@ -303,9 +323,7 @@ def test_phase_swap_preserves_series_count_in_temperature_overview(qt_app):
             f"got {type(same_widget).__name__}"
         )
         after = len(same_widget._series.get("Т1 Криостат верх", aw._ChannelSeries()).xs)
-        assert after >= before, (
-            f"Series count dropped after phase swap: before={before}, after={after}"
-        )
+        assert after >= before, f"Series count dropped after phase swap: before={before}, after={after}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -321,8 +339,7 @@ def test_vacuum_prediction_now_marker_not_at_epoch(qt_app):
         widget.set_pressure_reading(reading)
         now_pos = widget._inner._now_line.value()
         assert now_pos > 1_500_000_000, (
-            f"VacuumPredictionWidget now-line is at {now_pos}; "
-            "must be a recent Unix timestamp, not the 1970 epoch."
+            f"VacuumPredictionWidget now-line is at {now_pos}; must be a recent Unix timestamp, not the 1970 epoch."
         )
 
 
@@ -343,9 +360,7 @@ def test_forward_warning_on_setter_with_no_recipient(qt_app, caplog):
     with caplog.at_level(logging.WARNING, logger="cryodaq.gui.shell.views.analytics_view"):
         view.set_cooldown(None)
     messages = [rec.getMessage() for rec in caplog.records]
-    assert any("set_cooldown_data" in m for m in messages), (
-        f"Expected WARNING about set_cooldown_data; got: {messages}"
-    )
+    assert any("set_cooldown_data" in m for m in messages), f"Expected WARNING about set_cooldown_data; got: {messages}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -366,13 +381,8 @@ def test_forward_warning_fires_once_per_phase_not_per_reading(qt_app, caplog):
             reading = _temperature_reading("Т1 Криостат верх", 80.0)
             for _ in range(100):
                 view.set_temperature_readings({"Т1 Криостат верх": reading})
-    temp_warnings = [
-        r for r in caplog.records
-        if "set_temperature_readings" in r.getMessage()
-    ]
-    assert len(temp_warnings) == 1, (
-        f"Expected exactly 1 WARNING for set_temperature_readings; got {len(temp_warnings)}"
-    )
+    temp_warnings = [r for r in caplog.records if "set_temperature_readings" in r.getMessage()]
+    assert len(temp_warnings) == 1, f"Expected exactly 1 WARNING for set_temperature_readings; got {len(temp_warnings)}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -423,9 +433,7 @@ def test_pressure_current_widget_issues_readings_history_on_construction(qt_app)
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_lazy_open_with_active_experiment_does_not_construct_then_destroy(
-    qt_app, monkeypatch
-):
+def test_lazy_open_with_active_experiment_does_not_construct_then_destroy(qt_app, monkeypatch):
     """v0.52.7 regression: clicking Analytics during vacuum/cooldown/etc
     used to construct fallback widgets then immediately destroy them via
     set_phase, killing in-flight ZmqCommandWorkers parented to the

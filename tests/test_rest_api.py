@@ -30,10 +30,14 @@ def test_temperatures_returns_kelvin_readings(client) -> None:
     from cryodaq.web import server
 
     server._state.last_readings = {
-        "Т1": {"timestamp": "2026-03-17T10:00:00+00:00", "channel": "Т1",
-               "value": 4.2, "unit": "K", "status": "ok"},
-        "P1": {"timestamp": "2026-03-17T10:00:00+00:00", "channel": "P1",
-               "value": 1e-5, "unit": "mbar", "status": "ok"},
+        "Т1": {"timestamp": "2026-03-17T10:00:00+00:00", "channel": "Т1", "value": 4.2, "unit": "K", "status": "ok"},
+        "P1": {
+            "timestamp": "2026-03-17T10:00:00+00:00",
+            "channel": "P1",
+            "value": 1e-5,
+            "unit": "mbar",
+            "status": "ok",
+        },
     }
     resp = client.get("/api/v1/temperatures")
     assert resp.status_code == 200
@@ -77,8 +81,15 @@ def test_experiment_response_redacts_sensitive_fields(client) -> None:
 
     assert resp.status_code == 200
     body = resp.text
-    for leak in ("SECRET_OPERATOR", "SECRET_SAMPLE", "SECRET_NOTES",
-                 "SECRET_KEY", "SECRET_VALUE", "SECRET_CF", "/secret/"):
+    for leak in (
+        "SECRET_OPERATOR",
+        "SECRET_SAMPLE",
+        "SECRET_NOTES",
+        "SECRET_KEY",
+        "SECRET_VALUE",
+        "SECRET_CF",
+        "/secret/",
+    ):
         assert leak not in body, f"leaked {leak!r}"
     exp = resp.json()["active_experiment"]
     assert exp["experiment_id"] == "exp-1"
@@ -89,15 +100,17 @@ def test_experiment_response_redacts_sensitive_fields(client) -> None:
 
 def test_log_response_redacts_author(client) -> None:
     """Operator-log authors must not leak through the REST facade."""
-    entries = [{
-        "id": 1,
-        "timestamp": "2026-03-17T10:00:00+00:00",
-        "experiment_id": "exp-1",
-        "author": "SECRET_AUTHOR",
-        "source": "gui",
-        "message": "hello",
-        "tags": ["note"],
-    }]
+    entries = [
+        {
+            "id": 1,
+            "timestamp": "2026-03-17T10:00:00+00:00",
+            "experiment_id": "exp-1",
+            "author": "SECRET_AUTHOR",
+            "source": "gui",
+            "message": "hello",
+            "tags": ["note"],
+        }
+    ]
 
     async def _fake(req: dict) -> dict:
         assert req["cmd"] == "log_get"
@@ -131,9 +144,7 @@ def test_oversize_body_returns_413_before_engine(client) -> None:
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
-@pytest.mark.parametrize(
-    "path", ["/api/v1/state", "/api/v1/experiment", "/api/v1/readings", "/api/v1/alarms"]
-)
+@pytest.mark.parametrize("path", ["/api/v1/state", "/api/v1/experiment", "/api/v1/readings", "/api/v1/alarms"])
 def test_write_verbs_are_rejected(client, method: str, path: str) -> None:
     """Mutating verbs on read-only GET paths never mutate. Auth runs before
     routing (WriteAuthMiddleware), so with no token configured the write-auth
@@ -182,9 +193,7 @@ def test_state_redacts_acknowledged_by(client) -> None:
     """/api/v1/state must not leak acknowledged_by via active_alarms."""
     from cryodaq.web import server
 
-    server._state.active_alarms = {
-        "T1_high": {"level": "warning", "acknowledged_by": "SECRET_OPERATOR"}
-    }
+    server._state.active_alarms = {"T1_high": {"level": "warning", "acknowledged_by": "SECRET_OPERATOR"}}
     resp = client.get("/api/v1/state")
     assert resp.status_code == 200
     assert "SECRET_OPERATOR" not in resp.text
@@ -230,9 +239,7 @@ def _make_write_app():
 
 
 def _write_local_config(config_dir, token: str) -> None:
-    (config_dir / "web.local.yaml").write_text(
-        f'web:\n  api_token: "{token}"\n', encoding="utf-8"
-    )
+    (config_dir / "web.local.yaml").write_text(f'web:\n  api_token: "{token}"\n', encoding="utf-8")
 
 
 @pytest.fixture()
@@ -322,9 +329,7 @@ _REST_IDENTITY = "REST API"
 def auth_client(monkeypatch, tmp_path):
     """Production app with a configured write token (config dir = tmp_path)."""
     monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
-    (tmp_path / "web.local.yaml").write_text(
-        f'web:\n  api_token: "{_TOKEN}"\n', encoding="utf-8"
-    )
+    (tmp_path / "web.local.yaml").write_text(f'web:\n  api_token: "{_TOKEN}"\n', encoding="utf-8")
     with patch("cryodaq.web.server._zmq_to_ws_bridge"):
         app = create_app()
         with TestClient(app) as c:
@@ -346,9 +351,7 @@ def test_post_log_forwards_log_entry_command(auth_client) -> None:
         return {"ok": True, "entry": {"id": 1, "message": cmd["message"]}}
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
-        resp = auth_client.post(
-            "/api/v1/log", headers=_AUTH, json={"message": "проверка насоса"}
-        )
+        resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": "проверка насоса"})
 
     assert resp.status_code == 200
     assert captured["cmd"] == "log_entry"
@@ -365,9 +368,7 @@ def test_post_log_author_is_server_set_not_spoofable(auth_client) -> None:
         return {"ok": True, "entry": {"id": 1}}
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
-        ok = auth_client.post(
-            "/api/v1/log", headers=_AUTH, json={"message": "hi"}
-        )
+        ok = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": "hi"})
         spoof = auth_client.post(
             "/api/v1/log",
             headers=_AUTH,
@@ -382,9 +383,7 @@ def test_post_log_author_is_server_set_not_spoofable(auth_client) -> None:
 def test_post_log_extra_field_rejected(auth_client) -> None:
     """Unknown keys → 422 (strict request model)."""
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
-        resp = auth_client.post(
-            "/api/v1/log", headers=_AUTH, json={"message": "x", "bogus": 1}
-        )
+        resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": "x", "bogus": 1})
     assert resp.status_code == 422
 
 
@@ -434,11 +433,17 @@ def test_post_ack_forwards_alarm_v2_ack_command(auth_client) -> None:
         return {"ok": True, "alarm_name": cmd["alarm_name"], "event_emitted": True}
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
-        resp = auth_client.post("/api/v1/alarms/T1_high/ack", headers=_AUTH)
+        resp = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_AUTH,
+            json={"engine_instance_id": "engine-a", "activation_id": "a1"},
+        )
 
     assert resp.status_code == 200
     assert captured["cmd"] == "alarm_v2_ack"
     assert captured["alarm_name"] == "T1_high"
+    assert captured["engine_instance_id"] == "engine-a"
+    assert captured["activation_id"] == "a1"
 
 
 def test_post_ack_operator_is_server_set_not_spoofable(auth_client) -> None:
@@ -451,14 +456,85 @@ def test_post_ack_operator_is_server_set_not_spoofable(auth_client) -> None:
         return {"ok": True}
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
-        ok = auth_client.post("/api/v1/alarms/T1_high/ack", headers=_AUTH)
+        ok = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_AUTH,
+            json={"engine_instance_id": "engine-a", "activation_id": "a1"},
+        )
         spoof = auth_client.post(
-            "/api/v1/alarms/T1_high/ack", headers=_AUTH, json={"operator": "victim"}
+            "/api/v1/alarms/T1_high/ack",
+            headers=_AUTH,
+            json={
+                "engine_instance_id": "engine-a",
+                "activation_id": "a1",
+                "operator": "victim",
+            },
         )
 
     assert ok.status_code == 200
     assert captured["operator"] == _REST_IDENTITY
     assert spoof.status_code == 422
+
+
+def test_post_ack_without_expected_activation_fails_closed(auth_client) -> None:
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        response = auth_client.post("/api/v1/alarms/T1_high/ack", headers=_AUTH)
+
+    assert response.status_code == 422
+
+
+def test_post_ack_rejects_reason_over_engine_limit(auth_client) -> None:
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_AUTH,
+            json={
+                "engine_instance_id": "engine-a",
+                "activation_id": "a1",
+                "reason": "x" * 257,
+            },
+        )
+    assert response.status_code == 422
+
+
+def test_delayed_rest_ack_never_substitutes_latest_activation(auth_client) -> None:
+    active = {"activation_id": "a1", "acknowledged": False}
+
+    async def _fake(cmd: dict) -> dict:
+        if cmd == {"cmd": "alarm_v2_status"}:
+            return {
+                "ok": True,
+                "engine_instance_id": "engine-a",
+                "snapshot_revision": 1,
+                "active": {"T1_high": dict(active)},
+            }
+        assert cmd["cmd"] == "alarm_v2_ack"
+        if cmd["activation_id"] == active["activation_id"]:
+            active["acknowledged"] = True
+        return {"ok": False, "error": "stale_or_unknown_activation"}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        snapshot_response = auth_client.get("/api/v1/alarms")
+        snapshot = snapshot_response.json()
+
+        # The first activation clears and the same named alarm fires again
+        # before the operator submits the acknowledgement.
+        active = {"activation_id": "a2", "acknowledged": False}
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_AUTH,
+            json={
+                "engine_instance_id": snapshot["engine_instance_id"],
+                "activation_id": snapshot["active"]["T1_high"]["activation_id"],
+            },
+        )
+
+    assert snapshot_response.status_code == 200
+    assert snapshot["snapshot_revision"] == 1
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert active["activation_id"] == "a2"
+    assert active["acknowledged"] is False
 
 
 def test_post_ack_without_token_is_401(auth_client) -> None:
@@ -508,9 +584,7 @@ def test_post_to_unlisted_api_path_is_not_a_command(monkeypatch, tmp_path) -> No
     monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
     with patch("cryodaq.web.server._zmq_to_ws_bridge"):
         app = create_app()
-        with TestClient(app) as c, patch(
-            "cryodaq.web.server._async_engine_command", side_effect=AssertionError
-        ):
+        with TestClient(app) as c, patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
             assert c.post("/api/v1/experiment").status_code == 403
             assert c.post("/api/v1/state").status_code == 403
             assert c.post("/api/v1/experiment/note").status_code == 403
@@ -538,30 +612,31 @@ _BAD_JSON = {"content": "{", "headers": {"Content-Type": "application/json"}}
 def test_invalid_json_without_token_is_403_not_422(monkeypatch, tmp_path) -> None:
     """Invalid JSON + no token ⇒ 403 (fail-closed), not 422 — the parser is
     never reached by an unauthenticated client."""
-    with patch("cryodaq.web.server._zmq_to_ws_bridge"), patch(
-        "cryodaq.web.server._async_engine_command", side_effect=AssertionError
+    with (
+        patch("cryodaq.web.server._zmq_to_ws_bridge"),
+        patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError),
     ):
         app = _no_token_app(monkeypatch, tmp_path)
         with TestClient(app) as c:
-            resp = c.post("/api/v1/log", content="{",
-                          headers={"Content-Type": "application/json"})
+            resp = c.post("/api/v1/log", content="{", headers={"Content-Type": "application/json"})
     assert resp.status_code == 403
 
 
 def test_invalid_json_wrong_token_is_401_not_422(monkeypatch, tmp_path) -> None:
     """Invalid JSON + wrong bearer ⇒ 401, not 422 — auth precedes the parser."""
     monkeypatch.setattr("cryodaq.web.rest_api.get_config_dir", lambda: tmp_path)
-    (tmp_path / "web.local.yaml").write_text(
-        f'web:\n  api_token: "{_TOKEN}"\n', encoding="utf-8"
-    )
-    with patch("cryodaq.web.server._zmq_to_ws_bridge"), patch(
-        "cryodaq.web.server._async_engine_command", side_effect=AssertionError
+    (tmp_path / "web.local.yaml").write_text(f'web:\n  api_token: "{_TOKEN}"\n', encoding="utf-8")
+    with (
+        patch("cryodaq.web.server._zmq_to_ws_bridge"),
+        patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError),
     ):
         app = create_app()
         with TestClient(app) as c:
-            resp = c.post("/api/v1/log", content="{",
-                          headers={"Content-Type": "application/json",
-                                   "Authorization": "Bearer wrong"})
+            resp = c.post(
+                "/api/v1/log",
+                content="{",
+                headers={"Content-Type": "application/json", "Authorization": "Bearer wrong"},
+            )
     assert resp.status_code == 401
 
 
@@ -570,7 +645,8 @@ def test_valid_auth_then_invalid_json_is_422(auth_client) -> None:
     proving auth precedes, not replaces, body validation."""
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
         resp = auth_client.post(
-            "/api/v1/log", content="{",
+            "/api/v1/log",
+            content="{",
             headers={**_AUTH, "Content-Type": "application/json"},
         )
     assert resp.status_code == 422
@@ -596,7 +672,8 @@ def test_post_log_rejects_reserved_tag(auth_client, reserved: str) -> None:
     """A reserved (system-semantic) tag ⇒ 422 naming the tag, engine untouched."""
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
         resp = auth_client.post(
-            "/api/v1/log", headers=_AUTH,
+            "/api/v1/log",
+            headers=_AUTH,
             json={"message": "ok", "tags": [reserved]},
         )
     assert resp.status_code == 422
@@ -613,7 +690,8 @@ def test_post_log_freeform_tags_pass_through(auth_client) -> None:
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
         resp = auth_client.post(
-            "/api/v1/log", headers=_AUTH,
+            "/api/v1/log",
+            headers=_AUTH,
             json={"message": "ok", "tags": ["насос", "проверка"]},
         )
     assert resp.status_code == 200

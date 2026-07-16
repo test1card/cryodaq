@@ -82,8 +82,11 @@ MUTED_FOREGROUND = _pack["MUTED_FOREGROUND"]
 # tests/gui/test_theme_loader.py::test_status_palette_identical_across_all_themes.
 
 STATUS_OK = _pack["STATUS_OK"]
-STATUS_WARNING = _pack["STATUS_WARNING"]
 STATUS_CAUTION = _pack["STATUS_CAUTION"]
+# ``warning`` remains an input/history compatibility name, but is not a
+# separate operator-facing severity. Keep the runtime alias explicit so a
+# custom pack cannot accidentally reintroduce a fourth visual rung.
+STATUS_WARNING = STATUS_CAUTION
 STATUS_FAULT = _pack["STATUS_FAULT"]
 STATUS_INFO = _pack["STATUS_INFO"]
 STATUS_STALE = _pack["STATUS_STALE"]
@@ -101,7 +104,7 @@ PLOT_LINE_PALETTE = [
     "#9b7bb8",  # 1: muted violet
     "#5fa090",  # 2: muted teal
     "#a3b85b",  # 3: muted lime
-    "#c4862e",  # 4: amber (= STATUS_WARNING)
+    "#8f8578",  # 4: warm grey
     "#b88a5b",  # 5: warm tan
     "#b87b9b",  # 6: muted rose
     "#7c8cff",  # 7: indigo
@@ -112,9 +115,9 @@ PLOT_LINE_PALETTE = [
 # =============================================================================
 
 QUANTITY_VOLTAGE = "#5b8db8"  # steel blue
-QUANTITY_CURRENT = STATUS_OK  # forest green
-QUANTITY_RESISTANCE = STATUS_WARNING  # amber
-QUANTITY_POWER = "#c44545"  # brick red
+QUANTITY_CURRENT = "#5fa090"  # muted teal
+QUANTITY_RESISTANCE = "#b88a5b"  # warm tan
+QUANTITY_POWER = "#b87b9b"  # muted rose
 
 # =============================================================================
 # TYPOGRAPHY

@@ -1,34 +1,35 @@
 ---
 title: TopWatchBar
-keywords: top-bar, watch-bar, header, chrome, vitals, at-a-glance, pressure, temperature, heater, mode-badge
-applies_to: top chrome strip showing global vitals + mode badge
+keywords: top-bar, watch-bar, header, chrome, vitals, at-a-glance, pressure, temperature, mode-badge
+applies_to: persistent top chrome showing engine, experiment, fixed physical references, channel summary, alarms, and mode
 status: active
 implements: src/cryodaq/gui/shell/top_watch_bar.py (Phase B.4/B.4.5.2)
-last_updated: 2026-07-12
+last_updated: 2026-07-16
 references: rules/data-display-rules.md, rules/color-rules.md, rules/content-voice-rules.md
 ---
 
 # TopWatchBar
 
-Horizontal chrome strip at the top of every screen. Shows 4 global vital readings + current mode badge. Visible from every overlay, acts as persistent operator situational awareness surface.
+Horizontal chrome strip at the top of every screen. It keeps engine state,
+experiment/phase context, the current mode, three fixed physical readings,
+channel health, and alarm count visible across operator surfaces.
 
 > **Implementation status.** The shipped TopWatchBar at
 > `src/cryodaq/gui/shell/top_watch_bar.py` is aligned with this spec:
 > height = `HEADER_HEIGHT` (56px), pressure formatted in `мбар`
-> (Cyrillic), `Т мин` / `Т макс` locked to `Т11` / `Т12` (positionally
-> fixed reference channels), no emoji in the alarms cell. The bar
-> still uses a zone-based layout (engine / experiment+phase /
-> channel summary / alarms) with an inserted persistent context
-> strip, rather than the canonical 4-vital-cell + mode-badge anatomy
-> shown above. Moving to the 4-cell anatomy is tracked as later
-> Phase II work.
+> (Cyrillic), `Т 2-й ступени` / `Т плиты N₂` locked to `Т12` / `Т11` (positionally
+> fixed reference channels), no emoji in the alarms cell. The canonical
+> anatomy is the shipped zone-based layout: engine; experiment, phase, elapsed
+> time, and mode; persistent pressure/T12/T11 context; channel summary; and
+> alarms. Heater current is intentionally absent here and remains available in
+> the Keithley panel.
 >
 > **Batch A (2026-04-17) cleanup:** zone separators now carry explicit
 > `background: transparent` (Fusion palette was painting them as
 > filled rectangles around the 1px divider); the heater cell was
 > removed from the context strip (low-signal for operators; heater
 > current still surfaces on the Keithley panel) so the strip is now
-> **pressure + T мин + T макс**; the time-window echo label was
+> **pressure + second-stage temperature + nitrogen-plate temperature**; the time-window echo label was
 > removed from the header (picker remains on `TempPlotWidget` — the
 > header does not echo it).
 
@@ -42,60 +43,64 @@ Horizontal chrome strip at the top of every screen. Shows 4 global vital reading
 
 ## Anatomy
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│  Давление         Т мин         Т макс         Нагреватель    [Эксперимент] │
-│  1.23e-06 мбар    4.21 K        77.3 K         0.125 Вт                    │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-  ◀── height: HEADER_HEIGHT (56)
-  ◀── background: SURFACE_CARD (matches top edge of main content)
-  ◀── border-bottom: 1px BORDER
-  ◀── padding-left: coincides with TOOL_RAIL_WIDTH (56) — starts after left rail
-  ◀── 4 vital slots evenly distributed + mode badge right-aligned
+```text
+Engine | Experiment · phase · elapsed [mode] |
+Pressure · Т 2-й ступени (Т12) · Т плиты N₂ (Т11) | channels | alarms
 ```
 
-Width of each vital slot: `(available_width - mode_badge_width) / 4` minus gap.
+The implementation may elide a long experiment name, but its complete text
+remains available through the tooltip. Current values and state/provenance
+cues must not be replaced by a summary-only presentation.
 
 ## Parts
 
 | Part | Required | Description |
 |---|---|---|
 | **Bar frame** | Yes | Horizontal strip, `HEADER_HEIGHT` tall, spans viewport width |
-| **Vital cells** | 4 fixed | ДАВЛЕНИЕ, Т МИН, Т МАКС, НАГРЕВАТЕЛЬ — in that order |
-| **Mode badge** | Yes | Right-aligned pill: «Эксперимент» or «Отладка» |
+| **Engine zone** | Yes | Engine connection/state with a non-color cue |
+| **Experiment zone** | Yes | Active experiment, phase, elapsed time, and «Эксперимент»/«Отладка»/replay identity |
+| **Physical context** | 3 fixed readings | Давление, `Т 2-й ступени` (`Т12`), `Т плиты N₂` (`Т11`) — in that order |
+| **Channel summary** | Yes | Current normal/total count without replacing channel detail |
+| **Alarm zone** | Yes | Validated attention count, worst severity, availability, and route to alarm detail |
 | **Divider** | Implicit | 1px bottom border separates bar from main content |
 
 ## Invariants
 
 1. **Height = HEADER_HEIGHT (56).** Coupled to TOOL_RAIL_WIDTH per RULE-SPACE-006 (corner square).
-2. **Exactly 4 vital cells.** Order is fixed: Pressure → T min → T max → Heater. Changing count or order requires product decision; operator muscle memory forms here.
+2. **Exactly three persistent physical readings.** Order is fixed: pressure → `Т 2-й ступени` (`Т12`) → `Т плиты N₂` (`Т11`). Heater current remains in the Keithley panel; it is not a TopWatchBar vital.
 3. **Pressure always in мбар, scientific notation.** (RULE-COPY-006, RULE-DATA-005)
-4. **T min / T max use Т11 and Т12.** These are the positionally fixed reference channels — physically immovable on the second stage (nitrogen plate); cannot be relocated without dismantling the rheostat. All temperature channels are metrologically calibrated, but other channels may change position between experiments, making them unsuitable as fixed quantitative reference points. Using other channels for T min / T max thresholds is a domain violation (architect-level rule, see channels.yaml).
+4. **Physical labels identify fixed channels, not extrema.** `Т 2-й ступени` reads only `Т12`; `Т плиты N₂` reads only `Т11`. These references are positionally fixed and cannot be relocated without dismantling the rheostat. Other temperature channels may change position between experiments, so neither fleet-wide minima/maxima nor substitute channels may be presented under these labels.
 5. **Mode badge always visible.** Even during fault states. Operator must always know whether actions have real-world consequences.
 6. **Instant fault rendering.** If a vital goes into fault, color changes immediately — no fade. (RULE-INTER-006)
-7. **Tabular numbers.** Vital values use FONT_MONO_VALUE with tnum. (RULE-TYPO-003, RULE-DATA-003)
-8. **UPPERCASE category labels** with letter-spacing. «ДАВЛЕНИЕ», «НАГРЕВАТЕЛЬ». (RULE-TYPO-005, RULE-TYPO-008)
-9. **Not interactive by default.** Clicking vitals does nothing, or opens related drill-down if enabled. Not a tab or button.
+7. **Tabular numbers.** Physical values use the canonical monospace/tabular-number treatment. (RULE-TYPO-003, RULE-DATA-003)
+8. **Physical names remain explicit.** Never abbreviate the two fixed temperatures as minimum/maximum.
+9. **Physical readings are not controls.** Experiment/mode/alarm zones may expose their documented routes; reading labels never imply actuation.
+10. **Alarm truth has one writer.** The alarm panel owns validated snapshot
+    identity, revision, availability, attention count, and worst severity. The
+    top bar never polls alarm status independently. Before the first accepted
+    snapshot, after disconnect, or after a rejected poll it shows
+    `Тревоги: нет данных` in the stale/neutral presentation. A valid nonzero
+    count uses `STATUS_INFO`, `STATUS_CAUTION`, or `STATUS_FAULT` according to
+    the worst unacknowledged alarm; unknown severity fails closed to fault.
 10. **No background shift on hover.** Bar is chrome, not interactive surface.
 
 ## Layout structure
 
 ```
 Bar frame (HBoxLayout)
-├── Spacer to align with TOOL_RAIL_WIDTH (leaves left rail space)
-├── Vital cell: Pressure      (fixed relative width or equal-stretch)
-├── Vital cell: T min         (fixed relative width)
-├── Vital cell: T max
-├── Vital cell: Heater
-├── Stretch
-└── Mode badge                (right-aligned, fixed width)
+├── Engine state
+├── Experiment + phase + elapsed
+├── Mode badge
+├── Context: pressure · Т12 second stage · Т11 nitrogen plate
+├── Channel summary
+└── Alarm count
 ```
 
-## Vital cell anatomy
+## Physical-value anatomy
 
-Each of the 4 vitals uses the same layout:
+Each physical reference pairs an explicit location/quantity label with its
+current value. Stale state retains the last value, dims it, and adds visible
+stale wording; unavailable state shows an em dash rather than invented truth.
 
 ```
 ┌──────────────────────┐
@@ -110,13 +115,18 @@ Each of the 4 vitals uses the same layout:
                              color: FOREGROUND (or STATUS_* on alarm)
 ```
 
-## API (proposed)
+## Conceptual value contract
+
+The shipped widget ingests `Reading` objects through `on_reading()` and polls
+the existing engine/experiment/alarm clients. The signatures below name the
+three physical values for design discussion only; they are not a second public
+widget API and must not be added alongside the existing ingestion path.
 
 ```python
 # src/cryodaq/gui/shell/top_watch_bar.py
 
 class VitalCell(QWidget):
-    """One of the four vital slots."""
+    """Conceptual rendering of one persistent physical reference."""
     def __init__(
         self,
         label: str,            # "ДАВЛЕНИЕ"
@@ -144,14 +154,16 @@ class TopWatchBar(QWidget):
     def __init__(self, parent: QWidget) -> None: ...
     
     def set_pressure(self, mbar: float, status: str = "ok") -> None: ...  # parameter name stays Latin
-    def set_tmin(self, kelvin: float, status: str = "ok") -> None: ...
-    def set_tmax(self, kelvin: float, status: str = "ok") -> None: ...
-    def set_heater(self, watts: float, status: str = "ok") -> None: ...
+    def set_second_stage_temperature(self, kelvin: float, status: str = "ok") -> None: ...
+    def set_n2_plate_temperature(self, kelvin: float, status: str = "ok") -> None: ...
     def set_mode(self, mode: str) -> None: ...
     def set_stale_vital(self, vital_key: str, stale: bool) -> None: ...
 ```
 
-## Reference implementation sketch
+## Historical value-cell sketch (non-canonical)
+
+This sketch illustrates token use inside a value cell. It does not replace the
+canonical shipped zone layout or its `on_reading()` ingestion path.
 
 ```python
 class TopWatchBar(QWidget):
@@ -176,13 +188,12 @@ class TopWatchBar(QWidget):
         )
         row.setSpacing(theme.SPACE_6)  # 32px gap between vitals
         
-        # 4 vital cells in fixed order
+        # Three physical readings in fixed order; heater remains in Keithley.
         self._pressure = VitalCell("ДАВЛЕНИЕ")
-        self._tmin = VitalCell("Т МИН")
-        self._tmax = VitalCell("Т МАКС")
-        self._heater = VitalCell("НАГРЕВАТЕЛЬ")
+        self._second_stage = VitalCell("Т 2-Й СТУПЕНИ")
+        self._n2_plate = VitalCell("Т ПЛИТЫ N₂")
         
-        for cell in (self._pressure, self._tmin, self._tmax, self._heater):
+        for cell in (self._pressure, self._second_stage, self._n2_plate):
             row.addWidget(cell, 1)  # equal stretch
         
         row.addStretch(0)
@@ -234,7 +245,7 @@ class VitalCell(QWidget):
         # DESIGN: RULE-COLOR-002
         return {
             "ok":      theme.FOREGROUND,
-            "warning": theme.STATUS_WARNING,
+            "warning": theme.STATUS_CAUTION,  # legacy source alias
             "caution": theme.STATUS_CAUTION,
             "fault":   theme.STATUS_FAULT,
             "stale":   theme.STATUS_STALE,
@@ -249,7 +260,10 @@ class VitalCell(QWidget):
             self.setToolTip("")
 ```
 
-## ModeBadge reference
+## Historical ModeBadge styling sketch (non-canonical)
+
+The shipped badge uses neutral experiment styling and attention styling for
+debug/replay. This snippet records the semantic mapping only.
 
 ```python
 class ModeBadge(QLabel):
@@ -261,8 +275,8 @@ class ModeBadge(QLabel):
     _MODE_CONFIG = {
         "experiment": {
             "text": "Эксперимент",
-            "bg": "STATUS_OK",     # operational
-            "fg": "ON_DESTRUCTIVE",
+            "bg": "SURFACE_ELEVATED",  # identity, not safety state
+            "fg": "FOREGROUND",
         },
         "debug": {
             "text": "Отладка",
@@ -309,21 +323,24 @@ Scheduler / DataBroker (engine process)
            │
            ▼
     TopWatchBar.set_pressure()
-    TopWatchBar.set_tmin()
-    TopWatchBar.set_tmax()
-    TopWatchBar.set_heater()
+    TopWatchBar second-stage display (Т12)
+    TopWatchBar nitrogen-plate display (Т11)
 ```
 
-Update frequency: 2Hz per RULE-DATA-002. If engine pushes faster, GUI coalesces.
+Human-readable presentation must not exceed 2 Hz per RULE-DATA-002. The shipped
+channel summary/context refresh is currently 1 Hz; faster engine readings
+update the cache without making the digits fly.
 
-Stale detection: if no update in `stale_timeout_s` (from safety.yaml, default 10s), mark vital as stale.
+Stale detection for this header uses the shipped `_STALE_TIMEOUT_S = 30.0`.
+This presentation threshold does not replace backend safety freshness truth.
 
 ## Mode badge semantics
 
 | Mode | Meaning | Color | When active |
 |---|---|---|---|
-| «Эксперимент» | Real operational run — commands have real-world effects, data persisted to archive | STATUS_OK (green) | Operator starts real experiment |
+| «Эксперимент» | Real operational run — commands have real-world effects, data persisted to archive | Neutral surface/foreground identity treatment | Operator starts real experiment |
 | «Отладка» | Debug run — commands execute but no archive entry created | STATUS_CAUTION (amber) | Operator selects Debug mode |
+| `REPLAY` | Archived evidence, not a live run | STATUS_CAUTION (legacy `warning` input maps to the same presentation) | Operator opens replay |
 
 **Why badge is critical:** the very same UI affords both real and debug operations. Operator error risk: pressing «АВАР. ОТКЛ.» thinking they're in Debug when actually in Experiment (or vice versa). Persistent visible badge reduces this risk.
 
@@ -331,33 +348,43 @@ Stale detection: if no update in `stale_timeout_s` (from safety.yaml, default 10
 
 | State | Treatment |
 |---|---|
-| **Normal operation** | All vitals FOREGROUND, mode badge STATUS_OK or STATUS_CAUTION |
+| **Normal operation** | Physical values use FOREGROUND; experiment mode is neutral; debug/replay uses STATUS_CAUTION |
 | **Cold start / no channel readings** | Diamond cue + persistent «Нет текущих данных · N ожидают» in stale treatment; never seeded or rendered as OK |
-| **Vital in warning** | That vital's value → STATUS_WARNING color; others unchanged |
+| **Vital in caution / legacy warning input** | That vital's value → STATUS_CAUTION color; others unchanged |
 | **Vital in fault** | Value → STATUS_FAULT; immediate no-fade (RULE-INTER-006) |
 | **Vital stale** | Value → STATUS_STALE; tooltip describes |
-| **Engine disconnected** | All 4 vitals → STATUS_STALE + tooltip "Нет связи с engine"; mode badge to `—` greyed |
+| **Engine disconnected** | All three physical readings → STATUS_STALE + explicit unavailable/stale wording; mode badge to `—` greyed |
 | **Replay** | `REPLAY` badge is pinned before asynchronous polling and cannot be overwritten by a later live/debug/unknown status result |
 
 ## Common mistakes
 
-1. **Using Т1 or Т7 for T-min / T-max thresholds.** These channels may be relocated between experiments (operator-moveable placement). Т11 / Т12 are the only physically fixed reference channels. Hardcoded channel IDs for T-min / T-max in TopWatchBar backend.
+1. **Using extrema or substitute channels for physical references.** `Т 2-й ступени` is always Т12 and `Т плиты N₂` is always Т11. Т1 / Т7 may be relocated between experiments and must not populate either readout.
 
 2. **Pressure in linear units.** Always scientific notation. (RULE-COPY-006, RULE-DATA-008 note — mandatory log in plots; here scientific display similar rationale).
 
 3. **Mode badge missing.** Without badge, operator can't tell Experiment vs Debug. Always present.
 
-4. **Variable-width pressure readout.** "1.2e-5" vs "1.23e-05" vs "1.234e-05" — different widths. Use fixed format `{:.2e}` always. (RULE-DATA-003, RULE-DATA-004)
+4. **Unbounded pressure formatting.** Use the shipped compact scientific formatter (`1.5e-6`) so exponent zeros do not consume header width. (RULE-DATA-003, RULE-DATA-004)
 
 5. **Animating vital value transitions.** Fade or tween between old and new value. Violates RULE-DATA-001 atomic, RULE-DATA-009 no animation.
 
 6. **Hover on vitals triggers drill-down.** If vitals become clickable via hover, operator opens panels accidentally. Keep non-interactive, or require explicit click.
 
-7. **Mode badge color = ACCENT.** ACCENT is focus only (RULE-COLOR-004). Mode uses STATUS_OK / STATUS_CAUTION.
+7. **Experiment identity rendered as safe green.** A running experiment is not proof of safety. Use neutral identity treatment; reserve STATUS_CAUTION for debug/replay attention and safety colors for their locked meanings.
 
 8. **Hiding TopWatchBar under a modal.** Modals do not hide TopWatchBar — the bar stays visible above (outside the modal's overlay). This is deliberate: operator retains situational awareness even inside drill-downs.
 
-9. **Latin T for channel labels.** "T MIN" with Latin T; should be "Т МИН" with Cyrillic. RULE-COPY-001.
+9. **Latin T for channel labels.** `T 2-й ступени` with Latin T is invalid; use Cyrillic `Т`. RULE-COPY-001.
+
+## Change-impact record: physical labels
+
+| Field | Assessment |
+|---|---|
+| Better | The bar names the actual hardware locations and exposes the exact Т12/Т11 provenance; it no longer implies a computed minimum or maximum. |
+| Worse | The labels are longer and operators familiar with the terse min/max shorthand need a brief adaptation period. |
+| Safety/operator goal | Stable physical identity improves anomaly interpretation and prevents an operator from mistaking one fixed sensor for a fleet-wide extremum. |
+| Mitigation and evidence | Preserve the existing order, values, stale treatment, and update cadence; focused widget tests assert both exact Russian labels and channel-to-widget routing. |
+| Revert trigger | If the labels clip at the supported minimum viewport or operators cannot identify the two locations in scenario review, adjust spacing or wording without restoring false min/max semantics. |
 
 ## Related components
 
@@ -369,6 +396,8 @@ Stale detection: if no update in `stale_timeout_s` (from safety.yaml, default 10
 
 ## Changelog
 
+- 2026-07-16: Made the shipped zone layout canonical, removed the stale heater/extrema anatomy, kept experiment identity neutral, and mapped legacy warning input onto the single operator-facing caution rung.
+- 2026-07-15: Replaced comparative `Т мин` / `Т макс` copy with physical labels `Т 2-й ступени` (Т12) and `Т плиты N₂` (Т11); recorded the operator/safety tradeoff and retained fixed-channel, stale, and cadence semantics.
 - 2026-07-12 (v1.2.0): Cold start no longer seeds channel OK truth; unavailable/stale text plus diamond is shown until real readings arrive. Replay mode is pinned before polling so the archive identity cannot be overwritten.
 - 2026-04-17: Initial version. Documents B.4 / B.4.5.2 implementation. 4 fixed vitals (Pressure / T min / T max / Heater) + mode badge. T-min / T-max locked to Т11 / Т12 — positionally fixed reference channels on the second stage (nitrogen plate), not relocatable without dismantling the rheostat. Mode badge distinguishes Experiment from Debug.
 - 2026-04-17 (v1.0.1): Fixed `mбар` → `мбар` in pressure invariant (FR-016) — was a typo mixing Latin `m` with Cyrillic `бар`. Code identifier `mbar:` in `set_pressure` API stays Latin (parameter name).

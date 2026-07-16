@@ -135,7 +135,7 @@ never imports routes, ZMQ, REST, SafetyManager, or command helpers.
 |---|---|---|---|
 | ok | `НОРМА` | filled circle | `STATUS_OK` |
 | caution | `ВНИМАНИЕ` | filled triangle | `STATUS_CAUTION` |
-| warning | `ПРЕДУПРЕЖДЕНИЕ` | filled triangle | `STATUS_WARNING` |
+| legacy warning input | `ВНИМАНИЕ` | filled triangle | `STATUS_CAUTION` |
 | fault | `АВАРИЯ` | filled square / 3px list edge | `STATUS_FAULT` |
 | stale | `УСТАРЕЛО` | hollow circle | `STATUS_STALE` |
 | disconnected | `НЕТ СВЯЗИ` | dashed diamond | `STATUS_STALE` |

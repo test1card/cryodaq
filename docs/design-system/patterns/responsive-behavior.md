@@ -4,7 +4,7 @@ keywords: responsive, viewport, breakpoints, reflow, desktop-only, minimum-width
 applies_to: how layouts adapt to different viewport dimensions
 status: canonical
 references: tokens/breakpoints.md, tokens/layout.md, components/bento-grid.md
-last_updated: 2026-04-17
+last_updated: 2026-07-15
 ---
 
 # Responsive Behavior
@@ -25,17 +25,23 @@ Rules for layout adaptation across viewport dimensions. CryoDAQ is a desktop ind
 ## Scope boundaries
 
 **CryoDAQ targets:**
-- Desktop viewports: 1280×800 minimum → 3840×2160 maximum
+- Intended desktop targets: 1280×800 through 3840×2160. Automated tests cover
+  logical geometry only; physical monitors and 100/125/150/200% configured
+  scaling remain explicit laboratory validation gates.
 - Single-window operation (no floating panels, no multi-window docking)
 - Mouse + keyboard input (touch interaction is out of scope)
 
 **NOT supported:**
 - Phone / small-tablet viewports (< 1280 width)
 - Touch-first gestures (pinch, swipe, long-press)
-- Portrait orientation (< 720 height is truncated, not reflowed)
+- Portrait is not a primary operating target, but supported content reflows or
+  scrolls rather than silently truncating current truth.
 - Split-screen side-by-side with other apps taking < 50% of screen
 
-If operator tries to run CryoDAQ at <1280 width, the shell stays as-is with horizontal scroll; chrome does not collapse. This is intentional — industrial tool, not marketing site.
+Below the preferred width, the shell keeps safety chrome visible and
+automatically reflows controls vertically. Dense grids/tables may use deliberate
+scrolling. No current value, state, unit, or provenance may be clipped without
+a complete accessible path.
 
 ## Three viewport bands
 
@@ -68,7 +74,8 @@ If operator tries to run CryoDAQ at <1280 width, the shell stays as-is with hori
 
 ### Adapts only at extreme viewports
 
-- **Below 1280:** chrome stays, main content gets horizontal scroll (no responsive collapse).
+- **Below 1280 logical pixels:** chrome stays; controls reflow vertically;
+  grids recompute columns; dense evidence may scroll without hiding channels.
 - **Above 3840 (rare):** BentoGrid still 8 columns, but single-pane Scaffold 2 panels clamp to roughly 1400px (the proposed `OVERLAY_MAX_WIDTH`, not yet a formal token) to avoid "line-stretched-across-4K" readability problem.
 
 ## BentoGrid responsive behavior
@@ -128,8 +135,10 @@ Charts (pyqtgraph PlotWidget inside ChartTile):
 
 At minimum 1280px width, TopWatchBar's 4 vitals + mode badge fit comfortably. At < 1280px (unsupported but handled gracefully):
 
-- Chrome stays at full width; horizontal scrollbar appears on main content area (not chrome).
-- Mode badge may truncate to icon-only if < 800px (extreme unsupported edge case).
+- Chrome preserves its safety/status meaning and may use a documented compact
+  label, but never an unlabeled status icon.
+- Main content selects vertical reflow, grid-column recomputation, or deliberate
+  scrolling according to content type.
 - BottomStatusBar items may drop least-critical (time) first if truly squeezed.
 
 These are "best effort" fallbacks, not design targets.
@@ -143,10 +152,34 @@ Unlike web UI design, there are no media queries per se. Breakpoints are implici
 - Column min widths inside BentoGrid (implicit ~100px per column)
 - Chart minimum heights (~120px sparkline, ~240px full chart)
 
-When constraints collide with small viewports, the response is:
-1. Content scrolls inside its container if possible
-2. Or truncates with ellipsize + tooltip if single-line
-3. Never reflows to a different layout
+When constraints collide with small logical viewports, the response is:
+1. Dashboard sensor cells reflow without reordering or hiding
+2. Overflow scrolls vertically inside its deliberate container
+3. Only non-critical single-line labels may ellipsize with a complete tooltip
+4. Current value, unit, status, freshness, and provenance never clip without a complete accessible path
+
+## Automatic density and scale adjustment
+
+Sensor grids automatically choose column count from the logical widget width,
+channel count, and minimum readable cell geometry. Automatic adjustment never
+changes channel visibility or declared order. Qt supplies logical dimensions
+after configured scaling; real-DPI behavior remains validation-open. An
+operator density/scale override and the 100+ sensor/projector fleet view are
+deferred roadmap work, not current runtime claims.
+
+## Responsive dashboard change assessment
+
+| Field | Assessment |
+|---|---|
+| **Better** | Constrained logical layouts preserve every selected sensor and provide a complete path to lower dashboard zones. |
+| **Worse** | Fewer zones remain simultaneously visible and vertical scrolling may increase comparison time. |
+| **Safety / operator goal** | Prevent obscured truth and silent sensor loss while preserving selected membership, stable order, status, units, freshness, and provenance. |
+| **Mitigation / evidence** | One vertical scroll path, no dashboard horizontal scroll, keyboard focus, stable order, and deterministic offscreen geometry tests. Real configured-DPI and operator validation remains open. |
+| **Revert trigger** | Revert or redesign if any selected sensor disappears, current truth lacks a complete path, horizontal clipping appears, keyboard scrolling fails, or operator testing shows unacceptable comparison delay. |
+
+## Validation boundary
+
+Automated Qt offscreen tests establish logical-width reflow, membership preservation, vertical overflow, and absence of horizontal dashboard scrolling. They do **not** certify a physical monitor, Windows scaling configuration, projector, screen reader, or operator task time. Fleet/projector mode and 100+ sensor semantic zoom are separate deferred work.
 
 ## Rules applied
 
@@ -184,4 +217,5 @@ When constraints collide with small viewports, the response is:
 
 ## Changelog
 
+- 2026-07-15 (v4.0.0): Added logical-width sensor reflow, one vertical truth-preserving scroll path, the operator tradeoff, and an explicit open physical-DPI gate.
 - 2026-04-17: Initial version. Desktop-only scope. Three viewport bands (Laptop / Standard / Wide). What adapts vs fixed. No mobile, no touch, no portrait. BentoGrid stays 8 columns at all viewports.

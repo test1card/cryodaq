@@ -48,7 +48,7 @@ def _write_pack(path: Path, overrides: dict[str, str] | None = None) -> None:
         "ON_DESTRUCTIVE": "#ffffff",
         "STATUS_OK": "#4a8a5e",
         "STATUS_WARNING": "#c4862e",
-        "STATUS_CAUTION": "#b35a38",
+        "STATUS_CAUTION": "#c4862e",
         "STATUS_FAULT": "#c44545",
         "STATUS_INFO": "#6490c4",
         "STATUS_STALE": "#5a5d68",
@@ -138,6 +138,19 @@ def test_invalid_hex_falls_back(monkeypatch, tmp_path, caplog):
 
     assert pack["ACCENT"] == "#b89e7a"
     assert any("ACCENT" in rec.message for rec in caplog.records)
+
+
+def test_warning_must_alias_caution_or_pack_falls_back(monkeypatch, tmp_path, caplog):
+    themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
+    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_pack(themes_dir / "split.yaml", overrides={"STATUS_WARNING": "#abcdef"})
+    settings_file.write_text("theme: split\n")
+
+    with caplog.at_level("ERROR"):
+        pack = loader.load_theme()
+
+    assert pack["STATUS_WARNING"] == pack["STATUS_CAUTION"]
+    assert any("separates STATUS_WARNING" in rec.message for rec in caplog.records)
 
 
 def test_short_hex_rejected(monkeypatch, tmp_path):
@@ -278,9 +291,7 @@ _LIGHT_THEMES = frozenset({"gost", "xcode", "braun"})
 # gost/xcode/braun light) — the pre-ADR packs are out of scope for
 # these checks (e.g. warm_stone has ACCENT hue == STATUS_OK hue,
 # a known pre-existing compromise; retro-audit is an architect call).
-_ADR_001_PACKS = frozenset(
-    {"signal", "instrument", "amber", "gost", "xcode", "braun"}
-)
+_ADR_001_PACKS = frozenset({"signal", "instrument", "amber", "gost", "xcode", "braun"})
 
 _STATUS_TOKENS = (
     "STATUS_OK",
@@ -345,19 +356,14 @@ def test_status_palette_hue_locked_across_all_themes(real_themes_dir):
     STATUS_OK dark #4a8a5e hue 138.8°, light #2e6b45 hue 142.6° —
     same hue family, quantization-bounded).
     """
-    packs = {
-        pack_file.stem: loader._load_theme_pack(pack_file.stem)
-        for pack_file in real_themes_dir.glob("*.yaml")
-    }
+    packs = {pack_file.stem: loader._load_theme_pack(pack_file.stem) for pack_file in real_themes_dir.glob("*.yaml")}
     assert packs
     for token in _STATUS_TOKENS:
         hues = {name: _hue(p[token]) for name, p in packs.items()}
         base = next(iter(hues.values()))
         for name, h in hues.items():
             delta = min(abs(h - base), 360.0 - abs(h - base))
-            assert delta <= 5.0, (
-                f"{token} hue {h:.1f}° in {name} differs >5° from base {base:.1f}°"
-            )
+            assert delta <= 5.0, f"{token} hue {h:.1f}° in {name} differs >5° from base {base:.1f}°"
 
 
 def test_status_palette_hex_identical_across_dark_themes(real_themes_dir):
@@ -416,8 +422,7 @@ def test_accent_hue_separation_from_status(real_themes_dir):
             # COLD_HIGHLIGHT and STALE are often near-achromatic; 30°
             # still applies but should be trivially satisfied.
             assert delta >= 30.0, (
-                f"{name}: ACCENT hue {accent_hue:.1f}° only {delta:.1f}° from "
-                f"{token} {status_hue:.1f}° (need ≥30°)"
+                f"{name}: ACCENT hue {accent_hue:.1f}° only {delta:.1f}° from {token} {status_hue:.1f}° (need ≥30°)"
             )
 
 
@@ -494,8 +499,7 @@ def test_neutral_tokens_distinct_from_status_ok(real_themes_dir):
             hue_delta = min(abs(ok_hue - tok_hue), 360.0 - abs(ok_hue - tok_hue))
             lum_delta = abs(ok_lum - tok_lum)
             assert hue_delta >= 30.0 or lum_delta >= 0.15, (
-                f"{pack_file.stem}.{token} too close to STATUS_OK: "
-                f"hue Δ{hue_delta:.1f}°, lum Δ{lum_delta:.3f}"
+                f"{pack_file.stem}.{token} too close to STATUS_OK: hue Δ{hue_delta:.1f}°, lum Δ{lum_delta:.3f}"
             )
 
 
@@ -526,8 +530,7 @@ def test_default_cool_accent_preserved_as_indigo():
     STATUS_OK green that the other presets had."""
     pack = loader._load_theme_pack("default_cool")
     assert pack["ACCENT"] == "#7c8cff", (
-        "default_cool ACCENT changed from historical indigo #7c8cff — "
-        "if intentional, update this test + ADR 002"
+        "default_cool ACCENT changed from historical indigo #7c8cff — if intentional, update this test + ADR 002"
     )
 
 
@@ -536,15 +539,11 @@ def test_warm_stone_accent_decoupled_from_status_ok():
     (#4a8a5e) which caused semantic collision across every primary
     button and mode badge. Guard against regression."""
     pack = loader._load_theme_pack("warm_stone")
-    assert pack["ACCENT"] != pack["STATUS_OK"], (
-        "warm_stone ACCENT == STATUS_OK — III.A decoupling lost"
-    )
+    assert pack["ACCENT"] != pack["STATUS_OK"], "warm_stone ACCENT == STATUS_OK — III.A decoupling lost"
 
 
 def test_taupe_quiet_accent_decoupled_from_status_ok():
     """III.A fix: taupe_quiet deliberately set ACCENT == STATUS_OK
     with a «by design» comment; III.A decoupled."""
     pack = loader._load_theme_pack("taupe_quiet")
-    assert pack["ACCENT"] != pack["STATUS_OK"], (
-        "taupe_quiet ACCENT == STATUS_OK — III.A decoupling lost"
-    )
+    assert pack["ACCENT"] != pack["STATUS_OK"], "taupe_quiet ACCENT == STATUS_OK — III.A decoupling lost"

@@ -37,7 +37,7 @@ ON_DESTRUCTIVE: "#ffffff"
 # См. ADR 001: docs/design-system/adr/001-light-theme-status-unlock.md
 STATUS_OK: "#2e6b45"
 STATUS_WARNING: "#8c5a1c"
-STATUS_CAUTION: "#9c4a2c"
+STATUS_CAUTION: "#8c5a1c"
 STATUS_FAULT: "#a53838"
 STATUS_INFO: "#355e94"
 STATUS_STALE: "#4a4d58"

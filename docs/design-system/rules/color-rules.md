@@ -91,9 +91,9 @@ Only `theme.py` defines raw hex values. Asset SVG files may contain hex if immut
 
 ```python
 # DESIGN: RULE-COLOR-002
-# Active phase uses STATUS_OK — "this phase is operationally active and healthy"
+# Active phase uses ACCENT because progress is not health
 active_phase_pill.setStyleSheet(
-    f"border: 2px solid {theme.STATUS_OK};"
+    f"border: 2px solid {theme.ACCENT};"
     f"color: {theme.FOREGROUND};"
 )
 
@@ -188,14 +188,17 @@ sensor_cell.setStyleSheet(
 Invalid uses (violations):
 
 - Status color (use `STATUS_*`)
-- Phase indication / active phase (use `STATUS_OK`)
+- Health/safe state (use `STATUS_OK`; phase progress uses ACCENT/neutral chrome)
 - Hover state background (use `MUTED`, see RULE-COLOR-006)
 - "Primary button" color — CryoDAQ has no primary button style; forms use `SECONDARY` surface
 - Decorative accent (use neutral `FOREGROUND` or `MUTED_FOREGROUND`)
 
-**Rationale:** Phase 0 decision. ACCENT was being used as both "focus ring" AND "active phase indicator" on dashboard PhaseStepper (violet fill for active phase). Two different semantic roles sharing one color = operators cannot distinguish "focused UI element" from "active experiment phase." Locking ACCENT to focus/selection restores clarity.
+**Rationale:** Active phase is the current progress selection, not proof of a
+healthy experiment. ACCENT consistently means current/focused/selected UI;
+health is rendered independently with STATUS_OK only when demonstrated.
 
-**Historical context:** Dashboard PhaseStepper previously used ACCENT as active-phase fill — this was the visual inconsistency Vladimir identified in first Phase I.1 review. ExperimentOverlay correctly used STATUS_OK green for active phase. Phase II.9 rebuild migrates PhaseStepper to STATUS_OK.
+**Historical context:** An earlier rule used STATUS_OK for active/completed
+progress. v4 removes that collision so safety colors keep one meaning.
 
 **Applies to:** any widget considering using `ACCENT` / `RING` / `TEXT_ACCENT`
 
@@ -219,19 +222,19 @@ selected_tab.setStyleSheet(
     f"border-bottom: 2px solid {theme.ACCENT};"  # selection — correct
 )
 
-# Active phase — uses STATUS_OK, NOT ACCENT
+# Active phase — uses ACCENT, not a safety color
 active_phase_pill.setStyleSheet(
-    f"border: 2px solid {theme.STATUS_OK};"  # correct per RULE-COLOR-002
+    f"border: 2px solid {theme.ACCENT};"
 )
 ```
 
 **Example (bad):**
 
 ```python
-# ACCENT misused as active phase
+# STATUS_OK misused as active/completed progress
 active_phase_pill.setStyleSheet(
-    f"background: {theme.ACCENT};"  # WRONG — active phase is status, not selection
-    f"color: {theme.ON_ACCENT};"
+    f"background: {theme.STATUS_OK};"  # WRONG — progress is not health
+    f"color: {theme.ON_DESTRUCTIVE};"
 )
 
 # ACCENT misused as status color
@@ -612,6 +615,22 @@ rg -n "theme\.STONE_" src/cryodaq/gui/ | wc -l
 ```
 
 **Related rules:** RULE-GOV-003 (deprecation policy — see `governance/deprecation-policy.md`)
+
+---
+
+## RULE-COLOR-011: Measurement colors never reuse safety semantics
+
+**TL;DR:** Plot-series, category, and `QUANTITY_*` colors must not equal any bundled safety/status color.
+
+**Statement:** `PLOT_LINE_PALETTE` and `QUANTITY_*` values MUST remain disjoint from `STATUS_OK`, `STATUS_WARNING`, `STATUS_CAUTION`, `STATUS_FAULT`, `STATUS_INFO`, `STATUS_STALE`, and `COLD_HIGHLIGHT` in every bundled theme. Data identity is always accompanied by a visible label/legend and unit; it is never communicated by color alone. Status-colored threshold regions and labeled event annotations remain valid because they express actual status semantics rather than series identity.
+
+**Rationale:** Reusing green, amber, or red for an ordinary measurement trains the operator to ignore the same colors when they mean healthy, caution, or fault. Exact palette separation preserves the learned safety grammar. Labels and line style preserve identification for color-blind operators.
+
+**Tradeoff:** The fifth series and three quantity hues change from the previous palette, temporarily weakening color muscle memory. The eight series positions and cycling order remain fixed; legends and units remain authoritative.
+
+**Detection:** `tests/gui/test_theme_tokens.py` checks both measurement palettes against all bundled theme packs.
+
+**Related rules:** RULE-COLOR-002 (status semantic lock), RULE-DATA-007 (series identity), RULE-A11Y-002 (never color alone)
 
 ---
 

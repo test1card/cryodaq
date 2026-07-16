@@ -244,6 +244,7 @@ def test_set_pressure_reading_forwards_to_pressure_widget(app):
     xs, ys = pressure_widget._plot._curve.getData()
     assert xs is not None and len(xs) >= 1
     import math
+
     assert ys[-1] == pytest.approx(math.log10(1e-5))
 
 
@@ -269,11 +270,12 @@ def test_set_instrument_health_forwards_to_sensor_widget(app):
         if item and item.widget():
             name_labels.append(item.widget().text())
     assert "Т1" in name_labels and "Т2" in name_labels
-    # SeverityChip for WARNING must use STATUS_WARNING color.
+    # Legacy WARNING is accepted but uses the canonical caution presentation.
     chip_t2 = sensor_widget._chips["Т2"]
-    assert theme.STATUS_WARNING in chip_t2.styleSheet(), (
-        f"WARNING chip missing STATUS_WARNING: {chip_t2.styleSheet()!r}"
+    assert theme.STATUS_CAUTION in chip_t2.styleSheet(), (
+        f"WARNING chip missing STATUS_CAUTION compatibility color: {chip_t2.styleSheet()!r}"
     )
+    assert chip_t2.text() == "ВНИМ"
     # SeverityChip text: "OK" severity falls back to severity[:4] = "OK  "
     # but the chip label for "OK" renders as the raw text since it's not in
     # _SEVERITY_LABELS — check it contains the severity text.

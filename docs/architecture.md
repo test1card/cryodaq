@@ -1,7 +1,8 @@
 # CryoDAQ Architecture
 
-**Version:** v0.64.1
-**Date:** 2026-07-15
+**Released baseline:** v0.64.1
+**Document scope:** active Montana candidate architecture on `feat/montana-phase-a`
+**Date:** 2026-07-16
 
 ---
 
@@ -44,12 +45,14 @@ state. Key responsibilities:
 ### cryodaq-gui (Qt desktop client)
 
 Connects to the engine via ZMQ subprocess bridge. Restartable without stopping
-data acquisition. `MainWindowV2` owns one snapshot-ingress composition: the
-Primary Operator Display is the sole home/current-truth surface, while
-specialist functions remain explicit overlays. Ingress drains newest coherent
-revisions into the GUI-thread Store and settles before normal shutdown or theme
-re-exec. The legacy 10-tab `MainWindow` was retired in Phase II.13; there is no
-v1 fallback.
+data acquisition. `MainWindowV2` owns one snapshot-ingress composition. The
+panoramic dashboard remains the primary high-information operator surface; the
+Primary Operator Display is an additive summary, not a replacement or a black
+box. Specialist functions remain explicit overlays, and current values, status,
+provenance, and acknowledged active hazards stay reachable. Ingress drains the
+newest coherent revisions into the GUI-thread Store and settles before normal
+shutdown or theme re-exec. The legacy 10-tab `MainWindow` is retired; there is
+no v1 fallback.
 
 ### cryodaq.web.server (optional FastAPI)
 
@@ -57,7 +60,17 @@ Monitoring dashboard on `:8080` (loopback bind only; LAN access via SSH
 tunnel). REST facade `/api/v1`: read-only GET surface plus exactly two
 authenticated write endpoints (`POST /log`, `POST /alarms/{id}/ack`) behind
 a write token in gitignored `config/web.local.yaml`. Requires `.[web]`
-install extra.
+install extra. Alarm acknowledgement is activation-exact: the alarms GET
+snapshot exposes its `engine_instance_id`, monotonic `snapshot_revision`, and
+each active row's `activation_id` while recursively redacting
+`acknowledged_by`; the ACK POST must echo the selected row's engine/activation
+identity. A delayed request, an identity from a previous engine process, or a
+name-only request fails closed instead of targeting the latest recurrence.
+
+Acknowledgement owns attention/audible responsibility only. It does not clear
+authoritative alarm truth, enter safety recovery, or gain actuator/control
+authority. Active evidence remains available until the underlying condition
+clears through its authoritative owner.
 
 ---
 
@@ -106,7 +119,7 @@ Subsystems in `src/cryodaq/core/` (unless noted).
 | Subsystem | Key modules |
 |---|---|
 | Safety FSM | `safety_manager.py`, `safety_broker.py` |
-| Alarm engine v2 | `alarm_v2.py`, `alarm_config.py`, `alarm_providers.py` |
+| Alarm engine v2 | `alarm_v2.py`, `alarm_config.py`, `alarm_providers.py`, `annunciation.py` |
 | Physical alarms | `vacuum_guard.py`, `cooldown_alarm.py`, `physical_alarms_config.py` |
 | Interlock | `interlock.py` |
 | Sensor diagnostics | `sensor_diagnostics.py` |

@@ -46,6 +46,7 @@ class AlarmEvent:
     acknowledged: bool = False
     acknowledged_at: float = 0.0
     acknowledged_by: str = ""
+    activation_id: int = 0
 
 
 class AlarmSnapshotUnavailableError(RuntimeError):
@@ -83,6 +84,7 @@ def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
         acknowledged=event.acknowledged,
         acknowledged_at=event.acknowledged_at,
         acknowledged_by=event.acknowledged_by,
+        activation_id=event.activation_id,
     )
 
 
@@ -504,6 +506,7 @@ class AlarmStateManager:
         self._active: dict[str, AlarmEvent] = {}
         self._sustained_since: dict[str, float] = {}
         self._state_revision = 0
+        self._activation_sequence = 0
         # Ограниченный deque предотвращает утечку памяти при длительной работе.
         self._history: deque[dict] = deque(maxlen=1000)
 
@@ -550,6 +553,8 @@ class AlarmStateManager:
                 return None  # Уже активен, не re-notify
 
             stored_event = _copy_alarm_event(event)
+            self._activation_sequence += 1
+            stored_event.activation_id = self._activation_sequence
             self._active[alarm_id] = stored_event
             self._mark_active_mutation()
             self._history.append(
@@ -753,6 +758,8 @@ class AlarmStateManager:
             channels=[channel_id],
             values={channel_id: age_seconds},
         )
+        self._activation_sequence += 1
+        event.activation_id = self._activation_sequence
         self._active[alarm_id] = event
         self._mark_active_mutation()
         self._history.append(
@@ -793,7 +800,14 @@ class AlarmStateManager:
         )
         logger.info("DIAGNOSTIC ALARM CLEARED: %s", alarm_id)
 
-    def acknowledge(self, alarm_id: str, *, operator: str = "", reason: str = "") -> dict | None:
+    def acknowledge(
+        self,
+        alarm_id: str,
+        *,
+        operator: str = "",
+        reason: str = "",
+        expected_activation_id: int | None = None,
+    ) -> dict | None:
         """Подтвердить аларм — записать факт подтверждения в историю.
 
         Аларм остаётся в _active до сброса по условию (CLEARED).
@@ -807,6 +821,14 @@ class AlarmStateManager:
             return None
 
         event = self._active[alarm_id]
+        if expected_activation_id is not None and event.activation_id != expected_activation_id:
+            logger.warning(
+                "ALARM ACK IGNORED: %s activation changed (%s != %s)",
+                alarm_id,
+                event.activation_id,
+                expected_activation_id,
+            )
+            return None
         if event.acknowledged:
             logger.debug(
                 "ALARM ACK NOOP: %s already acknowledged by %s",

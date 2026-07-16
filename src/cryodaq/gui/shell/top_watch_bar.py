@@ -60,9 +60,9 @@ def _format_pressure(p: float) -> str:
 # second stage (nitrogen plate); cannot be relocated without dismantling
 # the rheostat. All temperature channels are metrologically calibrated,
 # but only these two qualify as fixed quantitative references for
-# TopWatchBar T-min / T-max display.
-T_MIN_CHANNEL = "Т12"  # U+0422 Cyrillic Т — 2-я ступень GM-cooler (~2.9K floor)
-T_MAX_CHANNEL = "Т11"  # U+0422 Cyrillic Т — плита 1-й ступени GM-cooler (~40K floor)
+# TopWatchBar physical-reference display.
+SECOND_STAGE_CHANNEL = "Т12"  # U+0422 Cyrillic Т — 2-я ступень GM-cooler (~2.9 K floor)
+N2_PLATE_CHANNEL = "Т11"  # U+0422 Cyrillic Т — азотная плита (~40 K floor)
 
 
 def _fmt_elapsed(start_iso: str) -> str:
@@ -120,7 +120,7 @@ class TopWatchBar(QWidget):
         self._channel_mgr = channel_manager
         # Per-channel last-seen tracking: channel_id -> (monotonic_ts, status)
         self._channel_last_seen: dict[str, tuple[float, ChannelStatus]] = {}
-        self._alarm_count: int = 0
+        self._alarm_count: int | None = None
         self._replay_pinned = False
 
         self._build_ui()
@@ -142,10 +142,10 @@ class TopWatchBar(QWidget):
         self._channel_refresh_timer.timeout.connect(self._refresh_channels)
         self._channel_refresh_timer.start()
 
-        # 2 s polling for zone 4 (alarms)
+        # Alarm sound polling remains independent from the authoritative
+        # alarm snapshot/count owned by AlarmPanel.
         self._slow_timer = QTimer(self)
         self._slow_timer.setInterval(2000)
-        self._slow_timer.timeout.connect(self._poll_alarms)
         self._slow_timer.start()
 
         # A3b: same 2s cadence carries the recent_alarms sound poll — one
@@ -164,7 +164,6 @@ class TopWatchBar(QWidget):
         # One in-flight worker per poll stream — skip tick if previous
         # request still running (Finding 2, Block A.9).
         self._experiment_worker = None
-        self._alarm_worker = None
 
     # ------------------------------------------------------------------
     # UI construction
@@ -192,7 +191,7 @@ class TopWatchBar(QWidget):
         # B.6: Mode badge (ЭКСПЕРИМЕНТ / ОТЛАДКА) — clickable (B.6.2)
         self._mode_badge = _ClickableLabel()
         self._mode_badge.setObjectName("modeBadge")
-        self._mode_badge.setVisible(False)
+        self._update_mode_badge(None)
         self._mode_badge.clicked.connect(self._on_mode_badge_clicked)
         self._app_mode: str | None = None
         self._mode_switch_worker = None
@@ -208,7 +207,9 @@ class TopWatchBar(QWidget):
         layout.addWidget(self._make_zone_sep())
 
         # Zone 4: alarms (clickable). No emoji per RULE-COPY-005 — text label only.
-        self._alarms_label = _ClickableLabel("Тревоги: 0")
+        self._alarms_label = _ClickableLabel(
+            "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+        )
         self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._alarms_label.clicked.connect(self.alarms_clicked.emit)
         layout.addWidget(self._alarms_label)
@@ -279,28 +280,26 @@ class TopWatchBar(QWidget):
 
         ctx.addWidget(self._make_ctx_dot())
 
-        # T_2st (2-я ступень) — Т11, physically second stage of the
-        # cryocooler. Label is positional rather than comparative
-        # because Т11/Т12 are the locked quantitative reference
-        # pair for cold zone monitoring (design system invariant #21).
-        self._ctx_tmin_label = QLabel("\u0422 2\u0441\u0442.")  # Т 2ст.
-        self._ctx_tmin_label.setStyleSheet(label_style)
-        self._ctx_tmin_value = QLabel("\u2014")
-        self._ctx_tmin_value.setStyleSheet(value_style)
-        ctx.addWidget(self._ctx_tmin_label)
-        ctx.addWidget(self._ctx_tmin_value)
+        # Т12 is physically fixed on the second cryocooler stage.
+        # The operator label names that location instead of implying a
+        # computed minimum across the channel fleet.
+        self._ctx_second_stage_label = QLabel("Т 2-й ступени")
+        self._ctx_second_stage_label.setStyleSheet(label_style)
+        self._ctx_second_stage_value = QLabel("\u2014")
+        self._ctx_second_stage_value.setStyleSheet(value_style)
+        ctx.addWidget(self._ctx_second_stage_label)
+        ctx.addWidget(self._ctx_second_stage_value)
 
         ctx.addWidget(self._make_ctx_dot())
 
-        # T_N2 (азотная плита) — Т12, physically nitrogen plate side
-        # of the second stage. Subscript 2 via U+2082 (₂) keeps the
-        # chemical formula form N₂ instead of the ambiguous N2.
-        self._ctx_tmax_label = QLabel("\u0422 N\u2082")  # Т N₂
-        self._ctx_tmax_label.setStyleSheet(label_style)
-        self._ctx_tmax_value = QLabel("\u2014")
-        self._ctx_tmax_value.setStyleSheet(value_style)
-        ctx.addWidget(self._ctx_tmax_label)
-        ctx.addWidget(self._ctx_tmax_value)
+        # Т11 is physically fixed on the nitrogen plate. Subscript 2 via
+        # U+2082 (₂) preserves the chemical formula in operator copy.
+        self._ctx_n2_plate_label = QLabel("Т плиты N₂")
+        self._ctx_n2_plate_label.setStyleSheet(label_style)
+        self._ctx_n2_plate_value = QLabel("\u2014")
+        self._ctx_n2_plate_value.setStyleSheet(value_style)
+        ctx.addWidget(self._ctx_n2_plate_label)
+        ctx.addWidget(self._ctx_n2_plate_value)
 
         # Insert after exp_label, before mode_badge
         # exp_label is at index 2, mode_badge at index 3
@@ -309,12 +308,12 @@ class TopWatchBar(QWidget):
         main.insertWidget(4, self._context_frame)
         main.insertWidget(5, self._make_zone_sep())  # sep after context
 
-        # T-min / T-max lock: track only Т11 and Т12 readings
+        # Physical-reference lock: track only Т11 and Т12 readings
         # (positionally fixed reference channels, design system invariant #21).
         # Other cold channels are metrologically valid but not positionally
         # fixed, so using them would allow T-min / T-max to shift between
         # experiments depending on the visible-channel set.
-        self._latest_ref_temps: dict[str, tuple[float, float]] = {}
+        self._latest_physical_temps: dict[str, tuple[float, float]] = {}
         self._latest_pressure: tuple[float, float] | None = None
 
     @staticmethod
@@ -352,14 +351,14 @@ class TopWatchBar(QWidget):
             )
         self._ctx_pressure_value.setText(text)
 
-    def _update_temp_display(self) -> None:
-        """Render T min / T max from locked reference channels Т11 / Т12.
+    def _update_physical_temp_display(self) -> None:
+        """Render the two fixed physical references from Т12 / Т11.
 
-        DESIGN: invariant #4, MANIFEST.md decision #21 — T min / T max
-        read specifically from Т11 and Т12. No fallback to other visible
+        DESIGN: invariant #4, MANIFEST.md decision #21 — the second-stage
+        and nitrogen-plate values read specifically from Т12 and Т11. No fallback to other visible
         cold channels: those are metrologically calibrated but not
-        positionally fixed, so using them would let the displayed
-        min/max shift between experiments when channels are toggled.
+        positionally fixed, so using them would change the displayed
+        physical meaning between experiments when channels are toggled.
         """
         now = time.time()
         val_style = (
@@ -370,7 +369,7 @@ class TopWatchBar(QWidget):
         muted_style = f"color: {theme.TEXT_MUTED};"
 
         def _render(ch_id: str, label_widget: QLabel) -> None:
-            entry = self._latest_ref_temps.get(ch_id)
+            entry = self._latest_physical_temps.get(ch_id)
             if entry is None:
                 label_widget.setText("\u2014")
                 label_widget.setStyleSheet(muted_style)
@@ -383,13 +382,13 @@ class TopWatchBar(QWidget):
             label_widget.setText(f"{val:.2f} K")
             label_widget.setStyleSheet(val_style)
 
-        _render(T_MIN_CHANNEL, self._ctx_tmin_value)
-        _render(T_MAX_CHANNEL, self._ctx_tmax_value)
+        _render(SECOND_STAGE_CHANNEL, self._ctx_second_stage_value)
+        _render(N2_PLATE_CHANNEL, self._ctx_n2_plate_value)
 
     def _stale_check_tick(self) -> None:
         """Re-run display updates to refresh stale markers."""
         self._update_pressure_display()
-        self._update_temp_display()
+        self._update_physical_temp_display()
 
     # ------------------------------------------------------------------
     # Reading ingestion (called from MainWindowV2._dispatch_reading)
@@ -409,12 +408,12 @@ class TopWatchBar(QWidget):
             # "0/16 \u043d\u043e\u0440\u043c\u0430".
             short_id = ch.split(" ", 1)[0]
             self._channel_last_seen[short_id] = (time.monotonic(), reading.status)
-            # T-min / T-max locked to positionally fixed reference channels.
+            # Physical readouts are locked to positionally fixed reference channels.
             if isinstance(value, (int, float)) and not math.isnan(value):
-                if short_id in (T_MIN_CHANNEL, T_MAX_CHANNEL):
+                if short_id in (SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
                     ts = reading.timestamp.timestamp()
-                    self._latest_ref_temps[short_id] = (ts, float(value))
-                    self._update_temp_display()
+                    self._latest_physical_temps[short_id] = (ts, float(value))
+                    self._update_physical_temp_display()
         elif ch.endswith("/pressure"):
             if isinstance(value, (int, float)) and not math.isnan(value):
                 ts = reading.timestamp.timestamp()
@@ -534,30 +533,6 @@ class TopWatchBar(QWidget):
         self._channel_label.setToolTip(", ".join(tooltip_parts))
         self._channel_label.setStyleSheet(f"color: {color};")
 
-    def _poll_alarms(self) -> None:
-        """Poll alarm_v2_status for zone 4. Skips if previous still in flight."""
-        if self._alarm_worker is not None and not self._alarm_worker.isFinished():
-            return
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
-
-        self._alarm_worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
-        self._alarm_worker.finished.connect(self._on_alarms_result)
-        self._alarm_worker.start()
-
-    def _on_alarms_result(self, result: dict) -> None:
-        if not result.get("ok"):
-            return
-        active = result.get("active", {}) or {}
-        n = len(active)
-        self._alarm_count = n
-        if n == 0:
-            self._alarms_label.setText("Тревоги: 0")
-            self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        else:
-            verb = ru_plural(n, "активна", "активны", "активны")
-            self._alarms_label.setText(f"Тревоги: {n} {verb}")
-            self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
-
     def _poll_recent_alarms(self) -> None:
         """Poll recent_alarms for A3b sound. Skips if previous still in flight."""
         if self._alarm_sound_worker is not None and not self._alarm_sound_worker.isFinished():
@@ -614,8 +589,19 @@ class TopWatchBar(QWidget):
             result = None
         self._app_mode = app_mode
         if app_mode is None:
-            self._mode_badge.setVisible(False)
+            self._mode_badge.setText(
+                "\u0420\u0435\u0436\u0438\u043c: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+            )
+            self._mode_badge.setStyleSheet(
+                f"#modeBadge {{ background-color: {theme.SURFACE_MUTED}; "
+                f"color: {theme.MUTED_FOREGROUND}; "
+                f"border: 1px solid {theme.BORDER_SUBTLE}; "
+                f"border-radius: {theme.RADIUS_SM}px; "
+                f"padding: {theme.SPACE_1}px {theme.SPACE_3}px; }}"
+            )
+            self._mode_badge.setVisible(True)
             return
+        # Authoritative mode is absent, not inferred: unavailable remains visible.
         # DESIGN: cryodaq-primitives/top-watch-bar.md ModeBadge reference +
         # invariant #5 "Mode badge always visible".
         # Phase III.A: "Эксперимент" renders as low-emphasis identifier
@@ -670,15 +656,25 @@ class TopWatchBar(QWidget):
             self._mode_badge.setStyleSheet(
                 f"#modeBadge {{ "
                 f"background-color: {theme.SURFACE_ELEVATED}; "
-                f"color: {theme.STATUS_WARNING}; "
-                f"border: 1px solid {theme.STATUS_WARNING}; "
+                f"color: {theme.STATUS_CAUTION}; "
+                f"border: 1px solid {theme.STATUS_CAUTION}; "
                 f"{base_style}"
                 f"}}"
             )
             self._mode_badge.setVisible(True)
         else:
             logger.warning("Unknown app_mode value: %s", app_mode)
-            self._mode_badge.setVisible(False)
+            self._mode_badge.setText(
+                "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c"
+            )
+            self._mode_badge.setStyleSheet(
+                f"#modeBadge {{ background-color: {theme.SURFACE_ELEVATED}; "
+                f"color: {theme.STATUS_CAUTION}; "
+                f"border: 1px solid {theme.STATUS_CAUTION}; "
+                f"border-radius: {theme.RADIUS_SM}px; "
+                f"padding: {theme.SPACE_1}px {theme.SPACE_3}px; }}"
+            )
+            self._mode_badge.setVisible(True)
 
     # ------------------------------------------------------------------
     # Mode badge click → confirmation → ZMQ command (B.6.2)
@@ -752,7 +748,7 @@ class TopWatchBar(QWidget):
     def closeEvent(self, event):  # noqa: ANN001
         super().closeEvent(event)
 
-    def set_alarm_count(self, n: int) -> None:
+    def set_alarm_summary(self, n: int, worst_level: str) -> None:
         self._alarm_count = max(0, int(n))
         if self._alarm_count == 0:
             self._alarms_label.setText("Тревоги: 0")
@@ -760,4 +756,19 @@ class TopWatchBar(QWidget):
         else:
             verb = ru_plural(self._alarm_count, "активна", "активны", "активны")
             self._alarms_label.setText(f"Тревоги: {self._alarm_count} {verb}")
-            self._alarms_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+            color = {
+                "INFO": theme.STATUS_INFO,
+                "CAUTION": theme.STATUS_CAUTION,
+                "CRITICAL": theme.STATUS_FAULT,
+                "UNKNOWN": theme.STATUS_FAULT,
+            }.get(str(worst_level).upper(), theme.STATUS_FAULT)
+            self._alarms_label.setStyleSheet(f"color: {color};")
+
+    def set_alarm_available(self, available: bool) -> None:
+        if available:
+            return
+        self._alarm_count = None
+        self._alarms_label.setText(
+            "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+        )
+        self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")

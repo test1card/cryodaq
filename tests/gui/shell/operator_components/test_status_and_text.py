@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtGui import QColor, QTextDocument
 
 from cryodaq.gui.shell.operator_components import CanonicalStatusLabel, ReadinessBlockerRow
-from cryodaq.gui.shell.operator_components._visuals import STATE_VISUALS
+from cryodaq.gui.shell.operator_components._visuals import state_visual
 from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessBlocker
 
 
@@ -14,16 +14,17 @@ def test_status_label_exposes_text_and_distinct_shape_semantics(qapp):
 
     for state in OperatorPresentationState:
         widget.set_state(state)
-        assert state.value in widget.accessibleDescription()
+        expected = "caution" if state is OperatorPresentationState.WARNING else state.value
+        assert expected in widget.accessibleDescription()
         assert widget.accessibleName().startswith("Состояние:")
         assert widget.sizeHint().width() > 0
         descriptions.add(widget.accessibleDescription())
 
-    assert len(descriptions) == 6
+    assert len(descriptions) == 5
     assert widget.styleSheet() == ""
 
 
-def test_all_six_states_paint_their_canonical_token_and_distinct_shape(qapp):
+def test_legacy_warning_and_caution_paint_one_canonical_visual(qapp):
     widget = CanonicalStatusLabel()
     widget.resize(220, 36)
     widget.show()
@@ -33,12 +34,16 @@ def test_all_six_states_paint_their_canonical_token_and_distinct_shape(qapp):
     for state in OperatorPresentationState:
         widget.set_state(state)
         image = widget.grab().toImage()
-        token = QColor(STATE_VISUALS[state].color).rgb()
+        token = QColor(state_visual(state).color).rgb()
         pixels = tuple(image.pixel(x, y) for y in range(image.height()) for x in range(image.width()))
         assert token in pixels
         rendered.add(hash(pixels))
 
-    assert len(rendered) == 6
+    assert len(rendered) == 5
+
+    widget.set_state(OperatorPresentationState.WARNING)
+    assert widget.accessibleName() == "Состояние: Требует внимания"
+    assert "ВНИМАНИЕ" in widget.accessibleDescription()
 
 
 def test_readiness_blocker_bounds_visible_text_but_retains_full_authority(qapp):

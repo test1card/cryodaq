@@ -178,27 +178,20 @@ def test_experiment_card_phase_stepper_reflects_current_phase(app):
     # "measurement" pill must use ACCENT (current-phase UI activation color).
     current_pill = stepper._pills["measurement"]
     current_ss = current_pill.styleSheet()
-    assert theme.ACCENT in current_ss, (
-        f"current pill should have ACCENT ({theme.ACCENT}), got: {current_ss!r}"
-    )
+    assert theme.ACCENT in current_ss, f"current pill should have ACCENT ({theme.ACCENT}), got: {current_ss!r}"
 
-    # Phases before "measurement" (preparation, vacuum, cooldown) must use STATUS_OK (past).
+    # Past phases use neutral filled progress; completion is not health.
     for past_phase in ("preparation", "vacuum", "cooldown"):
         past_pill = stepper._pills[past_phase]
         past_ss = past_pill.styleSheet()
-        assert theme.STATUS_OK in past_ss, (
-            f"past pill '{past_phase}' should have STATUS_OK ({theme.STATUS_OK}), "
-            f"got: {past_ss!r}"
-        )
+        assert theme.SECONDARY in past_ss
+        assert theme.STATUS_OK not in past_ss
 
     # Phases after "measurement" (warmup, teardown) must use BORDER (future).
     for future_phase in ("warmup", "teardown"):
         future_pill = stepper._pills[future_phase]
         future_ss = future_pill.styleSheet()
         assert theme.BORDER in future_ss, (
-            f"future pill '{future_phase}' should have BORDER ({theme.BORDER}), "
-            f"got: {future_ss!r}"
+            f"future pill '{future_phase}' should have BORDER ({theme.BORDER}), got: {future_ss!r}"
         )
-        assert theme.ACCENT not in future_ss, (
-            f"future pill '{future_phase}' must not have ACCENT color"
-        )
+        assert theme.ACCENT not in future_ss, f"future pill '{future_phase}' must not have ACCENT color"

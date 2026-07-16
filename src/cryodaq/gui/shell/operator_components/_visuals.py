@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QPolygon
 from PySide6.QtWidgets import QLabel, QWidget
 
 from cryodaq.gui import theme
+from cryodaq.gui.presentation_severity import operator_state_for_display
 from cryodaq.operator_snapshot import OperatorPresentationState
 
 VISIBLE_TEXT_LIMIT = 160
@@ -35,13 +36,16 @@ class PreparedText:
 STATE_VISUALS = {
     OperatorPresentationState.OK: StateVisual("НОРМА", "Норма", theme.STATUS_OK, "circle"),
     OperatorPresentationState.CAUTION: StateVisual("ВНИМАНИЕ", "Требует внимания", theme.STATUS_CAUTION, "triangle"),
-    OperatorPresentationState.WARNING: StateVisual(
-        "ПРЕДУПРЕЖДЕНИЕ", "Предупреждение", theme.STATUS_WARNING, "triangle"
-    ),
     OperatorPresentationState.FAULT: StateVisual("АВАРИЯ", "Авария", theme.STATUS_FAULT, "square"),
     OperatorPresentationState.STALE: StateVisual("УСТАРЕЛО", "Данные устарели", theme.STATUS_STALE, "hollow_circle"),
     OperatorPresentationState.DISCONNECTED: StateVisual("НЕТ СВЯЗИ", "Нет связи", theme.STATUS_STALE, "diamond"),
 }
+
+
+def state_visual(state: OperatorPresentationState) -> StateVisual:
+    """Resolve one operator-visible visual while accepting legacy states."""
+
+    return STATE_VISUALS[operator_state_for_display(state)]
 
 
 def body_font(*, semibold: bool = False) -> QFont:
@@ -77,10 +81,11 @@ def paint_state_shape(
 ) -> None:
     """Paint the canonical state-specific non-color shape."""
 
-    visual = STATE_VISUALS[state]
+    display_state = operator_state_for_display(state)
+    visual = STATE_VISUALS[display_state]
     color = QColor(visual.color)
     pen = QPen(color, 2)
-    if state is OperatorPresentationState.DISCONNECTED:
+    if display_state is OperatorPresentationState.DISCONNECTED:
         pen.setStyle(Qt.PenStyle.DashLine)
     painter.setPen(pen)
     painter.setBrush(color if visual.shape in {"circle", "triangle", "square"} else Qt.BrushStyle.NoBrush)

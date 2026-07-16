@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -214,18 +215,37 @@ def test_manifest_rejects_excessive_yaml_nesting_before_schema_validation(tmp_pa
         load_live_channel_descriptor_catalog(path)
 
 
-def test_manifest_rejects_oversized_symlinked_and_hardlinked_files(tmp_path: Path) -> None:
+def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows token cannot create symlinks")
+        raise
+
+
+def test_manifest_rejects_symlinked_file(tmp_path: Path) -> None:
     regular = tmp_path / "manifest.yaml"
     _write_manifest(regular, _one_manifest())
     symlink = tmp_path / "link.yaml"
-    symlink.symlink_to(regular)
+    _symlink_or_skip(symlink, regular)
+
+    with pytest.raises(ChannelDescriptorStorageError, match="single-link regular file"):
+        load_live_channel_descriptor_catalog(symlink)
+
+
+def test_manifest_rejects_hardlinked_files(tmp_path: Path) -> None:
+    regular = tmp_path / "manifest.yaml"
+    _write_manifest(regular, _one_manifest())
     hardlink = tmp_path / "hardlink.yaml"
     hardlink.hardlink_to(regular)
 
-    for unsafe in (regular, symlink, hardlink):
+    for unsafe in (regular, hardlink):
         with pytest.raises(ChannelDescriptorStorageError, match="single-link regular file"):
             load_live_channel_descriptor_catalog(unsafe)
 
+
+def test_manifest_rejects_oversized_file(tmp_path: Path) -> None:
     oversized = tmp_path / "oversized.yaml"
     oversized.write_bytes(b"x" * (MAX_LIVE_DESCRIPTOR_CONFIG_BYTES + 1))
     with pytest.raises(ChannelDescriptorStorageError, match="bounded file grammar"):
@@ -238,7 +258,7 @@ def test_manifest_rejects_symlinked_parent_authority_path(tmp_path: Path) -> Non
     manifest = real_parent / "manifest.yaml"
     _write_manifest(manifest, _one_manifest())
     linked_parent = tmp_path / "linked"
-    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    _symlink_or_skip(linked_parent, real_parent, target_is_directory=True)
 
     with pytest.raises(ChannelDescriptorStorageError, match="symlink-free|cannot be read safely"):
         load_live_channel_descriptor_catalog(linked_parent / manifest.name)
@@ -248,6 +268,8 @@ def test_manifest_rejects_same_inode_same_length_rewrite_with_restored_mtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    if os.name == "nt":
+        pytest.skip("Windows native-handle replacement coverage is in test_windows_secure_read.py")
     path = tmp_path / "manifest.yaml"
     _write_manifest(path, _one_manifest())
     original = path.read_bytes()
@@ -277,6 +299,62 @@ def test_manifest_rejects_same_inode_same_length_rewrite_with_restored_mtime(
     with pytest.raises(ChannelDescriptorStorageError, match="changed while reading"):
         load_live_channel_descriptor_catalog(path)
     assert mutated
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ancestor timestamp semantics")
+def test_manifest_tolerates_unrelated_windows_sibling_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "manifest.yaml"
+    _write_manifest(path, _one_manifest())
+    real_read = descriptor_storage.read_secure_relative_bytes
+    churned = False
+
+    def create_sibling_before_read(*args: object, **kwargs: object) -> bytes:
+        nonlocal churned
+        churned = True
+        (tmp_path / "unrelated.tmp").write_text("noise", encoding="utf-8")
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(descriptor_storage, "read_secure_relative_bytes", create_sibling_before_read)
+
+    load_live_channel_descriptor_catalog(path)
+    assert churned
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file identity contract")
+def test_windows_lstat_and_open_handle_share_file_identity(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    _write_manifest(path, _one_manifest())
+    before = path.lstat()
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        opened = os.fstat(fd)
+    finally:
+        os.close(fd)
+
+    assert (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_manifest_rejects_windows_junction_ancestor(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    path = real_parent / "manifest.yaml"
+    _write_manifest(path, _one_manifest())
+    junction = tmp_path / "junction"
+    created = subprocess.run(
+        ["cmd.exe", "/c", "mklink", "/J", str(junction), str(real_parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {created.stderr.strip()}")
+
+    with pytest.raises(ChannelDescriptorStorageError, match="symlink-free"):
+        load_live_channel_descriptor_catalog(junction / path.name)
 
 
 @pytest.mark.parametrize(

@@ -2233,15 +2233,28 @@ class Lifecycle:
         self.evidence.finish_fail(reason, phase=self.phase, error_type=error_type)
 
 
+def _psutil_process_start_ns(process: Any, *, epoch_seconds: object) -> int:
+    """Use Linux's clock-stable process start time; preserve other platforms."""
+
+    try:
+        started = float(process._proc.create_time(monotonic=True)) if sys.platform == "linux" else float(epoch_seconds)
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise ValueError("process start identity is unavailable") from exc
+    if not math.isfinite(started) or started <= 0:
+        raise ValueError("process start identity is invalid")
+    return int(round(started * 1_000_000_000))
+
+
 class PsutilObserver:
     def __init__(self, psutil_module: Any) -> None:
         self._psutil = psutil_module
 
     def snapshot(self) -> Sequence[ProcessSnapshot]:
         result: list[ProcessSnapshot] = []
-        for process in self._psutil.process_iter(
-            ["pid", "ppid", "create_time", "cmdline", "name", "memory_info", "num_threads"]
-        ):
+        attributes = ["pid", "ppid", "cmdline", "name", "memory_info", "num_threads"]
+        if sys.platform != "linux":
+            attributes.append("create_time")
+        for process in self._psutil.process_iter(attributes):
             try:
                 info = process.info
                 descriptors = process.num_handles() if sys.platform == "win32" else process.num_fds()
@@ -2249,7 +2262,7 @@ class PsutilObserver:
                     ProcessSnapshot(
                         ProcessIdentity(
                             int(info["pid"]),
-                            int(round(float(info["create_time"]) * 1_000_000_000)),
+                            _psutil_process_start_ns(process, epoch_seconds=info.get("create_time")),
                         ),
                         int(info["ppid"]) or None,
                         tuple(info.get("cmdline") or ()),
@@ -2265,7 +2278,8 @@ class PsutilObserver:
 
     def signal(self, identity: ProcessIdentity, sig: int) -> None:
         process = self._psutil.Process(identity.pid)
-        current = int(round(float(process.create_time()) * 1_000_000_000))
+        epoch_seconds = None if sys.platform == "linux" else process.create_time()
+        current = _psutil_process_start_ns(process, epoch_seconds=epoch_seconds)
         if current != identity.started_ns:
             raise RuntimeError("refusing to signal reused PID")
         process.send_signal(sig)

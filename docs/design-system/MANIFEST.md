@@ -6,9 +6,9 @@ last_updated: 2026-07-14
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-14
-**Session:** Phase UI-1 foundation, F36 operator snapshots, and F35 D7.2
-**Scope:** Design system v3.0.1 — foundation tokens + enforcement rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-07-15
+**Session:** v4 panoramic observability and operator-evidence reconciliation
+**Scope:** Design system v4.0.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -38,8 +38,8 @@ design-system/
 │   ├── breakpoints.md                  # desktop-only responsive
 │   └── keyboard-shortcuts.md           # canonical bindings; Python constants proposed
 │
-├── rules/                              # Enforcement: 9 files, 79 rules with code examples
-│   ├── color-rules.md                  # COLOR-001..010
+├── rules/                              # Enforcement: 9 files, 83 rules total with code examples
+│   ├── color-rules.md                  # COLOR-001..011
 │   ├── surface-rules.md                # SURF-001..010
 │   ├── typography-rules.md             # TYPO-001..010
 │   ├── spacing-rules.md                # SPACE-001..008
@@ -85,7 +85,7 @@ design-system/
     ├── operator-log-panel.md            # operator-log surface
     └── operator-snapshot-components.md # F36 pure status/attention/readiness/card atoms
 
-├── patterns/                           # Cross-surface patterns: 11 files, composition recipes
+├── patterns/                           # Cross-surface patterns: 12 files, composition recipes
     ├── page-scaffolds.md               # 3 canonical scaffolds (Bento / Single-panel / Split)
     ├── information-hierarchy.md        # 3-tier model + F-pattern scan order
     ├── cross-surface-consistency.md    # 5 consistency dimensions + two-surface test
@@ -96,7 +96,8 @@ design-system/
     ├── destructive-actions.md          # 3-severity classification + two-layer pattern
     ├── copy-voice.md                   # Russian vocabulary lexicon + imperative/descriptive
     ├── operator-snapshot-presentation.md # coherent revision and authority composition
-    └── operator-display-composition.md # root-owned eight-card POD composition
+    ├── operator-display-composition.md # root-owned eight-card supplemental briefing
+    └── operator-evidence-and-retention.md # panoramic truth, severity, audio, cadence, responsive decisions
 
 ├── accessibility/                      # Accessibility commitments: 5 files
     ├── wcag-baseline.md                # WCAG 2.2 AA target, scope, per-criterion commitment
@@ -105,12 +106,13 @@ design-system/
     ├── focus-management.md             # 2px ACCENT ring, restoration, autofocus policy
     └── reduced-motion.md               # MotionPolicy, prefers-reduced-motion, HoldConfirm exception
 
-└── governance/                         # System self-governance: 6 files
+└── governance/                         # System self-governance: 7 files
     ├── token-naming.md                 # closes RULE-GOV-001, naming conventions + prefix registry
     ├── deprecation-policy.md           # closes RULE-GOV-003, lifecycle + STONE_* case
     ├── versioning.md                   # SemVer 2.0.0 with design-system breaking definitions
     ├── testing-strategy.md             # 3 enforcement layers (lint / review / manual) + tooling
     ├── performance-budget.md           # 60 FPS / 16ms / ≤2Hz / 100ms input budget
+    ├── change-impact.md                # mandatory five-field operator/safety review
     └── contribution.md                 # proposal process, 6 types, review gates
 ```
 
@@ -122,9 +124,9 @@ design-system/
 - **79 rule IDs** across 9 rule categories (Batches 1+2+6)
 - **14 generic components** specified (Batch 3)
 - **18 CryoDAQ domain primitives** specified (Batch 4 + F36)
-- **11 cross-surface patterns** specified (Batch 5 + F36)
+- **12 cross-surface patterns** specified (including operator evidence retention)
 - **5 accessibility documents** (Batch 6)
-- **6 governance documents** (Batch 6)
+- **7 governance documents** (including mandatory change-impact review)
 - **77 color/runtime-color constants** inventoried from theme.py (includes RING + SUCCESS_400 / WARNING_400 / DANGER_400 chart series additions; Phase III.A added ON_ACCENT, SELECTION_BG, and FOCUS_RING — see `adr/002-accent-status-decoupling.md`)
 - **142 exported uppercase runtime constants** (colors 77 + typography 36 + spacing 9 + layout 7 + radius 5 + motion 3 + quantity 4 + corner-shape 1)
 
@@ -138,12 +140,12 @@ design-system/
 ## Key design decisions encoded
 
 1. **Desaturated industrial dark palette** — NOT Tailwind-like. STATUS_OK=#4a8a5e forest green, not green-500.
-2. **ACCENT is UI-activation affordance** (Phase III.A decoupling; prior: «locked to focus/selection only»). Primary button background, active tab underline, active ToolRail slot indicator, progress chunks for user-triggered tasks, focused-input border. NOT a status (use STATUS_*), NOT a phase indicator (phase active = STATUS_OK border via phase_stepper), NOT a hover state (use MUTED background). `SELECTION_BG` / `FOCUS_RING` (Phase III.A neutrals) carry selection / focus when accent bleed would collide with chrome. See `adr/002-accent-status-decoupling.md`.
+2. **ACCENT is UI-activation affordance** (Phase III.A decoupling; prior: «locked to focus/selection only»). Primary button background, active tab underline, active ToolRail slot indicator, progress chunks for user-triggered tasks, focused-input border. NOT a status (use STATUS_*). Active phase may use ACCENT; completed phase stays neutral. NOT a hover state (use MUTED background). `SELECTION_BG` / `FOCUS_RING` (Phase III.A neutrals) carry selection / focus when accent bleed would collide with chrome. See `adr/002-accent-status-decoupling.md`.
 3. **STONE_* legacy tokens — read-only in new code** — zero breaking change policy.
 4. **3 surface brightness levels max** — BACKGROUND, CARD, SECONDARY. No 4th level.
 5. **Radius scale tight** — NONE=0, SM=4, MD=6, LG=8, FULL=9999. No RADIUS_XL.
 6. **Zero-shadow policy** — single exception for modal cards.
-7. **STATUS_OK (4.67:1) passes WCAG AA body; STATUS_FAULT (3.94:1), STATUS_INFO (4.31:1), STATUS_STALE (2.94:1) FAIL** — measured.
+7. **Default-dark measured body contrast** — STATUS_OK (4.67:1), canonical caution (6.24:1), STATUS_INFO (5.81:1), and COLD_HIGHLIGHT (8.71:1) pass; STATUS_FAULT (3.94:1) and STATUS_STALE (2.94:1) fail and stay out of numeric value text.
 8. **HEADER_HEIGHT == TOOL_RAIL_WIDTH = 56** — coupled constant.
 9. **Off-scale font sizes 15 and 32 protected** — FONT_MONO_VALUE_SIZE and FONT_DISPLAY_SIZE.
 10. **Fira fonts bundled via QFontDatabase** — Mac/Ubuntu fallback otherwise.
@@ -157,12 +159,13 @@ design-system/
 18. **Card RADIUS_LG (8) > Tile RADIUS_MD (6) > Input RADIUS_SM (4)** — hierarchy cascade.
 19. **Modal close button in single-row header**, AlignVCenter with breadcrumb — NOT own row, NOT absolute-positioned (Phase I.1 regression avoided).
 20. **BentoTile only inside BentoGrid** — standalone = Card instead.
-21. **TopWatchBar T-min/T-max locked to Т11/Т12** — the only positionally fixed reference channels (physically immovable on the second stage / nitrogen plate; cannot be relocated without dismantling the rheostat). All temperature channels are metrologically calibrated, but other channels may change position between experiments, disqualifying them as fixed quantitative reference points.
+21. **TopWatchBar names physical references, never comparative Tmin/Tmax** — `Т 2-й ступени` is Т12 and `Т плиты N₂` is Т11. Both are positionally fixed; other channels may move between experiments.
 22. **Mode badge (Эксперимент / Отладка)** always visible — operator always knows whether actions have real-world effect vs debug-only.
 23. **ToolRail is icon-only + tooltip mandatory** — 9 slots, Ctrl+[1-9] shortcuts, Ctrl+L alias for Journal.
 24. **FSM states displayed lowercase** in BottomStatusBar — `safe_off`, `fault_latched` — per absolute codebase rule.
 25. **SensorCell value stays FOREGROUND in fault** — uses border + icon for fault signal (avoids RULE-A11Y-003 contrast fail on STATUS_FAULT body text).
-26. **Active phase uses STATUS_OK, not ACCENT** — corrected Phase 0 violet violation. Active phase IS a status, not a selection.
+26. **Phase progress never consumes STATUS_OK** — active uses ACCENT and
+    completed phases use neutral filled chrome; health remains a separate fact.
 27. **PhaseStepper compact=True for dashboard inline; full stepper in overlay** — per Phase B.5.6.
 28. **AlarmBadge uses Lucide bell, never emoji** — per Phase 0 decision after bell emoji removal.
 29. **AlarmBadge empty state stays visible (dim)** — operator situational awareness: must see system is watching.
@@ -176,12 +179,12 @@ design-system/
 37. **3-tier info hierarchy** — critical vitals (chrome) / active task (main area top-left) / supporting context (periphery).
 38. **F-pattern scan order** — top-left most important, top-right secondary, bottom deferred.
 39. **Two-channel status signaling** — color never alone; pair with shape (border/icon) or text per RULE-A11Y-002.
-40. **Six-state vocabulary** — ok/caution/warning/fault/stale/disconnected. No gradients, no sub-states.
+40. **Operator severity staircase** — safe/caution/fault. Legacy `warning` is accepted only as an explicit compatibility alias for caution; stale/disconnected and acknowledgement are orthogonal facts, never severity substitutions.
 41. **2 Hz UI update cap** — regardless of engine sample rate; coalesce via QTimer per `patterns/real-time-data.md`.
 42. **Stale ≠ hidden** — stale values keep last-known + dim color + tooltip explaining freshness age.
 43. **Initial-empty ≠ stale** — «Ожидание первого измерения» (TEXT_DISABLED) vs «Устарело NN с» (STATUS_STALE).
-44. **Desktop-only scope** — no phone, no tablet, no touch. Minimum 1280px width; chrome fixed regardless.
-45. **BentoGrid stays 8 columns at all viewports** — no responsive collapse; tiles keep their col_span.
+44. **Desktop operator scope with responsive truth preservation** — logical DPI and available width drive vertical reflow/density; no value/status/provenance may be clipped without a complete accessible path.
+45. **Grid density may adapt without hiding or reordering sensors** — deliberate evidence-region scrolling is allowed; automatic channel hiding is forbidden.
 46. **Two-layer protection for safety-critical destructive** — HoldConfirmButton (1s gesture) + Dialog (cognitive confirmation).
 47. **Directional safety in toggles** — enable destructive (confirm), disable safe (no confirm).
 48. **No «Don't show again» checkboxes** — creates state divergence + training regressions. Fix root cause instead.
@@ -201,10 +204,10 @@ Batch 6 — accessibility + governance:
 59. **Destructive Dialog default-focus = Cancel** — operator Enter muscle-memory dismisses safely.
 60. **Shift+Enter keyboard alternative for HoldConfirmButton** — full keyboard accessibility without requiring held-key.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in the current v3.0.x line** — the v2.0.0
+62. **Design system remains flat-token in the current v4.0.0 line** — the v2.0.0
     instrument-identity major and v3.0.0 composition-contract major did not
     perform the separately reviewed future three-layer token migration.
-63. **STONE_* remains deprecated/read-only in the current v3.0.x line** — neither
+63. **STONE_* remains deprecated/read-only in the current v4.0.0 line** — neither
     major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
@@ -233,7 +236,7 @@ F36 operator-snapshot additions:
 
 ## Status
 
-**Design system v3.0.1 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; descriptor-qualified identity, F36 composition, and software POD home cutover are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
-79 rules and the 142-constant runtime inventory are unchanged. Real Windows
+**Design system v4.0.0 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+83 rules (79 widget rules plus 4 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
 ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
 remain open.

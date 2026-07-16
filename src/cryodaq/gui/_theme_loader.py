@@ -142,6 +142,16 @@ def _load_theme_pack(name: str) -> dict[str, Any]:
                 return _load_theme_pack(DEFAULT_THEME)
             raise RuntimeError(f"Default theme pack invalid hex for {token}: {val!r}")
 
+    if pack["STATUS_WARNING"].lower() != pack["STATUS_CAUTION"].lower():
+        logger.error(
+            "theme: pack '%s' separates STATUS_WARNING from STATUS_CAUTION; falling back to %s",
+            name,
+            DEFAULT_THEME,
+        )
+        if name != DEFAULT_THEME:
+            return _load_theme_pack(DEFAULT_THEME)
+        raise RuntimeError("Default theme pack must alias STATUS_WARNING to STATUS_CAUTION")
+
     logger.info("theme: loaded pack '%s' (%d tokens)", name, len(pack))
     return pack
 

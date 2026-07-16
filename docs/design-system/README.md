@@ -9,9 +9,31 @@ status: canonical
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `3.0.1`
+**Current design-system version:** `4.0.0`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
+
+## Operator-first observability
+
+The primary operating surface MUST preserve panoramic observability: current
+channel values, trends, experiment context, provenance, and explicit
+stale/disconnected/fault state remain discoverable even when the software did
+not anticipate the condition. Summaries and prioritization may guide attention,
+but they are additive and MUST NOT replace or hide the comprehensive evidence
+view. A visually calmer screen is not an improvement if it reduces anomaly
+discovery, provenance, or operator agency.
+
+Every GUI change records five items in its reviewed evidence:
+
+1. what becomes easier, clearer, faster, or safer for the operator;
+2. what becomes harder, less visible, slower, or less flexible;
+3. which operator workflow and safety goal justify the tradeoff;
+4. how the downside is mitigated and tested; and
+5. the observable condition that requires reverting or revising the change.
+
+If the benefit is purely aesthetic while the cost reduces panoramic awareness,
+unexpected-condition discovery, raw evidence, provenance, or truthful state,
+the change fails the design-system gate.
 
 This document is written for both automated tooling and human developers. Every rule has a unique ID, grep-friendly keywords, and concrete code examples.
 
@@ -33,7 +55,10 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
    and dense chrome is a design failure even when it is technically usable.
 3. **Deliberate desaturation.** Our palette is intentionally desaturated dark. This reduces eye strain during long shifts and avoids the "toy" appearance of bright neon dashboards. Sharp primary colors are signal loss to the eye.
 4. **Static by default, motion only for state transition.** UI is still. Motion indicates change, never decoration. Pulsing alarms, count-up numbers, parallax — all forbidden.
-5. **Consistency over cleverness.** The same concept must render the same way across every surface. If "active phase" is green border in dashboard, it must be green border in overlay. No per-surface variation.
+5. **Consistency over cleverness.** The same concept must render the same way
+   across every surface. An active phase uses the canonical ACCENT progress
+   treatment everywhere; green remains reserved for safe/healthy truth. No
+   per-surface variation.
 6. **Discoverability via layout, not via interaction.** Everything an operator needs must be visible or at most one click away. Hover-only affordances fail in stress operations.
 7. **Operator clarity and bounded autonomy.** No magic: operators can see what the system is doing and why, and may override only where the safety architecture explicitly permits it. Ordinary UI actions require an explicit operator trigger; automatic fail-closed, interlock, verified-OFF, persistence, and bounded-shutdown actions retain their independent authority.
 8. **Quiet normalcy, loud exceptions.** Normal state is invisible (muted tones). Abnormal state is impossible to miss (loud red, prominent placement, persistent badge).
@@ -63,7 +88,8 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 | Wire a destructive action | `patterns/destructive-actions.md` |
 | Format a number (temperature/pressure/time) | `patterns/numeric-formatting.md` |
 | Display stale data | `patterns/real-time-data.md` |
-| Compose the Primary Operator Display | `patterns/operator-display-composition.md` |
+| Compose the supplemental operator briefing | `patterns/operator-display-composition.md` |
+| Preserve operator evidence and reviewed workflow decisions | `patterns/operator-evidence-and-retention.md` |
 | Check or update GUI v3 migration status | `GUI_MIGRATION_INVENTORY.md` |
 | Check WCAG contrast | `accessibility/contrast-matrix.md` |
 | Write Russian copy | `patterns/copy-voice.md` |
@@ -155,6 +181,7 @@ docs/design-system/
 │   ├── copy-voice.md
 │   ├── operator-snapshot-presentation.md
 │   ├── operator-display-composition.md
+│   ├── operator-evidence-and-retention.md
 │   └── responsive-behavior.md
 │
 ├── accessibility/                   # WCAG + keyboard + motion
@@ -169,6 +196,7 @@ docs/design-system/
     ├── deprecation-policy.md
     ├── testing-strategy.md
     ├── performance-budget.md
+    ├── change-impact.md
     ├── versioning.md
     └── contribution.md
 ```
@@ -276,6 +304,11 @@ From `src/cryodaq/gui/theme.py` inventory (v3.0.0, 142 exported uppercase consta
 
 ## Changelog
 
+- 2026-07-15: Released v4.0.0: restored panoramic observability as the
+  mandatory primary-surface contract, made the shift briefing additive, and
+  added an explicit operator/safety tradeoff gate for every GUI change.
+- 2026-07-15: Released v3.0.2: aligned the ToolRail home destination and
+  tooltip with the Primary Operator Display term «Сводка смены».
 - 2026-07-15: Released v3.0.1: completed the software POD home cutover with
   one visible truth owner, consolidated provenance, and quiet-normal cards;
   physical, DPI/NVDA, long-session, and operator evidence remain open.

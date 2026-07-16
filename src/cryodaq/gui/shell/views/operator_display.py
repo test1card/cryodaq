@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.gui import theme
+from cryodaq.gui.presentation_severity import operator_state_for_display
 from cryodaq.gui.shell.operator_components import (
     AttentionList,
     CanonicalStatusLabel,
@@ -30,12 +31,12 @@ from cryodaq.gui.shell.operator_components import (
     SnapshotCardShell,
 )
 from cryodaq.gui.shell.operator_components._visuals import (
-    STATE_VISUALS,
     PreparedText,
     configure_text_label,
     prepare_text,
     safe_plain_text,
     set_prepared_label,
+    state_visual,
 )
 from cryodaq.gui.shell.operator_components.card import _CardRenderPlan
 from cryodaq.operator_snapshot import (
@@ -581,7 +582,7 @@ def _prepare_facts(value: str) -> PreparedText:
 
 
 def _state_text(state: OperatorPresentationState) -> str:
-    return STATE_VISUALS[state].label
+    return state_visual(state).label
 
 
 def _readiness_facts(summary: ReadinessSummary) -> str:
@@ -677,7 +678,17 @@ def _support_facts(summary: SupportBundleSummary) -> str:
 
 
 def _counts_text(counts: Counter[OperatorPresentationState]) -> str:
-    parts = [f"{_state_text(state)}: {counts[state]}" for state in OperatorPresentationState if counts[state]]
+    display_counts: Counter[OperatorPresentationState] = Counter()
+    for state, count in counts.items():
+        display_counts[operator_state_for_display(state)] += count
+    display_order = (
+        OperatorPresentationState.OK,
+        OperatorPresentationState.CAUTION,
+        OperatorPresentationState.FAULT,
+        OperatorPresentationState.STALE,
+        OperatorPresentationState.DISCONNECTED,
+    )
+    parts = [f"{_state_text(state)}: {display_counts[state]}" for state in display_order if display_counts[state]]
     return " · ".join(parts) if parts else "нет авторитетных элементов"
 
 

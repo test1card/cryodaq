@@ -1,22 +1,28 @@
 ---
-title: Primary Operator Display Composition
+title: Supplemental Operator Briefing Composition
 keywords: F36, POD, shift briefing, atomic composition, attention, replay, navigation
-applies_to: composing all eight operator-snapshot summaries into the Primary Operating Display
-status: implemented composition and shell cutover; operator evidence open
+applies_to: composing all eight operator-snapshot summaries into a supplemental shift briefing
+status: implemented supplemental composition; operator evidence open
 implements: src/cryodaq/gui/shell/views/operator_display.py
 last_updated: 2026-07-15
 references: patterns/operator-snapshot-presentation.md, patterns/information-hierarchy.md, accessibility/keyboard-navigation.md, governance/performance-budget.md
 ---
 
-# Primary Operator Display Composition
+# Supplemental Operator Briefing Composition
 
 ## Problem and boundary
 
-The Primary Operator Display (POD) answers four bounded questions from one
+The operator briefing answers four bounded questions from one
 immutable `OperatorSnapshot`: may work continue, what is happening, what needs
 attention, and what evidence should be inspected next. It is a presentation
 and navigation surface only. It does not poll transport, acknowledge an alarm,
 recover Safety, change an experiment, or command hardware.
+
+The briefing is additive. It MUST NOT replace the comprehensive dashboard or
+become the only route to current readings, trends, experiment context,
+provenance, or unexpected-condition discovery. Its curated questions cover
+anticipated needs; the primary dashboard preserves the evidence needed to
+notice conditions that were not anticipated by the software.
 
 This pattern does not close the twelve F36 operator scenarios by itself. Those
 scenarios include later destination behavior, acknowledgement requests,
@@ -84,7 +90,9 @@ time, then stable identity and projects at most eight items. The list is
 virtualized. A row is exactly two `ROW_HEIGHT` lines: title/state and full
 bounded detail. The viewport always fits at least the complete most-urgent
 row, shows at most four complete rows, and scrolls for items five through
-eight. The adjacent count states both projected and total queue size.
+eight. The adjacent count states projected and total queue size, the omitted
+count, and whether omitted items include equal or higher severity. One action
+opens the complete queue.
 
 An empty queue collapses its list viewport while the backend summary and explicit
 zero-item fact remain visible; the POD never reserves a blank list void. Detail is
@@ -124,6 +132,8 @@ long-session memory, and measured operator decision time.
 
 ## Anti-patterns
 
+- Making the briefing the sole home/current-truth surface or hiding the
+  comprehensive dashboard and persistent status chrome behind it.
 - Independently rendering any card after it is bound to the POD.
 - Treating a root `_committing` flag as sufficient while child render APIs
   remain writable.
@@ -158,6 +168,9 @@ selected only when the accepted attention summary includes
 
 ## Changelog
 
+- 2026-07-15 (v4.0.0): Reclassified the display as a supplemental briefing;
+  revoked the summary-only home rule and restored the comprehensive dashboard
+  as the primary panoramic operating surface.
 - 2026-07-15 (v3.0.1): Made POD the only visible home truth owner,
   consolidated repeated visual provenance, and quieted normal card chrome.
 - 2026-07-15: Made the POD the MainWindowV2 home surface and wired the

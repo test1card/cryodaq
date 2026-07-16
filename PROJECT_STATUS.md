@@ -1,14 +1,15 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-07-14 *(release baseline v0.64.1 + active pre-lab campaign note)*
+**Дата:** 2026-07-16 *(release baseline v0.64.1 + active pre-lab campaign note)*
 **Релизная ветка:** master
 **Активная campaign-ветка:** `feat/montana-phase-a` (последний recorded exact-SHA checkpoint `b7b1356`)
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
-**Тесты:** 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Последний зелёный полный прогон — 3 608 passed / 2 skipped на baseline v0.63.0.
-**CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
+**Тесты release baseline:** исторический локальный монолитный прогон v0.63.0 — 3 608 passed / 2 skipped при 3 657 selected / 3 658 collected (1 deselected: `@ollama` marker). Эти числа не описывают текущий Montana-кандидат и не переносятся на него.
+**CI релизной линии:** GitHub Actions (`.github/workflows/main.yml`) — исторически зелёный на полном сьюте `ubuntu-latest` + `windows-latest`, начиная с v0.64.0. Это был **первый полностью зелёный прогон в истории репозитория** (ранее сборка обрывалась на lint-шаге до запуска pytest, маскируя падения).
 **CI recorded checkpoint:** PASS — sharded exact-SHA run `29340534592` для `b7b1356` завершён зелёным: agents/core/GUI/remaining PASS на Windows и Ubuntu. Safe SQLite verification прошла во всех jobs; lint и requirements-lock drift checks прошли в обоих remaining jobs. Каждый более новый candidate требует свой exact-SHA eight-job PASS. Это не закрывает frozen-build, soak-duration, physical-hardware, F35 frozen-packaging или F36 operator/accessibility/performance/external gates.
-**Final-candidate evidence:** pending — для текущего кандидата ещё нужны полный локальный прогон и собственный exact-SHA eight-job CI PASS; старые числа и SHA не переносятся по умолчанию.
+**Final-candidate evidence:** pending — для текущего кандидата ещё нужны обновлённый WSL archive/docs rerun, чистый окончательный локальный verdict, регенерация отчёта/графов на sealed SHA и собственный exact-SHA eight-job CI PASS; старые числа и SHA не переносятся по умолчанию.
+**Current candidate evidence:** native Windows descriptor secure-read — **47 passed / 3 exact privilege skips**, independent **PASS**, handle count неизменен после 500 reads. Storage — **460 passed / 7 skipped**; remaining exact CI-style partition — **2 278 passed / 106 skipped, PASS**; GUI — **1 559 passed / 4 skipped / 75 deselected**. Core дошёл до **1 573 passed** и отдельно имеет ровно 6 WinError 1314 symlink-setup failures без product-assertion failure; agents/reporting — **1 448 passed / 35 skipped / 1 deselected** и ровно 17 таких же setup failures. Alarm malformed-projection/ACK/GUI-owner panel — **122 passed**; web ACK retention — **2 passed**; sensor-focused panel — **35 passed**. Report/SVG manifest: **1 035 source files / 1 039 delivered files**; метрики уже внесены в отчёт. WSL archive `1D6E23626126F18237BCE87298C05CE21F7726656C52A59566CCE90F8B4D6828` остаётся полезным, но устаревшим evidence и должен быть обновлён.
 **Фронтир:** Release train v0.58.0 → v0.64.0 отгружен 2026-07-07/08.
 После релиза активна software-side pre-lab campaign: H3/H4 runtime/ONEDIR,
 F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
@@ -47,7 +48,8 @@ F35 ASC extension contract и F36 operator/fleet readiness из `ROADMAP.md`.
 | Thyracont VSP63D | RS-232 | 1 давление | `thyracont_vsp63d.py` |
 | Etalon MultiLine | TCP/IP | интерферометрическая метрология длины | `etalon_multiline.py` |
 
-Т11 / Т12 — позиционно зафиксированные ступени GM-cooler-а, единственные
+Т12 — позиционно зафиксированная вторая ступень GM-cooler-а; Т11 — позиционно
+зафиксированная азотная плита. Оба канала — единственные
 `critical_channels` для FSM безопасности (`safety.yaml`, с v0.55.4).
 
 ### Аппаратные / рантайм инварианты
@@ -193,11 +195,13 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    теперь использует actual loop-owned experiment/acquisition/direct-SQLite
    persistence feeds, один durable revision allocator и sole PUB socket;
    cold/disconnected cuts fail-dark, а stale/ambiguous persistence остаётся
-   явно NOT_RECORDING/unavailable без fallback writer. Software POD home
-   cutover завершён: оба production launch root удерживают одного ingress owner,
-   передают newest coherent cuts в реальный POD и завершают ingress до normal
-   shutdown или theme re-exec. Reviewed source-mode 1280x800 POD visual QA
-   собран. Открыты все 12 operator scenarios, keyboard/NVDA, DPI/ONEDIR,
+   явно NOT_RECORDING/unavailable без fallback writer. Панорамный dashboard
+   теперь является основным home; POD сохранён как дополнительный
+   маршрут сводки смены. Оба production launch root удерживают одного
+   ingress owner, передают newest coherent cuts в реальный POD и
+   завершают ingress до normal shutdown или theme re-exec. Reviewed
+   source-mode 1280x800 POD visual QA собран. Открыты все 12 operator
+   scenarios, keyboard/NVDA, DPI/ONEDIR, WSL candidate integration,
    startup/frame/memory/long-session и physical gates; один скриншот их не
    закрывает.
 5. Recorded exact-SHA CI checkpoint `29340534592` для `b7b1356`: все восемь
@@ -246,7 +250,7 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 9. **Graceful scheduler drain** — configurable via `safety.yaml scheduler_drain_timeout_s`.
 10. **Verified-off fail-closed** — неподтверждённый OFF латчит FAULT, а не ложный SAFE_OFF (все три call-site класса CR-2 + connect force-OFF).
 11. **Calibration state deferral** — `prepare_srdg_readings` считает pending state, `on_srdg_persisted` применяет атомарно после успешной записи.
-12. **Design system v1.0.1 canonical** — `docs/design-system/**` — единственный источник правды по UI. Значения токенов берутся ТОЛЬКО из `theme.py`.
+12. **Design system v4.0.0 canonical** — `docs/design-system/**` — единственный источник правды по UI в текущей campaign-ветке. Релизный снимок v0.64.1 в таблице выше исторически фиксирует v1.0.1. Значения токенов берутся ТОЛЬКО из `theme.py`.
 13. **Mnemonic shortcuts canonical per AD-002** — `Ctrl+L/E/A/K/M/R/C/D`. Владелец биндингов — `main_window_v2.py` после ретайра v1-shell (Phase II.13).
 14. **SQLite fail-closed runtime** — `environment.yml` фиксирует безопасный Python-linked SQLite для Windows/Linux; shim выбирает реализацию один раз и F25 проверяет её до записи. Bypass-флаг `CRYODAQ_ALLOW_BROKEN_SQLITE=1` — крайняя мера-подтверждение, не исправление.
 15. **Cold-storage lossless** — архивный Parquet хранит сырые пары `(value, status)`; маскирование делают reader-ы на чтении; ротация идемпотентна (index пишется до удаления; sweep удаляет только байт-идентичный оригинал по `source_md5`).

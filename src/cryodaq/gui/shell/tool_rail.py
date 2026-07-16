@@ -100,6 +100,7 @@ _ICON_SIZE = 24  # proposed: theme.ICON_SIZE_MD (not yet in theme.py)
 # Maps Ctrl+<letter> → ToolRail slot name. Ctrl+R maps to an item in
 # the More menu; all others are top-level slots.
 _MNEMONIC_SHORTCUTS: dict[str, str] = {
+    "Ctrl+H": "home",  # Home / Дашборд
     "Ctrl+L": "log",  # Журнал
     "Ctrl+E": "experiment",  # Эксперимент
     "Ctrl+A": "analytics",  # Аналитика
@@ -114,7 +115,7 @@ _ICONS_DIR = Path(__file__).parent.parent / "resources" / "icons"
 
 # (name, icon_filename, label) — order matches wireframe section 4
 _TOP_ITEMS = [
-    ("home", "home.svg", "Сводка смены"),
+    ("home", "home.svg", "Дашборд (Ctrl+H)"),
 ]
 _NEW_ITEMS = [
     ("new_experiment", "plus.svg", "Новый эксперимент"),
@@ -143,6 +144,7 @@ _OVERLAY_ITEMS = [
 _MORE_NAME = "more"
 _MORE_ICON = "more-horizontal.svg"
 _MORE_ITEMS = [
+    ("summary", "Сводка смены"),
     ("archive", "Архив"),
     # v0.55.6.1: «База знаний» promoted to main ToolRail — see _OVERLAY_ITEMS.
     ("calibration", "Калибровка"),
@@ -320,5 +322,7 @@ class ToolRail(QFrame):
 
     def set_active(self, name: str | None) -> None:
         """Mark one button as active (or none)."""
+        if name in {item_name for item_name, _ in _MORE_ITEMS if item_name != "__separator__"}:
+            name = _MORE_NAME
         for btn_name, btn in self._buttons.items():
             btn.set_active(btn_name == name)

@@ -25,6 +25,7 @@ from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
+from cryodaq.gui.state.descriptor_store import IdentityStatus
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,8 @@ class SensorCell(QFrame):
         self._channel_mgr = channel_manager
         self._buffer = buffer_store
         self._last_status: ChannelStatus | None = None
+        self._source_status: ChannelStatus | None = None
+        self._source_identity = IdentityStatus.LEGACY_ABSENT
         self._data_stale = True
         self._read_only = False
         self._is_renaming = False
@@ -186,11 +189,31 @@ class SensorCell(QFrame):
             f"}}"
         )
 
+    def _apply_identity_state(self, *, stale: bool) -> None:
+        """Render descriptor identity and freshness without hiding either axis."""
+        if self._source_identity is IdentityStatus.REFUSED:
+            text = "Идентификация недоступна: описание канала отклонено"
+            self._apply_status_style(ChannelStatus.SENSOR_ERROR)
+        else:
+            text = "Идентификация недоступна: описание канала отсутствует"
+            self._apply_stale_style()
+        if stale:
+            text += " · Устарело"
+        self._status_hint_widget.setText(text)
+        self.setAccessibleDescription(text)
+        self._last_status = None
+
     # ------------------------------------------------------------------
     # Value updates
     # ------------------------------------------------------------------
 
-    def update_value(self, reading: Reading) -> None:
+    def update_value(
+        self,
+        reading: Reading,
+        identity_status: IdentityStatus,
+        *,
+        interval_status: ChannelStatus | None = None,
+    ) -> None:
         """Update displayed value and status from a Reading (push path)."""
         if not reading.channel.startswith(self._channel_id):
             return
@@ -206,21 +229,37 @@ class SensorCell(QFrame):
             self._value_widget.setText("\u2014")
 
         self._unit_widget.setText(reading.unit or "")
+        self._source_status = reading.status
+        self._source_identity = identity_status
         was_stale = self._data_stale
-        self._data_stale = False
+        self._data_stale = time.time() - reading.timestamp.timestamp() > _STALE_THRESHOLD_S
 
-        if reading.status != self._last_status or was_stale:
-            self._apply_status_style(reading.status)
-            self._status_hint_widget.setText(
-                _STATUS_LABELS.get(
-                    reading.status,
-                    "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445",  # Нет данных
-                )
+        if identity_status is not IdentityStatus.AUTHORITATIVE:
+            self._apply_identity_state(stale=self._data_stale)
+            return
+
+        self.setAccessibleDescription("")
+
+        if self._data_stale:
+            self._apply_stale_style()
+            self._status_hint_widget.setText("\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e")
+            self._last_status = None
+            return
+
+        display_status = interval_status or reading.status
+        if display_status != self._last_status or was_stale:
+            self._apply_status_style(display_status)
+            status_text = _STATUS_LABELS.get(
+                display_status,
+                "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445",  # Нет данных
             )
-            self._last_status = reading.status
+            if display_status is not reading.status:
+                status_text = f"{status_text} (за интервал)"
+            self._status_hint_widget.setText(status_text)
+            self._last_status = display_status
 
     def refresh_from_buffer(self) -> None:
-        """Pull latest value from buffer store (1 Hz timer path).
+        """Pull latest value from the buffer on the bounded presentation tick.
 
         Buffer stores only (timestamp, value) — no ChannelStatus.
         This path tracks staleness by data age; full status comes
@@ -242,11 +281,14 @@ class SensorCell(QFrame):
         age = time.time() - timestamp_epoch
         if age > _STALE_THRESHOLD_S:
             if not self._data_stale:
-                self._apply_stale_style()
-                self._status_hint_widget.setText(
-                    "\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e"  # Устарело
-                )
                 self._data_stale = True
+                if self._source_identity is IdentityStatus.AUTHORITATIVE:
+                    self._apply_stale_style()
+                    self._status_hint_widget.setText(
+                        "\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e"  # Устарело
+                    )
+                else:
+                    self._apply_identity_state(stale=True)
             return
 
         if isinstance(value, (int, float)) and not math.isnan(value):
@@ -256,6 +298,15 @@ class SensorCell(QFrame):
                 text = f"{value:.2f}"
             self._value_widget.setText(text)
         self._data_stale = False
+        if self._source_identity is not IdentityStatus.AUTHORITATIVE:
+            self._apply_identity_state(stale=False)
+            return
+        if self._source_status is not None and self._last_status is not self._source_status:
+            self._apply_status_style(self._source_status)
+            self._status_hint_widget.setText(
+                _STATUS_LABELS.get(self._source_status, "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445")
+            )
+            self._last_status = self._source_status
 
     # ------------------------------------------------------------------
     # Inline rename

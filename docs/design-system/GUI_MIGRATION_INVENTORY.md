@@ -5,9 +5,9 @@ last_updated: 2026-07-15
 references: README.md, governance/testing-strategy.md, governance/performance-budget.md, accessibility/wcag-baseline.md
 ---
 
-# GUI v3 migration inventory
+# GUI v4 migration inventory
 
-This is the auditable backlog for the design-system v3.0.1 corpus-wide
+This is the auditable backlog for the design-system v4.0.0 corpus-wide
 informative-and-beautiful composition contract. It inventories every
 operator-visible production surface under `src/cryodaq/gui`; non-visual state,
 transport, buffers, and package/bootstrap modules are covered through the
@@ -15,6 +15,10 @@ surface that renders them. A new operator-visible surface must be added here in
 the same slice that introduces it.
 
 Status values:
+
+The `v3` text in the stable status identifiers below is retained for ledger
+compatibility; v4 acceptance additionally requires the panoramic-observability
+and per-change tradeoff gates in `README.md`.
 
 - `pending-v3-audit` — reachable production surface, not yet accepted against
   the complete v3 gate;
@@ -31,11 +35,11 @@ not qualify as `v3-accepted`.
 
 | Surface | Production owner(s) | Status | Evidence required before v3 acceptance |
 |---|---|---|---|
-| Application shell and navigation | `shell/main_window_v2.py`, `shell/navigation.py`, `shell/overlay_container.py` | pending-v3-audit | Software POD home cutover and reviewed 1280x800 source visual QA complete at `5935575`; remaining: full-shell scenarios, focus order, DPI/ONEDIR visual QA, startup/frame/memory budgets |
+| Application shell and navigation | `shell/main_window_v2.py`, `shell/navigation.py`, `shell/overlay_container.py` | in-review | Panoramic dashboard restored as primary and atomic briefing retained as supplemental; remaining: frozen-diff review, full-shell scenarios, focus order, DPI/ONEDIR visual QA, startup/frame/memory budgets |
 | Top watch bar | `shell/top_watch_bar.py` | pending-v3-audit | Landmark truth; stale/disconnected states; contrast/non-color cues; visual hierarchy |
 | Tool rail | `shell/tool_rail.py` | pending-v3-audit | Keyboard navigation; selected/disabled cues; target sizing; visual rhythm |
 | Bottom status bar | `shell/bottom_status_bar.py` | pending-v3-audit | Provenance/freshness truth; clipping; quiet-normal/loud-exception hierarchy |
-| Primary Operator Display | `shell/views/operator_display.py`, `shell/operator_components/*` | pending-v3-audit | Coherent-cut/one-owner runtime and source visual QA complete through `5935575`; remaining: all 12 F36 scenarios, zero false-safe operator evidence, keyboard/NVDA, bounded fleet, performance and ONEDIR whole-page visual QA |
+| Supplemental operator briefing | `shell/views/operator_display.py`, `shell/operator_components/*` | pending-v3-audit | Coherent-cut/one-owner runtime and source visual QA complete through `5935575`; must remain additive; remaining: all 12 scenarios, zero false-safe operator evidence, keyboard/NVDA, bounded fleet, performance and ONEDIR whole-page visual QA |
 | Dashboard composition | `dashboard/dashboard_view.py`, `dashboard/dynamic_sensor_grid.py` | pending-v3-audit | Fleet scaling; task hierarchy; empty/stale/fault states; visual composition |
 | Experiment card and phase content | `dashboard/experiment_card.py`, `dashboard/phase_aware_widget.py`, `dashboard/phase_stepper.py`, `dashboard/phase_content/*` | pending-v3-audit | Experiment lifecycle scenarios; legibility; phase semantics; keyboard and layout QA |
 | Dashboard plots and quick log | `dashboard/temp_plot_widget.py`, `dashboard/pressure_plot_widget.py`, `dashboard/quick_log_block.py` | pending-v3-audit | Sampling/aggregation; no misleading interpolation; keyboard/text alternatives; frame budget |

@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import re
 
-from cryodaq.gui import theme
+from cryodaq.gui import _theme_loader, theme
 
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -37,7 +37,8 @@ def test_status_tier_tokens_exist():
     """Status tiers are locked across all themes — safety semantics."""
     assert theme.STATUS_OK == "#4a8a5e"
     assert theme.STATUS_WARNING == "#c4862e"
-    assert theme.STATUS_CAUTION == "#b35a38"
+    assert theme.STATUS_CAUTION == "#c4862e"
+    assert theme.STATUS_WARNING == theme.STATUS_CAUTION
     assert theme.STATUS_FAULT == "#c44545"
     assert theme.STATUS_INFO == "#6490c4"
     assert theme.STATUS_STALE == "#5a5d68"
@@ -85,9 +86,50 @@ def test_spacing_rhythm():
 
 
 def test_plot_line_palette():
-    """Plot palette has enough colors for multi-channel plots."""
-    assert len(theme.PLOT_LINE_PALETTE) >= 8
+    """Plot palette preserves the established eight-series order."""
+    assert theme.PLOT_LINE_PALETTE == [
+        "#5b8db8",
+        "#9b7bb8",
+        "#5fa090",
+        "#a3b85b",
+        "#8f8578",
+        "#b88a5b",
+        "#b87b9b",
+        "#7c8cff",
+    ]
     assert all(c.startswith("#") for c in theme.PLOT_LINE_PALETTE)
+
+
+def _bundled_safety_colors() -> set[str]:
+    names = {
+        "STATUS_OK",
+        "STATUS_WARNING",
+        "STATUS_CAUTION",
+        "STATUS_FAULT",
+        "STATUS_INFO",
+        "STATUS_STALE",
+        "COLD_HIGHLIGHT",
+    }
+    return {
+        pack[name].lower()
+        for path in _theme_loader.THEMES_DIR.glob("*.yaml")
+        for pack in (_theme_loader._load_theme_pack(path.stem),)
+        for name in names
+    }
+
+
+def test_plot_palette_does_not_reuse_safety_semantic_colors():
+    assert not ({color.lower() for color in theme.PLOT_LINE_PALETTE} & _bundled_safety_colors())
+
+
+def test_quantity_palette_does_not_reuse_safety_semantic_colors():
+    quantity_colors = {
+        theme.QUANTITY_VOLTAGE.lower(),
+        theme.QUANTITY_CURRENT.lower(),
+        theme.QUANTITY_RESISTANCE.lower(),
+        theme.QUANTITY_POWER.lower(),
+    }
+    assert not (quantity_colors & _bundled_safety_colors())
 
 
 def test_line_color_function():

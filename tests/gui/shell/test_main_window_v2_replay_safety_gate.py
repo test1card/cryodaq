@@ -139,7 +139,6 @@ def test_replay_recent_readings_leave_every_mutating_panel_read_only(monkeypatch
         )
         source._smua_block._on_start_clicked()
         source._on_start_both()
-        alarm._acknowledge("alarm")
         alarm._acknowledge_v2("alarm-v2")
         log._message_edit.setPlainText("forbidden")
         log._on_submit_clicked()

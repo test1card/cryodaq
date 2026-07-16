@@ -36,7 +36,7 @@ ON_DESTRUCTIVE: "#faf9f5"
 # Status palette (LOCKED — identical across all bundled themes)
 STATUS_OK: "#4a8a5e"
 STATUS_WARNING: "#c4862e"
-STATUS_CAUTION: "#b35a38"
+STATUS_CAUTION: "#c4862e"
 STATUS_FAULT: "#c44545"
 STATUS_INFO: "#6490c4"
 STATUS_STALE: "#5a5d68"

@@ -1,0 +1,50 @@
+---
+title: GUI Change Impact Review
+keywords: tradeoff, operator impact, safety impact, mitigation, revert trigger
+applies_to: every GUI, UI, UX, and design-system change
+status: canonical
+last_updated: 2026-07-15
+references: ../README.md, ../patterns/operator-evidence-and-retention.md, testing-strategy.md
+---
+
+# GUI Change Impact Review
+
+Every GUI slice includes one reviewed record with these exact fields:
+
+| Field | Required evidence |
+|---|---|
+| Better | What becomes easier, clearer, faster, or safer for the operator |
+| Worse | What becomes harder, denser, less visible, slower, or less flexible |
+| Safety/workflow justification | The laboratory decision or hazard boundary served |
+| Mitigation and tests | How the cost is bounded and which scenarios/tests prove it |
+| Revise/revert trigger | An observable operator or truth failure that rejects the change |
+
+“No downside” is not an acceptable record. If the benefit is only aesthetic
+and the cost reduces truth, panorama, provenance, anomaly discovery, or
+operator agency, the change is rejected.
+
+## Current slice: panoramic dashboard restoration
+
+| Field | Evidence |
+|---|---|
+| Better | Restores simultaneous channel values, plots, experiment context, and unexpected-condition discovery to home |
+| Worse | The first screen is denser; the atomic shift briefing is one menu action farther away |
+| Safety/workflow justification | Operator evidence must not be limited to conditions anticipated by a curated summary |
+| Mitigation and tests | Shift briefing remains under «Ещё» with a visible selected cue; persistent top/bottom truth chrome remains; refused/absent identity keeps values visible but cannot render normal/green |
+| Revise/revert trigger | Revise if current channel truth, stale/fault/identity state, summary route, or persistent chrome becomes hidden/unreachable, or if operators cannot find the briefing during scenario testing |
+
+## Current v4 semantic slices
+
+| Slice | Better | Worse | Safety/workflow justification | Mitigation and tests | Revise/revert trigger |
+|---|---|---|---|---|---|
+| Warning compatibility → caution | Operators learn one yellow-orange attention step between safe and fault | Legacy logs and payloads still contain the word `warning` | Similar warning/caution visuals must not create a false precision in operator severity | Normalize only at presentation boundaries; preserve backend/history truth; test legacy and canonical inputs render identically | Revise if warning and caution paint differently, source history is rewritten, or unknown severity becomes quiet |
+| Measurement palette separation | Series and quantity colors no longer train operators to ignore safety colors | Several familiar trace hues change | Green/yellow-orange/red must keep one safety meaning | Keep stable series order, visible legends/units, line-style redundancy, and disjointness tests across every theme | Revert a hue if it collides with any safety token or operators cannot distinguish adjacent labeled series |
+| Active phase uses ACCENT | Activity no longer makes a green healthy assertion | Operators accustomed to green phase progress must adapt | Progress and health are independent facts | Completed phases use neutral chrome; health remains separately visible; component tests assert no STATUS_OK progress | Revise if active phase is mistaken for health or loses a visible current-step cue |
+| Identity and current-value retention | Descriptor failures remain conspicuous without erasing measurements | Cells are denser and can show several simultaneous state axes | Unexpected identity failure must not create optimistic normal state or hide evidence | Keep value/unit visible; add fixed fault/stale identity text, non-color cue, count, and deterministic refused/absent tests | Revert if identity failure paints safe, hides a computable value, or allows untrusted descriptor fallback |
+| Physical TopWatchBar labels | Operators see exact Т12/Т11 hardware references instead of misleading min/max language | Labels are longer | Fixed physical provenance is safer than an implied computed extremum | Preserve fixed positions and exact label/route tests | Revise if labels clip, swap channels, or imply Tmin/Tmax again |
+| 2 Hz display and peak evidence | Digits remain readable and plots retain short excursions | Intermediate samples do not appear as standalone digits | Presentation cadence must not downsample acquisition, persistence, alarms, or evidence | Full-rate buffer; latest digit; interval extrema/event evidence; peak-preserving tests | Revise if samples disappear from evidence, alarms wait for repaint, or repaint exceeds 2 Hz |
+| Responsive truth path | Constrained layouts reflow and scroll without hiding selected sensors | More scrolling can slow cross-channel comparison | Truth access outranks simultaneous fit | Stable order, one vertical dashboard path, deliberate table scrolling, logical-geometry tests; physical DPI remains open | Revise if any value/state/unit/provenance clips or keyboard access fails |
+| Audible alarm behavior (open) | Current dual-owner behavior remains fail-loud during protocol work | Duplicate owners and a repeating 3-second bell can fatigue/startle operators | A quiet consolidation without exact activation identity could miss an overnight fault | Keep current behavior documented; require engine activation identity, audio-only ACK, one owner, visible availability, and independent review before consolidation | Do not ship the target protocol if ACK can clear safety state, silence a newer activation, or sound can fail invisibly |
+| Persistent mode availability | Operators can always see whether mode truth is authoritative, unavailable, or unknown | The header carries one additional neutral/caution label during startup or malformed status | Hiding the field makes absence indistinguishable from layout failure and removes operational context | Missing status renders neutral `?????: ??? ??????`; an unexpected value renders caution; neither path infers experiment/debug or enables a mode command; focused component tests cover both | Revise if the badge clips physical vitals, becomes actionable without authority, or operators confuse unavailable with an actual mode |
+| Temperature linear/log scale transition | An explicit scale change recomputes a compatible visible Y range instead of leaving all transformed data off-screen | The operator's prior Y viewport is reset when they deliberately change scale | A visible scale control must not produce a blank plot that looks like missing acquisition | Seed once on initial data and once on the explicit toggle; never resize again during live refresh; ignore non-positive values only for logarithmic range calculation; test viewport stability and log-to-linear round trips | Revert if data remain outside the transformed viewport after a toggle, if later samples override operator zoom, or if non-positive evidence is removed from storage/history |
+| Single-owner alarm summary | The persistent bar cannot be overwritten by an older independent poll and distinguishes unavailable, info, caution, and fault states | The bar depends on the alarm panel's validated polling cadence and shows no count while that truth is unavailable | A stale zero or red INFO count trains the operator to trust false safety color and ordering | AlarmPanel emits validated count, worst severity, and availability; retain last-known rows but revoke ACK and show `нет данных` on disconnect/malformed/error; exact-identity tests cover delayed and failed snapshots | Revert if another count writer appears, malformed rows mutate visible evidence, ACK remains enabled on unavailable truth, or severity color no longer follows the worst unacknowledged alarm |

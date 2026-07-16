@@ -44,7 +44,7 @@ AlarmBadge is the persistent count reflecting the current state. Toast is the "j
 │   bell icon         │                │       MUTED_FOREGROUND│
 │                     │                │       dim             │
 └─────────────────────┘                └─────────────────────┘
-  bg: STATUS_WARNING                     bg: transparent
+  bg: STATUS_CAUTION                     bg: transparent
   text: ON_DESTRUCTIVE                   no border
   radius: RADIUS_SM                      hover: MUTED bg
   padding: SPACE_1 SPACE_2
@@ -62,14 +62,14 @@ Note: 🔔 in diagram shows position; actual implementation uses Lucide `bell` S
 | **Container frame** | Yes | Clickable widget; pill-shaped when alarms present, icon-only when empty |
 | **Bell icon** | Yes | Lucide `bell` SVG, color inherits from state |
 | **Count label** | When count > 0 | Numeric count in FONT_MONO_VALUE |
-| **Severity hint** | Optional | Color ramp: 1 alarm = WARNING, any FAULT = FAULT; when no alarms, MUTED_FOREGROUND |
+| **Severity hint** | Optional | Color ramp: 1 caution/legacy-warning alarm = CAUTION, any FAULT = FAULT; when no alarms, MUTED_FOREGROUND |
 
 ## Invariants
 
 1. **No emoji.** Lucide `bell` SVG only. (RULE-COPY-005)
 2. **Clickable — cursor PointingHand.** Opens Alarms panel on click. (RULE-INTER-011)
 3. **Tooltip mandatory** since this is icon-primary. Tooltip: «3 активные тревоги» or «Нет активных тревог». (RULE-INTER-008)
-4. **Color reflects worst severity present.** 5 warnings + 0 faults → STATUS_WARNING. 1 fault + 10 warnings → STATUS_FAULT. Highest severity wins.
+4. **Color reflects worst severity present.** 5 warnings + 0 faults → STATUS_CAUTION. 1 fault + 10 warnings → STATUS_FAULT. Highest severity wins.
 5. **Count uses tabular mono font.** Prevents width jitter as count increments. (RULE-TYPO-003)
 6. **Two-channel signal: icon + count.** Not color alone. (RULE-A11Y-002)
 7. **Fires instantly, no fade.** State transitions are fault events. (RULE-INTER-006)
@@ -153,7 +153,7 @@ class AlarmBadge(QWidget):
             icon_color = theme.ON_DESTRUCTIVE
         elif s.warning_count > 0:
             severity = "warning"
-            bg_color = theme.STATUS_WARNING
+            bg_color = theme.STATUS_CAUTION
             fg_color = theme.ON_DESTRUCTIVE
             icon_color = theme.ON_DESTRUCTIVE
         elif s.caution_count > 0:
@@ -229,7 +229,7 @@ class AlarmBadge(QWidget):
 
 ```
 fault ≥ 1  →  STATUS_FAULT    (red pill)
-fault = 0, warning ≥ 1  →  STATUS_WARNING  (amber pill)
+fault = 0, warning ≥ 1  →  STATUS_CAUTION  (amber pill)
 fault = 0, warning = 0, caution ≥ 1  →  STATUS_CAUTION  (orange pill)
 all counts = 0  →  transparent + dim icon
 ```
@@ -251,7 +251,7 @@ The badge is small (height ~30, width depends on count digits). Fits naturally i
 |---|---|
 | **No alarms** | Transparent bg, dim bell icon, no count. Hover: MUTED bg |
 | **Caution only** | STATUS_CAUTION pill, count visible, icon + text high-contrast |
-| **Warning present** | STATUS_WARNING pill |
+| **Warning present** | STATUS_CAUTION pill |
 | **Fault present** | STATUS_FAULT pill |
 | **Click (pressed)** | Pressed state ~100ms, then opens panel |
 | **Focus** | 2px ACCENT border (via :focus) replacing normal border |

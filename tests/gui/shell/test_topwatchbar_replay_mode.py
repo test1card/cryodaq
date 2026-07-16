@@ -80,4 +80,5 @@ def test_topwatchbar_non_replay_mode_falls_through(qapp):
     assert "Отладка" in bar._mode_badge.text()
 
     bar._update_mode_badge(None, None)
-    assert not _badge_visible(bar)
+    assert _badge_visible(bar)
+    assert "\u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445" in bar._mode_badge.text().lower()

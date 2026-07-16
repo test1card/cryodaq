@@ -69,7 +69,7 @@ handoff-документах) по-прежнему точный: WARNING=33°, 
 |---|---|---|---|---|
 | STATUS_OK | `#4a8a5e` | `#2e6b45` | 139° | forest green |
 | STATUS_WARNING | `#c4862e` | `#8c5a1c` | 33° | амбер |
-| STATUS_CAUTION | `#b35a38` | `#9c4a2c` | 16° | red-orange |
+| STATUS_CAUTION / legacy STATUS_WARNING | `#c4862e` | `#8c5a1c` | 33° | caution amber |
 | STATUS_FAULT | `#c44545` | `#a53838` | 0° | brick red |
 | STATUS_INFO | `#6490c4` | `#355e94` | 214° | communication blue |
 | STATUS_STALE | `#5a5d68` | `#4a4d58` | 227° | cool gray |
@@ -120,8 +120,7 @@ Reconstructed hue из hex'ов может отличаться от Design hue 
 | Token | light hex | gost CARD (#f5f1e2) | xcode CARD (#fff) | braun CARD (#faf6ea) |
 |---|---|---|---|---|
 | STATUS_OK | `#2e6b45` | 6.78:1 | 7.31:1 | 7.03:1 |
-| STATUS_WARNING | `#8c5a1c` | 5.43:1 | 5.89:1 | 5.67:1 |
-| STATUS_CAUTION | `#9c4a2c` | 5.74:1 | 6.21:1 | 5.98:1 |
+| STATUS_CAUTION / legacy STATUS_WARNING | `#8c5a1c` | 5.43:1 | 5.89:1 | 5.67:1 |
 | STATUS_FAULT | `#a53838` | 6.04:1 | 6.53:1 | 6.29:1 |
 | STATUS_INFO | `#355e94` | 6.56:1 | 7.09:1 | 6.82:1 |
 | STATUS_STALE | `#4a4d58` | 7.42:1 | 8.02:1 | 7.73:1 |

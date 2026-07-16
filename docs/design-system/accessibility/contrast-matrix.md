@@ -30,12 +30,11 @@ All ratios below computed against **BACKGROUND `#0d0e12`** (the canonical shell 
 | **FOREGROUND** | `#e8eaf0` | **16.04:1** | ✓ | ✓ | ✓ | Primary text — safest |
 | **MUTED_FOREGROUND** | `#8a8f9b` | **5.95:1** | ✓ | ✓ | ✗ | Labels, secondary text — AA OK, AAA miss |
 | **ACCENT** | `#7c8cff` | **6.48:1** | ✓ | ✓ | ✗ | Focus rings, selection — AA body OK |
-| **COLD_HIGHLIGHT** | `#5b8db8` | **5.46:1** | ✓ | ✓ | ✗ | Cold channel indicator — AA OK |
+| **COLD_HIGHLIGHT** | `#7ab8c4` | **8.71:1** | ✓ | ✓ | ✓ | Cold channel indicator — AAA OK |
 | **STATUS_OK** | `#4a8a5e` | **4.67:1** | ✓ (barely) | ✓ | ✗ | Status chrome — passes AA but close to threshold |
-| **STATUS_WARNING** | `#c4862e` | **6.24:1** | ✓ | ✓ | ✗ | Warning — AA OK |
-| **STATUS_CAUTION** | `#c47a30` | **5.67:1** | ✓ | ✓ | ✗ | Caution — AA OK |
+| **STATUS_CAUTION / legacy WARNING** | `#c4862e` | **6.24:1** | ✓ | ✓ | ✗ | One caution visual — AA OK |
 | **STATUS_FAULT** | `#c44545` | **3.94:1** | ✗ | ✓ | ✗ | **Body text FAILS AA.** Large text only OR chrome accent |
-| **STATUS_INFO** | `#4a7ba8` | **4.31:1** | ✗ (close) | ✓ | ✗ | **Body text fails AA.** Use as chrome / filled pill only |
+| **STATUS_INFO** | `#6490c4` | **5.81:1** | ✓ | ✓ | ✗ | Informational body text — AA OK |
 | **STATUS_STALE** | `#5a5d68` | **2.94:1** | ✗ | ✗ | ✗ | **Intentionally unreachable.** Reserved for dimmed/stale |
 | **TEXT_DISABLED** | calculated from FG × 0.5 | **2.79:1** | ✗ | ✗ | ✗ | **Intentionally unreachable.** Disabled state |
 | **DESTRUCTIVE** | `#c44545` | **3.94:1** | ✗ | ✓ | ✗ | Same as STATUS_FAULT — destructive button uses filled context not text |
@@ -48,20 +47,25 @@ When STATUS_FAULT / STATUS_WARNING etc. is used as a **background** with ON_DEST
 | Background | Foreground | Ratio | AA body (4.5:1) | AA large (3:1) | AAA body (7:1) |
 |---|---|---|---|---|---|
 | STATUS_OK `#4a8a5e` | ON_DESTRUCTIVE `#e8eaf0` | **3.43:1** | ✗ | ✓ | ✗ |
-| STATUS_WARNING `#c4862e` | ON_DESTRUCTIVE `#e8eaf0` | **2.57:1** | ✗ | ✗ | ✗ |
-| STATUS_CAUTION `#c47a30` | ON_DESTRUCTIVE `#e8eaf0` | **2.83:1** | ✗ | ✗ | ✗ |
+| STATUS_CAUTION / legacy WARNING `#c4862e` | ON_DESTRUCTIVE `#e8eaf0` | **2.57:1** | ✗ | ✗ | ✗ |
 | STATUS_FAULT `#c44545` | ON_DESTRUCTIVE `#e8eaf0` | **4.07:1** | ✗ | ✓ | ✗ |
-| STATUS_INFO `#4a7ba8` | ON_DESTRUCTIVE `#e8eaf0` | **3.72:1** | ✗ | ✓ | ✗ |
+| STATUS_INFO `#6490c4` | ON_DESTRUCTIVE `#e8eaf0` | **2.76:1** | ✗ | ✗ | ✗ |
 | ACCENT `#7c8cff` | ON_DESTRUCTIVE `#e8eaf0` | **2.48:1** | ✗ | ✗ | ✗ |
 
-**Implication:** All filled-pill contexts **fail AA body** with ON_DESTRUCTIVE (`#e8eaf0`). STATUS_OK, STATUS_FAULT, and STATUS_INFO pass AA large (≥3:1), so they remain usable for ≥14px semibold or ≥18px regular labels. STATUS_WARNING, STATUS_CAUTION, and ACCENT fail even AA large — label text on these backgrounds cannot rely on text contrast alone.
+**Implication:** All listed filled-pill contexts fail AA body with
+ON_DESTRUCTIVE. Only STATUS_OK and STATUS_FAULT reach the AA-large threshold;
+caution, info, and ACCENT pill text cannot be the sole readable signal.
 
 This is a documented AA gap in filled pills. Options to remediate (pick per use case):
 1. Accept — rely on multi-channel redundancy (color + shape + icon + adjacent label) per RULE-A11Y-002; filled pills are informational, not the sole state signal
-2. Invert the fill — use ON_ACCENT `#0d0e12` (dark text) on light-filled pills; this flips the math and recovers AA body contrast against STATUS_OK/WARNING/CAUTION/ACCENT backgrounds
-3. Restrict ON_DESTRUCTIVE text to STATUS_FAULT/STATUS_INFO/STATUS_OK pills with ≥14px semibold (AA large applies, 3:1 threshold met); avoid ON_DESTRUCTIVE on STATUS_WARNING, STATUS_CAUTION, ACCENT pills
+2. Invert the fill — use ON_ACCENT `#0d0e12` (dark text) on light-filled pills; this may recover AA body contrast after the exact pair is measured
+3. Restrict ON_DESTRUCTIVE large text to STATUS_FAULT/STATUS_OK pills; caution, info, and ACCENT do not reach 3:1 and need a different foreground or adjacent readable label
 
-CryoDAQ v1.0.x ships option 1 — filled pills ride on multi-channel redundancy (shape + color + icon + adjacent FOREGROUND label), so the pill text itself is supplementary rather than the sole state signal. See `patterns/state-visualization.md`.
+CryoDAQ design system v4 uses option 1 for retained legacy pills: shape,
+color, icon, and an adjacent FOREGROUND label carry the state, so
+sub-threshold pill text is never the sole readable signal. New or revised
+pills must prefer a contrast-tested foreground pair. See
+`patterns/state-visualization.md`.
 
 ## Ratios vs SECONDARY surfaces
 
@@ -73,7 +77,7 @@ When content sits on a secondary surface (CARD `#181a22`, SECONDARY `#22252f`, M
 | MUTED_FOREGROUND | **5.36:1** | **4.72:1** | **5.03:1** |
 | ACCENT | **5.83:1** | **5.13:1** | **5.47:1** |
 | STATUS_OK | **4.21:1** (fails AA body!) | **3.70:1** (fails AA body!) | **3.95:1** (fails AA body!) |
-| STATUS_WARNING | **5.62:1** | **4.95:1** | **5.27:1** |
+| STATUS_CAUTION / legacy WARNING | **5.62:1** | **4.95:1** | **5.27:1** |
 | STATUS_FAULT | **3.54:1** (fails AA body) | **3.12:1** (fails AA body) | **3.32:1** (fails AA body) |
 
 **Critical callout:** STATUS_OK and STATUS_FAULT fail AA body on every secondary surface. MUTED_FOREGROUND on SECONDARY (4.72:1) passes AA body but sits close to the threshold. This means:
@@ -105,13 +109,12 @@ Safe (AA passes):
 - MUTED_FOREGROUND on any background (SECONDARY is the tightest at 4.72:1)
 - ACCENT on any background
 - STATUS_OK on BACKGROUND only (4.67:1 — fails on CARD/SECONDARY/MUTED)
-- STATUS_WARNING on any background (SECONDARY is the tightest at 4.95:1)
-- STATUS_CAUTION on BACKGROUND (5.67:1); CARD/MUTED/SECONDARY not measured separately but tracking within ~0.5 of STATUS_WARNING
-- COLD_HIGHLIGHT on BACKGROUND (5.46:1)
+- STATUS_CAUTION / legacy WARNING on any listed background (SECONDARY is the tightest at 4.95:1)
+- STATUS_INFO on BACKGROUND (5.81:1); other surfaces require their own measured pair
+- COLD_HIGHLIGHT on BACKGROUND (8.71:1)
 
 Not safe as body text (use chrome/icon/border instead):
 - STATUS_FAULT (fails AA body on every surface; use filled pill, border, or large text)
-- STATUS_INFO (fails AA body on BACKGROUND; use filled pill)
 - STATUS_STALE (intentional)
 - TEXT_DISABLED (intentional)
 
@@ -119,13 +122,13 @@ Not safe as body text (use chrome/icon/border instead):
 
 All AA-passing body colors above are safe; additionally, all tokens with ratio ≥ 3:1 qualify:
 - STATUS_FAULT can be used as large text on BACKGROUND (3.94:1), CARD (3.54:1), MUTED (3.32:1), SECONDARY (3.12:1) — all pass AA large
-- STATUS_INFO can be used as large text on BACKGROUND (4.31:1)
+- STATUS_INFO already passes AA body on BACKGROUND (5.81:1)
 - DESTRUCTIVE matches STATUS_FAULT (same hex)
 
 ### For UI components (borders, axes, focus outlines)
 
 Safe (3:1 passes against BACKGROUND):
-- ACCENT (6.48:1), FOREGROUND, STATUS_OK (4.67:1), STATUS_WARNING (6.24:1), STATUS_CAUTION (5.67:1), STATUS_FAULT (3.94:1), STATUS_INFO (4.31:1), COLD_HIGHLIGHT (5.46:1)
+- ACCENT (6.48:1), FOREGROUND, STATUS_OK (4.67:1), STATUS_CAUTION / legacy WARNING (6.24:1), STATUS_FAULT (3.94:1), STATUS_INFO (5.81:1), COLD_HIGHLIGHT (8.71:1)
 
 Not safe as UI component borders:
 - BORDER on any surface (1.46:1 vs BACKGROUND, 1.32:1 vs CARD, 1.16:1 vs SECONDARY) — treat BORDER as visual grouping only, not a functional separator. Functional boundaries (focus, active, fault) must use ACCENT or STATUS_* tokens with proven ≥ 3:1 against the adjacent surface.
@@ -146,20 +149,18 @@ Some AA gaps are deliberate design trade-offs:
 - **TEXT_DISABLED 2.79:1** — disabled means unreachable; operator's eye should skip it. AA compliance on disabled text is not required per WCAG (explicitly excluded).
 - **STATUS_OK 4.67:1 body on BACKGROUND** — passes AA but close to threshold; fails on CARD/SECONDARY/MUTED. Acceptable because STATUS_OK is used mostly as chrome/indicator, not body text.
 - **STATUS_FAULT / DESTRUCTIVE 3.94:1 body on BACKGROUND** — fails AA body on every surface but passes AA large (≥3:1) on BACKGROUND/CARD/MUTED. Used as chrome, filled-pill background, or large semibold labels — never as body text.
-- **Filled-pill text 2.48–4.07:1** — ON_DESTRUCTIVE (`#e8eaf0`) on STATUS_* and ACCENT pill backgrounds fails AA body; three combinations (STATUS_WARNING 2.57:1, STATUS_CAUTION 2.83:1, ACCENT 2.48:1) fail even AA large. Accepted because filled pills ride on multi-channel redundancy (shape + color + icon + adjacent FOREGROUND label) per RULE-A11Y-002 — the pill text is supplementary, not the sole state signal.
+- **Filled-pill text 2.48–4.07:1** — ON_DESTRUCTIVE (`#e8eaf0`) on STATUS_* and ACCENT pill backgrounds fails AA body; caution (2.57:1), info (2.76:1), and ACCENT (2.48:1) fail even AA large. Retained pills therefore require multi-channel redundancy and an adjacent readable FOREGROUND label; the pill text is supplementary, not the sole state signal.
 - **BORDER 1.46:1 non-text on BACKGROUND (and lower on CARD/SECONDARY)** — fails 1.4.11 (≥3:1) on every surface. Accepted as a visual-grouping stroke only; functional boundaries (focus, active, fault) use ACCENT or STATUS_* which do meet 3:1. This gap downgrades 1.4.11 to `Partial` in `accessibility/wcag-baseline.md`.
 
 None of these gaps is "we didn't notice"; each is a documented trade-off between accessibility and visual design density. Multi-channel redundancy (shape + color + icon + text) ensures operators never depend on a single sub-threshold pair to resolve state.
 
-## Light theme (future)
+## Light themes
 
-CryoDAQ currently ships dark theme only. If light theme is added:
-
-- All semantic tokens must be re-derived with same role + new hue
-- Contrast testing must be repeated against new BACKGROUND
-- Light-theme status colors will likely shift (STATUS_FAULT toward darker red for contrast against white)
-
-Light theme is **out of scope** for design system v1.0.0; reserved for future governance.
+The bundled `gost`, `xcode`, and `braun` packs ship contrast-adjusted light
+variants. They preserve the same safe/caution/fault semantics while using the
+pack values tested by `tests/gui/test_theme_loader.py`; dark-background ratios
+in this document must not be copied to a light surface. Any new pack must run
+the same per-surface contrast tests before release.
 
 ## Verification tooling
 

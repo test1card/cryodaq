@@ -57,23 +57,29 @@ Minimum cell size: 160×80px (per `DynamicSensorGrid._MIN_CELL_WIDTH` / `_CELL_H
 2. **Value format fixed per unit.** Temperature `{:.2f} K`, pressure `{:.2e} мбар`, voltage `{:.3f} В`. (RULE-DATA-004, RULE-COPY-006)
 3. **Tabular numbers.** FONT_MONO_VALUE with `tnum` feature. Digits don't shift width. (RULE-TYPO-003, RULE-DATA-003)
 4. **Atomic value updates.** No tween, no count-up animation. Snap. (RULE-DATA-001, RULE-DATA-009)
-5. **Color always paired with value change.** Fault → red; warning → amber; stale → grey. But color alone is insufficient — pair with icon or dedicated indicator for accessibility. (RULE-A11Y-002)
+5. **Color always paired with a non-color cue.** Fault → red; caution (including legacy warning input) → yellow-orange; stale chrome/label → grey. Value text remains legible. (RULE-A11Y-002)
 6. **RADIUS_SM (4)** subordinate in cascade when inside BentoTile (RADIUS_MD=6) or Card (RADIUS_LG=8). (RULE-SURF-006)
-7. **Positionally fixed reference channels matter.** Т11 / Т12 are the only channels with guaranteed fixed physical location — mounted on the second stage (nitrogen plate), cannot be relocated without dismantling the rheostat. All temperature channels are metrologically calibrated, but other channels may change position between experiments, which disqualifies them as fixed reference points for quantitative thresholds. SensorCell itself does not enforce consumer policy — but consumers (TopWatchBar T-min / T-max, alarm thresholds) must prefer Т11 / Т12 for cross-experiment quantitative comparisons. Document in tooltip.
+7. **Positionally fixed reference channels matter.** Т11 / Т12 are the only channels with guaranteed fixed physical locations: Т11 on the N₂ plate and Т12 on the second cryocooler stage. They cannot be relocated without dismantling the rheostat. All temperature channels are metrologically calibrated, but other channels may change position between experiments, which disqualifies them as fixed reference points for quantitative thresholds. SensorCell itself does not enforce consumer policy; consumers use the explicitly named Т11 N₂-plate and Т12 second-stage references rather than implying a computed minimum or maximum. Document the physical location in the tooltip.
 8. **No emoji / no icon in default state.** Clean. Icon prefix only when channel has a specific state to communicate (fault icon next to value if fault). (RULE-COPY-005)
 9. **Height default = ROW_HEIGHT × 1.8** or so — enough for 2-3 lines of stacked text. Not exactly ROW_HEIGHT (which is buttons).
 10. **Interactive on click/double-click** — click shows hover info (popover), double-click opens full channel diagnostic. Single-click on cell must NOT execute destructive command.
 11. **Replay keeps inspection but removes configuration authority.** `SensorCell.set_read_only(True)` cancels any in-flight inline editor, rejects double-click/queued rename, and omits Rename/Hide from the context menu. Plot and history inspection remain available. `DynamicSensorGrid` propagates this state to existing and rebuilt cells, while `DashboardView` independently rejects queued/direct rename and hide signals before `ChannelManager.save()`.
+12. **Identity failure never erases the reading or looks normal.** The numeric
+    value and unit remain visible, while absent/refused descriptor identity is
+    shown with fixed bounded Russian text, a non-color border cue, and a
+    dashboard-level count. Freshness remains adjacent (`… · Устарело`) so
+    neither identity nor stale truth can replace the other. A raw
+    `Reading.status == OK` cannot override that identity cue or paint the cell
+    safe/green.
 
 ## Visual state matrix
 
 | State | Border | Background | Value color | Friendly name color |
 |---|---|---|---|---|
 | **OK** (normal) | 1px BORDER | SURFACE_CARD | FOREGROUND | MUTED_FOREGROUND |
-| **Warning** (approaching limit) | 1px STATUS_WARNING | SURFACE_CARD | STATUS_WARNING | MUTED_FOREGROUND |
-| **Caution** | 1px STATUS_CAUTION | SURFACE_CARD | STATUS_CAUTION | MUTED_FOREGROUND |
+| **Caution / legacy warning** | 1px STATUS_CAUTION | SURFACE_CARD | FOREGROUND | MUTED_FOREGROUND |
 | **Fault** (hard limit exceeded) | 2px STATUS_FAULT | SURFACE_CARD | FOREGROUND* | MUTED_FOREGROUND |
-| **Stale** (not updating) | 1px BORDER | SURFACE_CARD | STATUS_STALE | STATUS_STALE |
+| **Stale** (not updating) | 1px STATUS_STALE | SURFACE_CARD | FOREGROUND | STATUS_STALE |
 | **Disconnected** | 1px dashed BORDER | MUTED | TEXT_DISABLED | TEXT_DISABLED |
 | **Hover** (pointer over interactive cell) | inherits domain border | SECONDARY overlay | inherits | inherits (cursor: pointer) |
 | **Focus** (keyboard) | 2px ACCENT (per RULE-A11Y-001) | inherits | inherits | inherits |
@@ -217,7 +223,7 @@ class SensorCell(QFrame):
         if status == "fault":
             return (theme.STATUS_FAULT, 2)  # thicker border for fault attention
         elif status == "warning":
-            return (theme.STATUS_WARNING, 1)
+            return (theme.STATUS_CAUTION, 1)
         elif status == "caution":
             return (theme.STATUS_CAUTION, 1)
         else:
@@ -285,10 +291,10 @@ Phase B.3 implementation details to preserve:
   `ChannelManager.on_change` and rebuilds cells when the visible set
   changes; subscription is torn down via `off_change` on `closeEvent` and
   `destroyed` (double-guard cleanup).
-- **Per-cell dispatch.** `dispatch_reading(Reading)` routes an incoming
-  reading to the matching `SensorCell.update_value()` by short channel id;
-  `refresh()` is called at ~1 Hz to repaint all cells from the shared
-  `ChannelBufferStore`.
+- **Per-cell dispatch.** `dispatch_reading(Reading, IdentityStatus)` retains
+  the latest presentation value plus interval status/extrema evidence for the
+  matching short channel id. `refresh()` flushes that cut at no more than 2 Hz
+  while the shared `ChannelBufferStore` retains every ingested sample.
 - **Context-menu signals propagated from cells.** `rename_requested`,
   `hide_requested`, `show_on_plot_requested`, `history_requested` —
   emitted by cells, forwarded by the grid to the dashboard.
@@ -348,4 +354,6 @@ if r.status == "fault":
 ## Changelog
 
 - 2026-07-12 (v1.2.0): Added the replay/configuration gate. Mouse and keyboard rename, context-menu hide, and queued/direct persistence signals fail closed; plot/history inspection remains available.
+- 2026-07-15 (v4.0.0): Kept raw numeric evidence visible while making
+  descriptor-absent/refused identity explicit at cell and dashboard level.
 - 2026-04-17: Initial version. Documents Phase B.3 implementation (DynamicSensorGrid with width-driven dynamic column count: `cols = available_width // (MIN_CELL_WIDTH + spacing)`, `MIN_CELL_WIDTH = 160`, `CELL_HEIGHT = 80`). Cold/warm distinction via COLD_HIGHLIGHT left edge. Positionally fixed reference status surfaced in tooltip for Т11 / Т12 («Неподвижный опорный канал»). Fault state uses border + icon + color redundancy. Hover / keyboard-focus / pressed interaction states added to the visual state matrix (FR-021).

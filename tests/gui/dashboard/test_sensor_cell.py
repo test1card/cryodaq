@@ -6,7 +6,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
@@ -14,6 +15,7 @@ from PySide6.QtGui import QKeyEvent
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.sensor_cell import SensorCell
+from cryodaq.gui.state.descriptor_store import IdentityStatus
 
 
 # LOW: assert initial label text, dash value, hint text, stale style
@@ -46,7 +48,7 @@ def test_sensor_cell_update_value_with_reading(app, mock_channel_mgr, buffer_sto
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    cell.update_value(reading)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
     assert "4.21" in cell._value_widget.text()
     assert cell._unit_widget.text() == "K"
     assert cell._last_status == ChannelStatus.OK
@@ -64,7 +66,7 @@ def test_sensor_cell_refresh_from_empty_buffer_marks_stale(app, mock_channel_mgr
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    cell.update_value(reading)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
     assert not cell._data_stale
     # Now refresh from empty buffer → must go stale
     cell.refresh_from_buffer()
@@ -219,7 +221,7 @@ def test_sensor_cell_update_value_large_number(app, mock_channel_mgr, buffer_sto
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    cell.update_value(reading)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
     assert cell._value_widget.text() == "1.50e+03", f"Expected '1.50e+03', got {cell._value_widget.text()!r}"
 
 
@@ -234,7 +236,7 @@ def test_sensor_cell_update_value_small_number(app, mock_channel_mgr, buffer_sto
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    cell.update_value(reading)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
     assert cell._value_widget.text() == "5.00e-03", f"Expected '5.00e-03', got {cell._value_widget.text()!r}"
 
 
@@ -250,7 +252,7 @@ def test_sensor_cell_stale_recovery(app, mock_channel_mgr, buffer_store):
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    cell.update_value(reading)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
     assert cell._last_status == ChannelStatus.OK
     assert cell._data_stale is False
     # Simulate stale via empty buffer refresh
@@ -259,9 +261,98 @@ def test_sensor_cell_stale_recovery(app, mock_channel_mgr, buffer_store):
     cell.refresh_from_buffer()
     assert cell._data_stale is True
     # Push another OK reading — must re-apply OK border
-    cell.update_value(reading)
+    cell.update_value(reading, IdentityStatus.AUTHORITATIVE)
     assert cell._data_stale is False
     assert cell._last_status == ChannelStatus.OK
-    # Verify border is not stale anymore
-    ss = cell.styleSheet()
-    assert theme.STATUS_OK in ss
+    assert theme.STATUS_OK in cell.styleSheet()
+
+
+def test_refused_identity_keeps_value_visible_but_never_renders_normal(app, mock_channel_mgr, buffer_store):
+    cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+    reading = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="LS218_1",
+        channel="Т1 Криостат",
+        value=4.2,
+        unit="K",
+        status=ChannelStatus.OK,
+    )
+
+    cell.update_value(reading, IdentityStatus.REFUSED)
+
+    assert cell._value_widget.text() == "4.20"
+    assert "отклонено" in cell._status_hint_widget.text()
+    assert "Норма" not in cell._status_hint_widget.text()
+    assert cell._data_stale is False
+    assert cell._last_status is None
+    assert theme.STATUS_OK not in cell.styleSheet()
+
+
+def test_refused_identity_and_staleness_remain_simultaneously_visible(app, mock_channel_mgr, buffer_store):
+    cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+    reading = Reading(
+        timestamp=datetime.now(UTC) - timedelta(seconds=31),
+        instrument_id="LS218_1",
+        channel="Т1 Криостат",
+        value=4.2,
+        unit="K",
+        status=ChannelStatus.OK,
+    )
+
+    cell.update_value(reading, IdentityStatus.REFUSED)
+
+    assert cell._value_widget.text() == "4.20"
+    assert "отклонено" in cell._status_hint_widget.text()
+    assert "Устарело" in cell._status_hint_widget.text()
+    assert cell._data_stale is True
+    assert theme.STATUS_FAULT in cell.styleSheet()
+
+
+def test_legacy_absent_identity_and_staleness_remain_simultaneously_visible(app, mock_channel_mgr, buffer_store):
+    cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+    reading = Reading(
+        timestamp=datetime.now(UTC) - timedelta(seconds=31),
+        instrument_id="LS218_1",
+        channel="Т1 Криостат",
+        value=4.2,
+        unit="K",
+        status=ChannelStatus.OK,
+    )
+
+    cell.update_value(reading, IdentityStatus.LEGACY_ABSENT)
+
+    assert cell._value_widget.text() == "4.20"
+    assert "отсутствует" in cell._status_hint_widget.text()
+    assert "Устарело" in cell._status_hint_widget.text()
+    assert cell._data_stale is True
+    assert theme.STATUS_STALE in cell.styleSheet()
+
+
+def test_refresh_adds_stale_without_erasing_non_authoritative_identity(app, mock_channel_mgr, buffer_store):
+    observed_at = datetime.now(UTC)
+    for identity, expected_text, expected_color in (
+        (IdentityStatus.REFUSED, "отклонено", theme.STATUS_FAULT),
+        (IdentityStatus.LEGACY_ABSENT, "отсутствует", theme.STATUS_STALE),
+    ):
+        cell = SensorCell("Т1", mock_channel_mgr, buffer_store)
+        reading = Reading(
+            timestamp=observed_at,
+            instrument_id="LS218_1",
+            channel="Т1 Криостат",
+            value=4.2,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+        buffer_store.append("Т1", observed_at.timestamp(), reading.value)
+        cell.update_value(reading, identity)
+
+        with patch(
+            "cryodaq.gui.dashboard.sensor_cell.time.time",
+            return_value=observed_at.timestamp() + 31,
+        ):
+            cell.refresh_from_buffer()
+
+        assert cell._value_widget.text() == "4.20"
+        assert expected_text in cell._status_hint_widget.text()
+        assert "Устарело" in cell._status_hint_widget.text()
+        assert expected_color in cell.styleSheet()

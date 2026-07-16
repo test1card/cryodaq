@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import soak_mock_stack as soak
 from scripts import soak_mock_stack_runner as runner
 
 
@@ -39,14 +40,16 @@ class _FakeProcess:
         self.module = module
         self.pid = pid
         self.created = created
+        self.started = created
+        self._proc = self
         self.parent = parent
         self.argv = argv
         self.current_status = status
         self.signals: list[int] = []
         self.reuse_after_signal: float | None = None
 
-    def create_time(self) -> float:
-        return self.created
+    def create_time(self, monotonic: bool = False) -> float:
+        return self.started if monotonic else self.created
 
     def status(self) -> str:
         return self.current_status
@@ -61,6 +64,7 @@ class _FakeProcess:
         self.signals.append(signum)
         if self.reuse_after_signal is not None:
             self.created = self.reuse_after_signal
+            self.started = self.reuse_after_signal
 
     def wait(self, *, timeout: float) -> None:
         assert 0 < timeout <= 20
@@ -113,11 +117,13 @@ def test_descendant_scan_ignores_only_children_that_exit_during_identity_capture
     leader = module.add_assistant()
     child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
 
-    def vanished_create_time() -> float:
+    def vanished_create_time(monotonic: bool = False) -> float:
+        del monotonic
         raise vanished(21)
 
     child.create_time = vanished_create_time  # type: ignore[method-assign]
-    leader.children = lambda *, recursive: [child]  # type: ignore[attr-defined]
+    module.processes[child.pid] = child
+    leader.children = lambda *, recursive: pytest.fail("public children() is forbidden")  # type: ignore[attr-defined]
     observer = runner._LockedPsutilObserver(module)
 
     assert observer.descendants(observer.identity_for_pid(20)) == ()
@@ -128,11 +134,13 @@ def test_descendant_scan_keeps_access_denial_fail_closed() -> None:
     leader = module.add_assistant()
     child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
 
-    def denied_create_time() -> float:
+    def denied_create_time(monotonic: bool = False) -> float:
+        del monotonic
         raise module.AccessDenied(21)
 
     child.create_time = denied_create_time  # type: ignore[method-assign]
-    leader.children = lambda *, recursive: [child]  # type: ignore[attr-defined]
+    module.processes[child.pid] = child
+    leader.children = lambda *, recursive: pytest.fail("public children() is forbidden")  # type: ignore[attr-defined]
     observer = runner._LockedPsutilObserver(module)
 
     with pytest.raises(runner._RunnerFoundationError, match="identity is unavailable") as captured:
@@ -151,10 +159,47 @@ def test_descendant_scan_settles_child_that_becomes_zombie_after_enumeration() -
         argv=("python", "child.py"),
         status=module.STATUS_ZOMBIE,
     )
-    leader.children = lambda *, recursive: [child]  # type: ignore[attr-defined]
+    module.processes[child.pid] = child
+    leader.children = lambda *, recursive: pytest.fail("public children() is forbidden")  # type: ignore[attr-defined]
     observer = runner._LockedPsutilObserver(module)
 
     assert observer.descendants(observer.identity_for_pid(20)) == ()
+
+
+def test_descendant_scan_uses_monotonic_process_table_not_epoch_children() -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
+    grandchild = _FakeProcess(module, 22, created=125.0, parent=21, argv=("python", "grandchild.py"))
+    module.processes[child.pid] = child
+    module.processes[grandchild.pid] = grandchild
+    leader.children = lambda *, recursive: pytest.fail("public children() is forbidden")  # type: ignore[attr-defined]
+    child.created -= 1.0
+    grandchild.created -= 1.0
+    observer = runner._LockedPsutilObserver(module)
+
+    assert observer.descendants(observer.identity_for_pid(leader.pid)) == (
+        observer.identity_for_pid(child.pid),
+        observer.identity_for_pid(grandchild.pid),
+    )
+
+
+def test_descendant_scan_rechecks_fresh_pid_after_parent_capture() -> None:
+    module = _FakePsutil()
+    leader = module.add_assistant()
+    child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
+    replacement = _FakeProcess(module, 21, created=999.0, parent=20, argv=("python", "replacement.py"))
+    module.processes[child.pid] = child
+
+    def replacing_parent() -> int:
+        module.processes[child.pid] = replacement
+        return leader.pid
+
+    child.ppid = replacing_parent  # type: ignore[method-assign]
+    observer = runner._LockedPsutilObserver(module)
+
+    with pytest.raises(runner._RunnerFoundationError, match="changed"):
+        observer.descendants(observer.identity_for_pid(leader.pid))
 
 
 def test_group_scan_ignores_exited_zombie_but_retains_exact_live_leader(monkeypatch) -> None:
@@ -180,7 +225,8 @@ def test_group_scan_ignores_process_that_exits_after_pgid_probe(monkeypatch, van
     leader = module.add_assistant()
     child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
 
-    def vanished_create_time() -> float:
+    def vanished_create_time(monotonic: bool = False) -> float:
+        del monotonic
         raise vanished(21)
 
     child.create_time = vanished_create_time  # type: ignore[method-assign]
@@ -196,7 +242,8 @@ def test_group_scan_keeps_post_pgid_access_denial_fail_closed(monkeypatch) -> No
     leader = module.add_assistant()
     child = _FakeProcess(module, 21, created=124.0, parent=20, argv=("python", "child.py"))
 
-    def denied_create_time() -> float:
+    def denied_create_time(monotonic: bool = False) -> float:
+        del monotonic
         raise module.AccessDenied(21)
 
     child.create_time = denied_create_time  # type: ignore[method-assign]
@@ -215,7 +262,7 @@ def test_locked_observer_binds_exact_assistant_identity_signals_and_settles() ->
     observer = runner._LockedPsutilObserver(module)
 
     observed = observer.observe_assistant(20, expected_launcher_pid=10)
-    assert observed.identity == runner._ProcessIdentity(20, "psutil-7.2.2:ctime-ns=123500000000")
+    assert observed.identity == runner._ProcessIdentity(20, "psutil-7.2.2:monotonic-ns=123500000000")
     observer.signal_exact(observed.identity, signal.SIGTERM)
     assert process.signals == [signal.SIGTERM]
     observer.wait_gone(observed.identity, timeout_s=5)
@@ -240,10 +287,40 @@ def test_locked_observer_rejects_version_role_parent_pid_reuse_and_nonterm_signa
         observer.observe_assistant(20, expected_launcher_pid=10)
     process.argv = ("python", "-m", "cryodaq.agents.assistant_bootstrap")
     process.created = 124.0
+    process.started = 124.0
     with pytest.raises(runner._RunnerFoundationError, match="changed"):
         observer.signal_exact(identity, signal.SIGTERM)
     with pytest.raises(runner._RunnerFoundationError, match="only"):
         observer.signal_exact(observer.identity_for_pid(20), signal.SIGINT)
+
+
+def test_process_identity_uses_monotonic_start_across_wall_clock_adjustment(monkeypatch) -> None:
+    module = _FakePsutil()
+    process = module.add_assistant()
+    observer = runner._LockedPsutilObserver(module)
+    identity = observer.identity_for_pid(process.pid)
+
+    process.created += 1.0
+    assert observer.identity_for_pid(process.pid) == identity
+    monkeypatch.setattr(soak.sys, "platform", "linux")
+    assert soak._psutil_process_start_ns(process, epoch_seconds=process.created) == 123_500_000_000
+
+    process.started += 0.01
+    with pytest.raises(runner._RunnerFoundationError, match="changed"):
+        observer.recheck_exact(identity)
+
+
+def test_broad_snapshot_keeps_monotonic_identity_failure_terminal(monkeypatch) -> None:
+    module = _FakePsutil()
+    process = module.add_assistant()
+    process._proc = object()
+    process.info = {"pid": process.pid}  # type: ignore[attr-defined]
+    process.num_fds = lambda: 0  # type: ignore[attr-defined]
+    module.process_iter = lambda _attrs: (process,)  # type: ignore[method-assign]
+    monkeypatch.setattr(soak.sys, "platform", "linux")
+
+    with pytest.raises(ValueError, match="identity is unavailable"):
+        soak.PsutilObserver(module).snapshot()
 
 
 def test_locked_observer_rejects_zombie_missing_and_unbounded_wait() -> None:

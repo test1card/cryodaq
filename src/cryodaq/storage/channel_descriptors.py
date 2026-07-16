@@ -40,6 +40,7 @@ from cryodaq.channels.persistence import (
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
+from cryodaq.storage._windows_secure_read import SecureRelativeReadError, read_secure_relative_bytes
 
 CATALOG_SCHEMA_VERSION: Final = 1
 MAX_CATALOG_ENVELOPE_BYTES: Final = MAX_CATALOG_DESCRIPTORS * MAX_PERSISTED_ENVELOPE_BYTES
@@ -242,50 +243,50 @@ def _read_live_descriptor_config(path: Path) -> bytes:
 
     selected = Path(path)
     absolute = Path(os.path.abspath(os.fspath(selected)))
+    if os.name == "nt":
+        try:
+            raw = read_secure_relative_bytes(
+                absolute.parent,
+                absolute.name,
+                max_bytes=MAX_LIVE_DESCRIPTOR_CONFIG_BYTES,
+            )
+        except SecureRelativeReadError as exc:
+            detail = str(exc)
+            cause = exc.__cause__
+            if isinstance(cause, FileNotFoundError) or getattr(cause, "winerror", None) in {2, 3}:
+                message = "live descriptor manifest is unavailable"
+            elif "exactly one hard link" in detail:
+                message = "live descriptor manifest must be a single-link regular file"
+            elif "exceeds max_bytes" in detail:
+                message = "live descriptor manifest exceeds its bounded file grammar"
+            elif "reparse point" in detail:
+                message = "live descriptor manifest authority path must be symlink-free"
+            else:
+                message = "live descriptor manifest cannot be read safely"
+            raise ChannelDescriptorStorageError(message) from None
+        if not raw:
+            raise ChannelDescriptorStorageError("live descriptor manifest exceeds its bounded file grammar")
+        return raw
+
     directory_fd: int | None = None
     fd: int | None = None
-    parent_snapshots: tuple[tuple[Path, tuple[int, int, int, int, int]], ...] = ()
     try:
         supports_dirfd_walk = hasattr(os, "O_DIRECTORY") and os.open in os.supports_dir_fd
-        if supports_dirfd_walk:
-            parts = absolute.parts
-            if len(parts) < 2:
-                raise ChannelDescriptorStorageError("live descriptor manifest path is invalid")
-            directory_flags = os.O_RDONLY | os.O_DIRECTORY
-            if hasattr(os, "O_NOFOLLOW"):
-                directory_flags |= os.O_NOFOLLOW
-            directory_fd = os.open(parts[0], directory_flags)
-            for component in parts[1:-1]:
-                next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-                os.close(directory_fd)
-                directory_fd = next_fd
-            filename = parts[-1]
-            before = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
-        else:
-            # Windows does not expose dir_fd traversal through os.open.  Keep
-            # an exact identity snapshot of every ancestor, reject links, and
-            # recheck the entire chain after the file descriptor is consumed.
-            # This is the platform fallback for the same symlink-free authority
-            # policy; a parent replacement cannot silently select another file.
-            snapshots: list[tuple[Path, tuple[int, int, int, int, int]]] = []
-            for parent in reversed(absolute.parents):
-                parent_stat = parent.lstat()
-                if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-                    raise ChannelDescriptorStorageError("live descriptor manifest authority path must be symlink-free")
-                snapshots.append(
-                    (
-                        parent,
-                        (
-                            parent_stat.st_dev,
-                            parent_stat.st_ino,
-                            parent_stat.st_mode,
-                            parent_stat.st_mtime_ns,
-                            parent_stat.st_ctime_ns,
-                        ),
-                    )
-                )
-            parent_snapshots = tuple(snapshots)
-            before = absolute.lstat()
+        if not supports_dirfd_walk:
+            raise ChannelDescriptorStorageError("live descriptor manifest cannot be read safely on this platform")
+        parts = absolute.parts
+        if len(parts) < 2:
+            raise ChannelDescriptorStorageError("live descriptor manifest path is invalid")
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        directory_fd = os.open(parts[0], directory_flags)
+        for component in parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        filename = parts[-1]
+        before = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise ChannelDescriptorStorageError("live descriptor manifest must be a single-link regular file")
         if before.st_size <= 0 or before.st_size > MAX_LIVE_DESCRIPTOR_CONFIG_BYTES:
@@ -293,34 +294,16 @@ def _read_live_descriptor_config(path: Path) -> bytes:
         file_flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             file_flags |= os.O_NOFOLLOW
-        if supports_dirfd_walk:
-            fd = os.open(filename, file_flags, dir_fd=directory_fd)
-        else:
-            fd = os.open(absolute, file_flags)
+        fd = os.open(filename, file_flags, dir_fd=directory_fd)
         try:
             opened = os.fstat(fd)
-            # On Windows, lstat-by-path and fstat-by-handle disagree on fields
-            # one API cannot supply for an *unchanged* file: st_dev/st_ino file
-            # identity and st_ctime (creation-time vs change-time semantics).
-            # Bind only the fields that are stable across both calls on every
-            # platform — link count, size, mtime. POSIX keeps the full identity
-            # fence unchanged (and the engine, which loads this manifest, runs on
-            # POSIX with the stronger dir_fd traversal above).
-            if os.name == "nt":
-                changed_before_reading = (
-                    not stat.S_ISREG(opened.st_mode)
-                    or opened.st_nlink != 1
-                    or (opened.st_size, opened.st_mtime_ns)
-                    != (before.st_size, before.st_mtime_ns)
-                )
-            else:
-                changed_before_reading = (
-                    not stat.S_ISREG(opened.st_mode)
-                    or opened.st_nlink != 1
-                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-                    or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-                    != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                )
+            changed_before_reading = (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            )
             if changed_before_reading:
                 raise ChannelDescriptorStorageError("live descriptor manifest changed before reading")
             chunks: list[bytes] = []
@@ -346,17 +329,6 @@ def _read_live_descriptor_config(path: Path) -> bytes:
                 opened.st_ctime_ns,
             ):
                 raise ChannelDescriptorStorageError("live descriptor manifest changed while reading")
-            for parent, expected in parent_snapshots:
-                parent_stat = parent.lstat()
-                actual = (
-                    parent_stat.st_dev,
-                    parent_stat.st_ino,
-                    parent_stat.st_mode,
-                    parent_stat.st_mtime_ns,
-                    parent_stat.st_ctime_ns,
-                )
-                if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode) or actual != expected:
-                    raise ChannelDescriptorStorageError("live descriptor manifest authority path changed while reading")
         finally:
             os.close(fd)
             fd = None

@@ -5,7 +5,7 @@ applies_to: all icon rendering contexts
 enforcement: strict
 priority: high
 status: partially-proposed
-last_updated: 2026-04-17
+last_updated: 2026-07-16
 ---
 
 # Icon Tokens
@@ -85,14 +85,18 @@ def load_colored_icon(name: str, color: str = None) -> QIcon:
 | Status | Color | Required icon |
 |---|---|---|
 | OK | `STATUS_OK` green | `check-circle` |
-| Warning | `STATUS_WARNING` amber | `alert-triangle` |
-| Caution | `STATUS_CAUTION` orange | `alert-triangle` (same as warning, filled) |
+| Caution | `STATUS_CAUTION` amber/orange | filled `alert-triangle` |
 | Fault | `STATUS_FAULT` red | `x-octagon` |
 | Stale | `STATUS_STALE` gray | `cloud-off` or `wifi-off` |
 | Info | `STATUS_INFO` blue | `info` |
 | Cold | `COLD_HIGHLIGHT` blue | `snowflake` |
 
 See `rules/accessibility-rules.md` RULE-A11Y-002 (color not sole channel).
+
+The backend may still emit `warning` for source compatibility. Presentation
+must normalize it to the caution row above: the same label, icon, color, and
+counting rung. `STATUS_WARNING`, where retained in code, is an alias for
+`STATUS_CAUTION`, not an additional operator-facing severity.
 
 ## Emoji prohibition
 
@@ -168,7 +172,7 @@ Common icons used across CryoDAQ for specific domain concepts:
 | `square` | Stop experiment (standard stop icon) |
 | `x` | Close button |
 | `chevron-left` / `chevron-right` | Pagination, back navigation |
-| `alert-triangle` | Warning |
+| `alert-triangle` | Caution (including legacy warning input) |
 | `x-octagon` | Fault |
 | `check-circle` | OK / success |
 | `info` | Informational |
@@ -205,4 +209,5 @@ See `ANTI_PATTERNS.md#icons`.
 
 ## Changelog
 
+- 2026-07-16: Collapsed operator warning/caution iconography into one caution rung; documented legacy `warning` as a presentation alias only.
 - 2026-04-17: Initial version. Lucide bundle documented; sizing tokens PROPOSED (not yet in theme.py).

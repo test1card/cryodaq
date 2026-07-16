@@ -32,7 +32,7 @@ The complete existing GUI corpus is in scope: previously token-compliant
 generic surfaces are not grandfathered. Each touched surface migrates in its
 reviewed slice, and the untouched remainder stays in the canonical enumerated
 `docs/design-system/GUI_MIGRATION_INVENTORY.md` backlog under design-system
-v3.0.1 rather than being silently called complete.
+v4.0.0 rather than being silently called complete.
 
 If reachable production behavior shows that a design-system rule is stale,
 the same reviewed slice corrects the canonical rule and its examples/tests;
@@ -40,6 +40,13 @@ when a reusable token, component, pattern, or state semantic changes, the slice
 also updates design-system versioning and changelog evidence. Legacy GUI code
 is not authority for new presentation behavior. A functional test pass or
 screenshot alone cannot satisfy this gate.
+
+Backend contracts retain the canonical source states `ok | caution | warning |
+fault | stale | disconnected` for compatibility and provenance. Operator
+presentation has one attention rung: `warning` is normalized to `caution` and
+must use the same wording, icon, color, and counting behavior. Safety colors
+are exclusive to safety/status meaning; experiment phase, selection, and
+measurement-series identity use non-safety tokens.
 
 ---
 
@@ -92,7 +99,7 @@ screenshot alone cannot satisfy this gate.
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
 | F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, descriptor-qualified generic and specialist GUI routing, real-localhost lifecycle, conformance/reference driver, and continuous acquisition-to-display software proof committed; real-Windows frozen-build extension proof open | L | H |
-| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — backend snapshot production and software POD home cutover activated; operator, accessibility, performance, ONEDIR, and physical gates open | L | H |
+| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — backend snapshot production is active; the panoramic dashboard is home and the POD remains an additive shift-summary route; operator, accessibility, performance, ONEDIR, WSL candidate-integration, and physical gates open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -218,10 +225,12 @@ This is feature-branch evidence, not shipped history and not a release claim:
   supervised production path consumes the actual loop-owned experiment,
   acquisition, and direct-SQLite persistence feeds. Both production launch
   roots retain one snapshot-ingress owner, pump newest coherent cuts into the
-  real POD, and settle ingress before normal shutdown or theme re-exec. A
-  reviewed 1280x800 source-mode POD visual exists. The 12 operator scenarios,
-  keyboard/NVDA, DPI/ONEDIR, startup/frame/memory/long-session, and physical
-  gates remain open; the screenshot alone closes none of them.
+  real POD, and settle ingress before normal shutdown or theme re-exec. The
+  panoramic dashboard is the primary home surface; the POD is retained as an
+  additive shift-summary route. A reviewed 1280x800 source-mode POD visual
+  exists. The 12 operator scenarios, keyboard/NVDA, DPI/ONEDIR,
+  startup/frame/memory/long-session, WSL final-candidate integration, and
+  physical gates remain open; the screenshot alone closes none of them.
 - No software, mock, replay, CI, soak, or screenshot evidence closes a real
   Windows, dummy-load, independent-final-element, or physical-laboratory gate.
 
@@ -346,8 +355,10 @@ Create backend-owned/read-only contracts for:
 
 Panels consume one revisioned snapshot rather than independently polling and
 reinterpreting state. Every summary carries provenance, freshness, reason
-codes, revision/time, and explicit `ok | caution | warning | fault | stale |
-disconnected` semantics. Unknown never becomes optimistic green.
+codes, revision/time, and explicit source-state `ok | caution | warning |
+fault | stale | disconnected` semantics. Presentation normalizes legacy
+`warning` to the single `caution` attention rung while preserving the source
+state for provenance. Unknown never becomes optimistic green.
 
 Acceptance: model/view tests prove coherent revision cuts, defensive copies,
 disconnect/stale transitions, replay compatibility, and no GUI safety
@@ -399,11 +410,12 @@ scenario, accessibility, performance, or backend-truth gates.
 
 Current boundary: the reusable operating-display, navigation, backend-truth
 models, snapshot transport, Store, production engine publication path, and
-software POD home cutover exist. Both production launch roots retain one
-snapshot-ingress owner and settle it before normal shutdown or theme re-exec.
-A reviewed source-mode POD screenshot is evidence input only; no operator,
-accessibility, performance, ONEDIR, long-session, or physical acceptance is
-claimed.
+software POD route exist. The panoramic dashboard is the primary home surface;
+the POD remains available as an additive shift summary. Both production launch
+roots retain one snapshot-ingress owner and settle it before normal shutdown or
+theme re-exec. A reviewed source-mode POD screenshot is evidence input only; no
+operator, accessibility, performance, ONEDIR, WSL final-candidate integration,
+long-session, or physical acceptance is claimed.
 
 ### F36.3 — Cooldown mission and durable attention history
 
@@ -475,6 +487,13 @@ safety boundaries.
 
 ## Deferred feature work
 
+- **F37 — Fleet/projector operating view.** After ordinary lab-readiness and
+  F36 operator-scenario gates, add an automatically DPI-aware scale mode for
+  100+ sensors and 4K wall/projector displays: virtualized grids, aggregation,
+  search/filter, semantic zoom, projector-scale typography, and an operator
+  density override. Automatic layout must never silently hide channels or
+  change acquisition/alarm truth. Validate both close bench use and room-scale
+  viewing without replacing the ordinary panoramic dashboard.
 - **F8 — Cooldown ML prediction upgrade.** Still research-gated: dataset
   curation, model evaluation, and uncertainty methodology come before code.
 - **F12 — Experiment templates UI editor.** Nice-to-have operator workflow;

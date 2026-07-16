@@ -5,7 +5,7 @@ applies_to: how design-system releases are numbered and what changes go into eac
 status: canonical
 references: governance/deprecation-policy.md, governance/contribution.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-07-14
+last_updated: 2026-07-15
 ---
 
 # Versioning
@@ -20,7 +20,7 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `3.0.1` — POD home truth-boundary and quiet-normal composition patch (see `CHANGELOG.md`).
+**Current version:** `4.0.0` — panoramic primary-surface and GUI tradeoff-review contract (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative

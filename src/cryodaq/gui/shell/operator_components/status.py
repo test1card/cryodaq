@@ -7,9 +7,10 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QWidget
 
 from cryodaq.gui import theme
+from cryodaq.gui.presentation_severity import operator_state_for_display
 from cryodaq.operator_snapshot import OperatorPresentationState
 
-from ._visuals import STATE_VISUALS, label_font, paint_state_shape, plain_text_tooltip
+from ._visuals import label_font, paint_state_shape, plain_text_tooltip, state_visual
 
 
 class CanonicalStatusLabel(QWidget):
@@ -35,10 +36,11 @@ class CanonicalStatusLabel(QWidget):
         if not isinstance(state, OperatorPresentationState):
             raise TypeError("state must be an OperatorPresentationState")
         self._state = state
-        visual = STATE_VISUALS[state]
+        display_state = operator_state_for_display(state)
+        visual = state_visual(state)
         self.setAccessibleName(f"Состояние: {visual.accessible_label}")
         self.setAccessibleDescription(
-            f"Каноническое состояние {state.value}; обозначено формой и текстом {visual.label}."
+            f"Каноническое состояние {display_state.value}; обозначено формой и текстом {visual.label}."
         )
         self.setToolTip(plain_text_tooltip(visual.accessible_label))
         self.updateGeometry()
@@ -46,7 +48,7 @@ class CanonicalStatusLabel(QWidget):
 
     def sizeHint(self) -> QSize:
         metrics = self.fontMetrics()
-        visual = STATE_VISUALS[self._state]
+        visual = state_visual(self._state)
         return QSize(theme.SPACE_3 + theme.SPACE_2 + metrics.horizontalAdvance(visual.label), theme.ROW_HEIGHT)
 
     def minimumSizeHint(self) -> QSize:
@@ -54,7 +56,7 @@ class CanonicalStatusLabel(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: ANN001 - Qt override
         del event
-        visual = STATE_VISUALS[self._state]
+        visual = state_visual(self._state)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(label_font(semibold=True))

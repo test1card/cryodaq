@@ -134,9 +134,11 @@ header_row.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
 **Historical occurrence:** Ongoing until Phase II.9 fix. `ACCENT #7c8cff` (periwinkle, leans violet) was applied to active phase indication.
 
-**Why forbidden:** `ACCENT` is semantically locked to focus/selection affordance (RULE-COLOR-004). Active phase is a **status** concept (this phase is operational), which should use `STATUS_OK #4a8a5e` green.
+**Why forbidden:** Activity and completion are progress, not evidence that the
+experiment is healthy. Using STATUS_OK teaches green to mean two things.
 
-**Fix:** Replace ACCENT with STATUS_OK for active phase border/fill in PhaseStepper widget. Reserve ACCENT strictly for keyboard focus ring, selected tab indicator, and similar interaction affordances.
+**Fix:** Use ACCENT/SECONDARY for the current phase and a neutral filled
+SECONDARY/BORDER cue for completed phases. Render health separately.
 
 ### case: hardcoded-hex-literal
 
@@ -424,16 +426,18 @@ QShortcut(shortcuts.SHORTCUT_OPEN_LOG, self)
 
 ### case: status-color-for-small-text
 
-**Pattern:** Body text in `STATUS_FAULT` red, `STATUS_INFO` blue, or `STATUS_STALE` gray.
+**Pattern:** Body text in `STATUS_FAULT` red or `STATUS_STALE` gray.
 
 **Why forbidden:** These colors fail WCAG AA body contrast (4.5:1 minimum) on `BACKGROUND #0d0e12`:
 - `STATUS_FAULT #c44545`: 3.94:1
-- `STATUS_INFO #4a7ba8`: 4.31:1
 - `STATUS_STALE #5a5d68`: 2.94:1 (intentionally fails all levels)
 
 Reading body-size text (≤14px) in these colors causes eye strain over long shifts.
 
-Note: `STATUS_OK` (4.67:1), `STATUS_WARNING` (6.24:1), `STATUS_CAUTION` (5.67:1), and `COLD_HIGHLIGHT` (5.46:1) DO pass AA body and are acceptable for body text.
+Note: `STATUS_OK` (4.67:1), canonical `STATUS_CAUTION` / legacy
+`STATUS_WARNING` (6.24:1), `STATUS_INFO` (5.81:1), and
+`COLD_HIGHLIGHT` (8.71:1) pass AA body on the default BACKGROUND. Do not
+copy those ratios to another theme or surface without measuring the exact pair.
 
 **Fix:** For inline status with a failing color, use `FOREGROUND` text color and prefix with a colored icon. See RULE-A11Y-003 and `tokens/colors.md` contrast matrix.
 
@@ -526,9 +530,9 @@ RULE-TYPO-001, and the design philosophy in `README.md`.
 
 **Pattern:** Content wider than viewport, activating horizontal scrollbar.
 
-**Why forbidden:** Strict anti-pattern. Content must fit or truncate, never scroll sideways.
+**Why forbidden:** Dashboard horizontal overflow can hide current values and breaks panoramic scanning. Truncating current truth is not an acceptable substitute.
 
-**Fix:** Responsive tile sizing, truncation with tooltips, or reduce information density.
+**Fix:** Dashboard sensors reflow and the dashboard scrolls vertically. Only non-critical labels may ellipsize with a complete tooltip. A dense table may use a deliberate, labeled horizontal scroll path when its columns cannot safely reflow.
 
 **Related rules:** None currently — advisory guidance.
 
@@ -538,7 +542,7 @@ RULE-TYPO-001, and the design philosophy in `README.md`.
 
 **Why forbidden:** Operator doesn't know the UI is outside supported range. Reports "bug" which is "unsupported resolution."
 
-**Fix:** Check viewport at startup; if < 1280×720, display warning dialog requesting larger window.
+**Fix:** The runtime logical minimum is 1280×800. Below it, warn the operator while preserving a vertically scrollable path to current dashboard truth; do not automatically hide sensors.
 
 **Related rules:** None currently — advisory guidance.
 

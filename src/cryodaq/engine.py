@@ -36,6 +36,7 @@ from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
 from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
+from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
@@ -1971,6 +1972,7 @@ class EngineCommandContext:
     cooldown_service: Any = None
     zmq_publisher: ZMQPublisher | None = None
     recording_lifecycle_feed: RecordingLifecycleFeed | None = None
+    annunciation_registry: AnnunciationRegistry | None = None
 
 
 def _feed_recording_experiment_lifecycle(
@@ -2159,6 +2161,7 @@ async def _handle_gui_command(
     leak_rate_estimator = context.leak_rate_estimator
     _leak_cfg = context.leak_cfg
     alarm_v2_state_mgr = context.alarm_v2_state_mgr
+    annunciation_registry = context.annunciation_registry
     _alarm_ring = context.alarm_ring
     broker = context.broker
     experiment_manager = context.experiment_manager
@@ -2218,6 +2221,73 @@ async def _handle_gui_command(
             return result
         if action == "safety_status":
             return {"ok": True, **safety_manager.get_status()}
+        if action == "annunciation_status":
+            if set(cmd) != {"cmd"}:
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            if annunciation_registry is None:
+                return {"ok": False, "error": "annunciation_unavailable"}
+            try:
+                annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
+            except AnnunciationProjectionUnavailable:
+                logger.error("Annunciation projection unavailable")
+                return {"ok": False, "error": "annunciation_unavailable"}
+            return {"ok": True, **annunciation_registry.snapshot()}
+        if action == "annunciation_ack":
+            required = {"cmd", "engine_instance_id", "activation_id", "operator", "reason"}
+            if set(cmd) != required or not all(
+                type(cmd[key]) is str and len(cmd[key]) <= 256 for key in required - {"cmd"}
+            ):
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            if not cmd["engine_instance_id"] or not cmd["activation_id"]:
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            if annunciation_registry is None:
+                return {"ok": False, "error": "annunciation_unavailable"}
+            try:
+                annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
+            except AnnunciationProjectionUnavailable:
+                logger.error("Annunciation projection unavailable")
+                return {"ok": False, "error": "annunciation_unavailable"}
+            target = annunciation_registry.resolve(
+                cmd["engine_instance_id"],
+                cmd["activation_id"],
+            )
+            if target is None:
+                return {"ok": False, "error": "stale_or_unknown_activation"}
+            event_emitted = False
+            if target.source == "alarm_v2" and not target.acknowledged:
+                ack_event = alarm_v2_state_mgr.acknowledge(
+                    target.source_key,
+                    operator=cmd["operator"],
+                    reason=cmd["reason"],
+                    expected_activation_id=target.source_activation_id,
+                )
+                if ack_event is None:
+                    return {"ok": False, "error": "activation_changed"}
+                try:
+                    annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
+                except AnnunciationProjectionUnavailable:
+                    logger.error("Annunciation projection unavailable")
+                    return {"ok": False, "error": "annunciation_unavailable"}
+                await broker.publish(
+                    Reading(
+                        timestamp=datetime.now(UTC),
+                        instrument_id="alarm_v2",
+                        channel="alarm_v2/acknowledged",
+                        value=ack_event["acknowledged_at"],
+                        unit="",
+                        metadata=ack_event,
+                    )
+                )
+                event_emitted = True
+            elif target.source == "safety_fault" and not target.acknowledged:
+                if not annunciation_registry.acknowledge_safety_audio(target.activation_id):
+                    return {"ok": False, "error": "activation_changed"}
+            return {
+                "ok": True,
+                "activation_id": target.activation_id,
+                "event_emitted": event_emitted,
+                "snapshot_revision": annunciation_registry.snapshot()["snapshot_revision"],
+            }
         if action == "sinks_status":
             return {
                 "ok": True,
@@ -2247,9 +2317,47 @@ async def _handle_gui_command(
         if _leak_resp is not None:
             return _leak_resp
         if action == "alarm_v2_status":
+            if annunciation_registry is None:
+                return {"ok": False, "error": "annunciation_unavailable"}
             active = alarm_v2_state_mgr.get_active()
+            try:
+                annunciation_registry.sync(active, safety_manager.get_status())
+                annunciation = annunciation_registry.snapshot()
+            except Exception:
+                logger.error("Alarm activation projection unavailable")
+                return {"ok": False, "error": "alarm_activation_unavailable"}
+            activations = annunciation.get("activations") if isinstance(annunciation, dict) else None
+            valid_activations = isinstance(activations, list) and all(
+                isinstance(item, dict)
+                and type(item.get("activation_id")) is str
+                and bool(item["activation_id"])
+                and type(item.get("source")) is str
+                and bool(item["source"])
+                and type(item.get("source_key")) is str
+                and bool(item["source_key"])
+                and type(item.get("severity")) is str
+                and bool(item["severity"])
+                and type(item.get("activated_at")) in (int, float)
+                and math.isfinite(float(item["activated_at"]))
+                and type(item.get("acknowledged")) is bool
+                for item in activations or []
+            )
+            alarm_activations = (
+                [item for item in activations if item["source"] == "alarm_v2"] if valid_activations else []
+            )
+            activation_keys = {item["source_key"] for item in alarm_activations}
+            if (
+                not valid_activations
+                or len(alarm_activations) != len(activation_keys)
+                or activation_keys != set(active)
+            ):
+                logger.error("Alarm activation projection unavailable")
+                return {"ok": False, "error": "alarm_activation_unavailable"}
+            activation_by_alarm = {item["source_key"]: item["activation_id"] for item in alarm_activations}
             return {
                 "ok": True,
+                "engine_instance_id": annunciation["engine_instance_id"],
+                "snapshot_revision": annunciation["snapshot_revision"],
                 "active": {
                     k: {
                         "level": v.level,
@@ -2259,6 +2367,7 @@ async def _handle_gui_command(
                         "acknowledged": v.acknowledged,
                         "acknowledged_at": v.acknowledged_at,
                         "acknowledged_by": v.acknowledged_by,
+                        "activation_id": activation_by_alarm[k],
                     }
                     for k, v in active.items()
                 },
@@ -2296,13 +2405,38 @@ async def _handle_gui_command(
                 "history": filtered[:limit],
             }
         if action == "alarm_v2_ack":
-            name = cmd.get("alarm_name", "")
-            operator = cmd.get("operator", "")
-            reason = cmd.get("reason", "")
+            required = {
+                "cmd",
+                "alarm_name",
+                "engine_instance_id",
+                "activation_id",
+                "operator",
+                "reason",
+            }
+            if set(cmd) != required or not all(
+                type(cmd[key]) is str and len(cmd[key]) <= 256 for key in required - {"cmd"}
+            ):
+                return {"ok": False, "error": "invalid_alarm_ack_command"}
+            if not cmd["alarm_name"] or not cmd["engine_instance_id"] or not cmd["activation_id"]:
+                return {"ok": False, "error": "invalid_alarm_ack_command"}
+            if annunciation_registry is None:
+                return {"ok": False, "error": "annunciation_unavailable"}
+            try:
+                annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
+            except AnnunciationProjectionUnavailable:
+                logger.error("Alarm activation projection unavailable")
+                return {"ok": False, "error": "alarm_activation_unavailable"}
+            target = annunciation_registry.resolve(cmd["engine_instance_id"], cmd["activation_id"])
+            if target is None or target.source != "alarm_v2" or target.source_key != cmd["alarm_name"]:
+                return {"ok": False, "error": "stale_or_unknown_activation"}
+            name = cmd["alarm_name"]
+            operator = cmd["operator"]
+            reason = cmd["reason"]
             ack_event = alarm_v2_state_mgr.acknowledge(
                 name,
                 operator=operator,
                 reason=reason,
+                expected_activation_id=target.source_activation_id,
             )
             if ack_event is not None:
                 await broker.publish(
@@ -2316,7 +2450,7 @@ async def _handle_gui_command(
                     )
                 )
             return {
-                "ok": ack_event is not None or name in alarm_v2_state_mgr.get_active(),
+                "ok": ack_event is not None or target.acknowledged,
                 "alarm_name": name,
                 "event_emitted": ack_event is not None,
             }
@@ -3110,6 +3244,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         multiline_burst_auto_stop_tasks=_multiline_burst_auto_stop_tasks,
         zmq_publisher=zmq_pub,
         recording_lifecycle_feed=recording_lifecycle_feed,
+        annunciation_registry=AnnunciationRegistry(),
     )
     handle_gui_command = functools.partial(
         _handle_gui_command,

@@ -4,7 +4,7 @@ keywords: tool-rail, sidebar, left-rail, navigation, icon-only, vertical, chrome
 applies_to: left vertical icon-only navigation strip
 status: active
 implements: src/cryodaq/gui/shell/tool_rail.py (Phase 0)
-last_updated: 2026-07-12
+last_updated: 2026-07-15
 references: rules/interaction-rules.md, rules/color-rules.md, tokens/icons.md
 ---
 
@@ -46,7 +46,7 @@ Per Phase 0 audit, these icons open functional panels. **Canonical shortcut = mn
 
 | Slot | Icon | Panel | Canonical shortcut | Numeric fallback |
 |---|---|---|---|---|
-| 1 | `home` or `layout-dashboard` | Дашборд (overview) | *(no mnemonic yet — propose `Ctrl+H` for "home" in a future release)* | Ctrl+1 |
+| 1 | `home` or `layout-dashboard` | Дашборд (panoramic overview) | `Ctrl+H` | Ctrl+1 |
 | 2 | `plus-circle` | Создать эксперимент | *(no mnemonic yet — Ctrl+E is taken by slot 3; candidate: `Ctrl+N` for "new experiment")* | Ctrl+2 |
 | 3 | `flask-conical` | Карточка эксперимента | `Ctrl+E` | Ctrl+3 |
 | 4 | `zap` | Keithley (источник мощности) | `Ctrl+K` | Ctrl+4 |
@@ -58,7 +58,7 @@ Per Phase 0 audit, these icons open functional panels. **Canonical shortcut = mn
 
 Per Phase 0 product decision: «Создать эксперимент» (slot 2) and «Карточка эксперимента» (slot 3) may be merged into a single slot in Phase II — mnemonic for slot 2 will be settled at that point.
 
-When both a canonical mnemonic and a numeric fallback exist, the tooltip shows the **canonical** shortcut: `«Дашборд (Ctrl+1)»` today, migrating to the mnemonic as slot mnemonics are finalized. Do not display both in one tooltip — pick the canonical one.
+When both a canonical mnemonic and a numeric fallback exist, the tooltip shows the **canonical** shortcut: `«Дашборд (Ctrl+H)»`. Do not display both in one tooltip — pick the canonical one. The supplemental «Сводка смены» is available from «Ещё» and does not replace home.
 
 ## Anatomy
 
@@ -103,7 +103,7 @@ When both a canonical mnemonic and a numeric fallback exist, the tooltip shows t
 ## Invariants
 
 1. **Width = TOOL_RAIL_WIDTH (56).** Coupled to HEADER_HEIGHT per RULE-SPACE-006.
-2. **Icon-only, tooltip mandatory** per RULE-INTER-008. Tooltip includes name + shortcut: «Дашборд (Ctrl+1)».
+2. **Icon-only, tooltip mandatory** per RULE-INTER-008. Tooltip includes name + shortcut: «Дашборд (Ctrl+H)».
 3. **Active slot uses ACCENT.** This is legitimate ACCENT use — selection affordance per RULE-COLOR-004.
 4. **Inactive slots MUTED_FOREGROUND icons.** Active slot FOREGROUND icon + 3px ACCENT bar on left edge.
 5. **Click selects.** Hover does not select — hover only changes icon color to FOREGROUND (RULE-COLOR-006).

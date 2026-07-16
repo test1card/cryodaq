@@ -173,9 +173,8 @@ class MainWindowV2(QMainWindow):
     }
 
     def _build_ui(self) -> None:
-        # Eager: the one-cut operator display is home. The legacy dashboard
-        # remains a read-model consumer for existing specialist flows while
-        # operators reach those panels as drill-down destinations.
+        # Eager: the comprehensive dashboard is the primary operator surface.
+        # The one-cut shift briefing remains available as an additive summary.
         self._overview_panel = DashboardView(self._channel_mgr)
         self._overview_panel.setParent(self)
         self._overview_panel.set_read_only(self._replay_mode)
@@ -217,8 +216,10 @@ class MainWindowV2(QMainWindow):
         self._bottom_bar = BottomStatusBar()
         self._overlay = OverlayContainer()
 
-        # F36: home consumes only complete immutable operator snapshots.
-        self._overlay.register("home", self._operator_display)
+        self._overlay.register("home", self._overview_panel)
+        # F36: the supplemental briefing consumes only complete immutable
+        # operator snapshots and remains navigation-only.
+        self._overlay.register("summary", self._operator_display)
         # AlarmPanel needs a stack page but is not visible by default
         self._overlay.register("alarms", self._alarm_panel)
         self._overlay.show_dashboard()
@@ -230,8 +231,9 @@ class MainWindowV2(QMainWindow):
         self._top_bar.experiment_clicked.connect(self._on_experiment_clicked)
         self._top_bar.alarms_clicked.connect(lambda: self._on_tool_clicked("alarms"))
 
-        # Forward alarm count from AlarmPanel directly to top bar
-        self._alarm_panel.v2_alarm_count_changed.connect(self._top_bar.set_alarm_count)
+        # AlarmPanel is the sole validated snapshot/count owner.
+        self._alarm_panel.v2_alarm_summary_changed.connect(self._top_bar.set_alarm_summary)
+        self._alarm_panel.v2_alarm_availability_changed.connect(self._top_bar.set_alarm_available)
 
         # B.5: forward experiment status from top bar to dashboard phase widget
         self._top_bar.experiment_status_received.connect(self._on_experiment_status_received)
@@ -258,7 +260,6 @@ class MainWindowV2(QMainWindow):
 
         root.addWidget(self._bottom_bar)
         self.setCentralWidget(central)
-        self._set_home_truth_surface(True)
 
     # ------------------------------------------------------------------
     # Tool rail handler
@@ -268,11 +269,6 @@ class MainWindowV2(QMainWindow):
     def render_operator_snapshot(self, snapshot: object) -> None:
         """Present one ingress-qualified cut through the POD transaction."""
         self._operator_display.render(snapshot)
-
-    def _set_home_truth_surface(self, home: bool) -> None:
-        """Keep the POD as the only visible current-truth owner on home."""
-        self._top_bar.setVisible(not home)
-        self._bottom_bar.setVisible(not home)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -302,14 +298,11 @@ class MainWindowV2(QMainWindow):
         if name == "home":
             self._overlay.show_dashboard()
             self._tool_rail.set_active("home")
-            self._set_home_truth_surface(True)
             return
         # Lazy-construct overlay panel on first open
         self._ensure_overlay(name)
         self._overlay.show_overlay(name)
         self._tool_rail.set_active(name)
-        if self._overlay.current_overlay == name:
-            self._set_home_truth_surface(False)
 
     def _ensure_overlay(self, name: str) -> None:
         """Build the overlay panel and register it on first access."""
@@ -487,6 +480,7 @@ class MainWindowV2(QMainWindow):
 
         view: DescriptorView | None = None
         result: IngestResult | None = None
+        dashboard_identity = IdentityStatus.REFUSED
         try:
             result = self._descriptor_store.ingest(qualified)
         except RuntimeError:
@@ -505,7 +499,9 @@ class MainWindowV2(QMainWindow):
                 )
             else:
                 view = self._descriptor_store.view(qualified.reading.channel)
-        self._dispatch_reading(qualified.reading)
+                if view is not None:
+                    dashboard_identity = view.identity_status
+        self._dispatch_reading(qualified.reading, dashboard_identity)
         if (
             result is IngestResult.ACCEPTED
             and qualified.descriptor is not None
@@ -526,7 +522,11 @@ class MainWindowV2(QMainWindow):
         self._descriptor_store.invalidate_transport()
 
     @Slot(object)
-    def _dispatch_reading(self, reading: Reading) -> None:
+    def _dispatch_reading(
+        self,
+        reading: Reading,
+        dashboard_identity: IdentityStatus = IdentityStatus.LEGACY_ABSENT,
+    ) -> None:
         self._reading_count += 1
         self._rate_count += 1
         self._last_reading_time = time.monotonic()
@@ -534,12 +534,11 @@ class MainWindowV2(QMainWindow):
         channel = reading.channel
 
         # Eager sinks
-        self._overview_panel.on_reading(reading)
+        self._overview_panel.on_reading(reading, dashboard_identity)
         try:
             self._top_bar.on_reading(reading)
         except Exception:
             logger.warning("TopWatchBar reading dispatch failed", exc_info=True)
-        self._alarm_panel.on_reading(reading)
 
         # Lazy sinks — only route if the panel has been opened at least once
         # B.8.0.2: route log entries to overlay for live timeline

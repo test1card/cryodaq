@@ -960,3 +960,75 @@ worktree after D7.1 is settled.
   startup/frame/memory/long-session evidence, and every dummy-load,
   independent-final-element, and physical-laboratory gate remain open until
   their prescribed evidence exists.
+
+## 2026-07-15 panoramic-home and design-system v4 supersession
+
+- This checkpoint supersedes current-state wording in the earlier historical
+  entries without rewriting their evidence. The panoramic dashboard is now the
+  primary home surface. The immutable POD remains available as the additive
+  `summary` / shift-summary route; it is not the current home screen.
+- The current canonical design-system release is **v4.0.0**. Its physical
+  reference contract is explicit: `Т12` is the second GM-cooler stage and `Т11`
+  is the nitrogen plate. Historical v1/v3 release notes remain historical, not
+  current authority.
+- Established local candidate evidence is limited to the GUI partition at
+  **1,337 passed / 4 skipped**, design-system documentation checks at
+  **18 passed**, and Ruff **PASS**. No verdict is claimed for the
+  still-running or failing remaining partition.
+- Final exact-SHA CI, real-Windows ONEDIR, WSL candidate integration, all 12
+  operator scenarios, keyboard/NVDA, DPI, startup/frame/memory/long-session,
+  dummy-load, independent-final-element, and physical-laboratory gates remain
+  open. This checkpoint does not claim lab readiness.
+
+## 2026-07-16 final-candidate evidence reconciliation
+
+- Exact alarm acknowledgement now binds an action to the exact engine process
+  and exact alarm activation. Name-only, stale-engine, stale-activation,
+  malformed, and delayed-recurrence requests fail closed. Independent review
+  also required one GUI alarm owner: the panel owns the accepted generation,
+  rows, availability, worst severity, and summary emission; a late older
+  generation cannot restore ACK authority or overwrite newer/unavailable
+  truth. A native-Windows alarm/GUI/REST rerun passed **122 tests**. Active
+  evidence remains visible after acknowledgement; this is software evidence.
+- The channel-descriptor loader has a native-Windows handle-anchored secure
+  read. One opened handle supplies identity checks and bytes; reparse,
+  multi-link, nonregular, oversized, and replacement conditions reject.
+  Final focused evidence is **47 passed / 3 exact privilege skips**; the handle
+  count remained unchanged across **500 reads**. Independent re-review verdict:
+  **PASS**.
+- Final native-Windows partition evidence: storage **460 passed / 7 skipped**;
+  exact CI-style remaining **2,278 passed / 106 skipped, PASS**; GUI isolated
+  **7 + 68 passed** plus main **1,484 passed / 4 skipped / 75 deselected**, or
+  **1,559 GUI passes total**. Core reached **1,573 passed** with exactly
+  **6 WinError 1314 symlink-setup failures**; agents/reporting reached
+  **1,448 passed / 35 skipped / 1 deselected** with exactly **17 WinError 1314
+  symlink-setup failures**. Those 23 failures occur while constructing
+  privileged symlink fixtures and contain no product-assertion failure; they
+  are reported, not converted into false passes. The malformed alarm projection
+  fails closed in the **122-pass** alarm/GUI/REST panel; web ACK retention adds
+  **2 passes**, and the sensor-focused panel adds **35 passes**.
+- WSL archive SHA-256
+  `1D6E23626126F18237BCE87298C05CE21F7726656C52A59566CCE90F8B4D6828`
+  ran on `CryoDAQ-Ubuntu-3`, Ubuntu 24.04.4, WSL2 kernel 6.6.87.2,
+  Miniforge Python 3.14.6, SQLite 3.53.2, pytest 9.0.3, 34 dependencies,
+  exact H4 `.venv` alias, and clean `pip check`. Core: **1,575 passed**.
+  Agents/reporting: **1,496 passed / 4 skipped / 1 deselected**. GUI:
+  isolated **7 + 68 passed** and main **1,483 passed / 2 skipped /
+  75 deselected**, or **1,558 passes total**. Adversarial link/process/soak:
+  **639 passed / 10 skipped**, plus **1 passed** unprivileged permission probe
+  under UID/GID 65534. Ruff and lock drift were clean; all applicable POSIX
+  link, hardlink, race, and process tests passed.
+- The WSL archive is stale historical candidate evidence. Remaining reached
+  **2,342 passed / 20 skipped / 1 deselected** before an old report dead-path
+  assertion prevented a green verdict. The shared-tree assertion is corrected,
+  but the archive predates that correction and current alarm/descriptor/docs
+  work. A refreshed archive and docs/remaining rerun are mandatory; no final
+  combined WSL PASS is claimed.
+- The Montana report and four architecture SVGs cover **1,035 source-manifest
+  files** and **1,039 delivered files**; the matching repository metrics are
+  recorded in the report. Regenerate and hash them again after the exact
+  candidate inventory freezes; pre-freeze numbers are not sealed-SHA evidence.
+- Exact-current-SHA local/full and eight-job CI, real-Windows ONEDIR, final-SHA
+  15-minute soak, 12/72-hour duration, all 12 operator scenarios,
+  keyboard/NVDA/DPI/performance/long-session, dummy-load,
+  independent-final-element, and physical-laboratory gates remain **OPEN**.

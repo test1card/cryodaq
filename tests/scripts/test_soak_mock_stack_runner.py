@@ -436,6 +436,34 @@ def test_process_group_cleanup_refuses_reused_leader_before_any_probe_or_signal(
     assert operations == []
 
 
+@pytest.mark.parametrize("signum", [None, signal.SIGTERM])
+def test_descendant_cut_rejects_single_empty_before_late_survivor(
+    monkeypatch: pytest.MonkeyPatch, signum: int | None
+) -> None:
+    child = runner._ProcessIdentity(2, "child")
+    scans = iter(((), (child,), (), ()))
+    signaled: list[tuple[runner._ProcessIdentity, int]] = []
+
+    class Observer:
+        def descendants(self, _expected: object) -> tuple[runner._ProcessIdentity, ...]:
+            return next(scans)
+
+        def signal_exact_for_cleanup(self, identity: runner._ProcessIdentity, received: int) -> None:
+            signaled.append((identity, received))
+
+    monkeypatch.setattr(runner.time, "sleep", lambda _duration: None)
+    descendants, stable = runner._observe_stable_descendant_cut(
+        observer=Observer(),  # type: ignore[arg-type]
+        expected=object(),  # type: ignore[arg-type]
+        deadline=runner.time.monotonic() + 1,
+        signum=signum,
+    )
+
+    assert descendants == ()
+    assert stable is True
+    assert signaled == ([] if signum is None else [(child, signal.SIGTERM)])
+
+
 @pytest.mark.parametrize("stage", ["grace", "signal", "wait"])
 def test_cleanup_retries_to_settlement_before_propagating_cancellation(
     monkeypatch: pytest.MonkeyPatch, stage: str

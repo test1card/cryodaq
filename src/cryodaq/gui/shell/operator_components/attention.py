@@ -21,7 +21,6 @@ from cryodaq.gui import theme
 from cryodaq.operator_snapshot import AttentionItem, AttentionQueue
 
 from ._visuals import (
-    STATE_VISUALS,
     bounded_visible_text,
     configure_text_label,
     label_font,
@@ -29,6 +28,7 @@ from ._visuals import (
     plain_text_tooltip,
     safe_plain_text,
     set_bounded_label,
+    state_visual,
 )
 from .status import CanonicalStatusLabel
 
@@ -93,7 +93,7 @@ class _AttentionModel(QAbstractListModel):
             return None
         item = self._items[index.row()]
         if role in {Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole}:
-            return safe_plain_text(f"{STATE_VISUALS[item.state].accessible_label}. {item.title}. {item.detail}")
+            return safe_plain_text(f"{state_visual(item.state).accessible_label}. {item.title}. {item.detail}")
         if role == Qt.ItemDataRole.ToolTipRole:
             return plain_text_tooltip(item.title, item.detail, f"Код: {item.attention_id}")
         if role == Qt.ItemDataRole.UserRole:
@@ -120,7 +120,7 @@ class _AttentionDelegate(QStyledItemDelegate):
         painter.save()
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, QColor(theme.SELECTION_BG))
-        visual = STATE_VISUALS[item.state]
+        visual = state_visual(item.state)
         color = QColor(visual.color)
         x = option.rect.left() + theme.SPACE_2
         painter.setPen(QPen(color, 3 if item.state.value == "fault" else 2))
@@ -205,7 +205,7 @@ class AttentionList(QListView):
         return _AttentionRenderPlan(
             queue=queue,
             accessible_description=(
-                f"Элементов: {len(queue.items)}. Состояние: {STATE_VISUALS[queue.state].accessible_label}."
+                f"Элементов: {len(queue.items)}. Состояние: {state_visual(queue.state).accessible_label}."
             ),
             expected_revision=self._revision,
             expected_queue=self._queue,

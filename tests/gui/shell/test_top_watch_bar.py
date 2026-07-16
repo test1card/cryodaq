@@ -6,6 +6,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui import theme
@@ -138,7 +139,7 @@ def test_alarms_click_emits_signal() -> None:
     bar.hide()
 
 
-def test_set_alarm_count_updates_label() -> None:
+def test_set_alarm_summary_updates_label() -> None:
     # MED: assert exact text + stylesheet color, not just substring.
     # zero → "Тревоги: 0" + TEXT_MUTED; nonzero → "Тревоги: N <verb>" + STATUS_FAULT.
     _app()
@@ -147,17 +148,47 @@ def test_set_alarm_count_updates_label() -> None:
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
     bar._stale_timer.stop()
-    bar.set_alarm_count(0)
+    bar.set_alarm_summary(0, "NONE")
     assert bar._alarms_label.text() == "Тревоги: 0", f"Zero alarms text wrong: {bar._alarms_label.text()!r}"
     assert theme.TEXT_MUTED in bar._alarms_label.styleSheet(), (
         f"Zero alarms must use TEXT_MUTED: {bar._alarms_label.styleSheet()!r}"
     )
-    bar.set_alarm_count(3)
+    bar.set_alarm_summary(3, "CRITICAL")
     # Text: "Тревоги: 3 активны" (3 → plural "активны")
     assert bar._alarms_label.text() == "Тревоги: 3 активны", f"Three alarms text wrong: {bar._alarms_label.text()!r}"
     assert theme.STATUS_FAULT in bar._alarms_label.styleSheet(), (
         f"Nonzero alarms must use STATUS_FAULT: {bar._alarms_label.styleSheet()!r}"
     )
+
+
+@pytest.mark.parametrize(
+    ("level", "color"),
+    [
+        ("INFO", theme.STATUS_INFO),
+        ("CAUTION", theme.STATUS_CAUTION),
+        ("CRITICAL", theme.STATUS_FAULT),
+        ("UNKNOWN", theme.STATUS_FAULT),
+    ],
+)
+def test_alarm_summary_uses_worst_severity(level: str, color: str) -> None:
+    bar = _make_bar()
+    bar.set_alarm_summary(1, level)
+    assert bar._alarm_count == 1
+    assert (
+        bar._alarms_label.text()
+        == "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: 1 \u0430\u043a\u0442\u0438\u0432\u043d\u0430"
+    )
+    assert color in bar._alarms_label.styleSheet()
+
+
+def test_alarm_count_starts_and_returns_unavailable() -> None:
+    bar = _make_bar()
+    assert bar._alarm_count is None
+    assert "\u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445" in bar._alarms_label.text().lower()
+    bar.set_alarm_summary(2, "CAUTION")
+    bar.set_alarm_available(False)
+    assert bar._alarm_count is None
+    assert "\u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445" in bar._alarms_label.text().lower()
 
 
 # --- B.6 Mode badge tests ---
@@ -173,9 +204,14 @@ def _make_bar():
     return bar
 
 
-def test_mode_badge_hidden_when_no_status() -> None:
+def test_mode_badge_keeps_unavailable_status_visible() -> None:
     bar = _make_bar()
-    assert bar._mode_badge.isHidden()
+    assert not bar._mode_badge.isHidden()
+    assert (
+        bar._mode_badge.text()
+        == "\u0420\u0435\u0436\u0438\u043c: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+    )
+    assert theme.MUTED_FOREGROUND in bar._mode_badge.styleSheet()
 
 
 def test_mode_badge_shows_experiment() -> None:
@@ -219,12 +255,17 @@ def test_mode_badge_uses_status_caution_for_debug() -> None:
     assert theme.SURFACE_ELEVATED in ss
 
 
-def test_mode_badge_hides_on_unknown_value() -> None:
+def test_mode_badge_shows_unknown_value_as_caution() -> None:
     bar = _make_bar()
     bar._update_mode_badge("experiment")
     assert not bar._mode_badge.isHidden()
     bar._update_mode_badge("invalid")
-    assert bar._mode_badge.isHidden()
+    assert not bar._mode_badge.isHidden()
+    assert (
+        bar._mode_badge.text()
+        == "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c"
+    )
+    assert theme.STATUS_CAUTION in bar._mode_badge.styleSheet()
 
 
 def test_mode_badge_updates_when_no_active_experiment() -> None:
@@ -269,12 +310,13 @@ def test_mode_badge_updates_on_change() -> None:
 # --- B.6.2 Clickable badge tests ---
 
 
-def test_mode_badge_click_does_nothing_when_hidden() -> None:
-    """Click on hidden badge (no mode known) should not trigger anything."""
+def test_mode_badge_click_does_nothing_when_mode_unavailable() -> None:
+    """Unavailable remains visible but cannot dispatch a mode command."""
     bar = _make_bar()
-    assert bar._mode_badge.isHidden()
-    bar._on_mode_badge_clicked()  # Should not raise, not show dialog
-    assert bar._mode_badge.isHidden()
+    initial_text = bar._mode_badge.text()
+    assert not bar._mode_badge.isHidden()
+    bar._on_mode_badge_clicked()
+    assert not bar._mode_badge.isHidden() and bar._mode_badge.text() == initial_text
 
 
 def test_mode_badge_stores_current_mode() -> None:
@@ -296,7 +338,11 @@ def test_mode_badge_stores_current_mode() -> None:
 
     bar._update_mode_badge(None)
     assert bar._app_mode is None
-    assert bar._mode_badge.isHidden()
+    assert not bar._mode_badge.isHidden()
+    assert (
+        bar._mode_badge.text()
+        == "\u0420\u0435\u0436\u0438\u043c: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+    )
 
 
 def test_mode_badge_cursor_is_pointing_hand() -> None:

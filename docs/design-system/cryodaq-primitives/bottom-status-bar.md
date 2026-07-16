@@ -166,7 +166,7 @@ class StatusItem(QWidget):
         color = {
             "ok":      theme.STATUS_OK,
             "info":    theme.STATUS_INFO,
-            "warning": theme.STATUS_WARNING,
+            "warning": theme.STATUS_CAUTION,
             "caution": theme.STATUS_CAUTION,
             "fault":   theme.STATUS_FAULT,
             "stale":   theme.STATUS_STALE,

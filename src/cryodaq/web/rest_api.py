@@ -231,9 +231,7 @@ class WriteAuthMiddleware(BaseHTTPMiddleware):
         if request.method not in _SAFE_METHODS and request.url.path.startswith("/api/v1"):
             status = _check_bearer(request.headers.get("authorization"))
             if status is not None:
-                return JSONResponse(
-                    {"detail": _AUTH_ERROR_DETAIL[status]}, status_code=status
-                )
+                return JSONResponse({"detail": _AUTH_ERROR_DETAIL[status]}, status_code=status)
         return await call_next(request)
 
 
@@ -300,7 +298,12 @@ async def get_alarms() -> dict[str, Any]:
     try:
         result = await server._async_engine_command({"cmd": "alarm_v2_status"})
         if result.get("ok"):
-            return {"ok": True, "active": _redact(result.get("active", {}))}
+            return {
+                "ok": True,
+                "engine_instance_id": result.get("engine_instance_id"),
+                "snapshot_revision": result.get("snapshot_revision"),
+                "active": _redact(result.get("active", {})),
+            }
     except Exception:
         server.logger.warning("api/v1 alarms fetch failed")
     return {"ok": False, "active": {}}
@@ -379,11 +382,14 @@ class LogAppendIn(BaseModel):
 
 class AlarmAckIn(BaseModel):
     """Alarm-ack body. ``operator`` (→ acknowledged_by) is NOT accepted —
-    extra="forbid" makes it a 422. ``reason`` is the only client input."""
+    extra="forbid" makes it a 422. Exact engine/activation identity is required
+    so a delayed request cannot acknowledge a later recurrence."""
 
     model_config = ConfigDict(extra="forbid")
 
-    reason: str = ""
+    engine_instance_id: str = Field(min_length=1, max_length=256)
+    activation_id: str = Field(min_length=1, max_length=256)
+    reason: str = Field(default="", max_length=256)
 
 
 async def _forward_write(cmd: dict[str, Any]) -> dict[str, Any]:
@@ -422,15 +428,15 @@ async def post_log(payload: LogAppendIn) -> dict[str, Any]:
 
 
 @router.post("/alarms/{alarm_id}/ack", dependencies=[Depends(require_write_token)])
-async def post_alarm_ack(
-    alarm_id: str, payload: AlarmAckIn | None = None
-) -> dict[str, Any]:
+async def post_alarm_ack(alarm_id: str, payload: AlarmAckIn) -> dict[str, Any]:
     """Квитировать аларм (acknowledged_by = «REST API»)."""
     return await _forward_write(
         {
             "cmd": "alarm_v2_ack",
             "alarm_name": alarm_id,
+            "engine_instance_id": payload.engine_instance_id,
+            "activation_id": payload.activation_id,
             "operator": _REST_IDENTITY,
-            "reason": payload.reason if payload else "",
+            "reason": payload.reason,
         }
     )

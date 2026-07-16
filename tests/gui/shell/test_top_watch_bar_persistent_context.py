@@ -66,16 +66,16 @@ def test_constructs_with_channel_mgr(app, mock_channel_mgr):
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
     assert bar._ctx_pressure_value is not None
-    assert bar._ctx_tmin_value is not None
-    assert bar._ctx_tmax_value is not None
+    assert bar._ctx_second_stage_value is not None
+    assert bar._ctx_n2_plate_value is not None
 
 
 def test_initial_state_shows_dashes(app, mock_channel_mgr):
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
     assert "\u2014" in bar._ctx_pressure_value.text()
-    assert "\u2014" in bar._ctx_tmin_value.text()
-    assert "\u2014" in bar._ctx_tmax_value.text()
+    assert "\u2014" in bar._ctx_second_stage_value.text()
+    assert "\u2014" in bar._ctx_n2_plate_value.text()
 
 
 def test_no_heater_cell_in_top_watch_bar(app, mock_channel_mgr):
@@ -98,9 +98,7 @@ def test_no_time_window_picker_in_top_watch_bar(app, mock_channel_mgr):
     btns = bar.findChildren(QPushButton)
     labels_to_reject = {"1мин", "1ч", "6ч", "24ч", "Всё"}
     for b in btns:
-        assert b.text() not in labels_to_reject, (
-            f"unexpected time-window button: {b.text()}"
-        )
+        assert b.text() not in labels_to_reject, f"unexpected time-window button: {b.text()}"
     assert not hasattr(bar, "_time_window_echo_label")
     assert not hasattr(bar, "set_time_window_echo")
 
@@ -120,49 +118,35 @@ def test_pressure_reading_updates_display(app, mock_channel_mgr):
     assert "\u043c\u0431\u0430\u0440" in text  # мбар
 
 
-def test_cold_temp_updates_tmin_tmax(app, mock_channel_mgr):
-    # T-min / T-max are locked to positionally-fixed reference channels
-    # Т11 and Т12 (design system invariant #21). Arbitrary cold channels
-    # like Т1 / Т7 must NOT populate the min/max cells.
+def test_physical_temperature_labels_and_channels_are_exact(app, mock_channel_mgr):
+    # The fixed references name their physical locations. Arbitrary cold
+    # channels like Т1 / Т7 must not populate these cells.
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
-    # Т12 -> T min cell (2-я ступень, холодная точка ~2.9K)
-    bar.on_reading(
-        _make_reading(
-            "\u042212 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 2", 4.2
-        )
-    )
-    # Т11 -> T max cell (плита 1-й ступени ~40K)
-    bar.on_reading(
-        _make_reading(
-            "\u042211 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 1", 76.5
-        )
-    )
-    assert "4.20" in bar._ctx_tmin_value.text()
-    assert "76.50" in bar._ctx_tmax_value.text()
+    assert bar._ctx_second_stage_label.text() == "Т 2-й ступени"
+    assert bar._ctx_n2_plate_label.text() == "Т плиты N₂"
+
+    # Т12 -> second-stage cell (cold reference, ~2.9 K)
+    bar.on_reading(_make_reading("\u042212 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 2", 4.2))
+    # Т11 -> nitrogen-plate cell (~40 K)
+    bar.on_reading(_make_reading("\u042211 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 1", 76.5))
+    assert "4.20" in bar._ctx_second_stage_value.text()
+    assert "76.50" in bar._ctx_n2_plate_value.text()
 
 
-def test_non_reference_cold_channel_ignored_for_tmin_tmax(app, mock_channel_mgr):
+def test_non_reference_cold_channel_ignored_for_physical_references(app, mock_channel_mgr):
     # Reading from a non-reference cold channel (e.g. Т1) must not affect
     # T min / T max — those are locked to Т11 / Т12 regardless of what
     # other channels report.
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
-    bar.on_reading(
-        _make_reading(
-            "\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442", 4.2
-        )
-    )
-    bar.on_reading(
-        _make_reading(
-            "\u04227 \u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440", 76.5
-        )
-    )
-    assert "\u2014" in bar._ctx_tmin_value.text()
-    assert "\u2014" in bar._ctx_tmax_value.text()
+    bar.on_reading(_make_reading("\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442", 4.2))
+    bar.on_reading(_make_reading("\u04227 \u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440", 76.5))
+    assert "\u2014" in bar._ctx_second_stage_value.text()
+    assert "\u2014" in bar._ctx_n2_plate_value.text()
 
 
-def test_warm_channel_ignored_for_tmin_tmax(app, mock_channel_mgr):
+def test_warm_channel_ignored_for_physical_references(app, mock_channel_mgr):
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
     bar.on_reading(
@@ -171,15 +155,15 @@ def test_warm_channel_ignored_for_tmin_tmax(app, mock_channel_mgr):
             295.0,
         )
     )
-    assert "\u2014" in bar._ctx_tmin_value.text()
-    assert "\u2014" in bar._ctx_tmax_value.text()
+    assert "\u2014" in bar._ctx_second_stage_value.text()
+    assert "\u2014" in bar._ctx_n2_plate_value.text()
 
 
 def test_nan_value_ignored(app, mock_channel_mgr):
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
     bar.on_reading(_make_reading("\u04221 X", float("nan")))
-    assert "\u2014" in bar._ctx_tmin_value.text()
+    assert "\u2014" in bar._ctx_second_stage_value.text()
 
 
 # --- _format_pressure helper (Batch A) ---

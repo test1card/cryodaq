@@ -81,7 +81,10 @@ def test_main_window_ingests_then_dispatches_valid_reading_once(described: bool)
     assert window._descriptor_store.identity_status(reading.channel) is (
         IdentityStatus.AUTHORITATIVE if described else IdentityStatus.LEGACY_ABSENT
     )
-    dispatch.assert_called_once_with(reading)
+    dispatch.assert_called_once_with(
+        reading,
+        IdentityStatus.AUTHORITATIVE if described else IdentityStatus.LEGACY_ABSENT,
+    )
 
 
 def test_main_window_drops_malformed_carrier_before_store_or_legacy_sinks() -> None:
@@ -110,7 +113,7 @@ def test_main_window_preserves_valid_reading_after_unexpected_ingest_failure() -
     ):
         window.dispatch_qualified_reading(qualified)
 
-    dispatch.assert_called_once_with(qualified.reading)
+    dispatch.assert_called_once_with(qualified.reading, IdentityStatus.REFUSED)
 
 
 def test_main_window_never_hides_store_thread_ownership_violation() -> None:

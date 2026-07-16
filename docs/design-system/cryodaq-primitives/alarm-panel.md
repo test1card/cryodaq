@@ -1,123 +1,81 @@
 ---
 title: AlarmPanel
-keywords: alarms, acknowledge, v1, v2, severity chip, fail-open, K1 safety, tray count
-applies_to: Dual-engine alarm overlay (v1 threshold + v2 YAML-driven phase-aware)
+keywords: alarms, acknowledge, v2, exact identity, fail-open, K1 safety
+applies_to: YAML-driven phase-aware alarm overlay
 status: active
-implements: src/cryodaq/gui/shell/overlays/alarm_panel.py (Phase II.4); legacy src/cryodaq/gui/widgets/alarm_panel.py retained (DEPRECATED) until Phase II.13
-last_updated: 2026-07-12
-references: rules/data-display-rules.md, rules/copy-rules.md, rules/color-rules.md, cryodaq-primitives/alarm-badge.md, components/card.md, components/button.md
+implements: src/cryodaq/gui/shell/overlays/alarm_panel.py
+last_updated: 2026-07-16
+references: rules/data-display-rules.md, rules/color-rules.md, patterns/operator-evidence-and-retention.md
 ---
 
 # AlarmPanel
 
-K1-critical overlay. Shows two tables — v1 threshold-based engine (fed via `on_reading()` readings with `metadata["alarm_name"]`) and v2 YAML-driven phase-aware engine (fed via 3 s polling of `alarm_v2_status`). This is the primary surface for **acknowledging safety alarms**; it must be readable, unambiguous, and never hide active faults.
+K1-critical operator surface for the single authoritative phase-aware alarm
+engine. The retired threshold-alarm table and `Reading` ingress MUST NOT be
+restored: the engine no longer publishes that protocol, and a second GUI truth
+owner would permit divergent counts and name-only acknowledgement.
 
-## Rebuild scope (II.4)
+## Operator contract
 
-Legacy widget at `src/cryodaq/gui/widgets/alarm_panel.py` used emoji severity icons (🔴/🟡/🔵), hardcoded `theme.STONE_400` / `theme.TEXT_INVERSE` on the ACK button QSS, and eager registration at module import. Replacement at `src/cryodaq/gui/shell/overlays/alarm_panel.py` resolves all three:
+- Poll `alarm_v2_status` while connected and retain the last accepted rows on
+  disconnect or transport failure.
+- Accept a snapshot only when it has a non-empty engine instance, a
+  non-negative integer revision, non-empty string alarm identifiers, mapping
+  rows, and exact activation identifiers for every actionable row.
+- A malformed snapshot MUST retain last-known evidence, revoke ACK authority,
+  and show an explicit unavailable/stale cue. It MUST NOT partially apply,
+  silently filter rows, erase the table, or raise into the event loop.
+- Ignore lower revisions from the same engine instance.
+- Capture the accepted engine instance and activation identifier in each row's
+  ACK callback. A delayed click MUST NOT substitute a newer activation with the
+  same alarm name.
+- ACK changes attention and audible responsibility only. It never clears the
+  hazard or invokes recovery/control. Acknowledged evidence remains visible
+  until the authoritative engine removes it.
+- Replay/read-only and disconnected states retain evidence but disable ACK.
 
-- Emoji → `SeverityChip` pill widget using `STATUS_FAULT` / `STATUS_WARNING` / `STATUS_INFO` tokens with Russian short labels (`КРИТ` / `ПРЕД` / `ИНФО`).
-- Deprecated `STONE_400` / `TEXT_INVERSE` → `SURFACE_MUTED` / `MUTED_FOREGROUND` for disabled state, `STATUS_FAULT` + `ON_PRIMARY` for active state.
-- Host Integration Contract: `set_connected(bool)` gates ACK buttons and pauses v2 polling. The overlay is still eagerly built (it feeds the top-bar alarm count before the user ever opens the tab), but `_tick_status` now explicitly mirrors connection state into the panel.
+## Presentation
 
-## Tokens
+The table presents severity, stable identifier, full message (tooltip when
+visually abbreviated), channels, elapsed time, and action/state. Severity has a
+Russian text cue as well as color. `WARNING` and `CAUTION` share the canonical
+caution presentation; `CRITICAL` and unknown severity use fault presentation.
+Acknowledged rows are muted and marked `✓`, but remain readable.
 
-- **Background / surfaces:** `BACKGROUND` (panel root), `SURFACE_CARD` (v1 + v2 cards and tables), `SURFACE_MUTED` (disabled ACK + table header).
-- **Borders:** `BORDER_SUBTLE` (card + table outline, header separator, gridlines).
-- **Text:** `FOREGROUND` (titles, data), `MUTED_FOREGROUND` (summary chip, empty-state label, disabled ACK text, table header text).
-- **Status tokens:** `STATUS_FAULT` (CRITICAL chip + ACK), `STATUS_WARNING` (WARNING chip + ACK), `STATUS_INFO` (INFO chip + ACK + fallback).
-- **Contrast base:** `ON_PRIMARY` (chip + ACK text on colored background).
-- **Spacing:** `SPACE_0 / SPACE_1 / SPACE_2 / SPACE_3 / SPACE_4` only.
-- **Radii:** `RADIUS_MD` (cards), `RADIUS_SM` (chip, tables, ACK button).
-- **Typography:** `FONT_BODY` with `FONT_BODY_SIZE` / `FONT_LABEL_SIZE`, `FONT_SIZE_XL` for the title, `FONT_SIZE_LG` for section titles, `FONT_SIZE_XS` for the chip, `FONT_MONO` for numeric cells and chip label.
+The cooldown footer is evidence, not a safety-health verdict. Active monitoring
+uses `ACCENT`, deviations use caution/fault, and completed/within-threshold
+comparisons use `ACCENT` rather than safety green. Unknown backend state or
+missing decision evidence is explicit and neutral; it MUST NOT render as
+`НОРМА` or `STATUS_OK`.
 
-No hardcoded hex. No emoji. No deprecated tokens.
+## Design-system tradeoff record
 
-## Layout
+1. **Better:** one authoritative table eliminates divergent alarm truth and
+   name-only ACK; malformed data can no longer erase evidence or grant action.
+2. **Worse:** operators lose the obsolete threshold table and see retained
+   last-known rows during protocol faults rather than an apparently fresh list.
+3. **Justification:** exact activation identity and persistent evidence align
+   with fail-closed acknowledgement and operator-centric anomaly review.
+4. **Mitigation:** an explicit unavailable cue distinguishes retained evidence;
+   focused tests cover delayed ACK, malformed nested rows, disconnect, replay,
+   acknowledged retention, and non-green cooldown completion.
+5. **Revisit trigger:** restore or replace an additional table only if a new
+   authoritative producer is designed with stable identity, revisioning, and a
+   reviewed migration contract; revise neutral cooldown treatment only with
+   validated decision metrics and operator evidence.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ АЛАРМЫ                             N критических, M предупр.    │
-├─────────────────────────────────────────────────────────────────┤
-│ ┌ Card: Текущие тревоги (v1) ──────────────────────────────┐   │
-│ │  [КРИТ] | Имя | Канал | Значение | Порог | Время | N | ACK   │
-│ │  ...                                                       │   │
-│ └──────────────────────────────────────────────────────────┘   │
-│ ┌ Card: Физические тревоги (v2) ───────────────────────────┐   │
-│ │  [КРИТ] | alarm_id | Сообщение | Каналы | Время | ACK        │
-│ │  ...                                                       │   │
-│ │  Нет активных алармов                                      │   │
-│ └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
+## Host integration
 
-- Root: `QVBoxLayout`, margins `(SPACE_4, SPACE_3, SPACE_4, SPACE_3)`, spacing `SPACE_3`.
-- Header: title (`FONT_SIZE_XL` + SEMIBOLD) left, aggregate severity chip right (`MUTED_FOREGROUND`).
-- v1 and v2 cards: `SURFACE_CARD` with `RADIUS_MD` and `BORDER_SUBTLE`, inner margin `SPACE_3`.
-- v2 card has an empty-state label `«Нет активных алармов»` under the table; visible when the active map is empty.
-- Tables: stretched last-column-resize except the chip (col 0) and state (last col) columns which are `ResizeToContents`.
-- v1 and v2 sort order: `CRITICAL` → `WARNING` → `INFO`, then by name / alarm_id.
-
-## Public API
-
-```python
-class AlarmPanel(QWidget):
-    v2_alarm_count_changed = Signal(int)  # preserved for tray-icon consumer
-
-    def on_reading(self, reading: Reading) -> None: ...
-    def set_connected(self, connected: bool) -> None: ...
-    def set_read_only(self, read_only: bool) -> None: ...
-    def update_v2_status(self, payload: dict) -> None: ...
-    def get_active_v1_count(self) -> int: ...
-    def get_active_v2_count(self) -> int: ...
-```
-
-- `on_reading(reading)`: v1 reading sink. Drops readings without `metadata["alarm_name"]`. Updates row severity / value / state based on `event_type` (`activated` | `acknowledged` | `cleared`).
-- `set_connected(bool)`: gates ACK buttons (disabled when disconnected) and pauses the v2 poll timer. Idempotent for repeated values.
-- `set_read_only(bool)`: replay gate. Alarm rows and polling remain observational; v1/v2 ACK buttons stay disabled and both dispatch handlers reject direct or queued invocation.
-- `update_v2_status(payload)`: accepts the raw `alarm_v2_status` response. Host / tests may call this directly without going through the 3 s poll. Emits `v2_alarm_count_changed`.
-- `get_active_v1_count()` / `get_active_v2_count()`: accessors reserved for future finalize / report-generation guards.
-
-## Interaction
-
-- **Connected + alarm active** → ACK button colored by severity token, enabled. Click dispatches `alarm_acknowledge` (v1) or `alarm_v2_ack` (v2) via `ZmqCommandWorker`.
-- **Disconnected** → ACK buttons disabled via `SURFACE_MUTED` + `MUTED_FOREGROUND`. Row data remains visible (fail-OPEN — stale data is better than hidden alarms).
-- **Engine error during poll** → existing v2 map is preserved; no table wipe. Logged as warning.
-- **Replay/read-only** → active and acknowledged history remains visible; `alarm_acknowledge` and `alarm_v2_ack` are unavailable even if replay readings make the transport look connected.
-- **Alarm transitions** — v1 `activated` increments `trigger_count`; `acknowledged` / `cleared` update the state cell (`Подтв.` / `Сброшена`).
-
-## Severity chip
-
-`SeverityChip(severity)` renders a small centered pill:
-
-- Background: `STATUS_FAULT` / `STATUS_WARNING` / `STATUS_INFO`.
-- Foreground: `ON_PRIMARY`.
-- Label: `КРИТ` / `ПРЕД` / `ИНФО` (Russian short, `FONT_MONO` + SEMIBOLD, `FONT_SIZE_XS`).
-- Padding: `SPACE_0 SPACE_2`; radius `RADIUS_SM`.
-
-Reused by both tables.
-
-## Host integration contract
-
-`MainWindowV2` must:
-
-1. Construct `AlarmPanel` eagerly (it supplies the top-bar alarm count before the user opens the tab).
-2. Connect `v2_alarm_count_changed` to `TopWatchBar.set_alarm_count`.
-3. Register the panel under the `"alarms"` key on `OverlayContainer`.
-4. Mirror connection state into the panel from `_tick_status` — same pattern as KeithleyPanel / OperatorLogPanel / ArchivePanel / ConductivityPanel / CalibrationPanel.
-5. Route every reading through `self._alarm_panel.on_reading(reading)` from `_dispatch_reading`.
-
-See `src/cryodaq/gui/shell/main_window_v2.py` lines 38, 148, 168, 178, 332 and the `_tick_status` block for the canonical wiring.
-
-## Rules cross-reference
-
-- `rules/color-rules.md` RULE-COLOR-010 — no hardcoded hex (satisfied: only DS tokens).
-- `rules/color-rules.md` RULE-COLOR-015 — status colors reserved for semantic status (CRITICAL / WARNING / INFO).
-- `rules/copy-rules.md` RULE-COPY-005 — no emoji in operator-facing labels (satisfied: chip replaces 🔴🟡🔵).
-- `rules/data-display-rules.md` RULE-TABLE-002 — monospace numeric cells with tabular figures.
-- `rules/interaction-rules.md` RULE-INTERACT-003 — destructive / high-impact actions (ACK) gated by connection state.
+`MainWindowV2` constructs the panel eagerly, registers it under `alarms`, wires
+`v2_alarm_summary_changed` and `v2_alarm_availability_changed` to the top watch
+bar, and mirrors connection state from its status tick. The panel is the sole
+validated owner of alarm count, worst presentation severity, revision, and
+availability. Generic measurement readings are not routed to the panel.
 
 ## Changelog
 
-- **2026-07-12 (v1.2.0)** — documented replay-readable/alarm-ACK-disabled semantics and handler-level fail-closed dispatch.
-- **2026-04-18 (Phase II.4)** — rebuild landed. Emoji removed; DS v1.0.1 tokens throughout; `set_connected` hook added; eager registration kept by design (tray-count path).
+- **2026-07-16 (v2.0.0):** retired obsolete v1 GUI/protocol ingress; made v2 the
+  sole truth owner; added whole-snapshot validation, retained-evidence failure
+  cues, exact ACK identity, and neutral cooldown evidence semantics.
+- **2026-07-15 (v1.3.0):** required exact engine-instance/activation identity
+  for v2 ACK and retained acknowledged rows.

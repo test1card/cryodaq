@@ -4,12 +4,12 @@ keywords: rules, governance, token-naming, versioning, deprecation, RULE-GOV
 applies_to: meta-rules about how the design system itself evolves
 status: canonical
 references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md
-last_updated: 2026-07-14
+last_updated: 2026-07-15
 ---
 
 # Governance Rules
 
-Three rules that govern how the design system itself evolves. Distinct from the eight enforcement-rule categories (COLOR, SURF, TYPO, SPACE, INTER, DATA, A11Y, COPY) — those govern what widgets look like; these govern how the system gets changed.
+Four rules govern how the design system itself evolves. Distinct from the eight enforcement-rule categories (COLOR, SURF, TYPO, SPACE, INTER, DATA, A11Y, COPY) — those govern what widgets look like; these govern how the system gets changed.
 
 Each rule is a thin pointer to the authoritative governance document, because the full specification is too long to duplicate here and because governance documents need room for worked examples, migration guides, and lifecycle diagrams.
 
@@ -44,7 +44,7 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v3.0.1 (corpus-wide informative/beautiful composition gate; flat tokens unchanged).
+**Current version:** v4.0.0 (panoramic observability and operator-evidence gate; flat tokens unchanged).
 
 ## RULE-GOV-003
 
@@ -63,19 +63,27 @@ Lifecycle: Active → Deprecated → Removed. Deprecation window is at least one
 
 **Currently deprecated artifacts:** STONE_* token aliases (~15 legacy-panel call sites, being migrated).
 
-## Why three rules, not more
+## RULE-GOV-004
 
-RULE-GOV-* deliberately minimal. Governance rules describe the system's self-change mechanism; each additional rule adds process overhead. Three rules cover the critical axes:
+Every GUI/UI/UX change MUST include the five-field operator/safety tradeoff
+record defined by `governance/change-impact.md`. Review blocks the change when
+an aesthetic benefit obscures truth or when the downside has no mitigation,
+test, and revise/revert trigger.
+
+## Why four rules, not more
+
+RULE-GOV-* deliberately minimal. Governance rules describe the system's self-change mechanism; each additional rule adds process overhead. Four rules cover the critical axes:
 
 1. **Naming** (GOV-001) — how artifacts are identified
 2. **Versioning** (GOV-002) — when changes ship
 3. **Deprecation** (GOV-003) — how old artifacts retire
+4. **Operator impact** (GOV-004) — how GUI benefits and costs are reviewed
 
 Other governance concerns (testing, performance, contribution workflow) are documented as governance documents but not promoted to RULE-* status because they're process guidance rather than invariant constraints.
 
 ## Rules applied to themselves
 
-These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v3.0.x state: all three Active, no pending removals.
+These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.0.0 state: all four Active, no pending removals.
 
 ## Related rules and patterns
 
@@ -86,6 +94,8 @@ These three rules are themselves subject to the design system's evolution proces
 
 ## Changelog
 
+- 2026-07-15 (v4.0.0): Added RULE-GOV-004, the mandatory five-field
+  operator/safety change-impact record.
 - 2026-04-17: Initial version. Three governance rules as thin pointers to canonical governance documents. Closes forward references to RULE-GOV-001 and RULE-GOV-003 from Batches 1 and 2.
 - 2026-07-14 (v2.0.0): Reconciled the current flat-token architecture and STONE_* deprecation schedule with the scoped descriptor-identity major release.
 - 2026-07-14 (v3.0.0): Applied governance to the breaking corpus-wide

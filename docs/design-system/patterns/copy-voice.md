@@ -4,7 +4,7 @@ keywords: copy, voice, tone, russian, vocabulary, imperative, descriptive, fsm-s
 applies_to: operator-facing text across all surfaces — labels, buttons, messages, tooltips
 status: canonical
 references: rules/content-voice-rules.md, rules/typography-rules.md
-last_updated: 2026-04-17
+last_updated: 2026-07-15
 ---
 
 # Copy Voice
@@ -27,7 +27,7 @@ Target: a lab engineer who knows the domain should read a label, button, or mess
 - Panel titles: «Создать эксперимент», «Диагностика датчиков»
 - Buttons: «Сохранить», «Начать эксперимент», «Применить»
 - Tab labels: «Общие», «Датчики», «Соединения»
-- Breadcrumb crumbs: «Дашборд», «Эксперимент»
+- Breadcrumb crumbs: «Дашборд» (primary root), «Эксперимент»
 - Tooltips: «Закрыть (Esc)», «Аварийное отключение обоих каналов»
 - Body text in messages: «Эксперимент будет прерван.»
 - Operator log entries: «Давление упало до 1.23e-6»

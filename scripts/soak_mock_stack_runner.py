@@ -489,16 +489,23 @@ class _LockedPsutilObserver:
 
     def _identity(self, process: Any, *, allow_zombie: bool = False) -> _ProcessIdentity:
         try:
-            created = float(process.create_time())
+            started = float(process._proc.create_time(monotonic=True))
             status = process.status()
-        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+        except (
+            AttributeError,
+            self._psutil.NoSuchProcess,
+            self._psutil.AccessDenied,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise _RunnerFoundationError("process start identity is unavailable") from exc
-        if not math.isfinite(created) or created <= 0:
+        if not math.isfinite(started) or started <= 0:
             raise _RunnerFoundationError("process start identity is not live")
         if status == self._psutil.STATUS_ZOMBIE and not allow_zombie:
             raise _ObservedProcessGone("process start identity is not live")
-        started_ns = int(round(created * 1_000_000_000))
-        return _ProcessIdentity(process.pid, f"psutil-{_LOCKED_PSUTIL_VERSION}:ctime-ns={started_ns}")
+        started_ns = int(round(started * 1_000_000_000))
+        return _ProcessIdentity(process.pid, f"psutil-{_LOCKED_PSUTIL_VERSION}:monotonic-ns={started_ns}")
 
     def identity_for_pid(self, pid: int) -> _ProcessIdentity:
         return self._identity(self._process(pid))
@@ -540,22 +547,41 @@ class _LockedPsutilObserver:
         if self._identity(process, allow_zombie=True) != leader:
             raise _RunnerFoundationError("PID/start identity changed; refusing descendant scan")
         try:
-            children = tuple(process.children(recursive=True))
-        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError) as exc:
+            processes = tuple(self._psutil.process_iter())
+        except (self._psutil.AccessDenied, OSError) as exc:
             raise _RunnerFoundationError("owned descendant scan is unavailable") from exc
-        if len(children) > 128:
-            raise _RunnerFoundationError("owned descendant count exceeds the reviewed bound")
-        identities: list[_ProcessIdentity] = []
-        for child in children:
+        observed: list[tuple[_ProcessIdentity, int]] = []
+        for candidate in processes:
             try:
-                identities.append(self._identity(child))
+                identity = self._identity(candidate)
+                parent_pid = int(candidate._proc.ppid())
+                if self._identity(self._process(identity.pid)) != identity:
+                    raise _RunnerFoundationError("process identity changed during descendant scan")
             except _ObservedProcessGone:
                 continue
             except _RunnerFoundationError as exc:
                 if isinstance(exc.__cause__, self._psutil.NoSuchProcess):
                     continue
                 raise
-        return tuple(sorted(identities, key=lambda item: item.pid))
+            except self._psutil.NoSuchProcess:
+                continue
+            except (self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
+                raise _RunnerFoundationError("owned descendant scan is unavailable") from exc
+            observed.append((identity, parent_pid))
+        owned: set[_ProcessIdentity] = set()
+        frontier = {leader.pid}
+        while frontier:
+            next_frontier: set[int] = set()
+            for identity, parent_pid in observed:
+                if identity in owned or parent_pid not in frontier:
+                    continue
+                owned.add(identity)
+                next_frontier.add(identity.pid)
+            if len(owned) > 128:
+                raise _RunnerFoundationError("owned descendant count exceeds the reviewed bound")
+            frontier = next_frontier
+        self.recheck_exact(leader)
+        return tuple(sorted(owned, key=lambda item: item.pid))
 
     def signal_exact_for_cleanup(self, identity: _ProcessIdentity, signum: int) -> None:
         allowed = {signal.SIGTERM, getattr(signal, "SIGKILL", 9)}
@@ -1908,26 +1934,58 @@ def _settle_process_group(
         raise _RunnerFoundationError("exact-six process leader did not settle") from exc
 
 
+def _observe_stable_descendant_cut(
+    *,
+    observer: _LockedPsutilObserver,
+    expected: _ProcessIdentity,
+    deadline: float,
+    signum: int | None = None,
+) -> tuple[tuple[_ProcessIdentity, ...], bool]:
+    """Require two consecutive empty scans within the existing bound."""
+
+    signaled: set[_ProcessIdentity] = set()
+    descendants: tuple[_ProcessIdentity, ...] = ()
+    empty_scans = 0
+    while time.monotonic() < deadline and empty_scans < 2:
+        descendants = observer.descendants(expected)
+        if descendants:
+            empty_scans = 0
+            if signum is not None:
+                for identity in reversed(descendants):
+                    if identity not in signaled:
+                        observer.signal_exact_for_cleanup(identity, signum)
+                        signaled.add(identity)
+        else:
+            empty_scans += 1
+        if empty_scans < 2:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.05, max(0.001, remaining)))
+    return descendants, empty_scans == 2
+
+
 def _settle_owned_tree_once(
     process: subprocess.Popen[bytes],
     *,
     observer: _LockedPsutilObserver,
     expected: _ProcessIdentity,
 ) -> None:
-    descendants = observer.descendants(expected)
-    for identity in reversed(descendants):
-        observer.signal_exact_for_cleanup(identity, signal.SIGTERM)
     deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
-    while descendants and time.monotonic() < deadline:
-        time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
-        descendants = observer.descendants(expected)
-    for identity in reversed(descendants):
-        observer.signal_exact_for_cleanup(identity, getattr(signal, "SIGKILL", 9))
-    deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
-    while descendants and time.monotonic() < deadline:
-        time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
-        descendants = observer.descendants(expected)
-    if descendants:
+    descendants, stable = _observe_stable_descendant_cut(
+        observer=observer,
+        expected=expected,
+        deadline=deadline,
+        signum=signal.SIGTERM,
+    )
+    if not stable:
+        deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
+        descendants, stable = _observe_stable_descendant_cut(
+            observer=observer,
+            expected=expected,
+            deadline=deadline,
+            signum=getattr(signal, "SIGKILL", 9),
+        )
+    if descendants or not stable:
         raise _RunnerFoundationError("owned exact-six descendants did not settle")
     _settle_process_group(process, observer=observer, expected=expected)
 
@@ -2071,11 +2129,12 @@ def _execute_bounded_process(
             raise _RunnerFoundationError("exact-six supervisor status is incomplete")
         exit_code = _STATUS_STRUCT.unpack(status)[0]
         quiescence_deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
-        descendants = observer.descendants(identity)
-        while descendants and time.monotonic() < quiescence_deadline:
-            time.sleep(min(0.05, max(0.001, quiescence_deadline - time.monotonic())))
-            descendants = observer.descendants(identity)
-        if descendants:
+        descendants, stable = _observe_stable_descendant_cut(
+            observer=observer,
+            expected=identity,
+            deadline=quiescence_deadline,
+        )
+        if descendants or not stable:
             raise _RunnerFoundationError("exact-six child left owned descendants")
         if observer.group_members(process.pid) != (identity,):
             raise _RunnerFoundationError("exact-six child left process-group survivors")

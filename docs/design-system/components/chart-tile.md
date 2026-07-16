@@ -339,7 +339,7 @@ def _on_mouse_moved(self, pos: QPointF) -> None:
 | **Empty** | "Нет данных" centered text, plot hidden |
 | **Loading historical** | Spinner overlay, plot dimmed |
 | **Stale** (no updates for threshold) | Plot shown but dimmed + indicator "Последнее обновление: 14:32" |
-| **Fault (channel in fault state)** | Specific series drawn with STATUS_FAULT color override; other series normal |
+| **Fault (channel in fault state)** | Series keeps its data color; labeled STATUS_FAULT threshold region or event annotation carries fault meaning |
 
 ## Common mistakes
 

@@ -40,9 +40,7 @@ def test_cooldown_footer_has_no_push_button(panel: AlarmPanel) -> None:
     box = _cooldown_groupbox(panel)
     assert box is not None
     buttons = box.findChildren(QPushButton)
-    assert buttons == [], (
-        f"Cooldown footer must have no buttons under v0.55.6.1; got {buttons}"
-    )
+    assert buttons == [], f"Cooldown footer must have no buttons under v0.55.6.1; got {buttons}"
 
 
 def test_cooldown_footer_status_label_present(panel: AlarmPanel) -> None:
@@ -81,9 +79,7 @@ def test_cooldown_footer_armed_state_displays_active(panel: AlarmPanel) -> None:
 def test_cooldown_footer_watchdog_state(panel: AlarmPanel) -> None:
     panel.show()
     try:
-        panel._on_cooldown_status(
-            {"state": "WATCHDOG", "progress": None, "eta_h": None, "t_cold": 4.5}
-        )
+        panel._on_cooldown_status({"state": "WATCHDOG", "progress": None, "eta_h": None, "t_cold": 4.5})
         assert "Сторож" in panel._cooldown_status_lbl.text(), (
             f"WATCHDOG must show 'Сторож', got: {panel._cooldown_status_lbl.text()!r}"
         )
@@ -98,23 +94,20 @@ def test_cooldown_footer_watchdog_state(panel: AlarmPanel) -> None:
 def test_cooldown_footer_fired_uses_status_fault_color(panel: AlarmPanel) -> None:
     panel._on_cooldown_status({"state": "FIRED", "progress": 0.6, "eta_h": 2.5})
     style = panel._cooldown_status_lbl.styleSheet()
-    assert theme.STATUS_FAULT in style, (
-        f"FIRED state must use STATUS_FAULT color; styleSheet={style!r}"
-    )
+    assert theme.STATUS_FAULT in style, f"FIRED state must use STATUS_FAULT color; styleSheet={style!r}"
     # Also assert text is rendered (not just color).
-    assert "ПРЕДУПРЕЖДЕНИЕ" in panel._cooldown_status_lbl.text() or \
-        "захолажив" in panel._cooldown_status_lbl.text().lower() or \
-        "план" in panel._cooldown_status_lbl.text().lower(), (
-        f"FIRED status text unexpected: {panel._cooldown_status_lbl.text()!r}"
-    )
+    assert (
+        "ПРЕДУПРЕЖДЕНИЕ" in panel._cooldown_status_lbl.text()
+        or "захолажив" in panel._cooldown_status_lbl.text().lower()
+        or "план" in panel._cooldown_status_lbl.text().lower()
+    ), f"FIRED status text unexpected: {panel._cooldown_status_lbl.text()!r}"
 
 
-def test_cooldown_footer_auto_disarmed_uses_status_ok_color(panel: AlarmPanel) -> None:
+def test_cooldown_footer_auto_disarmed_uses_phase_accent_not_safety_ok(panel: AlarmPanel) -> None:
     panel._on_cooldown_status({"state": "AUTO_DISARMED", "progress": None, "eta_h": None})
     style = panel._cooldown_status_lbl.styleSheet()
-    assert theme.STATUS_OK in style, (
-        f"AUTO_DISARMED must use STATUS_OK color; styleSheet={style!r}"
-    )
+    assert theme.ACCENT in style
+    assert theme.STATUS_OK not in style
     assert "Захолаживание завершено" in panel._cooldown_status_lbl.text(), (
         f"AUTO_DISARMED text wrong: {panel._cooldown_status_lbl.text()!r}"
     )
@@ -124,13 +117,9 @@ def test_cooldown_footer_progress_bar_only_visible_while_watching(panel: AlarmPa
     panel.show()
     try:
         panel._on_cooldown_status({"state": "DISARMED", "progress": None, "eta_h": None})
-        assert not panel._cooldown_progress.isVisible(), (
-            "Progress bar must be hidden for DISARMED"
-        )
+        assert not panel._cooldown_progress.isVisible(), "Progress bar must be hidden for DISARMED"
         panel._on_cooldown_status({"state": "WATCHING", "progress": 0.5, "eta_h": 2.0})
-        assert panel._cooldown_progress.isVisible(), (
-            "Progress bar must be visible for WATCHING"
-        )
+        assert panel._cooldown_progress.isVisible(), "Progress bar must be visible for WATCHING"
         assert panel._cooldown_progress.value() == 50
     finally:
         panel.hide()
@@ -143,9 +132,8 @@ def test_cooldown_footer_no_arm_handler_attributes(panel: AlarmPanel) -> None:
     box = _cooldown_groupbox(panel)
     assert box is not None
     arm_buttons = [
-        btn for btn in box.findChildren(QPushButton)
+        btn
+        for btn in box.findChildren(QPushButton)
         if any(kw in btn.text().lower() for kw in ("arm", "disarm", "захолаж", "взвод"))
     ]
-    assert arm_buttons == [], (
-        f"No arm/disarm buttons must exist in cooldown footer; found: {arm_buttons}"
-    )
+    assert arm_buttons == [], f"No arm/disarm buttons must exist in cooldown footer; found: {arm_buttons}"

@@ -20,7 +20,8 @@ Every screen has operator information split into three priority tiers. The desig
 Information an operator must see without conscious effort. These are the «одновзглядовые» values that answer "is anything wrong right now?"
 
 **Contains:**
-- The 4 TopWatchBar vitals: Pressure, T-min, T-max, Heater
+- The 4 TopWatchBar vitals: Pressure, fixed T11 N₂-plate reference, fixed T12
+  second-stage reference, Heater
 - Mode badge (Эксперимент / Отладка)
 - Active fault indicators (STATUS_FAULT coloring on any vital)
 - Active alarm count
@@ -81,6 +82,12 @@ When a screen has competing signals:
 3. **Within the same tier, recency wins.** Newer is more prominent than older (per `patterns/real-time-data.md`).
 4. **Active state wins over passive state.** «Running» phase is more visually prominent than «Ready» phase.
 
+Hierarchy guides attention; it does not authorize information removal. The
+primary operating surface must retain a clear route to the complete channel,
+trend, experiment, provenance, and freshness picture. Aggregation may reduce
+visual weight or defer detail, but it must not make an unanticipated condition
+undiscoverable.
+
 ## F-pattern scan order
 
 Latin-script readers scan content in an F-shape: top-left first, then top-right, then down-left. Place Tier-2 content accordingly:
@@ -139,7 +146,9 @@ Fix: default tile state is neutral (SURFACE_CARD + 1px BORDER). Status color and
 - One Tier-2 tile dominates (bigger, top-left). Usually `ExperimentCard`.
 - Two-three Tier-2 supporting tiles (charts, KPIs).
 - Tier-3 chrome: channel names, units, timestamps.
-- Maximum one "alert" presentation at a time (e.g., if fault is live, mute other decorative tile borders).
+- Emphasize one highest-priority alert, but keep the total count, simultaneous
+  alert list/aggregation, and complete drill-down visible. “One emphasized”
+  never means “only one presented.”
 
 ### On single-panel scaffold (Scaffold 2)
 
@@ -179,6 +188,15 @@ Fix: default tile state is neutral (SURFACE_CARD + 1px BORDER). Status color and
 
 8. **Silent Tier-1.** No visible fault indication when system is faulted; all color stays neutral. Tier-1 must communicate even in passive state (empty alarm badge is dim, not absent).
 
+9. **Curated black-box home.** Replacing the panoramic dashboard with a small
+set of predicted questions. This improves calmness at the cost of anomaly
+discovery and operator agency. Keep the summary additive and the evidence view
+primary.
+
+10. **Anti-LabVIEW by subtraction.** Removing dense evidence because legacy
+instrument software looks visually dated. Modernize type, spacing, hierarchy,
+plots, and interaction while preserving the panoramic information model.
+
 ## Related patterns
 
 - `patterns/state-visualization.md` — how state (OK / warning / fault) expresses through visual weight
@@ -187,4 +205,6 @@ Fix: default tile state is neutral (SURFACE_CARD + 1px BORDER). Status color and
 
 ## Changelog
 
+- 2026-07-15 (v4.0.0): Clarified that hierarchy may guide attention but may
+  not hide comprehensive evidence or unanticipated conditions.
 - 2026-04-17: Initial version. Three-tier model (critical vitals / active task / supporting context) codified. F-pattern scan order. Visual weight toolbox. Scaffold-specific guidance.

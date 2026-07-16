@@ -127,7 +127,7 @@ def _encode_envelope(reading: Reading, *, revision: int = 1) -> bytes:
 def _recording_window() -> tuple[MainWindowV2, list[Reading]]:
     """Return a MainWindowV2 + fresh call-recorder list.
 
-    Callers wrap with ``patch.object(w, "_dispatch_reading", side_effect=calls.append)``
+    Callers wrap with ``patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(calls))``
     to record every _dispatch_reading call without modifying the instance.
     """
     _app()
@@ -135,6 +135,15 @@ def _recording_window() -> tuple[MainWindowV2, list[Reading]]:
     _stop_timers(w)
     calls: list[Reading] = []
     return w, calls
+
+
+def _record_dispatch(calls: list[Reading]):
+    """Adapt the qualified sink signature while recording bare readings."""
+
+    def _record(reading: Reading, _identity_status: IdentityStatus) -> None:
+        calls.append(reading)
+
+    return _record
 
 
 def _find_poll_readings_bare_calls(source: str) -> list[int]:
@@ -303,7 +312,7 @@ def test_t1_mixed_batch_exact_once_no_invented_identity(zmq_harness: ZmqHarness)
     small_store = DescriptorStore(max_entries=SMALL_MAX)
     w._descriptor_store = small_store  # type: ignore[assignment]
 
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in qualified_list:
             w.dispatch_qualified_reading(q)
 
@@ -411,7 +420,7 @@ def _run_t1_core(harness: ZmqHarness) -> None:
     assert len(qualified_list) == 3
 
     w, dispatch_calls = _recording_window()
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in qualified_list:
             w.dispatch_qualified_reading(q)
 
@@ -450,7 +459,7 @@ def test_t2_launcher_path_real_drain(zmq_harness: ZmqHarness) -> None:  # noqa: 
     valid_env = _encode_envelope(r)
 
     w, dispatch_calls = _recording_window()
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         # Build minimal namespace that mirrors the attributes _poll_bridge_data touches.
         min_self = SimpleNamespace(
             _bridge=zmq_harness.bridge,
@@ -534,7 +543,7 @@ def test_t2_app_path_real_drain(zmq_harness: ZmqHarness) -> None:  # noqa: F811
         _drain_bridge_readings(zmq_harness.bridge, w)
         snapshot_ingress.pump()  # must not raise
 
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         # FIX-1: do NOT pre-drain. Publish, then run the production _tick sequence
         # inside a bounded-deadline loop until the reading arrives (slow-joiner).
         zmq_harness.publish(r, descriptor_envelope=valid_env)
@@ -644,7 +653,7 @@ def test_t3_behavioural_invalidate_then_requalify() -> None:
         descriptor=_make_descriptor_for(r),
         descriptor_issue=None,
     )
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         w.dispatch_qualified_reading(qualified_auth)
 
     assert store.identity_status(ch) is IdentityStatus.AUTHORITATIVE, (
@@ -668,7 +677,7 @@ def test_t3_behavioural_invalidate_then_requalify() -> None:
         descriptor=None,
         descriptor_issue=None,
     )
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         w.dispatch_qualified_reading(legacy_q)
 
     post_legacy_status = store.identity_status(ch)
@@ -684,7 +693,7 @@ def test_t3_behavioural_invalidate_then_requalify() -> None:
         descriptor=_make_descriptor_for(r2, revision=2),  # new revision → requalify
         descriptor_issue=None,
     )
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         w.dispatch_qualified_reading(fresh_q)
 
     requalified_status = store.identity_status(ch)
@@ -1022,7 +1031,7 @@ def test_t3_real_socket_invalidate_requalify_via_bridge(zmq_harness: ZmqHarness)
     ql1 = zmq_harness.drain_until(1, timeout_s=15.0)
 
     w, dispatch_calls = _recording_window()
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql1:
             w.dispatch_qualified_reading(q)
 
@@ -1039,7 +1048,7 @@ def test_t3_real_socket_invalidate_requalify_via_bridge(zmq_harness: ZmqHarness)
     zmq_harness.publish(r2, descriptor_envelope=None)
     ql2 = zmq_harness.drain_until(1, timeout_s=15.0)
 
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql2:
             w.dispatch_qualified_reading(q)
 
@@ -1057,7 +1066,7 @@ def test_t3_real_socket_invalidate_requalify_via_bridge(zmq_harness: ZmqHarness)
     zmq_harness.publish(r3, descriptor_envelope=valid_env_v2)
     ql3 = zmq_harness.drain_until(1, timeout_s=15.0)
 
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql3:
             w.dispatch_qualified_reading(q)
 
@@ -1132,7 +1141,7 @@ def _run_real_restart_via_poll_bridge_data(
     valid_env = _encode_envelope(r1)
     harness.publish(r1, descriptor_envelope=valid_env)
     ql1 = harness.drain_until(1, timeout_s=15.0)
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql1:
             w.dispatch_qualified_reading(q)
     assert w._descriptor_store.identity_status(ch) is IdentityStatus.AUTHORITATIVE, (
@@ -1217,7 +1226,7 @@ def _run_real_restart_via_poll_bridge_data(
     r2 = _make_reading(channel=ch, value=2.0)
     harness.publish(r2, descriptor_envelope=None)
     ql2 = harness.drain_until(1, timeout_s=15.0)
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql2:
             w.dispatch_qualified_reading(q)
     post_legacy = w._descriptor_store.identity_status(ch)
@@ -1232,7 +1241,7 @@ def _run_real_restart_via_poll_bridge_data(
     valid_env_v2 = _encode_envelope(r3, revision=2)
     harness.publish(r3, descriptor_envelope=valid_env_v2)
     ql3 = harness.drain_until(1, timeout_s=15.0)
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql3:
             w.dispatch_qualified_reading(q)
     assert w._descriptor_store.identity_status(ch) is IdentityStatus.AUTHORITATIVE, (
@@ -1302,7 +1311,7 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
     valid_env = _encode_envelope(r1)
     zmq_harness.publish(r1, descriptor_envelope=valid_env)
     ql1 = zmq_harness.drain_until(1, timeout_s=15.0)
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql1:
             w.dispatch_qualified_reading(q)
     assert w._descriptor_store.identity_status(ch) is IdentityStatus.AUTHORITATIVE, (
@@ -1379,7 +1388,7 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
     r2 = _make_reading(channel=ch, value=2.0)
     zmq_harness.publish(r2, descriptor_envelope=None)
     ql2 = zmq_harness.drain_until(1, timeout_s=15.0)
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql2:
             w.dispatch_qualified_reading(q)
     post_legacy = w._descriptor_store.identity_status(ch)
@@ -1393,7 +1402,7 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
     valid_env_v2 = _encode_envelope(r3, revision=2)
     zmq_harness.publish(r3, descriptor_envelope=valid_env_v2)
     ql3 = zmq_harness.drain_until(1, timeout_s=15.0)
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql3:
             w.dispatch_qualified_reading(q)
     assert w._descriptor_store.identity_status(ch) is IdentityStatus.AUTHORITATIVE, (
@@ -1544,7 +1553,7 @@ def _t4_harness_shutdown_core(harness: ZmqHarness, tag: str) -> None:
 
     _app()
     w, dispatch_calls = _recording_window()
-    with patch.object(w, "_dispatch_reading", side_effect=dispatch_calls.append):
+    with patch.object(w, "_dispatch_reading", side_effect=_record_dispatch(dispatch_calls)):
         for q in ql:
             w.dispatch_qualified_reading(q)
 

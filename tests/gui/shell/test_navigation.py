@@ -16,6 +16,7 @@ from cryodaq.gui.shell.navigation import (
 
 _LEGACY_ROUTE_KEYS = {
     "home",
+    "summary",
     "new_experiment",
     "experiment",
     "source",
@@ -51,6 +52,7 @@ def test_every_current_route_key_and_roadmap_destination_is_preserved() -> None:
     ]
     assert [destination.key for destination in NAVIGATION_SECTIONS[2].destinations] == ["log", "archive"]
     assert [destination.key for destination in NAVIGATION_SECTIONS[3].destinations] == [
+        "summary",
         "calibration",
         "knowledge_base",
         "settings",
@@ -61,6 +63,7 @@ def test_every_current_route_key_and_roadmap_destination_is_preserved() -> None:
 
 def test_current_mnemonic_and_numeric_shortcuts_are_preserved_without_collision() -> None:
     expected = {
+        "Ctrl+H": "home",
         "Ctrl+L": "log",
         "Ctrl+E": "experiment",
         "Ctrl+A": "analytics",
@@ -150,6 +153,7 @@ def test_labels_and_order_are_deterministic_and_operator_facing() -> None:
             "more",
             "Ещё",
             [
+                ("summary", "Сводка смены"),
                 ("calibration", "Калибровка"),
                 ("knowledge_base", "База знаний"),
                 ("settings", "Настройки"),

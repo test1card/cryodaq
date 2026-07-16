@@ -118,7 +118,13 @@ NAVIGATION_SECTIONS: Final[tuple[NavigationSection, ...]] = (
         NavigationGroup.OPERATE,
         "Работа",
         (
-            NavigationDestination("home", NavigationGroup.OPERATE, "Главная", legacy_shortcuts=("Ctrl+1",)),
+            NavigationDestination(
+                "home",
+                NavigationGroup.OPERATE,
+                "Главная",
+                shortcut="Ctrl+H",
+                legacy_shortcuts=("Ctrl+1",),
+            ),
             NavigationDestination(
                 "experiment",
                 NavigationGroup.OPERATE,
@@ -207,6 +213,7 @@ NAVIGATION_SECTIONS: Final[tuple[NavigationSection, ...]] = (
         NavigationGroup.MORE,
         "Ещё",
         (
+            NavigationDestination("summary", NavigationGroup.MORE, "Сводка смены"),
             NavigationDestination("calibration", NavigationGroup.MORE, "Калибровка"),
             NavigationDestination("knowledge_base", NavigationGroup.MORE, "База знаний"),
             NavigationDestination("settings", NavigationGroup.MORE, "Настройки"),

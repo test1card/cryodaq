@@ -142,14 +142,21 @@ def test_file_corruption_and_access_failure_are_normalized(tmp_path: Path, monke
     assert "private filesystem detail" not in str(captured.value)
 
 
-def test_symlink_and_non_regular_database_topology_fail_closed(tmp_path: Path) -> None:
+def test_symlinked_database_root_fails_closed(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     linked_root = tmp_path / "linked"
-    linked_root.symlink_to(target, target_is_directory=True)
+    try:
+        linked_root.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows token cannot create symlinks")
+        raise
     with pytest.raises(OperatorSnapshotRevisionError, match="root must not be a symlink"):
         OperatorSnapshotRevisionAllocator(linked_root).allocate()
 
+
+def test_non_regular_database_topology_fails_closed(tmp_path: Path) -> None:
     allocator = OperatorSnapshotRevisionAllocator(tmp_path / "regular-root")
     allocator.path.mkdir(parents=True)
     with pytest.raises(OperatorSnapshotRevisionError, match="regular file"):

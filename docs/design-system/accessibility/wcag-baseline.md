@@ -36,7 +36,7 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 **Out of scope (explicitly):**
 - **Phone / tablet / touch-screen use** — CryoDAQ is desktop-only per `patterns/responsive-behavior.md`; touch target sizing (WCAG 2.5.5) not applicable
 - **Print / PDF export accessibility** — reports go through separate pipeline, not governed by this baseline
-- **Video / audio content** — CryoDAQ has none; 1.2.x criteria not applicable
+- **Recorded media content** — CryoDAQ has none; 1.2.x criteria are not applicable. Runtime alarm beeps are annunciation, not media.
 - **Natural-language screen reader narration of charts** — chart data is complex numeric; operators read values directly; alt-text describes chart category/axes, not per-point data
 - **Full AAA contrast** — some status colors (STATUS_FAULT, STATUS_INFO) do not reach AAA; documented in `accessibility/contrast-matrix.md`
 
@@ -47,14 +47,14 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 | WCAG | Commitment | CryoDAQ mapping |
 |---|---|---|
 | **1.1.1 Non-text Content** (A) | Met | All icons have label OR tooltip (RULE-INTER-008); decorative SVG uses aria-hidden |
-| **1.2.x Media** (A, AA) | N/A | No audio/video content |
+| **1.2.x Media** (A, AA) | N/A | No prerecorded/live media content |
 | **1.3.1 Info and Relationships** (A) | Met | ARIA roles on semantic groups; form labels via QLabel + buddy widget |
 | **1.3.2 Meaningful Sequence** (A) | Met | Tab order matches visual order (RULE-A11Y-006); F-pattern scan aligned with DOM |
 | **1.3.3 Sensory Characteristics** (A) | Met | Instructions never refer only to shape/color/position (e.g., "click the red one") |
 | **1.3.4 Orientation** (AA) | Met | Desktop-only; landscape is the only orientation |
 | **1.3.5 Identify Input Purpose** (AA) | Met | Form autocomplete attributes where applicable (operator login, if present) |
 | **1.4.1 Use of Color** (A) | Met | RULE-A11Y-002 two-channel signaling enforces this |
-| **1.4.2 Audio Control** (A) | N/A | No audio |
+| **1.4.2 Audio Control** (A) | Open | Alarm beeps exist. Current dual-owner fail-loud behavior has no consolidated mute/volume surface; exact-activation acknowledgement and visible audio availability remain an explicit gate. |
 | **1.4.3 Contrast (Minimum)** (AA) | Met for text; documented exceptions for status chrome | See `contrast-matrix.md` |
 | **1.4.4 Resize Text** (AA) | Partial | Qt apps support OS-level DPI scaling; manual text zoom within app is out of scope |
 | **1.4.5 Images of Text** (AA) | Met | No images of text; all text is actual text |
@@ -115,7 +115,7 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 
 ## AAA aspirations (opportunistic, not committed)
 
-- **1.4.6 Contrast (Enhanced)** — 7:1 for body text. FOREGROUND (16.04:1) meets AAA; MUTED_FOREGROUND (5.95:1), ACCENT (6.48:1), COLD_HIGHLIGHT (5.46:1), and every STATUS_* token miss AAA on body; intentional for dense data display
+- **1.4.6 Contrast (Enhanced)** — 7:1 for body text. FOREGROUND (16.04:1) and COLD_HIGHLIGHT (8.71:1) meet AAA on the default dark background; other semantic tokens are assessed per the contrast matrix
 - **2.4.8 Location** — breadcrumb provides location within drill-downs, but top-level nav doesn't
 - **3.3.5 Help** — tooltips provide contextual help; not a full help system
 - **2.2.4 Interruptions** — alarms use Toast (dismissable) + persistent state; critical faults require ack (blocking Dialog) by design
@@ -180,5 +180,6 @@ When conformance is claimed externally (e.g., procurement doc, accessibility rep
 
 ## Changelog
 
-- 2026-04-17: Initial version. WCAG 2.2 Level AA target committed. Scope boundaries explicit (desktop-only, no audio/video). Criterion-by-criterion commitment table with CryoDAQ mapping. AAA aspirations opportunistic not committed.
+- 2026-07-15 (v4.0.0): Classified runtime alarm beeps accurately and left consolidated audio control/availability evidence open.
+- 2026-04-17: Initial version. WCAG 2.2 Level AA target committed. Criterion-by-criterion commitment table with CryoDAQ mapping. AAA aspirations opportunistic not committed.
 - 2026-04-17: v1.0.1 — Downgraded 1.4.11 Non-text Contrast from Met to Partial after recomputing BORDER contrast (1.46:1 actual vs 3.1:1 claimed). Corrected 1.4.6 AAA note (FOREGROUND meets AAA; MUTED_FOREGROUND misses). Added 1.4.11 exception to external conformance statement.

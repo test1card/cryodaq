@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QLayout, QScrollArea, QVBoxLayout, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import Reading
@@ -22,8 +22,11 @@ from cryodaq.gui.dashboard.phase_aware_widget import PhaseAwareWidget
 from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 from cryodaq.gui.dashboard.quick_log_block import QuickLogBlock
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
+from cryodaq.gui.state.descriptor_store import IdentityStatus
 
 logger = logging.getLogger(__name__)
+
+_PRESENTATION_INTERVAL_MS = 500  # DESIGN: RULE-DATA-002 — at most 2 Hz
 
 # Zone definitions: (objectName, label_or_None, stretch)
 # label_or_None=None means the zone is filled by a real widget, not placeholder.
@@ -36,7 +39,7 @@ _ZONES = [
 ]
 
 
-class DashboardView(QWidget):
+class DashboardView(QScrollArea):
     """Phase UI-1 v2 dashboard — replaces legacy OverviewPanel."""
 
     def __init__(
@@ -60,7 +63,19 @@ class DashboardView(QWidget):
         self._start_refresh_timer()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAccessibleName("Панель мониторинга")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        self._content = QWidget()
+        self._content.setObjectName("dashboardContent")
+        self.setWidget(self._content)
+
+        root = QVBoxLayout(self._content)
+        root.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         root.setContentsMargins(
             theme.SPACE_2,
             theme.SPACE_2,
@@ -91,7 +106,7 @@ class DashboardView(QWidget):
                 self._sensor_grid = DynamicSensorGrid(
                     self._channel_mgr,
                     self._buffer_store,
-                    parent=self,
+                    parent=self._content,
                 )
                 self._sensor_grid.rename_requested.connect(self._on_rename_requested)
                 self._sensor_grid.hide_requested.connect(self._on_hide_requested)
@@ -100,7 +115,7 @@ class DashboardView(QWidget):
                 zone.layout().addWidget(self._sensor_grid)
             elif obj_name == "quickLogZone":
                 zone = self._make_zone(obj_name, None)
-                self._quick_log = QuickLogBlock(parent=self)
+                self._quick_log = QuickLogBlock(parent=self._content)
                 self._quick_log.entry_submitted.connect(self._on_log_entry_submitted)
                 zone.layout().addWidget(self._quick_log)
             else:
@@ -136,7 +151,7 @@ class DashboardView(QWidget):
 
     def _start_refresh_timer(self) -> None:
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(1000)  # 1 Hz
+        self._refresh_timer.setInterval(_PRESENTATION_INTERVAL_MS)
         self._refresh_timer.timeout.connect(self._refresh_plots)
         self._refresh_timer.start()
 
@@ -158,7 +173,11 @@ class DashboardView(QWidget):
     # Reading ingestion
     # ------------------------------------------------------------------
 
-    def on_reading(self, reading: Reading) -> None:
+    def on_reading(
+        self,
+        reading: Reading,
+        identity_status: IdentityStatus = IdentityStatus.LEGACY_ABSENT,
+    ) -> None:
         """Route reading into buffer store, grid cells, and phase widget."""
         channel = reading.channel
         value = reading.value
@@ -170,7 +189,7 @@ class DashboardView(QWidget):
             short_id = channel.split(" ")[0]
             self._buffer_store.append(short_id, timestamp_epoch, float(value))
             if self._sensor_grid is not None:
-                self._sensor_grid.dispatch_reading(reading)
+                self._sensor_grid.dispatch_reading(reading, identity_status)
         elif channel.endswith("/pressure"):
             self._buffer_store.append(channel, timestamp_epoch, float(value))
 

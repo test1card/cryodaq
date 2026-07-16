@@ -170,6 +170,30 @@ Write-действия web dashboard ограничены двумя REST routes
 `config/web.local.yaml` (`web.api_token`). Пока токен не задан, write routes
 отвечают 403. Неверный или отсутствующий bearer-токен даёт 401.
 
+Клиенты квитирования тревог должны использовать точную идентичность
+срабатывания. Сначала прочитайте `GET /api/v1/alarms`: ответ содержит
+`engine_instance_id`, `snapshot_revision` и `activation_id` внутри каждой
+записи `active`; `acknowledged_by` остаётся отредактированным. Затем передайте
+идентичность именно этой строки, не подставляя более свежие значения:
+
+```http
+POST /api/v1/alarms/T1_high/ack
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"engine_instance_id":"<from GET>","activation_id":"<from active.T1_high>","reason":"observed"}
+```
+
+Поля `engine_instance_id` и `activation_id` обязательны; `reason` опционален и
+ограничен 256 символами. Это breaking migration для прежних REST-клиентов,
+посылавших пустое тело или только имя тревоги. Нельзя сохранять идентичность
+между перезапусками движка или повторными срабатываниями: задержанный/старый
+ACK отказывается fail-closed и клиент должен заново показать оператору
+актуальный GET-снимок. Квитирование меняет только ответственность за внимание
+и звуковую индикацию. Оно не очищает hazard, не запускает safety recovery и не
+выдаёт управляющую команду; строка тревоги остаётся видимой до авторитетного
+сброса условия.
+
 Этот путь запуска относится к optional web-компоненту и требует установленного extra `web`
 (или полного dev/test install path `.[dev,web]`).
 

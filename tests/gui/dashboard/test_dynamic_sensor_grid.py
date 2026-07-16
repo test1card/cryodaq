@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
+
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from cryodaq.gui.dashboard.dynamic_sensor_grid import DynamicSensorGrid
+from cryodaq.gui.state.descriptor_store import IdentityStatus
 
 
 def test_grid_constructs(app, mock_channel_mgr, buffer_store):
@@ -19,6 +22,33 @@ def test_grid_creates_cells_for_visible_channels(app, mock_channel_mgr, buffer_s
     assert "\u04221" in grid._cells
     assert "\u04222" in grid._cells
     assert "\u04223" in grid._cells
+
+
+def test_grid_reflows_from_logical_width_without_hiding_selected_sensors(app, mock_channel_mgr, buffer_store):
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    selected = tuple(grid._cells)
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(grid)
+
+    host.resize(330, 320)
+    host.show()
+    app.processEvents()
+    grid._relayout_cells()
+
+    narrow_positions = [grid._grid_layout.getItemPosition(index)[:2] for index in range(grid._grid_layout.count())]
+    assert narrow_positions == [(0, 0), (1, 0), (2, 0)]
+    assert tuple(grid._cells) == selected
+    assert all(cell.isVisible() for cell in grid._cells.values())
+
+    host.resize(700, 320)
+    app.processEvents()
+    grid._relayout_cells()
+
+    wide_positions = [grid._grid_layout.getItemPosition(index)[:2] for index in range(grid._grid_layout.count())]
+    assert wide_positions == [(0, 0), (0, 1), (0, 2)]
+    assert tuple(grid._cells) == selected
 
 
 def test_grid_rebuilds_on_channel_change(app, mock_channel_mgr, buffer_store):
@@ -78,24 +108,54 @@ def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
         assert expected in actual, f"Cell {ch_id!r} must display '{expected}' after refresh, got {actual!r}"
 
 
-def test_grid_dispatch_reading(app, mock_channel_mgr, buffer_store):
-    from datetime import datetime
-
+def test_grid_dispatch_coalesces_until_tick_and_renders_latest(app, mock_channel_mgr, buffer_store):
     from cryodaq.drivers.base import ChannelStatus, Reading
 
     grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
-    reading = Reading(
-        channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
-        value=77.3,
-        unit="K",
-        timestamp=datetime.now(UTC),
-        status=ChannelStatus.OK,
-        instrument_id="lakeshore_218s",
-    )
-    grid.dispatch_reading(reading)
     cell = grid._cells.get("\u04221")
     assert cell is not None
+    before = cell._value_widget.text()
+
+    for value in (77.1, 77.2, 77.3):
+        reading = Reading(
+            channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+            value=value,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        )
+        grid.dispatch_reading(reading, IdentityStatus.AUTHORITATIVE)
+        assert cell._value_widget.text() == before
+
+    grid.refresh()
+
     assert "77.30" in cell._value_widget.text()
+    assert grid._pending_readings == {}
+
+
+def test_coalesced_cut_uses_source_timestamp_for_staleness(app, mock_channel_mgr, buffer_store):
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    grid.dispatch_reading(
+        Reading(
+            channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+            value=77.3,
+            unit="K",
+            timestamp=datetime.now(UTC) - timedelta(seconds=30),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+
+    grid.refresh()
+
+    cell = grid._cells["\u04221"]
+    assert cell._value_widget.text() == "77.30"
+    assert cell._data_stale is True
+    assert cell._status_hint_widget.text() == "\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e"
 
 
 def test_grid_read_only_survives_cell_rebuild(app, mock_channel_mgr, buffer_store):

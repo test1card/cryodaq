@@ -103,6 +103,9 @@ class SafetyManager:
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
         self._fault_reason = ""
         self._fault_time = 0.0
+        self._fault_activated_at = 0.0
+        # Presentation identity only; no recovery or output authority.
+        self._fault_revision = 0
         self._recovery_reason = ""
         self._active_sources: set[SmuChannel] = set()
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
@@ -1237,6 +1240,8 @@ class SafetyManager:
         return {
             "state": self._state.value,
             "fault_reason": self._fault_reason,
+            "fault_revision": self._fault_revision,
+            "fault_activated_at": self._fault_activated_at,
             "recovery_reason": self._recovery_reason,
             "channels_tracked": len(self._latest),
             "keithley_connected": self._keithley is not None and getattr(self._keithley, "connected", False),
@@ -1400,11 +1405,13 @@ class SafetyManager:
             )
             return
 
+        self._fault_revision += 1
         # 1. Latch fault state IMMEDIATELY — no awaits before this.
         #    _transition is synchronous, so request_run() will see
         #    FAULT_LATCHED and reject before any yield point.
         self._fault_reason = reason
         self._fault_time = time.monotonic()
+        self._fault_activated_at = time.time()
         self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
 
         # 2. Now safe to do async cleanup — state already protects us.

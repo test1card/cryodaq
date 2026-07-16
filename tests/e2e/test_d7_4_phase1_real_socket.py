@@ -159,11 +159,13 @@ def test_real_socket_loopback_roundtrip(zmq_harness: ZmqHarness) -> None:  # noq
 
     # Wrap _dispatch_reading to record calls.
     dispatch_calls: list[Reading] = []
+    identity_calls: list[IdentityStatus] = []
     original_dispatch = w._dispatch_reading
 
-    def _recording_dispatch(reading: Reading) -> None:
+    def _recording_dispatch(reading: Reading, identity_status: IdentityStatus) -> None:
         dispatch_calls.append(reading)
-        original_dispatch(reading)
+        identity_calls.append(identity_status)
+        original_dispatch(reading, identity_status)
 
     with patch.object(w, "_dispatch_reading", side_effect=_recording_dispatch):
         for q in qualified_list:
@@ -185,6 +187,17 @@ def test_real_socket_loopback_roundtrip(zmq_harness: ZmqHarness) -> None:  # noq
     assert sorted(call_pairs) == sorted(all_expected), (
         f"Dispatch call mismatch.\nExpected: {sorted(all_expected)}\nGot:      {sorted(call_pairs)}"
     )
+
+    # The qualified identity evidence crosses the same sink boundary as the
+    # reading; authoritative channels must never be reconstructed from labels.
+    identity_by_channel = {
+        reading.channel: identity for reading, identity in zip(dispatch_calls, identity_calls, strict=True)
+    }
+    assert identity_by_channel == {
+        "e2e.ch.alpha": IdentityStatus.AUTHORITATIVE,
+        "e2e.ch.beta": IdentityStatus.AUTHORITATIVE,
+        "e2e.ch.gamma": IdentityStatus.LEGACY_ABSENT,
+    }
 
     # 3. Descriptor-bearing channels are AUTHORITATIVE in the store.
     status_alpha = w._descriptor_store.identity_status("e2e.ch.alpha")

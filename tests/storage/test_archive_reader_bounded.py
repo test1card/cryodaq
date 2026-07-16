@@ -590,17 +590,28 @@ def test_invalid_arguments_reject_before_io(tmp_path: Path, change: dict[str, ob
         _query(reader, start, start + timedelta(seconds=1), **change)
 
 
-def test_index_symlink_and_hardlink_are_rejected_before_read(tmp_path: Path) -> None:
+def test_index_symlink_is_rejected_before_read(tmp_path: Path) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     archive = tmp_path / "archive"
     archive.mkdir()
     authority = tmp_path / "authority.json"
     authority.write_text('{"files": []}', encoding="utf-8")
-    (archive / "index.json").symlink_to(authority)
+    try:
+        (archive / "index.json").symlink_to(authority)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("Windows token cannot create symlinks")
+        raise
     result = _query(ArchiveReader(tmp_path / "data", archive), start, start + timedelta(seconds=1))
     assert {issue.code for issue in result.issues} == {BoundedReadIssueCode.ARCHIVE_INDEX_INVALID}
 
-    (archive / "index.json").unlink()
+
+def test_index_hardlink_is_rejected_before_read(tmp_path: Path) -> None:
+    start = datetime(2026, 7, 10, tzinfo=UTC)
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    authority = tmp_path / "authority.json"
+    authority.write_text('{"files": []}', encoding="utf-8")
     (archive / "index.json").hardlink_to(authority)
     result = _query(ArchiveReader(tmp_path / "data", archive), start, start + timedelta(seconds=1))
     assert {issue.code for issue in result.issues} == {BoundedReadIssueCode.ARCHIVE_INDEX_INVALID}
