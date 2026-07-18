@@ -115,6 +115,62 @@ For concurrency, persistence, cancellation, election, or safety work, add a
 deterministic regression test and repeat the failure-prone boundary. A passing
 focused test does not erase a full-suite failure; reproduce and adjudicate it.
 
+## Integration and publication discipline
+
+Treat integration as a separate gate from slice-level review. Two independently
+green slices are not evidence that their combined commit is green.
+
+- Before every push intended as a reviewed checkpoint, freeze the exact
+  candidate tree or commit and run the repository's hosted-CI-equivalent
+  partitions for every affected platform and test group. At minimum, reproduce
+  the lint, format, lockfile, core, GUI, agent/reporting, and remaining-test
+  partitions that GitHub Actions will run; use both Windows and WSL/Linux when
+  the workflow does. Record anything that cannot genuinely be reproduced.
+- Verify the exact object being published. Re-check the candidate commit after
+  tests, confirm that no worker changed its files during verification, inspect
+  its exact diff, and push that same hash. Results collected from a moving dirty
+  worktree, a different index, or a predecessor commit do not certify the push.
+- Keep concurrent author lanes out of the frozen candidate. Give each lane
+  bounded ownership, integrate one coherent slice at a time, and independently
+  review the integrated diff. Never let an unrelated dirty file enter a commit
+  merely because it was present during a broad test run.
+- After pushing, watch every required hosted check to completion. A red or
+  cancelled job leaves the checkpoint open even when other matrix jobs pass.
+  Extract every failing assertion, reproduce it locally where possible, and
+  publish a focused correction before calling the branch green or moving to a
+  release/PR gate.
+- Fix CI at the violated contract boundary. If a stronger fail-closed runtime
+  contract makes an old fixture invalid, update the fixture and retain a
+  regression for the stronger contract; never weaken production safety,
+  authority, persistence, or evidence rules merely to restore a green check.
+- Report publication state precisely: local commit, remote branch, pull
+  request, default branch, hosted-CI result, and release are distinct states.
+  A pushed feature branch may not appear as recent activity on the repository
+  landing page, and a pushed red commit is not a completed checkpoint.
+- Prefer frequent, coherent, reviewed checkpoints so work is visible and
+  recoverable, but do not trade away exact-candidate verification for cadence.
+  If publication is delayed, state which integration gate is still open and
+  why rather than describing unpushed activity as GitHub progress.
+
+## Learned-rule discipline
+
+Every confirmed agent mistake must close with a durable prevention rule, not
+only an apology or a transient note. Amend this file with the concise rule or
+link from this file to the specific governed guideline that contains it.
+
+- Record the concrete failure mode, the gate that prevents recurrence, and the
+  evidence that verifies the gate. Rules such as "be careful" are not useful.
+- Search the existing contract first. If a rule already covers the mistake,
+  strengthen or clarify that rule and its verification instead of adding a
+  duplicate. Put long procedures in the appropriate authoritative document
+  (normally `docs/ORCHESTRATION.md`) and add an explicit link here.
+- Apply this discipline to process errors, lost or overwritten work, incorrect
+  completion/evidence claims, unsafe assumptions, review escapes, CI escapes,
+  publication mistakes, and operator-impacting misunderstandings.
+- Keep the lesson proportional and review the rule change as part of the
+  corrective slice. Do not turn unverified suspicions or ordinary experimental
+  failures into permanent policy.
+
 ## Architecture and extension rules
 
 - Keep hardware modules behind narrow driver/capability contracts. Generic

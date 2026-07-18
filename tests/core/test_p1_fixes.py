@@ -23,6 +23,11 @@ import pytest
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
@@ -35,7 +40,8 @@ def _mock_keithley():
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock()
+    # Exact verified-OFF contract: only literal True proves the hardware OFF.
+    k.emergency_off = AsyncMock(return_value=True)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -44,11 +50,34 @@ def _mock_keithley():
 async def _make_manager(*, mock: bool = True, keithley=None, stale: float = 10.0):
     """Create and start a SafetyManager in the standard test configuration."""
     broker = SafetyBroker()
-    mgr = SafetyManager(broker, keithley_driver=keithley, mock=mock)
+    binding = None
+    if not mock:
+        binding = _issue_registry_runtime_binding(
+            driver=keithley,
+            timing=AcquisitionTiming(1.0, 1.0, 1.0),
+            registry_provenance="test:p1-fixes",
+            trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        )
+    mgr = SafetyManager(
+        broker,
+        keithley_driver=keithley,
+        reviewed_source_runtime_binding=binding,
+        mock=mock,
+    )
     mgr._config.stale_timeout_s = stale
     mgr._config.cooldown_before_rearm_s = 0.1
     mgr._config.require_keithley_for_run = not mock
     await mgr.start()
+    if not mock:
+        # Model the real engine's connection-generation OFF proof.  The
+        # manager must remain SAFE_OFF without this exact sealed authority.
+        generation = await mgr.begin_reviewed_source_connect(keithley, binding, "test setup")
+        assert await mgr.complete_reviewed_source_connect(
+            keithley,
+            binding,
+            generation,
+            "test setup",
+        )
     return mgr, broker
 
 
@@ -142,8 +171,7 @@ async def test_heartbeat_rejects_sensor_error():
         await asyncio.sleep(3.0)
 
         assert mgr.state == SafetyState.FAULT_LATCHED, (
-            f"Expected FAULT_LATCHED after Keithley SENSOR_ERROR + heartbeat "
-            f"timeout, got {mgr.state}"
+            f"Expected FAULT_LATCHED after Keithley SENSOR_ERROR + heartbeat timeout, got {mgr.state}"
         )
     finally:
         await mgr.stop()
@@ -157,9 +185,7 @@ async def test_heartbeat_fresh_ok_reading_keeps_running():
     mgr._config.critical_channels = []
     try:
         # Seed Keithley data BEFORE entering RUNNING (so heartbeat has data)
-        await _feed(
-            broker, channel="keithley/smu_a/voltage", value=0.1, unit="V", status=ChannelStatus.OK
-        )
+        await _feed(broker, channel="keithley/smu_a/voltage", value=0.1, unit="V", status=ChannelStatus.OK)
         await _get_to_running(mgr, broker)
 
         # Continue feeding healthy data
@@ -174,9 +200,7 @@ async def test_heartbeat_fresh_ok_reading_keeps_running():
             await asyncio.sleep(0.3)
 
         # Monitor loop should still see the source as healthy
-        assert mgr.state == SafetyState.RUNNING, (
-            f"Healthy Keithley readings should keep state RUNNING, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.RUNNING, f"Healthy Keithley readings should keep state RUNNING, got {mgr.state}"
     finally:
         await mgr.stop()
 
@@ -189,21 +213,16 @@ async def test_heartbeat_uses_smu_channel_pattern():
     mgr._config.critical_channels = []
     try:
         # Seed Keithley data before RUNNING
-        await _feed(
-            broker, channel="keithley/smu_a/power", value=0.1, unit="W", status=ChannelStatus.OK
-        )
+        await _feed(broker, channel="keithley/smu_a/power", value=0.1, unit="W", status=ChannelStatus.OK)
         await _get_to_running(mgr, broker)
 
         # Feed more data
-        await _feed(
-            broker, channel="keithley/smu_a/power", value=0.5, unit="W", status=ChannelStatus.OK
-        )
+        await _feed(broker, channel="keithley/smu_a/power", value=0.5, unit="W", status=ChannelStatus.OK)
         await asyncio.sleep(0.5)
 
         # Within heartbeat window — should remain RUNNING
         assert mgr.state == SafetyState.RUNNING, (
-            f"Channel 'keithley/smu_a/power' containing '/smu' must satisfy "
-            f"heartbeat, got {mgr.state}"
+            f"Channel 'keithley/smu_a/power' containing '/smu' must satisfy heartbeat, got {mgr.state}"
         )
     finally:
         await mgr.stop()
@@ -312,9 +331,7 @@ async def test_telegram_notifier_has_no_persistent_session_at_init():
     # The notifier should NOT hold an open session as an instance attribute.
     # If _session exists it must be None (not an open ClientSession).
     session = getattr(notifier, "_session", None)
-    assert session is None, (
-        f"TelegramNotifier must not hold an open session at init, got {session!r}"
-    )
+    assert session is None, f"TelegramNotifier must not hold an open session at init, got {session!r}"
 
 
 async def test_telegram_notifier_stores_config():
@@ -360,9 +377,7 @@ async def test_telegram_notifier_skips_cleared_when_disabled():
 
     await notifier(cleared_event)
 
-    assert not send_calls, (
-        "TelegramNotifier must not call _send for cleared events when send_cleared=False"
-    )
+    assert not send_calls, "TelegramNotifier must not call _send for cleared events when send_cleared=False"
 
 
 async def test_telegram_notifier_skips_acknowledged_events():
@@ -453,9 +468,7 @@ async def test_sqlite_writes_real_timestamp(tmp_path: Path):
     # Import _parse_timestamp — it may not exist yet; skip if missing
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
-        pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
-        )
+        pytest.skip("cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)")
 
     writer = SQLiteWriter(tmp_path)
     ts = datetime.now(UTC)
@@ -472,8 +485,7 @@ async def test_sqlite_writes_real_timestamp(tmp_path: Path):
     assert row is not None, "Expected at least one row in readings table"
     stored_ts = row[0]
     assert isinstance(stored_ts, float), (
-        f"Timestamp column must store a float (REAL) after P1-07 fix, "
-        f"got {type(stored_ts).__name__}: {stored_ts!r}"
+        f"Timestamp column must store a float (REAL) after P1-07 fix, got {type(stored_ts).__name__}: {stored_ts!r}"
     )
 
 
@@ -481,9 +493,7 @@ async def test_parse_timestamp_real():
     """_parse_timestamp(float) must return a timezone-aware datetime."""
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
-        pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
-        )
+        pytest.skip("cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)")
 
     _parse_timestamp = sqlite_writer_mod._parse_timestamp
 
@@ -502,9 +512,7 @@ async def test_parse_timestamp_text_legacy():
     """_parse_timestamp(str) must parse legacy ISO-8601 TEXT timestamps."""
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
-        pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
-        )
+        pytest.skip("cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)")
 
     _parse_timestamp = sqlite_writer_mod._parse_timestamp
 
@@ -522,18 +530,14 @@ async def test_parse_timestamp_text_naive_legacy():
     """_parse_timestamp must handle naive ISO strings (no tz) without raising."""
     sqlite_writer_mod = importlib.import_module("cryodaq.storage.sqlite_writer")
     if not hasattr(sqlite_writer_mod, "_parse_timestamp"):
-        pytest.skip(
-            "cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)"
-        )
+        pytest.skip("cryodaq.storage.sqlite_writer._parse_timestamp not yet implemented (P1-07 fix pending)")
 
     _parse_timestamp = sqlite_writer_mod._parse_timestamp
 
     naive_str = "2026-03-14T12:00:00"
     dt = _parse_timestamp(naive_str)
 
-    assert isinstance(dt, datetime), (
-        f"_parse_timestamp(naive str) must return datetime, got {type(dt)}"
-    )
+    assert isinstance(dt, datetime), f"_parse_timestamp(naive str) must return datetime, got {type(dt)}"
     assert dt.year == 2026
 
 
@@ -589,6 +593,4 @@ async def test_sqlite_schema_has_timestamp_column(tmp_path: Path):
     conn.close()
 
     col_names = [row[1] for row in cols_info]
-    assert "timestamp" in col_names, (
-        f"readings table must have a 'timestamp' column, found: {col_names}"
-    )
+    assert "timestamp" in col_names, f"readings table must have a 'timestamp' column, found: {col_names}"

@@ -444,12 +444,14 @@ async def test_cancellation_resistant_coordinator_becomes_terminal_without_overl
     shared_task = scheduler._instruments[driver.name].task
     assert shared_task is not None and shared_task.done()
     marked_before_stop = participant.marked
-    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="instrument shutdown incomplete.*resistant-bus still pending"):
+        await asyncio.wait_for(scheduler.stop(), timeout=0.1)
     assert coordinator.calls == coordinator.max_active == 1
     assert coordinator.active == 1
     assert participant.marked == marked_before_stop
     await asyncio.wait_for(coordinator.finished.wait(), timeout=0.3)
     assert coordinator.active == 0
+    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
 
 
 async def test_stop_during_cancellation_resistant_recovery_terminalizes_without_disconnect() -> None:
@@ -503,12 +505,14 @@ async def test_stop_during_cancellation_resistant_recovery_terminalizes_without_
     await scheduler.start()
     await asyncio.wait_for(coordinator.started.wait(), timeout=0.5)
     marked_before_stop = participant.marked
-    await asyncio.wait_for(scheduler.stop(), timeout=0.15)
+    with pytest.raises(RuntimeError, match="instrument shutdown incomplete.*poll task still pending"):
+        await asyncio.wait_for(scheduler.stop(), timeout=0.15)
     assert coordinator.max_active == 1
     assert coordinator.active == 1
     assert participant.marked == marked_before_stop
-    assert descriptor.bus_id in scheduler._terminal_bus_authority
     await asyncio.wait_for(coordinator.finished.wait(), timeout=0.3)
+    assert descriptor.bus_id in scheduler._terminal_bus_authority
+    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
 
 
 async def test_cancellation_during_public_device_recovery_settles_bounded() -> None:
@@ -578,11 +582,13 @@ async def test_cancellation_resistant_device_recovery_terminalizes_bus_by_second
     assert shared_task is not None and shared_task.done()
     assert participant.recoveries == participant.max_active == participant.active == 1
     marked_before_stop = participant.marked
-    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="instrument shutdown incomplete.*resistant-device-bus still pending"):
+        await asyncio.wait_for(scheduler.stop(), timeout=0.1)
     assert participant.marked == marked_before_stop
     assert descriptor.bus_id in scheduler._terminal_bus_authority
     await asyncio.wait_for(participant.finished.wait(), timeout=0.3)
     assert participant.active == 0
+    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
 
 
 async def test_stop_during_cancellation_resistant_device_recovery_owns_late_task() -> None:
@@ -629,12 +635,17 @@ async def test_stop_during_cancellation_resistant_device_recovery_owns_late_task
     await scheduler.start()
     await asyncio.wait_for(participant.recovery_started.wait(), timeout=0.5)
     marked_before_stop = participant.marked
-    await asyncio.wait_for(scheduler.stop(), timeout=0.15)
+    with pytest.raises(
+        RuntimeError,
+        match="instrument shutdown incomplete.*poll task still pending",
+    ):
+        await asyncio.wait_for(scheduler.stop(), timeout=0.15)
     assert participant.recoveries == participant.max_active == participant.active == 1
     assert participant.marked == marked_before_stop
-    assert descriptor.bus_id in scheduler._terminal_bus_authority
     await asyncio.wait_for(participant.finished.wait(), timeout=0.3)
     assert participant.active == 0
+    assert descriptor.bus_id in scheduler._terminal_bus_authority
+    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
 
 
 async def test_cancellation_resistant_read_terminalizes_bus_without_peer_overlap() -> None:
@@ -706,12 +717,15 @@ async def test_cancellation_resistant_read_terminalizes_bus_without_peer_overlap
     assert resistant.reads == resistant.max_active == resistant.active == 1
     assert peer.reads == 0
 
-    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="instrument shutdown incomplete.*resistant-read-bus still pending"):
+        await asyncio.wait_for(scheduler.stop(), timeout=0.1)
     assert resistant.disconnects == peer.disconnects == 0
     assert peer.reads == 0
     await asyncio.wait_for(resistant.finished.wait(), timeout=0.3)
     assert resistant.active == 0
     assert peer.reads == 0
+    await asyncio.wait_for(scheduler.stop(), timeout=0.1)
+    assert resistant.disconnects == peer.disconnects == 1
 
 
 async def test_public_recovery_exceptions_do_not_strand_scheduler_task() -> None:

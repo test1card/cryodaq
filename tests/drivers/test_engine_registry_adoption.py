@@ -337,7 +337,6 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
     class _StopAfterSafetyBinding(RuntimeError):
         pass
 
-    source = object()
     observed: dict[str, object] = {}
 
     def _fake_load_drivers(
@@ -351,7 +350,16 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
         observed["mock"] = mock
         observed["calibration_store"] = calibration_store
         observed["data_dir"] = data_dir
-        return DriverLoadResult((), (), source, KEITHLEY_2604B_SOURCE_BINDING)  # type: ignore[arg-type]
+        # A bare fake source is intentionally invalid now: source authority
+        # requires the exact sealed runtime binding on its InstrumentConfig.
+        result = _load_drivers(
+            Path("config/instruments.yaml"),
+            mock=mock,
+            calibration_store=calibration_store,
+            data_dir=data_dir,
+        )
+        observed["expected_source"] = result.reviewed_source
+        return result
 
     class _RecordingSafetyManager:
         def __init__(self, _broker: object, *, keithley_driver: object, **_kwargs: object) -> None:
@@ -376,4 +384,4 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
     assert observed["mock"] is True
     assert isinstance(observed["calibration_store"], CalibrationStore)
     assert observed["data_dir"] is data_dir
-    assert observed["source"] is source
+    assert observed["source"] is observed["expected_source"]

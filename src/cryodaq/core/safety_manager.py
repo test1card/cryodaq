@@ -94,8 +94,17 @@ class _ReviewedSourceGeneration:
 
 async def _settle_shielded_hardware_task(
     task: asyncio.Task[Any],
+    *,
+    cancel_owned_on_caller_cancel: bool = False,
 ) -> tuple[Any | None, BaseException | None, asyncio.CancelledError | None]:
-    """Settle an owned hardware task despite repeated caller cancellation."""
+    """Settle an owned hardware task despite repeated caller cancellation.
+
+    Most safety operations must finish even when their caller disappears.  A
+    target-scoped OFF proof is different: cancellation invalidates that proof,
+    so its task must become terminal before the caller escalates to one full
+    global OFF.  The opt-in flag provides that exact handoff without changing
+    cancellation ownership for any other hardware operation.
+    """
     caller_cancelled: asyncio.CancelledError | None = None
     while not task.done():
         try:
@@ -103,6 +112,8 @@ async def _settle_shielded_hardware_task(
         except asyncio.CancelledError as exc:
             if asyncio.current_task().cancelling():
                 caller_cancelled = caller_cancelled or exc
+                if cancel_owned_on_caller_cancel and not task.done():
+                    task.cancel()
             if task.done():
                 break
             continue
@@ -679,8 +690,11 @@ class SafetyManager:
                         "error": target_off_error,
                     }
                 target_off_task = asyncio.create_task(self._keithley.emergency_off(smu_channel))
-                target_result, target_error, target_cancelled = await _settle_shielded_hardware_task(target_off_task)
-                target_off_confirmed = target_error is None and target_result is True
+                target_result, target_error, target_cancelled = await _settle_shielded_hardware_task(
+                    target_off_task,
+                    cancel_owned_on_caller_cancel=True,
+                )
+                target_off_confirmed = target_cancelled is None and target_error is None and target_result is True
                 if target_error is not None:
                     logger.critical("%s: %s", target_off_error, target_error)
                 if not target_off_confirmed:

@@ -322,6 +322,51 @@ async def test_cancelled_second_channel_proof_settles_full_fault_shutdown() -> N
     driver.start_source.assert_not_awaited()
 
 
+async def test_same_turn_target_proof_completion_and_cancellation_still_force_full_fault() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    target_returned = asyncio.Event()
+    global_shutdown = asyncio.Event()
+
+    async def _off(channel: str | None = None) -> bool:
+        if channel == "smub":
+            entered.set()
+            await release.wait()
+            target_returned.set()
+            return True
+        global_shutdown.set()
+        return True
+
+    driver = MagicMock()
+    driver.connected = True
+    driver.output_state_unverified = True
+    driver.watchdog_trip_pending = False
+    driver.emergency_off = AsyncMock(side_effect=_off)
+    driver.start_source = AsyncMock()
+    manager = _manager(driver=driver)
+    manager._config.critical_channels = []
+    await _qualify_generation(manager, driver, expected_verified_off=False)
+    manager._state = SafetyState.RUNNING
+    manager._active_sources.add("smua")
+    manager._reviewed_source_verified_off = False
+
+    task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smub"))
+    await entered.wait()
+    # Schedule the proof's successful completion before cancelling its owner.
+    # The helper may therefore observe both a literal True result and caller
+    # cancellation; cancellation must invalidate the scoped proof regardless.
+    release.set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert target_returned.is_set()
+    assert global_shutdown.is_set()
+    assert manager.state is SafetyState.FAULT_LATCHED
+    assert manager._active_sources == set()
+    driver.start_source.assert_not_awaited()
+
+
 async def test_keithley_dual_channel_uses_scoped_proof_despite_global_active_flag() -> None:
     from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
@@ -440,8 +485,13 @@ async def test_persistence_fault_recovery_and_source_start_stop_each_refresh_own
 
 async def test_confirmed_off_and_disconnect_are_separate_explicit_mutations() -> None:
     driver = MagicMock()
+    driver.connected = True
     driver.emergency_off = AsyncMock(return_value=True)
-    driver.disconnect = AsyncMock()
+
+    async def _disconnect() -> None:
+        driver.connected = False
+
+    driver.disconnect = AsyncMock(side_effect=_disconnect)
     manager = _manager(driver=driver)
     manager._safety_monitor_active = True
     before = manager.snapshot_operator_safety()
@@ -469,6 +519,9 @@ async def test_disconnect_cancellation_settles_proof_and_lifecycle_revisions() -
     disconnect_release = asyncio.Event()
 
     class Driver:
+        def __init__(self) -> None:
+            self.connected = True
+
         async def emergency_off(self) -> bool:
             off_started.set()
             await off_release.wait()
@@ -477,6 +530,7 @@ async def test_disconnect_cancellation_settles_proof_and_lifecycle_revisions() -
         async def disconnect(self) -> None:
             disconnect_started.set()
             await disconnect_release.wait()
+            self.connected = False
 
     driver = Driver()
     manager = _manager(driver=driver)
