@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
+from cryodaq.core.scheduler import ReviewedSourceSettlementIncomplete
 from cryodaq.engine import (
     EngineCommandContext,
     _feed_recording_experiment_lifecycle,
@@ -222,6 +223,66 @@ async def test_scheduler_failure_feeds_unavailable_and_preserves_failure(operati
     feed.acquisition_stopped.assert_not_called()
 
 
+async def test_reviewed_source_stop_retries_fail_dark_before_stopped_publication() -> None:
+    events: list[str] = []
+    attempts = 0
+
+    async def _stop() -> None:
+        nonlocal attempts
+        attempts += 1
+        events.append(f"stop-{attempts}")
+        if attempts == 1:
+            raise ReviewedSourceSettlementIncomplete("source cleanup pending")
+
+    async def _sleep(delay: float) -> None:
+        events.append(f"sleep-{delay:.1f}")
+
+    scheduler = MagicMock()
+    scheduler.stop = AsyncMock(side_effect=_stop)
+    feed = MagicMock()
+    feed.persistence_ambiguous.side_effect = lambda: events.append("persistence-ambiguous")
+    feed.acquisition_unavailable.side_effect = lambda *_args: events.append("acquisition-unavailable")
+    feed.acquisition_stopped.side_effect = lambda *_args: events.append("acquisition-stopped")
+    feed.persistence_stopped.side_effect = lambda: events.append("persistence-stopped")
+
+    sequence = await _stop_scheduler_with_recording_feed(
+        scheduler,
+        feed,
+        1,
+        retry_delay_s=99.0,
+        sleep=_sleep,
+    )
+
+    assert sequence == 3
+    assert events == [
+        "stop-1",
+        "persistence-ambiguous",
+        "acquisition-unavailable",
+        "sleep-1.0",
+        "stop-2",
+        "acquisition-stopped",
+        "persistence-stopped",
+    ]
+    feed.acquisition_stopped.assert_called_once_with(3)
+
+
+async def test_generic_stop_failure_is_not_retried() -> None:
+    original = RuntimeError("ordinary stop failed")
+    scheduler = MagicMock()
+    scheduler.stop = AsyncMock(side_effect=original)
+    feed = MagicMock()
+    sleep = AsyncMock()
+
+    with pytest.raises(RuntimeError) as caught:
+        await _stop_scheduler_with_recording_feed(scheduler, feed, 4, sleep=sleep)
+
+    assert caught.value is original
+    scheduler.stop.assert_awaited_once_with()
+    sleep.assert_not_awaited()
+    feed.acquisition_unavailable.assert_called_once_with(5)
+    feed.acquisition_stopped.assert_not_called()
+
+
 def test_production_wiring_uses_direct_persistence_observation_without_publication_or_control() -> None:
     source = inspect.getsource(_run_engine)
     assert source.index("recording_lifecycle_feed = RecordingLifecycleFeed(") < source.index("EngineCommandContext(")
@@ -229,6 +290,12 @@ def test_production_wiring_uses_direct_persistence_observation_without_publicati
     assert "persistence_commit_observer=recording_lifecycle_feed.persistence_committed" in source
     assert "_start_scheduler_with_recording_feed(" in source
     assert "_stop_scheduler_with_recording_feed(" in source
+    assert "reviewed_source_connect_begin=safety_manager.begin_reviewed_source_connect" in source
+    assert "reviewed_source_connect_complete=safety_manager.complete_reviewed_source_connect" in source
+    assert "reviewed_source_uncertain=safety_manager.mark_reviewed_source_uncertain" in source
+    assert "reviewed_source_connect_abandon=safety_manager.abandon_reviewed_source_connect" in source
+    assert "reviewed_source_disconnect=safety_manager.disconnect_reviewed_source" in source
+    assert source.index("_stop_scheduler_with_recording_feed(") < source.index("await safety_manager.stop()")
 
     bridge_source = "\n".join(
         inspect.getsource(operation)

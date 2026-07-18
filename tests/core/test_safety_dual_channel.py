@@ -6,6 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 
 
 def _mock_keithley():
@@ -20,10 +25,26 @@ def _mock_keithley():
 
 async def _make_manager(*, mock: bool = True, keithley=None):
     broker = SafetyBroker()
-    manager = SafetyManager(broker, keithley_driver=keithley, mock=mock)
+    binding = None
+    if not mock:
+        binding = _issue_registry_runtime_binding(
+            driver=keithley,
+            timing=AcquisitionTiming(1.0, 1.0, 1.0),
+            registry_provenance="test:safety-dual-channel",
+            trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        )
+    manager = SafetyManager(
+        broker,
+        keithley_driver=keithley,
+        reviewed_source_runtime_binding=binding,
+        mock=mock,
+    )
     manager._config.cooldown_before_rearm_s = 0.1
     manager._config.require_keithley_for_run = not mock
     await manager.start()
+    if not mock:
+        generation = await manager.begin_reviewed_source_connect(keithley, binding, "test setup")
+        assert await manager.complete_reviewed_source_connect(keithley, binding, generation, "test setup")
     return manager, broker
 
 
@@ -34,9 +55,7 @@ async def _feed_ready(broker: SafetyBroker, manager: SafetyManager | None = None
         deadline = asyncio.get_event_loop().time() + 3.0
         while manager.state != SafetyState.READY:
             if asyncio.get_event_loop().time() >= deadline:
-                raise AssertionError(
-                    f"Manager did not reach READY within 3s; state={manager.state}"
-                )
+                raise AssertionError(f"Manager did not reach READY within 3s; state={manager.state}")
             await asyncio.sleep(0.05)
     else:
         # Fallback for callers that don't pass manager: wait long enough for monitor loop

@@ -22,6 +22,11 @@ from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.smu_channel import SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import Reading
+from cryodaq.drivers.contracts import (
+    DriverRuntimeBinding,
+    DriverTrustClass,
+    is_issued_runtime_binding,
+)
 from cryodaq.engine_wiring.operator_safety_snapshot import (
     OperatorSafetySnapshot,
     PlantHealthFact,
@@ -81,6 +86,38 @@ class SafetyConfig:
     scheduler_drain_timeout_s: float = 5.0
 
 
+class _ReviewedSourceGeneration:
+    """Opaque SafetyManager-owned identity for one source connection attempt."""
+
+    __slots__ = ()
+
+
+async def _settle_shielded_hardware_task(
+    task: asyncio.Task[Any],
+) -> tuple[Any | None, BaseException | None, asyncio.CancelledError | None]:
+    """Settle an owned hardware task despite repeated caller cancellation."""
+    caller_cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if asyncio.current_task().cancelling():
+                caller_cancelled = caller_cancelled or exc
+            if task.done():
+                break
+            continue
+        except Exception:
+            # The owned task has reached a normal exceptional terminal state;
+            # classify it below instead of leaking through asyncio.shield.
+            break
+    try:
+        return task.result(), None, caller_cancelled
+    except asyncio.CancelledError as exc:
+        return None, exc, caller_cancelled
+    except Exception as exc:
+        return None, exc, caller_cancelled
+
+
 class SafetyManager:
     """Single safety state machine with channel-aware Keithley control."""
 
@@ -89,6 +126,7 @@ class SafetyManager:
         safety_broker: SafetyBroker,
         *,
         keithley_driver: Any | None = None,
+        reviewed_source_runtime_binding: DriverRuntimeBinding | None = None,
         mock: bool = False,
         data_broker: Any | None = None,
         fault_log_callback: Any | None = None,
@@ -96,6 +134,15 @@ class SafetyManager:
         self._broker = safety_broker
         self._keithley = keithley_driver
         self._mock = mock
+        self._reviewed_source_runtime_binding = reviewed_source_runtime_binding
+        self._reviewed_source_identity_qualified = bool(
+            keithley_driver is not None
+            and reviewed_source_runtime_binding is not None
+            and is_issued_runtime_binding(reviewed_source_runtime_binding)
+            and reviewed_source_runtime_binding.driver is keithley_driver
+            and reviewed_source_runtime_binding.trust_class is DriverTrustClass.REVIEWED_SOURCE
+        )
+        self._reviewed_source_generation: _ReviewedSourceGeneration | None = None
         self._data_broker = data_broker
         self._fault_log_callback = fault_log_callback
         self._state = SafetyState.SAFE_OFF
@@ -387,21 +434,146 @@ class SafetyManager:
         return self._operator_safety_snapshot
 
     def record_reviewed_source_connected(self, *, verified_off: bool) -> None:
-        """Commit explicit connection-generation evidence from reviewed wiring.
+        """Commit explicit simulator-only connection evidence.
 
-        ``verified_off`` must be the exact result of current-generation final
-        element readback.  False is evidence of connection, never OFF proof.
+        Production authority must flow through the exact begin/complete
+        lifecycle; a bare boolean must never synthesize a generation.
         """
         if type(verified_off) is not bool:
             raise TypeError("verified_off must be an exact bool")
+        if not self._mock:
+            raise RuntimeError("manual reviewed-source connection evidence is simulator-only")
         if verified_off and (self._active_sources or self._state in {SafetyState.RUN_PERMITTED, SafetyState.RUNNING}):
             raise ValueError("cannot accept verified-OFF evidence while a source lifecycle is active")
+        if self._reviewed_source_generation is None:
+            self._reviewed_source_generation = _ReviewedSourceGeneration()
         self._reviewed_source_connected = True
         self._reviewed_source_verified_off = verified_off
         self._refresh_operator_safety_snapshot()
 
     def record_reviewed_source_unavailable(self) -> None:
         """Invalidate connection and OFF authority without probing a driver."""
+        self._reviewed_source_generation = None
+        self._reviewed_source_connected = False
+        self._reviewed_source_verified_off = False
+        self._refresh_operator_safety_snapshot()
+
+    def _require_reviewed_source_identity(
+        self,
+        driver: object,
+        runtime_binding: DriverRuntimeBinding,
+    ) -> None:
+        if (
+            not self._reviewed_source_identity_qualified
+            or driver is not self._keithley
+            or runtime_binding is not self._reviewed_source_runtime_binding
+            or not is_issued_runtime_binding(runtime_binding)
+            or runtime_binding.driver is not driver
+            or runtime_binding.trust_class is not DriverTrustClass.REVIEWED_SOURCE
+        ):
+            raise ValueError("reviewed-source sealed runtime binding identity mismatch")
+
+    def _has_current_reviewed_connection_generation(self) -> bool:
+        if self._mock:
+            return True
+        return bool(
+            self._reviewed_source_identity_qualified
+            and self._reviewed_source_generation is not None
+            and self._reviewed_source_connected
+            and self._keithley is not None
+            and getattr(self._keithley, "connected", None) is True
+        )
+
+    async def begin_reviewed_source_connect(
+        self,
+        driver: object,
+        runtime_binding: DriverRuntimeBinding,
+        context: str,
+    ) -> object:
+        """Revoke old authority before one scheduler-owned connect attempt."""
+        self._require_reviewed_source_identity(driver, runtime_binding)
+        self._register_abort_intent(full=True)
+        async with self._cmd_lock:
+            self._require_reviewed_source_identity(driver, runtime_binding)
+            had_active_source = bool(self._active_sources)
+            self._reviewed_source_generation = None
+            self._reviewed_source_connected = False
+            self._reviewed_source_verified_off = False
+            self._refresh_operator_safety_snapshot()
+            if had_active_source:
+                await self._fault(f"reviewed source connection changed while active ({context})")
+                # The caller may still complete a diagnostic reconnect, but
+                # this unrecorded token can never qualify RUN after ACK.
+                return _ReviewedSourceGeneration()
+            generation = _ReviewedSourceGeneration()
+            self._reviewed_source_generation = generation
+            return generation
+
+    async def complete_reviewed_source_connect(
+        self,
+        driver: object,
+        runtime_binding: DriverRuntimeBinding,
+        generation: object,
+        context: str,
+    ) -> bool:
+        """Commit current-generation both-channel OFF cache after connect."""
+        del context
+        async with self._cmd_lock:
+            self._require_reviewed_source_identity(driver, runtime_binding)
+            if generation is not self._reviewed_source_generation:
+                return False
+            connected = getattr(driver, "connected", None) is True
+            verified_off = connected and getattr(driver, "output_state_unverified", None) is False
+            self._reviewed_source_connected = connected
+            self._reviewed_source_verified_off = verified_off
+            if verified_off:
+                self._active_sources.clear()
+            self._refresh_operator_safety_snapshot()
+            return verified_off
+
+    async def mark_reviewed_source_uncertain(
+        self,
+        driver: object,
+        runtime_binding: DriverRuntimeBinding,
+        generation: object,
+        context: str,
+    ) -> None:
+        """Revoke one exact connection generation before uncertain recovery."""
+        self._require_reviewed_source_identity(driver, runtime_binding)
+        if generation is not self._reviewed_source_generation:
+            return
+        self._register_abort_intent(full=True)
+        async with self._cmd_lock:
+            self._require_reviewed_source_identity(driver, runtime_binding)
+            if generation is not self._reviewed_source_generation:
+                return
+            self._reviewed_source_generation = None
+            self._reviewed_source_connected = False
+            self._reviewed_source_verified_off = False
+            self._refresh_operator_safety_snapshot()
+            if self._active_sources:
+                await self._fault(f"reviewed source connection uncertain ({context})")
+
+    def abandon_reviewed_source_connect(
+        self,
+        driver: object,
+        runtime_binding: DriverRuntimeBinding,
+        generation: object,
+        context: str,
+    ) -> None:
+        """Synchronously revoke RUN authority at a caller deadline/cancel cut."""
+        del context
+        self._require_reviewed_source_identity(driver, runtime_binding)
+        if generation is not self._reviewed_source_generation:
+            return
+        # This synchronous cut is deliberately lock-independent, like the
+        # operator abort generation: it must outrun a command that yielded
+        # while holding _cmd_lock.  The retained owner subsequently performs
+        # the locked uncertainty transition and exact disconnect.
+        self._register_abort_intent(full=True)
+        if generation is not self._reviewed_source_generation:
+            return
+        self._reviewed_source_generation = None
         self._reviewed_source_connected = False
         self._reviewed_source_verified_off = False
         self._refresh_operator_safety_snapshot()
@@ -486,7 +658,48 @@ class SafetyManager:
                     "error": f"I={i_comp}A exceeds limit {self._config.max_current_a}A",
                 }
 
-            self._reviewed_source_connected = self._keithley is not None or self._mock
+            # A global OFF receipt cannot remain true while another channel is
+            # intentionally sourcing. Before adding a second channel, obtain
+            # fresh, target-scoped OFF authority from the already-reviewed
+            # source capability. This happens under _cmd_lock and immediately
+            # before start_source, so no competing source command can consume
+            # or invalidate the proof. Never promote it to global OFF truth.
+            if not self._mock and self._active_sources:
+                assert self._keithley is not None
+                target_off_error = f"Target {smu_channel} OFF state is UNVERIFIED before RUN"
+                if (
+                    not self._reviewed_source_identity_qualified
+                    or self._reviewed_source_generation is None
+                    or not self._reviewed_source_connected
+                ):
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error": target_off_error,
+                    }
+                target_off_task = asyncio.create_task(self._keithley.emergency_off(smu_channel))
+                target_result, target_error, target_cancelled = await _settle_shielded_hardware_task(target_off_task)
+                target_off_confirmed = target_error is None and target_result is True
+                if target_error is not None:
+                    logger.critical("%s: %s", target_off_error, target_error)
+                if not target_off_confirmed:
+                    await self._fault(target_off_error, channel=smu_channel)
+                    if target_cancelled is not None:
+                        raise target_cancelled
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "error": target_off_error,
+                    }
+                if target_cancelled is not None:
+                    raise target_cancelled
+
+            # Connection authority is committed only by the exact reviewed
+            # lifecycle generation. Mere object presence is never authority.
+            if self._mock:
+                self._reviewed_source_connected = True
             self._reviewed_source_verified_off = False
             self._refresh_operator_safety_snapshot()
             if self._state != SafetyState.RUNNING:
@@ -508,15 +721,54 @@ class SafetyManager:
                         "error": "Keithley not connected",
                     }
             else:
-                try:
-                    await self._keithley.start_source(smu_channel, p_target, v_comp, i_comp)
-                except Exception as exc:
-                    await self._fault(f"Source start failed on {smu_channel}: {exc}", channel=smu_channel)
+                start_task = asyncio.create_task(
+                    self._keithley.start_source(smu_channel, p_target, v_comp, i_comp),
+                    name=f"safety_start_source_{smu_channel}",
+                )
+                _start_result, start_error, caller_cancelled = await _settle_shielded_hardware_task(start_task)
+
+                if caller_cancelled is not None:
+                    # The retained start owner has settled before this full
+                    # OFF begins, so no late OUTPUT_ON can land after OFF.
+                    self._register_abort_intent(full=True)
+                    off_task = asyncio.create_task(
+                        self._emergency_off_locked(None),
+                        name=f"cancelled_start_full_off_{smu_channel}",
+                    )
+                    _off_result, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
+                    caller_cancelled = caller_cancelled or off_cancelled
+                    if off_error is not None:
+                        logger.critical(
+                            "Cancelled start on %s could not settle full emergency OFF: %s",
+                            smu_channel,
+                            off_error,
+                        )
+                        fault_task = asyncio.create_task(
+                            self._fault(
+                                f"cancelled start on {smu_channel} could not settle full OFF",
+                                channel=smu_channel,
+                            )
+                        )
+                        _fault_result, fault_error, fault_cancelled = await _settle_shielded_hardware_task(fault_task)
+                        caller_cancelled = caller_cancelled or fault_cancelled
+                        if fault_error is not None:
+                            logger.critical(
+                                "Cancelled start fault settlement failed on %s: %s",
+                                smu_channel,
+                                fault_error,
+                            )
+                    raise caller_cancelled
+
+                if start_error is not None:
+                    await self._fault(
+                        f"Source start failed on {smu_channel}: {start_error}",
+                        channel=smu_channel,
+                    )
                     return {
                         "ok": False,
                         "state": self._state.value,
                         "channel": smu_channel,
-                        "error": str(exc),
+                        "error": str(start_error),
                     }
 
                 # CRITICAL safety reconciliation (Phase 1 review P0-2):
@@ -528,10 +780,12 @@ class SafetyManager:
                 # re-issue emergency_off in case start_source's last write
                 # interleaved after the fault's OUTPUT_OFF.
                 if self._state == SafetyState.FAULT_LATCHED:
-                    try:
-                        await self._keithley.emergency_off()
-                    except Exception as exc:
-                        logger.critical("FAULT after start_source: emergency_off failed: %s", exc)
+                    off_task = asyncio.create_task(self._ensure_output_off())
+                    _off_result, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
+                    if off_error is not None:
+                        logger.critical("FAULT after start_source: emergency_off failed: %s", off_error)
+                    if off_cancelled is not None:
+                        raise off_cancelled
                     return {
                         "ok": False,
                         "state": self._state.value,
@@ -555,15 +809,15 @@ class SafetyManager:
                     "output OFF, not committing source",
                     smu_channel,
                 )
-                try:
-                    confirmed_off = await self._keithley.emergency_off(None if full_shutdown else smu_channel) is True
-                except Exception as exc:
+                off_task = asyncio.create_task(self._ensure_output_off(None if full_shutdown else smu_channel))
+                off_result, off_error, abort_caller_cancelled = await _settle_shielded_hardware_task(off_task)
+                confirmed_off = off_error is None and off_result is True
+                if off_error is not None:
                     logger.critical(
                         "request_run abort emergency_off(%s) failed: %s",
                         smu_channel,
-                        exc,
+                        off_error,
                     )
-                    confirmed_off = False
                 if not confirmed_off:
                     await self._fault(
                         f"request_run({smu_channel}) abort could not confirm OFF",
@@ -585,6 +839,8 @@ class SafetyManager:
                             channel=smu_channel,
                         )
                     await self._publish_keithley_channel_states(f"start_aborted:{smu_channel}")
+                if abort_caller_cancelled is not None:
+                    raise abort_caller_cancelled
                 return {
                     "ok": False,
                     "state": self._state.value,
@@ -602,7 +858,46 @@ class SafetyManager:
                 )
             else:
                 self._refresh_operator_safety_snapshot()
-            await self._publish_keithley_channel_states(f"run:{smu_channel}")
+            publish_task = asyncio.create_task(
+                self._publish_keithley_channel_states(f"run:{smu_channel}"),
+                name=f"publish_run_{smu_channel}",
+            )
+            _publish_result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
+            if publish_error is not None or publish_cancelled is not None:
+                # The caller has not received an activation receipt.  Never
+                # expose cancellation/exception while leaving that ambiguous
+                # source ON: settle a full exact OFF first.
+                self._register_abort_intent(full=True)
+                off_task = asyncio.create_task(
+                    self._emergency_off_locked(None),
+                    name=f"unacknowledged_run_full_off_{smu_channel}",
+                )
+                _off_result, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
+                if off_error is not None:
+                    logger.critical(
+                        "Unacknowledged RUN on %s could not settle full OFF: %s",
+                        smu_channel,
+                        off_error,
+                    )
+                    fault_task = asyncio.create_task(
+                        self._fault(
+                            f"unacknowledged RUN on {smu_channel} could not settle full OFF",
+                            channel=smu_channel,
+                        )
+                    )
+                    _fault_result, fault_error, fault_cancelled = await _settle_shielded_hardware_task(fault_task)
+                    off_cancelled = off_cancelled or fault_cancelled
+                    if fault_error is not None:
+                        logger.critical(
+                            "Unacknowledged RUN fault settlement failed on %s: %s",
+                            smu_channel,
+                            fault_error,
+                        )
+                cancellation = publish_cancelled or off_cancelled
+                if cancellation is not None:
+                    raise cancellation
+                assert publish_error is not None
+                raise publish_error
             return {
                 "ok": True,
                 "state": self._state.value,
@@ -611,6 +906,21 @@ class SafetyManager:
             }
 
     async def request_stop(self, *, channel: str | None = None) -> dict[str, Any]:
+        """Own stop intent and the complete lock-to-publication settlement."""
+        self._register_abort_intent(full=channel is None)
+        operation = asyncio.create_task(
+            self._request_stop_owned(channel=channel),
+            name="safety_request_stop",
+        )
+        result, error, caller_cancelled = await _settle_shielded_hardware_task(operation)
+        if error is not None:
+            raise error
+        if caller_cancelled is not None:
+            raise caller_cancelled
+        assert isinstance(result, dict)
+        return result
+
+    async def _request_stop_owned(self, *, channel: str | None = None) -> dict[str, Any]:
         async with self._cmd_lock:
             channels = self._resolve_channels(channel)
             if self._state == SafetyState.FAULT_LATCHED:
@@ -654,34 +964,52 @@ class SafetyManager:
         # the wire. Later runs capture the settled generation, while any run
         # already in flight must observe the change and abort.
         self._register_abort_intent(full=channel is None)
+        operation = asyncio.create_task(
+            self._emergency_off_with_lock(channel),
+            name="safety_emergency_off",
+        )
+        result, error, caller_cancelled = await _settle_shielded_hardware_task(operation)
+        if error is not None:
+            raise error
+        if caller_cancelled is not None:
+            raise caller_cancelled
+        assert isinstance(result, dict)
+        return result
+
+    async def _emergency_off_with_lock(self, channel: str | None) -> dict[str, Any]:
+        """Own lock acquisition and the full OFF bookkeeping as one task."""
         async with self._cmd_lock:
             return await self._emergency_off_locked(channel)
 
-    async def disconnect_reviewed_source(self, driver: Any, context: str) -> bool:
+    async def disconnect_reviewed_source(
+        self,
+        driver: Any,
+        runtime_binding: DriverRuntimeBinding,
+        generation: object | None,
+        context: str,
+    ) -> bool:
         """Prove the exact reviewed source OFF before scheduler disconnect."""
+        del generation  # Full fail-closed OFF remains available after revocation.
+        self._require_reviewed_source_identity(driver, runtime_binding)
         self._register_abort_intent(full=True)
         cancelled: asyncio.CancelledError | None = None
         async with self._cmd_lock:
-            if driver is not self._keithley:
-                raise ValueError("reviewed-source disconnect driver identity mismatch")
+            self._require_reviewed_source_identity(driver, runtime_binding)
+            self._reviewed_source_generation = None
+            self._reviewed_source_connected = False
+            self._reviewed_source_verified_off = False
+            self._refresh_operator_safety_snapshot()
 
             proof_task = asyncio.create_task(driver.emergency_off())
-            try:
-                confirmed = await asyncio.shield(proof_task) is True
-            except asyncio.CancelledError as exc:
-                caller_cancelled = bool(asyncio.current_task().cancelling())
-                if caller_cancelled:
-                    cancelled = exc
-                try:
-                    confirmed = await proof_task is True
-                except (asyncio.CancelledError, Exception):
-                    confirmed = False
-            except Exception:
+            proof_result, proof_error, proof_cancelled = await _settle_shielded_hardware_task(proof_task)
+            cancelled = proof_cancelled
+            confirmed = proof_error is None and proof_result is True
+            if proof_error is not None and not isinstance(proof_error, asyncio.CancelledError):
                 logger.exception(
                     "Reviewed-source OFF proof failed during scheduler disconnect (%s)",
                     context,
+                    exc_info=proof_error,
                 )
-                confirmed = False
 
             if not confirmed:
                 self._reviewed_source_verified_off = False
@@ -691,44 +1019,36 @@ class SafetyManager:
                     raise cancelled
                 return False
 
-            self._reviewed_source_connected = True
-            self._reviewed_source_verified_off = True
-            self._refresh_operator_safety_snapshot()
-
             disconnect_task = asyncio.create_task(driver.disconnect())
-            try:
-                await asyncio.shield(disconnect_task)
-            except asyncio.CancelledError as exc:
-                caller_cancelled = bool(asyncio.current_task().cancelling())
-                if caller_cancelled:
-                    cancelled = cancelled or exc
-                try:
-                    await disconnect_task
-                except (asyncio.CancelledError, Exception) as disconnect_exc:
-                    logger.critical(
-                        "Reviewed-source disconnect failed after verified OFF: %s",
-                        disconnect_exc,
-                    )
-                    await self._fault(f"reviewed source disconnect failed after OFF proof ({context})")
-                    if cancelled is not None:
-                        raise cancelled
-                    return False
-            except Exception as exc:
-                logger.critical("Reviewed-source disconnect failed after verified OFF: %s", exc)
+            _result, disconnect_error, disconnect_cancelled = await _settle_shielded_hardware_task(disconnect_task)
+            cancelled = cancelled or disconnect_cancelled
+            disconnected = getattr(driver, "connected", None) is False
+            if disconnect_error is not None or not disconnected:
+                if disconnect_error is not None:
+                    logger.critical("Reviewed-source disconnect failed after verified OFF: %s", disconnect_error)
+                else:
+                    logger.critical("Reviewed-source disconnect returned normally without connected=False")
                 await self._fault(f"reviewed source disconnect failed after OFF proof ({context})")
+                if cancelled is not None:
+                    raise cancelled
                 return False
 
             self._active_sources.clear()
-            # Preserve the terminal proof that authorized this exact teardown,
-            # while connection health becomes explicitly disconnected.
             self._reviewed_source_connected = False
-            self._reviewed_source_verified_off = True
+            self._reviewed_source_verified_off = False
             self._refresh_operator_safety_snapshot()
-            await self._publish_keithley_channel_states("reviewed_source_disconnected")
             if self._state != SafetyState.FAULT_LATCHED:
                 self._transition(
                     SafetyState.SAFE_OFF,
                     f"Reviewed source disconnected: {context}",
+                )
+            publish_task = asyncio.create_task(self._publish_keithley_channel_states("reviewed_source_disconnected"))
+            _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
+            cancelled = cancelled or publish_cancelled
+            if publish_error is not None:
+                logger.warning(
+                    "Reviewed-source disconnected-state publish failed: %s",
+                    publish_error,
                 )
             if cancelled is not None:
                 raise cancelled
@@ -771,10 +1091,9 @@ class SafetyManager:
             }
         self._active_sources.difference_update(channels)
         self._refresh_operator_safety_snapshot()
-        await self._publish_keithley_channel_states("emergency_off")
 
         if self._state == SafetyState.FAULT_LATCHED:
-            return {
+            result = {
                 "ok": True,
                 "state": self._state.value,
                 "channels": sorted(channels),
@@ -782,16 +1101,22 @@ class SafetyManager:
                 "latched": True,
                 "warning": "Outputs disabled but fault remains latched",
             }
-
-        if not self._active_sources:
-            self._transition(SafetyState.SAFE_OFF, "Operator emergency off")
-
-        return {
-            "ok": True,
-            "state": self._state.value,
-            "channels": sorted(channels),
-            "active_channels": sorted(self._active_sources),
-        }
+        else:
+            if not self._active_sources:
+                self._transition(SafetyState.SAFE_OFF, "Operator emergency off")
+            result = {
+                "ok": True,
+                "state": self._state.value,
+                "channels": sorted(channels),
+                "active_channels": sorted(self._active_sources),
+            }
+        publish_task = asyncio.create_task(self._publish_keithley_channel_states("emergency_off"))
+        _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
+        if publish_error is not None:
+            logger.warning("Emergency-OFF state publish failed: %s", publish_error)
+        if publish_cancelled is not None:
+            raise publish_cancelled
+        return result
 
     async def update_target(self, p_target: float, *, channel: str | None = None) -> dict[str, Any]:
         """Live-update P_target on an active channel. Validates against config limits.
@@ -1420,35 +1745,15 @@ class SafetyManager:
         #    so the clear can be deferred until AFTER emergency_off and made
         #    conditional on a CONFIRMED off (F3).
         outputs_confirmed_off = True
+        caller_cancelled: asyncio.CancelledError | None = None
 
         if self._keithley is not None:
-            # Hardware shutdown must complete even if our caller is cancelled.
-            # asyncio.shield prevents outer cancellation from interrupting
-            # emergency_off. We catch CancelledError to ensure the shielded
-            # task finishes before re-raising.
             shutdown_task = asyncio.create_task(self._keithley.emergency_off())
-            try:
-                outputs_confirmed_off = await asyncio.shield(shutdown_task) is True
-            except asyncio.CancelledError:
-                caller_cancelled = bool(asyncio.current_task().cancelling())
-                logger.critical(
-                    "FAULT: _fault() cancelled but emergency_off is shielded; waiting for hardware shutdown to complete"
-                )
-                try:
-                    outputs_confirmed_off = await shutdown_task is True
-                except asyncio.CancelledError:
-                    outputs_confirmed_off = False
-                except Exception as exc:
-                    logger.critical("FAULT: shielded emergency_off failed: %s", exc)
-                    outputs_confirmed_off = False
-                self._reviewed_source_connected = True
-                self._reviewed_source_verified_off = outputs_confirmed_off
-                self._refresh_operator_safety_snapshot()
-                if caller_cancelled:
-                    raise
-            except Exception as exc:
-                logger.critical("FAULT: emergency_off failed: %s", exc)
-                outputs_confirmed_off = False
+            result, error, cancelled = await _settle_shielded_hardware_task(shutdown_task)
+            caller_cancelled = cancelled
+            outputs_confirmed_off = error is None and result is True
+            if error is not None:
+                logger.critical("FAULT: emergency_off failed: %s", error)
 
         # F3: only drop the sources whose OFF the driver CONFIRMED. On an
         # unconfirmed OFF (emergency_off returned False, per the CR-2 driver
@@ -1465,8 +1770,9 @@ class SafetyManager:
                 sorted(self._active_sources),
             )
         if self._keithley is not None:
-            self._reviewed_source_connected = True
-            self._reviewed_source_verified_off = outputs_confirmed_off
+            retained_generation = self._has_current_reviewed_connection_generation()
+            self._reviewed_source_connected = retained_generation
+            self._reviewed_source_verified_off = retained_generation and outputs_confirmed_off
         self._refresh_operator_safety_snapshot()
 
         # 4. Post-mortem log emission — shielded — MUST happen after hardware
@@ -1482,31 +1788,22 @@ class SafetyManager:
                     value=value,
                 )
             )
-            try:
-                await asyncio.shield(log_task)
-            except asyncio.CancelledError:
-                logger.critical(
-                    "FAULT: _fault() cancelled after hardware shutdown; "
-                    "waiting for post-mortem log emission to complete"
-                )
-                try:
-                    await log_task
-                except Exception as exc:
-                    logger.error("Failed to write safety fault to operator_log: %s", exc)
-                raise
-            except Exception as exc:
-                logger.error("Failed to write safety fault to operator_log: %s", exc)
+            _result, error, cancelled = await _settle_shielded_hardware_task(log_task)
+            caller_cancelled = caller_cancelled or cancelled
+            if error is not None:
+                logger.error("Failed to write safety fault to operator_log: %s", error)
 
         # 5. Broadcast Keithley channel states — best-effort, non-critical.
         #    Publish failure does NOT prevent fault latching or post-mortem
         #    logging because those already completed above.
         fault_channel = channel if channel in {"smua", "smub"} else None
-        try:
-            await self._publish_keithley_channel_states(reason, fault_channel=fault_channel)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("Failed to publish Keithley channel states: %s", exc)
+        publish_task = asyncio.create_task(self._publish_keithley_channel_states(reason, fault_channel=fault_channel))
+        _result, error, cancelled = await _settle_shielded_hardware_task(publish_task)
+        caller_cancelled = caller_cancelled or cancelled
+        if error is not None:
+            logger.warning("Failed to publish Keithley channel states: %s", error)
+        if caller_cancelled is not None:
+            raise caller_cancelled
 
     async def _ensure_output_off(self, channel: str | None = None) -> bool:
         """Force Keithley output OFF. True iff the driver CONFIRMED it.
@@ -1517,28 +1814,29 @@ class SafetyManager:
         """
         if self._keithley is None:
             return True
-        try:
-            confirmed = await self._keithley.emergency_off(channel)
-        except TypeError:
-            if channel is not None:
-                raise
-            try:
-                confirmed = await self._keithley.emergency_off()
-            except Exception as exc:
-                logger.critical("_ensure_output_off failed: %s", exc)
-                return False
-        except Exception as exc:
-            logger.critical("_ensure_output_off failed: %s", exc)
-            self._reviewed_source_verified_off = False
-            self._refresh_operator_safety_snapshot()
-            return False
-        exact_confirmed = confirmed is True
-        self._reviewed_source_connected = True
-        if channel is None:
+        caller_cancelled: asyncio.CancelledError | None = None
+        off_task = asyncio.create_task(self._keithley.emergency_off(channel))
+        confirmed, error, cancelled = await _settle_shielded_hardware_task(off_task)
+        caller_cancelled = cancelled
+        if isinstance(error, TypeError) and channel is None:
+            # Legacy drivers may expose only emergency_off().  Its fallback
+            # remains separately owned and cancellation-resistant.
+            off_task = asyncio.create_task(self._keithley.emergency_off())
+            confirmed, error, cancelled = await _settle_shielded_hardware_task(off_task)
+            caller_cancelled = caller_cancelled or cancelled
+        if error is not None:
+            logger.critical("_ensure_output_off failed: %s", error)
+            confirmed = False
+        exact_confirmed = error is None and confirmed is True
+        retained_generation = self._has_current_reviewed_connection_generation()
+        self._reviewed_source_connected = retained_generation
+        if channel is None and retained_generation:
             self._reviewed_source_verified_off = exact_confirmed
-        elif not exact_confirmed:
+        elif not exact_confirmed or not retained_generation:
             self._reviewed_source_verified_off = False
         self._refresh_operator_safety_snapshot()
+        if caller_cancelled is not None:
+            raise caller_cancelled
         return exact_confirmed
 
     async def _safe_off(self, reason: str, *, channels: set[SmuChannel]) -> None:
@@ -1546,25 +1844,22 @@ class SafetyManager:
             # Jules review: shield emergency_off in fault-latched cleanup path
             # so cancellation cannot interrupt the defensive hardware shutdown.
             off_task = asyncio.create_task(self._ensure_output_off())
-            try:
-                await asyncio.shield(off_task)
-            except asyncio.CancelledError:
-                logger.warning("_safe_off cancelled while fault latched; waiting for hardware shutdown to complete")
-                try:
-                    await off_task
-                except Exception as exc:
-                    logger.critical("_safe_off shielded emergency_off failed: %s", exc)
-                raise
-            except Exception as exc:
-                logger.error("_ensure_output_off in _safe_off failed: %s", exc)
+            _result, error, caller_cancelled = await _settle_shielded_hardware_task(off_task)
+            if error is not None:
+                logger.error("_ensure_output_off in _safe_off failed: %s", error)
             logger.warning("_safe_off rejected while fault latched")
+            if caller_cancelled is not None:
+                raise caller_cancelled
             return
 
+        caller_cancelled: asyncio.CancelledError | None = None
         if self._keithley is not None:
             for smu_channel in sorted(channels):
-                try:
-                    await self._keithley.stop_source(smu_channel)
-                except Exception as exc:
+                stop_task = asyncio.create_task(self._keithley.stop_source(smu_channel))
+                result, error, cancelled = await _settle_shielded_hardware_task(stop_task)
+                caller_cancelled = caller_cancelled or cancelled
+                if error is not None or result is False:
+                    exc = error if error is not None else RuntimeError("driver returned explicit False")
                     # FAIL CLOSED. A stop that throws may have left the channel
                     # still active in the driver (``runtime.active`` is only
                     # cleared AFTER OUTPUT_OFF + verify succeed), so the host-side
@@ -1583,6 +1878,8 @@ class SafetyManager:
                         f"stop_source({smu_channel}) failed: {exc}",
                         channel=str(smu_channel),
                     )
+                    if caller_cancelled is not None:
+                        raise caller_cancelled
                     return
 
         self._active_sources.difference_update(channels)
@@ -1593,9 +1890,12 @@ class SafetyManager:
             )
             return
 
-        self._reviewed_source_connected = self._keithley is not None or self._mock
-        self._reviewed_source_verified_off = True
+        retained_generation = self._has_current_reviewed_connection_generation()
+        self._reviewed_source_connected = retained_generation
+        self._reviewed_source_verified_off = retained_generation
         self._transition(SafetyState.SAFE_OFF, reason)
+        if caller_cancelled is not None:
+            raise caller_cancelled
 
     def _resolve_channels(self, channel: str | None) -> set[SmuChannel]:
         if channel is not None:
@@ -1635,11 +1935,32 @@ class SafetyManager:
             if not getattr(self._keithley, "connected", False):
                 return False, "Keithley connected=False"
 
+        if not self._mock and not self._reviewed_source_identity_qualified:
+            return False, "Reviewed source lacks exact sealed runtime binding authority"
+
+        # The driver's absence of an ``output_state_unverified`` flag is not
+        # affirmative OFF evidence.  RUN authority comes only from the
+        # reviewed-source owner after an exact, current-generation OFF
+        # confirmation. Explicit mock mode retains its established simulator
+        # authority, including focused tests that exercise commands without
+        # starting the background monitor. Keep the real-hardware gate
+        # independent of the FSM name: READY may outlive invalidated
+        # connection/OFF evidence.
+        if not self._mock and (self._reviewed_source_generation is None or not self._reviewed_source_connected):
+            return False, "Reviewed source connection generation is UNAVAILABLE"
+
+        if not self._mock and not self._active_sources and self._reviewed_source_verified_off is not True:
+            return False, ("Reviewed source OFF state is UNVERIFIED - confirm exact OFF before RUN")
+
         # F2: a connected Keithley whose crash-recovery force-OFF could not be
         # readback-verified may still be sourcing. Block RUN (only RUN — this is
         # a precondition, so measurement/diagnostics/manual retry stay available)
         # until a later verified OFF clears the flag. Fail-closed, no lockout.
-        if self._keithley is not None and getattr(self._keithley, "output_state_unverified", False):
+        if (
+            self._keithley is not None
+            and not self._active_sources
+            and getattr(self._keithley, "output_state_unverified", False)
+        ):
             return False, (
                 "Keithley output state UNVERIFIED after connect (crash-recovery "
                 "force-OFF unconfirmed) — issue emergency off before RUN"
@@ -1812,6 +2133,34 @@ class SafetyManager:
         *,
         action: str = "emergency_off",
     ) -> None:
+        """Own the complete interlock action through truthful publication."""
+        if action == "stop_source":
+            # This synchronous cut reaches an in-flight request_run before the
+            # owned interlock task can acquire _cmd_lock.
+            self._register_abort_intent(full=True)
+        operation = asyncio.create_task(
+            self._on_interlock_trip_owned(
+                interlock_name,
+                channel,
+                value,
+                action=action,
+            ),
+            name=f"safety_interlock_{interlock_name}",
+        )
+        _result, error, caller_cancelled = await _settle_shielded_hardware_task(operation)
+        if error is not None:
+            raise error
+        if caller_cancelled is not None:
+            raise caller_cancelled
+
+    async def _on_interlock_trip_owned(
+        self,
+        interlock_name: str,
+        channel: str,
+        value: float,
+        *,
+        action: str = "emergency_off",
+    ) -> None:
         """Handle an interlock trip from InterlockEngine.
 
         ``action="emergency_off"`` (default, backwards-compatible):
@@ -1843,10 +2192,18 @@ class SafetyManager:
             # source we are about to shut down. Monotonic ownership means
             # caller timeout/cancellation cannot withdraw this intent.
             self._register_abort_intent(full=True)
+            caller_cancelled: asyncio.CancelledError | None = None
             async with self._cmd_lock:
                 if self._keithley is not None:
                     try:
-                        ok = await self._keithley.emergency_off()
+                        off_task = asyncio.create_task(
+                            self._keithley.emergency_off(),
+                            name=f"interlock_full_off_{interlock_name}",
+                        )
+                        ok, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
+                        caller_cancelled = caller_cancelled or off_cancelled
+                        if off_error is not None:
+                            raise RuntimeError("interlock full OFF ended without a usable result") from off_error
                     except Exception as exc:
                         logger.error(
                             "stop_source interlock: emergency_off failed: %s — escalating to full fault",
@@ -1857,6 +2214,8 @@ class SafetyManager:
                             channel=channel,
                             value=value,
                         )
+                        if caller_cancelled is not None:
+                            raise caller_cancelled
                         return
                     # A final-element OFF proof is deliberately nominal, not
                     # truthy: driver bugs and un-awaited/mock-shaped values
@@ -1867,12 +2226,14 @@ class SafetyManager:
                             channel=channel,
                             value=value,
                         )
+                        if caller_cancelled is not None:
+                            raise caller_cancelled
                         return
                 self._active_sources.clear()
-                self._reviewed_source_connected = self._keithley is not None or self._mock
-                self._reviewed_source_verified_off = True
+                retained_generation = self._has_current_reviewed_connection_generation()
+                self._reviewed_source_connected = retained_generation
+                self._reviewed_source_verified_off = retained_generation
                 self._refresh_operator_safety_snapshot()
-                await self._publish_keithley_channel_states(f"interlock_stop:{interlock_name}")
                 if self._state not in (
                     SafetyState.FAULT_LATCHED,
                     SafetyState.MANUAL_RECOVERY,
@@ -1883,6 +2244,18 @@ class SafetyManager:
                         channel=channel,
                         value=value,
                     )
+                publish_task = asyncio.create_task(
+                    self._publish_keithley_channel_states(f"interlock_stop:{interlock_name}")
+                )
+                _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
+                caller_cancelled = caller_cancelled or publish_cancelled
+                if publish_error is not None:
+                    logger.warning(
+                        "stop_source interlock state publish failed: %s",
+                        publish_error,
+                    )
+            if caller_cancelled is not None:
+                raise caller_cancelled
             return
 
         # Unknown action — fail-safe to a full fault rather than ignore.

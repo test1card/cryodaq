@@ -10,6 +10,12 @@ from __future__ import annotations
 
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers import registry as driver_registry
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 
 
 class _FakeKeithley:
@@ -17,6 +23,7 @@ class _FakeKeithley:
         self._tripped = tripped
         self._ack_ok = ack_ok
         self.connected = True
+        self.output_state_unverified = False
         self.emergency_off_called = False
         self.ack_called = False
 
@@ -38,9 +45,46 @@ class _FakeKeithley:
         return self._ack_ok
 
 
+def _manager(driver: _FakeKeithley) -> tuple[SafetyManager, object]:
+    binding = _issue_registry_runtime_binding(
+        driver=driver,
+        timing=AcquisitionTiming(1.0, 1.0, 1.0),
+        registry_provenance="test:safety-watchdog-reconcile",
+        trust_class=DriverTrustClass.REVIEWED_SOURCE,
+    )
+    with driver_registry._RUNTIME_BINDINGS_LOCK:
+        driver_registry._RUNTIME_BINDINGS[driver] = binding
+    return (
+        SafetyManager(
+            SafetyBroker(),
+            keithley_driver=driver,
+            reviewed_source_runtime_binding=binding,
+            mock=False,
+        ),
+        binding,
+    )
+
+
+async def _qualify(sm: SafetyManager, driver: _FakeKeithley, binding: object) -> None:
+    generation = await sm.begin_reviewed_source_connect(
+        driver,
+        binding,  # type: ignore[arg-type]
+        "watchdog fixture",
+    )
+    assert (
+        await sm.complete_reviewed_source_connect(
+            driver,
+            binding,  # type: ignore[arg-type]
+            generation,
+            "watchdog fixture",
+        )
+        is True
+    )
+
+
 async def test_reconcile_trip_latches_fault() -> None:
     k = _FakeKeithley(tripped=True)
-    sm = SafetyManager(SafetyBroker(), keithley_driver=k, mock=False)
+    sm, _ = _manager(k)
     sm._state = SafetyState.RUNNING
 
     await sm._run_checks()
@@ -52,7 +96,7 @@ async def test_reconcile_trip_latches_fault() -> None:
 
 async def test_reconcile_no_trip_stays_running() -> None:
     k = _FakeKeithley(tripped=False)
-    sm = SafetyManager(SafetyBroker(), keithley_driver=k, mock=False)
+    sm, _ = _manager(k)
     sm._state = SafetyState.RUNNING
 
     await sm._run_checks()
@@ -68,7 +112,7 @@ async def test_reconcile_invalid_trip_readback_fails_closed() -> None:
         raise ValueError("cryodaq_wdog_tripped must be exactly 0 or 1")
 
     k.wdog_tripped = _invalid_readback  # type: ignore[method-assign]
-    sm = SafetyManager(SafetyBroker(), keithley_driver=k, mock=False)
+    sm, _ = _manager(k)
     sm._state = SafetyState.RUNNING
 
     await sm._run_checks()
@@ -91,7 +135,8 @@ async def test_reconcile_skipped_in_mock_mode() -> None:
 
 async def test_trip_acknowledge_recovery_does_not_refault_on_stale_latch() -> None:
     k = _FakeKeithley(tripped=True)
-    sm = SafetyManager(SafetyBroker(), keithley_driver=k, mock=False)
+    sm, binding = _manager(k)
+    await _qualify(sm, k, binding)
     sm._config.cooldown_before_rearm_s = 0
     sm._config.require_keithley_for_run = False
     sm._state = SafetyState.RUNNING
@@ -113,7 +158,7 @@ async def test_trip_acknowledge_recovery_does_not_refault_on_stale_latch() -> No
 
 async def test_trip_acknowledge_failure_stays_fault_latched_and_actionable() -> None:
     k = _FakeKeithley(tripped=True, ack_ok=False)
-    sm = SafetyManager(SafetyBroker(), keithley_driver=k, mock=False)
+    sm, _ = _manager(k)
     sm._config.cooldown_before_rearm_s = 0
     sm._state = SafetyState.RUNNING
 
@@ -128,7 +173,7 @@ async def test_trip_acknowledge_failure_stays_fault_latched_and_actionable() -> 
 
 async def test_pending_trip_blocks_immediate_run_before_monitor_tick() -> None:
     k = _FakeKeithley(tripped=True)
-    sm = SafetyManager(SafetyBroker(), keithley_driver=k, mock=False)
+    sm, _ = _manager(k)
     sm._state = SafetyState.SAFE_OFF
 
     result = await sm.request_run(0.1, 1.0, 0.1)

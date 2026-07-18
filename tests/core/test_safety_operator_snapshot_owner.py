@@ -10,6 +10,11 @@ import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 from cryodaq.engine_wiring.operator_safety_snapshot import (
     OperatorSafetySnapshot,
     SafetyLifecycle,
@@ -25,11 +30,44 @@ from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessTruth
 
 
 def _manager(*, mock: bool = False, driver: object | None = None) -> SafetyManager:
-    return SafetyManager(SafetyBroker(), keithley_driver=driver, mock=mock)
+    binding = None
+    if driver is not None and not mock:
+        binding = _issue_registry_runtime_binding(
+            driver=driver,
+            timing=AcquisitionTiming(1.0, 1.0, 1.0),
+            registry_provenance="test:safety-operator-owner",
+            trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        )
+    return SafetyManager(
+        SafetyBroker(),
+        keithley_driver=driver,
+        reviewed_source_runtime_binding=binding,
+        mock=mock,
+    )
 
 
 def _codes(snapshot: OperatorSafetySnapshot) -> set[str]:
     return {item.code for item in snapshot.blockers}
+
+
+async def _qualify_generation(
+    manager: SafetyManager,
+    driver: object,
+    *,
+    expected_verified_off: bool,
+) -> None:
+    generation = await manager.begin_reviewed_source_connect(
+        driver,
+        manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
+        "test qualification",
+    )
+    committed = await manager.complete_reviewed_source_connect(
+        driver,
+        manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
+        generation,
+        "test qualification",
+    )
+    assert committed is expected_verified_off
 
 
 _CUT = CommonCut(
@@ -70,7 +108,7 @@ def test_getter_is_identity_stable_and_performs_no_sampling_or_driver_io(
 def test_explicit_connection_evidence_advances_exactly_one_revision_and_never_regresses_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manager = _manager()
+    manager = _manager(mock=True)
     first = manager.snapshot_operator_safety()
     monkeypatch.setattr(time, "monotonic", lambda: first.observed_monotonic_s - 100.0)
     manager.record_reviewed_source_connected(verified_off=False)
@@ -93,7 +131,7 @@ def test_explicit_connection_evidence_advances_exactly_one_revision_and_never_re
 
 
 def test_safe_off_name_and_empty_active_set_do_not_imply_ready() -> None:
-    manager = _manager()
+    manager = _manager(mock=True)
     manager._safety_monitor_active = True
     manager.record_reviewed_source_connected(verified_off=True)
     snapshot = manager.snapshot_operator_safety()
@@ -104,7 +142,7 @@ def test_safe_off_name_and_empty_active_set_do_not_imply_ready() -> None:
 
 
 def test_state_change_observer_sees_the_matching_new_owner_cut() -> None:
-    manager = _manager()
+    manager = _manager(mock=True)
     manager._safety_monitor_active = True
     manager.record_reviewed_source_connected(verified_off=True)
     observed: list[SafetyLifecycle] = []
@@ -114,7 +152,7 @@ def test_state_change_observer_sees_the_matching_new_owner_cut() -> None:
 
 
 def test_ready_requires_monitor_current_inputs_connection_and_exact_off_proof() -> None:
-    manager = _manager()
+    manager = _manager(mock=True)
     manager._safety_monitor_active = True
     manager._config.critical_channels = [re.compile("critical/temperature")]
     manager._latest["critical/temperature"] = (time.monotonic(), 4.2, "ok")
@@ -134,6 +172,178 @@ def test_ready_requires_monitor_current_inputs_connection_and_exact_off_proof() 
     assert "reviewed_source_off_unverified" in _codes(unproved)
 
 
+@pytest.mark.parametrize("begin_ready", (False, True))
+async def test_request_run_requires_current_exact_reviewed_off_proof(
+    begin_ready: bool,
+) -> None:
+    driver = MagicMock()
+    driver.connected = True
+    driver.output_state_unverified = False
+    driver.watchdog_trip_pending = False
+    driver.start_source = AsyncMock()
+    manager = _manager(driver=driver)
+    manager._config.critical_channels = []
+    manager._safety_monitor_active = True
+    if begin_ready:
+        manager._transition(SafetyState.READY, "previously qualified")
+
+    # Explicitly invalidating OFF proof must dominate both a READY FSM name
+    # and a driver's non-affirmative ``output_state_unverified=False`` cache.
+    driver.output_state_unverified = True
+    await _qualify_generation(manager, driver, expected_verified_off=False)
+    before = manager.snapshot_operator_safety()
+    result = await manager.request_run(0.1, 1.0, 0.1)
+
+    assert result == {
+        "ok": False,
+        "state": manager.state.value,
+        "channel": "smua",
+        "error": "Reviewed source OFF state is UNVERIFIED - confirm exact OFF before RUN",
+    }
+    driver.start_source.assert_not_awaited()
+    assert manager.snapshot_operator_safety() is before
+    assert before.verified_off is False
+    expected_readiness = ReadinessTruth.UNKNOWN if begin_ready else ReadinessTruth.BLOCKED
+    assert before.readiness is expected_readiness
+
+
+async def test_second_channel_requires_ordered_exact_target_off_proof() -> None:
+    order: list[tuple[str, str]] = []
+    driver = MagicMock()
+    driver.connected = True
+    # A real dual-channel driver reports global OFF as unverified while smua
+    # is intentionally active; that global fact must not replace smub proof.
+    driver.output_state_unverified = True
+    driver.watchdog_trip_pending = False
+
+    async def _target_off(channel: str | None = None) -> bool:
+        order.append(("off", str(channel)))
+        return True
+
+    async def _start(channel: str, *_settings: float) -> None:
+        order.append(("start", channel))
+
+    driver.emergency_off = AsyncMock(side_effect=_target_off)
+    driver.start_source = AsyncMock(side_effect=_start)
+    manager = _manager(driver=driver)
+    manager._config.critical_channels = []
+    manager._safety_monitor_active = True
+    await _qualify_generation(manager, driver, expected_verified_off=False)
+    manager._state = SafetyState.RUNNING
+    manager._active_sources.add("smua")
+    manager._reviewed_source_verified_off = False
+    manager._refresh_operator_safety_snapshot()
+
+    result = await manager.request_run(0.1, 1.0, 0.1, channel="smub")
+
+    assert result["ok"] is True
+    assert order == [("off", "smub"), ("start", "smub")]
+    assert manager._active_sources == {"smua", "smub"}
+    assert manager.snapshot_operator_safety().verified_off is False
+
+
+@pytest.mark.parametrize(
+    "target_result",
+    (
+        pytest.param(False, id="false"),
+        pytest.param(1, id="truthy-non-bool"),
+        pytest.param(OSError("readback failed"), id="exception"),
+    ),
+)
+async def test_second_channel_unverified_target_fails_closed(target_result: object) -> None:
+    calls: list[str | None] = []
+
+    async def _off(channel: str | None = None) -> object:
+        calls.append(channel)
+        if channel == "smub":
+            if isinstance(target_result, BaseException):
+                raise target_result
+            return target_result
+        return True
+
+    driver = MagicMock()
+    driver.connected = True
+    driver.output_state_unverified = True
+    driver.watchdog_trip_pending = False
+    driver.emergency_off = AsyncMock(side_effect=_off)
+    driver.start_source = AsyncMock()
+    manager = _manager(driver=driver)
+    manager._config.critical_channels = []
+    manager._safety_monitor_active = True
+    await _qualify_generation(manager, driver, expected_verified_off=False)
+    manager._state = SafetyState.RUNNING
+    manager._active_sources.add("smua")
+    manager._reviewed_source_verified_off = False
+
+    result = await manager.request_run(0.1, 1.0, 0.1, channel="smub")
+
+    assert result["ok"] is False
+    assert result["state"] == SafetyState.FAULT_LATCHED.value
+    assert result["error"] == "Target smub OFF state is UNVERIFIED before RUN"
+    assert calls == ["smub", None]
+    driver.start_source.assert_not_awaited()
+    assert manager._active_sources == set()
+    assert manager.snapshot_operator_safety().verified_off is True
+
+
+async def test_cancelled_second_channel_proof_settles_full_fault_shutdown() -> None:
+    entered = asyncio.Event()
+    global_shutdown = asyncio.Event()
+
+    async def _off(channel: str | None = None) -> bool:
+        if channel == "smub":
+            entered.set()
+            await asyncio.Future()
+        global_shutdown.set()
+        return True
+
+    driver = MagicMock()
+    driver.connected = True
+    driver.output_state_unverified = True
+    driver.watchdog_trip_pending = False
+    driver.emergency_off = AsyncMock(side_effect=_off)
+    driver.start_source = AsyncMock()
+    manager = _manager(driver=driver)
+    manager._config.critical_channels = []
+    await _qualify_generation(manager, driver, expected_verified_off=False)
+    manager._state = SafetyState.RUNNING
+    manager._active_sources.add("smua")
+    manager._reviewed_source_verified_off = False
+
+    task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smub"))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert global_shutdown.is_set()
+    assert manager.state is SafetyState.FAULT_LATCHED
+    assert manager._active_sources == set()
+    driver.start_source.assert_not_awaited()
+
+
+async def test_keithley_dual_channel_uses_scoped_proof_despite_global_active_flag() -> None:
+    from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
+
+    driver = Keithley2604B("source", "USB::MOCK", mock=True)
+    await driver.connect()
+    manager = _manager(driver=driver)
+    manager._config.critical_channels = []
+    await _qualify_generation(manager, driver, expected_verified_off=True)
+    try:
+        first = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert first["ok"] is True
+        assert driver.output_state_unverified is True
+
+        second = await manager.request_run(0.1, 1.0, 0.1, channel="smub")
+        assert second["ok"] is True
+        assert manager._active_sources == {"smua", "smub"}
+        assert manager.snapshot_operator_safety().verified_off is False
+    finally:
+        await manager.emergency_off()
+        await driver.disconnect()
+
+
 @pytest.mark.parametrize(
     "state",
     (
@@ -144,7 +354,7 @@ def test_ready_requires_monitor_current_inputs_connection_and_exact_off_proof() 
     ),
 )
 def test_active_fault_and_recovery_matrix_is_blocked(state: SafetyState) -> None:
-    manager = _manager()
+    manager = _manager(mock=True)
     manager._safety_monitor_active = True
     manager.record_reviewed_source_connected(verified_off=True)
     if state in {SafetyState.RUN_PERMITTED, SafetyState.RUNNING}:
@@ -160,10 +370,13 @@ def test_active_fault_and_recovery_matrix_is_blocked(state: SafetyState) -> None
         assert "source_operation_active" in _codes(snapshot)
 
 
-def test_stale_invalid_and_missing_critical_inputs_are_explicit_blockers() -> None:
-    manager = _manager()
+async def test_stale_invalid_and_missing_critical_inputs_are_explicit_blockers() -> None:
+    driver = MagicMock()
+    driver.connected = True
+    driver.output_state_unverified = False
+    manager = _manager(driver=driver)
     manager._safety_monitor_active = True
-    manager.record_reviewed_source_connected(verified_off=True)
+    await _qualify_generation(manager, driver, expected_verified_off=True)
     manager._config.critical_channels = [re.compile("critical/temperature")]
 
     manager._refresh_operator_safety_snapshot()
@@ -232,10 +445,18 @@ async def test_confirmed_off_and_disconnect_are_separate_explicit_mutations() ->
     manager = _manager(driver=driver)
     manager._safety_monitor_active = True
     before = manager.snapshot_operator_safety()
-    assert await manager.disconnect_reviewed_source(driver, "test") is True
+    assert (
+        await manager.disconnect_reviewed_source(
+            driver,
+            manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
+            None,
+            "test",
+        )
+        is True
+    )
     disconnected = manager.snapshot_operator_safety()
     assert disconnected.revision >= before.revision + 3
-    assert disconnected.verified_off is True
+    assert disconnected.verified_off is False
     assert "reviewed_source_disconnected" in _codes(disconnected)
     driver.emergency_off.assert_awaited_once()
     driver.disconnect.assert_awaited_once()
@@ -261,7 +482,14 @@ async def test_disconnect_cancellation_settles_proof_and_lifecycle_revisions() -
     manager = _manager(driver=driver)
     manager._safety_monitor_active = True
     before = manager.snapshot_operator_safety()
-    task = asyncio.create_task(manager.disconnect_reviewed_source(driver, "cancelled"))
+    task = asyncio.create_task(
+        manager.disconnect_reviewed_source(
+            driver,
+            manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
+            None,
+            "cancelled",
+        )
+    )
     await off_started.wait()
     task.cancel()
     off_release.set()
@@ -273,12 +501,12 @@ async def test_disconnect_cancellation_settles_proof_and_lifecycle_revisions() -
     settled = manager.snapshot_operator_safety()
     assert settled.revision >= before.revision + 3
     assert settled.lifecycle is SafetyLifecycle.SAFE_OFF
-    assert settled.verified_off is True
+    assert settled.verified_off is False
     assert "reviewed_source_disconnected" in _codes(settled)
 
 
 def test_non_ok_plant_fact_is_not_implicitly_a_readiness_blocker() -> None:
-    manager = _manager()
+    manager = _manager(mock=True)
     manager._safety_monitor_active = True
     manager.record_reviewed_source_connected(verified_off=True)
     manager._transition(SafetyState.READY, "qualified")

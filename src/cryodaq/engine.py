@@ -23,6 +23,7 @@ import secrets
 import signal
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,7 +73,11 @@ from cryodaq.core.safety_pattern_liveness import (
     SafetyPatternLivenessError,
     validate_safety_pattern_liveness,
 )
-from cryodaq.core.scheduler import InstrumentConfig, Scheduler
+from cryodaq.core.scheduler import (
+    InstrumentConfig,
+    ReviewedSourceSettlementIncomplete,
+    Scheduler,
+)
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.vacuum_guard import VacuumGuard
@@ -84,7 +89,12 @@ from cryodaq.core.zmq_bridge import (
     encode_periodic_command_reply,
 )
 from cryodaq.drivers.base import InstrumentDriver, Reading
-from cryodaq.drivers.contracts import ControlledSource, VerifiedOffSource
+from cryodaq.drivers.contracts import (
+    ControlledSource,
+    DriverTrustClass,
+    VerifiedOffSource,
+    is_issued_runtime_binding,
+)
 from cryodaq.drivers.registry import (
     KEITHLEY_2604B_SOURCE_BINDING,
     REVIEWED_SOURCE_SPECS,
@@ -130,7 +140,10 @@ from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
 from cryodaq.report_process import ReportProcessError, ReportProcessRunner
-from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorStorageError,
+    load_live_channel_descriptor_catalog,
+)
 from cryodaq.storage.cold_rotation import build_cold_rotation_service, normalize_schedule_time
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -2077,20 +2090,51 @@ async def _stop_scheduler_with_recording_feed(
     scheduler: Scheduler,
     feed: RecordingLifecycleFeed,
     sequence: int,
+    *,
+    retry_delay_s: float = 0.1,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> int:
-    try:
-        await scheduler.stop()
-    except BaseException:
+    requested_delay = float(retry_delay_s)
+    bounded_retry_delay_s = min(max(0.0, requested_delay), 1.0) if math.isfinite(requested_delay) else 0.1
+    while True:
         try:
-            feed.persistence_ambiguous()
-        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
-            logger.warning("Recording persistence feed unavailable after scheduler failure: %s", exc, exc_info=True)
-        sequence += 1
-        try:
-            feed.acquisition_unavailable(sequence)
-        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
-            logger.warning("Recording acquisition feed unavailable after scheduler failure: %s", exc, exc_info=True)
-        raise
+            await scheduler.stop()
+            break
+        except ReviewedSourceSettlementIncomplete as exc:
+            try:
+                feed.persistence_ambiguous()
+            except Exception as feed_exc:  # noqa: BLE001 - settlement retry must continue
+                logger.warning(
+                    "Recording persistence feed unavailable during reviewed-source settlement: %s",
+                    feed_exc,
+                    exc_info=True,
+                )
+            sequence += 1
+            try:
+                feed.acquisition_unavailable(sequence)
+            except Exception as feed_exc:  # noqa: BLE001 - settlement retry must continue
+                logger.warning(
+                    "Recording acquisition feed unavailable during reviewed-source settlement: %s",
+                    feed_exc,
+                    exc_info=True,
+                )
+            logger.critical(
+                "Scheduler stop retains reviewed-source authority; retrying in %.3fs: %s",
+                bounded_retry_delay_s,
+                exc,
+            )
+            await sleep(bounded_retry_delay_s)
+        except BaseException:
+            try:
+                feed.persistence_ambiguous()
+            except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+                logger.warning("Recording persistence feed unavailable after scheduler failure: %s", exc, exc_info=True)
+            sequence += 1
+            try:
+                feed.acquisition_unavailable(sequence)
+            except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+                logger.warning("Recording acquisition feed unavailable after scheduler failure: %s", exc, exc_info=True)
+            raise
     sequence += 1
     try:
         feed.acquisition_stopped(sequence)
@@ -2864,12 +2908,26 @@ async def _run_engine(*, mock: bool = False) -> None:
     )
     driver_configs = driver_load.instrument_configs
     drivers_by_name = {cfg.driver.name: cfg.driver for cfg in driver_configs}
+    reviewed_source_runtime_binding = None
+    if driver_load.reviewed_source is not None:
+        reviewed_source_runtime_binding = next(
+            (cfg.runtime_binding for cfg in driver_configs if cfg.driver is driver_load.reviewed_source),
+            None,
+        )
+        if (
+            reviewed_source_runtime_binding is None
+            or not is_issued_runtime_binding(reviewed_source_runtime_binding)
+            or reviewed_source_runtime_binding.driver is not driver_load.reviewed_source
+            or reviewed_source_runtime_binding.trust_class is not DriverTrustClass.REVIEWED_SOURCE
+        ):
+            raise DriverRegistryError("reviewed source lacks exact sealed runtime binding")
 
     # SafetyManager — создаётся ПЕРВЫМ
     safety_cfg = _engine_config_path("safety")
     safety_manager = SafetyManager(
         safety_broker,
         keithley_driver=driver_load.reviewed_source,
+        reviewed_source_runtime_binding=reviewed_source_runtime_binding,
         mock=mock,
         data_broker=broker,
     )
@@ -2972,6 +3030,10 @@ async def _run_engine(*, mock: bool = False) -> None:
         sqlite_writer=writer,
         adaptive_throttle=adaptive_throttle,
         calibration_acquisition=calibration_acquisition,
+        reviewed_source_connect_begin=safety_manager.begin_reviewed_source_connect,
+        reviewed_source_connect_complete=safety_manager.complete_reviewed_source_connect,
+        reviewed_source_uncertain=safety_manager.mark_reviewed_source_uncertain,
+        reviewed_source_connect_abandon=safety_manager.abandon_reviewed_source_connect,
         reviewed_source_disconnect=safety_manager.disconnect_reviewed_source,
         drain_timeout_s=safety_manager._config.scheduler_drain_timeout_s,
         persistence_commit_observer=recording_lifecycle_feed.persistence_committed,
@@ -4039,6 +4101,7 @@ def main() -> None:
             InterlockConfigError,
             HousekeepingConfigError,
             ChannelConfigError,
+            ChannelDescriptorStorageError,
             DriverRegistryError,
         ) as exc:
             labels = (
@@ -4047,6 +4110,7 @@ def main() -> None:
                 (InterlockConfigError, "interlock"),
                 (HousekeepingConfigError, "housekeeping"),
                 (ChannelConfigError, "channel"),
+                (ChannelDescriptorStorageError, "channel descriptor"),
                 (DriverRegistryError, "driver registry"),
             )
             label = next(
