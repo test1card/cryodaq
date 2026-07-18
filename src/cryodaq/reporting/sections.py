@@ -601,7 +601,8 @@ def render_cooldown_section(document: Document, dataset: ReportDataset, assets_d
     temp_readings = [
         item
         for item in dataset.readings
-        if _visible_quantity(item, "temperature") or (_legacy(item) and item.unit == "K")
+        if (_visible_quantity(item, "temperature") or (_legacy(item) and item.unit == "K"))
+        and math.isfinite(item.value)
     ]
     _add_archived_or_multichannel(
         document,
@@ -646,7 +647,8 @@ def render_thermal_section(document: Document, dataset: ReportDataset, assets_di
     power_readings = [
         item
         for item in dataset.readings
-        if _visible_quantity(item, "power") or (_legacy(item) and item.channel.endswith("/power"))
+        if (_visible_quantity(item, "power") or (_legacy(item) and item.channel.endswith("/power")))
+        and math.isfinite(item.value)
     ]
     _add_archived_or_multichannel(
         document,

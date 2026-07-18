@@ -222,6 +222,7 @@ class ReplaySource:
         self._broker = broker
         self._speed = max(speed, 0.0)
         self._running = False
+        self._stop_generation = 0
         self._total_replayed: int = 0
 
     @property
@@ -236,6 +237,7 @@ class ReplaySource:
         start: datetime | None = None,
         end: datetime | None = None,
         channels: list[str] | None = None,
+        _generation: int | None = None,
     ) -> int:
         """Воспроизвести данные из SQLite-файла.
 
@@ -254,10 +256,22 @@ class ReplaySource:
         ----------
         int:  Количество воспроизведённых записей.
         """
+        generation = self._stop_generation if _generation is None else _generation
+        if generation != self._stop_generation:
+            return 0
         if not db_path.exists():  # noqa: ASYNC240
             raise FileNotFoundError(f"Файл БД не найден: {db_path}")
 
-        encoded = self._load_rows(db_path, start=start, end=end, channels=channels)
+        encoded = await asyncio.to_thread(
+            self._load_rows,
+            db_path,
+            start=start,
+            end=end,
+            channels=channels,
+        )
+        if generation != self._stop_generation:
+            logger.info("Replay was stopped while loading %s", db_path.name)
+            return 0
         if not encoded:
             logger.info("Нет данных для воспроизведения в %s", db_path.name)
             return 0
@@ -276,13 +290,15 @@ class ReplaySource:
             (ts_posix, inst_id, channel, decode(value, status_str), unit, status_str)
             for ts_posix, channel, value, unit, status_str, inst_id in encoded
         ]
-        count = await self._replay_rows(rows)
+        count = await self._replay_rows(rows, generation=generation)
         logger.info("Воспроизведение завершено: %d записей", count)
         return count
 
     async def _replay_rows(
         self,
         rows: list[tuple[float, str, str, float, str, str]],
+        *,
+        generation: int,
     ) -> int:
         """Publish already-decoded rows to the broker with speed pacing.
 
@@ -291,42 +307,55 @@ class ReplaySource:
         ``(ts_posix, instrument_id, channel, value, unit, status_str)`` with
         ``value`` already decoded — the caller must NOT decode twice.
         """
+        if generation != self._stop_generation:
+            return 0
         self._running = True
         count = 0
         prev_ts: float | None = None
 
-        for ts_posix, inst_id, channel, value, unit, status_str in rows:
-            if not self._running:
-                logger.info("Воспроизведение остановлено оператором")
-                break
+        try:
+            for ts_posix, inst_id, channel, value, unit, status_str in rows:
+                if not self._running or generation != self._stop_generation:
+                    logger.info("Воспроизведение остановлено оператором")
+                    break
 
-            # Пауза с учётом скорости
-            if prev_ts is not None and self._speed > 0.0:
-                delta = ts_posix - prev_ts
-                if delta > 0:
-                    await asyncio.sleep(delta / self._speed)
-            prev_ts = ts_posix
+                # Пауза с учётом скорости
+                if prev_ts is not None and self._speed > 0.0:
+                    delta = ts_posix - prev_ts
+                    if delta > 0:
+                        await asyncio.sleep(delta / self._speed)
+                    if not self._running or generation != self._stop_generation:
+                        logger.info("Воспроизведение остановлено оператором")
+                        break
+                prev_ts = ts_posix
 
-            try:
-                status = ChannelStatus(status_str)
-            except ValueError:
-                status = ChannelStatus.OK
+                try:
+                    status = ChannelStatus(status_str)
+                except ValueError:
+                    logger.warning(
+                        "Unknown persisted replay status %r for %s/%s; failing closed",
+                        status_str,
+                        inst_id,
+                        channel,
+                    )
+                    status = ChannelStatus.SENSOR_ERROR
 
-            reading = Reading(
-                timestamp=datetime.fromtimestamp(ts_posix, tz=UTC),
-                instrument_id=inst_id,
-                channel=channel,
-                value=value,
-                unit=unit,
-                status=status,
-                metadata={"source": "replay"},
-            )
+                reading = Reading(
+                    timestamp=datetime.fromtimestamp(ts_posix, tz=UTC),
+                    instrument_id=inst_id,
+                    channel=channel,
+                    value=value,
+                    unit=unit,
+                    status=status,
+                    metadata={"source": "replay"},
+                )
 
-            await self._broker.publish(reading)
-            count += 1
-            self._total_replayed += 1
-
-        self._running = False
+                await self._broker.publish(reading)
+                count += 1
+                self._total_replayed += 1
+        finally:
+            if generation == self._stop_generation:
+                self._running = False
         return count
 
     async def play_directory(
@@ -351,6 +380,7 @@ class ReplaySource:
         ----------
         int:  Суммарное количество воспроизведённых записей.
         """
+        generation = self._stop_generation
         if not data_dir.exists():  # noqa: ASYNC240
             raise FileNotFoundError(f"Директория не найдена: {data_dir}")
 
@@ -370,7 +400,15 @@ class ReplaySource:
             # Hot-only fast path — byte-identical to the pre-archive behavior.
             total = 0
             for db_path in db_files:
-                total += await self.play(db_path, start=start, end=end, channels=channels)
+                if generation != self._stop_generation:
+                    break
+                total += await self.play(
+                    db_path,
+                    start=start,
+                    end=end,
+                    channels=channels,
+                    _generation=generation,
+                )
             return total
 
         # Merge hot files and cold days, replay in chronological day order.
@@ -390,8 +428,16 @@ class ReplaySource:
 
         total = 0
         for _key, kind, ref in items:
+            if generation != self._stop_generation:
+                break
             if kind == "hot":
-                total += await self.play(ref, start=start, end=end, channels=channels)  # type: ignore[arg-type]
+                total += await self.play(  # type: ignore[arg-type]
+                    ref,
+                    start=start,
+                    end=end,
+                    channels=channels,
+                    _generation=generation,
+                )
             else:
                 total += await self._play_archived_day(
                     reader,
@@ -399,6 +445,7 @@ class ReplaySource:
                     start=start,
                     end=end,
                     channels=channels,  # type: ignore[arg-type]
+                    generation=generation,
                 )
         return total
 
@@ -422,8 +469,11 @@ class ReplaySource:
         start: datetime | None,
         end: datetime | None,
         channels: list[str] | None,
+        generation: int,
     ) -> int:
         """Replay one cold (Parquet-archived) day through the same publish path."""
+        if generation != self._stop_generation:
+            return 0
         day = date.fromisoformat(day_iso)
         day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
         day_end = day_start + timedelta(days=1)
@@ -435,6 +485,9 @@ class ReplaySource:
             return 0
 
         full = await asyncio.to_thread(reader.query_rows, q_start, q_end, channels, None)
+        if generation != self._stop_generation:
+            logger.info("Replay was stopped while loading archived day %s", day_iso)
+            return 0
         if not full:
             return 0
 
@@ -449,12 +502,13 @@ class ReplaySource:
             (_parse_timestamp(ts).timestamp(), inst, channel, value, unit, status)
             for ts, inst, channel, value, unit, status in full
         ]
-        count = await self._replay_rows(rows)
+        count = await self._replay_rows(rows, generation=generation)
         logger.info("Воспроизведение архива завершено: %d записей", count)
         return count
 
     def stop(self) -> None:
         """Запросить остановку воспроизведения."""
+        self._stop_generation += 1
         self._running = False
 
     # ------------------------------------------------------------------

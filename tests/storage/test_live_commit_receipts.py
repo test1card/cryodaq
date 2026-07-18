@@ -214,17 +214,73 @@ async def test_partial_invalid_batch_rolls_back_catalog_and_all_rows(
     await writer.stop()
 
 
-async def test_midnight_crossing_descriptor_batch_is_rejected_before_any_file(tmp_path: Path) -> None:
+async def test_midnight_crossing_descriptor_batch_commits_each_day_before_one_receipt(
+    tmp_path: Path,
+) -> None:
     writer = SQLiteWriter(tmp_path, channel_catalog=_owner())
     first = _reading()
     second = _reading(timestamp=first.timestamp + timedelta(days=1))
 
-    with pytest.raises(ValueError, match="cannot span"):
-        await writer.write_committed([first, second])
+    receipt = await writer.write_committed([first, second])
 
-    assert await asyncio.to_thread(lambda: list(tmp_path.glob("data_*.db"))) == []
-    assert len(writer._issued_commits) == 0
+    assert receipt is not None
+    assert writer.owns_commit(receipt)
+    assert [entry.reading for entry in receipt.entries] == [first, second]
+    db_names = await asyncio.to_thread(lambda: sorted(path.name for path in tmp_path.glob("data_*.db")))
+    assert db_names == [
+        "data_2026-07-12.db",
+        "data_2026-07-13.db",
+    ]
+    for day in ("2026-07-12", "2026-07-13"):
+        conn = sqlite3.connect(str(tmp_path / f"data_{day}.db"))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM readings").fetchone() == (1,)
+            assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone() == (1,)
+        finally:
+            conn.close()
+    assert len(writer._issued_commits) == 1
     await writer.stop()
+
+
+@pytest.mark.parametrize("failure_mode", ["swallowed", "raised"])
+async def test_midnight_partial_commit_never_issues_whole_batch_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path, channel_catalog=_owner())
+    first = _reading()
+    second = _reading(timestamp=first.timestamp + timedelta(days=1))
+    real_write = writer._write_day_batch
+    call_count = 0
+
+    def fail_second_day(conn: sqlite3.Connection, batch: list[Reading]) -> bool:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return real_write(conn, batch)
+        if failure_mode == "swallowed":
+            return False
+        raise sqlite3.OperationalError("simulated second-day persistence failure")
+
+    monkeypatch.setattr(writer, "_write_day_batch", fail_second_day)
+    if failure_mode == "swallowed":
+        assert await writer.write_committed([first, second]) is None
+    else:
+        with pytest.raises(sqlite3.OperationalError, match="second-day"):
+            await writer.write_committed([first, second])
+
+    assert writer._commit_revision == 0
+    assert len(writer._issued_commits) == 0
+    first_db = sqlite3.connect(str(tmp_path / "data_2026-07-12.db"))
+    second_db = sqlite3.connect(str(tmp_path / "data_2026-07-13.db"))
+    try:
+        assert first_db.execute("SELECT COUNT(*) FROM readings").fetchone() == (1,)
+        assert second_db.execute("SELECT COUNT(*) FROM readings").fetchone() == (0,)
+    finally:
+        first_db.close()
+        second_db.close()
+        await writer.stop()
 
 
 async def test_swallowed_persistence_failure_returns_no_receipt(

@@ -112,7 +112,8 @@ class ReportDataExtractor:
         self._validate_artifact_paths(metadata, metadata_path.parent)
         experiment = metadata.get("experiment", {})
         start_time = self._parse_time(experiment.get("start_time"))
-        end_time = self._parse_time(experiment.get("end_time")) or datetime.now(UTC)
+        raw_end_time = experiment.get("end_time")
+        end_time = self._parse_time(raw_end_time) if str(raw_end_time or "").strip() else datetime.now(UTC)
         experiment_id = experiment.get("experiment_id")
 
         readings = self._load_archived_readings(metadata, metadata_path.parent)

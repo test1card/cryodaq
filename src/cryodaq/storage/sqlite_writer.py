@@ -16,7 +16,7 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -122,6 +122,14 @@ _SQLITE_VERSION_CHECKED = False
 # SQL so the query never materialises more than can survive truncation.
 _HISTORY_MAX_ROWS = 100_000
 _HISTORY_MAX_CHANNELS = 64
+# A no-filter request is one aggregate trust-boundary query, not 64 implicit
+# per-channel requests.  Keep one hard cap across every daily file so the
+# caller cannot multiply the materialised row count by days on disk.
+_HISTORY_MAX_TOTAL_ROWS = 100_000
+_HISTORY_COLD_MAX_RETAINED_BYTES = 32 * 1024 * 1024
+_HISTORY_COLD_MIN_RETAINED_BYTES = 64 * 1024
+_HISTORY_COLD_DEADLINE_S = 10.0
+_HISTORY_COLD_CHUNK = timedelta(hours=168)
 
 # Range and backport-safe set live in cryodaq.storage._sqlite (single source,
 # also used to pick the sqlite3 implementation). Imported above.
@@ -291,6 +299,8 @@ class SQLiteWriter:
         self._batch_size = batch_size
         self._conn: sqlite3.Connection | None = None
         self._current_date: date | None = None
+        self._descriptor_catalog_installed = False
+        self._descriptor_connection_guard: tuple[int, int, int] | None = None
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._total_written: int = 0
@@ -437,6 +447,8 @@ class SQLiteWriter:
             self._conn.close()
             self._conn = None
             self._current_date = None
+            self._descriptor_catalog_installed = False
+            self._descriptor_connection_guard = None
         db_path = self._db_path(day)
         self._data_dir.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
@@ -479,10 +491,44 @@ class SQLiteWriter:
         except Exception:
             conn.close()
             raise
+        self._descriptor_catalog_installed = False
+        # Do not trust a baseline sampled outside the receipted write lock.
+        # The first batch must run the full descriptor verification after
+        # BEGIN IMMEDIATE, then publish its pre-commit guard sample.
+        self._descriptor_connection_guard = None
         self._conn = conn
         self._current_date = day
         logger.info("Открыта БД: %s", db_path)
         return conn
+
+    @staticmethod
+    def _descriptor_guard_state(conn: sqlite3.Connection) -> tuple[int, int, int]:
+        """Return cheap change detectors for one descriptor-authoritative DB."""
+
+        main_schema = conn.execute("PRAGMA main.schema_version").fetchone()
+        temp_schema = conn.execute("PRAGMA temp.schema_version").fetchone()
+        data_version = conn.execute("PRAGMA main.data_version").fetchone()
+        if any(row is None or type(row[0]) is not int for row in (main_schema, temp_schema, data_version)):
+            raise RuntimeError("SQLite descriptor guard PRAGMA returned an invalid value")
+        return main_schema[0], temp_schema[0], data_version[0]
+
+    def _verify_descriptor_write_boundary(self, conn: sqlite3.Connection) -> None:
+        """Escalate to a full verification only after observable DB change.
+
+        Normal acquisition batches pay three constant-time PRAGMA reads. A
+        schema/temp-schema change or an external connection commit triggers the
+        complete descriptor/FK verification before the next write. This keeps
+        the trigger, temporary-shadow and external-tamper defenses without
+        scanning the entire descriptor/readings history for every poll.
+        """
+
+        if self._channel_catalog is None:
+            return
+        current = self._descriptor_guard_state(conn)
+        if current == self._descriptor_connection_guard:
+            return
+        verify_descriptor_storage(conn)
+        self._descriptor_connection_guard = self._descriptor_guard_state(conn)
 
     def _write_batch(self, batch: list[Reading]) -> bool:
         """Вставить пакет в таблицу readings (вызывается в потоке).
@@ -521,10 +567,11 @@ class SQLiteWriter:
     ) -> tuple[DescriptorBoundReading, ...] | None:
         """Bind and commit one descriptor-authoritative batch in the writer thread.
 
-        A descriptor-mode poll is one SQLite transaction and therefore cannot
-        span daily files.  Midnight-crossing input is refused before either
-        file is opened; a later scheduler poll may retry each coherent batch.
-        ``None`` means SQLite explicitly swallowed a disk-full/locked failure.
+        Every input is bound and validated before persistence. A batch crossing
+        UTC midnight is then split into ordered, single-day transactions. One
+        receipt covering the original batch is issued only after every daily
+        transaction commits; ``None`` means a disk-full/locked failure left no
+        publication authority (even if an earlier day already committed).
         """
 
         owner = self._live_channel_catalog
@@ -534,11 +581,7 @@ class SQLiteWriter:
             raise ValueError("descriptor-authoritative commit requires a non-empty batch")
 
         bound = tuple(owner.bind(reading) for reading in batch)
-        days = {item.reading.timestamp.date() for item in bound}
-        if len(days) != 1:
-            raise ValueError("descriptor-authoritative batch cannot span daily SQLite files")
-
-        stable_readings: list[Reading] = []
+        by_day: dict[date, list[Reading]] = {}
         for item in bound:
             reading = item.reading
             nonfinite = not math.isfinite(reading.value)
@@ -546,13 +589,18 @@ class SQLiteWriter:
                 raise ValueError("descriptor-authoritative batch contains non-finite OK reading")
             if not nonfinite and is_sentinel(reading.value) and reading.status is ChannelStatus.OK:
                 raise ValueError("descriptor-authoritative batch contains sentinel OK reading")
-            stable_readings.append(replace(reading, channel=item.descriptor.channel_id))
+            stable = replace(reading, channel=item.descriptor.channel_id)
+            timestamp = (
+                reading.timestamp.astimezone(UTC)
+                if reading.timestamp.tzinfo is not None
+                else reading.timestamp.replace(tzinfo=UTC)
+            )
+            by_day.setdefault(timestamp.date(), []).append(stable)
 
-        persisted = self._write_day_batch(
-            self._ensure_connection(next(iter(days))),
-            stable_readings,
-        )
-        return bound if persisted else None
+        for day, stable_readings in sorted(by_day.items()):
+            if not self._write_day_batch(self._ensure_connection(day), stable_readings):
+                return None
+        return bound
 
     @staticmethod
     def _receipt_entry_value(
@@ -725,9 +773,17 @@ class SQLiteWriter:
             )
         if not rows:
             return True
+        catalog_was_installed = self._descriptor_catalog_installed
         try:
             conn.execute("BEGIN IMMEDIATE")
-            if self._channel_catalog is not None:
+            # Verify after acquiring the writer lock. An external connection
+            # must not be able to install a trigger or corrupt FK data between
+            # this guard and the receipted INSERT below.
+            self._verify_descriptor_write_boundary(conn)
+            if self._channel_catalog is not None and not catalog_was_installed:
+                # Install once per daily connection, in the same transaction as
+                # its first readings. A failed first write therefore cannot
+                # leave catalog authority behind without any persisted sample.
                 install_catalog(conn, self._channel_catalog, within_transaction=True)
             conn.executemany(
                 "INSERT INTO main.readings "
@@ -735,9 +791,17 @@ class SQLiteWriter:
                 "VALUES (?, ?, ?, ?, ?, ?, ?);",
                 rows,
             )
-            if self._channel_catalog is not None:
-                verify_descriptor_storage(conn)
+            descriptor_guard_after_write = (
+                self._descriptor_guard_state(conn) if self._channel_catalog is not None else None
+            )
             conn.commit()
+            if self._channel_catalog is not None:
+                self._descriptor_catalog_installed = True
+                # Publish only the baseline sampled while BEGIN IMMEDIATE still
+                # excluded external writers. A commit landing immediately after
+                # ours must remain observable as a change on the next batch.
+                assert descriptor_guard_after_write is not None
+                self._descriptor_connection_guard = descriptor_guard_after_write
             # A successful write resets the locked-DB streak (roadmap A6).
             self._locked_failure_count = 0
             self._locked_failure_first_ts = None
@@ -940,7 +1004,14 @@ class SQLiteWriter:
             conn = sqlite3.connect(str(db_path), timeout=10)
             conn.row_factory = sqlite3.Row
             try:
-                conn.execute(SCHEMA_OPERATOR_LOG)
+                # This is a read path over historical databases. Older files
+                # legitimately predate operator_log; probing sqlite_master is
+                # observational, while CREATE TABLE here would mutate them.
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operator_log'"
+                ).fetchone()
+                if exists is None:
+                    continue
                 query = (
                     "SELECT id, timestamp, experiment_id, author, source, message, tags FROM operator_log WHERE 1 = 1"
                 )
@@ -1187,6 +1258,8 @@ class SQLiteWriter:
         if self._conn:
             self._conn.close()
             self._conn = None
+            self._descriptor_catalog_installed = False
+            self._descriptor_connection_guard = None
         logger.info("SQLiteWriter остановлен (записано: %d)", self._total_written)
 
     # ------------------------------------------------------------------
@@ -1212,7 +1285,16 @@ class SQLiteWriter:
         # list, i.e. unbounded — the opposite of a limit).
         limit_per_channel = min(max(int(limit_per_channel), 1), _HISTORY_MAX_ROWS)
         if channels:
-            channels = list(channels)[:_HISTORY_MAX_CHANNELS]
+            # One requested channel consumes one bounded query budget. Preserve
+            # caller order while preventing duplicate names from multiplying
+            # work across every retained daily file.
+            channels = list(dict.fromkeys(channels))[:_HISTORY_MAX_CHANNELS]
+        hot_deficits = {channel: limit_per_channel for channel in channels} if channels else None
+        unfiltered_limit = min(
+            limit_per_channel * _HISTORY_MAX_CHANNELS,
+            _HISTORY_MAX_TOTAL_ROWS,
+        )
+        unfiltered_remaining = unfiltered_limit
 
         result: dict[str, list[tuple[float, float]]] = {}
         db_files = sorted(self._data_dir.glob("data_????-??-??.db"))
@@ -1239,7 +1321,16 @@ class SQLiteWriter:
                 continue
             selected_dbs.append(db_path)
 
-        for db_path in selected_dbs:
+        # Newest files satisfy the retained tail first. Older files are opened
+        # only while a requested channel (or the aggregate no-filter budget)
+        # still has a deficit.
+        for db_path in reversed(selected_dbs):
+            if channels:
+                assert hot_deficits is not None
+                if not any(hot_deficits.values()):
+                    break
+            elif unfiltered_remaining <= 0:
+                break
             try:
                 conn = sqlite3.connect(str(db_path), timeout=5)
                 conn.row_factory = sqlite3.Row
@@ -1254,51 +1345,67 @@ class SQLiteWriter:
                         time_clause += " AND timestamp <= ?"
                         time_params.append(to_ts)
 
-                    def _collect(query: str, params: list[Any]) -> None:
-                        for row in conn.execute(query, params).fetchall():
+                    def _collect(query: str, params: list[Any]) -> int:
+                        pending: list[tuple[str, float, float]] = []
+                        for row in conn.execute(query, params):
                             ch = row["channel"]
-                            if ch not in result:
-                                result[ch] = []
                             # NaN-доктрина: mask sentinel / error / legacy ±inf at
                             # the read boundary — the GUI-reconnect history feed
                             # must not surface a non-physical number.
-                            result[ch].append((float(row["timestamp"]), decode(float(row["value"]), row["status"])))
+                            pending.append(
+                                (
+                                    ch,
+                                    float(row["timestamp"]),
+                                    decode(float(row["value"]), row["status"]),
+                                )
+                            )
+                        # Keep each bounded file/channel query atomic. A malformed
+                        # later row must not retain a partial prefix without also
+                        # consuming its deficit, which could multiply memory by
+                        # the number of retained daily files.
+                        for ch, timestamp, value in pending:
+                            result.setdefault(ch, []).append((timestamp, value))
+                        return len(pending)
 
                     if channels:
                         # Per-channel bounded query: each channel gets its own
                         # newest-first LIMIT, so a fast channel (e.g. thermometry)
                         # can't crowd out a slow one (e.g. vacuum) — mixed sampling
-                        # rates are normal. Rows are re-sorted ASC and merged below.
+                        # rates are normal. Spend each budget across files rather
+                        # than once per file; rows are re-sorted ASC below.
+                        assert hot_deficits is not None
                         for ch in channels:
-                            _collect(
+                            remaining = hot_deficits[ch]
+                            if remaining <= 0:
+                                continue
+                            collected = _collect(
                                 base + time_clause + " AND channel = ? ORDER BY timestamp DESC LIMIT ?",
-                                [*time_params, ch, limit_per_channel],
+                                [*time_params, ch, remaining],
                             )
+                            hot_deficits[ch] -= collected
                     else:
-                        # No channel filter: bound the total fetch as before so we
-                        # never fetchall() the whole file.
-                        _collect(
+                        # No channel filter: spend one aggregate budget across
+                        # daily files, newest first. A separate LIMIT per file
+                        # would let retained history multiply this bound.
+                        collected = _collect(
                             base + time_clause + " ORDER BY timestamp DESC LIMIT ?",
-                            [*time_params, limit_per_channel * _HISTORY_MAX_CHANNELS],
+                            [*time_params, unfiltered_remaining],
                         )
+                        unfiltered_remaining -= collected
                 finally:
                     conn.close()
             except Exception:
                 logger.warning("Ошибка чтения истории из %s", db_path)
 
         # Cold path: a window reaching before the oldest hot day would silently
-        # miss days already rotated to Parquet. Union those cold rows in from the
-        # archive. ArchiveReader.query already decodes (NaN-доктрина) and returns
-        # the same {ch: [(ts, value)]} shape → no double-decode; the per-channel
-        # limit clamp below then applies to the union (newest-first), preserving
-        # the readings_history contract. Bound the cold read strictly before the
-        # oldest hot day so hot days are never read twice (rotation deletes a
-        # day's .db, so the archive holds only pre-oldest-hot days).
-        # ponytail: cold read is unbounded per request (query has no LIMIT) —
-        # bounded only by the date window; add a cold LIMIT only if a deep-history
-        # request is ever shown to strain memory.
+        # miss days already rotated to Parquet. Union those cold rows through
+        # ArchiveReader's hard-bounded API. Process at most seven days per call,
+        # newest first, under one row/byte/deadline budget for the whole request.
+        # The cold end is strictly before the oldest hot day so an ordinary
+        # rotation cannot make the hot and cold paths read the same source.
         archive_index = self._data_dir / "archive" / "index.json"
-        if archive_index.exists():
+        cold_needed = any(hot_deficits.values()) if channels and hot_deficits is not None else unfiltered_remaining > 0
+        if archive_index.exists() and cold_needed:
             # Local import breaks the archive_reader → sqlite_writer cycle.
             from cryodaq.storage.archive_reader import ArchiveReader
 
@@ -1315,6 +1422,7 @@ class SQLiteWriter:
             # start only reaches cold days when it predates the oldest hot day).
             from_day_req = datetime.fromtimestamp(from_ts, tz=UTC).date() if from_ts is not None else None
             if from_day_req is None or oldest_hot is None or from_day_req < oldest_hot:
+                cold_deadline = time.monotonic() + _HISTORY_COLD_DEADLINE_S
                 if oldest_hot is not None:
                     boundary = datetime(oldest_hot.year, oldest_hot.month, oldest_hot.day, tzinfo=UTC).timestamp()
                     cold_to = boundary - 1e-6
@@ -1327,27 +1435,154 @@ class SQLiteWriter:
                 if from_ts is not None:
                     cold_from = from_ts
                 else:
-                    index = reader._load_index()
-                    archived_days: list[date] = []
-                    for entry in index.get("files", []):
-                        name = str(entry.get("original_name", ""))
-                        try:
-                            archived_days.append(date.fromisoformat(name.removeprefix("data_")[:10]))
-                        except ValueError:
-                            continue
-                    if archived_days:
-                        earliest = min(archived_days)
-                        cold_from = datetime(earliest.year, earliest.month, earliest.day, tzinfo=UTC).timestamp()
-                    else:
+                    try:
+                        if time.monotonic() >= cold_deadline:
+                            raise TimeoutError("cold history deadline expired before index read")
+                        index = reader._read_bounded_index(archive_index)
+                        if not isinstance(index, dict) or set(index) != {"files"}:
+                            raise ValueError("invalid bounded archive index schema")
+                        entries = index["files"]
+                        if not isinstance(entries, list) or len(entries) > 100_000:
+                            raise ValueError("invalid bounded archive index entries")
+                        archived_days: list[date] = []
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                raise ValueError("invalid bounded archive index entry")
+                            name = entry.get("original_name")
+                            if (
+                                not isinstance(name, str)
+                                or len(name) != 18
+                                or not name.startswith("data_")
+                                or not name.endswith(".db")
+                            ):
+                                raise ValueError("invalid bounded archive original_name")
+                            archived_day = date.fromisoformat(name[5:15])
+                            if name != f"data_{archived_day.isoformat()}.db":
+                                raise ValueError("non-canonical bounded archive original_name")
+                            archived_days.append(archived_day)
+                        if time.monotonic() >= cold_deadline:
+                            raise TimeoutError("cold history deadline expired during index read")
+                    except Exception:
+                        logger.warning("Bounded cold history index read failed", exc_info=True)
                         cold_from = None
+                    else:
+                        if archived_days:
+                            earliest = min(archived_days)
+                            cold_from = datetime(
+                                earliest.year,
+                                earliest.month,
+                                earliest.day,
+                                tzinfo=UTC,
+                            ).timestamp()
+                        else:
+                            cold_from = None
                 if cold_from is not None and cold_to >= cold_from:
-                    cold = reader.query(
-                        channels,
-                        datetime.fromtimestamp(cold_from, tz=UTC),
-                        datetime.fromtimestamp(cold_to, tz=UTC),
+                    deficits = (
+                        {
+                            channel: limit_per_channel - len(result.get(channel, ()))
+                            for channel in channels
+                            if len(result.get(channel, ())) < limit_per_channel
+                        }
+                        if channels
+                        else None
                     )
-                    for ch, pts in cold.items():
-                        result.setdefault(ch, []).extend(pts)
+                    cold_rows_remaining = min(
+                        sum(deficits.values()) if deficits is not None else unfiltered_remaining,
+                        _HISTORY_MAX_TOTAL_ROWS,
+                    )
+                    cold_bytes_remaining = _HISTORY_COLD_MAX_RETAINED_BYTES
+                    cold_start = datetime.fromtimestamp(cold_from, tz=UTC)
+                    cold_end = datetime.fromtimestamp(cold_to, tz=UTC) + timedelta(microseconds=1)
+                    deadline = cold_deadline
+                    stop_cold = False
+                    while (
+                        cold_rows_remaining > 0
+                        and cold_bytes_remaining >= _HISTORY_COLD_MIN_RETAINED_BYTES
+                        and cold_start < cold_end
+                    ):
+                        if time.monotonic() >= deadline:
+                            logger.warning("Cold history read stopped at its bounded deadline")
+                            break
+                        chunk_start = max(cold_start, cold_end - _HISTORY_COLD_CHUNK)
+                        query_channels = list(deficits) if deficits is not None else [None]
+                        for channel in query_channels:
+                            if cold_rows_remaining <= 0:
+                                break
+                            if cold_bytes_remaining < _HISTORY_COLD_MIN_RETAINED_BYTES:
+                                stop_cold = True
+                                break
+                            if deficits is not None:
+                                deficit = deficits.get(channel, 0)
+                                if deficit <= 0:
+                                    continue
+                                row_cap = min(deficit, cold_rows_remaining)
+                                selected_channels: list[str] | None = [str(channel)]
+                            else:
+                                deficit = cold_rows_remaining
+                                row_cap = cold_rows_remaining
+                                selected_channels = None
+                            query_total = max(2, row_cap)
+                            try:
+                                bounded = reader.query_reading_rows_bounded(
+                                    start=chunk_start,
+                                    end=cold_end,
+                                    channels=selected_channels,
+                                    max_channels=_HISTORY_MAX_CHANNELS,
+                                    max_points_per_channel=query_total,
+                                    max_total_points=query_total,
+                                    max_retained_bytes=cold_bytes_remaining,
+                                    deadline_monotonic=deadline,
+                                )
+                            except Exception:
+                                logger.warning("Bounded cold history read failed", exc_info=True)
+                                stop_cold = True
+                                break
+
+                            retained_bytes = bounded.retained_encoded_bytes
+                            if (
+                                type(retained_bytes) is not int
+                                or retained_bytes < 0
+                                or retained_bytes > cold_bytes_remaining
+                            ):
+                                logger.warning("Bounded cold history returned an invalid byte count")
+                                stop_cold = True
+                                break
+                            cold_bytes_remaining -= retained_bytes
+                            accepted = bounded.rows[-row_cap:]
+                            for row in accepted:
+                                value = float("nan") if row.value is None else row.value
+                                result.setdefault(row.channel, []).append((row.timestamp, value))
+                            cold_rows_remaining -= len(accepted)
+                            if deficits is not None:
+                                assert channel is not None
+                                deficits[channel] = max(0, deficit - len(accepted))
+                            if not bounded.complete or (bounded.truncated and len(accepted) < row_cap):
+                                logger.warning(
+                                    "Cold history read returned partial bounded evidence "
+                                    "(complete=%s, truncated=%s, issues=%d)",
+                                    bounded.complete,
+                                    bounded.truncated,
+                                    len(bounded.issues) + bounded.issue_overflow,
+                                )
+                                stop_cold = True
+                                break
+                        if stop_cold:
+                            break
+                        cold_end = chunk_start
+
+        if not channels:
+            # The cold reader has its own date/source bounds but returns a
+            # channel mapping. Re-apply the same absolute newest-row cap to the
+            # hot+cold union so the public result cannot exceed the trust
+            # boundary even when the archive contributes the remaining rows.
+            newest = sorted(
+                ((timestamp, channel, value) for channel, points in result.items() for timestamp, value in points),
+                key=lambda item: item[0],
+                reverse=True,
+            )[:unfiltered_limit]
+            result = {}
+            for timestamp, channel, value in newest:
+                result.setdefault(channel, []).append((timestamp, value))
 
         # Sort ASC and truncate to limit_per_channel (keep latest). Rows arrive
         # newest-first and possibly interleaved across daily DB files.
