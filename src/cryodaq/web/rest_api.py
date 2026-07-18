@@ -30,7 +30,7 @@ docstring.
 from __future__ import annotations
 
 import hmac
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request, Security
@@ -47,9 +47,13 @@ from cryodaq.paths import get_config_dir
 # server imports this module inside create_app().
 from cryodaq.web import server
 
-# Max request body for the unauthenticated facade. All endpoints are GET and
-# take no body; a large body is only ever abuse. 1 MiB is generous headroom.
+# Maximum request body for the read-only facade and its two strict-token write
+# routes. Writes require an explicit finite length; large read bodies are abuse.
+# 1 MiB is generous headroom for the bounded write schemas.
 MAX_BODY_BYTES = 1 * 1024 * 1024
+MAX_LOG_MESSAGE_CHARS = 4096
+MAX_LOG_TAGS = 16
+MAX_LOG_TAG_CHARS = 64
 
 router = APIRouter(prefix="/api/v1", tags=["read-only"])
 
@@ -196,13 +200,16 @@ class BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """Reject requests whose body exceeds ``MAX_BODY_BYTES`` with 413.
 
     Runs before routing, so no handler (and no engine command) executes for an
-    oversize request. ponytail: checks the Content-Length header only; a
-    chunked upload without that header would slip past — add streaming
-    enforcement if such clients ever appear (they won't on a GET-only facade).
+    oversize request. Authenticated write routes deliberately require a finite
+    Content-Length and reject transfer encodings rather than buffering an
+    unbounded stream in the web process.
     """
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
         cl = request.headers.get("content-length")
+        bounded_write = request.method not in _SAFE_METHODS and request.url.path.startswith("/api/v1")
+        if bounded_write and (cl is None or request.headers.get("transfer-encoding") is not None):
+            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
         if cl is not None:
             try:
                 if int(cl) > MAX_BODY_BYTES:
@@ -242,7 +249,7 @@ def _readings_with_unit(unit: str) -> list[dict[str, Any]]:
 _REDACT_KEYS = frozenset({"acknowledged_by"})
 
 
-def _redact(obj: Any, keys: frozenset[str] = _REDACT_KEYS) -> Any:
+def redact_public_payload(obj: Any, keys: frozenset[str] = _REDACT_KEYS) -> Any:
     """Recursively strip operator-identity keys from a plain dict/list payload.
 
     ``/state`` and ``/alarms`` return engine dicts verbatim (no Pydantic model),
@@ -250,10 +257,33 @@ def _redact(obj: Any, keys: frozenset[str] = _REDACT_KEYS) -> Any:
     acknowledged an alarm — over the unauthenticated facade.
     """
     if isinstance(obj, dict):
-        return {k: _redact(v, keys) for k, v in obj.items() if k not in keys}
+        return {k: redact_public_payload(v, keys) for k, v in obj.items() if k not in keys}
     if isinstance(obj, list):
-        return [_redact(v, keys) for v in obj]
+        return [redact_public_payload(v, keys) for v in obj]
     return obj
+
+
+def project_public_experiment(obj: Any) -> dict[str, Any]:
+    """Return the canonical unauthenticated experiment projection.
+
+    Both the versioned facade and the legacy dashboard route must expose the
+    same whitelisted fields. Keeping the projection here prevents either read
+    surface from silently re-introducing operator or configuration metadata.
+    """
+    return ExperimentOut.model_validate(obj).model_dump(mode="json")
+
+
+def project_public_log_entries(obj: Any) -> list[dict[str, Any]]:
+    """Return the canonical author-free projection for every public log route."""
+    if not isinstance(obj, list):
+        return []
+    projected: list[dict[str, Any]] = []
+    for entry in obj:
+        try:
+            projected.append(LogEntryOut.model_validate(entry).model_dump(mode="json"))
+        except Exception:  # noqa: BLE001 — malformed engine rows are omitted, never exposed
+            server.logger.warning("Ignoring malformed public operator-log entry")
+    return projected
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +294,7 @@ def _redact(obj: Any, keys: frozenset[str] = _REDACT_KEYS) -> Any:
 @router.get("/state")
 async def get_state() -> dict[str, Any]:
     """System status snapshot (uptime, instruments, safety, alarm counts)."""
-    return _redact(server._state.status_json())
+    return redact_public_payload(server._state.status_json())
 
 
 @router.get("/readings", response_model=list[ReadingOut])
@@ -302,7 +332,7 @@ async def get_alarms() -> dict[str, Any]:
                 "ok": True,
                 "engine_instance_id": result.get("engine_instance_id"),
                 "snapshot_revision": result.get("snapshot_revision"),
-                "active": _redact(result.get("active", {})),
+                "active": redact_public_payload(result.get("active", {})),
             }
     except Exception:
         server.logger.warning("api/v1 alarms fetch failed")
@@ -328,7 +358,7 @@ async def get_log(limit: int = 10) -> list[dict[str, Any]]:
     try:
         result = await server._async_engine_command({"cmd": "log_get", "limit": limit})
         if result.get("ok"):
-            return result.get("entries", [])
+            return project_public_log_entries(result.get("entries", []))
     except Exception:
         server.logger.warning("api/v1 log fetch failed")
     return []
@@ -376,8 +406,10 @@ class LogAppendIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(min_length=1)
-    tags: list[str] | None = None
+    message: str = Field(min_length=1, max_length=MAX_LOG_MESSAGE_CHARS)
+    tags: list[Annotated[str, Field(min_length=1, max_length=MAX_LOG_TAG_CHARS)]] | None = Field(
+        default=None, max_length=MAX_LOG_TAGS
+    )
 
 
 class AlarmAckIn(BaseModel):

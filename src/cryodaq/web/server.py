@@ -143,8 +143,7 @@ class _ServerState:
             self.instrument_status[inst_id] = {
                 "last_seen": reading.timestamp.isoformat(),
                 "status": reading.status.value,
-                "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0)
-                + 1,
+                "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0) + 1,
             }
 
     def status_json(self) -> dict[str, Any]:
@@ -273,7 +272,19 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
     if not _DATA_DIR.exists():
         return result
 
+    # Daily filenames use the writer's wall-clock date. Include one preceding
+    # day conservatively for timezone/cross-midnight overlap, but never open
+    # the entire archive for a short dashboard request.
+    oldest_candidate_date = (cutoff - timedelta(days=1)).date()
+    latest_candidate_date = (datetime.now(UTC) + timedelta(days=1)).date()
     for db_path in sorted(_DATA_DIR.glob("data_????-??-??.db")):
+        try:
+            db_date = datetime.strptime(db_path.stem.removeprefix("data_"), "%Y-%m-%d").date()
+        except ValueError:
+            logger.warning("Ignoring malformed daily SQLite filename: %s", db_path.name)
+            continue
+        if not oldest_candidate_date <= db_date <= latest_candidate_date:
+            continue
         conn = None
         try:
             conn = sqlite3.connect(str(db_path), timeout=5)
@@ -342,7 +353,13 @@ def create_app() -> FastAPI:
 
     # Read-only REST facade + Swagger. Imported here (not at module top) to
     # keep the server<->rest_api import non-circular.
-    from cryodaq.web.rest_api import BodySizeLimitMiddleware, WriteAuthMiddleware
+    from cryodaq.web.rest_api import (
+        BodySizeLimitMiddleware,
+        WriteAuthMiddleware,
+        project_public_experiment,
+        project_public_log_entries,
+        redact_public_payload,
+    )
     from cryodaq.web.rest_api import router as rest_router
 
     application.add_middleware(BodySizeLimitMiddleware)
@@ -362,12 +379,12 @@ def create_app() -> FastAPI:
     @application.get("/status")
     async def status() -> dict[str, Any]:
         """JSON-статус системы."""
-        return _state.status_json()
+        return redact_public_payload(_state.status_json())
 
     @application.get("/api/status")
     async def api_status() -> dict[str, Any]:
         """Полный JSON-статус: readings + experiment + shift."""
-        base = _state.status_json()
+        base = redact_public_payload(_state.status_json())
         base["readings"] = _state.last_readings
         # Safety status via engine command
         try:
@@ -381,18 +398,18 @@ def create_app() -> FastAPI:
         try:
             alarms = await _async_engine_command({"cmd": "alarm_v2_status"})
             if alarms.get("ok"):
-                base["active_alarms"] = alarms.get("active", {})
                 _state.active_alarms = alarms.get("active", {})
+                base["active_alarms"] = redact_public_payload(alarms.get("active", {}))
         except Exception as exc:
             logger.warning("api_status alarm fetch failed: %s", exc)
         # Experiment/shift data via ZMQ command
         try:
             exp = await _async_engine_command({"cmd": "experiment_status"})
-            base["experiment"] = exp if exp.get("ok") else None
+            base["experiment"] = project_public_experiment(exp) if exp.get("ok") else None
         except Exception as exc:
             logger.warning("api_status experiment fetch failed: %s", exc)
             base["experiment"] = None
-        return base
+        return redact_public_payload(base)
 
     @application.get("/api/version")
     async def api_version() -> dict[str, Any]:
@@ -408,7 +425,10 @@ def create_app() -> FastAPI:
         try:
             result = await _async_engine_command({"cmd": "log_get", "limit": limit})
             if result.get("ok"):
-                return {"ok": True, "entries": result.get("entries", [])}
+                return {
+                    "ok": True,
+                    "entries": project_public_log_entries(result.get("entries", [])),
+                }
         except Exception as exc:
             logger.warning("api_log fetch failed: %s", exc)
         return {"ok": False, "entries": []}

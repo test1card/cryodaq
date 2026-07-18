@@ -126,6 +126,39 @@ def test_log_response_redacts_author(client) -> None:
     assert entry["message"] == "hello"
 
 
+def test_legacy_log_route_shares_public_projection(client) -> None:
+    """The embedded dashboard route cannot bypass operator-log redaction."""
+    entry = {
+        "id": 7,
+        "timestamp": "2026-07-18T01:02:03+00:00",
+        "experiment_id": "exp-7",
+        "author": "SECRET_OPERATOR",
+        "source": "gui",
+        "message": "проверка",
+        "tags": ["note"],
+        "unexpected": "SECRET_EXTRA",
+    }
+
+    async def _fake(req: dict) -> dict:
+        assert req == {"cmd": "log_get", "limit": 5}
+        return {"ok": True, "entries": [entry]}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = client.get("/api/log?limit=5")
+
+    assert response.status_code == 200
+    assert "SECRET_OPERATOR" not in response.text
+    assert "SECRET_EXTRA" not in response.text
+    assert response.json()["entries"][0] == {
+        "id": 7,
+        "timestamp": "2026-07-18T01:02:03+00:00",
+        "experiment_id": "exp-7",
+        "source": "gui",
+        "message": "проверка",
+        "tags": ["note"],
+    }
+
+
 def test_oversize_body_returns_413_before_engine(client) -> None:
     """A too-large body is rejected with 413 before any engine call."""
     called = False
@@ -200,6 +233,68 @@ def test_state_redacts_acknowledged_by(client) -> None:
     alarm = resp.json()["active_alarms"]["T1_high"]
     assert "acknowledged_by" not in alarm
     assert alarm["level"] == "warning"
+
+
+def test_legacy_status_routes_share_public_redaction_contract(client) -> None:
+    """Legacy dashboard reads must not bypass the /api/v1 field whitelist."""
+    from cryodaq.web import server
+
+    secret_alarm = {
+        "T1_high": {
+            "level": "warning",
+            "acknowledged": True,
+            "acknowledged_by": "SECRET_OPERATOR",
+        }
+    }
+    secret_experiment = {
+        "ok": True,
+        "current_phase": "cooldown",
+        "active_experiment": {
+            "experiment_id": "exp-1",
+            "name": "run",
+            "status": "running",
+            "operator": "SECRET_OPERATOR",
+            "sample": "SECRET_SAMPLE",
+            "notes": "SECRET_NOTES",
+            "config_snapshot": {"SECRET_KEY": "SECRET_VALUE"},
+            "custom_fields": {"SECRET_CF": "x"},
+            "artifact_dir": "/secret/artifacts",
+            "metadata_path": "/secret/meta.json",
+        },
+    }
+
+    async def _fake(req: dict) -> dict:
+        if req == {"cmd": "safety_status"}:
+            return {"ok": True, "state": "safe"}
+        if req == {"cmd": "alarm_v2_status"}:
+            return {"ok": True, "active": secret_alarm}
+        if req == {"cmd": "experiment_status"}:
+            return secret_experiment
+        raise AssertionError(f"unexpected request: {req!r}")
+
+    server._state.active_alarms = secret_alarm
+    status_response = client.get("/status")
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        dashboard_response = client.get("/api/status")
+
+    assert status_response.status_code == 200
+    assert dashboard_response.status_code == 200
+    for response in (status_response, dashboard_response):
+        for leak in (
+            "SECRET_OPERATOR",
+            "SECRET_SAMPLE",
+            "SECRET_NOTES",
+            "SECRET_KEY",
+            "SECRET_VALUE",
+            "SECRET_CF",
+            "/secret/",
+        ):
+            assert leak not in response.text, f"{response.url.path} leaked {leak!r}"
+
+    dashboard = dashboard_response.json()
+    assert dashboard["active_alarms"]["T1_high"]["level"] == "warning"
+    assert dashboard["experiment"]["active_experiment"]["experiment_id"] == "exp-1"
+    assert dashboard["experiment"]["current_phase"] == "cooldown"
 
 
 def test_docs_available(client) -> None:
@@ -392,6 +487,37 @@ def test_post_log_empty_message_rejected(auth_client) -> None:
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
         resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": ""})
     assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "x" * 4097},
+        {"message": "ok", "tags": [f"tag-{index}" for index in range(17)]},
+        {"message": "ok", "tags": ["x" * 65]},
+    ],
+)
+def test_post_log_rejects_oversized_fields(auth_client, payload: dict) -> None:
+    """Authenticated writes remain bounded below the global body cap."""
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post("/api/v1/log", headers=_AUTH, json=payload)
+    assert resp.status_code == 422
+
+
+def test_post_log_rejects_chunked_transfer_before_body_parse(auth_client) -> None:
+    """The facade does not accept an unbounded body without Content-Length."""
+    headers = {
+        **_AUTH,
+        "Content-Type": "application/json",
+        "Transfer-Encoding": "chunked",
+    }
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        resp = auth_client.post(
+            "/api/v1/log",
+            headers=headers,
+            content=b'{"message":"ok"}',
+        )
+    assert resp.status_code == 411
 
 
 def test_post_log_without_token_is_401(auth_client) -> None:

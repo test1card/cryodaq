@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from cryodaq.agents.assistant.query.agent import _FALLBACK, AssistantQueryAgent
@@ -116,12 +117,15 @@ def _make_agent(
 
 def _intent_json(category: str) -> str:
     import json
-    return json.dumps({
-        "category": category,
-        "target_channels": None,
-        "time_window_minutes": None,
-        "quantity": "",
-    })
+
+    return json.dumps(
+        {
+            "category": category,
+            "target_channels": None,
+            "time_window_minutes": None,
+            "quantity": "",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +148,12 @@ async def test_query_agent_handles_eta_cooldown_full_flow() -> None:
     adapters = _make_adapters(cooldown_eta=eta)
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("eta_cooldown")),   # Phase B: classify
-        _make_gen_result("Охлаждение займёт ещё 5 часов."),  # Phase C: format
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("eta_cooldown")),  # Phase B: classify
+            _make_gen_result("Охлаждение займёт ещё 5 часов."),  # Phase C: format
+        ]
+    )
 
     agent = _make_agent(ollama, adapters)
     resp = await agent.handle_query("когда достигнем 4К?")
@@ -162,10 +168,12 @@ async def test_query_agent_handles_eta_vacuum_with_no_active_pumping() -> None:
     adapters = _make_adapters(vacuum_eta=None)
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("eta_vacuum")),
-        _make_gen_result("Вакуумный прогноз недоступен: сервис не активен."),
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("eta_vacuum")),
+            _make_gen_result("Вакуумный прогноз недоступен: сервис не активен."),
+        ]
+    )
 
     agent = _make_agent(ollama, adapters)
     resp = await agent.handle_query("ETA вакуума?")
@@ -188,10 +196,12 @@ async def test_query_agent_composite_status_parallel() -> None:
     adapters = _make_adapters(composite_status=cs)
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("composite_status")),
-        _make_gen_result("Система в норме. T_cold = 42.5 K."),
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("composite_status")),
+            _make_gen_result("Система в норме. T_cold = 42.5 K."),
+        ]
+    )
 
     agent = _make_agent(ollama, adapters)
     resp = await agent.handle_query("что сейчас?")
@@ -225,10 +235,12 @@ async def test_query_agent_out_of_scope_historical_response() -> None:
     )
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("out_of_scope_historical")),
-        _make_gen_result("Исторические данные пока недоступны. Это появится в F33."),
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("out_of_scope_historical")),
+            _make_gen_result("Исторические данные пока недоступны. Это появится в F33."),
+        ]
+    )
 
     agent = _make_agent(ollama, adapters)
     resp = await agent.handle_query("что было вчера?")
@@ -256,10 +268,12 @@ async def test_query_agent_handles_intent_classifier_failure() -> None:
     adapters = _make_adapters()
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result("NOT JSON AT ALL"),  # classifier fails → UNKNOWN
-        _make_gen_result("Запрос непонятен. Попробуй: 'что сейчас?'."),
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result("NOT JSON AT ALL"),  # classifier fails → UNKNOWN
+            _make_gen_result("Запрос непонятен. Попробуй: 'что сейчас?'."),
+        ]
+    )
 
     agent = _make_agent(ollama, adapters)
     resp = await agent.handle_query("aasdfjkl")
@@ -273,9 +287,7 @@ async def test_query_agent_handles_ollama_exception() -> None:
     from cryodaq.agents.assistant.shared.ollama_client import OllamaUnavailableError
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(
-        side_effect=OllamaUnavailableError("server down")
-    )
+    ollama.generate = AsyncMock(side_effect=OllamaUnavailableError("server down"))
 
     agent = _make_agent(ollama, _make_adapters())
     resp = await agent.handle_query("ETA охлаждения?")
@@ -294,10 +306,12 @@ async def test_query_agent_audit_log_per_query() -> None:
     audit = _make_audit()
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("composite_status")),
-        _make_gen_result("Всё в порядке."),
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("composite_status")),
+            _make_gen_result("Всё в порядке."),
+        ]
+    )
 
     agent = AssistantQueryAgent(
         ollama_client=ollama,
@@ -322,10 +336,12 @@ async def test_query_agent_audit_log_records_errors() -> None:
     audit = _make_audit()
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("phase_info")),
-        _make_gen_result("", truncated=True),  # format LLM truncated
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("phase_info")),
+            _make_gen_result("", truncated=True),  # format LLM truncated
+        ]
+    )
 
     agent = AssistantQueryAgent(
         ollama_client=ollama,
@@ -350,9 +366,7 @@ async def test_query_agent_rate_limit_per_chat() -> None:
     adapters = _make_adapters()
 
     ollama = MagicMock()
-    ollama.generate = AsyncMock(
-        return_value=_make_gen_result("ok")
-    )
+    ollama.generate = AsyncMock(return_value=_make_gen_result("ok"))
 
     agent = _make_agent(ollama, adapters, max_per_hour=1)
 
@@ -371,12 +385,14 @@ async def test_query_agent_rate_limit_per_chat() -> None:
 async def test_query_agent_rate_limit_separate_chats() -> None:
     """Rate limit is per chat — different chat IDs have separate buckets."""
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("unknown")),
-        _make_gen_result("ок"),
-        _make_gen_result(_intent_json("unknown")),
-        _make_gen_result("ок"),
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("unknown")),
+            _make_gen_result("ок"),
+            _make_gen_result(_intent_json("unknown")),
+            _make_gen_result("ок"),
+        ]
+    )
 
     agent = _make_agent(ollama, _make_adapters(), max_per_hour=1)
 
@@ -387,6 +403,35 @@ async def test_query_agent_rate_limit_separate_chats() -> None:
     assert r2 != "Слишком много запросов. Подожди немного."
 
 
+def test_query_agent_rate_registry_expires_inactive_chats(monkeypatch) -> None:
+    """Distinct historical chat IDs must not remain allocated forever."""
+    from cryodaq.agents.assistant.query import agent as agent_module
+
+    now = [0.0]
+    monkeypatch.setattr(
+        agent_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: now[0]),
+    )
+    agent = _make_agent(MagicMock(), _make_adapters(), max_per_hour=30)
+    for chat_id in range(32):
+        assert agent._check_rate(chat_id) is True
+
+    now[0] = 3601.0
+    assert agent._check_rate("fresh") is True
+    assert set(agent._rate_buckets) == {"fresh"}
+
+
+def test_query_agent_rate_registry_fails_closed_at_capacity() -> None:
+    """A burst of new identifiers cannot make the registry itself unbounded."""
+    agent = _make_agent(MagicMock(), _make_adapters(), max_per_hour=30)
+    for chat_id in range(4096):
+        assert agent._check_rate(chat_id) is True
+
+    assert agent._check_rate("overflow") is False
+    assert len(agent._rate_buckets) == 4096
+
+
 # ---------------------------------------------------------------------------
 # Format prompt building
 # ---------------------------------------------------------------------------
@@ -395,10 +440,12 @@ async def test_query_agent_rate_limit_separate_chats() -> None:
 async def test_query_agent_empty_format_response_returns_fallback() -> None:
     """Format LLM returning whitespace-only text (not truncated) → _FALLBACK."""
     ollama = MagicMock()
-    ollama.generate = AsyncMock(side_effect=[
-        _make_gen_result(_intent_json("alarm_status")),
-        _make_gen_result("  ", truncated=False),  # empty text (not truncated flag)
-    ])
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("alarm_status")),
+            _make_gen_result("  ", truncated=False),  # empty text (not truncated flag)
+        ]
+    )
 
     agent = _make_agent(ollama, _make_adapters())
     resp = await agent.handle_query("тревоги?")
@@ -444,10 +491,7 @@ async def test_query_agent_format_timeout_returns_bounded_fallback() -> None:
     assert resp == _FALLBACK
     # Bounded by _format_timeout_s, not the 30 s hang — generous ceiling
     # for scheduler jitter but far below the hang duration.
-    assert elapsed < 2.0, (
-        f"format call was not bounded by _format_timeout_s "
-        f"({format_timeout_s}s); took {elapsed:.2f}s"
-    )
+    assert elapsed < 2.0, f"format call was not bounded by _format_timeout_s ({format_timeout_s}s); took {elapsed:.2f}s"
 
 
 async def test_query_agent_format_alarm_with_active_alarms() -> None:

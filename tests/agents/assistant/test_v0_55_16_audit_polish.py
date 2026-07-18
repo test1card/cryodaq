@@ -82,9 +82,7 @@ def test_archive_detail_prompt_localises_phase_names() -> None:
     # Raw English phase identifiers should NOT appear in the prompt
     # body (the localiser maps them to Russian display names).
     body_lines = prompt.splitlines()
-    phase_block = "\n".join(
-        line for line in body_lines if line.startswith("- ")
-    )
+    phase_block = "\n".join(line for line in body_lines if line.startswith("- "))
     assert "preparation" not in phase_block
     assert "cooldown" not in phase_block
     assert "measurement" not in phase_block
@@ -171,7 +169,8 @@ def test_get_detail_handles_malformed_metadata_json(tmp_path: Path) -> None:
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
     )
     adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
+        archive_root=tmp_path,
     )
 
     result = _run(adapter.get_detail("exp-corrupt"))
@@ -211,7 +210,8 @@ def test_get_detail_handles_invalid_iso_date_in_metadata(tmp_path: Path) -> None
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
     )
     adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
+        archive_root=tmp_path,
     )
 
     result = _run(adapter.get_detail("exp-bad-date"))
@@ -242,7 +242,8 @@ def test_get_detail_handles_phases_field_being_a_string(tmp_path: Path) -> None:
         start_time=datetime(2025, 12, 1, tzinfo=UTC),
     )
     adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
+        archive_root=tmp_path,
     )
 
     result = _run(adapter.get_detail("exp-bad-shape"))

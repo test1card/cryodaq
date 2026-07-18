@@ -48,20 +48,53 @@ def test_query_history_clamps_oversized_minutes(monkeypatch) -> None:
             pass
 
     monkeypatch.setattr(
-        server, "_DATA_DIR", _PatchedDir([server.Path("data_2026-03-16.db")])
+        server,
+        "_DATA_DIR",
+        _PatchedDir([server.Path(f"data_{datetime.now(UTC).date().isoformat()}.db")]),
     )
     monkeypatch.setattr(server.sqlite3, "connect", lambda *_a, **_k: _FakeConn())
 
     server._query_history(99999999)
 
     # Effective cutoff must be no older than now - max-window (with slack).
-    floor = (
-        datetime.now(UTC) - timedelta(minutes=server._HISTORY_MAX_MINUTES + 1)
-    ).timestamp()
+    floor = (datetime.now(UTC) - timedelta(minutes=server._HISTORY_MAX_MINUTES + 1)).timestamp()
     assert "cutoff_epoch" in captured, "query never ran"
-    assert captured["cutoff_epoch"] >= floor, (
-        "minutes not clamped — cutoff reaches far past the max window"
-    )
+    assert captured["cutoff_epoch"] >= floor, "minutes not clamped — cutoff reaches far past the max window"
+
+
+def test_query_history_skips_archive_files_outside_window(monkeypatch) -> None:
+    """A short dashboard query must not open every historical daily DB."""
+    today = datetime.now(UTC).date()
+    recent = server.Path(f"data_{today.isoformat()}.db")
+    old = server.Path(f"data_{(today - timedelta(days=30)).isoformat()}.db")
+    future = server.Path(f"data_{(today + timedelta(days=30)).isoformat()}.db")
+    opened: list[str] = []
+
+    class _FakeCursor:
+        def fetchall(self):
+            return []
+
+    class _FakeConn:
+        row_factory = None
+
+        def execute(self, _sql, _params):
+            return _FakeCursor()
+
+        def close(self) -> None:
+            pass
+
+    def _connect(path, **_kwargs):
+        opened.append(str(path))
+        return _FakeConn()
+
+    monkeypatch.setattr(server, "_DATA_DIR", _PatchedDir([old, recent, future]))
+    monkeypatch.setattr(server.sqlite3, "connect", _connect)
+
+    server._query_history(1)
+
+    assert str(recent) in opened
+    assert str(old) not in opened
+    assert str(future) not in opened
 
 
 def test_api_log_clamps_oversized_limit(monkeypatch) -> None:
@@ -84,9 +117,7 @@ def test_api_log_clamps_oversized_limit(monkeypatch) -> None:
 
     asyncio.run(handler(limit=10_000_000))
 
-    assert captured["cmd"]["limit"] == server._LOG_MAX_LIMIT, (
-        "limit not clamped to _LOG_MAX_LIMIT"
-    )
+    assert captured["cmd"]["limit"] == server._LOG_MAX_LIMIT, "limit not clamped to _LOG_MAX_LIMIT"
 
 
 def test_query_history_masks_sentinel(tmp_path, monkeypatch) -> None:

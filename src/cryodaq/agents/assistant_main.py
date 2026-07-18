@@ -323,13 +323,9 @@ async def _run_rag_rebuild(
                 "error": None,
             }
         )
-        logger.info(
-            "RAG manual rebuild complete: %d chunks indexed в %s", stats.get("indexed", 0), db_path
-        )
+        logger.info("RAG manual rebuild complete: %d chunks indexed в %s", stats.get("indexed", 0), db_path)
     except Exception as exc:  # noqa: BLE001
-        _rag_rebuild_state.update(
-            {"state": "failed", "finished_at": time.time(), "error": str(exc)}
-        )
+        _rag_rebuild_state.update({"state": "failed", "finished_at": time.time(), "error": str(exc)})
         logger.error("RAG manual rebuild failed: %s", exc, exc_info=True)
 
 
@@ -418,9 +414,7 @@ async def _bootstrap_rag_index_if_empty(
             procedures_dir=knowledge_dir / "procedures",
             reference_root=repo_root,
         )
-        logger.info(
-            "RAG bootstrap complete: %d chunks indexed в %s", stats.get("indexed", 0), db_path
-        )
+        logger.info("RAG bootstrap complete: %d chunks indexed в %s", stats.get("indexed", 0), db_path)
     except Exception as exc:  # noqa: BLE001
         logger.error("RAG bootstrap failed: %s", exc, exc_info=True)
 
@@ -459,16 +453,13 @@ async def _handle_assistant_query_command(
             "error": "AssistantQueryAgent не сконфигурирован (query_enabled=false в agent.yaml).",
         }
     try:
-        response = await asyncio.wait_for(
-            query_agent.handle_query(query, chat_id=chat_id), timeout=timeout_s
-        )
+        response = await asyncio.wait_for(query_agent.handle_query(query, chat_id=chat_id), timeout=timeout_s)
         return {"ok": True, "response": response}
     except TimeoutError:
         return {
             "ok": False,
             "error": (
-                f"Запрос обрабатывался слишком долго (>{timeout_s:g}s). "
-                "Попробуй ещё раз — модель уже прогрелась."
+                f"Запрос обрабатывался слишком долго (>{timeout_s:g}s). Попробуй ещё раз — модель уже прогрелась."
             ),
         }
     except Exception as exc:  # noqa: BLE001
@@ -602,9 +593,7 @@ async def _run_llm_runtime(
     try:
         # This reader is used read-only against the engine-owned WAL database.
         reader = SQLiteWriter(_DATA_DIR)
-        context_builder = ContextBuilder(
-            reader, state_cache, sensor_diag_provider=state_cache.get_summary
-        )
+        context_builder = ContextBuilder(reader, state_cache, sensor_diag_provider=state_cache.get_summary)
         audit_logger = AuditLogger(
             _DATA_DIR / "agents" / "assistant" / "audit",
             enabled=config.audit_enabled,
@@ -672,9 +661,7 @@ async def _run_llm_runtime(
             rag_rebuild_db_path = rag_db_path
             rag_rebuild_embeddings = rag_emb
             rag_rebuild_knowledge_dir = rag_knowledge_dir
-            logger.info(
-                "RAG searcher: инициализирован (config=%s, db=%s)", rag_cfg["_source"], rag_db_path
-            )
+            logger.info("RAG searcher: инициализирован (config=%s, db=%s)", rag_cfg["_source"], rag_db_path)
             rag_bootstrap_args = {
                 "db_path": rag_db_path,
                 "embeddings_client": rag_emb,
@@ -702,7 +689,10 @@ async def _run_llm_runtime(
             q_sqlite = SQLiteAdapter(engine_client)
             q_alarms = AlarmAdapter(engine_client)
             q_experiment = ExperimentAdapter(engine_client)
-            q_archive = ArchiveAdapter(engine_client)
+            q_archive = ArchiveAdapter(
+                engine_client,
+                archive_root=_DATA_DIR / "experiments",
+            )
             q_rag = RAGAdapter(rag_searcher)
             q_composite = CompositeAdapter(
                 broker_snapshot=broker_snapshot,

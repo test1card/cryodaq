@@ -82,9 +82,7 @@ def _entry_payload(
 
 def test_list_recent_wraps_entries_reply() -> None:
     entry = _entry_payload(experiment_id="exp-1")
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_archive_list={"ok": True, "entries": [entry]})
-    )
+    adapter = ArchiveAdapter(_fake_client(experiment_archive_list={"ok": True, "entries": [entry]}))
 
     result = _run(adapter.list_recent(days=7, limit=20))
 
@@ -96,9 +94,7 @@ def test_list_recent_wraps_entries_reply() -> None:
 
 def test_list_recent_caps_at_limit() -> None:
     entries = [_entry_payload(experiment_id=f"exp-{i}") for i in range(30)]
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_archive_list={"ok": True, "entries": entries})
-    )
+    adapter = ArchiveAdapter(_fake_client(experiment_archive_list={"ok": True, "entries": entries}))
 
     result = _run(adapter.list_recent(days=7, limit=5))
 
@@ -107,9 +103,7 @@ def test_list_recent_caps_at_limit() -> None:
 
 
 def test_list_recent_empty_archive_returns_empty_result() -> None:
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_archive_list={"ok": True, "entries": []})
-    )
+    adapter = ArchiveAdapter(_fake_client(experiment_archive_list={"ok": True, "entries": []}))
     result = _run(adapter.list_recent(days=7))
     assert isinstance(result, ArchiveListResult)
     assert result.total_count == 0
@@ -117,9 +111,7 @@ def test_list_recent_empty_archive_returns_empty_result() -> None:
 
 
 def test_list_recent_returns_none_when_call_fails() -> None:
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_archive_list={"ok": False, "error": "engine недоступен"})
-    )
+    adapter = ArchiveAdapter(_fake_client(experiment_archive_list={"ok": False, "error": "engine недоступен"}))
     assert _run(adapter.list_recent(days=7)) is None
 
 
@@ -159,11 +151,10 @@ def test_get_detail_reads_phases_and_cooldown(tmp_path: Path) -> None:
 
     started = datetime(2025, 12, 1, 8, 0, tzinfo=UTC)
     ended = datetime(2025, 12, 2, 4, 0, tzinfo=UTC)  # 20h total
-    entry = _entry_payload(
-        experiment_id="exp-1", start_time=started, end_time=ended, metadata_path=md_path
-    )
+    entry = _entry_payload(experiment_id="exp-1", start_time=started, end_time=ended, metadata_path=md_path)
     adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
+        archive_root=tmp_path,
     )
 
     result = _run(adapter.get_detail("exp-1"))
@@ -178,9 +169,7 @@ def test_get_detail_reads_phases_and_cooldown(tmp_path: Path) -> None:
 
 
 def test_get_detail_unknown_experiment_returns_none() -> None:
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": None})
-    )
+    adapter = ArchiveAdapter(_fake_client(experiment_get_archive_item={"ok": True, "entry": None}))
     assert _run(adapter.get_detail("does-not-exist")) is None
 
 
@@ -193,10 +182,53 @@ def test_get_detail_handles_missing_metadata_file_gracefully(tmp_path: Path) -> 
         end_time=datetime(2025, 12, 2, tzinfo=UTC),
         metadata_path=tmp_path / "missing.json",
     )
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
-    )
+    adapter = ArchiveAdapter(_fake_client(experiment_get_archive_item={"ok": True, "entry": entry}))
     result = _run(adapter.get_detail("exp-1"))
+    assert isinstance(result, ArchiveDetailResult)
+    assert result.phases == []
+    assert result.cooldown_metrics is None
+
+
+def test_get_detail_refuses_metadata_outside_trusted_archive_root(
+    tmp_path: Path,
+) -> None:
+    archive_root = tmp_path / "experiments"
+    archive_root.mkdir()
+    outside = tmp_path / "outside" / "metadata.json"
+    outside.parent.mkdir()
+    outside.write_text(
+        json.dumps({"phases": [{"phase": "cooldown", "ended_at": "SECRET"}]}),
+        encoding="utf-8",
+    )
+    entry = _entry_payload(experiment_id="exp-1", metadata_path=outside)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
+        archive_root=archive_root,
+    )
+
+    result = _run(adapter.get_detail("exp-1"))
+
+    assert isinstance(result, ArchiveDetailResult)
+    assert result.phases == []
+    assert result.cooldown_metrics is None
+
+
+def test_get_detail_refuses_oversized_metadata(tmp_path: Path) -> None:
+    archive_root = tmp_path / "experiments"
+    metadata_path = archive_root / "exp-1" / "metadata.json"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(
+        json.dumps({"phases": [{"phase": "cooldown", "ended_at": "SECRET"}]}) + (" " * (1024 * 1024 + 1)),
+        encoding="utf-8",
+    )
+    entry = _entry_payload(experiment_id="exp-1", metadata_path=metadata_path)
+    adapter = ArchiveAdapter(
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
+        archive_root=archive_root,
+    )
+
+    result = _run(adapter.get_detail("exp-1"))
+
     assert isinstance(result, ArchiveDetailResult)
     assert result.phases == []
     assert result.cooldown_metrics is None
@@ -209,9 +241,7 @@ def test_get_detail_empty_id_returns_none() -> None:
 
 
 def test_get_detail_returns_none_when_call_fails() -> None:
-    adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": False, "error": "engine недоступен"})
-    )
+    adapter = ArchiveAdapter(_fake_client(experiment_get_archive_item={"ok": False, "error": "engine недоступен"}))
     assert _run(adapter.get_detail("exp-1")) is None
 
 
@@ -228,9 +258,7 @@ def test_alarm_history_aggregates_triggered_and_cleared() -> None:
         {"at": now - 600, "transition": "TRIGGERED", "alarm_id": "overheat"},
         {"at": now - 500, "transition": "TRIGGERED", "alarm_id": "vacuum_loss"},
     ]
-    adapter = ArchiveAdapter(
-        _fake_client(alarm_v2_history={"ok": True, "history": history})
-    )
+    adapter = ArchiveAdapter(_fake_client(alarm_v2_history={"ok": True, "history": history}))
 
     result = _run(adapter.alarm_history_summary(days=7))
 
@@ -241,16 +269,12 @@ def test_alarm_history_aggregates_triggered_and_cleared() -> None:
 
 
 def test_alarm_history_returns_none_when_call_fails() -> None:
-    adapter = ArchiveAdapter(
-        _fake_client(alarm_v2_history={"ok": False, "error": "engine недоступен"})
-    )
+    adapter = ArchiveAdapter(_fake_client(alarm_v2_history={"ok": False, "error": "engine недоступен"}))
     assert _run(adapter.alarm_history_summary(days=7)) is None
 
 
 def test_alarm_history_returns_zero_counts_when_history_empty() -> None:
-    adapter = ArchiveAdapter(
-        _fake_client(alarm_v2_history={"ok": True, "history": []})
-    )
+    adapter = ArchiveAdapter(_fake_client(alarm_v2_history={"ok": True, "history": []}))
     result = _run(adapter.alarm_history_summary(days=7))
     assert isinstance(result, AlarmHistoryResult)
     assert result.triggered_count == 0
@@ -294,9 +318,9 @@ def test_get_detail_offloads_metadata_read_to_thread(monkeypatch, tmp_path: Path
         metadata_path=md_path,
     )
     adapter = ArchiveAdapter(
-        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry})
+        _fake_client(experiment_get_archive_item={"ok": True, "entry": entry}),
+        archive_root=tmp_path,
     )
     _run(adapter.get_detail("exp-1"))
 
-    # ``Path.read_text`` is a bound method — its __name__ is "read_text".
-    assert any(name == "read_text" for name in seen)
+    assert "_read_bounded_metadata" in seen
