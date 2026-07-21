@@ -42,11 +42,7 @@ def test_load_categories_returns_builtin_when_file_missing(tmp_path: Path) -> No
 def test_load_categories_parses_valid_yaml(tmp_path: Path) -> None:
     f = tmp_path / "cats.yaml"
     f.write_text(
-        "categories:\n"
-        "  - id: x\n"
-        "    label: 'X'\n"
-        "    query: 'q'\n"
-        "    limit: 3\n",
+        "categories:\n  - id: x\n    label: 'X'\n    query: 'q'\n    limit: 3\n",
         encoding="utf-8",
     )
     cats = _load_categories(f)
@@ -189,6 +185,7 @@ def test_snippet_pane_renders_results(app: QApplication) -> None:
     assert card is not None
     # Find body label (second child QLabel in the card).
     from PySide6.QtWidgets import QLabel
+
     labels = card.findChildren(QLabel)
     texts = [lbl.text() for lbl in labels]
     # Body text must appear.
@@ -221,7 +218,8 @@ def test_snippet_pane_empty_results(app: QApplication) -> None:
 def test_rebuild_initial_state_is_idle(app: QApplication) -> None:
     panel = KnowledgeBasePanel(categories=_custom_categories())
     assert panel._rebuild_button.text() == "Обновить индекс"
-    assert panel._rebuild_button.isEnabled()
+    assert not panel._rebuild_button.isEnabled()
+    assert "cryodaq-rag-index" in panel._rebuild_button.accessibleDescription()
     assert panel._rebuild_status_label.text() == "Готов"
     assert panel._rebuild_running is False
     assert not panel._rebuild_poll_timer.isActive()
@@ -250,8 +248,7 @@ def test_rebuild_response_start_error_keeps_button_enabled(app: QApplication) ->
     )
     assert panel._rebuild_running is False
     assert panel._rebuild_button.isEnabled()
-    assert "Rebuild" in panel._rebuild_status_label.text() or \
-           "идёт" in panel._rebuild_status_label.text()
+    assert "Rebuild" in panel._rebuild_status_label.text() or "идёт" in panel._rebuild_status_label.text()
     assert not panel._rebuild_poll_timer.isActive()
     panel.deleteLater()
 

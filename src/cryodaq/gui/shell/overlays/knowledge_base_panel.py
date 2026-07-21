@@ -289,17 +289,18 @@ class KnowledgeBasePanel(QWidget):
         toolbar_layout.addStretch(1)
         self._rebuild_status_label = QLabel("Готов")
         self._rebuild_status_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; "
-            f"font-family: '{theme.FONT_MONO}'; "
-            f"font-feature-settings: 'tnum';"
+            f"color: {theme.MUTED_FOREGROUND}; font-family: '{theme.FONT_MONO}'; font-feature-settings: 'tnum';"
         )
         toolbar_layout.addWidget(self._rebuild_status_label)
         self._rebuild_button = QPushButton("Обновить индекс")
         self._rebuild_button.setToolTip(
-            "Перестроить индекс базы знаний после нового PDF / процедуры. "
-            "Может занять несколько минут."
+            "Перестроить индекс базы знаний после нового PDF / процедуры. Может занять несколько минут."
         )
         self._rebuild_button.clicked.connect(self._on_rebuild_clicked)
+        self._rebuild_button.setEnabled(False)
+        self._rebuild_button.setAccessibleDescription(
+            "Indexing is offline maintenance; run cryodaq-rag-index outside the operator UI."
+        )
         toolbar_layout.addWidget(self._rebuild_button)
         root.addWidget(toolbar)
 
@@ -454,21 +455,18 @@ class KnowledgeBasePanel(QWidget):
             )
             if res != QMessageBox.StandardButton.Yes:
                 return
-        self._send_rebuild_command("rag.rebuild_index")
+        # Offline-only maintenance; no mutating command is available in the GUI.
+        return
 
     def _send_rebuild_command(self, action: str) -> None:
         worker = ZmqCommandWorker({"cmd": action}, parent=self)
-        worker.finished.connect(
-            lambda result, c=action: self._on_rebuild_response(c, result)
-        )
+        worker.finished.connect(lambda result, c=action: self._on_rebuild_response(c, result))
         self._rebuild_workers.append(worker)
         worker.start()
 
     def _on_rebuild_response(self, action: str, result: dict | None) -> None:
         # Drop finished workers so the list does not grow unbounded.
-        self._rebuild_workers = [
-            w for w in self._rebuild_workers if w.isRunning()
-        ]
+        self._rebuild_workers = [w for w in self._rebuild_workers if w.isRunning()]
         if not isinstance(result, dict):
             self._rebuild_running = False
             self._rebuild_button.setEnabled(True)
@@ -500,16 +498,12 @@ class KnowledgeBasePanel(QWidget):
                 self._rebuild_running = False
                 self._rebuild_button.setEnabled(True)
                 self._rebuild_poll_timer.stop()
-                self._rebuild_status_label.setText(
-                    f"Индекс обновлён: {chunks} chunks"
-                )
+                self._rebuild_status_label.setText(f"Индекс обновлён: {chunks} chunks")
             elif state == "failed":
                 self._rebuild_running = False
                 self._rebuild_button.setEnabled(True)
                 self._rebuild_poll_timer.stop()
-                self._rebuild_status_label.setText(
-                    (str(err) if err else "Сборка не удалась")[:80]
-                )
+                self._rebuild_status_label.setText((str(err) if err else "Сборка не удалась")[:80])
             else:  # idle и unknown
                 self._rebuild_running = False
                 self._rebuild_button.setEnabled(True)

@@ -92,3 +92,33 @@ def test_closeevent_stops_status_timer() -> None:
         assert not w._status_timer.isActive(), "status timer must be stopped on close"
     finally:
         _stop_timers(w)
+
+
+def test_disk_reading_is_presented_only_when_backend_metadata_is_exact() -> None:
+    _app()
+    window = MainWindowV2()
+    try:
+        reading = Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="system",
+            channel="system/disk_free_gb",
+            value=5.0,
+            unit="GB",
+            metadata={"source": "disk_monitor", "operator_state": "caution"},
+        )
+        window._dispatch_reading(reading)
+        assert "5.0" in window._bottom_bar._disk_label.text()
+        prior = window._bottom_bar._disk_label.text()
+        window._dispatch_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="system",
+                channel="system/disk_free_gb",
+                value=1.0,
+                unit="GB",
+                metadata={"source": "untrusted", "operator_state": "fault"},
+            )
+        )
+        assert window._bottom_bar._disk_label.text() == prior
+    finally:
+        _stop_timers(window)
