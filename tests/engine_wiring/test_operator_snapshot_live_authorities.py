@@ -67,7 +67,7 @@ def test_active_experiment_identity_and_phase_are_cached_without_sampling_io(
     assert started.experiment_name == "Cooldown"
     assert started.phase is None
 
-    manager.advance_phase("cooldown")
+    manager.advance_phase("cooldown", expected_experiment_id=experiment_id)
     phased = manager.snapshot_operator_experiment()
     assert phased.revision == started.revision + 1
     assert phased.phase == "cooldown"
