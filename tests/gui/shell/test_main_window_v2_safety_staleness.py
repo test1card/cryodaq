@@ -1,7 +1,4 @@
-"""Regression: the bottom-bar safety strip must NOT show a stale runtime state
-after the engine dies. runtime invariant — the GUI is not the source of truth
-for runtime state; a stale green "running" while the engine is gone is dangerous.
-"""
+"""Regression: disconnect retains last safety evidence but revokes currency."""
 
 from __future__ import annotations
 
@@ -42,7 +39,7 @@ def _safety_reading(state: str) -> Reading:
     )
 
 
-def test_safety_strip_blanks_when_engine_lost() -> None:
+def test_safety_strip_retains_last_known_state_as_disconnected_when_engine_lost() -> None:
     _app()
     w = MainWindowV2()
     try:
@@ -55,9 +52,10 @@ def test_safety_strip_blanks_when_engine_lost() -> None:
         w._last_reading_time = time.monotonic() - 200.0
         w._tick_status()
 
-        # The safety strip must NOT keep showing the stale "running" state.
-        assert w._last_safety_state is None, "stale safety state must be cleared on engine loss"
-        assert w._bottom_bar._safety_label.text() == "● —"
+        assert w._last_safety_state == "running"
+        assert "running" in w._bottom_bar._safety_label.text()
+        assert "нет связи" in w._bottom_bar._safety_label.text()
+        assert "текущая связь" in w._bottom_bar._safety_label.accessibleDescription().lower()
     finally:
         _stop_timers(w)
 
@@ -69,7 +67,7 @@ def test_safety_strip_restored_on_reconnect() -> None:
         w._dispatch_reading(_safety_reading("running"))
         w._last_reading_time = time.monotonic() - 200.0
         w._tick_status()
-        assert w._last_safety_state is None
+        assert "нет связи" in w._bottom_bar._safety_label.text()
 
         # A fresh safety reading after reconnect restores the strip.
         w._dispatch_reading(_safety_reading("ready"))

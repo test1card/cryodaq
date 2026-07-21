@@ -4,7 +4,7 @@ keywords: status-bar, bottom-bar, connection, safety-state, uptime, disk, data-r
 applies_to: bottom chrome strip showing passive system-level evidence
 status: active
 implements: src/cryodaq/gui/shell/bottom_status_bar.py
-last_updated: 2026-07-20
+last_updated: 2026-07-21
 references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voice-rules.md, governance/change-impact.md
 ---
 
@@ -18,7 +18,7 @@ The bar presents six fields in this order:
 
 1. current SafetyManager state supplied by the host;
 2. launcher/UI uptime measured from this widget's construction;
-3. free space for the configured data directory;
+3. last accepted free-space evidence from `DiskMonitor`;
 4. the latest data rate supplied by the host;
 5. recent-reading connection evidence supplied by the host;
 6. the GUI host's current local time.
@@ -63,13 +63,14 @@ pushed to the far edge by a stretch.
 2. Safety IDs remain lowercase (`safe_off`, `ready`, `run_permitted`,
    `running`, `fault_latched`) so the display matches authoritative log/state
    vocabulary.
-3. Missing safety evidence renders `● —` in muted text. Unknown states remain
-   muted; they never become green.
+3. Missing safety evidence renders `● —` in muted text. On disconnect, a known
+   state remains visible as `state · нет связи` in dim muted text with complete
+   accessible last-known/current-unknown detail; it never becomes green.
 4. `running` and `run_permitted` use `ACCENT`, because activity or permission is
    not evidence of health. `ready` uses `STATUS_INFO`.
-5. Any safety state containing `fault` uses `STATUS_FAULT`.
-   Exact `fault_latched` also sounds immediately and repeats the application
-   beep every three seconds until the state changes or becomes unavailable.
+5. Any safety state containing `fault` uses `STATUS_FAULT`. The bar owns no
+   audible behavior; exact activation-based sound belongs only to
+   `AnnunciationController`.
 6. Disk free space below 2 GiB uses `STATUS_FAULT`; 2 GiB through less than
    10 GiB uses `STATUS_CAUTION`; 10 GiB or more is muted technical information.
 7. Connected and disconnected states include both text and a dot glyph. The
@@ -84,13 +85,17 @@ pushed to the far edge by a stretch.
     display a timezone or UTC offset.
 11. The bar is passive and has no click, hover-command, or keyboard-command
     behavior.
+12. Visible safety, disk, rate, and connection strings are bounded for the
+    1280px shell floor. Their complete last-known value/state/provenance remains
+    in tooltip and accessible description; clipping never becomes information
+    loss.
 
 ## Safety state mapping
 
 | Backend text | Token | Meaning |
 |---|---|---|
 | missing/empty | `TEXT_MUTED` | no current safety evidence |
-| contains `fault` | `STATUS_FAULT` | fault evidence; exact `fault_latched` repeats the beep |
+| contains `fault` | `STATUS_FAULT` | fault evidence; audible ownership is external and activation-based |
 | contains `running` | `ACCENT` | current activity, not health |
 | contains `permitted` | `ACCENT` | authorization, not health |
 | contains `ready` | `STATUS_INFO` | informational readiness, not health |
@@ -105,7 +110,7 @@ The active public setter contract is exactly:
 
 ```python
 class BottomStatusBar(QWidget):
-    def set_safety_state(self, state: str | None) -> None: ...
+    def set_safety_state(self, state: str | None, *, stale: bool = False) -> None: ...
     def set_data_rate(self, rate_per_sec: float) -> None: ...
     def set_connected(
         self,
@@ -123,13 +128,15 @@ or `set_time` API. Documentation and tests must not imply otherwise.
 - A one-second widget timer updates uptime and local time only.
 - Safety, disk, rate, and connection change only through the public setters.
 - The presenter rejects malformed disk evidence and retains the last accepted
-  label; it performs no filesystem I/O on the Qt thread.
+  label; it performs no filesystem I/O on the Qt thread. DiskMonitor alone
+  owns threshold classification (`<2 GB` fault, `<10 GB` caution, otherwise
+  ordinary) and provenance.
 - The last data rate is not cleared or marked stale on disconnect.
 - The connection field receives already-derived host evidence; it cannot
   distinguish a disconnected socket from a live transport with silent
   acquisition.
-- The fault beep timer is owned by the widget and stops on every non-latched or
-  missing safety state.
+- The widget has no beep timer. Disconnect and stale safety presentation never
+  silence an already accepted active annunciation.
 
 ## Accessibility and operator trade-offs
 

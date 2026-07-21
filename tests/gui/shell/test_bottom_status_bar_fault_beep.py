@@ -71,8 +71,46 @@ def test_bottom_bar_has_no_filesystem_probe_and_rejects_malformed_disk_evidence(
     old = bar._disk_label.text()
     assert not bar.set_disk_evidence(float("nan"), source="disk_monitor", state="ok")
     assert not bar.set_disk_evidence(5.0, source="other", state="caution")
+    assert not bar.set_disk_evidence(1.0, source="disk_monitor", state="ok")
     assert bar._disk_label.text() == old
     assert bar.set_disk_evidence(5.0, source="disk_monitor", state="caution")
+
+
+def test_invalid_rate_retains_last_known_value_without_fabricating_zero() -> None:
+    bar = _make_bar()
+    bar.set_data_rate(7.0)
+    bar.set_data_rate(-1.0)
+
+    assert bar._rate_label.text().startswith("~7")
+    assert "-1.0" in bar._rate_label.accessibleDescription()
+
+
+def test_protocol_maxima_fit_1280_with_full_evidence_in_accessible_detail() -> None:
+    bar = _make_bar()
+    bar.set_safety_state("x" * 1_000, stale=True)
+    bar.set_data_rate(1e300)
+    bar.set_connected(False, "y" * 1_000)
+    assert bar.set_disk_evidence(1e300, source="disk_monitor", state="ok")
+    bar._start_time -= 10**12
+    bar._tick()
+    bar.resize(1280, bar.height())
+    bar.show()
+    QApplication.processEvents()
+
+    assert bar.minimumSizeHint().width() <= 1280
+    for label in (
+        bar._safety_label,
+        bar._uptime_label,
+        bar._disk_label,
+        bar._rate_label,
+        bar._conn_label,
+        bar._time_label,
+    ):
+        assert label.geometry().right() <= bar.rect().right()
+    assert "x" * 100 in bar._safety_label.accessibleDescription()
+    assert "1e+300" in bar._disk_label.accessibleDescription()
+    assert "y" * 100 in bar._conn_label.accessibleDescription()
+    assert "д" in bar._uptime_label.accessibleDescription()
 
 
 if __name__ == "__main__":

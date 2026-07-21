@@ -156,16 +156,18 @@ def test_lazy_open_replays_current_experiment():
 # ----------------------------------------------------------------------
 
 
-def test_operator_log_entry_reading_triggers_refresh_on_overlay():
+def test_operator_log_entry_does_not_forge_connection_or_refresh_on_overlay():
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("log")
         workers_before = len(w._operator_log_panel._workers)
         w._dispatch_reading(_log_entry_reading())
-        # Rendered effect: dispatch triggers refresh_entries() which spawns a
-        # ZmqCommandWorker for log_get. The worker list must have grown.
-        assert len(w._operator_log_panel._workers) > workers_before
+        # Analytics/support traffic is not measurement freshness or engine
+        # presence authority. A log entry may update the view only after a
+        # separately established live connection; it cannot spawn a poll by
+        # itself.
+        assert len(w._operator_log_panel._workers) == workers_before
     finally:
         _stop_timers(w)
 
