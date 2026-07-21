@@ -26,20 +26,15 @@ def load_housekeeping_config(config_path: Path) -> dict[str, Any]:
     """Load housekeeping.yaml. Raises HousekeepingConfigError on failure."""
     if not config_path.exists():
         raise HousekeepingConfigError(
-            f"housekeeping.yaml not found at {config_path} — refusing to start "
-            f"without housekeeping configuration"
+            f"housekeeping.yaml not found at {config_path} — refusing to start without housekeeping configuration"
         )
     try:
         with config_path.open(encoding="utf-8") as handle:
             raw = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
-        raise HousekeepingConfigError(
-            f"housekeeping.yaml at {config_path}: YAML parse error — {exc}"
-        ) from exc
+        raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: YAML parse error — {exc}") from exc
     if not isinstance(raw, dict):
-        raise HousekeepingConfigError(
-            f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
-        )
+        raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}")
     return raw
 
 
@@ -208,8 +203,7 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
             channels = groups.get(group_name)
             if not channels:
                 logger.warning(
-                    "alarms_v3 references unknown channel_group %r — "
-                    "no channels protected for this reference",
+                    "alarms_v3 references unknown channel_group %r — no channels protected for this reference",
                     group_name,
                 )
                 continue
@@ -221,6 +215,31 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
     return patterns
 
 
+def resolve_canonical_temperature_bindings(descriptor_catalog: Any, canonical_ids: set[str]) -> set[str]:
+    """Reverse-map canonical temperature identities to exact raw labels.
+
+    ``AdaptiveThrottle`` observes pre-bind readings, so canonical IDs and
+    broad regexes are unsafe there.  Each requested identity must have exactly
+    one non-observational raw emitted binding; the returned expressions are
+    full-string escaped labels suitable for ``fullmatch``.
+    """
+    bindings = descriptor_catalog._bindings
+    resolved: set[str] = set()
+    for canonical_id in canonical_ids:
+        candidates = sorted(
+            emitted
+            for (_instrument, emitted), bound_id in bindings.items()
+            if bound_id == canonical_id and not bound_id.endswith(".raw") and not emitted.endswith("_raw")
+        )
+        if len(candidates) != 1:
+            raise HousekeepingConfigError(
+                f"canonical safety identity {canonical_id!r} must resolve to exactly one emitted label; "
+                f"got {candidates!r}"
+            )
+        resolved.add(rf"^{re.escape(candidates[0])}$")
+    return resolved
+
+
 @dataclass
 class _ThrottleState:
     last_seen_value: float
@@ -230,9 +249,7 @@ class _ThrottleState:
 
 
 class AdaptiveThrottle:
-    def __init__(
-        self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None
-    ) -> None:
+    def __init__(self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", False))
         self._include = [re.compile(str(item)) for item in cfg.get("include_patterns", [])]
@@ -243,9 +260,7 @@ class AdaptiveThrottle:
         self._transition_holdoff_s = float(cfg.get("transition_holdoff_s", 30.0))
         delta_cfg = cfg.get("absolute_delta", {})
         self._default_delta = float(delta_cfg.get("default", 0.05))
-        self._delta_by_unit = {
-            str(key): float(value) for key, value in delta_cfg.items() if key != "default"
-        }
+        self._delta_by_unit = {str(key): float(value) for key, value in delta_cfg.items() if key != "default"}
         self._state: dict[str, _ThrottleState] = {}
         self._active_alarm_count = 0
         self._transition_until: datetime | None = None
@@ -261,16 +276,12 @@ class AdaptiveThrottle:
             self._active_alarm_count = max(0, int(round(reading.value)))
             return
         if channel.startswith("analytics/keithley_channel_state/"):
-            self._transition_until = reading.timestamp + timedelta(
-                seconds=self._transition_holdoff_s
-            )
+            self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
             return
         if channel == "analytics/safety_state":
             state = str(reading.metadata.get("state", "")).lower()
             if state != "running":
-                self._transition_until = reading.timestamp + timedelta(
-                    seconds=self._transition_holdoff_s
-                )
+                self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
 
     def filter_for_archive(self, readings: list[Reading]) -> list[Reading]:
         if not self.enabled:
