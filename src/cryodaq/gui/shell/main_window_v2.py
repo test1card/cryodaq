@@ -38,6 +38,7 @@ from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
+from cryodaq.gui.shell.annunciation_controller import AnnunciationController
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
@@ -215,6 +216,9 @@ class MainWindowV2(QMainWindow):
         self._top_bar.set_replay_mode(self._replay_mode)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
+        # The only in-shell owner of engine annunciation sound.  Launcher
+        # process-death sound remains deliberately separate.
+        self._annunciation_controller = AnnunciationController(self)
         self._overlay = OverlayContainer()
 
         self._overlay.register("home", self._overview_panel)
@@ -789,16 +793,12 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Нет данных")
             else:
                 self._bottom_bar.set_connected(False, "Engine потерян")
-            # Engine data flow lost — the last-known safety state is no longer
-            # trustworthy. The GUI must not present a stale runtime state as
-            # current (runtime invariant: GUI is not the source of truth for runtime
-            # state); a stale green "running" while the engine is gone is
-            # dangerous. Blank the safety strip and force the Keithley overlay
-            # to not-ready. Idempotent: only acts on the transition.
+            # Engine data flow lost — retain the last known state as evidence,
+            # but visibly revoke its current-truth claim and force controls
+            # not-ready. The GUI never erases operator evidence into a quiet
+            # blank or presents a stale runtime state as current.
             if self._last_safety_state is not None:
-                self._last_safety_state = None
-                self._last_safety_reason = ""
-                self._bottom_bar.set_safety_state(None)
+                self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
                 if self._keithley_panel is not None:
                     self._keithley_panel.set_safety_ready(False, "Engine потерян — состояние безопасности неизвестно")
         # Mirror connection state onto Keithley overlay. Guard on lazy

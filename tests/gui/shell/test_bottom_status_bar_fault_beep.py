@@ -1,8 +1,4 @@
-"""A3b — BottomStatusBar repeating fault-latched beep.
-
-``_fault_beep_active`` is covered without Qt directly (pure). The rest
-covers the QTimer start/stop wiring on a real (offscreen) widget.
-"""
+"""BottomStatusBar is a passive truth presenter, not an audio owner."""
 
 from __future__ import annotations
 
@@ -17,34 +13,11 @@ from cryodaq.gui import theme
 from cryodaq.gui.shell.bottom_status_bar import (
     BottomStatusBar,
     _disk_space_color,
-    _fault_beep_active,
 )
 
 
 def _app() -> QApplication:
     return QApplication.instance() or QApplication([])
-
-
-# ---------------------------------------------------------------------------
-# Part (a): pure _fault_beep_active
-# ---------------------------------------------------------------------------
-
-
-def test_fault_latched_is_active() -> None:
-    assert _fault_beep_active("fault_latched") is True
-
-
-def test_fault_latched_is_case_insensitive() -> None:
-    assert _fault_beep_active("FAULT_LATCHED") is True
-
-
-def test_none_is_not_active() -> None:
-    assert _fault_beep_active(None) is False
-
-
-def test_other_states_are_not_active() -> None:
-    for state in ("safe_off", "ready", "run_permitted", "running", "manual_recovery"):
-        assert _fault_beep_active(state) is False, state
 
 
 @pytest.mark.parametrize(
@@ -61,56 +34,11 @@ def test_disk_space_thresholds_use_canonical_safety_rungs(free_gb: float, expect
     assert _disk_space_color(free_gb) == expected
 
 
-# ---------------------------------------------------------------------------
-# Part (b): widget wiring
-# ---------------------------------------------------------------------------
-
-
 def _make_bar() -> BottomStatusBar:
     _app()
     bar = BottomStatusBar()
     bar._timer.stop()
     return bar
-
-
-def test_fault_latched_starts_the_repeating_beep_timer() -> None:
-    bar = _make_bar()
-    assert not bar._fault_beep_timer.isActive()
-    bar.set_safety_state("fault_latched")
-    assert bar._fault_beep_timer.isActive()
-
-
-def test_leaving_fault_latched_stops_the_timer() -> None:
-    bar = _make_bar()
-    bar.set_safety_state("fault_latched")
-    assert bar._fault_beep_timer.isActive()
-    bar.set_safety_state("ready")
-    assert not bar._fault_beep_timer.isActive()
-
-
-def test_blanking_state_on_connection_loss_stops_the_timer() -> None:
-    bar = _make_bar()
-    bar.set_safety_state("fault_latched")
-    assert bar._fault_beep_timer.isActive()
-    bar.set_safety_state(None)
-    assert not bar._fault_beep_timer.isActive()
-
-
-def test_repeated_fault_latched_calls_do_not_restart_a_running_timer() -> None:
-    """Idempotent: set_safety_state may be called every poll tick while
-    latched — must not keep re-triggering the immediate beep."""
-    bar = _make_bar()
-    bar.set_safety_state("fault_latched")
-    timer_id_before = id(bar._fault_beep_timer)
-    bar.set_safety_state("fault_latched")
-    assert bar._fault_beep_timer.isActive()
-    assert id(bar._fault_beep_timer) == timer_id_before
-
-
-def test_non_fault_state_never_starts_the_timer() -> None:
-    bar = _make_bar()
-    bar.set_safety_state("running")
-    assert not bar._fault_beep_timer.isActive()
 
 
 @pytest.mark.parametrize("state", ["run_permitted", "running"])
@@ -138,7 +66,7 @@ def test_bottom_bar_has_no_filesystem_probe_and_rejects_malformed_disk_evidence(
         Path(__file__).parents[3].joinpath("src/cryodaq/gui/shell/bottom_status_bar.py").read_text(encoding="utf-8")
     )
     names = {node.id for node in ast.walk(module) if isinstance(node, ast.Name)}
-    assert not {"shutil", "get_data_dir"} & names
+    assert not {"shutil", "get_data_dir", "QApplication"} & names
     bar = _make_bar()
     old = bar._disk_label.text()
     assert not bar.set_disk_evidence(float("nan"), source="disk_monitor", state="ok")
