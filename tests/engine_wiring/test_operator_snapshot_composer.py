@@ -38,6 +38,7 @@ from cryodaq.operator_snapshot import (
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotMode,
 )
 from cryodaq.storage.operator_snapshot_revision import OperatorSnapshotRevisionAllocator, SnapshotRevision
@@ -86,6 +87,7 @@ def _safety(cut: CommonCut) -> SafetyReadinessReceipt:
     return SafetyReadinessReceipt(
         **_base(cut),
         readiness=ReadinessTruth.READY,
+        lifecycle=SafetyLifecycle.READY,
         verified_off=True,
         plant_health=(PlantHealthEvidence("storage", "Storage", OperatorPresentationState.OK, "storage_ok"),),
     )
@@ -309,6 +311,7 @@ async def test_validation_failure_does_not_allocate_for_mismatch_unavailable_fut
             token=source.token,
             availability=source.availability,
             readiness=source.readiness,
+            lifecycle=source.lifecycle,
             verified_off=source.verified_off,
             blockers=source.blockers,
             plant_health=source.plant_health,
@@ -324,7 +327,9 @@ async def test_ready_without_verified_off_and_unreviewed_optional_unavailable_re
     allocator = _Allocator([SnapshotRevision(1, NOW)])
 
     def unsafe_ready(cut: CommonCut) -> SafetyReadinessReceipt:
-        return SafetyReadinessReceipt(**_base(cut), readiness=ReadinessTruth.READY, verified_off=False)
+        return SafetyReadinessReceipt(
+            **_base(cut), readiness=ReadinessTruth.READY, lifecycle=SafetyLifecycle.READY, verified_off=False
+        )
 
     with pytest.raises(ValueError, match="verified-OFF"):
         await _composer(allocator, safety=unsafe_ready).compose(NOW)

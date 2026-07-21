@@ -43,6 +43,18 @@ class ReadinessTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SafetyLifecycle(StrEnum):
+    """Exact owner lifecycle carried alongside readiness, never inferred."""
+
+    SAFE_OFF = "safe_off"
+    READY = "ready"
+    RUN_PERMITTED = "run_permitted"
+    RUNNING = "running"
+    FAULT_LATCHED = "fault_latched"
+    MANUAL_RECOVERY = "manual_recovery"
+    UNKNOWN = "unknown"
+
+
 class RecordingTruth(StrEnum):
     RECORDING = "recording"
     NOT_RECORDING = "not_recording"
@@ -129,6 +141,7 @@ __all__ = [
     "ReadinessSummary",
     "ReadinessTruth",
     "RecordingTruth",
+    "SafetyLifecycle",
     "SnapshotCut",
     "SnapshotMode",
     "SummaryStatus",
@@ -583,11 +596,14 @@ class ReadinessSummary(_OperatorSummary):
 
     readiness: ReadinessTruth
     blockers: tuple[ReadinessBlocker, ...]
+    lifecycle: SafetyLifecycle = SafetyLifecycle.UNKNOWN
 
     def __post_init__(self) -> None:
         super(ReadinessSummary, self).__post_init__()
-        if not isinstance(self.readiness, ReadinessTruth):
-            raise TypeError("readiness must be a ReadinessTruth")
+        if type(self.readiness) is not ReadinessTruth:
+            raise TypeError("readiness must be an exact ReadinessTruth")
+        if type(self.lifecycle) is not SafetyLifecycle:
+            raise TypeError("lifecycle must be an exact SafetyLifecycle")
         _typed_tuple(self.blockers, ReadinessBlocker, field_name="blockers")
         _bounded_tuple(self.blockers, field_name="blockers", limit=MAX_CHANNELS)
         _unique(tuple(item.code for item in self.blockers), field_name="blocker codes")
@@ -615,6 +631,17 @@ class ReadinessSummary(_OperatorSummary):
                 required = _max_state(tuple(item.state for item in self.blockers))
                 if not _state_at_least(self.state, required):
                     raise ValueError("readiness state must cover its most severe blocker")
+        # Transport loss and a same-cut reconnect retain the last typed
+        # lifecycle while revoking readiness. UNKNOWN is therefore deliberately
+        # not a lifecycle inference point; it is non-authoritative. Claims of
+        # READY or BLOCKED authority, however, must remain lifecycle-coherent.
+        if self.readiness is ReadinessTruth.READY and self.lifecycle is not SafetyLifecycle.READY:
+            raise ValueError("READY readiness requires READY safety lifecycle")
+        if self.readiness is ReadinessTruth.BLOCKED and self.lifecycle in {
+            SafetyLifecycle.READY,
+            SafetyLifecycle.UNKNOWN,
+        }:
+            raise ValueError("BLOCKED readiness requires a non-ready safety lifecycle")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1017,6 +1044,7 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             "snapshot.readiness.blockers",
             MAX_CHANNELS,
         ),
+        _enum(SafetyLifecycle, item["lifecycle"], "snapshot.readiness.lifecycle"),
     )
     (status, item) = status_and("plant_health")
     plant_health = PlantHealthSummary(

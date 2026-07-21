@@ -28,6 +28,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -136,27 +137,34 @@ def _snapshot(
         if current
         else AvailabilityTruth.UNKNOWN
     )
+    readiness = (
+        ReadinessTruth.UNKNOWN
+        if mode is SnapshotMode.REPLAY
+        else ReadinessTruth.BLOCKED
+        if urgent
+        else (
+            ReadinessTruth.UNKNOWN
+            if effective_state
+            in {
+                OperatorPresentationState.STALE,
+                OperatorPresentationState.DISCONNECTED,
+            }
+            else ReadinessTruth.READY
+        )
+    )
+    lifecycle = {
+        ReadinessTruth.READY: SafetyLifecycle.READY,
+        ReadinessTruth.BLOCKED: SafetyLifecycle.FAULT_LATCHED,
+        ReadinessTruth.UNKNOWN: SafetyLifecycle.UNKNOWN,
+    }[readiness]
     return OperatorSnapshot(
         cut=cut,
         readiness=ReadinessSummary(
             cut,
             status,
-            (
-                ReadinessTruth.UNKNOWN
-                if mode is SnapshotMode.REPLAY
-                else ReadinessTruth.BLOCKED
-                if urgent
-                else (
-                    ReadinessTruth.UNKNOWN
-                    if effective_state
-                    in {
-                        OperatorPresentationState.STALE,
-                        OperatorPresentationState.DISCONNECTED,
-                    }
-                    else ReadinessTruth.READY
-                )
-            ),
+            readiness,
             () if blocker is None else (blocker,),
+            lifecycle,
         ),
         plant_health=PlantHealthSummary(
             cut,
@@ -283,7 +291,13 @@ def test_snapshot_rejects_mixed_revision_or_provenance_cut() -> None:
     with pytest.raises(ValueError, match="same snapshot cut"):
         OperatorSnapshot(
             cut=snapshot.cut,
-            readiness=ReadinessSummary(other_cut, snapshot.readiness.status, ReadinessTruth.READY, ()),
+            readiness=ReadinessSummary(
+                other_cut,
+                snapshot.readiness.status,
+                ReadinessTruth.READY,
+                (),
+                SafetyLifecycle.READY,
+            ),
             plant_health=snapshot.plant_health,
             infrastructure=snapshot.infrastructure,
             attention=snapshot.attention,
@@ -307,6 +321,10 @@ def test_disconnected_transport_is_idempotent_and_does_not_change_cut() -> None:
     snapshot = _snapshot(state=OperatorPresentationState.OK)
     first = apply_transport_freshness(snapshot, connected=False, transport_age_s=8, stale_after_s=5)
     second = apply_transport_freshness(first, connected=False, transport_age_s=8, stale_after_s=5)
+
+    assert first.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert first.readiness.lifecycle is SafetyLifecycle.READY
+    assert second.readiness.lifecycle is SafetyLifecycle.READY
 
     assert first.cut == snapshot.cut
     assert second == first
@@ -408,6 +426,7 @@ def test_transport_degrades_nested_blockers_and_attention_with_explicit_cue(
             status=nested_status,
             readiness=ReadinessTruth.BLOCKED,
             blockers=(blocker,),
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
         ),
         attention=replace(snapshot.attention, status=nested_status, items=(attention,)),
     )

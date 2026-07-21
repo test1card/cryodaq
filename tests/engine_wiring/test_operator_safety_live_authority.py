@@ -95,6 +95,7 @@ def test_adapter_maps_explicit_blockers_without_promoting_plant_facts() -> None:
     )
     receipt = LiveSafetyReadinessAuthority(owner).snapshot_for_cut(CUT)  # type: ignore[arg-type]
     assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.lifecycle is SafetyLifecycle.SAFE_OFF
     assert tuple(item.code for item in receipt.blockers) == ("critical_input_stale",)
     assert tuple(item.subsystem_id for item in receipt.plant_health) == ("critical_inputs",)
 

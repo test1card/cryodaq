@@ -16,11 +16,17 @@ from cryodaq.gui.shell.operator_components import (
     FreshnessProvenanceFooter,
     SnapshotCardShell,
 )
-from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessSummary, ReadinessTruth
+from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessSummary, ReadinessTruth, SafetyLifecycle
 
 
 def _summary(cut, status):
-    return ReadinessSummary(cut=cut, status=status, readiness=ReadinessTruth.READY, blockers=())
+    return ReadinessSummary(
+        cut=cut,
+        status=status,
+        readiness=ReadinessTruth.READY,
+        blockers=(),
+        lifecycle=SafetyLifecycle.READY,
+    )
 
 
 def _card_state(card):

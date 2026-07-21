@@ -296,6 +296,7 @@ class OperatorSnapshotComposer:
             _status(readiness_state, source_age, readiness_reasons, "Backend readiness authority"),
             receipts.safety.readiness,
             blockers,
+            receipts.safety.lifecycle,
         )
 
         plant_items = tuple(

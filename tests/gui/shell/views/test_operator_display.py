@@ -37,6 +37,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -93,11 +94,13 @@ def _snapshot(
     }.get(kind)
 
     readiness_truth = ReadinessTruth.READY
+    lifecycle = SafetyLifecycle.READY
     readiness_state = transport_state or OperatorPresentationState.OK
     blockers: tuple[ReadinessBlocker, ...] = ()
     readiness_text = "Все серверные проверки готовы"
     if transport:
         readiness_truth = ReadinessTruth.UNKNOWN
+        lifecycle = SafetyLifecycle.READY
         readiness_text = "Текущая готовность неизвестна"
         blockers = (
             ReadinessBlocker(
@@ -110,6 +113,7 @@ def _snapshot(
         )
     elif kind == "unsafe":
         readiness_truth = ReadinessTruth.BLOCKED
+        lifecycle = SafetyLifecycle.SAFE_OFF
         readiness_state = OperatorPresentationState.WARNING
         readiness_text = "Запуск запрещён серверной проверкой"
         blockers = (
@@ -122,6 +126,7 @@ def _snapshot(
         )
     elif kind == "safety":
         readiness_truth = ReadinessTruth.BLOCKED
+        lifecycle = SafetyLifecycle.FAULT_LATCHED
         readiness_state = OperatorPresentationState.FAULT
         readiness_text = "Safety остаётся fault_latched"
         blockers = (
@@ -134,6 +139,7 @@ def _snapshot(
         )
     elif kind == "storage":
         readiness_truth = ReadinessTruth.BLOCKED
+        lifecycle = SafetyLifecycle.SAFE_OFF
         readiness_state = OperatorPresentationState.FAULT
         readiness_text = "Запуск заблокирован: запись не подтверждена"
         blockers = (
@@ -146,6 +152,7 @@ def _snapshot(
         )
     elif kind == "replay":
         readiness_truth = ReadinessTruth.UNKNOWN
+        lifecycle = SafetyLifecycle.UNKNOWN
         readiness_state = OperatorPresentationState.CAUTION
         readiness_text = "Повтор не подтверждает текущую готовность"
 
@@ -154,6 +161,7 @@ def _snapshot(
         status=_status(readiness_state, readiness_text, transport=transport),
         readiness=readiness_truth,
         blockers=blockers,
+        lifecycle=lifecycle,
     )
 
     plant_state = transport_state or (
@@ -419,6 +427,7 @@ def test_one_snapshot_commits_all_eight_cards_at_one_revision(qapp):
     assert attention is not None and attention.isHidden()
     text = _visible_text(display)
     assert "ГОТОВО — только по текущему серверному разрешению" in text
+    assert "Safety: ГОТОВО" in text
     assert "НЕ ЗАПИСЫВАЕТСЯ" in text
     assert "ЗАПИСЬ ПОДТВЕРЖДЕНА" not in text
 
@@ -771,6 +780,8 @@ def test_pod_composition_subset_is_visible_without_false_authority(qapp, kind, e
     if kind in {"disconnected", "stale", "replay", "storage"}:
         assert "ГОТОВО — только" not in text
         assert "ЗАПИСЬ ПОДТВЕРЖДЕНА" not in text
+    if kind in {"disconnected", "stale"}:
+        assert "Safety: ГОТОВО" in text
 
 
 def test_legacy_route_keys_remain_exact_and_navigation_only(qapp):
