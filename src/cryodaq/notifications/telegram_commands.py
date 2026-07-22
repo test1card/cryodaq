@@ -640,13 +640,20 @@ class TelegramCommandBot:
             logger.warning("Telegram /phase refused: no stable active experiment identity")
             await self._send(chat_id, _COMMAND_FAILED_TEXT)
             return
+        if experiment_id != expected_experiment_id:
+            logger.warning(
+                "Telegram /phase refused: operator experiment identity %r does not match active identity %r",
+                expected_experiment_id,
+                experiment_id,
+            )
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
+            return
         result = await self._dispatch_mutation(
             {
                 "cmd": "experiment_advance_phase",
                 "experiment_id": experiment_id,
                 "phase": phase,
                 "operator": username,
-                "expected_experiment_id": expected_experiment_id,
             }
         )
         if result.get("ok"):

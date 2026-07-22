@@ -406,7 +406,7 @@ async def test_cmd_phase_advances() -> None:
     assert cmd["protocol_major"] == 1
     assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
     assert cmd["capability_token"] == "token-1"
-    assert cmd["expected_experiment_id"] == "exp-current"
+    assert "expected_experiment_id" not in cmd
     assert "✅" in bot._send.call_args[0][1]
 
 
@@ -530,6 +530,22 @@ async def test_phase_refuses_to_discover_or_mutate_without_stable_experiment_id(
     bot = _make_bot(command_handler=handler)
 
     await bot._handle_message(_tg_msg("/phase cooldown exp-claimed"))
+
+    handler.assert_awaited_once_with({"cmd": "experiment_status"})
+    assert bot._mutation_envelope is None
+    assert "Подробности" in bot._send.await_args.args[1]
+
+
+async def test_phase_refuses_mismatched_operator_identity_before_capability_discovery() -> None:
+    handler = AsyncMock(
+        return_value={
+            "ok": True,
+            "active_experiment": {"experiment_id": "exp-new"},
+        }
+    )
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/phase cooldown exp-stale"))
 
     handler.assert_awaited_once_with({"cmd": "experiment_status"})
     assert bot._mutation_envelope is None

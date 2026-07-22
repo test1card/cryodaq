@@ -1471,6 +1471,14 @@ def _run_experiment_command(
                 "error_code": "experiment_id_required",
                 "error": "experiment_id must identify the experiment that owns this phase command",
             }
+        if "expected_experiment_id" in cmd and cmd.get("expected_experiment_id") != expected_experiment_id:
+            return {
+                "ok": False,
+                "error_code": "experiment_identity_conflict",
+                "error": "expected_experiment_id must exactly match experiment_id",
+                "retry_safe": False,
+                "experiment_id": expected_experiment_id,
+            }
         phase = str(cmd.get("phase", "")).strip()
         operator = str(cmd.get("operator", "")).strip()
         try:
