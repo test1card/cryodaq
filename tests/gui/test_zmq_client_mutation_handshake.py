@@ -162,6 +162,28 @@ def test_late_reply_is_queryable_by_request_id_exactly_once(monkeypatch) -> None
         _close_owned_queues(bridge)
 
 
+def test_first_late_terminal_reply_wins_over_contradictory_duplicate(monkeypatch) -> None:
+    bridge = _bridge(monkeypatch)
+    request_id = "duplicate-late"
+    generation = bridge._generation
+    bridge._outcome_unknown[request_id] = Future()
+    bridge._request_generation[request_id] = generation
+
+    with bridge._pending_lock:
+        assert bridge._route_reply_locked({"_rid": request_id, "ok": True, "revision": 1})
+        assert bridge._route_reply_locked({"_rid": request_id, "ok": False, "error": "contradiction"})
+
+    assert bridge.reconcile_late_result(
+        request_id,
+        generation=generation,
+    ) == zmq_client.LateCommandResult(
+        request_id,
+        generation,
+        {"ok": True, "revision": 1},
+    )
+    _close_owned_queues(bridge)
+
+
 def test_nonce_collision_with_outcome_unknown_never_overwrites_owner(monkeypatch) -> None:
     bridge = _bridge(monkeypatch)
     original = Future()

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import queue
+import subprocess
+import sys
 import threading
 from concurrent.futures import Future
+from pathlib import Path
 
 import pytest
 
@@ -107,9 +111,160 @@ def test_shutdown_drains_reply_emitted_during_terminal_child_join() -> None:
     assert result.reply == {"ok": True, "settled": "terminal"}
 
 
-def test_application_close_settles_all_real_qthreads(
+def test_restart_routes_reply_arriving_during_retired_queue_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    bridge = ZmqBridge()
+    retired_reply_queue: queue.Queue = queue.Queue()
+    bridge._reply_queue = retired_reply_queue
+    request_id = "between-drains"
+    generation = bridge._generation
+    owner: Future = Future()
+    bridge._pending[request_id] = owner
+    bridge._request_generation[request_id] = generation
+
+    class TriggerQueue:
+        def __init__(self) -> None:
+            self.triggered = False
+
+        def get_nowait(self):
+            if not self.triggered:
+                self.triggered = True
+                retired_reply_queue.put({"_rid": request_id, "ok": True, "settled": "during-retirement"})
+            raise queue.Empty
+
+        def cancel_join_thread(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class FakeProcess:
+        pid = 123
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+    class FakeThread:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            del timeout
+            self._alive = False
+
+    bridge._data_queue = TriggerQueue()
+    monkeypatch.setattr(zmq_client.mp, "Process", FakeProcess)
+    monkeypatch.setattr(zmq_client.threading, "Thread", FakeThread)
+
+    try:
+        bridge.start()
+        replacement = owner.result(timeout=1.0)
+        assert replacement["request_id"] == request_id
+        assert replacement["generation"] == generation
+        assert replacement["outcome_unknown"] is True
+        result = bridge.reconcile_late_result(request_id, generation=generation)
+        assert result is not None
+        assert result.reply == {"ok": True, "settled": "during-retirement"}
+    finally:
+        if bridge._reply_consumer is not None:
+            bridge._reply_consumer.join()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_shutdown_fails_closed_when_reply_consumer_does_not_settle() -> None:
+    bridge = ZmqBridge()
+    bridge._last_snapshot_time = 123.0
+
+    class BlockingConsumer:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout=None) -> None:
+            del timeout
+
+    bridge._reply_consumer = BlockingConsumer()
+
+    with pytest.raises(RuntimeError, match="reply consumer.*settle"):
+        bridge.shutdown()
+
+    assert bridge._last_snapshot_time == 0.0
+    assert bridge.bridge_instance_id is None
+    bridge._reply_consumer = None
+    for owned_queue in (
+        bridge._data_queue,
+        bridge._cmd_queue,
+        bridge._reply_queue,
+        bridge._snapshot_queue,
+    ):
+        with contextlib.suppress(Exception):
+            owned_queue.cancel_join_thread()
+        with contextlib.suppress(Exception):
+            owned_queue.close()
+
+
+def test_application_close_settles_all_real_qthreads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Deferred QObject deletion can abort the interpreter when this scenario
+    # shares a QApplication polluted by hundreds of prior GUI tests.  Run the
+    # real boundary in a fresh process: a Qt abort remains a hard non-zero test
+    # failure, while unrelated suite-owned windows cannot corrupt the result.
+    child_marker = "CRYODAQ_QTHREAD_SHUTDOWN_PROBE"
+    if os.environ.get(child_marker) != "1":
+        env = os.environ.copy()
+        env[child_marker] = "1"
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        repo_root = Path(__file__).resolve().parents[2]
+        env["PYTHONPATH"] = str(repo_root / "src")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                "--basetemp",
+                str(tmp_path / "isolated-shutdown"),
+                f"{Path(__file__).resolve()}::test_application_close_settles_all_real_qthreads",
+                "-q",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"isolated QThread shutdown probe failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        return
+
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThread
     from PySide6.QtWidgets import QApplication
@@ -163,7 +318,7 @@ def test_application_close_settles_all_real_qthreads(
     deferred_owner.deleteLater()
 
     try:
-        app.closeAllWindows()
+        window.close()
         app.processEvents()
         assert not window.isVisible()
         assert entered_ids == {"root", "nested-1", "nested-2"}
@@ -179,9 +334,10 @@ def test_application_close_settles_all_real_qthreads(
         assert callbacks == []
         assert not isValid(deferred_owner)
         assert not isValid(window)
+        assert all(not isValid(worker) for worker in workers)
     finally:
         for worker in workers:
-            if worker.isRunning():
+            if isValid(worker) and worker.isRunning():
                 worker.requestInterruption()
                 worker.wait(2_000)
         if isValid(window):

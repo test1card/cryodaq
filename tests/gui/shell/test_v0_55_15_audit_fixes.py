@@ -81,9 +81,7 @@ def test_multiline_panel_on_reading_skips_other_instrument(qapp) -> None:
     assert not panel._states
     # Rendered: table has zero rows, count label shows "0 каналов".
     assert panel._table.rowCount() == 0
-    assert panel._channel_count_label.text() == "0 каналов", (
-        f"Count label wrong: {panel._channel_count_label.text()!r}"
-    )
+    assert panel._channel_count_label.text() == "0 каналов", f"Count label wrong: {panel._channel_count_label.text()!r}"
 
 
 def test_multiline_panel_on_reading_accepts_own_instrument(qapp) -> None:
@@ -97,9 +95,7 @@ def test_multiline_panel_on_reading_accepts_own_instrument(qapp) -> None:
     val_text = panel._table.item(0, 1).text()
     assert "1.2340" in val_text, f"Value cell text wrong: {val_text!r}"
     # Count label reflects one channel.
-    assert panel._channel_count_label.text() == "1 канал", (
-        f"Count label wrong: {panel._channel_count_label.text()!r}"
-    )
+    assert panel._channel_count_label.text() == "1 канал", f"Count label wrong: {panel._channel_count_label.text()!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +310,4 @@ def test_chat_panel_worker_list_does_not_grow_unbounded(qapp) -> None:
         assert panel._input.isEnabled(), f"cycle {i}: input still disabled"
 
     # deleteLater() called once per completed worker (3 total).
-    assert len(delete_later_calls) == 3, (
-        f"deleteLater() called {len(delete_later_calls)} times, expected 3"
-    )
+    assert len(delete_later_calls) == 3, f"deleteLater() called {len(delete_later_calls)} times, expected 3"

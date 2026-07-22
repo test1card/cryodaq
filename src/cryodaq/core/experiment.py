@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import logging
 import os
@@ -340,6 +341,18 @@ def _report_error_display(error_code: Any, error_text: Any) -> str:
     return f"Previous report attempt failed ({code or 'report_failed'})."[:512]
 
 
+def _serialized_lifecycle_mutation(method: Any) -> Any:
+    """Hold the shared mutation owner from admission through side effects."""
+
+    @functools.wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._mutation_lock:
+            self._assert_mutation_available()
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class ExperimentManager:
     def __init__(
         self,
@@ -471,6 +484,7 @@ class ExperimentManager:
     def get_app_mode(self) -> AppMode:
         return self.app_mode
 
+    @_serialized_lifecycle_mutation
     def set_app_mode(self, mode: AppMode | str) -> AppMode:
         next_mode = self._normalize_app_mode(mode)
         if next_mode is AppMode.DEBUG and self._active is not None:
@@ -787,6 +801,7 @@ class ExperimentManager:
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
 
+    @_serialized_lifecycle_mutation
     def create_experiment(
         self,
         name: str,
@@ -976,6 +991,7 @@ class ExperimentManager:
         payload["artifact_index"] = artifact_index
         atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
+    @_serialized_lifecycle_mutation
     def update_experiment(
         self,
         experiment_id: str | None = None,
@@ -1018,6 +1034,7 @@ class ExperimentManager:
         self._set_active(updated)
         return updated
 
+    @_serialized_lifecycle_mutation
     def finalize_experiment(
         self,
         experiment_id: str | None = None,
@@ -1519,6 +1536,7 @@ class ExperimentManager:
     # Phase tracking
     # ------------------------------------------------------------------
 
+    @_serialized_lifecycle_mutation
     def advance_phase(
         self,
         phase: str,

@@ -177,25 +177,39 @@ class ReplayExperimentStub:
         """Restore one explicitly-authoritative active replay record, if valid."""
         if not self._data_dir.exists():
             return
+
+        def reject_active(metadata_path: Path, reason: str) -> None:
+            self._reload_error = f"invalid active replay metadata: {reason}"
+            logger.error(
+                "Replay startup unavailable for %s: %s",
+                metadata_path,
+                self._reload_error,
+            )
+
         candidates: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         for metadata_path in self._data_dir.glob("*/metadata.json"):
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 if not isinstance(metadata, dict):
                     continue
-                if metadata.get("schema") != REPLAY_METADATA_SCHEMA:
-                    continue
                 if metadata.get("is_replay") is not True or metadata.get("status") != "active":
                     continue
+                if metadata.get("schema") != REPLAY_METADATA_SCHEMA:
+                    reject_active(metadata_path, "unsupported schema")
+                    return
                 if set(metadata) - (_REPLAY_REQUIRED_FIELDS | {"schema", "phases"}):
-                    continue
+                    reject_active(metadata_path, "unexpected fields")
+                    return
                 if set(metadata) & _REPLAY_REQUIRED_FIELDS != _REPLAY_REQUIRED_FIELDS:
-                    continue
+                    reject_active(metadata_path, "required fields missing")
+                    return
                 experiment_id = metadata.get("experiment_id")
                 if not isinstance(experiment_id, str) or not experiment_id:
-                    continue
+                    reject_active(metadata_path, "invalid experiment identity")
+                    return
                 if metadata_path.parent.name != experiment_id:
-                    continue
+                    reject_active(metadata_path, "directory identity mismatch")
+                    return
                 required_string_fields = (
                     "title",
                     "sample",
@@ -207,16 +221,21 @@ class ReplayExperimentStub:
                     "phase_started_at",
                 )
                 if not all(isinstance(metadata.get(key), str) for key in required_string_fields):
-                    continue
+                    reject_active(metadata_path, "invalid string field")
+                    return
                 if metadata.get("end_time") is not None and not isinstance(metadata.get("end_time"), str):
-                    continue
+                    reject_active(metadata_path, "invalid end time")
+                    return
                 if metadata.get("phase") not in PHASE_ORDER:
-                    continue
+                    reject_active(metadata_path, "invalid phase")
+                    return
                 if not isinstance(metadata.get("custom_fields"), dict):
-                    continue
+                    reject_active(metadata_path, "invalid custom fields")
+                    return
                 phases = metadata.get("phases", [])
                 if not isinstance(phases, list) or not all(isinstance(item, dict) for item in phases):
-                    continue
+                    reject_active(metadata_path, "invalid phase history")
+                    return
                 if not all(
                     isinstance(item.get("phase"), str)
                     and item.get("phase") in PHASE_ORDER
@@ -225,7 +244,8 @@ class ReplayExperimentStub:
                     and isinstance(item.get("operator"), str)
                     for item in phases
                 ):
-                    continue
+                    reject_active(metadata_path, "invalid phase transition")
+                    return
                 candidates.append((copy.deepcopy(metadata), copy.deepcopy(phases)))
             except (OSError, ValueError, TypeError):
                 logger.warning("Ignoring unreadable replay metadata: %s", metadata_path)

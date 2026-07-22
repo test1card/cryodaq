@@ -21,7 +21,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from PySide6.QtCore import QCoreApplication, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
@@ -944,11 +944,12 @@ class MainWindowV2(QMainWindow):
                     if not thread.wait(_WORKER_SETTLE_MS):
                         settlement_failures.append(f"{owner} did not settle")
                         continue
-                # Keep settled workers alive until deferred callbacks have
-                # drained; QObject parenting is not a substitute for join.
-                app = QCoreApplication.instance()
-                if app is not None and thread.parent() is not app:
-                    thread.setParent(app)
+                # Join first, then consolidate QObject ownership under the
+                # closing window.  Reparenting settled workers to the global
+                # application leaked them past window teardown and could race
+                # deferred deletion of their former nested parent.
+                if thread.parent() is not self:
+                    thread.setParent(self)
             except RuntimeError:
                 settlement_failures.append(f"{owner} became invalid during shutdown")
                 continue

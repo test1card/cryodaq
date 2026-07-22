@@ -211,6 +211,16 @@ class ZmqBridge:
         # restart must never leave the previous snapshot looking fresh.
         self._last_snapshot_time = 0.0
         self._bridge_instance_id = None
+        # Snapshot cuts are presentation-only and have no command outcome to
+        # reconcile.  Quarantine them before fallible consumer/process cleanup
+        # so even a failed restart cannot revive the retired generation.
+        old_snapshot_queue = self._snapshot_queue
+        _drain(old_snapshot_queue, task_done=True)
+        with contextlib.suppress(Exception):
+            old_snapshot_queue.cancel_join_thread()
+        with contextlib.suppress(Exception):
+            old_snapshot_queue.close()
+        self._snapshot_queue = mp.JoinableQueue(maxsize=2)
         # A reply consumer owns the old reply queue.  It must settle before
         # any queue is drained, closed, or replaced; otherwise a late reply
         # can be consumed by the replacement generation.
@@ -222,28 +232,28 @@ class ZmqBridge:
             if old_consumer.is_alive():
                 raise RuntimeError("ZMQ reply consumer did not settle before restart")
             self._reply_consumer = None
-        # Route every reply already buffered on the retired queue before it is
-        # closed.  The same locked ownership function is used by the live
-        # consumer, so timeout/cancellation evidence cannot disappear at a
-        # generation boundary.
-        with self._pending_lock:
-            self._drain_replies_locked(self._reply_queue)
-        # A dead or partially started subprocess may still have feeder-
-        # buffered cuts.  A fresh queue on every spawn attempt makes restart
-        # invalidation atomic even when later cleanup or Process.start fails.
-        old_snapshot_queue = self._snapshot_queue
-        _drain(old_snapshot_queue, task_done=True)
-        with contextlib.suppress(Exception):
-            old_snapshot_queue.cancel_join_thread()
-        with contextlib.suppress(Exception):
-            old_snapshot_queue.close()
-        self._snapshot_queue = mp.JoinableQueue(maxsize=2)
+        # A dead child can still own multiprocessing feeder resources.  Join
+        # it before retiring any queue so no producer can race the final drain.
+        old_process = self._process
+        if old_process is not None and hasattr(old_process, "join"):
+            old_process.join(timeout=1.0)
+            if old_process.is_alive():
+                raise RuntimeError("ZMQ subprocess did not settle before restart")
         self._bridge_instance_id = uuid.uuid4().hex
         self._generation += 1
         with self._pending_lock:
             for rid, future in tuple(self._pending.items()):
                 if not future.done():
-                    future.set_result({"ok": False, "error": "bridge generation replaced; outcome unknown"})
+                    future.set_result(
+                        {
+                            "ok": False,
+                            "error": "bridge generation replaced; outcome unknown",
+                            "request_id": rid,
+                            "generation": self._request_generation.get(rid, self._generation - 1),
+                            "dispatched": True,
+                            "outcome_unknown": True,
+                        }
+                    )
                 self._outcome_unknown[rid] = future
             self._pending.clear()
             # Outcome-unknown owners remain addressable until explicit
@@ -257,7 +267,13 @@ class ZmqBridge:
             ("_reply_queue", lambda: mp.Queue(maxsize=1_000)),
         ):
             old_queue = getattr(self, name)
-            _drain(old_queue)
+            if name == "_reply_queue":
+                # This is the single final routed drain.  It runs only after
+                # the retired consumer, child, and feeders have settled.
+                with self._pending_lock:
+                    self._drain_replies_locked(old_queue)
+            else:
+                _drain(old_queue)
             with contextlib.suppress(Exception):
                 old_queue.cancel_join_thread()
             with contextlib.suppress(Exception):
@@ -651,16 +667,30 @@ class ZmqBridge:
 
     def shutdown(self) -> None:
         """Signal subprocess to stop, cancel pending futures, wait for exit."""
+        self._last_snapshot_time = 0.0
+        self._bridge_instance_id = None
         with self._pending_lock:
             for rid, future in tuple(self._pending.items()):
                 if not future.done():
-                    future.set_result({"ok": False, "error": "ZMQ bridge shutting down"})
+                    future.set_result(
+                        {
+                            "ok": False,
+                            "error": "ZMQ bridge shutting down; outcome unknown",
+                            "request_id": rid,
+                            "generation": self._request_generation.get(rid, self._generation),
+                            "dispatched": True,
+                            "outcome_unknown": True,
+                        }
+                    )
                 self._outcome_unknown[rid] = future
             self._pending.clear()
         # Stop reply consumer thread after queued replies are retained.
         self._reply_stop.set()
         if self._reply_consumer is not None and self._reply_consumer.is_alive():
             self._reply_consumer.join(timeout=3.0)
+        if self._reply_consumer is not None and self._reply_consumer.is_alive():
+            raise RuntimeError("ZMQ reply consumer did not settle before shutdown")
+        self._reply_consumer = None
         with self._pending_lock:
             self._drain_replies_locked(self._reply_queue)
 
@@ -686,8 +716,6 @@ class ZmqBridge:
             self._process = None
         else:
             logger.info("ZMQ bridge subprocess stopped")
-        self._last_snapshot_time = 0.0
-        self._bridge_instance_id = None
 
     def reconcile_late_result(self, request_id: str, *, generation: int | None = None) -> LateCommandResult | None:
         """Consume one exact late result after the mutation owner reconciles it."""
@@ -712,6 +740,9 @@ class ZmqBridge:
         generation = self._request_generation.get(rid, self._generation)
         clean_reply = {key: value for key, value in reply.items() if key != "_rid"}
         if unknown_owner is not None:
+            if rid in self._late_results:
+                logger.warning("Ignoring duplicate late ZMQ reply for request %s", rid)
+                return True
             self._late_results[rid] = LateCommandResult(rid, generation, clean_reply)
             if not unknown_owner.done():
                 unknown_owner.set_result(clean_reply)

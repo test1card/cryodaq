@@ -231,6 +231,39 @@ def test_reload_rejects_live_record_and_mismatched_directory_identity(tmp_path: 
     identity_rejected = ReplayExperimentStub(tmp_path)
     assert identity_rejected.active_experiment is None
     assert identity_rejected.current_phase is None
+    assert identity_rejected.availability_error is not None
+    assert "directory identity mismatch" in identity_rejected.availability_error
+    with pytest.raises(RuntimeError, match="directory identity mismatch"):
+        identity_rejected.create_retroactive(
+            title="must remain unavailable",
+            sample="sample",
+            operator="operator",
+            start_time="2026-07-22T00:00:00+00:00",
+        )
+
+
+def test_reload_fails_closed_on_active_replay_with_invalid_schema(tmp_path: Path) -> None:
+    metadata_path = _write_active_metadata(
+        tmp_path,
+        directory_id="replay-a",
+        experiment_id="replay-a",
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["schema"] = REPLAY_METADATA_SCHEMA + 1
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    invalid = ReplayExperimentStub(tmp_path)
+
+    assert invalid.active_experiment is None
+    assert invalid.availability_error is not None
+    assert "unsupported schema" in invalid.availability_error
+    with pytest.raises(RuntimeError, match="unsupported schema"):
+        invalid.create_retroactive(
+            title="must remain unavailable",
+            sample="sample",
+            operator="operator",
+            start_time="2026-07-22T00:00:00+00:00",
+        )
 
 
 def test_reload_fails_closed_on_multiple_active_replay_records(tmp_path: Path) -> None:

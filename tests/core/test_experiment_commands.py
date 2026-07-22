@@ -598,3 +598,57 @@ async def test_delayed_quick_log_cannot_attach_to_replacement_experiment(
 
     assert manager.active_experiment_id == experiment_b
     assert metadata_b.read_bytes() == before
+
+
+def test_lifecycle_admission_is_atomic_with_durable_mutation_reservation(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_id = manager.start_experiment("Atomic admission", "operator")
+    admitted = threading.Event()
+    release = threading.Event()
+    finalized = threading.Event()
+    reserved = threading.Event()
+    failures: list[BaseException] = []
+    original_assert = manager._assert_mutation_available
+
+    def block_after_admission() -> None:
+        original_assert()
+        if threading.current_thread().name == "lifecycle-owner" and not admitted.is_set():
+            admitted.set()
+            assert release.wait(2.0)
+
+    monkeypatch.setattr(manager, "_assert_mutation_available", block_after_admission)
+
+    def finalize() -> None:
+        try:
+            manager.finalize_experiment(experiment_id)
+            finalized.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    def reserve() -> None:
+        try:
+            with manager.experiment_cas(experiment_id):
+                reserved.set()
+        except BaseException as exc:
+            failures.append(exc)
+
+    lifecycle = threading.Thread(target=finalize, name="lifecycle-owner")
+    durable = threading.Thread(target=reserve, name="durable-owner")
+    lifecycle.start()
+    assert admitted.wait(1.0)
+    durable.start()
+    assert not reserved.wait(0.1), "durable mutation entered during lifecycle admission"
+    release.set()
+    lifecycle.join(1.0)
+    durable.join(1.0)
+
+    assert not lifecycle.is_alive()
+    assert not durable.is_alive()
+    assert finalized.is_set()
+    assert not reserved.is_set()
+    assert manager.active_experiment_id is None
+    assert len(failures) == 1
+    assert isinstance(failures[0], RuntimeError)
+    assert "identity mismatch" in str(failures[0]).lower()
