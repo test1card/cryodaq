@@ -346,6 +346,161 @@ async def test_send_cancellation_best_effort_reply_carries_proto() -> None:
     socket_mock.send.assert_awaited_once()
 
 
+async def test_timeout_quarantines_mutations_but_allows_read_and_global_off() -> None:
+    address = _free_tcp_address()
+    release = asyncio.Event()
+    resisted_cancellation = asyncio.Event()
+    calls: list[str] = []
+    commits: list[str] = []
+
+    async def handler(cmd: dict[str, object]) -> dict[str, object]:
+        action = str(cmd["cmd"])
+        calls.append(action)
+        if action == "experiment_start":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                resisted_cancellation.set()
+                await release.wait()
+            commits.append(action)
+        return {"ok": True, "cmd": action}
+
+    server = ZMQCommandServer(address=address, handler=handler, handler_timeout_s=0.02)
+    await server.start()
+    try:
+        timed_out = await _send_command(address, {"cmd": "experiment_start"})
+        _assert_failure_envelope(
+            timed_out,
+            error_code="command_handler_timeout",
+            delivery_state="dispatched",
+            commit_state="unknown",
+            retry_safe=False,
+        )
+        await asyncio.wait_for(resisted_cancellation.wait(), timeout=1.0)
+
+        read_reply = await _send_command(address, {"cmd": "safety_status"})
+        assert read_reply == {"ok": True, "cmd": "safety_status", "proto": PROTOCOL_VERSION}
+
+        quarantined = await _send_command(address, {"cmd": "experiment_stop"})
+        _assert_failure_envelope(
+            quarantined,
+            error_code="command_authority_quarantined",
+            delivery_state="not_dispatched",
+            commit_state="not_committed",
+            retry_safe=False,
+        )
+        channel_off = await _send_command(
+            address,
+            {"cmd": "keithley_emergency_off", "channel": "smua"},
+        )
+        assert channel_off["error_code"] == "command_authority_quarantined"
+
+        global_off = await _send_command(address, {"cmd": "keithley_emergency_off"})
+        assert global_off == {
+            "ok": True,
+            "cmd": "keithley_emergency_off",
+            "proto": PROTOCOL_VERSION,
+        }
+        assert calls == ["experiment_start", "safety_status", "keithley_emergency_off"]
+
+        release.set()
+        for _ in range(100):
+            if not server._has_uncertain_authority_owner():
+                break
+            await asyncio.sleep(0)
+        assert commits == ["experiment_start"]
+
+        admitted = await _send_command(address, {"cmd": "experiment_stop"})
+        assert admitted == {"ok": True, "cmd": "experiment_stop", "proto": PROTOCOL_VERSION}
+    finally:
+        release.set()
+        await server.stop()
+
+
+async def test_stop_waits_for_cancellation_resistant_handler_without_late_commit() -> None:
+    address = _free_tcp_address()
+    release = asyncio.Event()
+    cancellation_count = 0
+    commits: list[str] = []
+
+    async def handler(cmd: dict[str, object]) -> dict[str, object]:
+        nonlocal cancellation_count
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellation_count += 1
+        commits.append(str(cmd["cmd"]))
+        return {"ok": True}
+
+    server = ZMQCommandServer(address=address, handler=handler, handler_timeout_s=0.02)
+    await server.start()
+    timed_out = await _send_command(address, {"cmd": "experiment_start"})
+    assert timed_out["error_code"] == "command_handler_timeout"
+    for _ in range(100):
+        if cancellation_count:
+            break
+        await asyncio.sleep(0)
+    assert cancellation_count == 1
+
+    stop_task = asyncio.create_task(server.stop())
+    for _ in range(100):
+        if cancellation_count >= 2:
+            break
+        await asyncio.sleep(0)
+    assert cancellation_count >= 2
+    assert not stop_task.done()
+    assert server._socket is not None
+    assert server._ctx is not None
+    assert commits == []
+
+    release.set()
+    await asyncio.wait_for(stop_task, timeout=1.0)
+    assert commits == ["experiment_start"]
+    assert server._handler_tasks == set()
+    assert server._uncertain_authority_tasks == set()
+    assert server._socket is None
+    assert server._ctx is None
+    await asyncio.sleep(0.02)
+    assert commits == ["experiment_start"]
+
+
+async def test_cancelled_handler_waiter_retains_uncertain_owner_until_settlement() -> None:
+    release = asyncio.Event()
+    started = asyncio.Event()
+    resisted_cancellation = asyncio.Event()
+    commits: list[str] = []
+
+    async def handler(cmd: dict[str, object]) -> dict[str, object]:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            resisted_cancellation.set()
+            await release.wait()
+        commits.append(str(cmd["cmd"]))
+        return {"ok": True}
+
+    server = ZMQCommandServer(handler=handler, handler_timeout_s=5.0)
+    waiter = asyncio.create_task(server._run_handler({"cmd": "experiment_start"}))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.wait_for(resisted_cancellation.wait(), timeout=1.0)
+
+    rejected = await server._run_handler({"cmd": "experiment_stop"})
+    assert rejected["error_code"] == "command_authority_quarantined"
+    release.set()
+    for _ in range(100):
+        if not server._has_uncertain_authority_owner():
+            break
+        await asyncio.sleep(0)
+    assert commits == ["experiment_start"]
+    assert server._handler_tasks == set()
+    assert server._uncertain_authority_tasks == set()
+
+
 def test_engine_commands_keep_inner_timeouts_wired() -> None:
     """Inner timeout constants must be present and positive; do NOT pin specific
     seconds (F-TimeoutRelax bumped them and this test should not block

@@ -1300,6 +1300,33 @@ class ZMQCommandServer:
                 action,
             )
 
+    def _prune_handler_tasks(self) -> None:
+        """Drop terminal owners after consuming their outcome."""
+
+        for task in tuple(self._handler_tasks):
+            if not task.done():
+                continue
+            self._handler_tasks.discard(task)
+            self._uncertain_authority_tasks.discard(task)
+            if task.cancelled():
+                continue
+            try:
+                task.exception()
+            except asyncio.CancelledError:
+                pass
+
+    def _has_uncertain_authority_owner(self) -> bool:
+        """Return whether a prior non-read handler can still change state."""
+
+        self._prune_handler_tasks()
+        return any(not task.done() for task in self._uncertain_authority_tasks)
+
+    @staticmethod
+    def _is_exact_global_off(cmd: dict[str, Any]) -> bool:
+        """Recognize only the global, argument-free safe-direction envelope."""
+
+        return set(cmd) == {"cmd"} and cmd.get("cmd") == "keithley_emergency_off"
+
     def _detach_handler_task(
         self,
         task: asyncio.Task[Any],
@@ -1317,8 +1344,25 @@ class ZMQCommandServer:
                 action=label,
             )
         )
-        if command_class is CommandClass.READ:
+        task.cancel()
+
+    async def _settle_handler_tasks(self) -> None:
+        """Cancel and terminally settle every detached command owner.
+
+        A cancellation-resistant handler intentionally holds shutdown here.  The
+        REP socket and its context remain owned until no handler can commit late.
+        """
+
+        current = asyncio.current_task()
+        self._prune_handler_tasks()
+        tasks = tuple(task for task in self._handler_tasks if task is not current)
+        if current in self._handler_tasks:
+            raise RuntimeError("ZMQ command handler cannot synchronously stop its own server")
+        for task in tasks:
             task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._prune_handler_tasks()
 
     async def _open_bound_socket(self) -> zmq.asyncio.Socket:
         """Create and bind a fresh REP socket with the full boundary policy."""
@@ -1444,6 +1488,18 @@ class ZMQCommandServer:
 
         raw_action = cmd.get("cmd")
         action = _bounded_action_label(raw_action)
+        command_class = classify_engine_command(raw_action)
+        if self._has_uncertain_authority_owner() and not (
+            command_class is CommandClass.READ or self._is_exact_global_off(cmd)
+        ):
+            return {
+                "ok": False,
+                "error_code": "command_authority_quarantined",
+                "error": "A prior command outcome is still uncertain; mutation is quarantined.",
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": False,
+            }
         timeout = (
             self._handler_timeout_override_s if self._handler_timeout_override_s is not None else _timeout_for(cmd)
         )
@@ -1462,23 +1518,19 @@ class ZMQCommandServer:
         try:
             done, _pending = await asyncio.wait({handler_task}, timeout=timeout)
         except asyncio.CancelledError:
-            handler_task.add_done_callback(
-                lambda settled, label=action: self._observe_handler_task(
-                    settled,
-                    action=label,
-                )
+            self._detach_handler_task(
+                handler_task,
+                action=action,
+                command_class=command_class,
             )
-            handler_task.cancel()
             raise
 
         if not done:
-            handler_task.add_done_callback(
-                lambda settled, label=action: self._observe_handler_task(
-                    settled,
-                    action=label,
-                )
+            self._detach_handler_task(
+                handler_task,
+                action=action,
+                command_class=command_class,
             )
-            handler_task.cancel()
             logger.error(
                 "ZMQ command handler timeout: action=%s",
                 action,
@@ -1672,6 +1724,7 @@ class ZMQCommandServer:
             except asyncio.CancelledError:
                 pass
             self._restart_task = None
+        await self._settle_handler_tasks()
         if self._socket:
             self._socket.close(linger=0)
             self._socket = None
