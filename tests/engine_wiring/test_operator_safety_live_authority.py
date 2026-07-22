@@ -59,7 +59,7 @@ class _Owner:
 
 def test_adapter_maps_exact_detached_snapshot_and_repeats_same_revision() -> None:
     owner = _Owner(_snapshot())
-    authority = LiveSafetyReadinessAuthority(owner)  # type: ignore[arg-type]
+    authority = LiveSafetyReadinessAuthority(owner, monotonic=lambda: 20.0)  # type: ignore[arg-type]
     first = authority.snapshot_for_cut(CUT)
     repeated = authority.snapshot_for_cut(CUT)
     assert first.availability is AuthorityAvailability.AVAILABLE
@@ -93,7 +93,7 @@ def test_adapter_maps_explicit_blockers_without_promoting_plant_facts() -> None:
             ),
         )
     )
-    receipt = LiveSafetyReadinessAuthority(owner).snapshot_for_cut(CUT)  # type: ignore[arg-type]
+    receipt = LiveSafetyReadinessAuthority(owner, monotonic=lambda: 20.0).snapshot_for_cut(CUT)  # type: ignore[arg-type]
     assert receipt.availability is AuthorityAvailability.AVAILABLE
     assert receipt.lifecycle is SafetyLifecycle.SAFE_OFF
     assert tuple(item.code for item in receipt.blockers) == ("critical_input_stale",)
@@ -102,7 +102,7 @@ def test_adapter_maps_explicit_blockers_without_promoting_plant_facts() -> None:
 
 @pytest.mark.parametrize("bad", ({"revision": 9}, object(), None))
 def test_wrong_snapshot_type_fails_typed_unavailable(bad: object) -> None:
-    receipt = LiveSafetyReadinessAuthority(_Owner(bad)).snapshot_for_cut(CUT)  # type: ignore[arg-type]
+    receipt = LiveSafetyReadinessAuthority(_Owner(bad), monotonic=lambda: 20.0).snapshot_for_cut(CUT)  # type: ignore[arg-type]
     assert receipt.availability is AuthorityAvailability.UNAVAILABLE
     assert receipt.revision == 0
     assert receipt.unavailable_reason == "safety_verified_off_cut_unavailable"
@@ -111,7 +111,7 @@ def test_wrong_snapshot_type_fails_typed_unavailable(bad: object) -> None:
 
 def test_revision_regression_fails_unavailable_without_poisoning_last_good_cut() -> None:
     owner = _Owner(_snapshot(revision=5))
-    authority = LiveSafetyReadinessAuthority(owner)  # type: ignore[arg-type]
+    authority = LiveSafetyReadinessAuthority(owner, monotonic=lambda: 21.0)  # type: ignore[arg-type]
     assert authority.snapshot_for_cut(CUT).availability is AuthorityAvailability.AVAILABLE
     owner.snapshot = _snapshot(revision=4)
     assert authority.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
@@ -121,7 +121,7 @@ def test_revision_regression_fails_unavailable_without_poisoning_last_good_cut()
 
 def test_observed_time_regression_fails_unavailable() -> None:
     owner = _Owner(_snapshot(revision=5, observed_monotonic_s=20.0))
-    authority = LiveSafetyReadinessAuthority(owner)  # type: ignore[arg-type]
+    authority = LiveSafetyReadinessAuthority(owner, monotonic=lambda: 20.0)  # type: ignore[arg-type]
     assert authority.snapshot_for_cut(CUT).availability is AuthorityAvailability.AVAILABLE
     owner.snapshot = _snapshot(revision=6, observed_monotonic_s=19.0)
     rejected = authority.snapshot_for_cut(CUT)
@@ -131,7 +131,7 @@ def test_observed_time_regression_fails_unavailable() -> None:
 def test_same_revision_equivocation_in_nested_evidence_fails_unavailable() -> None:
     first = _snapshot()
     owner = _Owner(first)
-    authority = LiveSafetyReadinessAuthority(owner)  # type: ignore[arg-type]
+    authority = LiveSafetyReadinessAuthority(owner, monotonic=lambda: 20.0)  # type: ignore[arg-type]
     assert authority.snapshot_for_cut(CUT).availability is AuthorityAvailability.AVAILABLE
     owner.snapshot = replace(
         first,
@@ -153,8 +153,63 @@ def test_owner_exception_and_contract_corruption_fail_unavailable() -> None:
         def snapshot_operator_safety(self) -> OperatorSafetySnapshot:
             raise ValueError("corrupt owner")
 
-    receipt = LiveSafetyReadinessAuthority(RaisingOwner()).snapshot_for_cut(CUT)
+    receipt = LiveSafetyReadinessAuthority(RaisingOwner(), monotonic=lambda: 20.0).snapshot_for_cut(CUT)
     assert receipt.availability is AuthorityAvailability.UNAVAILABLE
+
+
+def test_cached_ready_expires_to_unknown() -> None:
+    now = [20.0]
+    owner = _Owner(_snapshot())
+    authority = LiveSafetyReadinessAuthority(
+        owner,  # type: ignore[arg-type]
+        freshness_budget_s=3.0,
+        monotonic=lambda: now[0],
+    )
+
+    ready = authority.snapshot_for_cut(CUT)
+    assert ready.availability is AuthorityAvailability.AVAILABLE
+    assert ready.lifecycle is SafetyLifecycle.READY
+    assert ready.readiness is ReadinessTruth.READY
+
+    now[0] = 23.000001
+    expired = authority.snapshot_for_cut(CUT)
+    assert expired.availability is AuthorityAvailability.UNAVAILABLE
+    assert expired.lifecycle is SafetyLifecycle.UNKNOWN
+    assert expired.readiness is ReadinessTruth.UNKNOWN
+    assert expired.verified_off is None
+
+    # Re-dating the accepted revision is equivocation, not recovery.  Only a
+    # genuinely newer owner cut can restore an available READY receipt.
+    owner.snapshot = _snapshot(revision=4, observed_monotonic_s=now[0])
+    assert authority.snapshot_for_cut(CUT).availability is AuthorityAvailability.UNAVAILABLE
+    owner.snapshot = _snapshot(revision=5, observed_monotonic_s=now[0])
+    recovered = authority.snapshot_for_cut(CUT)
+    assert recovered.availability is AuthorityAvailability.AVAILABLE
+    assert recovered.lifecycle is SafetyLifecycle.READY
+
+
+@pytest.mark.parametrize("budget", [0.0, -1.0, float("inf"), float("nan"), 3, True])
+def test_freshness_budget_requires_exact_finite_positive_float(budget: object) -> None:
+    with pytest.raises(ValueError, match="exact finite positive float"):
+        LiveSafetyReadinessAuthority(_Owner(_snapshot()), freshness_budget_s=budget)  # type: ignore[arg-type]
+
+
+def test_invalid_clock_or_future_owner_time_fails_unavailable() -> None:
+    owner = _Owner(_snapshot())
+    with pytest.raises(TypeError, match="monotonic must be callable"):
+        LiveSafetyReadinessAuthority(owner, monotonic=None)  # type: ignore[arg-type]
+
+    for clock in (
+        lambda: float("nan"),
+        lambda: float("inf"),
+        lambda: -1.0,
+        lambda: 19.0,
+        lambda: True,
+        lambda: "20.0",
+    ):
+        receipt = LiveSafetyReadinessAuthority(owner, monotonic=clock).snapshot_for_cut(CUT)  # type: ignore[arg-type]
+        assert receipt.availability is AuthorityAvailability.UNAVAILABLE
+        assert receipt.lifecycle is SafetyLifecycle.UNKNOWN
 
 
 def test_live_safety_adapter_has_no_driver_gui_storage_or_control_imports() -> None:

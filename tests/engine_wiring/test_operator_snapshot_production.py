@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -46,7 +47,7 @@ class _SafetyOwner:
     def __init__(self) -> None:
         self.snapshot: object = OperatorSafetySnapshot(
             1,
-            1.0,
+            time.monotonic(),
             SafetyLifecycle.READY,
             ReadinessTruth.READY,
             True,
@@ -203,6 +204,43 @@ async def test_live_feed_failures_stop_new_publication_without_fallback_cut(
         assert degraded.experiment.recording is RecordingTruth.NOT_RECORDING
         assert degraded.data_integrity.storage is AvailabilityTruth.UNAVAILABLE
         assert degraded.data_integrity.status.state is OperatorPresentationState.WARNING
+    await _stop_writer(writer)
+
+
+async def test_expired_safety_cut_cannot_publish_or_retain_ready_output(tmp_path: Path) -> None:
+    writer = _writer(tmp_path / "data")
+    feed = RecordingLifecycleFeed(writer)
+    safety = _SafetyOwner()
+    publisher, socket = _publisher()
+    service = build_operator_snapshot_publication_service(
+        safety_owner=safety,
+        recording_feed=feed,
+        publisher=publisher,
+        data_root=tmp_path / "state",
+    )
+    await _ready(feed, writer)
+    assert await _attempt(service) is True
+    assert decode_operator_snapshot_frames(socket.messages[-1]).readiness.readiness is ReadinessTruth.READY
+
+    safety.snapshot = OperatorSafetySnapshot(
+        2,
+        0.0,
+        SafetyLifecycle.READY,
+        ReadinessTruth.READY,
+        True,
+        (),
+        (
+            PlantHealthFact(
+                "reviewed_source",
+                "Reviewed source",
+                OperatorPresentationState.OK,
+                "reviewed_source_verified_off",
+            ),
+        ),
+    )
+    assert await _attempt(service) is False
+    assert len(socket.messages) == 1
+    assert service.last_published_revision == 1
     await _stop_writer(writer)
 
 

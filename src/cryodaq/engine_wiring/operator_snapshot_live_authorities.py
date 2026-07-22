@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+import time
 import unicodedata
+from collections.abc import Callable
 from typing import Protocol
 
 from cryodaq.core.experiment import OperatorExperimentSnapshot
@@ -42,6 +45,11 @@ from cryodaq.operator_snapshot import (
 )
 
 _GENERATION_RE = re.compile(r"[0-9a-f]{32}")
+
+# The SafetyManager refreshes its immutable operator cut once per second.  A
+# live receipt may survive at most three missed refresh periods; beyond that
+# the adapter must stop projecting even an otherwise valid READY snapshot.
+SAFETY_SNAPSHOT_FRESHNESS_BUDGET_S = 3.0
 
 
 class _ExperimentOwner(Protocol):
@@ -102,10 +110,29 @@ def _generation_id(value: object) -> str:
 class LiveSafetyReadinessAuthority:
     """Map the SafetyManager's immutable cached proof cut conservatively."""
 
-    __slots__ = ("__owner", "__last_revision", "__last_observed", "__last_token")
+    __slots__ = (
+        "__owner",
+        "__freshness_budget_s",
+        "__monotonic",
+        "__last_revision",
+        "__last_observed",
+        "__last_token",
+    )
 
-    def __init__(self, owner: _SafetyOwner) -> None:
+    def __init__(
+        self,
+        owner: _SafetyOwner,
+        *,
+        freshness_budget_s: float = SAFETY_SNAPSHOT_FRESHNESS_BUDGET_S,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if type(freshness_budget_s) is not float or not math.isfinite(freshness_budget_s) or freshness_budget_s <= 0.0:
+            raise ValueError("freshness_budget_s must be an exact finite positive float")
+        if not callable(monotonic):
+            raise TypeError("monotonic must be callable")
         self.__owner = owner
+        self.__freshness_budget_s = freshness_budget_s
+        self.__monotonic = monotonic
         self.__last_revision = 0
         self.__last_observed = 0.0
         self.__last_token: str | None = None
@@ -115,6 +142,19 @@ class LiveSafetyReadinessAuthority:
             snapshot = self.__owner.snapshot_operator_safety()
             if type(snapshot) is not OperatorSafetySnapshot:
                 raise TypeError("wrong safety snapshot type")
+            sampled_monotonic = self.__monotonic()
+            if type(sampled_monotonic) not in (int, float):
+                raise ValueError("monotonic clock must return an exact finite non-negative number")
+            sampled_monotonic_s = float(sampled_monotonic)
+            age_s = sampled_monotonic_s - snapshot.observed_monotonic_s
+            if (
+                not math.isfinite(sampled_monotonic_s)
+                or sampled_monotonic_s < 0.0
+                or not math.isfinite(age_s)
+                or age_s < 0.0
+                or age_s > self.__freshness_budget_s
+            ):
+                raise ValueError("safety snapshot is expired or is dated in the future")
             blockers = tuple(
                 ReadinessEvidence(
                     item.code,
@@ -407,4 +447,5 @@ __all__ = [
     "LiveIntegrityPersistenceAuthority",
     "LiveRecordingExperimentAuthority",
     "LiveSafetyReadinessAuthority",
+    "SAFETY_SNAPSHOT_FRESHNESS_BUDGET_S",
 ]

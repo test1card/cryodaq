@@ -15,6 +15,7 @@ from cryodaq.engine_wiring.operator_snapshot_authorities import (
 )
 from cryodaq.engine_wiring.operator_snapshot_composer import OperatorSnapshotComposer
 from cryodaq.engine_wiring.operator_snapshot_live_authorities import (
+    SAFETY_SNAPSHOT_FRESHNESS_BUDGET_S,
     LiveIntegrityPersistenceAuthority,
     LiveRecordingExperimentAuthority,
     LiveSafetyReadinessAuthority,
@@ -45,7 +46,10 @@ def build_operator_snapshot_publication_service(
     if not isinstance(data_root, Path):
         raise TypeError("data_root must be pathlib.Path")
     composer = OperatorSnapshotComposer(
-        safety=LiveSafetyReadinessAuthority(safety_owner),
+        safety=LiveSafetyReadinessAuthority(
+            safety_owner,
+            freshness_budget_s=SAFETY_SNAPSHOT_FRESHNESS_BUDGET_S,
+        ),
         attention=UnavailableAlarmAttentionAuthority(),
         experiment=LiveRecordingExperimentAuthority(recording_feed),
         integrity=LiveIntegrityPersistenceAuthority(recording_feed),
