@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -207,6 +208,70 @@ def export_candidate(repo: Path, revision: str, destination: Path) -> CandidateM
     return manifest
 
 
+def _git_blob_id(raw: bytes) -> str:
+    framed = f"blob {len(raw)}\0".encode("ascii") + raw
+    return hashlib.sha1(framed).hexdigest()
+
+
+def _materialized_file_mode(metadata: os.stat_result, expected: str) -> str:
+    if os.name == "nt":
+        # Windows synthesizes execute bits from filename extensions and cannot
+        # faithfully materialize Git's executable bit for ordinary files.
+        return expected
+    return "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+
+
+def _exported_leaf_paths(root: Path) -> set[str]:
+    paths: set[str] = set()
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in tuple(directories):
+            candidate = current_path / name
+            if candidate.is_symlink():
+                paths.add(candidate.relative_to(root).as_posix())
+                directories.remove(name)
+        for name in filenames:
+            paths.add((current_path / name).relative_to(root).as_posix())
+    return paths
+
+
+def validate_exported_candidate(export_root: Path, manifest: CandidateManifest) -> None:
+    """Re-hash every exported leaf and reject additions or missing records."""
+
+    export_root = export_root.resolve(strict=True)
+    expected = {record.path: record for record in manifest.records}
+    actual_paths = _exported_leaf_paths(export_root)
+    expected_paths = set(expected)
+    missing = sorted(expected_paths - actual_paths, key=lambda value: value.encode("utf-8"))
+    unexpected = sorted(actual_paths - expected_paths, key=lambda value: value.encode("utf-8"))
+    if missing or unexpected:
+        raise CandidateEvidenceError(
+            f"exported candidate leaf set changed (missing={missing!r}, unexpected={unexpected!r})"
+        )
+
+    changed: list[str] = []
+    for path in sorted(expected, key=lambda value: value.encode("utf-8")):
+        record = expected[path]
+        target = _safe_destination(export_root, path)
+        metadata = target.lstat()
+        if record.mode == _SYMLINK_MODE:
+            if not stat.S_ISLNK(metadata.st_mode):
+                changed.append(path)
+                continue
+            raw = os.readlink(target).encode("utf-8")
+            mode = _SYMLINK_MODE
+        else:
+            if record.mode == _GITLINK_MODE or not stat.S_ISREG(metadata.st_mode):
+                changed.append(path)
+                continue
+            raw = target.read_bytes()
+            mode = _materialized_file_mode(metadata, record.mode)
+        if mode != record.mode or _git_blob_id(raw) != record.blob:
+            changed.append(path)
+    if changed:
+        raise CandidateEvidenceError(f"exported candidate committed paths changed after execution: {changed!r}")
+
+
 def execute_exported_candidate(
     repo: Path,
     revision: str,
@@ -221,28 +286,50 @@ def execute_exported_candidate(
         raise CandidateEvidenceError("candidate command must be a nonempty string sequence")
     manifest = export_candidate(repo, revision, destination)
     export_root = destination.resolve(strict=True)
+    state_root = export_root.parent / f".{export_root.name}-execution-state"
+    if state_root.exists() and any(state_root.iterdir()):
+        raise CandidateEvidenceError("candidate execution state destination must be absent or empty")
+    state_root.mkdir(parents=True, exist_ok=True)
+    pytest_base = state_root / "pytest"
+    cache_root = state_root / "cache"
+    temp_root = state_root / "tmp"
+    for path in (pytest_base, cache_root, temp_root):
+        path.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ)
     for key in tuple(environment):
         upper = key.upper()
         if upper.startswith(("PYTEST_", "PYTHON", "COVERAGE_", "COV_")) or upper in {"NO_COLOR", "FORCE_COLOR"}:
             environment.pop(key, None)
     environment["PYTHONPATH"] = str(export_root / "src")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONUTF8"] = "1"
+    environment["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
     environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    environment["CRYODAQ_CANDIDATE_PYTEST_BASETEMP"] = str(pytest_base)
+    environment["COVERAGE_FILE"] = str(cache_root / ".coverage")
+    environment["MPLCONFIGDIR"] = str(cache_root / "matplotlib")
+    environment["NUMBA_CACHE_DIR"] = str(cache_root / "numba")
+    environment["XDG_CACHE_HOME"] = str(cache_root / "xdg")
+    environment["TEMP"] = str(temp_root)
+    environment["TMP"] = str(temp_root)
+    environment["TMPDIR"] = str(temp_root)
     environment["CRYODAQ_EXPORTED_CANDIDATE"] = "1"
     environment["CRYODAQ_CANDIDATE_COMMIT"] = manifest.commit
     environment["CRYODAQ_CANDIDATE_TREE"] = manifest.tree
     environment["CRYODAQ_CANDIDATE_MANIFEST_SHA256"] = manifest.sha256
-    completed = subprocess.run(
-        list(command),
-        cwd=export_root,
-        env=environment,
-        capture_output=True,
-        text=False,
-        check=False,
-        timeout=timeout,
-    )
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=export_root,
+            env=environment,
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=timeout,
+        )
+    finally:
+        validate_exported_candidate(export_root, manifest)
     return CandidateExecutionReceipt(
         commit=manifest.commit,
         tree=manifest.tree,

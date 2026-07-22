@@ -1137,7 +1137,7 @@ records:
       - node: tests/replay_engine/test_replay_phases.py::test_handle_command_rejects_invalid_phase_with_exact_identity_without_persisting
         ci_partition: remaining
       - node: tests/notifications/test_telegram.py::test_invalid_phase_with_exact_identity_never_dispatches
-        ci_partition: remaining
+        ci_partition: agents
       - node: tests/replay_engine/test_replay_phases.py::test_replay_phase_status_timestamp_tracks_exact_transition_not_session_start
         ci_partition: remaining
       - node: tests/replay_engine/test_replay_phases.py::test_active_experiment_copy_recursively_detaches_custom_fields
@@ -1590,6 +1590,20 @@ records:
       - node: tests/test_ci_candidate_evidence.py::test_executed_and_uploaded_candidate_manifests_are_identical
         ci_partition: remaining
       - node: tests/test_ci_candidate_evidence.py::test_receipt_binds_commit_tree_workflow_run_attempt_and_artifact_digest
+        ci_partition: remaining
+      - node: tests/governance/test_candidate_evidence_binding.py::test_export_execution_rejects_committed_path_mutation
+        ci_partition: remaining
+      - node: tests/governance/test_candidate_evidence_binding.py::test_export_execution_rejects_unexpected_file_creation
+        ci_partition: remaining
+      - node: tests/governance/test_candidate_evidence_binding.py::test_export_execution_preserves_logical_git_modes_on_windows
+        ci_partition: remaining
+      - node: tests/test_ci_candidate_evidence.py::test_execution_bundle_hashes_exported_workflow_and_lock_not_ambient_dirty_files
+        ci_partition: remaining
+      - node: tests/test_ci_candidate_evidence.py::test_gui_candidate_runner_executes_every_subcommand_and_aggregates_failures
+        ci_partition: remaining
+      - node: tests/test_ci_candidate_evidence.py::test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_registry_guard_partitions_match_candidate_runner_selection
         ci_partition: remaining
     red_evidence: ci_line_review_confirmed_misbinding_pending_hosted_artifact
     green_evidence: pending

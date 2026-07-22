@@ -150,13 +150,17 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
 ) -> None:
     _write(
         candidate_repo / "tests" / "test_environment.py",
-        "import os\n\n"
+        "import os\n"
+        "from pathlib import Path\n\n"
         "def test_environment_is_sanitized() -> None:\n"
-        "    assert 'PYTEST_ADDOPTS' not in os.environ\n"
+        "    assert os.environ['PYTEST_ADDOPTS'] == '-p no:cacheprovider'\n"
         "    assert 'PYTEST_PLUGINS' not in os.environ\n"
         "    assert 'PYTHONHOME' not in os.environ\n"
+        "    assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'\n"
         "    assert os.environ['PYTHONUTF8'] == '1'\n"
-        "    assert os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] == '1'\n",
+        "    assert os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] == '1'\n"
+        "    assert not Path(os.environ['CRYODAQ_CANDIDATE_PYTEST_BASETEMP']).is_relative_to(Path.cwd())\n"
+        "    assert not Path(os.environ['XDG_CACHE_HOME']).is_relative_to(Path.cwd())\n",
     )
     commit = _commit(candidate_repo, "environment guard")
     monkeypatch.setenv("PYTEST_ADDOPTS", "--ignore=tests/test_environment.py")
@@ -179,6 +183,53 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
     )
 
     assert receipt.returncode == 0, receipt.stdout + receipt.stderr
+
+
+def test_export_execution_rejects_committed_path_mutation(candidate_repo: Path, tmp_path: Path) -> None:
+    with pytest.raises(CandidateEvidenceError, match="committed paths changed"):
+        execute_exported_candidate(
+            candidate_repo,
+            "HEAD",
+            command=[
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('src/pkg/main.py').write_text('MUTATED\\n', encoding='utf-8')",
+            ],
+            destination=tmp_path / "export-mutated",
+        )
+
+
+def test_export_execution_rejects_unexpected_file_creation(candidate_repo: Path, tmp_path: Path) -> None:
+    with pytest.raises(CandidateEvidenceError, match="unexpected"):
+        execute_exported_candidate(
+            candidate_repo,
+            "HEAD",
+            command=[
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('unexpected.txt').write_text('not candidate', encoding='utf-8')",
+            ],
+            destination=tmp_path / "export-extra",
+        )
+
+
+def test_export_execution_preserves_logical_git_modes_on_windows(candidate_repo: Path, tmp_path: Path) -> None:
+    _write(candidate_repo / "scripts" / "tool.bat", "@echo off\n")
+    _write(candidate_repo / "scripts" / "tool.sh", "#!/bin/sh\n")
+    _run("git", "add", "-A", cwd=candidate_repo)
+    _run("git", "update-index", "--chmod=+x", "scripts/tool.sh", cwd=candidate_repo)
+    _run("git", "commit", "-m", "mode fixtures", cwd=candidate_repo)
+
+    receipt = execute_exported_candidate(
+        candidate_repo,
+        "HEAD",
+        command=[sys.executable, "-c", "print('unchanged')"],
+        destination=tmp_path / "export-modes",
+    )
+
+    records = {record.path: record.mode for record in receipt.manifest.records}
+    assert records["scripts/tool.bat"] == "100644"
+    assert records["scripts/tool.sh"] == "100755"
 
 
 def test_receipt_hashes_exact_output_bytes_without_unicode_replacement(

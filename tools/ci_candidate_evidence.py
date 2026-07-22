@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -28,8 +29,33 @@ def _canonical(payload: Mapping[str, Any]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _file_digest(path: Path) -> str:
-    return _digest(path.read_bytes())
+def _git_blob_id(raw: bytes) -> str:
+    framed = f"blob {len(raw)}\0".encode("ascii") + raw
+    return hashlib.sha1(framed).hexdigest()
+
+
+def _exported_file_binding(receipt: CandidateExecutionReceipt, path: str) -> dict[str, str]:
+    records = {record.path: record for record in receipt.manifest.records}
+    record = records.get(path)
+    if record is None:
+        raise CiCandidateEvidenceError(f"candidate manifest omits required execution input: {path}")
+    target = receipt.export_root.joinpath(*path.split("/"))
+    try:
+        metadata = target.lstat()
+        raw = target.read_bytes()
+    except OSError as exc:
+        raise CiCandidateEvidenceError(f"exported execution input is missing: {path}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or record.mode not in {"100644", "100755"}:
+        raise CiCandidateEvidenceError(f"exported execution input does not match candidate manifest: {path}")
+    mode = record.mode if os.name == "nt" else ("100755" if metadata.st_mode & stat.S_IXUSR else "100644")
+    if mode != record.mode or _git_blob_id(raw) != record.blob:
+        raise CiCandidateEvidenceError(f"exported execution input does not match candidate manifest: {path}")
+    return {
+        "blob": record.blob,
+        "mode": record.mode,
+        "path": path,
+        "sha256": _digest(raw),
+    }
 
 
 def _manifest_payload(receipt: CandidateExecutionReceipt) -> dict[str, Any]:
@@ -53,18 +79,23 @@ def write_execution_bundle(
     github: Mapping[str, str],
     artifact_name: str,
 ) -> dict[str, Any]:
+    if tuple(workflow_path.parts[-3:]) != (".github", "workflows", "main.yml"):
+        raise CiCandidateEvidenceError("workflow path is not the canonical candidate workflow")
+    if dependency_lock.name != "requirements-lock.txt":
+        raise CiCandidateEvidenceError("dependency lock path is not canonical")
+    if github.get("github_sha") != receipt.commit:
+        raise CiCandidateEvidenceError("GitHub SHA does not match the executed candidate commit")
     output.mkdir(parents=True, exist_ok=False)
     candidate = _manifest_payload(receipt)
     candidate_raw = _canonical(candidate)
+    workflow_binding = _exported_file_binding(receipt, ".github/workflows/main.yml")
+    lock_binding = _exported_file_binding(receipt, "requirements-lock.txt")
     execution = {
         "artifact_name": artifact_name,
         "candidate_manifest_sha256": receipt.manifest.sha256,
         "command": list(receipt.command),
         "commit": receipt.commit,
-        "dependency_lock": {
-            "path": dependency_lock.name,
-            "sha256": _file_digest(dependency_lock),
-        },
+        "dependency_lock": lock_binding,
         "github": dict(github),
         "returncode": receipt.returncode,
         "schema_version": 1,
@@ -72,10 +103,7 @@ def write_execution_bundle(
         "stdout_sha256": receipt.stdout_sha256,
         "suite": suite,
         "tree": receipt.tree,
-        "workflow": {
-            "path": workflow_path.as_posix(),
-            "sha256": _file_digest(workflow_path),
-        },
+        "workflow": workflow_binding,
     }
     files = {
         "candidate-manifest.json": candidate_raw,
@@ -138,6 +166,28 @@ def validate_execution_and_attestation(
         raise CiCandidateEvidenceError("executed and uploaded candidate objects differ")
     if execution.get("candidate_manifest_sha256") != candidate.get("manifest_sha256"):
         raise CiCandidateEvidenceError("executed and uploaded candidate manifests differ")
+    records = candidate.get("records")
+    if not isinstance(records, list):
+        raise CiCandidateEvidenceError("candidate records are missing")
+    record_bindings = {
+        record.get("path"): {"blob": record.get("blob"), "mode": record.get("mode")}
+        for record in records
+        if isinstance(record, Mapping)
+    }
+    for field, path in (
+        ("workflow", ".github/workflows/main.yml"),
+        ("dependency_lock", "requirements-lock.txt"),
+    ):
+        binding = execution.get(field)
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding) != {"blob", "mode", "path", "sha256"}
+            or binding.get("path") != path
+            or not isinstance(binding.get("sha256"), str)
+            or not binding["sha256"].startswith(_SHA256)
+            or {"blob": binding.get("blob"), "mode": binding.get("mode")} != record_bindings.get(path)
+        ):
+            raise CiCandidateEvidenceError("workflow or dependency lock is not bound to the candidate manifest")
     files = bundle.get("files")
     if not isinstance(files, Mapping):
         raise CiCandidateEvidenceError("bundle manifest is missing")
@@ -178,6 +228,7 @@ def _github_environment() -> dict[str, str]:
 
 def _run(args: argparse.Namespace) -> int:
     repo = args.repository.resolve(strict=True)
+    github = _github_environment()
     command = (sys.executable, "-m", "tools.ci_candidate_runner", "--suite", args.suite)
     receipt = execute_exported_candidate(
         repo,
@@ -192,7 +243,7 @@ def _run(args: argparse.Namespace) -> int:
         workflow_path=repo / ".github" / "workflows" / "main.yml",
         dependency_lock=repo / "requirements-lock.txt",
         suite=args.suite,
-        github=_github_environment(),
+        github=github,
         artifact_name=args.artifact_name,
     )
     return receipt.returncode

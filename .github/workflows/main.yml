@@ -39,9 +39,10 @@ jobs:
       # (default is cp1252, which raises UnicodeError on the project's Cyrillic
       # fixtures/content). No-op on Linux/macOS. Matches the repo's UTF-8 canon.
       PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
       CANDIDATE_ARTIFACT: cryodaq-candidate-${{ matrix.os }}-${{ matrix.suite }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -76,6 +77,28 @@ jobs:
           mkdir -m 700 -p .venv/bin
           ln -s -- "$(command -v python)" .venv/bin/python
           python -c "from pathlib import Path; alias = Path('.venv/bin/python').resolve(strict=True); running = Path('/proc/self/exe').resolve(strict=True); assert alias == running, (alias, running)"
+
+      - name: Run active exact-checkout remaining-only guards
+        id: active-remaining
+        if: matrix.suite == 'remaining'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA:?}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          python -m pytest \
+            -p no:cacheprovider \
+            --basetemp "${RUNNER_TEMP:?}/cryodaq-active-remaining-pytest" \
+            tests/docs/test_docs_freshness.py \
+            tests/test_claudemd_index.py \
+            tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six \
+            tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six \
+            --tb=short -v --timeout=120 --timeout-method=thread
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA:?}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
       - name: Lint
         if: matrix.suite == 'remaining'
@@ -170,7 +193,7 @@ jobs:
       - name: Upload exact candidate execution bundle
         id: candidate-upload
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ env.CANDIDATE_ARTIFACT }}
           path: ${{ runner.temp }}/cryodaq-candidate-evidence
@@ -190,7 +213,7 @@ jobs:
       - name: Upload exact candidate artifact attestation
         id: candidate-attestation-upload
         if: always() && steps.candidate-upload.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ env.CANDIDATE_ARTIFACT }}-attestation
           path: ${{ runner.temp }}/cryodaq-candidate-attestation/artifact-attestation.json
@@ -200,6 +223,11 @@ jobs:
       - name: Enforce exact candidate execution and evidence publication
         if: always()
         run: |
+          if test "${{ matrix.suite }}" = remaining; then
+            test "${{ steps.active-remaining.outcome }}" = success
+          else
+            test "${{ steps.active-remaining.outcome }}" = skipped
+          fi
           test "${{ steps.candidate.outcome }}" = success
           test "${{ steps.candidate-upload.outcome }}" = success
           test "${{ steps.candidate-attestation-upload.outcome }}" = success

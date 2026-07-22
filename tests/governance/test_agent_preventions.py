@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tools.ci_candidate_runner import suite_for_node
 from tools.governance_contract import GovernanceContractError, validate_registry
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -182,6 +183,18 @@ def test_false_green_pairs_have_unique_ids_runtime_links_and_exact_default_ci_gu
         assert pair["scope"] == runtime["scope"]
         assert pair["ci_partition"] in payload["default_ci_jobs"]
         assert any(guard["node"] == pair["guard"] for guard in runtime["guards"])
+
+
+def test_registry_guard_partitions_match_candidate_runner_selection() -> None:
+    payload = validate_registry(_registry())
+    assignments = [(pair["guard"], pair["ci_partition"]) for pair in payload["false_green_pairs"]]
+    assignments.extend(
+        (guard["node"], guard["ci_partition"]) for record in payload["records"] for guard in record["guards"]
+    )
+    mismatches = sorted(
+        (node, partition, suite_for_node(node)) for node, partition in assignments if partition != suite_for_node(node)
+    )
+    assert mismatches == [], f"registry guard partitions diverge from candidate runner selection: {mismatches}"
 
 
 def test_test_assertions_cannot_be_swallowed_by_broad_exception_handlers() -> None:
