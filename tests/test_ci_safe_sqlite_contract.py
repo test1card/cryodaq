@@ -5,6 +5,8 @@ from pathlib import Path
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
 
+from cryodaq.storage._sqlite import SQLITE_BACKPORT_SAFE, SQLITE_BROKEN_RANGE
+
 ROOT = Path(__file__).resolve().parents[1]
 PINNED_MINICONDA = "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5"
 
@@ -65,3 +67,16 @@ def test_pip_lock_preserves_platform_specific_runtime_dependencies() -> None:
     assert selected("macholib", "darwin")
     assert not selected("macholib", "win32")
     assert not selected("macholib", "linux")
+
+
+def test_windows_installer_sqlite_policy_matches_runtime_gate() -> None:
+    text = (ROOT / "install.bat").read_text(encoding="ascii")
+    lines = [line for line in text.splitlines() if "sqlite_version_info" in line]
+
+    assert len(lines) == 1
+    lo, hi = SQLITE_BROKEN_RANGE
+    backports = tuple(sorted(SQLITE_BACKPORT_SAFE))
+    expected = f"not ({lo!r} <= v < {hi!r}) or v in {backports!r}"
+    condition = lines[0].split("0 if ", 1)[1].split(" else 1", 1)[0]
+
+    assert condition.replace(" ", "") == expected.replace(" ", "")

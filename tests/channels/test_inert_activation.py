@@ -24,6 +24,7 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         "core/descriptor_transport.py",
         "core/zmq_bridge.py",
         "core/zmq_subprocess.py",
+        "core/safety_pattern_liveness.py",
         # Reviewed F35 observational presentation only; authority remains
         # denied by test_descriptors.py and test_registry.py.
         "gui/shell/main_window_v2.py",

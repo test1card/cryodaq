@@ -22,6 +22,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotMode,
     SupportBundleSummary,
     _OperatorSummary,
@@ -129,6 +130,34 @@ class OperatorSnapshotStore:
         self._invalidated = False
         return snapshot
 
+    def accept_snapshot_batch(self, snapshots: tuple[OperatorSnapshot, ...]) -> OperatorSnapshot:
+        """Validate and commit a drained batch atomically."""
+        if not isinstance(snapshots, tuple) or not snapshots:
+            raise ValueError("snapshot batch must be a non-empty tuple")
+        state = (
+            self._connected,
+            self._invalidated,
+            dict(self._live_observed_high_water),
+            self._raw,
+            self._stale_after_s,
+            self._transport_age_s,
+        )
+        try:
+            for snapshot in snapshots:
+                self.accept_snapshot(snapshot)
+        except Exception:
+            (
+                self._connected,
+                self._invalidated,
+                high_water,
+                self._raw,
+                self._stale_after_s,
+                self._transport_age_s,
+            ) = state
+            self._live_observed_high_water = high_water
+            raise
+        return self._require_snapshot()
+
     def observe_transport(
         self,
         *,
@@ -218,6 +247,7 @@ def _degrade_snapshot(
         }
         if isinstance(summary, ReadinessSummary):
             changes["readiness"] = ReadinessTruth.UNKNOWN
+            changes["lifecycle"] = SafetyLifecycle.UNKNOWN
             changes["blockers"] = tuple(
                 replace(
                     item,
@@ -338,6 +368,7 @@ def _recover_snapshot(raw: OperatorSnapshot, age_s: float) -> OperatorSnapshot:
         }
         if isinstance(summary, ReadinessSummary):
             changes["readiness"] = ReadinessTruth.UNKNOWN
+            changes["lifecycle"] = SafetyLifecycle.UNKNOWN
             changes["blockers"] = tuple(
                 replace(
                     item,

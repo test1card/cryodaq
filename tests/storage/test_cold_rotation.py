@@ -568,6 +568,37 @@ def test_operator_log_preserved_on_rotation(tmp_path: Path) -> None:
     messages = ol_table.column("message").to_pylist()
     assert "note 0" in messages
     assert "note 4" in messages
+    entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
+    assert entry["operator_log_rows"] == 5
+    assert entry["operator_log_size_bytes"] == ol_files[0].stat().st_size
+    assert len(entry["operator_log_checksum_md5"]) == 32
+    assert entry["operator_log_schema"] == "operator_log_v1"
+
+
+def test_corrupt_operator_log_after_index_blocks_hot_source_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    today = datetime(2026, 4, 29, tzinfo=UTC)
+    db_path = data_dir / _old_db_name(40, today)
+    _create_db(db_path, rows=2)
+    _add_operator_log(db_path, rows=1)
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir)
+    real_verify = service._verify_committed_archive
+
+    def corrupt_then_verify(**kwargs) -> None:
+        entry = json.loads((archive_dir / "index.json").read_text(encoding="utf-8"))["files"][0]
+        (archive_dir / entry["operator_log_path"]).write_bytes(b"corrupt after index")
+        real_verify(**kwargs)
+
+    monkeypatch.setattr(service, "_verify_committed_archive", corrupt_then_verify)
+    assert asyncio.run(service.run_once(now=today)) == []
+    assert db_path.exists(), "hot SQLite is the authority when operator-log proof fails"
 
 
 # ---------------------------------------------------------------------------

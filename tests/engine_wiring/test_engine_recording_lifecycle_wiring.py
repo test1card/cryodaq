@@ -295,7 +295,10 @@ def test_production_wiring_uses_direct_persistence_observation_without_publicati
     assert "reviewed_source_uncertain=safety_manager.mark_reviewed_source_uncertain" in source
     assert "reviewed_source_connect_abandon=safety_manager.abandon_reviewed_source_connect" in source
     assert "reviewed_source_disconnect=safety_manager.disconnect_reviewed_source" in source
-    assert source.index("_stop_scheduler_with_recording_feed(") < source.index("await safety_manager.stop()")
+    assert source.index("await stop_safety_manager_with_hold(safety_manager, logger)") < source.index(
+        "_stop_scheduler_with_recording_feed("
+    )
+    assert "await safety_manager.stop()" not in source
 
     bridge_source = "\n".join(
         inspect.getsource(operation)

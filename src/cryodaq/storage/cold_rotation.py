@@ -573,6 +573,8 @@ class ColdRotationService:
         # when the SQLite file is unlinked in Step 5.
         operator_log_rel: str | None = None
         operator_log_rows_count = 0
+        operator_log_checksum: str | None = None
+        operator_log_size_bytes: int | None = None
         try:
             operator_log_rows = self._read_operator_log_rows(read_db)
         except Exception:
@@ -597,11 +599,13 @@ class ColdRotationService:
             owned_outputs.add(operator_log_path)
             try:
                 self._write_operator_log_parquet(operator_log_path, operator_log_rows)
-                actual_ol = pq.read_metadata(str(operator_log_path)).num_rows
-                if actual_ol != operator_log_rows_count:
-                    raise RuntimeError(
-                        f"operator_log row count mismatch: expected {operator_log_rows_count}, got {actual_ol}"
-                    )
+                self._verify_operator_log_sidecar(operator_log_path, operator_log_rows_count)
+                operator_log_size_bytes = operator_log_path.stat().st_size
+                operator_log_checksum = self._md5_hex(operator_log_path)
+                if operator_log_path.stat().st_size != operator_log_size_bytes:
+                    raise RuntimeError("operator_log sidecar changed while checksumming")
+                if self._md5_hex(operator_log_path) != operator_log_checksum:
+                    raise RuntimeError("operator_log sidecar changed after verification")
                 self._assert_source_unchanged(source_conn, expected_source_md5)
             except Exception:
                 logger.exception(
@@ -644,6 +648,8 @@ class ColdRotationService:
                 rotated_at=rotated_at,
                 operator_log_rel=operator_log_rel,
                 operator_log_rows=operator_log_rows_count,
+                operator_log_checksum=operator_log_checksum,
+                operator_log_size_bytes=operator_log_size_bytes,
                 descriptor_rel=descriptor_rel if referenced_hashes else None,
                 descriptor_rows=descriptor_rows_count,
                 descriptor_checksum=descriptor_checksum,
@@ -660,6 +666,10 @@ class ColdRotationService:
                 archive_rel=archive_rel,
                 row_count=expected_rows,
                 checksum=checksum,
+                operator_log_rel=operator_log_rel,
+                operator_log_rows=operator_log_rows_count,
+                operator_log_checksum=operator_log_checksum,
+                operator_log_size_bytes=operator_log_size_bytes,
                 descriptor_rel=descriptor_rel if referenced_hashes else None,
                 descriptor_rows=descriptor_rows_count,
                 descriptor_checksum=descriptor_checksum,
@@ -677,6 +687,10 @@ class ColdRotationService:
                 row_count=expected_rows,
                 size_archive=size_archive,
                 checksum=checksum,
+                operator_log_rel=operator_log_rel,
+                operator_log_rows=operator_log_rows_count,
+                operator_log_checksum=operator_log_checksum,
+                operator_log_size_bytes=operator_log_size_bytes,
                 descriptor_rel=descriptor_rel if referenced_hashes else None,
                 descriptor_rows=descriptor_rows_count,
                 descriptor_checksum=descriptor_checksum,
@@ -742,7 +756,7 @@ class ColdRotationService:
             descriptor_expression = "descriptor_hash" if "descriptor_hash" in columns else "NULL"
             cursor = conn.execute(
                 "SELECT timestamp, instrument_id, channel, value, unit, status, "
-                f"{descriptor_expression} AS descriptor_hash FROM readings ORDER BY timestamp"
+                f"{descriptor_expression} AS descriptor_hash FROM readings ORDER BY timestamp, rowid"
             )
             result = []
             for row in cursor.fetchall():
@@ -888,6 +902,24 @@ class ColdRotationService:
             compression="zstd",
             compression_level=self._zstd_level,
         )
+
+    @staticmethod
+    def _verify_operator_log_sidecar(path: Path, expected_rows: int) -> None:
+        """Reopen the exact operator journal schema and count every decoded row."""
+
+        metadata = pq.read_metadata(str(path))
+        if metadata.schema.to_arrow_schema() != _OPERATOR_LOG_SCHEMA:
+            raise RuntimeError("operator_log sidecar schema mismatch")
+        if metadata.num_rows != expected_rows or expected_rows <= 0:
+            raise RuntimeError("operator_log sidecar row count mismatch")
+        reopened = pq.ParquetFile(str(path))
+        decoded_rows = 0
+        for batch in reopened.iter_batches(batch_size=4096, use_threads=False):
+            if batch.schema != _OPERATOR_LOG_SCHEMA:
+                raise RuntimeError("operator_log sidecar reopen schema mismatch")
+            decoded_rows += batch.num_rows
+        if decoded_rows != expected_rows:
+            raise RuntimeError("operator_log sidecar reopen row count mismatch")
 
     @staticmethod
     def _read_parquet_descriptor_hashes(path: Path) -> set[str]:
@@ -1062,12 +1094,12 @@ class ColdRotationService:
                     )
                     continue
                 descriptor_rel, descriptor_rows, descriptor_checksum, descriptor_size = descriptor_fields
-                expected_rel = archive_rel.removesuffix(".parquet") + ".channel_descriptors.parquet"
+                expected_descriptor_rel = archive_rel.removesuffix(".parquet") + ".channel_descriptors.parquet"
                 descriptor_path = self._archive_dir / str(descriptor_rel)
                 try:
                     if (
                         type(descriptor_rel) is not str
-                        or descriptor_rel != expected_rel
+                        or descriptor_rel != expected_descriptor_rel
                         or type(descriptor_rows) is not int
                         or not 0 < descriptor_rows <= MAX_ARCHIVE_DESCRIPTORS
                         or type(descriptor_checksum) is not str
@@ -1084,6 +1116,47 @@ class ColdRotationService:
                 except Exception as exc:
                     logger.warning(
                         "Stranded hot DB %s descriptor sidecar is missing or corrupt — NOT deleting: %s",
+                        name,
+                        exc,
+                    )
+                    continue
+            operator_fields = (
+                entry.get("operator_log_path"),
+                entry.get("operator_log_rows"),
+                entry.get("operator_log_checksum_md5"),
+                entry.get("operator_log_size_bytes"),
+                entry.get("operator_log_schema"),
+            )
+            has_any_operator_field = any(value is not None for value in operator_fields)
+            if has_any_operator_field:
+                if any(value is None for value in operator_fields):
+                    logger.warning(
+                        "Stranded hot DB %s has an incomplete operator-log index — NOT deleting",
+                        name,
+                    )
+                    continue
+                operator_rel, operator_rows, operator_checksum, operator_size, operator_schema = operator_fields
+                expected_rel = archive_rel.removesuffix(".parquet") + ".operator_log.parquet"
+                operator_path = self._archive_dir / str(operator_rel)
+                try:
+                    if (
+                        type(operator_rel) is not str
+                        or operator_rel != expected_rel
+                        or type(operator_rows) is not int
+                        or operator_rows <= 0
+                        or type(operator_checksum) is not str
+                        or type(operator_size) is not int
+                        or operator_size <= 0
+                        or operator_schema != "operator_log_v1"
+                        or not operator_path.is_file()
+                        or operator_path.stat().st_size != operator_size
+                        or self._md5_hex(operator_path) != operator_checksum
+                    ):
+                        raise RuntimeError("operator_log sidecar index mismatch")
+                    self._verify_operator_log_sidecar(operator_path, operator_rows)
+                except Exception as exc:
+                    logger.warning(
+                        "Stranded hot DB %s operator_log sidecar is missing or corrupt — NOT deleting: %s",
                         name,
                         exc,
                     )
@@ -1206,6 +1279,8 @@ class ColdRotationService:
         source_md5_kind: str | None = None,
         operator_log_rel: str | None = None,
         operator_log_rows: int = 0,
+        operator_log_checksum: str | None = None,
+        operator_log_size_bytes: int | None = None,
         descriptor_rel: str | None = None,
         descriptor_rows: int = 0,
         descriptor_checksum: str | None = None,
@@ -1227,8 +1302,13 @@ class ColdRotationService:
             if source_md5_kind is not None:
                 entry["source_md5_kind"] = source_md5_kind
         if operator_log_rel is not None:
+            if operator_log_checksum is None or operator_log_size_bytes is None:
+                raise RuntimeError("operator_log sidecar index metadata is incomplete")
             entry["operator_log_path"] = operator_log_rel
             entry["operator_log_rows"] = operator_log_rows
+            entry["operator_log_checksum_md5"] = operator_log_checksum
+            entry["operator_log_size_bytes"] = operator_log_size_bytes
+            entry["operator_log_schema"] = "operator_log_v1"
         if descriptor_rel is not None:
             if descriptor_checksum is None or descriptor_size_bytes is None:
                 raise RuntimeError("descriptor sidecar index metadata is incomplete")
@@ -1251,6 +1331,10 @@ class ColdRotationService:
         archive_rel: str,
         row_count: int,
         checksum: str,
+        operator_log_rel: str | None,
+        operator_log_rows: int,
+        operator_log_checksum: str | None,
+        operator_log_size_bytes: int | None,
         descriptor_rel: str | None,
         descriptor_rows: int,
         descriptor_checksum: str | None,
@@ -1269,14 +1353,24 @@ class ColdRotationService:
                 or entry.get("checksum_md5") != checksum
             ):
                 continue
-            if descriptor_rel is None:
-                return not any(key.startswith("channel_descriptors_") for key in entry)
-            return (
-                entry.get("channel_descriptors_path") == descriptor_rel
+            operator_ok = (
+                not any(key.startswith("operator_log_") for key in entry)
+                if operator_log_rel is None
+                else entry.get("operator_log_path") == operator_log_rel
+                and entry.get("operator_log_rows") == operator_log_rows
+                and entry.get("operator_log_checksum_md5") == operator_log_checksum
+                and entry.get("operator_log_size_bytes") == operator_log_size_bytes
+                and entry.get("operator_log_schema") == "operator_log_v1"
+            )
+            descriptor_ok = (
+                not any(key.startswith("channel_descriptors_") for key in entry)
+                if descriptor_rel is None
+                else entry.get("channel_descriptors_path") == descriptor_rel
                 and entry.get("channel_descriptors_rows") == descriptor_rows
                 and entry.get("channel_descriptors_checksum") == descriptor_checksum
                 and entry.get("channel_descriptors_size_bytes") == descriptor_size_bytes
             )
+            return operator_ok and descriptor_ok
         return False
 
     def _verify_committed_archive(
@@ -1287,6 +1381,10 @@ class ColdRotationService:
         row_count: int,
         size_archive: int,
         checksum: str,
+        operator_log_rel: str | None,
+        operator_log_rows: int,
+        operator_log_checksum: str | None,
+        operator_log_size_bytes: int | None,
         descriptor_rel: str | None,
         descriptor_rows: int,
         descriptor_checksum: str | None,
@@ -1312,26 +1410,45 @@ class ColdRotationService:
             or pq.read_metadata(str(archive_path)).num_rows != row_count
         ):
             raise RuntimeError("indexed readings artifact integrity mismatch")
+        if operator_log_rel is None:
+            if any(key.startswith("operator_log_") for key in entry):
+                raise RuntimeError("indexed operator_log metadata is unexpected")
+        else:
+            operator_log_path = self._archive_dir / operator_log_rel
+            if (
+                entry.get("operator_log_path") != operator_log_rel
+                or entry.get("operator_log_rows") != operator_log_rows
+                or entry.get("operator_log_checksum_md5") != operator_log_checksum
+                or entry.get("operator_log_size_bytes") != operator_log_size_bytes
+                or entry.get("operator_log_schema") != "operator_log_v1"
+                or operator_log_checksum is None
+                or operator_log_size_bytes is None
+                or not operator_log_path.is_file()
+                or operator_log_path.stat().st_size != operator_log_size_bytes
+                or self._md5_hex(operator_log_path) != operator_log_checksum
+            ):
+                raise RuntimeError("indexed operator_log artifact integrity mismatch")
+            self._verify_operator_log_sidecar(operator_log_path, operator_log_rows)
         referenced = self._read_parquet_descriptor_hashes(archive_path)
         if descriptor_rel is None:
             if referenced or any(key.startswith("channel_descriptors_") for key in entry):
                 raise RuntimeError("indexed readings require descriptor sidecar authority")
-            return
-        descriptor_path = self._archive_dir / descriptor_rel
-        if (
-            entry.get("channel_descriptors_path") != descriptor_rel
-            or entry.get("channel_descriptors_rows") != descriptor_rows
-            or entry.get("channel_descriptors_checksum") != descriptor_checksum
-            or entry.get("channel_descriptors_size_bytes") != descriptor_size_bytes
-            or descriptor_checksum is None
-            or descriptor_size_bytes is None
-            or not descriptor_path.is_file()
-            or descriptor_path.stat().st_size != descriptor_size_bytes
-            or self._md5_hex(descriptor_path) != descriptor_checksum
-            or pq.read_metadata(str(descriptor_path)).num_rows != descriptor_rows
-        ):
-            raise RuntimeError("indexed descriptor artifact integrity mismatch")
-        self._verify_descriptor_sidecar(descriptor_path, referenced)
+        else:
+            descriptor_path = self._archive_dir / descriptor_rel
+            if (
+                entry.get("channel_descriptors_path") != descriptor_rel
+                or entry.get("channel_descriptors_rows") != descriptor_rows
+                or entry.get("channel_descriptors_checksum") != descriptor_checksum
+                or entry.get("channel_descriptors_size_bytes") != descriptor_size_bytes
+                or descriptor_checksum is None
+                or descriptor_size_bytes is None
+                or not descriptor_path.is_file()
+                or descriptor_path.stat().st_size != descriptor_size_bytes
+                or self._md5_hex(descriptor_path) != descriptor_checksum
+                or pq.read_metadata(str(descriptor_path)).num_rows != descriptor_rows
+            ):
+                raise RuntimeError("indexed descriptor artifact integrity mismatch")
+            self._verify_descriptor_sidecar(descriptor_path, referenced)
 
     # ------------------------------------------------------------------
     # Utilities

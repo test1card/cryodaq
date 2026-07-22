@@ -64,7 +64,7 @@ def test_recent_reading_before_safety_cannot_enable_source() -> None:
         _stop(window)
 
 
-def test_authoritative_live_safety_transition_enables_then_revokes_source() -> None:
+def test_authoritative_off_plus_live_safety_enables_then_safety_revokes_source() -> None:
     _app()
     window = MainWindowV2()
     try:
@@ -72,6 +72,11 @@ def test_authoritative_live_safety_transition_enables_then_revokes_source() -> N
         window._ensure_overlay("source")
         panel = window._keithley_panel
         assert panel is not None
+        assert panel._smua_block._start_btn.isEnabled() is False
+        assert panel._start_both_btn.isEnabled() is False
+
+        window._dispatch_reading(_reading("analytics/keithley_channel_state/smua", state="off"))
+        window._dispatch_reading(_reading("analytics/keithley_channel_state/smub", state="off"))
         assert panel._smua_block._start_btn.isEnabled() is True
         assert panel._start_both_btn.isEnabled() is True
 
@@ -91,14 +96,15 @@ def test_replay_recent_readings_leave_every_mutating_panel_read_only(monkeypatch
         window._top_bar._update_mode_badge("experiment", {"app_mode": "experiment"})
         assert window._top_bar._app_mode == "replay"
         window._dispatch_reading(_reading("analytics/safety_state", state="ready"))
-        for route in ("source", "experiment", "alarms", "log"):
+        for route in ("source", "experiment", "alarms", "log", "multiline"):
             window._on_tool_clicked(route)
 
         source = window._keithley_panel
         experiment = window._experiment_overlay
         log = window._operator_log_panel
+        multiline = window._multiline_panel
         alarm = window._alarm_panel
-        assert source is not None and experiment is not None and log is not None
+        assert source is not None and experiment is not None and log is not None and multiline is not None
 
         assert source._connected and source._safety_ready and source._read_only
         assert source._smua_block._start_btn.isEnabled() is False
@@ -114,6 +120,8 @@ def test_replay_recent_readings_leave_every_mutating_panel_read_only(monkeypatch
         assert log._read_only
         assert log._submit_btn.isEnabled() is False
         assert log._message_edit.isEnabled() is False
+        assert multiline._read_only
+        assert multiline._burst_button.isEnabled() is False
         dashboard = window._overview_panel
         assert dashboard._phase_widget._create_btn.isEnabled() is False
         assert dashboard._phase_widget._back_btn.isEnabled() is False

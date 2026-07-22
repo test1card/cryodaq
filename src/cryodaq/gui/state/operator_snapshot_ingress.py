@@ -103,9 +103,9 @@ class OperatorSnapshotIngressOwner(QObject):
             self._failure_queued.emit(epoch)
             return
         if snapshots:
-            # The subprocess queue is latest-state, not an audit log.  Only
-            # the newest complete cut is qualified and presented.
-            self._snapshot_queued.emit(epoch, snapshots[-1])
+            # Validate every drained member before replacing current state;
+            # a mixed/poisoned batch is rejected as one coherent unit.
+            self._snapshot_queued.emit(epoch, tuple(snapshots))
             self._next_health_poll = now + _HEALTH_POLL_INTERVAL_S
         elif now >= self._next_health_poll:
             self._transport_queued.emit(epoch)
@@ -141,7 +141,32 @@ class OperatorSnapshotIngressOwner(QObject):
     @Slot(int, object)
     def _apply_snapshot_batch(self, epoch: int, candidate: object) -> None:
         """Accept and freshness-qualify one cut before emitting it once."""
-        accepted = self._apply_snapshot(epoch, candidate)
+        if isinstance(candidate, tuple):
+            if not candidate or not all(type(item) is OperatorSnapshot for item in candidate):
+                self._reject_snapshot_batch()
+                return
+            try:
+                if not self._active or epoch != self._epoch:
+                    return
+                first_cut = candidate[0].cut
+                if any(
+                    item.cut.source != first_cut.source or item.cut.mode is not first_cut.mode for item in candidate[1:]
+                ):
+                    raise ValueError("snapshot batch mixes producer identity")
+                if any(
+                    left.cut.revision >= right.cut.revision or left.cut.received_at > right.cut.received_at
+                    for left, right in zip(candidate, candidate[1:], strict=False)
+                ):
+                    raise ValueError("snapshot batch ordering is not strictly coherent")
+                self._store.accept_snapshot_batch(candidate)
+                self._accepted_count = min(_MAX_COUNTER, self._accepted_count + len(candidate))
+                self._last_transport_age = max(summary.transport_age_s for summary in candidate[-1].summaries())
+                accepted = True
+            except Exception:
+                self._reject_snapshot_batch()
+                return
+        else:
+            accepted = self._apply_snapshot(epoch, candidate)
         if accepted and self._active and epoch == self._epoch:
             self._apply_transport(epoch)
 

@@ -274,6 +274,7 @@ class MainWindowV2(QMainWindow):
     def render_operator_snapshot(self, snapshot: object) -> None:
         """Present one ingress-qualified cut through the POD transaction."""
         self._operator_display.render(snapshot)
+        self._overview_panel.set_operator_snapshot(snapshot)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -840,6 +841,14 @@ class MainWindowV2(QMainWindow):
             self._status_timer.stop()
         except RuntimeError:
             pass
+        try:
+            if not self._annunciation_controller.close():
+                logger.error("annunciation controller did not settle before window close")
+                event.ignore()
+                return
+        except RuntimeError:
+            event.ignore()
+            return
         worker = getattr(self, "_create_exp_worker", None)
         if worker is not None:
             try:

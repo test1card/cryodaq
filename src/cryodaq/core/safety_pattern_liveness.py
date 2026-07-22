@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from cryodaq.channels.descriptors import ChannelQuantity, ChannelSafetyClass
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_manager import SafetyConfigError
 
@@ -74,6 +75,194 @@ class _DeadPattern:
     pattern: str
     plane: str
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRawChannelBinding:
+    """One canonical descriptor identity projected onto the raw input plane.
+
+    ``raw_pattern`` is deliberately a full-string regular expression because
+    AdaptiveThrottle uses ``search`` while SafetyManager uses ``match``.  The
+    exact anchors make both consumers select only this one manifest binding.
+    """
+
+    canonical_channel_id: str
+    emitted_channel: str
+    raw_pattern: str
+
+
+def _full_string_raw_pattern(emitted_channel: str) -> str:
+    """Return an exact raw-plane matcher safe for both ``match`` and ``search``."""
+
+    return rf"\A{re.escape(emitted_channel)}\Z"
+
+
+def _binding_for_canonical_channel(
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+    channel_id: str,
+) -> ResolvedRawChannelBinding:
+    """Reverse one manifest identity binding without accepting aliases."""
+
+    candidates = [
+        emitted_channel
+        for (_instrument_id, emitted_channel), bound_id in descriptor_catalog._bindings.items()
+        if bound_id == channel_id
+    ]
+    if len(candidates) != 1:
+        raise SafetyPatternLivenessError(
+            "canonical channel must have exactly one emitted binding for raw-plane safety "
+            f"resolution: {channel_id!r} had {len(candidates)}"
+        )
+    emitted_channel = candidates[0]
+    if channel_id.endswith(".raw") or emitted_channel.endswith("_raw"):
+        raise SafetyPatternLivenessError(
+            f"canonical safety pattern resolved an observational raw companion: {channel_id!r} -> {emitted_channel!r}"
+        )
+    return ResolvedRawChannelBinding(
+        canonical_channel_id=channel_id,
+        emitted_channel=emitted_channel,
+        raw_pattern=_full_string_raw_pattern(emitted_channel),
+    )
+
+
+def resolve_canonical_patterns_to_raw_bindings(
+    *,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+    canonical_patterns: Collection[re.Pattern[str]],
+) -> tuple[ResolvedRawChannelBinding, ...]:
+    """Resolve canonical patterns to exact emitted labels, fail-closed.
+
+    Canonical identifiers are matched with ``fullmatch`` regardless of the
+    eventual raw-plane consumer.  This prevents a policy such as ``Т1`` from
+    selecting ``Т10`` through ``Т19`` or a ``*.raw`` observational companion.
+    Every selected canonical identity must have one manifest binding, and two
+    policy patterns may not silently collide on the same raw label.
+    """
+
+    catalog = descriptor_catalog.storage_catalog_snapshot()
+    canonical_ids = tuple(catalog.by_channel_id)
+    resolved: list[ResolvedRawChannelBinding] = []
+    seen_raw: dict[str, str] = {}
+
+    for pattern in canonical_patterns:
+        if not isinstance(pattern, re.Pattern):
+            raise SafetyPatternLivenessError("canonical safety pattern must be a compiled regular expression")
+        matches = [channel_id for channel_id in canonical_ids if pattern.fullmatch(channel_id)]
+        if not matches:
+            raise SafetyPatternLivenessError(
+                f"canonical safety pattern matches no descriptor identity: {pattern.pattern!r}"
+            )
+        for channel_id in matches:
+            binding = _binding_for_canonical_channel(descriptor_catalog, channel_id)
+            previous = seen_raw.get(binding.emitted_channel)
+            if previous is not None and previous != binding.canonical_channel_id:
+                raise SafetyPatternLivenessError(
+                    f"canonical safety patterns collide on one raw emitted label: {binding.emitted_channel!r}"
+                )
+            if previous is None:
+                seen_raw[binding.emitted_channel] = binding.canonical_channel_id
+                resolved.append(binding)
+    return tuple(resolved)
+
+
+def resolve_adaptive_throttle_patterns(
+    *,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+    patterns: Collection[str],
+) -> tuple[str, ...]:
+    """Project canonical protection refs onto the raw throttle input plane.
+
+    Legacy interlock and alarms-v3 references are written using canonical
+    channel identities.  AdaptiveThrottle sees pre-bind emitted labels, so a
+    canonical regex is first evaluated with ``fullmatch`` against the selected
+    descriptor snapshot and then reverse-mapped to an exact escaped raw label.
+    References that match no canonical identity are retained as raw-plane
+    expressions (for example Keithley power channels).  The disk channel is
+    the sole explicit direct-to-broker bypass.
+    """
+
+    catalog = descriptor_catalog.storage_catalog_snapshot()
+    canonical_ids = tuple(catalog.by_channel_id)
+    projected: set[str] = set()
+    for ref in patterns:
+        if ref in _THROTTLE_BYPASS_PATTERNS:
+            projected.add(ref)
+            continue
+        try:
+            compiled = re.compile(ref)
+        except re.error as exc:
+            raise SafetyPatternLivenessError(f"invalid AdaptiveThrottle pattern: {ref!r}") from exc
+        matches = [channel_id for channel_id in canonical_ids if compiled.fullmatch(channel_id)]
+        if matches:
+            bindings = resolve_canonical_patterns_to_raw_bindings(
+                descriptor_catalog=descriptor_catalog,
+                canonical_patterns=(compiled,),
+            )
+            projected.update(binding.raw_pattern for binding in bindings)
+        else:
+            projected.add(ref)
+    return tuple(sorted(projected))
+
+
+def resolve_safety_critical_temperature_bindings(
+    *,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+    canonical_patterns: Collection[re.Pattern[str]],
+) -> tuple[ResolvedRawChannelBinding, ...]:
+    """Resolve exactly the manifest's safety-critical temperature identities.
+
+    ``safety.yaml`` is canonical policy.  This projection is the only allowed
+    route from that policy to SafetyManager's and AdaptiveThrottle's raw input
+    planes.  It rejects zero/multiple identity matches, raw/observational
+    companions, and a policy set that differs from the selected manifest's
+    complete safety-critical temperature identity set.
+    """
+
+    catalog = descriptor_catalog.storage_catalog_snapshot()
+    expected = {
+        descriptor.channel_id
+        for descriptor in catalog.descriptors
+        if descriptor.quantity is ChannelQuantity.TEMPERATURE
+        and descriptor.safety_class is ChannelSafetyClass.SAFETY_CRITICAL_INPUT
+    }
+    if not expected:
+        raise SafetyPatternLivenessError("descriptor manifest has no safety-critical temperature identities")
+
+    for pattern in canonical_patterns:
+        matches = [channel_id for channel_id in catalog.by_channel_id if pattern.fullmatch(channel_id)]
+        if len(matches) != 1:
+            raise SafetyPatternLivenessError(
+                "each safety-critical canonical pattern must resolve exactly one descriptor identity: "
+                f"{pattern.pattern!r} had {len(matches)} matches"
+            )
+
+    resolved = resolve_canonical_patterns_to_raw_bindings(
+        descriptor_catalog=descriptor_catalog,
+        canonical_patterns=canonical_patterns,
+    )
+    actual = {binding.canonical_channel_id for binding in resolved}
+    if actual != expected:
+        raise SafetyPatternLivenessError(
+            "safety critical canonical identities do not equal the manifest's "
+            f"safety-critical temperature identities: expected={sorted(expected)!r} actual={sorted(actual)!r}"
+        )
+
+    for binding in resolved:
+        descriptor = catalog.by_channel_id[binding.canonical_channel_id]
+        if (
+            descriptor.quantity is not ChannelQuantity.TEMPERATURE
+            or descriptor.safety_class is not ChannelSafetyClass.SAFETY_CRITICAL_INPUT
+        ):
+            raise SafetyPatternLivenessError(
+                "safety critical canonical pattern resolved a non-critical or non-temperature descriptor: "
+                f"{binding.canonical_channel_id!r}"
+            )
+        if binding.canonical_channel_id.endswith(".raw") or binding.emitted_channel.endswith("_raw"):
+            raise SafetyPatternLivenessError(
+                "safety critical canonical pattern resolved an observational raw companion: "
+                f"{binding.canonical_channel_id!r} -> {binding.emitted_channel!r}"
+            )
+    return resolved
 
 
 def _load_interlock_conditions(config_path: Path) -> list[InterlockCondition]:
@@ -146,10 +335,12 @@ def validate_safety_pattern_liveness(
 
       1. ``interlocks.yaml`` — every interlock is safety-class. CANONICAL plane,
          ``.match`` (``InterlockCondition.matches_channel``).
-      2. ``safety.yaml`` ``critical_channels`` — RAW plane, ``.match``.
+      2. ``safety.yaml`` ``critical_channels`` — canonical identities resolved
+         through the selected descriptor snapshot to exact raw bindings.
       3. ``safety.yaml`` ``keithley_channels`` — RAW plane, ``.match`` (source
          heartbeat watchdog, src/cryodaq/core/safety_manager.py:1794).
-      4. The exact runtime ``AdaptiveThrottle`` protected-pattern union:
+      4. The exact runtime ``AdaptiveThrottle`` protected-pattern union after
+         canonical-to-raw descriptor resolution:
          legacy ``interlocks.yaml`` patterns plus ``alarms_v3.yaml`` patterns
          derived from CRITICAL/HIGH alarms and all v3 interlocks. RAW plane,
          ``.search`` (substring).
@@ -184,16 +375,32 @@ def validate_safety_pattern_liveness(
                 )
             )
 
-    # Plane 2: safety.yaml critical_channels (RAW, .match).
-    for pattern in safety_manager._config.critical_channels:
-        if not any(pattern.match(ch) for ch in raw_labels):
-            dead.append(
-                _DeadPattern(
-                    pattern=pattern.pattern,
-                    plane="raw (SafetyManager pre-bind emitted label, .match)",
-                    source="safety.yaml critical_channels",
+    # Plane 2: safety.yaml critical_channels are canonical policy identities.
+    # Resolve them against the selected manifest before any raw-plane check;
+    # passing these regexes directly to a raw consumer would make T1 match T10
+    # and observational companions.
+    try:
+        critical_bindings = resolve_safety_critical_temperature_bindings(
+            descriptor_catalog=descriptor_catalog,
+            canonical_patterns=safety_manager._config.critical_channels,
+        )
+        for binding in critical_bindings:
+            if not any(re.fullmatch(binding.raw_pattern, ch) for ch in raw_labels):
+                dead.append(
+                    _DeadPattern(
+                        pattern=binding.canonical_channel_id,
+                        plane="canonical -> exact raw (SafetyManager pre-bind emitted label)",
+                        source="safety.yaml critical_channels",
+                    )
                 )
+    except SafetyPatternLivenessError as exc:
+        dead.append(
+            _DeadPattern(
+                pattern="<critical_channels>",
+                plane="canonical -> exact raw (SafetyManager pre-bind emitted label)",
+                source=f"safety.yaml critical_channels: {exc}",
             )
+        )
 
     # Plane 3: safety.yaml keithley_channels (RAW, .match). Source heartbeat.
     # ``_keithley_patterns`` holds the YAML-loaded compiled patterns
@@ -209,10 +416,24 @@ def validate_safety_pattern_liveness(
                 )
             )
 
-    # Plane 4: the exact AdaptiveThrottle protected-pattern union (RAW,
-    # .search substring), MINUS the direct-to-DataBroker bypass set
-    # (system/disk_free_gb etc.).
-    for ref in sorted(set(adaptive_throttle_patterns) - _THROTTLE_BYPASS_PATTERNS):
+    # Plane 4: the exact AdaptiveThrottle protected-pattern union after
+    # canonical-to-raw resolution, MINUS the direct-to-DataBroker bypass set.
+    try:
+        projected_throttle_patterns = resolve_adaptive_throttle_patterns(
+            descriptor_catalog=descriptor_catalog,
+            patterns=adaptive_throttle_patterns,
+        )
+    except SafetyPatternLivenessError as exc:
+        dead.append(
+            _DeadPattern(
+                pattern="<adaptive_throttle_patterns>",
+                plane="canonical -> exact raw (AdaptiveThrottle pre-bind)",
+                source=f"AdaptiveThrottle protected patterns: {exc}",
+            )
+        )
+        projected_throttle_patterns = ()
+
+    for ref in sorted(set(projected_throttle_patterns) - _THROTTLE_BYPASS_PATTERNS):
         compiled = re.compile(ref)
         if not any(compiled.search(ch) for ch in raw_labels):
             dead.append(

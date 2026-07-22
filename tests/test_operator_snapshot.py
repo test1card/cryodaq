@@ -130,6 +130,7 @@ def _transport_degraded_envelope(reason: str = "transport_disconnected") -> dict
         snapshot[key]["status"]["transport_age_s"] = 8.0
         snapshot[key]["status"]["transport_reason_codes"] = [reason]
     snapshot["readiness"]["readiness"] = "unknown"
+    snapshot["readiness"]["lifecycle"] = "unknown"
     snapshot["experiment"]["recording"] = "unknown"
     snapshot["experiment"]["recording_session_id"] = None
     snapshot["data_integrity"]["storage"] = "unknown"
@@ -609,14 +610,14 @@ def test_loader_rejects_duplicate_keys_at_outer_and_nested_depth() -> None:
         load_operator_snapshot(nested)
 
 
-def test_live_readiness_lifecycle_is_exact_and_transport_loss_retains_last_known_lifecycle() -> None:
+def test_live_readiness_lifecycle_is_exact_and_transport_loss_revokes_lifecycle() -> None:
     snapshot = _snapshot()
     assert snapshot.readiness.lifecycle is SafetyLifecycle.READY
 
     envelope = _transport_degraded_envelope()
     degraded = decode_operator_snapshot(envelope)
     assert degraded.readiness.readiness is ReadinessTruth.UNKNOWN
-    assert degraded.readiness.lifecycle is SafetyLifecycle.READY
+    assert degraded.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
     with pytest.raises(ValueError, match="READY readiness requires READY safety lifecycle"):
         replace(snapshot.readiness, lifecycle=SafetyLifecycle.FAULT_LATCHED)

@@ -11,7 +11,7 @@ from tools import force_phase
 
 def test_cli_accepts_canonical_phase_names():
     for phase in ("preparation", "vacuum", "cooldown", "measurement", "warmup", "teardown"):
-        args = force_phase._parse_args([phase])
+        args = force_phase._parse_args([phase, "--experiment-id", "exp-1"])
         assert args.phase == phase
 
 
@@ -20,6 +20,8 @@ def test_cli_rejects_unknown_phase():
         force_phase._parse_args(["disassembly"])  # not in enum
     with pytest.raises(SystemExit):
         force_phase._parse_args(["bogus_phase"])
+    with pytest.raises(SystemExit):
+        force_phase._parse_args(["cooldown"])
 
 
 def test_main_dispatches_experiment_advance_phase_cmd():
@@ -31,9 +33,9 @@ def test_main_dispatches_experiment_advance_phase_cmd():
         return {"ok": True, "phase": cmd["phase"]}
 
     with patch("tools.force_phase.send_command", side_effect=fake_send):
-        rc = force_phase.main(["cooldown"])
+        rc = force_phase.main(["cooldown", "--experiment-id", "exp-1"])
     assert rc == 0
-    assert captured == [{"cmd": "experiment_advance_phase", "phase": "cooldown"}]
+    assert captured == [{"cmd": "experiment_advance_phase", "experiment_id": "exp-1", "phase": "cooldown"}]
 
 
 def test_main_returns_nonzero_on_engine_reject():
@@ -41,7 +43,7 @@ def test_main_returns_nonzero_on_engine_reject():
         return {"ok": False, "error": "phase not reachable"}
 
     with patch("tools.force_phase.send_command", side_effect=fake_send):
-        rc = force_phase.main(["measurement"])
+        rc = force_phase.main(["measurement", "--experiment-id", "exp-1"])
     assert rc == 2
 
 
@@ -50,7 +52,7 @@ def test_main_returns_nonzero_on_timeout():
         raise TimeoutError("engine silent")
 
     with patch("tools.force_phase.send_command", side_effect=fake_send):
-        rc = force_phase.main(["vacuum"])
+        rc = force_phase.main(["vacuum", "--experiment-id", "exp-1"])
     assert rc == 1
 
 
@@ -59,5 +61,5 @@ def test_main_returns_nonzero_on_unexpected_reply_shape():
         return "not a dict"  # engine should never return this, but be defensive
 
     with patch("tools.force_phase.send_command", side_effect=fake_send):
-        rc = force_phase.main(["warmup"])
+        rc = force_phase.main(["warmup", "--experiment-id", "exp-1"])
     assert rc == 2

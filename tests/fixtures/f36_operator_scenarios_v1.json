@@ -410,7 +410,7 @@
       "coverage": "unsafe_preconditions",
       "title": "Run blocked by unsafe preconditions",
       "initial_truth": {
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "authority_class": "safety_manager_authority",
         "authority": "SafetyManager readiness and preflight checks",
         "condition": "verified-OFF is confirmed, but the named non-output readiness blocker keithley_not_connected is active",
@@ -428,7 +428,7 @@
         "truth": "Verified-OFF is confirmed, but run permission is denied by a distinct non-output readiness check.",
         "reason": "SafetyManager reports Keithley not connected; the authoritative keithley_not_connected blocker prevents readiness independently of verified-OFF.",
         "action": "Open instrument-connectivity evidence; keep the unavailable control hidden until the backend clears the blocker.",
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "signal_channels": ["color", "text", "shape_position"]
       },
       "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
@@ -511,7 +511,7 @@
       "coverage": "alarm_acknowledgement",
       "title": "Acknowledge an active alarm without clearing truth",
       "initial_truth": {
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "authority_class": "alarm_authority",
         "authority": "canonical alarm state and acknowledgement audit",
         "condition": "an active unacknowledged alarm is present while its triggering condition remains",
@@ -529,7 +529,7 @@
         "truth": "Acknowledgement records operator awareness; it does not clear the alarm condition or recover safety state.",
         "reason": "The alarm source remains active after the acknowledgement audit transition.",
         "action": "Open the alarm cause or runbook after acknowledgement; use Safety Recovery separately if applicable.",
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "signal_channels": ["color", "text", "shape_position"]
       },
       "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
@@ -713,7 +713,7 @@
       "coverage": "cooldown_deviation",
       "title": "Cooldown trajectory deviates from evidence",
       "initial_truth": {
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "authority_class": "cooldown_projection_authority",
         "authority": "cooldown trajectory, source freshness, baseline and alarm state",
         "condition": "fresh measured cooldown diverges from baseline and an attention item is active",
@@ -731,7 +731,7 @@
         "truth": "Cooldown is active and durably recording, but the measured trajectory is outside the accepted baseline evidence.",
         "reason": "A named deviation verdict and contributing source values exceed the reviewed tolerance.",
         "action": "Open the cooldown mission evidence and related alarm; do not infer or initiate a corrective command.",
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "signal_channels": ["color", "text", "shape_position"]
       },
       "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
@@ -915,7 +915,7 @@
       "coverage": "passive_infrastructure_degradation",
       "title": "Passive support node is degraded",
       "initial_truth": {
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "authority_class": "passive_health_authority",
         "authority": "allowlisted passive infrastructure health snapshot",
         "condition": "a compressor, pump, cryocooler or support node reports degraded health without control authority",
@@ -933,7 +933,7 @@
         "truth": "A named passive infrastructure component is degraded; telemetry provides read-only evidence and no device-control authority.",
         "reason": "The component reports a reviewed health reason and affected capability with fresh provenance.",
         "action": "Open component diagnostics or its runbook and coordinate the documented external response.",
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "signal_channels": ["color", "text", "shape_position"]
       },
       "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],
@@ -1218,7 +1218,7 @@
       "coverage": "support_bundle_capture",
       "title": "Capture bounded support evidence while degraded",
       "initial_truth": {
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "authority_class": "support_bundle_authority",
         "authority": "support-bundle capability, component health and redaction policy",
         "condition": "a non-safety component is degraded while bounded local evidence remains available",
@@ -1236,7 +1236,7 @@
         "truth": "Support evidence can be captured independently of recovery, with missing and stale sources declared.",
         "reason": "The bundle preview lists bounded sources, redactions, integrity results and unavailable evidence.",
         "action": "Confirm capture, preserve the manifest/hash result and share it through the documented support path.",
-        "presentation_state": "warning",
+        "presentation_state": "caution",
         "signal_channels": ["color", "text", "shape_position"]
       },
       "forbidden_outcomes": ["false_safe", "false_ready", "false_recording"],

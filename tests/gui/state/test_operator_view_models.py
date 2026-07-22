@@ -323,8 +323,8 @@ def test_disconnected_transport_is_idempotent_and_does_not_change_cut() -> None:
     second = apply_transport_freshness(first, connected=False, transport_age_s=8, stale_after_s=5)
 
     assert first.readiness.readiness is ReadinessTruth.UNKNOWN
-    assert first.readiness.lifecycle is SafetyLifecycle.READY
-    assert second.readiness.lifecycle is SafetyLifecycle.READY
+    assert first.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+    assert second.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
     assert first.cut == snapshot.cut
     assert second == first

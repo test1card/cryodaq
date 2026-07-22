@@ -435,7 +435,7 @@ def test_session_atom_is_unwired_and_has_no_reading_gui_command_or_control_autho
     root = Path(__file__).resolve().parents[2]
     module_path = root / "src/cryodaq/replay_engine/operator_snapshot_session.py"
     server_path = root / "src/cryodaq/replay_engine/server.py"
-    tree = ast.parse(module_path.read_text())
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
     imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None}
     assert not any(
         module.startswith(
@@ -449,7 +449,7 @@ def test_session_atom_is_unwired_and_has_no_reading_gui_command_or_control_autho
         )
         for module in imports
     )
-    assert "operator_snapshot_session" not in server_path.read_text()
+    assert "operator_snapshot_session" not in server_path.read_text(encoding="utf-8")
     calls = {
         node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }

@@ -322,7 +322,7 @@ async def test_valid_json_non_dict_payload_returns_error_reply() -> None:
 
 def test_protocol_version_constant_is_a_positive_int() -> None:
     assert isinstance(PROTOCOL_VERSION, int)
-    assert PROTOCOL_VERSION >= 1
+    assert PROTOCOL_VERSION == 2
 
 
 @pytest.mark.asyncio
@@ -365,7 +365,7 @@ def test_client_and_server_protocol_versions_match() -> None:
     """The GUI mirrors the constant to preserve its no-pyzmq import boundary."""
     from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 
-    assert CLIENT_PROTOCOL_VERSION == PROTOCOL_VERSION
+    assert CLIENT_PROTOCOL_VERSION == PROTOCOL_VERSION == 2
 
 
 def test_encode_reply_adds_protocol_version() -> None:

@@ -21,6 +21,32 @@ class PhysicalAlarmsConfigError(RuntimeError):
     """Production physical-alarm configuration is absent or unsafe to use."""
 
 
+def validate_physical_alarm_references(
+    *,
+    cooldown: dict[str, Any],
+    vacuum: dict[str, Any],
+    landmarks: dict[str, dict[str, Any]],
+    descriptor_catalog: Any,
+) -> None:
+    """Require every configured physical reference in the selected manifest."""
+
+    snapshot = descriptor_catalog.storage_catalog_snapshot()
+    channel_ids = set(snapshot.by_channel_id)
+    required = {
+        "cooldown.cold_channel": cooldown.get("cold_channel"),
+        "cooldown.warm_channel": cooldown.get("warm_channel"),
+        "vacuum.reference_temp_channel": vacuum.get("reference_temp_channel"),
+        "vacuum.pressure_channel": vacuum.get("pressure_channel"),
+    }
+    missing = sorted(name for name, channel_id in required.items() if channel_id not in channel_ids)
+    if missing:
+        raise PhysicalAlarmsConfigError(
+            "physical alarm references are absent from the selected descriptor snapshot: " + ", ".join(missing)
+        )
+    if set(landmarks) != {"Т11", "Т12"} or not set(landmarks).issubset(channel_ids):
+        raise PhysicalAlarmsConfigError("physical alarm landmarks must bind exactly canonical Т11 and Т12 descriptors")
+
+
 # ---------------------------------------------------------------------------
 # Hard-coded defaults (all tunables)
 # ---------------------------------------------------------------------------

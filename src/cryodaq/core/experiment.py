@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import csv
+import functools
+import hashlib
 import json
 import logging
+import math
 import os
 import shutil
+import tempfile
+import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
@@ -25,7 +31,7 @@ from cryodaq.report_state import (
     resolve_report_paths,
 )
 from cryodaq.storage._sqlite import sqlite3
-from cryodaq.storage.sentinel import decode
+from cryodaq.storage.archive_reader import ArchiveReader
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,32 @@ CREATE TABLE IF NOT EXISTS experiments (
 );
 """
 
+SCHEMA_SINGLE_RUNNING_EXPERIMENT = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_experiments_single_running
+ON experiments(status) WHERE status = 'RUNNING';
+"""
+
+_LIFECYCLE_LOCKS_GUARD = threading.Lock()
+_LIFECYCLE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _lifecycle_lock_for(data_dir: Path) -> threading.RLock:
+    key = os.path.normcase(str(data_dir.resolve()))
+    with _LIFECYCLE_LOCKS_GUARD:
+        return _LIFECYCLE_LOCKS.setdefault(key, threading.RLock())
+
+
+def _serialized_lifecycle(method):
+    """Serialize every mutation for one experiment data root."""
+
+    @functools.wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._lifecycle_lock:
+            self._recover_transition()
+            return method(self, *args, **kwargs)
+
+    return guarded
+
 
 class ExperimentStatus(Enum):
     RUNNING = "RUNNING"
@@ -67,6 +99,10 @@ class ExperimentPhase(StrEnum):
     MEASUREMENT = "measurement"
     WARMUP = "warmup"
     TEARDOWN = "teardown"
+
+
+class ExperimentIdentityMismatchError(RuntimeError):
+    """A command was submitted for a different experiment generation."""
 
 
 class AppMode(Enum):
@@ -250,6 +286,14 @@ class OperatorExperimentSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ExperimentReadingsSnapshot:
+    rows: tuple[dict[str, Any], ...]
+    complete: bool
+    truncated: bool
+    issues: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RunRecord:
     record_id: str
     source_run_id: str
@@ -282,20 +326,26 @@ class RunRecord:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> RunRecord:
+        record_id = _clean_text(payload.get("record_id"))
+        source_run_id = _clean_text(payload.get("source_run_id"))
+        started_at = _parse_time(payload.get("started_at"))
+        finished_at = _parse_time(payload.get("finished_at"))
+        if not record_id or not source_run_id or started_at is None:
+            raise ValueError("Run record identity and started_at must be explicit.")
+        if finished_at is not None and finished_at < started_at:
+            raise ValueError("Run record finished_at cannot precede started_at.")
         return cls(
-            record_id=_clean_text(payload.get("record_id")) or uuid.uuid4().hex[:12],
-            source_run_id=_clean_text(payload.get("source_run_id")),
+            record_id=record_id,
+            source_run_id=source_run_id,
             source_tab=_clean_text(payload.get("source_tab")),
             source_module=_clean_text(payload.get("source_module")),
             run_type=_clean_text(payload.get("run_type")),
             status=_clean_text(payload.get("status")) or "UNKNOWN",
-            started_at=_parse_time(payload.get("started_at")) or datetime.now(UTC),
-            finished_at=_parse_time(payload.get("finished_at")),
+            started_at=started_at,
+            finished_at=finished_at,
             parameters=dict(payload.get("parameters") or {}),
             result_summary=dict(payload.get("result_summary") or {}),
-            artifact_paths=tuple(
-                str(item).strip() for item in payload.get("artifact_paths", []) if str(item).strip()
-            ),
+            artifact_paths=tuple(str(item).strip() for item in payload.get("artifact_paths", []) if str(item).strip()),
             experiment_context=dict(payload.get("experiment_context") or {}),
         )
 
@@ -352,12 +402,16 @@ class ExperimentManager:
         self._templates_dir = templates_dir
         self._artifacts_dir = self._data_dir / "experiments"
         self._state_path = self._data_dir / "experiment_state.json"
+        self._transition_path = self._data_dir / "experiment_transition.json"
+        self._lifecycle_lock = _lifecycle_lock_for(self._data_dir)
         self._active: ExperimentInfo | None = None
         self._state = ExperimentState(app_mode=AppMode.EXPERIMENT)
         self._operator_phase: str | None = None
         self._operator_snapshot = OperatorExperimentSnapshot(0, None, None, None)
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
-        self._load_state()
+        with self._lifecycle_lock:
+            self._recover_transition()
+            self._load_state()
         if self._active is not None:
             self._operator_phase = self.get_current_phase()
         self._refresh_operator_snapshot(force=True)
@@ -407,9 +461,7 @@ class ExperimentManager:
             "current_phase": self.get_current_phase(),
             "phase_started_at": phase_started_at,
             "phases": self.get_phase_history(),
-            "run_records": [
-                record.to_payload() for record in self.list_run_records(active_only=True)
-            ],
+            "run_records": [record.to_payload() for record in self.list_run_records(active_only=True)],
             "templates": [template.to_payload() for template in self.get_templates()],
         }
 
@@ -431,12 +483,11 @@ class ExperimentManager:
     def get_app_mode(self) -> AppMode:
         return self.app_mode
 
+    @_serialized_lifecycle
     def set_app_mode(self, mode: AppMode | str) -> AppMode:
         next_mode = self._normalize_app_mode(mode)
         if next_mode is AppMode.DEBUG and self._active is not None:
-            raise RuntimeError(
-                "Нельзя переключиться в режим отладки, пока карточка эксперимента активна."
-            )
+            raise RuntimeError("Нельзя переключиться в режим отладки, пока карточка эксперимента активна.")
         if next_mode == self._state.app_mode:
             return self._state.app_mode
         self._state = ExperimentState(
@@ -468,15 +519,10 @@ class ExperimentManager:
         entries: list[ArchiveEntry] = []
         data_root = self._data_dir.resolve()
         if self._artifacts_dir.is_symlink():
-            logger.warning(
-                "Ignoring symlinked experiments archive root: %s", self._artifacts_dir
-            )
+            logger.warning("Ignoring symlinked experiments archive root: %s", self._artifacts_dir)
             return entries
         resolved_artifacts = self._artifacts_dir.resolve()
-        if (
-            resolved_artifacts != data_root
-            and data_root not in resolved_artifacts.parents
-        ):
+        if resolved_artifacts != data_root and data_root not in resolved_artifacts.parents:
             logger.warning("Ignoring experiments archive root outside data directory")
             return entries
         if not self._artifacts_dir.exists():
@@ -495,19 +541,11 @@ class ExperimentManager:
                 payload = json.loads(metadata_path.read_text(encoding="utf-8"))
                 experiment = payload.get("experiment", {})
                 template = payload.get("template", {})
-                run_records = tuple(
-                    dict(item) for item in payload.get("run_records", []) if isinstance(item, dict)
-                )
+                run_records = tuple(dict(item) for item in payload.get("run_records", []) if isinstance(item, dict))
                 artifact_index = tuple(
-                    dict(item)
-                    for item in payload.get("artifact_index", [])
-                    if isinstance(item, dict)
+                    dict(item) for item in payload.get("artifact_index", []) if isinstance(item, dict)
                 )
-                result_tables = tuple(
-                    dict(item)
-                    for item in payload.get("result_tables", [])
-                    if isinstance(item, dict)
-                )
+                result_tables = tuple(dict(item) for item in payload.get("result_tables", []) if isinstance(item, dict))
                 artifact_dir = metadata_path.parent
                 manifest = None
                 report_paths = None
@@ -519,9 +557,7 @@ class ExperimentManager:
                     report_paths = resolve_report_paths(artifact_dir)
                     manifest = load_current_manifest(artifact_dir)
                 except (OSError, ReportContractError) as exc:
-                    logger.warning(
-                        "Ignoring unsafe report manifest %s: %s", artifact_dir, exc
-                    )
+                    logger.warning("Ignoring unsafe report manifest %s: %s", artifact_dir, exc)
                     if pointer_present:
                         report_authority = "invalid"
                 if pointer_present and manifest is None:
@@ -536,11 +572,7 @@ class ExperimentManager:
                     report = manifest["report"]
                     manifest_docx = artifact_dir / report["docx_path"]
                     docx_path = manifest_docx if manifest_docx.is_file() else None
-                    pdf_path = (
-                        artifact_dir / report["pdf_path"]
-                        if report["pdf_path"] is not None
-                        else None
-                    )
+                    pdf_path = artifact_dir / report["pdf_path"] if report["pdf_path"] is not None else None
                 elif not pointer_present and report_paths is not None:
                     docx_path = None
                     pdf_path = None
@@ -602,17 +634,13 @@ class ExperimentManager:
                     and report_authority != "invalid"
                 )
                 force_context = (
-                    report_force_context(state, manifest)
-                    if report_force_required and state is not None
-                    else None
+                    report_force_context(state, manifest) if report_force_required and state is not None else None
                 )
                 entry = ArchiveEntry(
                     experiment_id=_clean_text(experiment.get("experiment_id")),
                     title=_clean_text(experiment.get("title") or experiment.get("name")),
                     template_id=_clean_text(experiment.get("template_id") or template.get("id")),
-                    template_name=_clean_text(
-                        template.get("name") or experiment.get("template_id")
-                    ),
+                    template_name=_clean_text(template.get("name") or experiment.get("template_id")),
                     operator=_clean_text(experiment.get("operator")),
                     sample=_clean_text(experiment.get("sample")),
                     status=_clean_text(experiment.get("status")),
@@ -620,12 +648,8 @@ class ExperimentManager:
                     end_time=_parse_time(experiment.get("end_time")),
                     artifact_dir=artifact_dir,
                     metadata_path=metadata_path,
-                    docx_path=docx_path
-                    if docx_path is not None and docx_path.exists()
-                    else None,
-                    pdf_path=pdf_path
-                    if pdf_path is not None and pdf_path.exists()
-                    else None,
+                    docx_path=docx_path if docx_path is not None and docx_path.exists() else None,
+                    pdf_path=pdf_path if pdf_path is not None and pdf_path.exists() else None,
                     report_enabled=bool(experiment.get("report_enabled", True)),
                     report_present=(docx_path is not None and docx_path.exists())
                     or (pdf_path is not None and pdf_path.exists()),
@@ -640,9 +664,7 @@ class ExperimentManager:
                         else None
                     ),
                     report_error_text=(
-                        _report_error_display(state["error_code"], state["error_text"])
-                        if state is not None
-                        else ""
+                        _report_error_display(state["error_code"], state["error_text"]) if state is not None else ""
                     ),
                     report_force_required=report_force_required,
                     report_force_context=force_context,
@@ -696,6 +718,7 @@ class ExperimentManager:
                 return entry
         return None
 
+    @_serialized_lifecycle
     def attach_run_record(
         self,
         *,
@@ -717,13 +740,13 @@ class ExperimentManager:
         if active is None:
             return None
         if experiment_id is not None and experiment_id != active.experiment_id:
-            raise ValueError(
-                f"experiment_id '{experiment_id}' does not match active '{active.experiment_id}'."
-            )
+            raise ValueError(f"experiment_id '{experiment_id}' does not match active '{active.experiment_id}'.")
         started_dt = _parse_time(started_at)
         if started_dt is None:
             raise ValueError("started_at is required for run record attachment.")
         finished_dt = _parse_time(finished_at)
+        if finished_dt is not None and finished_dt < started_dt:
+            raise ValueError("finished_at cannot precede started_at.")
         run_key = _clean_text(source_run_id) or uuid.uuid4().hex[:12]
         record = RunRecord(
             record_id=f"{active.experiment_id}:{run_key}",
@@ -736,9 +759,7 @@ class ExperimentManager:
             finished_at=finished_dt,
             parameters=dict(parameters or {}),
             result_summary=dict(result_summary or {}),
-            artifact_paths=tuple(
-                str(item).strip() for item in (artifact_paths or []) if str(item).strip()
-            ),
+            artifact_paths=tuple(str(item).strip() for item in (artifact_paths or []) if str(item).strip()),
             experiment_context={
                 "experiment_id": active.experiment_id,
                 "title": active.title,
@@ -750,9 +771,7 @@ class ExperimentManager:
         )
         payload = self._read_metadata_payload(active.experiment_id)
         existing_records = [
-            RunRecord.from_payload(item)
-            for item in payload.get("run_records", [])
-            if isinstance(item, dict)
+            RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)
         ]
         updated_records: list[RunRecord] = []
         replaced = False
@@ -780,14 +799,11 @@ class ExperimentManager:
         if not experiment_id:
             return []
         payload = self._read_metadata_payload(experiment_id)
-        records = [
-            RunRecord.from_payload(item)
-            for item in payload.get("run_records", [])
-            if isinstance(item, dict)
-        ]
+        records = [RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)]
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
 
+    @_serialized_lifecycle
     def create_experiment(
         self,
         name: str,
@@ -808,6 +824,9 @@ class ExperimentManager:
             raise RuntimeError(
                 f"Experiment '{self._active.name}' ({self._active.experiment_id}) is already active."  # noqa: E501
             )
+        persisted_running = self._persisted_running_experiment_ids()
+        if persisted_running:
+            raise RuntimeError("A persisted RUNNING experiment already exists: " + ", ".join(sorted(persisted_running)))
 
         template = self.get_template(template_id)
         experiment_id = uuid.uuid4().hex[:12]
@@ -820,9 +839,7 @@ class ExperimentManager:
         # can turn off the auto-report for a one-off run without
         # editing the template YAML. None (default) keeps the
         # template's configured value.
-        effective_report_enabled = (
-            template.report_enabled if report_enabled is None else bool(report_enabled)
-        )
+        effective_report_enabled = template.report_enabled if report_enabled is None else bool(report_enabled)
 
         info = ExperimentInfo(
             experiment_id=experiment_id,
@@ -846,9 +863,7 @@ class ExperimentManager:
             retroactive=False,
         )
 
-        self._write_start(info)
-        self._write_artifact(info)
-        self._set_active(info)
+        self._commit_transition("create", info)
         return info
 
     def start_experiment(
@@ -882,6 +897,7 @@ class ExperimentManager:
     def get_active_experiment(self) -> ExperimentInfo | None:
         return self._active
 
+    @_serialized_lifecycle
     def attach_composition_photo(
         self,
         experiment_id: str,
@@ -946,9 +962,7 @@ class ExperimentManager:
             "phase_at_upload": phase_at_upload,
             "channels_mentioned": list(channels_mentioned or []),
         }
-        atomic_write_text(
-            sidecar_path, json.dumps(sidecar_meta, ensure_ascii=False, indent=2)
-        )
+        atomic_write_text(sidecar_path, json.dumps(sidecar_meta, ensure_ascii=False, indent=2))
 
         artifact_entry: dict[str, Any] = {
             "artifact_id": f"composition_photo:operator:{filename}",
@@ -969,9 +983,7 @@ class ExperimentManager:
 
         return {"filename": filename, "path": str(photo_path), "metadata": sidecar_meta}
 
-    def _append_composition_photo_to_metadata(
-        self, experiment_id: str, entry: dict[str, Any]
-    ) -> None:
+    def _append_composition_photo_to_metadata(self, experiment_id: str, entry: dict[str, Any]) -> None:
         """Atomically append a composition_photo entry to artifact_index in metadata.json."""
         metadata_path = self._metadata_path(experiment_id)
         from cryodaq.core.atomic_write import atomic_write_text
@@ -980,10 +992,9 @@ class ExperimentManager:
         artifact_index: list[dict[str, Any]] = list(payload.get("artifact_index", []))
         artifact_index.append(entry)
         payload["artifact_index"] = artifact_index
-        atomic_write_text(
-            metadata_path, json.dumps(payload, ensure_ascii=False, indent=2)
-        )
+        atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
+    @_serialized_lifecycle
     def update_experiment(
         self,
         experiment_id: str | None = None,
@@ -1020,11 +1031,10 @@ class ExperimentManager:
             metadata_path=active.metadata_path,
             retroactive=active.retroactive,
         )
-        self._write_end(updated)
-        self._write_artifact(updated)
-        self._set_active(updated)
+        self._commit_transition("update", updated)
         return updated
 
+    @_serialized_lifecycle
     def finalize_experiment(
         self,
         experiment_id: str | None = None,
@@ -1040,6 +1050,10 @@ class ExperimentManager:
         self._require_experiment_mode()
         active = self._require_active(experiment_id)
 
+        finished_at = _parse_time(end_time) or datetime.now(UTC)
+        if finished_at < active.start_time:
+            raise ValueError("Experiment end_time cannot precede start_time.")
+
         finished = ExperimentInfo(
             experiment_id=active.experiment_id,
             name=active.name,
@@ -1051,7 +1065,7 @@ class ExperimentManager:
             description=description if description is not None else active.description,
             notes=notes if notes is not None else active.notes,
             start_time=active.start_time,
-            end_time=_parse_time(end_time) or datetime.now(UTC),
+            end_time=finished_at,
             status=status,
             config_snapshot=active.config_snapshot,
             custom_fields={
@@ -1067,8 +1081,8 @@ class ExperimentManager:
 
         run_records = self.list_run_records(experiment_id=finished.experiment_id)
         archive_snapshot = self._build_archive_snapshot(finished, run_records)
-        self._write_end(finished)
-        self._write_artifact(
+        self._commit_transition(
+            "finalize",
             finished,
             run_records=archive_snapshot["run_records"],
             artifact_index=archive_snapshot["artifact_index"],
@@ -1094,7 +1108,6 @@ class ExperimentManager:
                 finished.experiment_id,
             )
 
-        self._clear_active()
         return finished
 
     def stop_experiment(
@@ -1179,9 +1192,7 @@ class ExperimentManager:
 
     def _require_experiment_mode(self) -> None:
         if self.app_mode is not AppMode.EXPERIMENT:
-            raise RuntimeError(
-                "Experiment lifecycle commands are only available in experiment mode."
-            )
+            raise RuntimeError("Experiment lifecycle commands are only available in experiment mode.")
 
     def _require_active(self, experiment_id: str | None = None) -> ExperimentInfo:
         if self._active is None:
@@ -1250,9 +1261,7 @@ class ExperimentManager:
         if self._state_path.exists():
             try:
                 payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-                app_mode = self._normalize_app_mode(
-                    payload.get("app_mode", AppMode.EXPERIMENT.value)
-                )
+                app_mode = self._normalize_app_mode(payload.get("app_mode", AppMode.EXPERIMENT.value))
                 active_experiment_id = _clean_text(payload.get("active_experiment_id")) or None
             except Exception as exc:
                 logger.warning("Failed to load experiment state %s: %s", self._state_path, exc)
@@ -1275,37 +1284,165 @@ class ExperimentManager:
 
         atomic_write_text(self._state_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
+    def _commit_transition(
+        self,
+        operation: str,
+        info: ExperimentInfo,
+        *,
+        run_records: list[RunRecord] | None = None,
+        artifact_index: list[dict[str, Any]] | None = None,
+        result_tables: list[dict[str, Any]] | None = None,
+        summary_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Durably journal and apply one idempotent lifecycle transition."""
+
+        if self._transition_path.exists():
+            self._recover_transition()
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "operation": operation,
+            "experiment": info.to_payload(),
+        }
+        if run_records is not None:
+            payload["run_records"] = [
+                item.to_payload() if isinstance(item, RunRecord) else dict(item) for item in run_records
+            ]
+        if artifact_index is not None:
+            payload["artifact_index"] = [dict(item) for item in artifact_index]
+        if result_tables is not None:
+            payload["result_tables"] = [dict(item) for item in result_tables]
+        if summary_metadata is not None:
+            payload["summary_metadata"] = dict(summary_metadata)
+
+        from cryodaq.core.atomic_write import atomic_write_text
+
+        atomic_write_text(
+            self._transition_path,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+        self._apply_transition(payload)
+        self._transition_path.unlink(missing_ok=False)
+
+    def _recover_transition(self) -> None:
+        """Replay an interrupted lifecycle transition before accepting commands."""
+
+        if not self._transition_path.exists():
+            return
+        if self._transition_path.stat().st_size > 16 * 1024 * 1024:
+            raise RuntimeError("Experiment transition journal exceeds its safety bound.")
+        try:
+            payload = json.loads(self._transition_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError("Experiment transition journal is unreadable.") from exc
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            raise RuntimeError("Experiment transition journal has an unsupported schema.")
+        self._apply_transition(payload)
+        self._transition_path.unlink(missing_ok=False)
+
+    def _apply_transition(self, payload: dict[str, Any]) -> None:
+        operation = payload.get("operation")
+        if operation not in {"create", "update", "finalize"}:
+            raise RuntimeError("Experiment transition operation is invalid.")
+        raw_info = payload.get("experiment")
+        if not isinstance(raw_info, dict):
+            raise RuntimeError("Experiment transition has no exact experiment payload.")
+        info = self._experiment_info_from_payload(raw_info)
+
+        raw_records = payload.get("run_records")
+        run_records = None
+        if raw_records is not None:
+            if not isinstance(raw_records, list):
+                raise RuntimeError("Experiment transition run_records are invalid.")
+            run_records = [RunRecord.from_payload(item) for item in raw_records if isinstance(item, dict)]
+            if len(run_records) != len(raw_records):
+                raise RuntimeError("Experiment transition run_records contain invalid entries.")
+
+        def exact_dict_list(key: str) -> list[dict[str, Any]] | None:
+            raw = payload.get(key)
+            if raw is None:
+                return None
+            if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+                raise RuntimeError(f"Experiment transition {key} is invalid.")
+            return [dict(item) for item in raw]
+
+        artifact_index = exact_dict_list("artifact_index")
+        result_tables = exact_dict_list("result_tables")
+        raw_summary = payload.get("summary_metadata")
+        if raw_summary is not None and not isinstance(raw_summary, dict):
+            raise RuntimeError("Experiment transition summary_metadata is invalid.")
+
+        if operation == "create":
+            if info.status is not ExperimentStatus.RUNNING or info.end_time is not None:
+                raise RuntimeError("Create transition must carry exact RUNNING state.")
+            self._write_start(info)
+        else:
+            self._write_end(info)
+        self._write_artifact(
+            info,
+            run_records=run_records,
+            artifact_index=artifact_index,
+            result_tables=result_tables,
+            summary_metadata=dict(raw_summary) if raw_summary is not None else None,
+        )
+        if operation in {"create", "update"}:
+            if info.status is not ExperimentStatus.RUNNING or info.end_time is not None:
+                raise RuntimeError("Active transition must carry exact RUNNING state.")
+            self._set_active(info)
+        else:
+            if info.status is ExperimentStatus.RUNNING or info.end_time is None:
+                raise RuntimeError("Finalize transition must carry exact terminal state.")
+            self._clear_active()
+
+    def _experiment_info_from_payload(self, experiment: dict[str, Any]) -> ExperimentInfo:
+        experiment_id = _clean_text(experiment.get("experiment_id"))
+        name = _clean_text(experiment.get("name"))
+        operator = _clean_text(experiment.get("operator"))
+        start_time = _parse_time(experiment.get("start_time"))
+        end_time = _parse_time(experiment.get("end_time"))
+        status_raw = _clean_text(experiment.get("status"))
+        if not experiment_id or not name or not operator or start_time is None or not status_raw:
+            raise ValueError("Experiment identity, operator, start_time, and status must be explicit.")
+        status = ExperimentStatus(status_raw)
+        if end_time is not None and end_time < start_time:
+            raise ValueError("Experiment end_time cannot precede start_time.")
+        if status is ExperimentStatus.RUNNING and end_time is not None:
+            raise ValueError("RUNNING experiment cannot carry end_time.")
+        if status is not ExperimentStatus.RUNNING and end_time is None:
+            raise ValueError("Terminal experiment must carry end_time.")
+        return ExperimentInfo(
+            experiment_id=experiment_id,
+            name=name,
+            title=_clean_text(experiment.get("title")) or name,
+            template_id=_clean_text(experiment.get("template_id")) or "custom",
+            operator=operator,
+            cryostat=_clean_text(experiment.get("cryostat")),
+            sample=_clean_text(experiment.get("sample")),
+            description=_clean_text(experiment.get("description")),
+            notes=_clean_text(experiment.get("notes")),
+            start_time=start_time,
+            end_time=end_time,
+            status=status,
+            config_snapshot=dict(experiment.get("config_snapshot") or {}),
+            custom_fields=_normalize_custom_fields(experiment.get("custom_fields")),
+            report_enabled=bool(experiment.get("report_enabled", True)),
+            sections=tuple(str(item) for item in experiment.get("sections", []) if str(item).strip()),
+            artifact_dir=self._artifact_dir(experiment_id),
+            metadata_path=self._metadata_path(experiment_id),
+            retroactive=bool(experiment.get("retroactive", False)),
+        )
+
     def _read_experiment_from_metadata(self, experiment_id: str) -> ExperimentInfo | None:
         metadata_path = self._metadata_path(experiment_id)
         if not metadata_path.exists():
             return None
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-        experiment = payload.get("experiment", {})
-        return ExperimentInfo(
-            experiment_id=_clean_text(experiment.get("experiment_id")),
-            name=_clean_text(experiment.get("name")),
-            title=_clean_text(experiment.get("title") or experiment.get("name")),
-            template_id=_clean_text(experiment.get("template_id")) or "custom",
-            operator=_clean_text(experiment.get("operator")),
-            cryostat=_clean_text(experiment.get("cryostat")),
-            sample=_clean_text(experiment.get("sample")),
-            description=_clean_text(experiment.get("description")),
-            notes=_clean_text(experiment.get("notes")),
-            start_time=_parse_time(experiment.get("start_time")) or datetime.now(UTC),
-            end_time=_parse_time(experiment.get("end_time")),
-            status=ExperimentStatus(
-                _clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value
-            ),
-            config_snapshot=dict(experiment.get("config_snapshot") or {}),
-            custom_fields=_normalize_custom_fields(experiment.get("custom_fields")),
-            report_enabled=bool(experiment.get("report_enabled", True)),
-            sections=tuple(
-                str(item) for item in experiment.get("sections", []) if str(item).strip()
-            ),
-            artifact_dir=self._artifact_dir(experiment_id),
-            metadata_path=metadata_path,
-            retroactive=bool(experiment.get("retroactive", False)),
-        )
+        experiment = payload.get("experiment")
+        if not isinstance(experiment, dict):
+            raise ValueError("Experiment metadata has no exact experiment payload.")
+        info = self._experiment_info_from_payload(experiment)
+        if info.experiment_id != experiment_id:
+            raise ValueError("Experiment metadata identity does not match its directory.")
+        return info
 
     def _load_templates(self) -> dict[str, ExperimentTemplate]:
         templates_dir = self._templates_dir
@@ -1337,9 +1474,7 @@ class ExperimentManager:
                 name=name,
                 sections=sections,
                 report_enabled=bool(raw.get("report_enabled", True)),
-                report_sections=tuple(
-                    str(item) for item in raw.get("report_sections", []) if str(item).strip()
-                ),
+                report_sections=tuple(str(item) for item in raw.get("report_sections", []) if str(item).strip()),
                 custom_fields=custom_fields,
             )
         if "custom" not in templates:
@@ -1376,6 +1511,29 @@ class ExperimentManager:
     def _db_path_for_today(self) -> Path:
         return self._db_path_for_day(datetime.now(UTC))
 
+    def _persisted_running_experiment_ids(self) -> set[str]:
+        """Return exact RUNNING identities across every daily lifecycle DB."""
+
+        running: set[str] = set()
+        if not self._data_dir.exists():
+            return running
+        for db_path in self._data_dir.glob("data_????-??-??.db"):
+            conn = sqlite3.connect(str(db_path), timeout=10)
+            try:
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiments'"
+                ).fetchone()
+                if exists is None:
+                    continue
+                for row in conn.execute("SELECT experiment_id FROM experiments WHERE status = 'RUNNING'"):
+                    experiment_id = _clean_text(row[0])
+                    if not experiment_id:
+                        raise RuntimeError(f"Persisted RUNNING row has no identity in {db_path.name}.")
+                    running.add(experiment_id)
+            finally:
+                conn.close()
+        return running
+
     def _get_connection(self, when: datetime | None = None) -> sqlite3.Connection:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         db_path = self._db_path_for_day(when or datetime.now(UTC))
@@ -1389,12 +1547,29 @@ class ExperimentManager:
                 f"CryoDAQ requires WAL for cross-process read concurrency."
             )
         conn.execute(SCHEMA_EXPERIMENTS)
+        conn.execute(SCHEMA_SINGLE_RUNNING_EXPERIMENT)
         conn.commit()
         return conn
 
     def _write_start(self, info: ExperimentInfo) -> None:
         conn = self._get_connection(info.start_time)
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT name, operator, start_time, status FROM experiments WHERE experiment_id = ?",
+                (info.experiment_id,),
+            ).fetchone()
+            if existing is not None:
+                expected = (
+                    info.name,
+                    info.operator,
+                    info.start_time.isoformat(),
+                    info.status.value,
+                )
+                if tuple(existing) != expected:
+                    raise RuntimeError("Persisted experiment identity collides with different evidence.")
+                conn.commit()
+                return
             conn.execute(
                 "INSERT INTO experiments ("
                 "experiment_id, name, operator, cryostat, sample, description, start_time, end_time, "  # noqa: E501
@@ -1430,7 +1605,7 @@ class ExperimentManager:
     def _write_end(self, info: ExperimentInfo) -> None:
         conn = self._get_connection(info.start_time)
         try:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE experiments SET "
                 "name = ?, title = ?, sample = ?, description = ?, notes = ?, end_time = ?, status = ?, "  # noqa: E501
                 "custom_fields = ?, report_enabled = ?, template_id = ?, artifact_dir = ?, metadata_path = ?, "  # noqa: E501
@@ -1454,6 +1629,8 @@ class ExperimentManager:
                     info.experiment_id,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Persisted experiment row is missing for {info.experiment_id}.")
             conn.commit()
         finally:
             conn.close()
@@ -1510,17 +1687,13 @@ class ExperimentManager:
             "artifact_index": [
                 dict(item)
                 for item in (
-                    artifact_index
-                    if artifact_index is not None
-                    else list(existing_payload.get("artifact_index", []))
+                    artifact_index if artifact_index is not None else list(existing_payload.get("artifact_index", []))
                 )
             ],
             "result_tables": [
                 dict(item)
                 for item in (
-                    result_tables
-                    if result_tables is not None
-                    else list(existing_payload.get("result_tables", []))
+                    result_tables if result_tables is not None else list(existing_payload.get("result_tables", []))
                 )
             ],
             "summary_metadata": dict(
@@ -1537,10 +1710,54 @@ class ExperimentManager:
     # Phase tracking
     # ------------------------------------------------------------------
 
-    def advance_phase(self, phase: str, operator: str = "") -> dict[str, Any]:
-        """Transition to a new experiment phase. Closes the current phase."""
+    @_serialized_lifecycle
+    def resolve_operator_log_scope(
+        self,
+        *,
+        expected_experiment_id: str | None,
+        unbound: bool,
+    ) -> str | None:
+        """Resolve an operator-log target without implicit current-state binding."""
+
+        if type(unbound) is not bool:
+            raise ValueError("unbound must be exactly bool")
+        if unbound:
+            if expected_experiment_id is not None:
+                raise ValueError("unbound operator log entry cannot also name an experiment")
+            return None
+        if type(expected_experiment_id) is not str or not expected_experiment_id:
+            raise ValueError("expected_experiment_id is required unless the entry is explicitly unbound")
+        if self._active is None or self._active.experiment_id != expected_experiment_id:
+            raise ExperimentIdentityMismatchError(
+                "Active experiment does not match expected_experiment_id; "
+                "the operator log command is stale and was not applied."
+            )
+        return expected_experiment_id
+
+    @_serialized_lifecycle
+    def advance_phase(
+        self,
+        phase: str,
+        operator: str = "",
+        *,
+        expected_experiment_id: str,
+    ) -> dict[str, Any]:
+        """Transition the explicitly identified active experiment to a phase.
+
+        The expected identifier is mandatory so a delayed command submitted
+        for a finalized experiment can never mutate a newer active experiment.
+        The lifecycle lock keeps the identity check and metadata write in one
+        serialized authority interval.
+        """
+        if type(expected_experiment_id) is not str or not expected_experiment_id:
+            raise ValueError("expected_experiment_id must be a non-empty string")
         if self._active is None:
             raise RuntimeError("No active experiment.")
+        if self._active.experiment_id != expected_experiment_id:
+            raise ExperimentIdentityMismatchError(
+                "Active experiment does not match expected_experiment_id; "
+                "the phase command is stale and was not applied."
+            )
         # Validate phase name
         try:
             ExperimentPhase(phase)
@@ -1605,7 +1822,8 @@ class ExperimentManager:
         for path in (plots_dir, tables_dir, summaries_dir):
             path.mkdir(parents=True, exist_ok=True)
 
-        readings = self._load_experiment_readings(info)
+        readings_snapshot = self._load_experiment_readings(info)
+        readings = list(readings_snapshot.rows)
         artifact_index: list[dict[str, Any]] = []
         result_tables: list[dict[str, Any]] = []
 
@@ -1739,8 +1957,7 @@ class ExperimentManager:
             readings,
             artifact_index,
             channel_filter=lambda item: (
-                "pressure" in str(item["channel"]).lower()
-                or str(item["unit"]).lower() in {"mbar", "pa"}
+                "pressure" in str(item["channel"]).lower() or str(item["unit"]).lower() in {"mbar", "pa"}
             ),
             role="pressure",
             title="Pressure",
@@ -1757,6 +1974,9 @@ class ExperimentManager:
             "artifact_count": len(artifact_index),
             "result_table_count": len(result_tables),
             "measured_value_rows": len(readings),
+            "measured_values_complete": readings_snapshot.complete,
+            "measured_values_truncated": readings_snapshot.truncated,
+            "measured_values_issues": list(readings_snapshot.issues),
             "setpoint_rows": setpoint_rows,
             "run_result_rows": run_result_rows,
             "conductivity_rows": len(conductivity_rows),
@@ -1781,42 +2001,83 @@ class ExperimentManager:
             "summary_metadata": summary_metadata,
         }
 
-    def _load_experiment_readings(self, info: ExperimentInfo) -> list[dict[str, Any]]:
+    def _load_experiment_readings(self, info: ExperimentInfo) -> ExperimentReadingsSnapshot:
         if info.end_time is None:
-            return []
-        rows: list[dict[str, Any]] = []
-        day = info.start_time.date()
-        end_day = info.end_time.date()
-        while day <= end_day:
-            db_path = self._data_dir / f"data_{day.isoformat()}.db"
-            if db_path.exists():
-                conn = sqlite3.connect(str(db_path), timeout=10)
-                conn.row_factory = sqlite3.Row
-                try:
-                    query = (
-                        "SELECT timestamp, instrument_id, channel, value, unit, status "
-                        "FROM readings WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp"
-                    )
-                    params = (info.start_time.timestamp(), info.end_time.timestamp())
-                    for row in conn.execute(query, params).fetchall():
-                        rows.append(
-                            {
-                                "timestamp": datetime.fromtimestamp(
-                                    float(row["timestamp"]), tz=UTC
-                                ),
-                                "instrument_id": str(row["instrument_id"] or ""),
-                                "channel": str(row["channel"] or ""),
-                                "value": decode(float(row["value"]), str(row["status"] or "")),
-                                "unit": str(row["unit"] or ""),
-                                "status": str(row["status"] or ""),
-                            }
-                        )
-                except sqlite3.OperationalError:
-                    logger.info("readings table not found in %s", db_path.name)
-                finally:
-                    conn.close()
-            day = day.fromordinal(day.toordinal() + 1)
-        return rows
+            return ExperimentReadingsSnapshot((), False, False, ("missing_end_time",))
+
+        reader = ArchiveReader(self._data_dir, self._data_dir / "archive")
+        campaign_start = info.start_time.astimezone(UTC)
+        cursor_end = info.end_time.astimezone(UTC) + timedelta(microseconds=1)
+        deadline = time.monotonic() + 30.0
+        max_total_points = 500_000
+        max_points_per_channel = 100_000
+        max_retained_bytes = 32 * 1024 * 1024
+        rows_newest_first: list[dict[str, Any]] = []
+        per_channel: dict[str, int] = {}
+        retained_bytes = 0
+        issues: list[str] = []
+        complete = True
+        truncated = False
+
+        while cursor_end > campaign_start:
+            if time.monotonic() >= deadline:
+                issues.append("deadline")
+                complete = False
+                break
+            chunk_start = max(campaign_start, cursor_end - timedelta(hours=168))
+            result = reader.query_reading_rows_bounded(
+                start=chunk_start,
+                end=cursor_end,
+                channels=None,
+                max_channels=64,
+                max_points_per_channel=max_points_per_channel,
+                max_total_points=max_total_points,
+                max_retained_bytes=max_retained_bytes,
+                deadline_monotonic=deadline,
+            )
+            complete = complete and result.complete
+            truncated = truncated or result.truncated
+            issues.extend(f"{issue.code.value}:{issue.source}" for issue in result.issues)
+            if result.issue_overflow:
+                issues.append(f"issue_overflow:{result.issue_overflow}")
+            for row in reversed(result.rows):
+                channel_count = per_channel.get(row.channel, 0)
+                encoded_size = (
+                    96
+                    + len(row.instrument_id.encode("utf-8"))
+                    + len(row.channel.encode("utf-8"))
+                    + len(row.unit.encode("utf-8"))
+                    + len(row.status.encode("utf-8"))
+                )
+                if (
+                    len(rows_newest_first) >= max_total_points
+                    or channel_count >= max_points_per_channel
+                    or retained_bytes + encoded_size > max_retained_bytes
+                ):
+                    truncated = True
+                    complete = False
+                    continue
+                rows_newest_first.append(
+                    {
+                        "timestamp": datetime.fromtimestamp(row.timestamp, tz=UTC),
+                        "instrument_id": row.instrument_id,
+                        "channel": row.channel,
+                        "value": float("nan") if row.value is None else row.value,
+                        "unit": row.unit,
+                        "status": row.status,
+                    }
+                )
+                per_channel[row.channel] = channel_count + 1
+                retained_bytes += encoded_size
+            cursor_end = chunk_start
+
+        rows_newest_first.sort(key=lambda item: item["timestamp"])
+        return ExperimentReadingsSnapshot(
+            tuple(rows_newest_first),
+            complete and not issues and not truncated and cursor_end <= campaign_start,
+            truncated,
+            tuple(dict.fromkeys(issues)),
+        )
 
     def _materialize_run_record_artifacts(
         self,
@@ -1831,11 +2092,14 @@ class ExperimentManager:
             normalized_paths: list[str] = []
             for raw_path in record.artifact_paths:
                 source = Path(str(raw_path))
-                if not source.exists():
+                if not source.exists() or source.is_symlink() or not source.is_file():
                     continue
-                if str(source).startswith(str(info.artifact_dir or "")):
+                source = source.resolve(strict=True)
+                artifact_root = (info.artifact_dir or self._artifact_dir(info.experiment_id)).resolve(strict=True)
+                source_digest = self._sha256_file(source)
+                if source.is_relative_to(artifact_root):
                     target = source
-                    linked = False
+                    materialization = "owned"
                 else:
                     target_dir = (
                         archive_root
@@ -1844,16 +2108,9 @@ class ExperimentManager:
                         / self._safe_slug(record.source_run_id)
                     )
                     target_dir.mkdir(parents=True, exist_ok=True)
-                    target = target_dir / source.name
-                    if not target.exists():
-                        try:
-                            os.link(str(source), str(target))
-                            linked = True
-                        except OSError:
-                            shutil.copy2(source, target)
-                            linked = False
-                    else:
-                        linked = target.stat().st_size == source.stat().st_size
+                    target = target_dir / (f"{source.stem}.{source_digest[:16]}{source.suffix.lower()}")
+                    self._materialize_immutable_copy(source, target, source_digest)
+                    materialization = "immutable_copy"
                 normalized_paths.append(str(target))
                 artifact_index.append(
                     self._artifact_entry(
@@ -1864,7 +2121,9 @@ class ExperimentManager:
                             "run_record_id": record.record_id,
                             "source_path": str(source),
                             "materialized": str(target),
-                            "linked": linked,
+                            "materialization": materialization,
+                            "sha256": source_digest,
+                            "size_bytes": target.stat().st_size,
                         },
                     )
                 )
@@ -1885,6 +2144,59 @@ class ExperimentManager:
                 )
             )
         return normalized_records, artifact_index
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while block := handle.read(1024 * 1024):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @classmethod
+    def _materialize_immutable_copy(
+        cls,
+        source: Path,
+        target: Path,
+        expected_digest: str,
+    ) -> None:
+        """Copy one stable source into an exclusive content-addressed target."""
+
+        before = source.stat()
+        descriptor, raw_temp = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        os.close(descriptor)
+        temp_path = Path(raw_temp)
+        try:
+            with source.open("rb") as source_handle, temp_path.open("wb") as target_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+            after = source.stat()
+            if (
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or cls._sha256_file(source) != expected_digest
+                or cls._sha256_file(temp_path) != expected_digest
+            ):
+                raise RuntimeError("Run artifact changed while being materialized.")
+            try:
+                os.link(temp_path, target)
+            except FileExistsError:
+                if not target.is_file() or target.is_symlink():
+                    raise RuntimeError("Run artifact target collides with unsafe filesystem state.")
+                if cls._sha256_file(target) != expected_digest:
+                    raise RuntimeError("Run artifact target collides with different content.")
+            except OSError as exc:
+                raise RuntimeError("Atomic exclusive artifact materialization is unavailable.") from exc
+            else:
+                temp_path.unlink()
+                target.chmod(target.stat().st_mode & ~0o222)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def _write_measured_values_table(self, path: Path, readings: list[dict[str, Any]]) -> None:
         with path.open("w", encoding="utf-8", newline="") as handle:
@@ -1967,15 +2279,15 @@ class ExperimentManager:
                         reader = csv.DictReader(line for line in handle if not line.startswith("#"))
                         for item in reader:
                             try:
-                                rows.append(
-                                    {
-                                        "temperature_k": float(item.get("T_avg_K", "")),
-                                        "conductance_wk": float(item.get("G_WK", "")),
-                                        "resistance_kw": float(item.get("R_KW", "")),
-                                    }
-                                )
+                                row = {
+                                    "temperature_k": float(item.get("T_avg_K", "")),
+                                    "conductance_wk": float(item.get("G_WK", "")),
+                                    "resistance_kw": float(item.get("R_KW", "")),
+                                }
                             except (TypeError, ValueError):
                                 continue
+                            if all(math.isfinite(value) for value in row.values()):
+                                rows.append(row)
                 except Exception as exc:
                     logger.warning("Failed to parse autosweep artifact %s: %s", path, exc)
         return rows
@@ -1985,9 +2297,7 @@ class ExperimentManager:
             writer = csv.writer(handle)
             writer.writerow(["temperature_k", "conductance_wk", "resistance_kw"])
             for item in rows:
-                writer.writerow(
-                    [item["temperature_k"], item["conductance_wk"], item["resistance_kw"]]
-                )
+                writer.writerow([item["temperature_k"], item["conductance_wk"], item["resistance_kw"]])
 
     def _maybe_write_channel_plot(
         self,
@@ -2030,13 +2340,9 @@ class ExperimentManager:
             plt.figure(figsize=(8, 3.5))
             series: dict[str, list[tuple[datetime, float]]] = {}
             for item in readings:
-                series.setdefault(str(item["channel"]), []).append(
-                    (item["timestamp"], float(item["value"]))
-                )
+                series.setdefault(str(item["channel"]), []).append((item["timestamp"], float(item["value"])))
             for channel, values in sorted(series.items()):
-                plt.plot(
-                    [stamp for stamp, _ in values], [value for _, value in values], label=channel
-                )
+                plt.plot([stamp for stamp, _ in values], [value for _, value in values], label=channel)
             plt.title(title)
             plt.ylabel(y_label)
             if len(series) <= 6:

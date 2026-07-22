@@ -631,10 +631,9 @@ class ReadinessSummary(_OperatorSummary):
                 required = _max_state(tuple(item.state for item in self.blockers))
                 if not _state_at_least(self.state, required):
                     raise ValueError("readiness state must cover its most severe blocker")
-        # Transport loss and a same-cut reconnect retain the last typed
-        # lifecycle while revoking readiness. UNKNOWN is therefore deliberately
-        # not a lifecycle inference point; it is non-authoritative. Claims of
-        # READY or BLOCKED authority, however, must remain lifecycle-coherent.
+        # Transport loss and same-cut reconnect revoke both readiness and the
+        # lifecycle authority. The last numeric observations remain visible,
+        # but no prior READY/BLOCKED claim may survive loss of its owner.
         if self.readiness is ReadinessTruth.READY and self.lifecycle is not SafetyLifecycle.READY:
             raise ValueError("READY readiness requires READY safety lifecycle")
         if self.readiness is ReadinessTruth.BLOCKED and self.lifecycle in {

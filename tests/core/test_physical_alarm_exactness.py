@@ -8,6 +8,7 @@ from cryodaq.core.housekeeping import HousekeepingConfigError, resolve_canonical
 from cryodaq.core.physical_alarms_config import (
     PhysicalAlarmsConfigError,
     load_production_physical_alarms_config,
+    validate_physical_alarm_references,
 )
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
 
@@ -46,9 +47,28 @@ def test_canonical_temperatures_reverse_map_to_one_nonraw_full_match() -> None:
 def test_canonical_binding_collision_is_rejected() -> None:
     class _Catalog:
         _bindings = {
-            ("one", "Т11 one"): "Т11",
-            ("two", "Т11 two"): "Т11",
+            ("one", "\u042211 one"): "\u042211",
+            ("two", "\u042211 two"): "\u042211",
         }
 
     with pytest.raises(HousekeepingConfigError, match="exactly one"):
-        resolve_canonical_temperature_bindings(_Catalog(), {"Т11"})
+        resolve_canonical_temperature_bindings(_Catalog(), {"\u042211"})
+
+
+def test_physical_alarm_references_must_exist_in_selected_descriptor_snapshot() -> None:
+    cooldown, vacuum, landmarks = load_production_physical_alarms_config(_ROOT / "config" / "physical_alarms.yaml")
+
+    class _Snapshot:
+        by_channel_id = {"\u042211": object(), "\u042212": object()}
+
+    class _Catalog:
+        def storage_catalog_snapshot(self):
+            return _Snapshot()
+
+    with pytest.raises(PhysicalAlarmsConfigError, match="descriptor snapshot"):
+        validate_physical_alarm_references(
+            cooldown=cooldown,
+            vacuum=vacuum,
+            landmarks=landmarks,
+            descriptor_catalog=_Catalog(),
+        )

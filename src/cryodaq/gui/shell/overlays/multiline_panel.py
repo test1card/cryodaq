@@ -262,6 +262,8 @@ class MultiLinePanel(QWidget):
         self._instrument_id: str | None = instrument_id
 
         self._connected: bool = False
+        self._read_only: bool = False
+        self._connection_generation = 0
         self._last_reading_mono: float = 0.0
         # channel name (e.g. "MultiLine_1/length_ch1") → deque[(ts_unix, mm)]
         self._buffers: dict[str, deque[tuple[float, float]]] = {}
@@ -291,11 +293,19 @@ class MultiLinePanel(QWidget):
         # Start but engine has not echoed status yet — coarser than
         # server-side `active` so the UI never strands the button.
         self._burst_active_server: bool = False
+        self._burst_outcome_unknown: bool = False
+        self._burst_pending_action: str | None = None
+        self._burst_operation_generation = 0
+        self._burst_command_sequence = 0
+        self._burst_settled_command_tokens: set[int] = set()
+        self._burst_status_worker: ZmqCommandWorker | None = None
+        self._burst_status_poll_coalesced = False
         self._burst_poll_timer = QTimer(self)
         self._burst_poll_timer.setInterval(500)
         self._burst_poll_timer.timeout.connect(self._poll_burst_status)
 
         self._build_ui()
+        self._update_burst_controls()
 
     # ------------------------------------------------------------------
     # UI
@@ -523,8 +533,11 @@ class MultiLinePanel(QWidget):
             self._refresh_env_labels()
 
     def set_connected(self, connected: bool) -> None:
+        connected = bool(connected)
         was_connected = self._connected
-        self._connected = bool(connected)
+        if connected != self._connected:
+            self._connection_generation += 1
+        self._connected = connected
         self._chip.set_state("ok" if self._connected else "off")
         # v0.55.15 (audit SCOPE 5 finding 5.2) — when the engine
         # transitions from connected → disconnected, mark every value
@@ -533,6 +546,35 @@ class MultiLinePanel(QWidget):
         # know if the displayed value was current.
         if was_connected and not self._connected:
             self._mark_all_stale()
+        if not self._connected:
+            self._burst_poll_timer.stop()
+            if self._burst_active_server or self._burst_in_flight or self._burst_status_worker is not None:
+                self._burst_in_flight = False
+                self._burst_pending_action = None
+                self._latch_burst_outcome_unknown("Связь потеряна; выполнявшаяся операция требует сверки.")
+        elif not self._read_only and (self._burst_active_server or self._burst_outcome_unknown):
+            self._burst_poll_timer.start()
+        self._update_burst_controls()
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Preserve evidence while revoking every burst-mutation authority."""
+
+        read_only = bool(read_only)
+        if read_only == self._read_only:
+            return
+        self._read_only = read_only
+        # A reply crossing an authority-mode transition cannot mutate the UI,
+        # even if read-only is later turned off before that reply arrives.
+        self._burst_operation_generation += 1
+        if read_only:
+            self._burst_poll_timer.stop()
+            if self._burst_active_server or self._burst_in_flight or self._burst_status_worker is not None:
+                self._burst_in_flight = False
+                self._burst_pending_action = None
+                self._latch_burst_outcome_unknown("Режим просмотра отозвал полномочия управления.")
+        elif self._connected and (self._burst_active_server or self._burst_outcome_unknown):
+            self._burst_poll_timer.start()
+        self._update_burst_controls()
 
     @property
     def instrument_id(self) -> str | None:
@@ -896,95 +938,194 @@ class MultiLinePanel(QWidget):
     # v0.55.11 — burst capture
     # ------------------------------------------------------------------
 
-    def _on_burst_clicked(self) -> None:
-        """Toggle burst capture: idle → start; active → stop early."""
-        if self._burst_active_server or self._burst_in_flight:
-            self._send_burst_command("multiline.burst_stop", {})
-            return
-        duration = int(self._burst_duration_spin.value())
-        self._burst_in_flight = True
-        self._burst_button.setEnabled(False)
-        self._burst_status_label.setText(f"Запуск ({duration} с)...")
-        self._send_burst_command(
-            "multiline.burst_start",
-            {"duration_s": duration},
+    def _on_burst_clicked(self) -> bool:
+        """Toggle capture only after a final handler-level authority check."""
+
+        if not self._connected or self._read_only:
+            self._burst_status_label.setText("Управление недоступно: нет живой связи или включён режим просмотра")
+            self._update_burst_controls()
+            return False
+        if self._burst_in_flight:
+            return False
+
+        action = (
+            "multiline.burst_stop"
+            if self._burst_active_server or self._burst_outcome_unknown
+            else "multiline.burst_start"
         )
+        self._burst_operation_generation += 1
+        self._burst_in_flight = True
+        self._burst_pending_action = action
+        self._burst_poll_timer.stop()
+        if action == "multiline.burst_start":
+            duration = int(self._burst_duration_spin.value())
+            extra = {"duration_s": duration}
+            self._burst_status_label.setText(f"Запуск ({duration} с)…")
+        else:
+            extra = {}
+            self._burst_status_label.setText("Останов запрошен — ожидается подтверждение Engine")
+        self._update_burst_controls()
+        if self._send_burst_command(action, extra):
+            return True
 
-    def _send_burst_command(self, action: str, extra: dict) -> None:
+        self._burst_in_flight = False
+        self._burst_pending_action = None
+        self._latch_burst_outcome_unknown("Команда не отправлена.")
+        return False
+
+    def _send_burst_command(self, action: str, extra: dict) -> bool:
+        """Dispatch one exact operation; coalesce status to one worker."""
+
+        if not self._connected or self._read_only:
+            return False
+        if action == "multiline.burst_status" and self._burst_status_worker is not None:
+            self._burst_status_poll_coalesced = True
+            return False
+
         cmd = {"cmd": action, **extra}
+        if self._instrument_id is not None:
+            cmd["name"] = self._instrument_id
+        self._burst_command_sequence += 1
+        token = self._burst_command_sequence
+        expected_connection_generation = self._connection_generation
+        expected_operation_generation = self._burst_operation_generation
         worker = ZmqCommandWorker(cmd, parent=self)
-        # Capture command in lambda so the response handler knows which
-        # branch to interpret. Workers retained on self._burst_workers
-        # to defeat Qt's QThread GC race.
-        worker.finished.connect(lambda result, c=action: self._on_burst_response(c, result))
-        self._burst_workers.append(worker)
-        worker.start()
 
-    def _on_burst_response(self, action: str, result: dict | None) -> None:
-        # Drop finished workers so the list does not grow unbounded.
-        self._burst_workers = [w for w in self._burst_workers if w.isRunning()]
-        if not isinstance(result, dict):
-            self._burst_in_flight = False
-            self._burst_button.setEnabled(True)
-            self._burst_status_label.setText("Engine не ответил")
+        def _completed(
+            result: dict,
+            command: str = action,
+            command_token: int = token,
+            connection_generation: int = expected_connection_generation,
+            operation_generation: int = expected_operation_generation,
+            completed_worker: ZmqCommandWorker = worker,
+        ) -> None:
+            self._on_burst_response(
+                command,
+                result,
+                token=command_token,
+                expected_connection_generation=connection_generation,
+                expected_operation_generation=operation_generation,
+                worker=completed_worker,
+            )
+
+        worker.finished.connect(_completed)
+        self._burst_workers.append(worker)
+        if action == "multiline.burst_status":
+            self._burst_status_worker = worker
+            self._burst_status_poll_coalesced = False
+        worker.start()
+        return True
+
+    def _on_burst_response(
+        self,
+        action: str,
+        result: dict | None,
+        *,
+        token: int | None = None,
+        expected_connection_generation: int | None = None,
+        expected_operation_generation: int | None = None,
+        worker: ZmqCommandWorker | None = None,
+    ) -> None:
+        """Apply only a current-generation reply under final live authority."""
+
+        if worker is not None:
+            self._burst_workers = [candidate for candidate in self._burst_workers if candidate is not worker]
+            if self._burst_status_worker is worker:
+                self._burst_status_worker = None
+                self._burst_status_poll_coalesced = False
+        if token is not None:
+            if token in self._burst_settled_command_tokens:
+                logger.warning("Повторный ответ MultiLine проигнорирован: token=%s", token)
+                return
+            self._burst_settled_command_tokens.add(token)
+
+        stale = (
+            expected_connection_generation is not None and expected_connection_generation != self._connection_generation
+        ) or (
+            expected_operation_generation is not None
+            and expected_operation_generation != self._burst_operation_generation
+        )
+        if stale or not self._connected or self._read_only:
+            logger.warning(
+                "Запоздалый ответ MultiLine проигнорирован: %s, token=%s",
+                action,
+                token,
+            )
             return
-        if not result.get("ok"):
-            self._burst_in_flight = False
-            self._burst_active_server = False
-            self._burst_button.setEnabled(True)
-            self._burst_button.setText("Записать")
-            err = str(result.get("error", "ошибка"))
-            # Preserve operator-actionable Russian phrasing the engine
-            # already emits; truncate so it fits the status row.
-            self._burst_status_label.setText(err[:80])
-            self._burst_poll_timer.stop()
+
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            if action != "multiline.burst_status":
+                self._burst_in_flight = False
+                self._burst_pending_action = None
+            error = str(result.get("error", "Engine не ответил")) if isinstance(result, dict) else "Engine не ответил"
+            self._latch_burst_outcome_unknown(f"{action} не подтверждён: {error[:120]}")
             return
+
         if action == "multiline.burst_start":
             self._burst_in_flight = False
+            self._burst_pending_action = None
             self._burst_active_server = True
-            self._burst_button.setText("Остановить")
-            self._burst_button.setEnabled(True)
-            self._burst_duration_spin.setEnabled(False)
+            self._burst_outcome_unknown = False
             duration = result.get("duration_s")
             if duration is not None:
                 self._burst_status_label.setText(f"Запись (авто-стоп через {int(float(duration))} с)…")
             else:
                 self._burst_status_label.setText("Запись (без авто-стопа)…")
-            if not self._burst_poll_timer.isActive():
-                self._burst_poll_timer.start()
-            return
-        if action == "multiline.burst_stop":
+            self._burst_poll_timer.start()
+        elif action == "multiline.burst_stop":
+            self._burst_in_flight = False
+            self._burst_pending_action = None
             self._burst_active_server = False
-            self._burst_button.setText("Записать")
-            self._burst_button.setEnabled(True)
-            self._burst_duration_spin.setEnabled(True)
+            self._burst_outcome_unknown = False
             self._burst_poll_timer.stop()
             if result.get("saved") and result.get("path"):
                 self._burst_status_label.setText(f"Сохранено: {result['path']}")
             else:
                 self._burst_status_label.setText("Цикла не было — пусто")
-            return
-        if action == "multiline.burst_status":
+        elif action == "multiline.burst_status":
             active = bool(result.get("active"))
             cycle_count = int(result.get("cycle_count", 0) or 0)
             elapsed_s = float(result.get("elapsed_s", 0.0) or 0.0)
+            self._burst_active_server = active
+            self._burst_outcome_unknown = False
             if active:
-                self._burst_active_server = True
                 self._burst_status_label.setText(f"Запись {elapsed_s:.1f} с, {cycle_count} кадров")
+                self._burst_poll_timer.start()
             else:
-                # Active flipped server-side (likely auto-stop fired);
-                # request the path via burst_stop so the operator gets
-                # confirmation of where the file landed.
-                if self._burst_active_server:
-                    self._burst_active_server = False
-                    self._burst_button.setText("Записать")
-                    self._burst_duration_spin.setEnabled(True)
-                    self._burst_poll_timer.stop()
-                    self._burst_status_label.setText(f"Авто-стоп ({cycle_count} кадров) — запись...")
-                    self._send_burst_command("multiline.burst_stop", {})
+                self._burst_poll_timer.stop()
+                self._burst_status_label.setText(f"Авто-стоп подтверждён ({cycle_count} кадров)")
+        self._update_burst_controls()
+
+    def _latch_burst_outcome_unknown(self, reason: str) -> None:
+        """Keep last-known activity visible until status/stop proves truth."""
+
+        self._burst_outcome_unknown = True
+        last_known = "ЗАПИСЬ АКТИВНА" if self._burst_active_server else "ЗАПИСЬ НЕ БЫЛА ПОДТВЕРЖДЕНА"
+        self._burst_status_label.setText(f"ИСХОД НЕИЗВЕСТЕН — последнее известное: {last_known}. {reason}")
+        if self._connected and not self._read_only:
+            self._burst_poll_timer.start()
+        self._update_burst_controls()
+
+    def _update_burst_controls(self) -> None:
+        live_authority = self._connected and not self._read_only
+        stopping_or_unknown = self._burst_active_server or self._burst_outcome_unknown
+        self._burst_button.setText("Остановить" if stopping_or_unknown else "Записать")
+        self._burst_button.setEnabled(live_authority and not self._burst_in_flight)
+        self._burst_duration_spin.setEnabled(
+            live_authority
+            and not self._burst_active_server
+            and not self._burst_outcome_unknown
+            and not self._burst_in_flight
+        )
 
     def _poll_burst_status(self) -> None:
-        if not self._burst_active_server:
+        if not (self._burst_active_server or self._burst_outcome_unknown):
             self._burst_poll_timer.stop()
+            return
+        if not self._connected or self._read_only:
+            self._burst_poll_timer.stop()
+            return
+        if self._burst_status_worker is not None:
+            self._burst_status_poll_coalesced = True
             return
         self._send_burst_command("multiline.burst_status", {})

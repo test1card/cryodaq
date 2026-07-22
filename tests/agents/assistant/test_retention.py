@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from cryodaq.agents.assistant.shared.retention import cleanup_old_audits
 
@@ -56,3 +59,22 @@ async def test_cleanup_handles_invalid_dirnames_gracefully(tmp_path: Path) -> No
 async def test_cleanup_nonexistent_dir_returns_zero(tmp_path: Path) -> None:
     deleted = await cleanup_old_audits(tmp_path / "nonexistent", retention_days=90)
     assert deleted == 0
+
+
+async def test_cleanup_never_follows_symlinked_date_directory(tmp_path: Path) -> None:
+    """An expired-looking link cannot turn retention into arbitrary deletion."""
+    audit_dir = tmp_path / "audit"
+    outside = tmp_path / "outside"
+    audit_dir.mkdir()
+    decoy = _make_audit_file(outside, "must-survive.json")
+    linked_date = audit_dir / "2000-01-01"
+    try:
+        os.symlink(outside, linked_date, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    deleted = await cleanup_old_audits(audit_dir, retention_days=90)
+
+    assert deleted == 0
+    assert decoy.exists()
+    assert linked_date.is_symlink()

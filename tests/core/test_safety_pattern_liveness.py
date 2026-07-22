@@ -66,6 +66,11 @@ from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_pattern_liveness import (
+    SafetyPatternLivenessError,
+    resolve_adaptive_throttle_patterns,
+    resolve_safety_critical_temperature_bindings,
+)
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
@@ -128,6 +133,10 @@ def _load_safety_patterns() -> tuple[list[re.Pattern[str]], list[re.Pattern[str]
 CANONICAL_CHANNEL_IDS, RAW_EMITTED_CHANNELS = _load_roster()
 INTERLOCK_CONDITIONS = _load_interlock_conditions()
 SAFETY_CRITICAL_PATTERNS, SAFETY_KEITHLEY_PATTERNS = _load_safety_patterns()
+SAFETY_CRITICAL_RAW_BINDINGS = resolve_safety_critical_temperature_bindings(
+    descriptor_catalog=load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH),
+    canonical_patterns=SAFETY_CRITICAL_PATTERNS,
+)
 ALARMS_V3_PROTECTED_PATTERNS = sorted(load_critical_channels_from_alarms_v3(_ALARMS_V3_PATH))
 
 # Channels published DIRECTLY to the DataBroker, bypassing the scheduler and
@@ -176,27 +185,75 @@ def test_interlock_pattern_matches_canonical_channel(condition: InterlockConditi
     )
 
 
-@pytest.mark.parametrize(
-    "pattern",
-    SAFETY_CRITICAL_PATTERNS,
-    ids=[_node_id(p.pattern) for p in SAFETY_CRITICAL_PATTERNS],
-)
-def test_safety_critical_pattern_matches_raw_channel(pattern: re.Pattern[str]) -> None:
-    """safety.yaml critical_channels pattern must match >=1 raw emitted label.
+def test_safety_critical_patterns_resolve_only_exact_raw_temperature_bindings() -> None:
+    """Canonical policy projects to exactly one non-raw input label each."""
+    assert {binding.canonical_channel_id for binding in SAFETY_CRITICAL_RAW_BINDINGS} == {"Т11", "Т12"}
+    assert {binding.emitted_channel for binding in SAFETY_CRITICAL_RAW_BINDINGS} == {
+        "Т11 Теплообменник 1",
+        "Т12 Теплообменник 2",
+    }
+    for binding in SAFETY_CRITICAL_RAW_BINDINGS:
+        compiled = re.compile(binding.raw_pattern)
+        assert [raw for raw in RAW_EMITTED_CHANNELS if compiled.search(raw)] == [binding.emitted_channel]
+        assert not binding.canonical_channel_id.endswith(".raw")
+        assert not binding.emitted_channel.endswith("_raw")
 
-    SafetyManager consumes the RAW plane (SafetyBroker pre-bind stream), so a
-    pattern written for the canonical id (e.g. ``Т11$`` with no display-name
-    suffix) would match nothing, defeat the stale/invalid-input gate, and let
-    RUN proceed without monitoring the critical channel.
-    """
-    matched = [ch for ch in RAW_EMITTED_CHANNELS if pattern.match(ch)]
-    assert matched, (
-        f"safety.yaml critical_channels pattern {pattern.pattern!r} matches NO "
-        f"raw emitted_channel (SafetyManager plane = pre-bind SafetyBroker "
-        f"output). If it was written for canonical channel_id, that is the "
-        f"F-1 class bug. Roster had {len(RAW_EMITTED_CHANNELS)} raw labels; "
-        f"sample: {RAW_EMITTED_CHANNELS[:6]}."
+
+@pytest.mark.parametrize(
+    "patterns, match",
+    [
+        ([re.compile("Т1")], "safety critical canonical identities"),
+        ([re.compile("^Т11\\.raw$"), re.compile("^Т12$")], "raw companion"),
+        ([re.compile("^Т11$"), re.compile("^Т1[12]$")], "exactly one descriptor identity"),
+        ([re.compile("^MISSING$"), re.compile("^Т12$")], "exactly one descriptor identity"),
+    ],
+)
+def test_safety_critical_resolution_rejects_unintended_or_ambiguous_identities(patterns, match: str) -> None:
+    with pytest.raises(SafetyPatternLivenessError, match=match):
+        resolve_safety_critical_temperature_bindings(
+            descriptor_catalog=load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH),
+            canonical_patterns=patterns,
+        )
+
+
+def test_safety_critical_resolution_rejects_colliding_raw_emitted_labels() -> None:
+    """Raw-plane consumers cannot distinguish two canonical IDs with one label."""
+    real_catalog = load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
+    snapshot = real_catalog.storage_catalog_snapshot()
+
+    class _CollidingCatalog:
+        _bindings = dict(real_catalog._bindings)
+
+        def storage_catalog_snapshot(self):
+            return snapshot
+
+    emitted_t11 = next(
+        emitted for (_instrument_id, emitted), channel_id in real_catalog._bindings.items() if channel_id == "Т11"
     )
+    t12_key = next(key for key, channel_id in real_catalog._bindings.items() if channel_id == "Т12")
+    _CollidingCatalog._bindings[t12_key] = "Т12"
+    _CollidingCatalog._bindings[("LS218_collision", emitted_t11)] = "Т12"
+    del _CollidingCatalog._bindings[t12_key]
+
+    with pytest.raises(SafetyPatternLivenessError, match="collide"):
+        resolve_safety_critical_temperature_bindings(
+            descriptor_catalog=_CollidingCatalog(),
+            canonical_patterns=SAFETY_CRITICAL_PATTERNS,
+        )
+
+
+def test_adaptive_throttle_canonical_projection_is_exact_and_not_substring() -> None:
+    """Canonical protection refs must not select T10--T19 or raw companions."""
+    owner = load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
+    projected = resolve_adaptive_throttle_patterns(
+        descriptor_catalog=owner,
+        patterns=[r"^\u04221$", r"^\u042211$", r"Keithley_1/smua/power"],
+    )
+    assert any(re.fullmatch(pattern, "Т1 Криостат верх") for pattern in projected)
+    assert any(re.fullmatch(pattern, "Т11 Теплообменник 1") for pattern in projected)
+    assert any(re.fullmatch(pattern, "Keithley_1/smua/power") for pattern in projected)
+    assert not any(re.fullmatch(pattern, "Т10 Компрессор выход") for pattern in projected)
+    assert not any(re.fullmatch(pattern, "Т1 Криостат верх_raw") for pattern in projected)
 
 
 @pytest.mark.parametrize(

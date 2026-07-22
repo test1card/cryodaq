@@ -280,6 +280,9 @@ async def test_emergency_off_unconfirmed_latches_fault():
         assert mgr.state == SafetyState.FAULT_LATCHED, f"unconfirmed emergency_off must latch FAULT, got {mgr.state}"
         assert mgr.state != SafetyState.SAFE_OFF
     finally:
+        # Unverified OFF intentionally leaves live HOLD ownership. Supply one
+        # exact later proof before asking the manager to relinquish children.
+        k.emergency_off = AsyncMock(return_value=True)
         await mgr.stop()
 
 
@@ -303,6 +306,9 @@ async def test_emergency_off_driver_raise_latches_fault():
         assert mgr.state == SafetyState.FAULT_LATCHED, f"emergency_off raise must latch FAULT, got {mgr.state}"
         assert mgr.state != SafetyState.SAFE_OFF
     finally:
+        # The simulated dead transport is the behavior under test, not a valid
+        # terminal receipt. Restore an exact proof for deterministic teardown.
+        k.emergency_off = AsyncMock(return_value=True)
         await mgr.stop()
 
 
@@ -835,6 +841,9 @@ async def test_cancelled_start_settles_before_full_off_at_every_write_boundary(
         assert snapshot.verified_off is True
     finally:
         release.set()
+        # The one-shot ordering double rejects any second OFF call. Terminal
+        # manager shutdown now always requires its own global proof.
+        k.emergency_off = AsyncMock(return_value=True)
         await manager.stop()
 
 

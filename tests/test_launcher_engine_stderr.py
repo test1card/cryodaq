@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 
 def test_create_engine_stderr_logger_writes_to_logs_dir(tmp_path, monkeypatch) -> None:
@@ -85,3 +89,30 @@ def test_create_engine_stderr_logger_closes_prior_handlers(tmp_path, monkeypatch
 
     _stderr_logger2.removeHandler(handler2)
     handler2.close()
+
+
+def test_stderr_pump_handle_is_retained_until_thread_really_stops() -> None:
+    from cryodaq.launcher import LauncherWindow
+
+    thread = MagicMock()
+    thread.is_alive.side_effect = [True, True, False, False]
+    stderr_logger = MagicMock()
+    handler = MagicMock()
+    host = SimpleNamespace(
+        _engine_stderr_thread=thread,
+        _engine_stderr_logger=stderr_logger,
+        _engine_stderr_handler=handler,
+    )
+
+    with pytest.raises(RuntimeError, match="stderr pump remained alive"):
+        LauncherWindow._close_engine_stderr_stream(host)
+    assert host._engine_stderr_thread is thread
+    assert host._engine_stderr_logger is stderr_logger
+    assert host._engine_stderr_handler is handler
+
+    LauncherWindow._close_engine_stderr_stream(host)
+    assert host._engine_stderr_thread is None
+    assert host._engine_stderr_logger is None
+    assert host._engine_stderr_handler is None
+    stderr_logger.removeHandler.assert_called_once_with(handler)
+    handler.close.assert_called_once_with()

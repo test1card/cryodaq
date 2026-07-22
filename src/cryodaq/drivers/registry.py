@@ -25,6 +25,7 @@ from cryodaq.drivers.contracts import (
     BusDescriptor,
     DriverRuntimeBinding,
     DriverTrustClass,
+    _bounded_identifier,
     _issue_registry_runtime_binding,
 )
 
@@ -675,7 +676,27 @@ def _revalidate_canonical_values(*, spec: DriverSpec, name: str, values: Mapping
     checked_name = checked.get("name")
     if not isinstance(name, str) or name != checked_name:
         raise DriverRegistryError("validated config.name does not match its identity")
+    checked["name"] = _validate_instrument_identity(name, path="validated config.name")
     return checked
+
+
+def _validate_instrument_identity(name: object, *, path: str) -> str:
+    """Apply the same bounded, control-free, non-path identity contract."""
+
+    try:
+        stable_name = _bounded_identifier(name, label=path)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise DriverRegistryError(str(exc)) from exc
+    if (
+        stable_name != stable_name.strip()
+        or "/" in stable_name
+        or "\\" in stable_name
+        or ":" in stable_name
+        or ".." in stable_name
+        or stable_name in {".", "~"}
+    ):
+        raise DriverRegistryError(f"{path} must be a stable identity, not path syntax")
+    return stable_name
 
 
 def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") -> ValidatedInstrumentConfig:
@@ -705,6 +726,9 @@ def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") ->
     values = spec.normalizer(values, path)
     name = values["name"]
     assert isinstance(name, str)
+    stable_name = _validate_instrument_identity(name, path=f"{path}.name")
+    values["name"] = stable_name
+    name = stable_name
     return ValidatedInstrumentConfig._from_validated(spec=spec, name=name, values=values)
 
 

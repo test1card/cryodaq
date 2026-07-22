@@ -512,10 +512,10 @@ async def test_clock_exception_during_cancelled_attempt_never_masks_cancellation
 
 def test_dark_service_has_no_command_control_gui_socket_or_driver_authority() -> None:
     path = Path(__file__).resolve().parents[2] / "src/cryodaq/engine_wiring/operator_snapshot_publisher.py"
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None}
     imports.update(alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names)
-    text = path.read_text().lower()
+    text = path.read_text(encoding="utf-8").lower()
 
     assert not any(name.startswith(("cryodaq.gui", "cryodaq.drivers", "zmq", "cryodaq.safety")) for name in imports)
     for forbidden in ("command", "actuator", "credential", "token", "remediation", "restart"):

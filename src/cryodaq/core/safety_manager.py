@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_EVENTS = 500
 _CHECK_INTERVAL_S = 1.0
+_CHILD_FAULT_SETTLEMENT_DEADLINE_S = 15.0
 
 
 class SafetyConfigError(RuntimeError):
@@ -48,6 +49,10 @@ class SafetyConfigError(RuntimeError):
     config error (clean exit code, no auto-restart) rather than a generic
     runtime crash (retryable).
     """
+
+
+class SafetyShutdownUnverifiedError(RuntimeError):
+    """Raised while shutdown must HOLD because safety settlement is incomplete."""
 
 
 class SafetyState(Enum):
@@ -190,6 +195,9 @@ class SafetyManager:
         self._stopping_child_generation: int | None = None
         self._failed_child_role: str | None = None
         self._failed_child_reason: str | None = None
+        self._pending_child_fault_settlements: set[asyncio.Task[Any]] = set()
+        self._shutdown_hold_fault_settlement: asyncio.Task[Any] | None = None
+        self._consumed_child_tasks: set[asyncio.Task[Any]] = set()
 
         # F36 owner-native operator cut.  This cache is replaced only on the
         # SafetyManager event-loop thread and its getter performs no sampling,
@@ -323,7 +331,12 @@ class SafetyManager:
         self._refresh_operator_safety_snapshot()
 
     async def start(self) -> None:
+        if self._pending_child_fault_settlements:
+            raise RuntimeError("SafetyManager child fault settlement is still in progress")
+        if self._stopping_child_generation is not None:
+            raise RuntimeError("SafetyManager stop is still in progress")
         if self._collect_task is not None or self._monitor_task is not None:
+            self._observe_terminal_safety_children()
             raise RuntimeError("SafetyManager child lifecycle is already owned")
         if self._queue is None:
             self._queue = self._broker.subscribe(
@@ -336,6 +349,7 @@ class SafetyManager:
         self._stopping_child_generation = None
         self._failed_child_role = None
         self._failed_child_reason = None
+        self._consumed_child_tasks.clear()
         self._collect_task = asyncio.create_task(self._collect_loop(), name="safety_collect")
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="safety_monitor")
         self._collect_task.add_done_callback(
@@ -362,41 +376,285 @@ class SafetyManager:
             self._refresh_operator_safety_snapshot()
         await self._publish_state("initial")
         await self._publish_keithley_channel_states("initial")
+        self._observe_terminal_safety_children()
+        if not self._safety_children_authoritative():
+            raise RuntimeError("SafetyManager children did not establish live authority")
 
     async def stop(self) -> None:
-        if self._active_sources:
-            await self._safe_off("system stop", channels=set(self._active_sources))
+        if self._stopping_child_generation is not None:
+            raise RuntimeError("SafetyManager stop is already in progress")
 
+        # Consume a child that was already terminal before this stop call. Its
+        # asyncio done callback may still be queued; establishing the stop cut
+        # first would misclassify that pre-existing authority loss as an
+        # expected shutdown exit and discard its fault/OFF/audit evidence.
+        self._observe_terminal_safety_children()
         generation = self._child_generation
         collect_task = self._collect_task
         monitor_task = self._monitor_task
+        previous_failed_role = self._failed_child_role
+        previous_failed_reason = self._failed_child_reason
+        consumed_before_stop = frozenset(
+            task for task in (collect_task, monitor_task) if task is not None and task in self._consumed_child_tasks
+        )
+
+        def _restore_shutdown_owner_cut() -> None:
+            """Roll a failed tentative stop back to retained owner truth."""
+
+            self._stopping_child_generation = None
+            self._failed_child_role = previous_failed_role
+            self._failed_child_reason = previous_failed_reason
+            self._safety_monitor_active = bool(
+                self._failed_child_role is None
+                and collect_task is not None
+                and monitor_task is not None
+                and collect_task is not monitor_task
+                and not collect_task.done()
+                and not monitor_task.done()
+            )
+            for task in (collect_task, monitor_task):
+                if task is not None and task.done() and task not in consumed_before_stop:
+                    self._consumed_child_tasks.discard(task)
+            self._observe_terminal_safety_children()
+            self._refresh_operator_safety_snapshot()
+
+        hold_reason = "SafetyManager shutdown HOLD: global OFF could not be verified"
+
+        def _begin_shutdown_hold(error: BaseException | None) -> None:
+            logger.critical(
+                "SafetyManager shutdown HOLD: global OFF could not be verified: %s",
+                error or "driver returned non-True confirmation",
+            )
+            self._begin_fault_latch(
+                hold_reason,
+                source="safety_shutdown",
+            )
+            hold_settlement = self._shutdown_hold_fault_settlement
+            if hold_settlement is None or hold_settlement.done():
+                hold_settlement = asyncio.create_task(
+                    self._settle_latched_fault(hold_reason, source="safety_shutdown"),
+                    name="safety_shutdown_hold_fault_settlement",
+                )
+                self._shutdown_hold_fault_settlement = hold_settlement
+                self._retain_child_fault_settlement(hold_settlement, reason=hold_reason)
+
+                def _clear_exact_shutdown_hold(completed: asyncio.Task[Any]) -> None:
+                    if self._shutdown_hold_fault_settlement is completed:
+                        self._shutdown_hold_fault_settlement = None
+
+                hold_settlement.add_done_callback(_clear_exact_shutdown_hold)
+            _restore_shutdown_owner_cut()
+
+        # Establish the synchronous mutation/lifecycle cut before the first
+        # hardware await. A child that exits while stop_source() is blocked is
+        # an expected member of this exact stopping generation, never a fresh
+        # fault which can erase or race the shutdown result.
         self._stopping_child_generation = generation
+        self._register_abort_intent(full=True)
         self._safety_monitor_active = False
-        self._failed_child_role = None
-        self._failed_child_reason = "safety_manager_stopping"
+        if self._failed_child_role is None:
+            self._failed_child_reason = "safety_manager_stopping"
+        self._reviewed_source_generation = None
+        self._reviewed_source_connected = False
         self._reviewed_source_verified_off = False
         self._refresh_operator_safety_snapshot()
+
+        cancelled: asyncio.CancelledError | None = None
+        safe_off_error: BaseException | None = None
+        if self._active_sources:
+            safe_off_task = asyncio.create_task(
+                self._safe_off("system stop", channels=set(self._active_sources)),
+                name="safety_manager_stop_sources",
+            )
+            _result, safe_off_error, safe_off_cancelled = await _settle_shielded_hardware_task(safe_off_task)
+            cancelled = safe_off_cancelled
+
+        # Per-channel stop is not the terminal shutdown receipt. Demand an
+        # exact global OFF confirmation before relinquishing either safety
+        # child, including pre-latched and stale-cache paths.
+        pending_before_global_proof = tuple(self._pending_child_fault_settlements)
+        global_off_task = asyncio.create_task(
+            self._ensure_output_off(),
+            name="safety_manager_global_off_proof",
+        )
+        global_off_result, global_off_error, global_off_cancelled = await _settle_shielded_hardware_task(
+            global_off_task
+        )
+        cancelled = cancelled or global_off_cancelled
+        global_off_verified = global_off_error is None and global_off_result is True
+        if global_off_verified:
+            self._active_sources.clear()
+        else:
+            # Keep the process and exact safety children alive. A later stop()
+            # retry may close the HOLD only after true OFF evidence; caller
+            # cancellation never converts uncertainty into success.
+            _begin_shutdown_hold(global_off_error)
+            if cancelled is not None:
+                raise cancelled
+            raise SafetyShutdownUnverifiedError(hold_reason) from global_off_error
+
+        # A retained older fault settlement can finish after the proof above
+        # and publish an inconclusive result. Settle every such owner while the
+        # safety children remain owned, then demand a new proof ordered after
+        # all of them. No older result may be the last writer before shutdown.
+        pending_faults = tuple(dict.fromkeys((*pending_before_global_proof, *self._pending_child_fault_settlements)))
+        if pending_faults:
+            bounded_drain = asyncio.create_task(
+                asyncio.wait(
+                    pending_faults,
+                    timeout=_CHILD_FAULT_SETTLEMENT_DEADLINE_S,
+                ),
+                name="safety_child_fault_pre_stop_drain",
+            )
+            drain_result, drain_error, drain_cancelled = await _settle_shielded_hardware_task(bounded_drain)
+            cancelled = cancelled or drain_cancelled
+            if drain_error is not None:
+                logger.critical("Safety child fault pre-stop drain failed: %s", drain_error)
+                still_pending = set(pending_faults)
+            else:
+                assert drain_result is not None
+                _done, still_pending = drain_result
+            if still_pending:
+                logger.critical(
+                    "Safety child fault settlement remained live after %.1fs during stop; ownership is retained",
+                    _CHILD_FAULT_SETTLEMENT_DEADLINE_S,
+                )
+                _restore_shutdown_owner_cut()
+                if cancelled is not None:
+                    raise cancelled
+                raise SafetyShutdownUnverifiedError(
+                    "SafetyManager shutdown HOLD: child fault settlement is still in progress"
+                )
+
+            ordered_proof_task = asyncio.create_task(
+                self._ensure_output_off(),
+                name="safety_manager_ordered_global_off_proof",
+            )
+            ordered_result, ordered_error, ordered_cancelled = await _settle_shielded_hardware_task(ordered_proof_task)
+            cancelled = cancelled or ordered_cancelled
+            if ordered_error is not None or ordered_result is not True:
+                _begin_shutdown_hold(ordered_error)
+                if cancelled is not None:
+                    raise cancelled
+                raise SafetyShutdownUnverifiedError(hold_reason) from ordered_error
+            self._active_sources.clear()
 
         tasks = tuple(task for task in (collect_task, monitor_task) if task is not None)
         for task in tasks:
             if not task.done():
                 task.cancel()
-        settlement = asyncio.gather(*tasks, return_exceptions=True)
-        cancelled: asyncio.CancelledError | None = None
-        try:
-            await asyncio.shield(settlement)
-        except asyncio.CancelledError as exc:
-            cancelled = exc
-            await settlement
+
+        async def _settle_children() -> None:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        settlement = asyncio.create_task(
+            _settle_children(),
+            name="safety_manager_child_stop_settlement",
+        )
+        _result, settlement_error, settlement_cancelled = await _settle_shielded_hardware_task(settlement)
+        cancelled = cancelled or settlement_cancelled
+        if settlement_error is not None:
+            logger.critical("Safety child stop settlement failed: %s", settlement_error)
 
         if self._child_generation == generation:
             if self._collect_task is collect_task:
                 self._collect_task = None
             if self._monitor_task is monitor_task:
                 self._monitor_task = None
-            self._stopping_child_generation = None
+        for task in tasks:
+            self._forget_consumed_child_if_unowned(task)
+        self._complete_stopping_generation_if_settled(generation)
         if cancelled is not None:
             raise cancelled
+        if safe_off_error is not None:
+            raise safe_off_error
+
+    def _safety_children_authoritative(self) -> bool:
+        """Return whether this exact manager lifetime owns both live children."""
+
+        if (
+            self._mock
+            and self._child_generation == 0
+            and self._stopping_child_generation is None
+            and self._failed_child_role is None
+        ):
+            # Focused simulator tests historically exercise command logic
+            # without starting background loops. No real manager receives this
+            # exception, and a mock loses it permanently after its first start.
+            return True
+        collect = self._collect_task
+        monitor = self._monitor_task
+        return bool(
+            self._child_generation > 0
+            and self._stopping_child_generation != self._child_generation
+            and self._failed_child_role is None
+            and self._safety_monitor_active
+            and collect is not None
+            and monitor is not None
+            and collect is not monitor
+            and not collect.done()
+            and not monitor.done()
+        )
+
+    def _complete_stopping_generation_if_settled(self, generation: int | None = None) -> None:
+        """Release the stop cut only after every owned async tail is terminal."""
+
+        stopping = self._stopping_child_generation
+        if stopping is None or (generation is not None and stopping != generation):
+            return
+        if self._collect_task is not None or self._monitor_task is not None:
+            return
+        if self._pending_child_fault_settlements:
+            return
+        self._stopping_child_generation = None
+
+    def _retain_child_fault_settlement(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        reason: str,
+    ) -> None:
+        """Retain a child-death OFF owner and make a missed deadline visible."""
+
+        self._pending_child_fault_settlements.add(task)
+        loop = asyncio.get_running_loop()
+
+        def _deadline() -> None:
+            if not task.done():
+                logger.critical(
+                    "Safety child fault/OFF settlement exceeded %.1fs (%s); the live task remains strongly owned",
+                    _CHILD_FAULT_SETTLEMENT_DEADLINE_S,
+                    reason,
+                )
+
+        deadline = loop.call_later(_CHILD_FAULT_SETTLEMENT_DEADLINE_S, _deadline)
+
+        def _settled(completed: asyncio.Task[Any]) -> None:
+            deadline.cancel()
+            self._pending_child_fault_settlements.discard(completed)
+            self._complete_stopping_generation_if_settled()
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                logger.critical("Safety child fault/OFF settlement was cancelled (%s)", reason)
+            except BaseException:
+                logger.exception("Safety child fault/OFF settlement failed (%s)", reason)
+
+        task.add_done_callback(_settled)
+
+    def _observe_terminal_safety_children(self) -> None:
+        """Synchronously consume exact owned children already known terminal."""
+
+        generation = self._child_generation
+        for role, task in (("collect", self._collect_task), ("monitor", self._monitor_task)):
+            if task is not None and task.done():
+                self._operator_child_done(task, role=role, generation=generation)
+
+    def _forget_consumed_child_if_unowned(self, task: asyncio.Task[Any]) -> None:
+        """Forget de-dup state only after this manager releases exact ownership."""
+
+        if task is not self._collect_task and task is not self._monitor_task:
+            self._consumed_child_tasks.discard(task)
 
     def _operator_child_done(
         self,
@@ -414,6 +672,8 @@ class SafetyManager:
         """
         if role not in {"collect", "monitor"}:
             raise ValueError("unknown SafetyManager child role")
+        if task in self._consumed_child_tasks:
+            return
         if task.cancelled():
             outcome = "cancelled"
         else:
@@ -423,14 +683,73 @@ class SafetyManager:
         current = self._collect_task if role == "collect" else self._monitor_task
         if generation != self._child_generation or task is not current:
             return
+        self._consumed_child_tasks.add(task)
         if self._stopping_child_generation == generation:
             return
 
+        self._reviewed_source_generation = None
+        self._reviewed_source_connected = False
+        self._reviewed_source_verified_off = False
         self._safety_monitor_active = False
         self._failed_child_role = role
         self._failed_child_reason = f"safety_{role}_{outcome}"
-        self._reviewed_source_verified_off = False
+        reason = f"Safety {role} child exited unexpectedly ({outcome})"
+        self._begin_fault_latch(reason, source=f"safety_{role}")
+        # Publish the revoked cut before any OFF/logging await. Even if another
+        # fault was already latched, child-authority loss still owns a distinct
+        # OFF attempt and audit record.
         self._refresh_operator_safety_snapshot()
+        settlement = asyncio.create_task(
+            self._settle_latched_fault(reason, source=f"safety_{role}"),
+            name=f"safety_{role}_{outcome}_fault_settlement",
+        )
+        self._retain_child_fault_settlement(settlement, reason=reason)
+
+    def replace_operator_child(self, role: str, task: asyncio.Task[Any]) -> None:
+        """Adopt one supervisor replacement without restoring safety authority."""
+
+        if role not in {"collect", "monitor"}:
+            raise ValueError("unknown SafetyManager child role")
+        if not isinstance(task, asyncio.Task):
+            raise TypeError("SafetyManager replacement child must be an asyncio.Task")
+        attr = "_collect_task" if role == "collect" else "_monitor_task"
+        other_attr = "_monitor_task" if role == "collect" else "_collect_task"
+        current = getattr(self, attr)
+        if task is getattr(self, other_attr):
+            raise RuntimeError("SafetyManager collect and monitor children must have distinct task identities")
+        if current is None:
+            raise RuntimeError(f"cannot replace live or unowned SafetyManager {role} child")
+        owner_loop = asyncio.get_running_loop()
+        if current.get_loop() is not owner_loop or task.get_loop() is not owner_loop:
+            raise RuntimeError("SafetyManager replacement child must belong to the owner event loop")
+        if current is task:
+            # Initial TaskSupervisor registration: SafetyManager.start()
+            # already installed the exact owner callback.
+            return
+        if self._stopping_child_generation == self._child_generation:
+            raise RuntimeError("cannot replace SafetyManager child while stopping")
+        if not current.done():
+            raise RuntimeError(f"cannot replace live or unowned SafetyManager {role} child")
+        # A supervisor may offer the replacement before asyncio has delivered
+        # the completed owner's queued done callback. Consume that exact
+        # terminal identity synchronously while it is still the authoritative
+        # role pointer; swapping first would make the delayed callback fail its
+        # identity check and silently discard terminal safety evidence.
+        self._operator_child_done(
+            current,
+            role=role,
+            generation=self._child_generation,
+        )
+        setattr(self, attr, task)
+        self._forget_consumed_child_if_unowned(current)
+        generation = self._child_generation
+        task.add_done_callback(
+            lambda completed, generation=generation: self._operator_child_done(
+                completed,
+                role=role,
+                generation=generation,
+            )
+        )
 
     @property
     def state(self) -> SafetyState:
@@ -441,7 +760,13 @@ class SafetyManager:
         return self._fault_reason
 
     def snapshot_operator_safety(self) -> OperatorSafetySnapshot:
-        """Return the immutable owner cache without I/O or recomputation."""
+        """Return the owner cache after consuming already-terminal children.
+
+        This boundary performs no await or driver I/O. It may synchronously
+        revoke a stale authority cut and schedule the separately-owned OFF
+        settlement for an exact task whose terminal state is already known.
+        """
+        self._observe_terminal_safety_children()
         return self._operator_safety_snapshot
 
     def record_reviewed_source_connected(self, *, verified_off: bool) -> None:
@@ -454,6 +779,8 @@ class SafetyManager:
             raise TypeError("verified_off must be an exact bool")
         if not self._mock:
             raise RuntimeError("manual reviewed-source connection evidence is simulator-only")
+        if not self._safety_children_authoritative():
+            raise RuntimeError("safety child authority is unavailable")
         if verified_off and (self._active_sources or self._state in {SafetyState.RUN_PERMITTED, SafetyState.RUNNING}):
             raise ValueError("cannot accept verified-OFF evidence while a source lifecycle is active")
         if self._reviewed_source_generation is None:
@@ -486,9 +813,10 @@ class SafetyManager:
 
     def _has_current_reviewed_connection_generation(self) -> bool:
         if self._mock:
-            return True
+            return self._safety_children_authoritative()
         return bool(
-            self._reviewed_source_identity_qualified
+            self._safety_children_authoritative()
+            and self._reviewed_source_identity_qualified
             and self._reviewed_source_generation is not None
             and self._reviewed_source_connected
             and self._keithley is not None
@@ -511,6 +839,8 @@ class SafetyManager:
             self._reviewed_source_connected = False
             self._reviewed_source_verified_off = False
             self._refresh_operator_safety_snapshot()
+            if not self._safety_children_authoritative():
+                raise RuntimeError("cannot grant reviewed-source generation without live safety children")
             if had_active_source:
                 await self._fault(f"reviewed source connection changed while active ({context})")
                 # The caller may still complete a diagnostic reconnect, but
@@ -531,6 +861,8 @@ class SafetyManager:
         del context
         async with self._cmd_lock:
             self._require_reviewed_source_identity(driver, runtime_binding)
+            if not self._safety_children_authoritative():
+                return False
             if generation is not self._reviewed_source_generation:
                 return False
             connected = getattr(driver, "connected", None) is True
@@ -710,6 +1042,43 @@ class SafetyManager:
                 if target_cancelled is not None:
                     raise target_cancelled
 
+                # The target proof is only evidence that this not-yet-started
+                # channel is OFF. A child death or competing abort can land
+                # while that proof is in flight; consume it before any state
+                # transition or source mutation and preserve an existing
+                # FAULT_LATCHED state exactly.
+                self._observe_terminal_safety_children()
+                authority_changed = (
+                    self._abort_generation != start_abort_generation
+                    or self._state == SafetyState.FAULT_LATCHED
+                    or not self._safety_children_authoritative()
+                )
+                if authority_changed:
+                    full_shutdown = (
+                        self._state == SafetyState.FAULT_LATCHED or self._full_abort_generation > start_abort_generation
+                    )
+                    if full_shutdown:
+                        off_task = asyncio.create_task(self._ensure_output_off())
+                        off_result, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
+                        confirmed_off = off_error is None and off_result is True
+                        if confirmed_off:
+                            self._active_sources.clear()
+                            self._refresh_operator_safety_snapshot()
+                        else:
+                            await self._fault(
+                                f"Safety authority changed during target OFF proof for {smu_channel}",
+                                channel=smu_channel,
+                            )
+                        if off_cancelled is not None:
+                            raise off_cancelled
+                    return {
+                        "ok": False,
+                        "state": self._state.value,
+                        "channel": smu_channel,
+                        "applied": {"output_off_confirmed": [smu_channel]},
+                        "error": "Safety authority changed before source start",
+                    }
+
             # Connection authority is committed only by the exact reviewed
             # lifecycle generation. Mere object presence is never authority.
             if self._mock:
@@ -784,6 +1153,15 @@ class SafetyManager:
                         "channel": smu_channel,
                         "error": str(start_error),
                     }
+
+                # A child can already be terminal while its done callback is
+                # still queued behind this resumed request. Observe exact task
+                # liveness here, advance the same full-abort generation, and
+                # let the established rollback path settle OFF.
+                if not self._safety_children_authoritative():
+                    self._observe_terminal_safety_children()
+                    if self._abort_generation == start_abort_generation:
+                        self._register_abort_intent(full=True)
 
                 # CRITICAL safety reconciliation (Phase 1 review P0-2):
                 # _fault() runs OUTSIDE _cmd_lock — a fail-on-silence /
@@ -921,9 +1299,12 @@ class SafetyManager:
 
     async def request_stop(self, *, channel: str | None = None) -> dict[str, Any]:
         """Own stop intent and the complete lock-to-publication settlement."""
-        self._register_abort_intent(full=channel is None)
+        stop_abort_generation = self._register_abort_intent(full=channel is None)
         operation = asyncio.create_task(
-            self._request_stop_owned(channel=channel),
+            self._request_stop_owned(
+                channel=channel,
+                expected_abort_generation=stop_abort_generation,
+            ),
             name="safety_request_stop",
         )
         result, error, caller_cancelled = await _settle_shielded_hardware_task(operation)
@@ -934,7 +1315,12 @@ class SafetyManager:
         assert isinstance(result, dict)
         return result
 
-    async def _request_stop_owned(self, *, channel: str | None = None) -> dict[str, Any]:
+    async def _request_stop_owned(
+        self,
+        *,
+        channel: str | None = None,
+        expected_abort_generation: int,
+    ) -> dict[str, Any]:
         async with self._cmd_lock:
             channels = self._resolve_channels(channel)
             if self._state == SafetyState.FAULT_LATCHED:
@@ -946,16 +1332,32 @@ class SafetyManager:
                     "error": "System is fault-latched - acknowledge_fault required",
                 }
 
-            await self._safe_off("Operator stop", channels=channels)
+            applied_off, interrupted = await self._safe_off(
+                "Operator stop",
+                channels=channels,
+                expected_abort_generation=expected_abort_generation,
+            )
             await self._publish_keithley_channel_states("stop")
-            if self._state == SafetyState.FAULT_LATCHED:
+            self._observe_terminal_safety_children()
+            interrupted = interrupted or (
+                self._abort_generation != expected_abort_generation
+                or self._state == SafetyState.FAULT_LATCHED
+                or not self._safety_children_authoritative()
+            )
+            if self._state == SafetyState.FAULT_LATCHED or interrupted:
                 # _safe_off fail-closed: the turn-off failed and latched a fault.
                 # Report that honestly rather than a successful stop.
                 return {
                     "ok": False,
                     "state": self._state.value,
                     "channels": sorted(channels),
-                    "error": f"Stop failed, fault latched: {self._fault_reason}",
+                    "active_channels": sorted(self._active_sources),
+                    "applied_off_channels": sorted(applied_off),
+                    "error": (
+                        f"Stop failed, fault latched: {self._fault_reason}"
+                        if self._state == SafetyState.FAULT_LATCHED
+                        else "Stop interrupted by a competing safety-authority change"
+                    ),
                 }
             return {
                 "ok": True,
@@ -1068,11 +1470,12 @@ class SafetyManager:
                 raise cancelled
             return True
 
-    def _register_abort_intent(self, *, full: bool) -> None:
+    def _register_abort_intent(self, *, full: bool) -> int:
         """Register cancellation-proof abort scope for competing starts."""
         self._abort_generation += 1
         if full:
             self._full_abort_generation = self._abort_generation
+        return self._abort_generation
 
     async def _emergency_off_locked(self, channel: str | None) -> dict[str, Any]:
         """emergency_off body; MUST be called holding ``_cmd_lock``."""
@@ -1153,6 +1556,9 @@ class SafetyManager:
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
 
+            if not self._safety_children_authoritative():
+                return {"ok": False, "error": "Safety child authority is unavailable"}
+
             if self._state == SafetyState.FAULT_LATCHED:
                 return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
 
@@ -1194,6 +1600,10 @@ class SafetyManager:
         """Live-update V/I compliance limits. Validates against config limits."""
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
+            update_abort_generation = self._abort_generation
+
+            if not self._safety_children_authoritative():
+                return {"ok": False, "error": "Safety child authority is unavailable"}
 
             if self._state == SafetyState.FAULT_LATCHED:
                 return {"ok": False, "error": f"FAULT: {self._fault_reason}"}
@@ -1235,15 +1645,100 @@ class SafetyManager:
                     }
 
             # All provided values validated — now apply.
+            applied: dict[str, float] = {}
             if v_comp is not None:
                 if not self._keithley.mock:
-                    await self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}")
-                runtime.v_comp = v_comp  # update only after successful write
+                    write_task = asyncio.create_task(
+                        self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}"),
+                        name=f"safety_limitv_write_{smu_channel}",
+                    )
+                    _result, write_error, write_cancelled = await _settle_shielded_hardware_task(write_task)
+                    if write_error is not None:
+                        reason = (
+                            f"Voltage-limit write outcome is uncertain on {smu_channel}: {type(write_error).__name__}"
+                        )
+                        logger.critical("%s: %s", reason, write_error)
+                        await self._fault(reason, channel=smu_channel, source="safety_limit_update")
+                        if write_cancelled is not None:
+                            raise write_cancelled
+                        return {
+                            "ok": False,
+                            "error": reason,
+                            "applied": applied,
+                            "uncertain": ["v_comp"],
+                        }
+                    # The SCPI write may already have reached hardware. Record
+                    # that fact before checking whether authority was lost
+                    # during the await; retaining the old cache would invent a
+                    # hardware/software agreement that no longer exists.
+                    runtime.v_comp = v_comp
+                    applied["v_comp"] = v_comp
+                    if write_cancelled is not None:
+                        await self._fault(
+                            f"Voltage-limit write completed after caller cancellation on {smu_channel}",
+                            channel=smu_channel,
+                            source="safety_limit_update",
+                        )
+                        raise write_cancelled
+                    self._observe_terminal_safety_children()
+                    if (
+                        self._abort_generation != update_abort_generation
+                        or self._state == SafetyState.FAULT_LATCHED
+                        or not self._safety_children_authoritative()
+                    ):
+                        return {
+                            "ok": False,
+                            "error": "Safety authority was lost after a limit write reached hardware",
+                            "applied": applied,
+                        }
+                else:
+                    runtime.v_comp = v_comp
+                    applied["v_comp"] = v_comp
 
             if i_comp is not None:
                 if not self._keithley.mock:
-                    await self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}")
-                runtime.i_comp = i_comp  # update only after successful write
+                    write_task = asyncio.create_task(
+                        self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}"),
+                        name=f"safety_limiti_write_{smu_channel}",
+                    )
+                    _result, write_error, write_cancelled = await _settle_shielded_hardware_task(write_task)
+                    if write_error is not None:
+                        reason = (
+                            f"Current-limit write outcome is uncertain on {smu_channel}: {type(write_error).__name__}"
+                        )
+                        logger.critical("%s: %s", reason, write_error)
+                        await self._fault(reason, channel=smu_channel, source="safety_limit_update")
+                        if write_cancelled is not None:
+                            raise write_cancelled
+                        return {
+                            "ok": False,
+                            "error": reason,
+                            "applied": applied,
+                            "uncertain": ["i_comp"],
+                        }
+                    runtime.i_comp = i_comp
+                    applied["i_comp"] = i_comp
+                    if write_cancelled is not None:
+                        await self._fault(
+                            f"Current-limit write completed after caller cancellation on {smu_channel}",
+                            channel=smu_channel,
+                            source="safety_limit_update",
+                        )
+                        raise write_cancelled
+                    self._observe_terminal_safety_children()
+                    if (
+                        self._abort_generation != update_abort_generation
+                        or self._state == SafetyState.FAULT_LATCHED
+                        or not self._safety_children_authoritative()
+                    ):
+                        return {
+                            "ok": False,
+                            "error": "Safety authority was lost after a limit write reached hardware",
+                            "applied": applied,
+                        }
+                else:
+                    runtime.i_comp = i_comp
+                    applied["i_comp"] = i_comp
 
             logger.info(
                 "SAFETY: limits update %s: V_comp=%.1f I_comp=%.3f",
@@ -1389,15 +1884,17 @@ class SafetyManager:
         previous = self._operator_safety_snapshot
         observed = max(time.monotonic(), previous.observed_monotonic_s)
         lifecycle = SafetyLifecycle(self._state.value)
+        children_authoritative = self._safety_children_authoritative()
         verified_off = (
-            self._reviewed_source_verified_off
+            children_authoritative
+            and self._reviewed_source_verified_off
             and not self._active_sources
             and lifecycle not in {SafetyLifecycle.RUN_PERMITTED, SafetyLifecycle.RUNNING}
         )
         blockers: list[SafetyBlocker] = []
         plant: list[PlantHealthFact] = []
 
-        if self._safety_monitor_active:
+        if children_authoritative:
             plant.append(
                 PlantHealthFact(
                     "safety_monitor",
@@ -1720,14 +2217,15 @@ class SafetyManager:
         """
         await self._fault(reason=reason, channel=channel, value=value, source=source)
 
-    async def _fault(
+    def _begin_fault_latch(
         self,
         reason: str,
         *,
         channel: str = "",
         value: float = 0.0,
         source: str = "safety_manager",
-    ) -> None:
+    ) -> bool:
+        del source
         # Early-return guard: ignore concurrent re-entries while already latched.
         # Multiple call sites (SafetyBroker overflow, monitoring loop, channel
         # faults, start_source failure) can fire in the same tick. Without
@@ -1742,8 +2240,13 @@ class SafetyManager:
                 reason,
                 channel or "-",
             )
-            return
+            return False
 
+        # Every newly latched fault owns the same synchronous full-abort cut.
+        # This prevents a mutation that resumes from an await from committing
+        # after monitor/rate/persistence faults that do not originate in an
+        # operator command.
+        self._register_abort_intent(full=True)
         self._fault_revision += 1
         # 1. Latch fault state IMMEDIATELY — no awaits before this.
         #    _transition is synchronous, so request_run() will see
@@ -1752,6 +2255,39 @@ class SafetyManager:
         self._fault_time = time.monotonic()
         self._fault_activated_at = time.time()
         self._transition(SafetyState.FAULT_LATCHED, reason, channel=channel, value=value)
+        return True
+
+    async def _fault(
+        self,
+        reason: str,
+        *,
+        channel: str = "",
+        value: float = 0.0,
+        source: str = "safety_manager",
+    ) -> None:
+        if not self._begin_fault_latch(
+            reason,
+            channel=channel,
+            value=value,
+            source=source,
+        ):
+            return
+        await self._settle_latched_fault(
+            reason,
+            channel=channel,
+            value=value,
+            source=source,
+        )
+
+    async def _settle_latched_fault(
+        self,
+        reason: str,
+        *,
+        channel: str = "",
+        value: float = 0.0,
+        source: str = "safety_manager",
+    ) -> None:
+        """Settle OFF, durable logging, and publication for a latched cut."""
 
         # 2. Now safe to do async cleanup — state already protects us.
         #    Re-entrancy is guarded by the FAULT_LATCHED early-return above (set
@@ -1853,7 +2389,14 @@ class SafetyManager:
             raise caller_cancelled
         return exact_confirmed
 
-    async def _safe_off(self, reason: str, *, channels: set[SmuChannel]) -> None:
+    async def _safe_off(
+        self,
+        reason: str,
+        *,
+        channels: set[SmuChannel],
+        expected_abort_generation: int | None = None,
+    ) -> tuple[frozenset[SmuChannel], bool]:
+        applied_off: set[SmuChannel] = set()
         if self._state == SafetyState.FAULT_LATCHED:
             # Jules review: shield emergency_off in fault-latched cleanup path
             # so cancellation cannot interrupt the defensive hardware shutdown.
@@ -1864,8 +2407,9 @@ class SafetyManager:
             logger.warning("_safe_off rejected while fault latched")
             if caller_cancelled is not None:
                 raise caller_cancelled
-            return
+            return frozenset(), True
 
+        interrupted = False
         caller_cancelled: asyncio.CancelledError | None = None
         if self._keithley is not None:
             for smu_channel in sorted(channels):
@@ -1894,15 +2438,33 @@ class SafetyManager:
                     )
                     if caller_cancelled is not None:
                         raise caller_cancelled
-                    return
+                    return frozenset(applied_off), True
+                applied_off.add(smu_channel)
+                self._active_sources.discard(smu_channel)
+                self._refresh_operator_safety_snapshot()
+                self._observe_terminal_safety_children()
+                if self._state == SafetyState.FAULT_LATCHED:
+                    interrupted = True
+                elif expected_abort_generation is not None and (
+                    self._abort_generation != expected_abort_generation or not self._safety_children_authoritative()
+                ):
+                    interrupted = True
+        else:
+            applied_off.update(channels)
+            self._active_sources.difference_update(channels)
 
-        self._active_sources.difference_update(channels)
+        if interrupted:
+            self._refresh_operator_safety_snapshot()
+            if caller_cancelled is not None:
+                raise caller_cancelled
+            return frozenset(applied_off), True
+
         if self._active_sources:
             self._transition(
                 SafetyState.RUNNING,
                 f"Partial stop: {sorted(channels)}, still active: {sorted(self._active_sources)}",
             )
-            return
+            return frozenset(applied_off), False
 
         retained_generation = self._has_current_reviewed_connection_generation()
         self._reviewed_source_connected = retained_generation
@@ -1910,6 +2472,7 @@ class SafetyManager:
         self._transition(SafetyState.SAFE_OFF, reason)
         if caller_cancelled is not None:
             raise caller_cancelled
+        return frozenset(applied_off), False
 
     def _resolve_channels(self, channel: str | None) -> set[SmuChannel]:
         if channel is not None:
@@ -1920,6 +2483,9 @@ class SafetyManager:
 
     def _check_preconditions(self) -> tuple[bool, str]:
         now = time.monotonic()
+
+        if not self._safety_children_authoritative():
+            return False, "Safety monitor/collector authority is unavailable"
 
         if self._keithley is not None and getattr(self._keithley, "watchdog_trip_pending", False) is True:
             return False, (

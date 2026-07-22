@@ -11,19 +11,32 @@ from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, Annunci
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
 
+_MUTATION_TOKEN = "test-mutation-token-1"
+
+
+def _mutation(command: dict[str, object]) -> dict[str, object]:
+    return {
+        **command,
+        "protocol_major": 1,
+        "mutation_capability": "cryodaq_mutation_v1",
+        "capability_token": _MUTATION_TOKEN,
+    }
+
 
 def _event(name: str, *, at: float = 100.0) -> AlarmEvent:
     return AlarmEvent(name, "CRITICAL", "hazard", at, ["T1"], {"T1": 9.0})
 
 
 def _ann_ack(engine: str, activation: str) -> dict[str, str]:
-    return {
-        "cmd": "annunciation_ack",
-        "engine_instance_id": engine,
-        "activation_id": activation,
-        "operator": "operator",
-        "reason": "observed",
-    }
+    return _mutation(
+        {
+            "cmd": "annunciation_ack",
+            "engine_instance_id": engine,
+            "activation_id": activation,
+            "operator": "operator",
+            "reason": "observed",
+        }
+    )
 
 
 def _context(*, alarms: AlarmStateManager, safety: object, registry: AnnunciationRegistry) -> EngineCommandContext:
@@ -54,6 +67,7 @@ def _context(*, alarms: AlarmStateManager, safety: object, registry: Annunciatio
         multiline_burst_auto_stop_meta={},
         multiline_burst_auto_stop_tasks={},
         annunciation_registry=registry,
+        mutation_capability_token=_MUTATION_TOKEN,
     )
 
 
@@ -280,9 +294,10 @@ async def test_closed_command_shapes_reject_legacy_extra_and_missing_fields() ->
         "error": "invalid_annunciation_command",
     }
     assert await _handle_gui_command(
-        {"cmd": "annunciation_ack", "engine_instance_id": "engine-a"}, context=context
+        _mutation({"cmd": "annunciation_ack", "engine_instance_id": "engine-a"}),
+        context=context,
     ) == {"ok": False, "error": "invalid_annunciation_command"}
-    assert await _handle_gui_command({"cmd": "alarm_v2_ack", "alarm_name": "a"}, context=context) == {
+    assert await _handle_gui_command(_mutation({"cmd": "alarm_v2_ack", "alarm_name": "a"}), context=context) == {
         "ok": False,
         "error": "invalid_alarm_ack_command",
     }
@@ -301,14 +316,16 @@ async def test_delayed_exact_alarm_command_cannot_ack_refired_alarm() -> None:
     alarms.process("a", None, {})
     alarms.process("a", _event("a", at=100.0), {})
     result = await _handle_gui_command(
-        {
-            "cmd": "alarm_v2_ack",
-            "alarm_name": "a",
-            "engine_instance_id": "engine-a",
-            "activation_id": old_id,
-            "operator": "operator",
-            "reason": "delayed",
-        },
+        _mutation(
+            {
+                "cmd": "alarm_v2_ack",
+                "alarm_name": "a",
+                "engine_instance_id": "engine-a",
+                "activation_id": old_id,
+                "operator": "operator",
+                "reason": "delayed",
+            }
+        ),
         context=context,
     )
 

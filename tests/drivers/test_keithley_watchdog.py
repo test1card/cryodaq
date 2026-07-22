@@ -7,7 +7,9 @@ strings). Tests drive a fake TSP transport and assert exact command strings.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -53,7 +55,7 @@ class _RecordingTransport:
         self.calls.append(("query", cmd))
         c = cmd.lower()
         if "*idn?" in c:
-            return "Keithley Instruments Inc., Model 2604B"
+            return "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
         if "cryodaq_wdog_version" in c:
             return self.wdog_version_raw
         if "cryodaq_wdog_autonomous" in c:
@@ -63,6 +65,10 @@ class _RecordingTransport:
         if "cryodaq_wdog_tripped" in c:
             return self.wdog_tripped_raw
         if "source.output" in c:
+            if "cryodaq_off_v1" in c:
+                match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", cmd)
+                assert match is not None
+                return f"CRYODAQ_OFF_V1|{match.group(1)}|0\n"
             return "0"
         if "errorqueue.count" in c:
             return "0"
@@ -152,6 +158,55 @@ async def test_arm_on_connect_emits_upload_timeout_run() -> None:
     assert idx_upload < idx_timeout < idx_run
 
 
+async def test_watchdog_script_file_load_runs_off_event_loop(monkeypatch) -> None:
+    import cryodaq.drivers.instruments.keithley_2604b as keithley_module
+
+    calls: list[object] = []
+
+    def _load() -> str:
+        return "CRYODAQ_WDOG_VERSION = 3\nfunction cryodaq_wdog_pet() end"
+
+    async def _to_thread(function, /, *args, **kwargs):
+        calls.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(keithley_module, "_load_wdog_script", _load)
+    monkeypatch.setattr(asyncio, "to_thread", _to_thread)
+    driver = _driver(enabled=True)
+    transport = _RecordingTransport()
+    driver._transport = transport
+
+    await driver.connect()
+
+    assert calls == [_load]
+
+
+async def test_watchdog_ack_recovery_script_load_runs_off_event_loop(monkeypatch) -> None:
+    import cryodaq.drivers.instruments.keithley_2604b as keithley_module
+
+    driver = _mode_driver("best_effort")
+    transport = _RecordingTransport()
+    driver._transport = transport
+    await driver.connect()
+    driver._wdog_trip_pending = True
+    transport.wdog_tripped_raw = "nil"
+
+    calls: list[object] = []
+
+    def _load() -> str:
+        return "CRYODAQ_WDOG_VERSION = 3\nfunction cryodaq_wdog_pet() end"
+
+    async def _to_thread(function, /, *args, **kwargs):
+        calls.append(function)
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(keithley_module, "_load_wdog_script", _load)
+    monkeypatch.setattr(asyncio, "to_thread", _to_thread)
+
+    assert await driver.acknowledge_wdog_trip() is True
+    assert calls == [_load]
+
+
 async def test_arm_timeout_reflects_config() -> None:
     drv = _driver(enabled=True, timeout_s=12.5)
     t = _RecordingTransport()
@@ -237,6 +292,21 @@ async def test_operator_ack_refuses_to_clear_trip_when_off_unverified() -> None:
     assert "cryodaq_wdog_acknowledge()" not in t.writes
     assert t.wdog_tripped_raw == "1"
     assert drv.watchdog_trip_pending is True
+
+
+async def test_disconnected_ack_cannot_consume_pending_trip_evidence(caplog) -> None:
+    drv = _mode_driver("best_effort")
+    transport = _RecordingTransport()
+    drv._transport = transport
+    drv._wdog_trip_pending = True
+    drv._connected = False
+
+    with caplog.at_level(logging.CRITICAL):
+        assert await drv.acknowledge_wdog_trip() is False
+
+    assert drv.watchdog_trip_pending is True
+    assert transport.writes == []
+    assert "while disconnected" in caplog.text
 
 
 async def test_operator_ack_bad_readback_disarms_and_stays_failed() -> None:
@@ -384,11 +454,15 @@ async def test_flag_off_default_is_byte_identical() -> None:
     assert _wdog_writes(off) == []
 
 
-async def test_off_and_default_command_streams_byte_identical() -> None:
+async def test_off_and_default_command_streams_byte_identical(monkeypatch) -> None:
     """True byte-identity: a driver built with ``watchdog_mode='off'`` and one
     built with NO watchdog kwargs must issue the exact same chronological
     command stream (writes AND queries, in order) across connect + poll +
     disconnect — proves the feature is inert, not merely wdog-write-free."""
+    monkeypatch.setattr(
+        "cryodaq.drivers.instruments.keithley_2604b.secrets.token_hex",
+        lambda _size: "a" * 32,
+    )
     d_off = _mode_driver("off")
     d_default = Keithley2604B("k2604", "USB0::FAKE", mock=False)
     t_off = _RecordingTransport()
@@ -716,7 +790,7 @@ async def test_latch_read_transport_fail_best_effort_degrades(caplog) -> None:
     assert "cryodaq_wdog_pet()" not in t.writes
 
 
-@pytest.mark.parametrize("sentinel", ["nil", " NIL "])
+@pytest.mark.parametrize("sentinel", ["nil", " nil \r\n"])
 async def test_latch_read_explicit_fresh_sentinel_is_untripped(sentinel) -> None:
     """Only explicit fresh-instrument sentinels permit the first upload."""
     drv = _mode_driver("required")
@@ -732,7 +806,7 @@ async def test_latch_read_explicit_fresh_sentinel_is_untripped(sentinel) -> None
 
 @pytest.mark.parametrize(
     "raw",
-    ["garbage", "undefined", "nan", "inf", "-inf", "2", "-1", "0.5", "", "true"],
+    ["garbage", "undefined", "NIL", "nan", "inf", "-inf", "2", "-1", "0.5", "", "true"],
 )
 @pytest.mark.parametrize("mode", ["best_effort", "required"])
 async def test_latch_malformed_preserves_evidence_without_upload(raw, mode, caplog) -> None:

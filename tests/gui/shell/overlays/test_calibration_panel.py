@@ -8,14 +8,13 @@ from datetime import UTC, datetime
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.calibration_panel import (
     CalibrationPanel,
     CoverageBar,
-    _ResultsWidget,
     _strip_instrument_prefix,
 )
 
@@ -49,11 +48,13 @@ class _StubWorker:
     """
 
     dispatched: list[dict] = []
+    instances: list[_StubWorker] = []
     next_result: dict[str, dict] = {}  # cmd → result dict
 
     def __init__(self, cmd, *, parent=None) -> None:
         self._cmd = dict(cmd)
         _StubWorker.dispatched.append(self._cmd)
+        _StubWorker.instances.append(self)
         self.finished = _FakeSignal()
 
     def start(self) -> None:
@@ -70,8 +71,8 @@ def _reset_stub(monkeypatch):
     import cryodaq.gui.shell.overlays.calibration_panel as module
 
     _StubWorker.dispatched = []
+    _StubWorker.instances = []
     _StubWorker.next_result = {}
-    _ResultsWidget._last_export_result = None
     monkeypatch.setattr(module, "ZmqCommandWorker", _StubWorker)
     yield
 
@@ -92,6 +93,7 @@ def test_panel_constructs_and_exposes_three_modes(app):
     assert panel._stack.currentWidget() is panel._setup_widget
     # Section title rendered inside the setup widget.
     from PySide6.QtWidgets import QLabel
+
     texts = [lbl.text() for lbl in panel._setup_widget.findChildren(QLabel)]
     assert any("Параметры калибровки" in t for t in texts)
     # Start button present.
@@ -109,11 +111,7 @@ def test_panel_header_cyrillic_uppercase(app):
     from PySide6.QtWidgets import QLabel
 
     panel = CalibrationPanel()
-    titles = [
-        label.text()
-        for label in panel.findChildren(QLabel)
-        if label.text().startswith("КАЛИБРОВКА")
-    ]
+    titles = [label.text() for label in panel.findChildren(QLabel) if label.text().startswith("КАЛИБРОВКА")]
     assert "КАЛИБРОВКА ДАТЧИКОВ" in titles
 
 
@@ -137,9 +135,7 @@ def test_setup_reference_combo_populated(app):
 def test_setup_target_checkboxes_default_checked(app):
     panel = CalibrationPanel()
     # Must have checkbox keys (from real instruments.yaml).
-    assert len(panel._setup_widget._target_checkboxes) >= 1, (
-        "No target checkboxes — instruments.yaml not loaded"
-    )
+    assert len(panel._setup_widget._target_checkboxes) >= 1, "No target checkboxes — instruments.yaml not loaded"
     for key, cb in panel._setup_widget._target_checkboxes.items():
         assert cb.isChecked() is True, f"Checkbox {key!r} not checked by default"
 
@@ -271,13 +267,21 @@ def test_acquisition_update_coverage_forwards_to_bar(app):
 # ----------------------------------------------------------------------
 
 
-def test_coverage_bar_uses_status_tokens(app):
-    assert CoverageBar._color_for("dense").name().lower() == theme.STATUS_OK.lower()
-    assert CoverageBar._color_for("medium").name().lower() == theme.STATUS_CAUTION.lower()
-    assert CoverageBar._color_for("sparse").name().lower() == theme.STATUS_WARNING.lower()
+def test_coverage_bar_uses_data_palette_not_safety_tokens(app):
+    assert CoverageBar._color_for("dense").name().lower() == theme.PLOT_LINE_PALETTE[0].lower()
+    assert CoverageBar._color_for("medium").name().lower() == theme.PLOT_LINE_PALETTE[1].lower()
+    assert CoverageBar._color_for("sparse").name().lower() == theme.PLOT_LINE_PALETTE[4].lower()
     assert CoverageBar._color_for("empty").name().lower() == theme.MUTED_FOREGROUND.lower()
     # Unknown status falls back to MUTED_FOREGROUND.
     assert CoverageBar._color_for("garbage").name().lower() == theme.MUTED_FOREGROUND.lower()
+    density_colors = {CoverageBar._color_for(status).name().lower() for status in ("dense", "medium", "sparse")}
+    safety_colors = {
+        theme.STATUS_OK.lower(),
+        theme.STATUS_CAUTION.lower(),
+        theme.STATUS_FAULT.lower(),
+    }
+    assert density_colors.isdisjoint(safety_colors)
+    assert len({CoverageBar._brush_style_for(status) for status in ("dense", "medium", "sparse")}) == 3
 
 
 def test_coverage_bar_empty_bins_paints_nothing(app):
@@ -287,9 +291,20 @@ def test_coverage_bar_empty_bins_paints_nothing(app):
     bar.show()
     bar.set_coverage([])
     from PySide6.QtWidgets import QApplication
+
     QApplication.processEvents()
     # Empty bins: no segments painted (early-return in paintEvent).
     assert bar._bins == []
+
+
+def test_coverage_bar_exposes_non_color_density_description(app):
+    bar = CoverageBar()
+    bar.set_coverage([{"status": "dense"}, {"status": "medium"}, {"status": "sparse"}, {"status": "empty"}])
+    description = bar.accessibleDescription().lower()
+    assert "плотно 1" in description
+    assert "средне 1" in description
+    assert "редко 1" in description
+    assert "нет данных 1" in description
 
 
 # ----------------------------------------------------------------------
@@ -308,12 +323,37 @@ def test_results_set_channels_populates_combo(app):
 
 def test_results_channel_change_dispatches_curve_get(app):
     panel = CalibrationPanel()
+    _StubWorker.next_result = {"calibration_curve_get": {"ok": True, "curve": {}}}
+    panel.set_connected(True)
     panel._results_widget.set_channels(["Т1", "Т2"])
     _StubWorker.dispatched = []
     panel._results_widget._channel_combo.setCurrentText("Т2")
     get_cmds = [c for c in _StubWorker.dispatched if c.get("cmd") == "calibration_curve_get"]
     assert len(get_cmds) == 1
     assert get_cmds[0]["sensor_id"] == "Т2"
+
+
+def test_metrics_requests_are_single_flight_and_channel_bound(app):
+    panel = CalibrationPanel()
+    panel.set_connected(True)
+    panel._results_widget.set_channels(["Т1", "Т2"])
+    first = next(
+        worker for worker in reversed(_StubWorker.instances) if worker._cmd.get("cmd") == "calibration_curve_get"
+    )
+    panel._results_widget._channel_combo.setCurrentText("Т2")
+    assert panel._results_widget._queued_metrics_sensor == "Т2"
+
+    first.finished.emit({"ok": True, "curve": {"raw_count": 111}})
+    assert panel._results_widget._raw_count_label.text() == "—"
+    second = next(
+        worker
+        for worker in reversed(_StubWorker.instances)
+        if worker is not first and worker._cmd.get("cmd") == "calibration_curve_get"
+    )
+    assert second._cmd["sensor_id"] == "Т2"
+    second.finished.emit({"ok": True, "curve": {"raw_count": 222}})
+    assert panel._results_widget._raw_count_label.text() == "222"
+    assert "Т2" in panel._results_widget._metrics_status_label.text()
 
 
 def test_results_update_metrics_populates_labels(app):
@@ -373,6 +413,23 @@ def test_import_cancel_no_dispatch(app, monkeypatch):
     assert import_cmds == []
 
 
+def test_import_revalidates_connection_after_file_dialog(app, monkeypatch, tmp_path):
+    panel = CalibrationPanel()
+    panel.set_connected(True)
+    import_path = tmp_path / "curve.340"
+    import_path.write_text("# curve\n", encoding="utf-8")
+
+    def _disconnect_during_dialog(*_args, **_kwargs):
+        panel.set_connected(False)
+        return str(import_path), "LakeShore .340 (*.340)"
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(_disconnect_during_dialog))
+    _StubWorker.dispatched = []
+    panel._setup_widget._on_import_clicked("LakeShore .340 (*.340)")
+    assert not any(cmd.get("cmd") == "calibration_curve_import" for cmd in _StubWorker.dispatched)
+    assert "не отправлен" in panel._banner_label.text().lower()
+
+
 # ----------------------------------------------------------------------
 # Export
 # ----------------------------------------------------------------------
@@ -420,9 +477,7 @@ def test_export_json_dispatches_json_path(app, monkeypatch, tmp_path):
     panel.set_connected(True)
     panel._results_widget.set_channels(["Т5"])
     out = tmp_path / "Т5.json"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "JSON (*.json)"))
-    )
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "JSON (*.json)")))
     _StubWorker.dispatched = []
     panel._results_widget._export_json_btn.click()
     export_cmds = [c for c in _StubWorker.dispatched if c.get("cmd") == "calibration_curve_export"]
@@ -434,6 +489,38 @@ def test_export_json_dispatches_json_path(app, monkeypatch, tmp_path):
     assert "curve_cof_path" not in cmd
     assert "curve_340_path" not in cmd
     assert "table_path" not in cmd
+
+
+def test_export_revalidates_connection_after_file_dialog(app, monkeypatch, tmp_path):
+    panel = CalibrationPanel()
+    panel.set_connected(True)
+    panel._results_widget.set_channels(["Т1"])
+    out = tmp_path / "Т1.json"
+
+    def _disconnect_during_dialog(*_args, **_kwargs):
+        panel.set_connected(False)
+        return str(out), "JSON (*.json)"
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(_disconnect_during_dialog))
+    _StubWorker.dispatched = []
+    panel._results_widget._on_export_clicked("json_path", "JSON (*.json)")
+    assert not any(cmd.get("cmd") == "calibration_curve_export" for cmd in _StubWorker.dispatched)
+    assert "не отправлен" in panel._banner_label.text().lower()
+
+
+def test_export_late_success_after_disconnect_is_unknown(app, monkeypatch, tmp_path):
+    panel = CalibrationPanel()
+    panel.set_connected(True)
+    panel._results_widget.set_channels(["Т1"])
+    out = tmp_path / "Т1.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *_a, **_k: (str(out), "JSON (*.json)")))
+    panel._results_widget._on_export_clicked("json_path", "JSON (*.json)")
+    worker = panel._results_widget._export_worker
+    assert worker is not None
+    panel.set_connected(False)
+    worker.finished.emit({"ok": True})
+    assert "неизвестен" in panel._banner_label.text().lower()
+    assert panel._banner_timer.isActive() is False
 
 
 # ----------------------------------------------------------------------
@@ -511,6 +598,75 @@ def test_apply_global_plus_channel_dispatches_global_first(app):
     assert policy_cmd["curve_id"] == "curve-xyz"
 
 
+def test_apply_lookup_failure_never_dispatches_empty_curve_policy(app):
+    panel = CalibrationPanel()
+    _StubWorker.next_result = {
+        "calibration_curve_get": {"ok": True, "curve": {}},
+        "calibration_curve_lookup": {"ok": False, "error": "not assigned"},
+    }
+    panel.set_connected(True)
+    panel._results_widget.set_channels(["Т1"])
+    _StubWorker.dispatched = []
+    panel._results_widget._apply_btn.click()
+    assert any(cmd.get("cmd") == "calibration_curve_lookup" for cmd in _StubWorker.dispatched)
+    assert not any(cmd.get("cmd") == "calibration_runtime_set_channel_policy" for cmd in _StubWorker.dispatched)
+    assert panel._active_apply is None
+
+
+def test_apply_timeout_reconciles_exact_runtime_state_without_retry(app):
+    panel = CalibrationPanel()
+    _StubWorker.next_result = {
+        "calibration_curve_get": {"ok": True, "curve": {}},
+        "calibration_curve_lookup": {"ok": True, "assignment": {"curve_id": "curve-1"}},
+        "calibration_runtime_set_channel_policy": {
+            "ok": False,
+            "_handler_timeout": True,
+            "error": "Engine timed out",
+        },
+        "calibration_runtime_status": {
+            "ok": True,
+            "runtime": {
+                "global_mode": "off",
+                "assignments": [
+                    {
+                        "channel_key": "Т1",
+                        "sensor_id": "Т1",
+                        "reading_mode_policy": "on",
+                    }
+                ],
+            },
+        },
+    }
+    panel.set_connected(True)
+    panel._results_widget.set_channels(["Т1"])
+    panel._results_widget._policy_combo.setCurrentText("Включить")
+    _StubWorker.dispatched = []
+    panel._results_widget._apply_btn.click()
+    QApplication.processEvents()
+    commands = [cmd["cmd"] for cmd in _StubWorker.dispatched]
+    assert commands.count("calibration_runtime_set_channel_policy") == 1
+    assert commands.count("calibration_runtime_status") == 1
+    assert panel._unresolved_apply is None
+    assert "подтверждено" in panel._banner_label.text().lower()
+
+
+def test_disconnect_during_apply_prevents_late_chain_dispatch(app):
+    panel = CalibrationPanel()
+    _StubWorker.next_result = {"calibration_curve_get": {"ok": True, "curve": {}}}
+    panel.set_connected(True)
+    panel._results_widget.set_channels(["Т1"])
+    _StubWorker.dispatched = []
+    panel._results_widget._apply_btn.click()
+    lookup = next(
+        worker for worker in reversed(_StubWorker.instances) if worker._cmd.get("cmd") == "calibration_curve_lookup"
+    )
+    panel.set_connected(False)
+    lookup.finished.emit({"ok": True, "assignment": {"curve_id": "curve-1"}})
+    assert not any(cmd.get("cmd") == "calibration_runtime_set_channel_policy" for cmd in _StubWorker.dispatched)
+    assert panel._unresolved_apply is not None
+    assert "неизвестен" in panel._banner_label.text().lower()
+
+
 # ----------------------------------------------------------------------
 # Connection gating
 # ----------------------------------------------------------------------
@@ -533,6 +689,44 @@ def test_reconnect_reenables_controls(app):
     # start gated by channel presence.
     assert panel._setup_widget._import_340_btn.isEnabled() is True
     assert panel._results_widget._export_cof_btn.isEnabled() is True
+
+
+def test_direct_start_handler_refuses_disconnected_dispatch(app):
+    panel = CalibrationPanel()
+    panel._on_start_requested("LS218:Т1", ["LS218:Т2"])
+    assert not any(cmd.get("cmd") == "experiment_start" for cmd in _StubWorker.dispatched)
+    assert "не отправлен" in panel._banner_label.text().lower()
+
+
+def test_start_timeout_blocks_repeat_until_exact_status(app):
+    panel = CalibrationPanel()
+    panel.set_connected(True)
+    _StubWorker.next_result = {
+        "experiment_start": {
+            "ok": False,
+            "_handler_timeout": True,
+            "error": "Engine timed out",
+        }
+    }
+    _StubWorker.dispatched = []
+    panel._on_start_requested("LS218:Т1", ["LS218:Т2"])
+    panel._on_start_requested("LS218:Т1", ["LS218:Т2"])
+    starts = [cmd for cmd in _StubWorker.dispatched if cmd.get("cmd") == "experiment_start"]
+    assert len(starts) == 1
+    assert panel._unresolved_start_name
+    assert "заблокирован" in panel._banner_label.text().lower()
+
+
+def test_stale_mode_reply_from_old_connection_cannot_switch_view(app):
+    panel = CalibrationPanel()
+    panel.set_connected(True)
+    old_worker = next(
+        worker for worker in _StubWorker.instances if worker._cmd.get("cmd") == "calibration_acquisition_status"
+    )
+    panel.set_connected(False)
+    panel.set_connected(True)
+    old_worker.finished.emit({"ok": True, "active": True, "point_count": 10})
+    assert panel.get_current_mode() == "setup"
 
 
 # ----------------------------------------------------------------------

@@ -203,8 +203,25 @@ def test_two_queued_cuts_coalesce_to_one_newest_qualified_revision(qapp) -> None
     _events_until(lambda: len(emitted) == 1)
 
     assert [snapshot.cut.revision for snapshot in emitted] == [2]
-    assert owner.accepted_count == 1
+    assert owner.accepted_count == 2
     assert owner.snapshot == emitted[0]
+
+
+def test_mixed_identity_batch_is_rejected_atomically(qapp) -> None:
+    bridge = _Bridge()
+    second = _snapshot(2, source="replacement-engine")
+    bridge.snapshots = [_snapshot(1), second]
+    owner = OperatorSnapshotIngressOwner(bridge)
+    emitted: list[OperatorSnapshot] = []
+    owner.snapshot_changed.connect(emitted.append)
+    owner.start()
+
+    owner.pump()
+    _events_until(lambda: owner.rejected_count == 1)
+
+    assert owner.snapshot is None
+    assert owner.accepted_count == 0
+    assert emitted == []
 
 
 def test_wrong_thread_direct_mutation_rejected_but_signal_delivery_is_queued(qapp) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -9,7 +10,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cryodaq.core.atomic_write import atomic_write_text
+
 logger = logging.getLogger(__name__)
+
+
+def _write_audit_record(path: Path, record: dict[str, Any]) -> None:
+    """Create and atomically persist one strict-JSON audit record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False)
+    atomic_write_text(path, content)
 
 
 class AuditLogger:
@@ -65,7 +75,6 @@ class AuditLogger:
 
         now = datetime.now(UTC)
         date_dir = self._audit_dir / now.strftime("%Y-%m-%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
 
         filename = f"{now.strftime('%Y%m%dT%H%M%S%f')}_{audit_id}.json"
         path = date_dir / filename
@@ -87,7 +96,9 @@ class AuditLogger:
         }
 
         try:
-            path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+            # JSON encoding, directory creation, fsync and replacement are all
+            # filesystem work and must not stall the assistant event loop.
+            await asyncio.to_thread(_write_audit_record, path, record)
         except Exception:
             logger.warning("AuditLogger: failed to write %s", path, exc_info=True)
             return None

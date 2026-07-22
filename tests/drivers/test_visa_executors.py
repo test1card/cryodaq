@@ -228,7 +228,7 @@ async def test_usbtmc_close_releases_partial_manager_ownership():
 async def test_usbtmc_close_failure_is_contained_but_blocks_reopen(caplog):
     import logging
 
-    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+    from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
     manager_closed = False
 
@@ -246,7 +246,8 @@ async def test_usbtmc_close_failure_is_contained_but_blocks_reopen(caplog):
     transport._rm = _Manager()
 
     with caplog.at_level(logging.CRITICAL):
-        await transport.close()
+        with pytest.raises(USBTMCIncompleteCloseError):
+            await transport.close()
 
     assert manager_closed is True
     assert transport._close_incomplete is True
@@ -1100,6 +1101,9 @@ async def test_usbtmc_query_quarantine_clears_only_after_clean_close_and_success
         def write(self, command: str) -> None:
             self.writes.append(command)
 
+        def read(self) -> str:
+            return "0"
+
         def close(self) -> None:
             return None
 
@@ -1348,7 +1352,7 @@ async def test_usbtmc_failed_cancelled_and_handleless_open_cannot_clear_quaranti
 
 @pytest.mark.asyncio
 async def test_usbtmc_incomplete_or_noop_close_cannot_enable_quarantine_recovery() -> None:
-    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+    from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
     class _Resource:
         timeout = 0
@@ -1368,7 +1372,8 @@ async def test_usbtmc_incomplete_or_noop_close_cannot_enable_quarantine_recovery
     transport._rm = _Manager()
     with pytest.raises(OSError, match="query failed"):
         await transport.query("poison")
-    await transport.close()
+    with pytest.raises(USBTMCIncompleteCloseError):
+        await transport.close()
     assert transport._quarantine_clean_close is False
     assert transport._close_incomplete is True
     with pytest.raises(RuntimeError, match="terminal"):
@@ -1737,6 +1742,9 @@ async def test_gpib_query_quarantine_survives_close_and_open(monkeypatch) -> Non
         def write(self, command: str) -> None:
             self.writes.append(command)
 
+        def read(self) -> str:
+            return "0"
+
         def close(self) -> None:
             return None
 
@@ -1758,9 +1766,7 @@ async def test_gpib_query_quarantine_survives_close_and_open(monkeypatch) -> Non
     monkeypatch.setattr(transport, "_blocking_connect", _reopen)
     await transport.open("GPIB0::12::INSTR")
 
-    with pytest.raises(RuntimeError, match="terminally desynchronized"):
-        await transport.query("KRDG? 1")
-    assert reopened.writes == []
+    assert await transport.query("KRDG? 1") == "0"
     await transport.write("OUTPUT 0")
-    assert reopened.writes == ["OUTPUT 0"]
+    assert reopened.writes == ["KRDG? 1", "OUTPUT 0"]
     await transport.close()

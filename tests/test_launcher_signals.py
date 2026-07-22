@@ -1,179 +1,184 @@
-"""Tests for launcher SIGTERM/SIGINT handler — case 03 CRITICAL.
-
-Covers 6 cases per spec:
-  1. SIGTERM/SIGINT registration in main() — structural
-  2. _do_shutdown() is idempotent — unit
-  3. _handle_engine_exit() skips restart when shutdown requested — unit
-  4. Double SIGTERM is a no-op — unit
-  5. _shutdown_requested initialised to False in __init__ — structural
-  6. Watchdog guard (_restart_pending) still works alongside shutdown flag — unit
-
-Hardware-dependent tests (actual signal delivery to a running QApplication)
-require a live event loop and are out of scope for the dev-env test suite.
-Those are verified on the lab Ubuntu PC before v0.34.0 tag.
-"""
+"""Launcher signal and retry-safe shutdown state-machine contracts."""
 
 from __future__ import annotations
 
 import inspect
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-# ---------------------------------------------------------------------------
-# Structural tests — source inspection, no QApplication
-# ---------------------------------------------------------------------------
+from cryodaq.launcher import LauncherWindow, _ShutdownPhase
+
+
+class _Loop:
+    def __init__(self) -> None:
+        self.closed = False
+        self.close_calls = 0
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+class _Bridge:
+    def __init__(self, *, fail_once: bool = False) -> None:
+        self.fail_once = fail_once
+        self.shutdown_calls = 0
+        self.close_calls = 0
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("bridge still alive")
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def _host(*, bridge: _Bridge | None = None) -> SimpleNamespace:
+    events: list[str] = []
+    tray = MagicMock(name="tray")
+    loop = _Loop()
+    app = SimpleNamespace(quit=lambda: events.append("app.quit"))
+    host = SimpleNamespace(
+        _shutdown_requested=False,
+        _restart_pending=True,
+        _assistant_restart_pending=True,
+        _health_timer=MagicMock(name="health_timer"),
+        _data_timer=MagicMock(name="data_timer"),
+        _async_timer=MagicMock(name="async_timer"),
+        _tray=tray,
+        _tray_icon_red=None,
+        _tray_icon_yellow=None,
+        _stop_engine_down_alarm=lambda: events.append("alarm.stop"),
+        _invalidate_descriptor_transport=lambda: events.append("descriptor.invalidate"),
+        _snapshot_ingress=None,
+        _stop_assistant=lambda: events.append("assistant.stop"),
+        _bridge=bridge or _Bridge(),
+        _safety_worker=None,
+        _stop_engine=lambda: events.append("engine.stop"),
+        _soak_artifact_capability=None,
+        _soak_bridge_handshake=None,
+        _loop=loop,
+        _app=app,
+        events=events,
+    )
+    return host
 
 
 def test_launcher_imports_signal_module() -> None:
-    """signal module is importable from cryodaq.launcher (real attribute check)."""
-    import cryodaq.launcher as mod
-
-    # Verify at runtime that `signal` is actually an attribute of the module
-    # (i.e. it was imported, not just mentioned in a comment).
-    assert hasattr(mod, "signal"), "launcher module must import the signal stdlib module"
     import signal as stdlib_signal
 
-    assert mod.signal is stdlib_signal
+    import cryodaq.launcher as module
+
+    assert module.signal is stdlib_signal
 
 
-def test_main_registers_sigint_handler() -> None:
-    """main() source must register SIGINT — structural check (main() needs QApplication)."""
-    import cryodaq.launcher as mod
+def test_main_registers_sigint_and_sigterm_handlers() -> None:
+    import cryodaq.launcher as module
 
-    src = inspect.getsource(mod.main)
-    assert "signal.signal" in src
-    assert "SIGINT" in src
-
-
-def test_main_registers_sigterm_handler() -> None:
-    """main() source must register SIGTERM — structural check (main() needs QApplication)."""
-    import cryodaq.launcher as mod
-
-    src = inspect.getsource(mod.main)
-    assert "SIGTERM" in src
+    source = inspect.getsource(module.main)
+    assert "signal.signal" in source
+    assert "SIGINT" in source
+    assert "SIGTERM" in source
 
 
-def test_do_shutdown_sets_flag_on_real_call() -> None:
-    """_do_shutdown must flip _shutdown_requested to True on a real bound call."""
-    from cryodaq.launcher import LauncherWindow
+def test_shutdown_success_is_monotonic_and_quits_once() -> None:
+    host = _host()
 
-    w = _make_window_mock()
-    assert w._shutdown_requested is False
-    LauncherWindow._do_shutdown(w)
-    assert w._shutdown_requested is True
+    assert LauncherWindow._do_shutdown(host) is True
 
+    assert host._shutdown_requested is True
+    assert host._shutdown_phase is _ShutdownPhase.COMPLETE
+    assert host._restart_pending is False
+    assert host._assistant_restart_pending is False
+    assert host._bridge.shutdown_calls == 1
+    assert host._bridge.close_calls == 1
+    assert host._loop.closed is True
+    assert host.events[-1] == "app.quit"
+    host._tray.hide.assert_called_once_with()
 
-def test_handle_engine_exit_returns_early_when_shutdown_requested_real_call() -> None:
-    """_handle_engine_exit must return immediately when _shutdown_requested is True."""
-    from unittest.mock import patch
-
-    from cryodaq.launcher import LauncherWindow
-
-    w = _make_window_mock()
-    w._shutdown_requested = True
-
-    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
-        LauncherWindow._handle_engine_exit(w)
-
-    mock_qtimer.singleShot.assert_not_called()
+    assert LauncherWindow._do_shutdown(host) is True
+    assert host._bridge.shutdown_calls == 1
+    assert host.events.count("app.quit") == 1
 
 
-def test_shutdown_requested_false_before_any_call() -> None:
-    """_make_window_mock sets _shutdown_requested=False — verifies the __init__ contract
-    is met: a fresh instance starts with no shutdown in progress."""
-    w = _make_window_mock()
-    assert w._shutdown_requested is False
+def test_incomplete_owner_keeps_app_and_tray_live_then_retries_only_unsettled_owner() -> None:
+    bridge = _Bridge(fail_once=True)
+    host = _host(bridge=bridge)
+    callbacks: list[object] = []
+
+    with patch("cryodaq.launcher.QTimer.singleShot", side_effect=lambda _delay, callback: callbacks.append(callback)):
+        assert LauncherWindow._do_shutdown(host) is False
+
+        assert host._shutdown_phase is _ShutdownPhase.RETRY_WAIT
+        assert host._loop.closed is False
+        assert "app.quit" not in host.events
+        host._tray.hide.assert_not_called()
+        host._tray.show.assert_called()
+        assert len(callbacks) == 1
+        assert host.events.count("assistant.stop") == 1
+        assert host.events.count("engine.stop") == 1
+
+        callbacks.pop()()
+
+    assert host._shutdown_phase is _ShutdownPhase.COMPLETE
+    assert bridge.shutdown_calls == 2
+    assert bridge.close_calls == 1
+    assert host.events.count("assistant.stop") == 1
+    assert host.events.count("engine.stop") == 1
+    assert host.events.count("app.quit") == 1
 
 
-# ---------------------------------------------------------------------------
-# Unit tests — direct method calls on a mocked LauncherWindow
-# ---------------------------------------------------------------------------
+def test_reentrant_shutdown_call_is_coalesced() -> None:
+    host = _host()
+    LauncherWindow._ensure_shutdown_state(host)
+    host._shutdown_attempt_active = True
 
-
-def _make_window_mock() -> MagicMock:
-    """Return a MagicMock pre-configured as a minimal LauncherWindow substitute."""
-    w = MagicMock()
-    w._shutdown_requested = False
-    w._restart_pending = False
-    w._lock_fd = None  # prevents release_lock branch from running
-    return w
-
-
-def test_do_shutdown_sets_shutdown_requested() -> None:
-    """First _do_shutdown call must flip _shutdown_requested to True."""
-    from cryodaq.launcher import LauncherWindow
-
-    w = _make_window_mock()
-    LauncherWindow._do_shutdown(w)
-
-    assert w._shutdown_requested is True
-
-
-def test_do_shutdown_calls_engine_stop_on_first_invocation() -> None:
-    """First _do_shutdown call must stop bridge and engine."""
-    from cryodaq.launcher import LauncherWindow
-
-    w = _make_window_mock()
-    LauncherWindow._do_shutdown(w)
-
-    w._stop_engine.assert_called_once()
-    w._bridge.shutdown.assert_called_once()
-
-
-def test_do_shutdown_idempotent_second_call_is_noop() -> None:
-    """Second _do_shutdown call (double-SIGTERM) must return early without side-effects."""
-    from cryodaq.launcher import LauncherWindow
-
-    w = _make_window_mock()
-    w._shutdown_requested = True  # simulate first call already ran
-
-    LauncherWindow._do_shutdown(w)
-
-    w._health_timer.stop.assert_not_called()
-    w._stop_engine.assert_not_called()
-    w._app.quit.assert_not_called()
+    assert LauncherWindow._do_shutdown(host) is False
+    assert host._bridge.shutdown_calls == 0
+    assert host.events == []
 
 
 def test_handle_engine_exit_skips_restart_when_shutdown_requested() -> None:
-    """_handle_engine_exit must not schedule engine restart during shutdown.
+    host = _host()
+    host._shutdown_requested = True
+    host._restart_pending = False
+    host._start_engine = MagicMock()
 
-    Prod uses QTimer.singleShot → _start_engine (not _restart_engine).
-    We spy on both _start_engine and QTimer.singleShot to ensure neither
-    fires when _shutdown_requested is True.
-    """
-    from unittest.mock import patch
+    with patch("cryodaq.launcher.QTimer") as timer:
+        LauncherWindow._handle_engine_exit(host)
 
-    from cryodaq.launcher import LauncherWindow
-
-    w = _make_window_mock()
-    w._shutdown_requested = True
-    w._restart_pending = False
-
-    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
-        LauncherWindow._handle_engine_exit(w)
-
-    # Neither the timer nor _start_engine must be invoked.
-    mock_qtimer.singleShot.assert_not_called()
-    w._start_engine.assert_not_called()
-    # Counters must remain at their initial mock state (not incremented).
-    assert w._restart_attempts == w._restart_attempts  # unchanged (no assignment)
+    timer.singleShot.assert_not_called()
+    host._start_engine.assert_not_called()
 
 
-def test_handle_engine_exit_skips_restart_when_restart_pending() -> None:
-    """Existing _restart_pending guard must still work alongside shutdown flag.
+def test_pending_restart_callback_cannot_respawn_after_shutdown_latch() -> None:
+    host = _host()
+    host._restart_pending = False
+    host._shutdown_requested = False
+    host._engine_proc = SimpleNamespace(poll=lambda: 1)
+    host._engine_external = False
+    host._restart_giving_up = False
+    host._restart_attempts = 0
+    host._restart_backoff_s = [0]
+    host._last_restart_time = 0.0
+    host._invalidate_descriptor_transport = MagicMock()
+    host._close_engine_stderr_stream = MagicMock()
+    host._show_engine_down_banner = MagicMock()
+    host._start_engine = MagicMock()
+    callbacks: list[object] = []
 
-    Prod uses QTimer.singleShot → _start_engine (not _restart_engine).
-    We spy on QTimer.singleShot to ensure it never fires when already pending.
-    """
-    from unittest.mock import patch
+    with (
+        patch("cryodaq.launcher.QTimer.singleShot", side_effect=lambda _delay, callback: callbacks.append(callback)),
+        patch("cryodaq.launcher.time.monotonic", return_value=1.0),
+    ):
+        LauncherWindow._handle_engine_exit(host)
+        host._shutdown_requested = True
+        callbacks.pop()()
 
-    from cryodaq.launcher import LauncherWindow
-
-    w = _make_window_mock()
-    w._shutdown_requested = False
-    w._restart_pending = True
-
-    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
-        LauncherWindow._handle_engine_exit(w)
-
-    mock_qtimer.singleShot.assert_not_called()
-    w._start_engine.assert_not_called()
+    assert host._restart_pending is False
+    host._start_engine.assert_not_called()

@@ -18,6 +18,12 @@ _MOCK_IDN = "Keithley Instruments Inc., Model 2604B, MOCK00001, 3.0.0"
 _MOCK_IV_RESPONSE = "0.01\t5.0"
 _CLOSE_TIMEOUT_S = 1.0
 _OPEN_CANCEL_SETTLE_TIMEOUT_S = 1.0
+
+
+class USBTMCIncompleteCloseError(RuntimeError):
+    """Close did not reach terminal handle settlement."""
+
+
 _OFF_CHALLENGE_RE = re.compile(
     r'^print\(string\.format\("CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", '
     r"(smua|smub)\.source\.output\)\)$"
@@ -417,6 +423,8 @@ class USBTMCTransport:
                 closed = await self._settle_handle_close(resource, manager)
                 if closed:
                     log.info("USBTMC: ресурс %s закрыт", self._resource_str)
+                else:
+                    raise USBTMCIncompleteCloseError(f"USBTMC close timed out for {self._resource_str}")
             except Exception as exc:
                 self._close_incomplete = True
                 log.critical(
@@ -424,6 +432,7 @@ class USBTMCTransport:
                     self._resource_str,
                     exc,
                 )
+                raise USBTMCIncompleteCloseError(f"USBTMC close did not settle for {self._resource_str}") from exc
             finally:
                 # Shut down the dedicated executor so threads do not
                 # accumulate across reconnects.

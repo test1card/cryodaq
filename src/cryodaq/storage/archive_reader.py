@@ -1061,11 +1061,12 @@ class ArchiveReader:
                 referenced = {row[0] for row in descriptor_rows}
                 if any(type(value) is not str for value in referenced):
                     raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_SCHEMA_MISMATCH)
-                try:
-                    raw_descriptors = load_referenced_descriptors(conn, referenced)
-                    descriptor_map = resolve_archived_descriptors(raw_descriptors, referenced)
-                except DescriptorArchiveError as exc:
-                    raise _DescriptorReadError(self._descriptor_adapter_issue(exc)) from exc
+                if referenced:
+                    try:
+                        raw_descriptors = load_referenced_descriptors(conn, referenced)
+                        descriptor_map = resolve_archived_descriptors(raw_descriptors, referenced)
+                    except DescriptorArchiveError as exc:
+                        raise _DescriptorReadError(self._descriptor_adapter_issue(exc)) from exc
             legacy_sql = "SELECT 1 FROM readings WHERE typeof(timestamp) = 'text'"
             legacy_params: tuple[object, ...] = ()
             if channels:
@@ -1923,7 +1924,13 @@ class ArchiveReader:
                             issues.add(BoundedReadIssueCode.INVALID_ROW, source.token)
                             ok = False
                             continue
-                        authority = (2, -ordinal)
+                        # Cold rotation preserves SQLite ``ORDER BY timestamp,
+                        # id`` physical order. The greatest physical ordinal is
+                        # therefore the same last-writer authority as the
+                        # greatest hot SQLite row id. Source rank 2 still makes
+                        # an archived cut authoritative over a later reappeared
+                        # hot copy on an overlap day.
+                        authority = (2, ordinal)
                         if time.monotonic() >= deadline_monotonic:
                             issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                             return False
@@ -2076,7 +2083,6 @@ class ArchiveReader:
                 if day is not None:
                     sources.setdefault(day, []).append(("sqlite", str(db_path)))
 
-        overlap = any(len(srcs) > 1 for srcs in sources.values())
         out: list[FullRow] = []
         for day_iso in sorted(sources):
             day = date.fromisoformat(day_iso)
@@ -2087,25 +2093,23 @@ class ArchiveReader:
                 continue
             if to_day is not None and day > to_day:
                 continue
-            # Parquet source(s) read first → archived wins on an exact-key clash.
-            for kind, ref in sources[day_iso]:
+            day_rows: dict[tuple[object, str, str], FullRow] = {}
+            # Parquet source(s) read first → archived wins across sources.
+            # Within every source, the last physical row wins so the same hot
+            # SQLite duplicate resolves identically after cold rotation.
+            ordered_sources = sorted(sources[day_iso], key=lambda item: 0 if item[0] == "parquet" else 1)
+            for kind, ref in ordered_sources:
+                source_rows: list[FullRow] = []
                 if kind == "parquet":
-                    self._read_parquet_rows(ref, from_epoch, to_epoch, channel_set, instrument_set, out)
+                    self._read_parquet_rows(ref, from_epoch, to_epoch, channel_set, instrument_set, source_rows)
                 else:
-                    self._read_sqlite_rows(Path(ref), from_epoch, to_epoch, channel_set, instrument_set, out)
-
-        if overlap:
-            # Only pay dedup cost when a day actually had >1 source; the common
-            # no-overlap path is untouched. Keep first occurrence per key.
-            seen: set[tuple[object, str, str]] = set()
-            deduped: list[FullRow] = []
-            for row in out:
-                key = (row[0], row[1], row[2])
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(row)
-            out = deduped
+                    self._read_sqlite_rows(Path(ref), from_epoch, to_epoch, channel_set, instrument_set, source_rows)
+                source_latest: dict[tuple[object, str, str], FullRow] = {}
+                for row in source_rows:
+                    source_latest[(row[0], row[1], row[2])] = row
+                for key, row in source_latest.items():
+                    day_rows.setdefault(key, row)
+            out.extend(day_rows.values())
 
         out.sort(key=lambda r: _ts_sort_key(r[0]))
         return out
@@ -2221,7 +2225,7 @@ class ArchiveReader:
                     params.append(to_epoch)
                 if cond:
                     query += " WHERE " + " AND ".join(cond)
-                query += " ORDER BY timestamp"
+                query += " ORDER BY timestamp, rowid"
                 for row in conn.execute(query, params):
                     out.append(
                         (
@@ -2395,17 +2399,12 @@ class ArchiveReader:
         self._query_parquet(archive_rel, from_epoch, to_epoch, channels, archived)
         hot: dict[str, list[tuple[float, float]]] = {}
         self._query_sqlite(db_path, from_epoch, to_epoch, channels, hot)
-        for ch, rows in archived.items():
-            seen = {ts for ts, _ in rows}
-            merged = list(rows)
-            for ts, val in hot.get(ch, []):
-                if ts not in seen:
-                    merged.append((ts, val))
-                    seen.add(ts)
-            out.setdefault(ch, []).extend(merged)
-        for ch, rows in hot.items():
-            if ch not in archived:
-                out.setdefault(ch, []).extend(rows)
+        for ch in archived.keys() | hot.keys():
+            merged = {ts: value for ts, value in hot.get(ch, ())}
+            # Archived cut wins across sources, while each source reader has
+            # already applied the same last-physical-row duplicate rule.
+            merged.update({ts: value for ts, value in archived.get(ch, ())})
+            out.setdefault(ch, []).extend(merged.items())
 
     def _query_sqlite(
         self,
@@ -2415,6 +2414,7 @@ class ArchiveReader:
         channels: set[str] | None,
         out: dict[str, list[tuple[float, float]]],
     ) -> None:
+        latest: dict[tuple[float, str], tuple[float, float]] = {}
         try:
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
@@ -2424,21 +2424,24 @@ class ArchiveReader:
                     cursor = conn.execute(
                         f"SELECT timestamp, channel, value, status FROM readings "
                         f"WHERE timestamp >= ? AND timestamp <= ? "
-                        f"AND channel IN ({placeholders}) ORDER BY timestamp",
+                        f"AND channel IN ({placeholders}) ORDER BY timestamp, rowid",
                         (from_epoch, to_epoch, *channels),
                     )
                 else:
                     cursor = conn.execute(
                         "SELECT timestamp, channel, value, status FROM readings "
-                        "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+                        "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp, rowid",
                         (from_epoch, to_epoch),
                     )
                 for row in cursor:
-                    ch = row["channel"]
+                    ch = str(row["channel"])
+                    timestamp = float(row["timestamp"])
                     # NaN-доктрина: mask sentinel / error / legacy ±inf at the read boundary.
-                    out.setdefault(ch, []).append((float(row["timestamp"]), decode(float(row["value"]), row["status"])))
+                    latest[(timestamp, ch)] = (timestamp, decode(float(row["value"]), row["status"]))
             finally:
                 conn.close()
+            for (_timestamp, ch), row in latest.items():
+                out.setdefault(ch, []).append(row)
         except Exception:
             logger.exception("Failed to read SQLite %s — partial result", db_path.name)
 
@@ -2457,6 +2460,8 @@ class ArchiveReader:
         try:
             import pyarrow.parquet as pq
 
+            latest: dict[tuple[float, str], tuple[float, float]] = {}
+
             table = pq.read_table(
                 str(parquet_path),
                 columns=["timestamp", "channel", "value", "status"],
@@ -2470,10 +2475,13 @@ class ArchiveReader:
                 epoch = ts_int / 1_000_000.0
                 if epoch < from_epoch or epoch > to_epoch:
                     continue
-                if channels is not None and ch not in channels:
+                channel = str(ch)
+                if channels is not None and channel not in channels:
                     continue
                 # NaN-доктрина: mask sentinel / error / legacy ±inf at the read boundary.
-                out.setdefault(ch, []).append((epoch, decode(float(val), status)))
+                latest[(epoch, channel)] = (epoch, decode(float(val), status))
+            for (_timestamp, channel), row in latest.items():
+                out.setdefault(channel, []).append(row)
         except Exception:
             logger.exception("Failed to read Parquet %s — partial result", archive_rel)
 

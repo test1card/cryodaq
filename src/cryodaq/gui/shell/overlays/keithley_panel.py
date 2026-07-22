@@ -82,6 +82,7 @@ _STALE_AFTER_S = 5.0
 _BANNER_AUTO_CLEAR_MS = 4000
 
 _STATE_LABELS: dict[str, str] = {
+    "unknown": "НЕИЗВЕСТНО",
     "off": "ВЫКЛ",
     "on": "ВКЛ",
     "fault": "АВАРИЯ",
@@ -221,22 +222,36 @@ class _SmuChannelBlock(QFrame):
     channel_emergency_requested = Signal(str)
     channel_target_updated = Signal(str, float)
     channel_limits_updated = Signal(str, float, float)
+    command_started = Signal(str, int, str)
+    command_finished = Signal(str, int, str, str, str)
+    command_rejected = Signal(str, str, str)
+    outcome_reconciled = Signal(str)
 
     def __init__(self, key: str, label: str, palette_index: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._key = key
         self._label_text = label
         self._palette_index = palette_index
-        self._channel_state: str = "off"
+        # Connection/Safety readiness does not prove the physical output state.
+        # Start remains fail-closed until an authoritative OFF event arrives.
+        self._channel_state: str = "unknown"
+        self._last_confirmed_state: str | None = None
         self._connected: bool = False
         self._safety_ready: bool = False
         self._read_only: bool = False
+        self._connection_generation = 0
+        self._source_observation_revision = 0
+        self._safety_observation_revision = 0
+        self._unknown_outcome_requires: tuple[int, int] | None = None
+        self._normal_pending_token: int | None = None
         # IV.2 A.3: default to the longest per-block buffer so the
         # first tick before _apply_global_window lands renders the
         # full available history. Parent panel overwrites this the
         # moment the TimeWindow controller fires.
         self._window_s: float = float(_BUFFER_MAXLEN)
         self._workers: list[ZmqCommandWorker] = []
+        self._command_sequence = 0
+        self._settled_command_tokens: set[int] = set()
         self._buffers: dict[str, deque[tuple[float, float]]] = {m: deque(maxlen=_BUFFER_MAXLEN) for m in _MEASUREMENTS}
         self._value_labels: dict[str, QLabel] = {}
         self._plot_widgets: dict[str, pg.PlotWidget] = {}
@@ -279,7 +294,7 @@ class _SmuChannelBlock(QFrame):
         layout.addWidget(self._title_label)
         layout.addStretch()
 
-        self._state_badge = QLabel(_STATE_LABELS["off"])
+        self._state_badge = QLabel(_STATE_LABELS["unknown"])
         badge_font = _label_font()
         badge_font.setWeight(QFont.Weight(theme.FONT_WEIGHT_SEMIBOLD))
         self._state_badge.setFont(badge_font)
@@ -447,8 +462,15 @@ class _SmuChannelBlock(QFrame):
     # ------------------------------------------------------------------
 
     def _apply_frame_style(self) -> None:
-        border_color = theme.STATUS_FAULT if self._channel_state == "fault" else theme.BORDER_SUBTLE
-        border_width = 3 if self._channel_state == "fault" else 1
+        if self._channel_state == "fault":
+            border_color = theme.STATUS_FAULT
+            border_width = 3
+        elif self._channel_state == "unknown":
+            border_color = theme.STATUS_CAUTION
+            border_width = 2
+        else:
+            border_color = theme.BORDER_SUBTLE
+            border_width = 1
         self.setStyleSheet(
             f"#smuBlock_{self._key} {{"
             f" background-color: {theme.SURFACE_PANEL};"
@@ -458,12 +480,26 @@ class _SmuChannelBlock(QFrame):
         )
 
     def _apply_state_visuals(self) -> None:
-        text = _STATE_LABELS.get(self._channel_state, _STATE_LABELS["off"])
+        text = _STATE_LABELS.get(self._channel_state, _STATE_LABELS["unknown"])
+        if self._channel_state == "unknown" and self._last_confirmed_state:
+            last = _STATE_LABELS.get(self._last_confirmed_state, _STATE_LABELS["unknown"])
+            text = f"{text} · последнее: {last}"
         self._state_badge.setText(text)
+        self._state_badge.setAccessibleName(text)
+        self._state_badge.setAccessibleDescription(
+            "Текущее состояние источника неизвестно; последнее подтверждённое "
+            "состояние показано только как историческое свидетельство."
+            if self._channel_state == "unknown" and self._last_confirmed_state
+            else text
+        )
         if self._channel_state == "on":
-            color = theme.STATUS_OK
+            # Source activity is not proof of health.  Safety green remains
+            # reserved for independently proven healthy state.
+            color = theme.ACCENT
         elif self._channel_state == "fault":
             color = theme.STATUS_FAULT
+        elif self._channel_state == "unknown":
+            color = theme.STATUS_CAUTION
         else:
             color = theme.MUTED_FOREGROUND
         self._state_badge.setStyleSheet(
@@ -538,14 +574,11 @@ class _SmuChannelBlock(QFrame):
     # Click handlers
     # ------------------------------------------------------------------
 
-    def _on_start_clicked(self) -> None:
-        if self._read_only:
-            return
+    def _on_start_clicked(self) -> bool:
         p = float(self._p_spin.value())
         v = float(self._v_spin.value())
         i = float(self._i_spin.value())
-        self.channel_start_requested.emit(self._key, p, v, i)
-        self._dispatch_command(
+        dispatched = self._dispatch_command(
             {
                 "cmd": "keithley_start",
                 "channel": self._key,
@@ -554,16 +587,21 @@ class _SmuChannelBlock(QFrame):
                 "i_comp": i,
             }
         )
+        if dispatched:
+            self.channel_start_requested.emit(self._key, p, v, i)
+        return dispatched
 
-    def _on_stop_clicked(self) -> None:
-        if self._read_only:
-            return
-        self.channel_stop_requested.emit(self._key)
-        self._dispatch_command({"cmd": "keithley_stop", "channel": self._key})
+    def _on_stop_clicked(self) -> bool:
+        dispatched = self._dispatch_command({"cmd": "keithley_stop", "channel": self._key})
+        if dispatched:
+            self.channel_stop_requested.emit(self._key)
+        return dispatched
 
-    def _on_emergency_clicked(self) -> None:
-        if self._read_only:
-            return
+    def _on_emergency_clicked(self) -> bool:
+        reason = self.authorization_reason("keithley_emergency_off")
+        if reason is not None:
+            self.command_rejected.emit(self._key, "keithley_emergency_off", reason)
+            return False
         answer = QMessageBox.warning(
             self,
             "Аварийное отключение",
@@ -576,9 +614,11 @@ class _SmuChannelBlock(QFrame):
             QMessageBox.StandardButton.Cancel,
         )
         if answer != QMessageBox.StandardButton.Ok:
-            return
-        self.channel_emergency_requested.emit(self._key)
-        self._dispatch_command({"cmd": "keithley_emergency_off", "channel": self._key})
+            return False
+        dispatched = self._dispatch_command({"cmd": "keithley_emergency_off", "channel": self._key})
+        if dispatched:
+            self.channel_emergency_requested.emit(self._key)
+        return dispatched
 
     def _on_p_spin_changed(self, value: float) -> None:
         if self._read_only or self._channel_state != "on" or value <= 0:
@@ -591,29 +631,25 @@ class _SmuChannelBlock(QFrame):
         self._limits_debounce.start()
 
     def _send_p_target(self) -> None:
-        if self._read_only or self._channel_state != "on":
-            return
         p = float(self._p_spin.value())
         if p <= 0:
             return
-        self.channel_target_updated.emit(self._key, p)
-        self._dispatch_command(
+        dispatched = self._dispatch_command(
             {
                 "cmd": "keithley_set_target",
                 "channel": self._key,
                 "p_target": p,
             }
         )
+        if dispatched:
+            self.channel_target_updated.emit(self._key, p)
 
     def _send_limits(self) -> None:
-        if self._read_only or self._channel_state != "on":
-            return
         v = float(self._v_spin.value())
         i = float(self._i_spin.value())
         if v <= 0 or i <= 0:
             return
-        self.channel_limits_updated.emit(self._key, v, i)
-        self._dispatch_command(
+        dispatched = self._dispatch_command(
             {
                 "cmd": "keithley_set_limits",
                 "channel": self._key,
@@ -621,41 +657,143 @@ class _SmuChannelBlock(QFrame):
                 "i_comp": i,
             }
         )
+        if dispatched:
+            self.channel_limits_updated.emit(self._key, v, i)
 
-    def _dispatch_command(self, cmd: dict) -> None:
-        """Fire-and-forget ZMQ command. Result is logged; UI does not block."""
+    def _dispatch_command(self, cmd: dict) -> bool:
+        """Dispatch without blocking while preserving visible command outcome."""
 
-        if self._read_only:
-            logger.warning("Keithley command discarded while panel is read-only: %s", cmd.get("cmd"))
+        command_name = str(cmd.get("cmd", "unknown"))
+        reason = self.authorization_reason(command_name)
+        if reason is not None:
+            logger.warning(
+                "Keithley command rejected on %s: %s (%s)",
+                self._key,
+                command_name,
+                reason,
+            )
+            self.command_rejected.emit(self._key, command_name, reason)
+            return False
+
+        self._command_sequence += 1
+        token = self._command_sequence
+        expected_generation = self._connection_generation
+        if command_name != "keithley_emergency_off":
+            self._normal_pending_token = token
+        worker = ZmqCommandWorker(cmd, parent=self)
+
+        def _completed(
+            result: dict,
+            command_token: int = token,
+            command: dict = dict(cmd),
+            generation: int = expected_generation,
+            completed_worker: ZmqCommandWorker = worker,
+        ) -> None:
+            self._on_command_result(command_token, command, result, generation, completed_worker)
+
+        worker.finished.connect(_completed)
+        self._workers.append(worker)
+        self._update_control_enablement()
+        self.command_started.emit(self._key, token, command_name)
+        worker.start()
+        return True
+
+    def _on_command_result(
+        self,
+        token: int,
+        command: dict,
+        result: dict,
+        expected_generation: int | None = None,
+        worker: ZmqCommandWorker | None = None,
+    ) -> None:
+        if token in self._settled_command_tokens:
+            logger.warning(
+                "ignored duplicate Keithley reply on %s for token %s",
+                self._key,
+                token,
+            )
+            return
+        self._settled_command_tokens.add(token)
+        if worker is not None:
+            self._workers = [candidate for candidate in self._workers if candidate is not worker]
+        if token == self._normal_pending_token:
+            self._normal_pending_token = None
+        command_name = str(command.get("cmd", "unknown"))
+        if expected_generation is not None and expected_generation != self._connection_generation:
+            error = "ответ относится к предыдущему состоянию подключения"
+            self._latch_unknown_outcome()
+            logger.warning(
+                "ignored stale Keithley reply on %s: %s",
+                self._key,
+                command_name,
+            )
+            self.command_finished.emit(self._key, token, command_name, "unknown", error)
             return
 
-        worker = ZmqCommandWorker(cmd, parent=self)
-        worker.finished.connect(self._on_command_result)
-        self._workers.append(worker)
-        worker.start()
-
-    def _on_command_result(self, result: dict) -> None:
-        if not result.get("ok", False):
+        error = str(result.get("error") or "") if isinstance(result, dict) else "некорректный ответ Engine"
+        if isinstance(result, dict) and result.get("ok") is True:
+            outcome = "ok"
+        elif self._result_outcome_unknown(result):
+            outcome = "unknown"
+            self._latch_unknown_outcome()
+        else:
+            outcome = "failed"
+        if outcome != "ok":
             logger.warning(
-                "Keithley command failed on %s: %s",
+                "Keithley command %s on %s: %s",
+                outcome,
                 self._key,
-                result.get("error"),
+                error,
             )
-        self._workers = [w for w in self._workers if w.isRunning()]
+        self._update_control_enablement()
+        self.command_finished.emit(
+            self._key,
+            token,
+            command_name,
+            outcome,
+            error,
+        )
+
+    @staticmethod
+    def _result_outcome_unknown(result: object) -> bool:
+        if not isinstance(result, dict):
+            return True
+        if result.get("_handler_timeout") is True:
+            return True
+        error = str(result.get("error") or "").casefold()
+        return any(
+            marker in error
+            for marker in (
+                "timeout",
+                "timed out",
+                "тайм-аут",
+                "не отвечает",
+                "may still be running",
+                "исход неизвестен",
+            )
+        )
 
     # ------------------------------------------------------------------
     # Public state pushers
     # ------------------------------------------------------------------
 
     def apply_state(self, state: str) -> None:
-        normalized = state.lower() if state else "off"
+        normalized = state.strip().lower() if state else "unknown"
         if normalized not in _STATE_LABELS:
-            normalized = "off"
-        if normalized == self._channel_state:
-            return
-        self._channel_state = normalized
+            normalized = "unknown"
+        self._source_observation_revision += 1
+        # A queued reading received after the host declared disconnect cannot
+        # re-establish current truth. Keep it out of both current and confirmed
+        # state until a live connection exists again.
+        if self._connected:
+            self._channel_state = normalized
+            if normalized in {"off", "on", "fault"}:
+                self._last_confirmed_state = normalized
+        else:
+            self._channel_state = "unknown"
         self._apply_state_visuals()
         self._update_control_enablement()
+        self._maybe_reconcile_unknown_outcome()
         # When not "on", clear stale styling — channel isn't expected to
         # publish live measurements.
         if self._channel_state != "on" and self._stale:
@@ -667,33 +805,101 @@ class _SmuChannelBlock(QFrame):
         if connected == self._connected:
             return
         self._connected = connected
+        self._connection_generation += 1
+        if not connected:
+            self._p_debounce.stop()
+            self._limits_debounce.stop()
+            self._channel_state = "unknown"
+            if self._normal_pending_token is not None:
+                self._latch_unknown_outcome()
+                self._normal_pending_token = None
+            self._apply_state_visuals()
         self._update_control_enablement()
 
     def set_safety_ready(self, ready: bool) -> None:
-        if ready == self._safety_ready:
-            return
-        self._safety_ready = ready
+        self._safety_observation_revision += 1
+        self._safety_ready = bool(ready)
         self._update_control_enablement()
+        self._maybe_reconcile_unknown_outcome()
 
     def set_read_only(self, read_only: bool) -> None:
-        self._read_only = bool(read_only)
+        read_only = bool(read_only)
+        if read_only != self._read_only:
+            self._connection_generation += 1
+            if read_only and self._normal_pending_token is not None:
+                self._latch_unknown_outcome()
+                self._normal_pending_token = None
+        self._read_only = read_only
         self._update_control_enablement()
 
     def set_window(self, seconds: float) -> None:
         self._window_s = max(1.0, float(seconds))
 
     def _update_control_enablement(self) -> None:
-        interactive_ok = self._connected and self._safety_ready and not self._read_only
+        interactive_ok = (
+            self._connected
+            and self._safety_ready
+            and not self._read_only
+            and self._unknown_outcome_requires is None
+            and self._normal_pending_token is None
+        )
         self._p_spin.setEnabled(interactive_ok)
         self._v_spin.setEnabled(interactive_ok)
         self._i_spin.setEnabled(interactive_ok)
-        start_enabled = interactive_ok and self._channel_state != "on"
+        # Only authoritative OFF permits Start. Unknown/fault remain fail-closed.
+        start_enabled = interactive_ok and self._channel_state == "off"
         stop_enabled = interactive_ok and self._channel_state == "on"
         self._start_btn.setEnabled(start_enabled)
         self._stop_btn.setEnabled(stop_enabled)
         # Emergency stays reachable whenever we have a live link, even if
         # safety preconditions block normal control. It's the escape hatch.
         self._emergency_btn.setEnabled(self._connected and not self._read_only)
+
+    def _latch_unknown_outcome(self) -> None:
+        self._unknown_outcome_requires = (
+            self._source_observation_revision + 1,
+            self._safety_observation_revision + 1,
+        )
+        self._update_control_enablement()
+
+    def _maybe_reconcile_unknown_outcome(self) -> None:
+        required = self._unknown_outcome_requires
+        if required is None or not self._connected:
+            return
+        source_required, safety_required = required
+        if self._source_observation_revision < source_required or self._safety_observation_revision < safety_required:
+            return
+        self._unknown_outcome_requires = None
+        self._update_control_enablement()
+        self.outcome_reconciled.emit(self._key)
+
+    def authorization_reason(self, command_name: str) -> str | None:
+        if self._read_only:
+            return "архивный повтор не имеет полномочий управления"
+        if not self._connected:
+            return "нет живой связи с Engine"
+        if command_name == "keithley_emergency_off":
+            return None
+        if self._unknown_outcome_requires is not None:
+            return "предыдущая команда имеет неизвестный исход; нужна свежая сверка state и Safety"
+        if self._normal_pending_token is not None:
+            return "для канала уже выполняется команда"
+        if not self._safety_ready:
+            return "нет свежего разрешения Safety"
+        required_state = "off" if command_name == "keithley_start" else "on"
+        if command_name not in {
+            "keithley_start",
+            "keithley_stop",
+            "keithley_set_target",
+            "keithley_set_limits",
+        }:
+            return "команда не входит в разрешённый набор панели"
+        if self._channel_state != required_state:
+            return (
+                f"требуется подтверждённое состояние {_STATE_LABELS[required_state]}, "
+                f"текущее состояние {_STATE_LABELS.get(self._channel_state, _STATE_LABELS['unknown'])}"
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Readings + refresh
@@ -802,6 +1008,9 @@ class KeithleyPanel(QWidget):
         self._connected: bool = False
         self._safety_ready: bool = False
         self._read_only: bool = False
+        self._pending_commands: dict[tuple[str, int], str] = {}
+        self._unresolved_outcomes: dict[str, str] = {}
+        self._command_error_latched = False
         self._banner_timer = QTimer(self)
         self._banner_timer.setSingleShot(True)
         self._banner_timer.setInterval(_BANNER_AUTO_CLEAR_MS)
@@ -959,29 +1168,127 @@ class KeithleyPanel(QWidget):
             block.channel_emergency_requested.connect(self.channel_emergency_requested)
             block.channel_target_updated.connect(self.channel_target_updated)
             block.channel_limits_updated.connect(self.channel_limits_updated)
+            block.command_started.connect(self._on_block_command_started)
+            block.command_finished.connect(self._on_block_command_finished)
+            block.command_rejected.connect(self._on_block_command_rejected)
+            block.outcome_reconciled.connect(self._on_block_outcome_reconciled)
+
+    @staticmethod
+    def _command_description(channel: str, command: str) -> str:
+        channel_label = "канала А" if channel == "smua" else "канала B"
+        action = {
+            "keithley_start": "Запуск",
+            "keithley_stop": "Остановка",
+            "keithley_emergency_off": "Аварийное отключение",
+            "keithley_set_target": "Изменение мощности",
+            "keithley_set_limits": "Изменение пределов",
+        }.get(command, "Команда")
+        return f"{action} {channel_label}"
+
+    def _on_block_command_started(self, channel: str, token: int, command: str) -> None:
+        if not self._pending_commands and not self._unresolved_outcomes:
+            # A deliberate retry/new action acknowledges the prior command error;
+            # the new pending state remains visible until Engine answers.
+            self._command_error_latched = False
+        self._pending_commands[(channel, token)] = command
+        description = self._command_description(channel, command)
+        self._set_banner(
+            f"{description}: команда отправлена, ожидается ответ Engine.",
+            theme.STATUS_INFO,
+            auto_clear=False,
+        )
+        self._update_both_buttons_enablement()
+
+    def _on_block_command_finished(
+        self,
+        channel: str,
+        token: int,
+        command: str,
+        outcome: str,
+        error: str,
+    ) -> None:
+        self._pending_commands.pop((channel, token), None)
+        description = self._command_description(channel, command)
+        if outcome == "unknown":
+            self._unresolved_outcomes[channel] = description
+            self._command_error_latched = True
+            cause = error.strip() or "Engine не подтвердил выполнение"
+            self._set_banner(
+                f"{description}: ИСХОД НЕИЗВЕСТЕН — {cause}. Не повторяйте команду "
+                "вслепую; обычное управление заблокировано до свежей сверки "
+                "состояния источника и Safety. Аварийное отключение остаётся доступно "
+                "при живой связи.",
+                theme.STATUS_CAUTION,
+                auto_clear=False,
+            )
+            self._update_both_buttons_enablement()
+            return
+        if outcome != "ok":
+            self._command_error_latched = True
+            cause = error.strip() or "Engine отклонил команду"
+            self.show_error(f"{description} отклонена: {cause}.")
+            self._update_both_buttons_enablement()
+            return
+        if self._command_error_latched or self._unresolved_outcomes:
+            self._update_both_buttons_enablement()
+            return
+        if self._pending_commands:
+            self._set_banner(
+                f"Engine подтвердил часть команд; ожидается ответ: {len(self._pending_commands)}.",
+                theme.STATUS_INFO,
+                auto_clear=False,
+            )
+            self._update_both_buttons_enablement()
+            return
+        self.show_info(f"{description}: Engine подтвердил выполнение.")
+        self._update_both_buttons_enablement()
+
+    def _on_block_command_rejected(self, channel: str, command: str, reason: str) -> None:
+        description = self._command_description(channel, command)
+        self._set_banner(
+            f"{description} не отправлена: {reason}.",
+            theme.STATUS_CAUTION,
+            auto_clear=False,
+        )
+        self._update_both_buttons_enablement()
+
+    def _on_block_outcome_reconciled(self, channel: str) -> None:
+        self._unresolved_outcomes.pop(channel, None)
+        if self._unresolved_outcomes:
+            return
+        self._command_error_latched = False
+        self.show_info("Свежие состояния источника и Safety получены; неизвестный исход сверён.")
+        self._update_both_buttons_enablement()
 
     # ------------------------------------------------------------------
     # A+B handlers
     # ------------------------------------------------------------------
 
     def _on_start_both(self) -> None:
-        if self._read_only:
+        if any(block.authorization_reason("keithley_start") is not None for block in self._blocks.values()):
+            self.show_warning(
+                "Старт A+B не отправлен: оба канала должны иметь подтверждённое "
+                "состояние ВЫКЛ, свежий Safety и не иметь команды в полёте."
+            )
             return
-        self.both_channels_start_requested.emit()
-        for block in self._blocks.values():
-            block._on_start_clicked()
-        self.show_info("Команды запуска отправлены для обоих каналов.")
+        dispatched = [block._on_start_clicked() for block in self._blocks.values()]
+        if all(dispatched):
+            self.both_channels_start_requested.emit()
 
     def _on_stop_both(self) -> None:
-        if self._read_only:
+        if any(block.authorization_reason("keithley_stop") is not None for block in self._blocks.values()):
+            self.show_warning(
+                "Стоп A+B не отправлен: оба канала должны иметь подтверждённое "
+                "состояние ВКЛ, свежий Safety и не иметь команды в полёте."
+            )
             return
-        self.both_channels_stop_requested.emit()
-        for block in self._blocks.values():
-            block._on_stop_clicked()
-        self.show_info("Команды остановки отправлены для обоих каналов.")
+        dispatched = [block._on_stop_clicked() for block in self._blocks.values()]
+        if all(dispatched):
+            self.both_channels_stop_requested.emit()
 
     def _on_emergency_both(self) -> None:
-        if self._read_only:
+        if any(block.authorization_reason("keithley_emergency_off") is not None for block in self._blocks.values()):
+            self.show_warning("Аварийное отключение A+B не отправлено: нет живой связи с Engine.")
             return
         answer = QMessageBox.warning(
             self,
@@ -995,14 +1302,20 @@ class KeithleyPanel(QWidget):
         )
         if answer != QMessageBox.StandardButton.Ok:
             return
-        self.both_channels_emergency_requested.emit()
+        if any(block.authorization_reason("keithley_emergency_off") is not None for block in self._blocks.values()):
+            self.show_warning("Связь изменилась во время подтверждения; команда A+B не отправлена.")
+            return
+        dispatched: list[bool] = []
         for block in self._blocks.values():
             # Sub-blocks dispatch the actual command; they skip their own
             # confirmation because the panel-level dialog already
             # confirmed both channels.
-            block.channel_emergency_requested.emit(block._key)
-            block._dispatch_command({"cmd": "keithley_emergency_off", "channel": block._key})
-        self.show_warning("Аварийное отключение A+B отправлено. Дождитесь подтверждения состояния.")
+            sent = block._dispatch_command({"cmd": "keithley_emergency_off", "channel": block._key})
+            dispatched.append(sent)
+            if sent:
+                block.channel_emergency_requested.emit(block._key)
+        if all(dispatched):
+            self.both_channels_emergency_requested.emit()
 
     # ------------------------------------------------------------------
     # Window toolbar
@@ -1032,8 +1345,9 @@ class KeithleyPanel(QWidget):
             key = channel.rsplit("/", 1)[-1]
             block = self._blocks.get(key)
             if block is not None:
-                state = str(reading.metadata.get("state", "off"))
+                state = str(reading.metadata.get("state", "unknown"))
                 block.apply_state(state)
+                self._update_both_buttons_enablement()
             return
 
         for key, block in self._blocks.items():
@@ -1097,9 +1411,12 @@ class KeithleyPanel(QWidget):
         self._update_both_buttons_enablement()
 
     def _update_both_buttons_enablement(self) -> None:
-        gated = self._connected and self._safety_ready and not self._read_only
-        self._start_both_btn.setEnabled(gated)
-        self._stop_both_btn.setEnabled(gated)
+        self._start_both_btn.setEnabled(
+            all(block.authorization_reason("keithley_start") is None for block in self._blocks.values())
+        )
+        self._stop_both_btn.setEnabled(
+            all(block.authorization_reason("keithley_stop") is None for block in self._blocks.values())
+        )
         self._emergency_both_btn.setEnabled(self._connected and not self._read_only)
 
     # ------------------------------------------------------------------
@@ -1110,18 +1427,22 @@ class KeithleyPanel(QWidget):
         self._set_banner(text, theme.STATUS_INFO)
 
     def show_warning(self, text: str) -> None:
-        self._set_banner(text, theme.STATUS_WARNING)
+        self._set_banner(text, theme.STATUS_CAUTION)
 
     def show_error(self, text: str) -> None:
-        self._set_banner(text, theme.STATUS_FAULT)
+        # Command failures remain visible until an explicit retry/new action or
+        # clear; a four-second timeout would train operators to miss failures.
+        self._set_banner(text, theme.STATUS_FAULT, auto_clear=False)
 
     def clear_message(self) -> None:
         self._banner_label.setVisible(False)
         self._banner_label.setText("")
         self._banner_timer.stop()
 
-    def _set_banner(self, text: str, color: str) -> None:
+    def _set_banner(self, text: str, color: str, *, auto_clear: bool = True) -> None:
+        self._banner_timer.stop()
         self._banner_label.setText(text)
+        self._banner_label.setAccessibleName(text)
         self._banner_label.setStyleSheet(
             f"#keithleyBanner {{"
             f" color: {theme.FOREGROUND};"
@@ -1131,7 +1452,8 @@ class KeithleyPanel(QWidget):
             f"}}"
         )
         self._banner_label.setVisible(True)
-        self._banner_timer.start()
+        if auto_clear:
+            self._banner_timer.start()
 
     # ------------------------------------------------------------------
     # Refresh loop

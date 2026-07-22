@@ -263,6 +263,44 @@ def test_hot_cold_overlap_archive_wins_at_microsecond_precision(tmp_path: Path) 
     assert [row.value for row in result.rows] == [10.0, 11.0]
 
 
+def test_duplicate_last_writer_authority_survives_hot_to_cold_rotation(tmp_path: Path) -> None:
+    start = datetime(2026, 7, 10, tzinfo=UTC)
+    hot_data = tmp_path / "hot" / "data"
+    _hot_db(
+        hot_data,
+        "2026-07-10",
+        [
+            (start.timestamp(), "i", "T", 1.0, "K", "ok"),
+            (start.timestamp(), "i", "T", 2.0, "K", "ok"),
+        ],
+    )
+    hot = _query(
+        ArchiveReader(hot_data, tmp_path / "hot" / "archive"),
+        start,
+        start + timedelta(seconds=1),
+    )
+
+    cold_archive = tmp_path / "cold" / "archive"
+    _cold(
+        cold_archive,
+        "2026-07-10",
+        [
+            (start, "i", "T", 1.0, "K", "ok"),
+            (start, "i", "T", 2.0, "K", "ok"),
+        ],
+    )
+    cold = _query(
+        ArchiveReader(tmp_path / "cold" / "data", cold_archive),
+        start,
+        start + timedelta(seconds=1),
+    )
+
+    assert hot.complete is True
+    assert cold.complete is True
+    assert [row.value for row in hot.rows] == [2.0]
+    assert [row.value for row in cold.rows] == [2.0]
+
+
 def test_caps_are_applied_during_collection(tmp_path: Path) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     rows = [((start + timedelta(seconds=index)).timestamp(), "i", "T", float(index), "K", "ok") for index in range(100)]

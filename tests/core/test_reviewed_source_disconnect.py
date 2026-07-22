@@ -20,6 +20,35 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 
+_STARTED_MANAGERS: list[SafetyManager] = []
+
+
+@pytest.fixture(autouse=True)
+async def _settle_started_managers() -> None:
+    """Close every production-like SafetyManager lifecycle opened by a test."""
+
+    first = len(_STARTED_MANAGERS)
+    errors: list[Exception] = []
+    try:
+        yield
+    finally:
+        created = _STARTED_MANAGERS[first:]
+        try:
+            for manager in reversed(created):
+                if (
+                    manager._collect_task is not None
+                    or manager._monitor_task is not None
+                    or manager._pending_child_fault_settlements
+                ):
+                    try:
+                        await manager.stop()
+                    except Exception as exc:  # preserve cleanup of every owned manager
+                        errors.append(exc)
+        finally:
+            del _STARTED_MANAGERS[first:]
+        if errors:
+            raise ExceptionGroup("failed to settle started SafetyManager fixtures", errors)
+
 
 class _ReviewedSource(InstrumentDriver):
     def __init__(self, proofs: list[bool]) -> None:
@@ -93,6 +122,14 @@ def _manager(driver: InstrumentDriver, binding=None):
     )
 
 
+async def _start_manager(manager: SafetyManager) -> None:
+    if manager._collect_task is None and manager._monitor_task is None:
+        # Own the manager before start(): a cancelled/failed startup may have
+        # created children and still requires exact teardown.
+        _STARTED_MANAGERS.append(manager)
+        await manager.start()
+
+
 async def _qualify_generation(
     manager: SafetyManager,
     driver: InstrumentDriver,
@@ -100,6 +137,7 @@ async def _qualify_generation(
     *,
     verified_off: bool = True,
 ) -> None:
+    await _start_manager(manager)
     driver._connected = True
     driver.output_state_unverified = not verified_off  # type: ignore[attr-defined]
     generation = await manager.begin_reviewed_source_connect(
@@ -474,6 +512,7 @@ async def test_timed_out_reviewed_connect_is_retained_and_blocks_retry() -> None
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     scheduler = Scheduler(
         DataBroker(),
         reviewed_source_connect_begin=manager.begin_reviewed_source_connect,
@@ -578,6 +617,7 @@ async def test_timeout_racing_committed_complete_revokes_before_run_can_start() 
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     manager._config.critical_channels = []
     committed = asyncio.Event()
     release_complete = asyncio.Event()
@@ -653,6 +693,7 @@ async def test_abandoned_connect_cleanup_requires_literal_true(
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     scheduler = Scheduler(
         DataBroker(),
         reviewed_source_connect_begin=manager.begin_reviewed_source_connect,
@@ -696,6 +737,7 @@ async def test_partial_connect_error_disconnects_even_when_uncertainty_callback_
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     scheduler = Scheduler(
         DataBroker(),
         reviewed_source_connect_begin=manager.begin_reviewed_source_connect,
@@ -791,6 +833,7 @@ async def test_stop_retains_pending_connect_owner_then_second_stop_settles() -> 
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     scheduler = Scheduler(
         DataBroker(),
         drain_timeout_s=0.01,
@@ -842,6 +885,7 @@ async def test_stop_retries_failed_exact_cleanup_without_publishing_success() ->
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     scheduler = Scheduler(
         DataBroker(),
         drain_timeout_s=0.05,
@@ -1063,6 +1107,7 @@ async def test_poll_barrier_retries_failed_cleanup_then_allows_fresh_generation(
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     scheduler = Scheduler(
         DataBroker(),
         reviewed_source_connect_begin=manager.begin_reviewed_source_connect,
@@ -1127,6 +1172,7 @@ async def test_shared_bus_cancelled_reviewed_connect_keeps_one_cleanup_owner() -
         reviewed_source_runtime_binding=binding,
         mock=False,
     )
+    await _start_manager(manager)
     scheduler = Scheduler(
         DataBroker(),
         drain_timeout_s=0.01,

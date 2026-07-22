@@ -61,19 +61,13 @@ def test_invalid_mode_rejected() -> None:
 
 def test_invalid_target_rate_rejected() -> None:
     with pytest.raises(ValueError, match="target_rate_hz"):
-        MultiLineDriver(
-            "ML1", "localhost", mode="continuous", target_rate_hz=0.0, mock=True
-        )
+        MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=0.0, mock=True)
     with pytest.raises(ValueError, match="target_rate_hz"):
-        MultiLineDriver(
-            "ML1", "localhost", mode="continuous", target_rate_hz=-1.0, mock=True
-        )
+        MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=-1.0, mock=True)
 
 
 def test_continuous_mode_decimation_interval() -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=4.0, mock=True
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=4.0, mock=True)
     assert driver._target_interval_s == pytest.approx(0.25)
 
 
@@ -98,17 +92,13 @@ async def test_averaged_mode_no_listener_spawned() -> None:
 
 
 def test_read_channels_continuous_returns_empty_without_cycle() -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False)
     # No cycle yet — decimation gate returns nothing.
     assert driver._read_channels_continuous() == []
 
 
 def test_read_channels_continuous_emits_first_cycle() -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False)
     # Deterministic timestamp so regressions to Reading.now() are caught.
     ts = 1_700_000_000.0
     expected_ts = datetime.fromtimestamp(ts, tz=UTC)
@@ -121,9 +111,7 @@ def test_read_channels_continuous_emits_first_cycle() -> None:
     assert len(length_channels) == 2
     # Assert actual length values match what was seeded (1234.5678 mm).
     for r in length_channels:
-        assert r.value == pytest.approx(1234.5678), (
-            f"{r.channel}: expected 1234.5678, got {r.value}"
-        )
+        assert r.value == pytest.approx(1234.5678), f"{r.channel}: expected 1234.5678, got {r.value}"
     assert any(r.channel == "ML1/env_temperature" for r in out)
     assert any(r.channel == "ML1/env_pressure" for r in out)
     assert any(r.channel == "ML1/env_humidity" for r in out)
@@ -135,47 +123,42 @@ def test_read_channels_continuous_emits_first_cycle() -> None:
     # Assert timestamp propagated from CycleSnapshot — regression to Reading.now()
     # would produce a different (wall-clock) datetime and fail.
     for r in out:
-        assert r.timestamp == expected_ts, (
-            f"{r.channel}: timestamp {r.timestamp!r} != {expected_ts!r}"
-        )
+        assert r.timestamp == expected_ts, f"{r.channel}: timestamp {r.timestamp!r} != {expected_ts!r}"
 
 
 def test_decimation_drops_cycles_inside_target_interval() -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=2.0, mock=False
-    )
-    driver._last_cycle = CycleSnapshot(
-        timestamp=time.time(), channels=(_channel_data(1),)
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=2.0, mock=False)
+    driver._last_cycle = CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),))
     # First call passes the gate (no prior emit).
     first = driver._read_channels_continuous()
     assert first
-    # Immediate re-call inside the 0.5s window must return [].
+    # A genuinely new cycle arriving inside the 0.5s window is retained but
+    # not emitted early.
+    pending = CycleSnapshot(timestamp=time.time() + 1.0, channels=(_channel_data(1),))
+    driver._last_cycle = pending
     second = driver._read_channels_continuous()
     assert second == []
+    assert driver._last_cycle is pending
 
 
 def test_decimation_emits_after_interval(monkeypatch) -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=2.0, mock=False
-    )
-    driver._last_cycle = CycleSnapshot(
-        timestamp=time.time(), channels=(_channel_data(1),)
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=2.0, mock=False)
+    driver._last_cycle = CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),))
 
     fake_now = [100.0]
 
     def _now() -> float:
         return fake_now[0]
 
-    monkeypatch.setattr(
-        "cryodaq.drivers.instruments.etalon_multiline.time.monotonic", _now
-    )
+    monkeypatch.setattr("cryodaq.drivers.instruments.etalon_multiline.time.monotonic", _now)
     out1 = driver._read_channels_continuous()
     assert out1
+    next_cycle = CycleSnapshot(timestamp=time.time() + 1.0, channels=(_channel_data(1),))
+    driver._last_cycle = next_cycle
     fake_now[0] += 0.6  # > 0.5 s → gate opens
     out2 = driver._read_channels_continuous()
     assert out2
+    assert all(reading.timestamp == datetime.fromtimestamp(next_cycle.timestamp, tz=UTC) for reading in out2)
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +186,7 @@ async def test_listener_handles_pushed_channeldata() -> None:
         "measstarted",
         "channeldata_1,1234.5678,10,20,22.5,1013.25,45.0,0,0,0,0,0,0,0,0,0,0_2,2345.6789,11,21,22.6,1013.30,45.1,0,0,0,0,0,0,0,0,0,0_0",
     ]
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", channel_count=2, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", channel_count=2, mock=False)
     driver._transport = _FakeTransport(push)  # type: ignore[assignment]
     driver._listener_started_mono = time.monotonic()
     await driver._continuous_listener()
@@ -230,18 +211,16 @@ async def test_listener_logs_first_cycle_latency(caplog) -> None:
             for line in self._lines:
                 yield line
 
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", channel_count=1, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", channel_count=1, mock=False)
     driver._transport = _FakeTransport(  # type: ignore[assignment]
         ["channeldata_1,1.0,0,0,22.0,1013.0,45.0,0,0,0,0,0,0,0,0,0,0_0"]
     )
     driver._listener_started_mono = time.monotonic()
     with caplog.at_level("INFO", logger="cryodaq.drivers.instruments.etalon_multiline"):
         await driver._continuous_listener()
-    assert any(
-        "first cycle received" in record.message for record in caplog.records
-    ), "Empirical cycle latency must be logged at INFO on first cycle"
+    assert any("first cycle received" in record.message for record in caplog.records), (
+        "Empirical cycle latency must be logged at INFO on first cycle"
+    )
 
 
 @pytest.mark.asyncio
@@ -263,9 +242,7 @@ async def test_listener_skips_malformed_channeldata(caplog) -> None:
         "channeldata_garbage_line",
         "channeldata_1,1234.5678,10,20,22.0,1013.0,45.0,0,0,0,0,0,0,0,0,0,0_0",
     ]
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", channel_count=1, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", channel_count=1, mock=False)
     driver._transport = _FakeTransport(push)  # type: ignore[assignment]
     driver._listener_started_mono = time.monotonic()
     with caplog.at_level("WARNING"):
@@ -288,9 +265,7 @@ async def test_listener_appends_to_burst_buffer_when_active() -> None:
             for line in self._lines:
                 yield line
 
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", channel_count=1, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", channel_count=1, mock=False)
     driver._transport = _FakeTransport(  # type: ignore[assignment]
         [
             "channeldata_1,1.0,0,0,22.0,1013.0,45.0,0,0,0,0,0,0,0,0,0,0_0",
@@ -324,9 +299,7 @@ async def test_burst_start_requires_continuous_mode() -> None:
 
 @pytest.mark.asyncio
 async def test_burst_start_double_call_rejected() -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False)
     await driver.burst_start()
     with pytest.raises(RuntimeError, match="already active"):
         await driver.burst_start()
@@ -334,9 +307,7 @@ async def test_burst_start_double_call_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_burst_status_reports_active_state() -> None:
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False)
     status_before = driver.burst_status()
     assert status_before["active"] is False
     assert status_before["cycle_count"] == 0
@@ -352,7 +323,11 @@ async def test_burst_status_reports_active_state() -> None:
 @pytest.mark.asyncio
 async def test_burst_stop_returns_none_when_empty(tmp_path: Path) -> None:
     driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False,
+        "ML1",
+        "localhost",
+        mode="continuous",
+        target_rate_hz=1.0,
+        mock=False,
         burst_dir=tmp_path,
     )
     await driver.burst_start()
@@ -366,7 +341,11 @@ async def test_burst_stop_persists_parquet_with_full_schema(tmp_path: Path) -> N
     import pyarrow.parquet as pq  # noqa: PLC0415
 
     driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False,
+        "ML1",
+        "localhost",
+        mode="continuous",
+        target_rate_hz=1.0,
+        mock=False,
         burst_dir=tmp_path,
     )
     # Deterministic per-cycle timestamps so cycle_ts regression is caught.
@@ -385,13 +364,24 @@ async def test_burst_stop_persists_parquet_with_full_schema(tmp_path: Path) -> N
     assert out.exists()
     table = pq.read_table(out)
     expected_cols = {
-        "cycle_ts", "channel_index", "length_mm",
-        "intensity_min", "intensity_max",
-        "temperature_c", "pressure_hpa", "humidity_pct",
-        "analysis_error", "beam_break", "temp_error",
-        "motion_tolerance_error", "intensity_error",
-        "usb_error", "dll_error", "laser_speed_error",
-        "laser_temp_error", "daq_error",
+        "cycle_ts",
+        "channel_index",
+        "length_mm",
+        "intensity_min",
+        "intensity_max",
+        "temperature_c",
+        "pressure_hpa",
+        "humidity_pct",
+        "analysis_error",
+        "beam_break",
+        "temp_error",
+        "motion_tolerance_error",
+        "intensity_error",
+        "usb_error",
+        "dll_error",
+        "laser_speed_error",
+        "laser_temp_error",
+        "daq_error",
     }
     assert set(table.column_names) == expected_cols
     # 3 cycles × 2 channels = 6 rows.
@@ -399,21 +389,13 @@ async def test_burst_stop_persists_parquet_with_full_schema(tmp_path: Path) -> N
     # Assert actual cell values match what was seeded — schema/count alone would
     # pass even if all cells were NULL or the wrong dtype.
     length_vals = table.column("length_mm").to_pylist()
-    assert all(v == pytest.approx(1234.5678) for v in length_vals), (
-        f"length_mm cells wrong: {length_vals}"
-    )
+    assert all(v == pytest.approx(1234.5678) for v in length_vals), f"length_mm cells wrong: {length_vals}"
     temp_vals = table.column("temperature_c").to_pylist()
-    assert all(v == pytest.approx(22.5) for v in temp_vals), (
-        f"temperature_c cells wrong: {temp_vals}"
-    )
+    assert all(v == pytest.approx(22.5) for v in temp_vals), f"temperature_c cells wrong: {temp_vals}"
     pressure_vals = table.column("pressure_hpa").to_pylist()
-    assert all(v == pytest.approx(1013.25) for v in pressure_vals), (
-        f"pressure_hpa cells wrong: {pressure_vals}"
-    )
+    assert all(v == pytest.approx(1013.25) for v in pressure_vals), f"pressure_hpa cells wrong: {pressure_vals}"
     channel_idx_vals = set(table.column("channel_index").to_pylist())
-    assert channel_idx_vals == {1, 2}, (
-        f"channel_index must contain both channels 1 and 2, got {channel_idx_vals}"
-    )
+    assert channel_idx_vals == {1, 2}, f"channel_index must contain both channels 1 and 2, got {channel_idx_vals}"
     # Assert cycle_ts propagated from CycleSnapshot.timestamp (raw float).
     # Each cycle timestamp appears once per channel (2 channels), in cycle order.
     expected_cycle_ts = [ts for ts in cycle_timestamps for _ in range(2)]
@@ -426,12 +408,14 @@ async def test_burst_stop_persists_parquet_with_full_schema(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_burst_routes_to_experiment_dir_when_active(tmp_path: Path) -> None:
     driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False,
+        "ML1",
+        "localhost",
+        mode="continuous",
+        target_rate_hz=1.0,
+        mock=False,
     )
     await driver.burst_start(experiment_id="exp-2026-05-07-001")
-    driver._burst_buffer.append(
-        CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),))
-    )
+    driver._burst_buffer.append(CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),)))
     experiments_root = tmp_path / "experiments"
     out = await driver.burst_stop(experiments_root=experiments_root)
     assert out is not None
@@ -443,12 +427,14 @@ async def test_burst_routes_to_experiment_dir_when_active(tmp_path: Path) -> Non
 async def test_burst_experiment_id_path_traversal_sanitised(tmp_path: Path) -> None:
     """A malicious experiment id must not escape experiments_root."""
     driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False,
+        "ML1",
+        "localhost",
+        mode="continuous",
+        target_rate_hz=1.0,
+        mock=False,
     )
     await driver.burst_start(experiment_id="../../etc/passwd")
-    driver._burst_buffer.append(
-        CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),))
-    )
+    driver._burst_buffer.append(CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),)))
     experiments_root = tmp_path / "experiments"
     out = await driver.burst_stop(experiments_root=experiments_root)
     assert out is not None
@@ -461,13 +447,15 @@ async def test_burst_experiment_id_path_traversal_sanitised(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_burst_routes_to_default_dir_when_no_experiment(tmp_path: Path) -> None:
     driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", target_rate_hz=1.0, mock=False,
+        "ML1",
+        "localhost",
+        mode="continuous",
+        target_rate_hz=1.0,
+        mock=False,
         burst_dir=tmp_path / "fallback",
     )
     await driver.burst_start()  # no experiment_id
-    driver._burst_buffer.append(
-        CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),))
-    )
+    driver._burst_buffer.append(CycleSnapshot(timestamp=time.time(), channels=(_channel_data(1),)))
     out = await driver.burst_stop()
     assert out is not None
     assert out.parent == tmp_path / "fallback"
@@ -503,9 +491,7 @@ async def test_disconnect_cancels_listener_and_clears_burst() -> None:
         async def close(self) -> None:
             self.closed = True
 
-    driver = MultiLineDriver(
-        "ML1", "localhost", mode="continuous", channel_count=1, mock=False
-    )
+    driver = MultiLineDriver("ML1", "localhost", mode="continuous", channel_count=1, mock=False)
     transport = _FakeTransport()
     driver._transport = transport  # type: ignore[assignment]
     driver._connected = True

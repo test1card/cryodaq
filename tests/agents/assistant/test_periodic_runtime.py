@@ -889,7 +889,11 @@ async def test_query_uses_fresh_req_and_parses_closed_responses() -> None:
     "body",
     [
         b'{"ok":true,"ok":true}',
-        b'{"ok":true,"proto":1,"schema":"cryodaq.periodic.query/v1","state_revision":true,"state_token":"x","active":{}}',
+        (
+            f'{{"ok":true,"proto":{PROTOCOL_VERSION},'
+            '"schema":"cryodaq.periodic.query/v1","state_revision":true,'
+            '"state_token":"x","active":{}}}'
+        ).encode(),
         b'{"ok":true,"proto":1e999,"schema":"cryodaq.periodic.query/v1","state_revision":1,"state_token":"x","active":{}}',
     ],
 )

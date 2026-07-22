@@ -48,6 +48,56 @@ def test_temperatures_returns_kelvin_readings(client) -> None:
     assert channels == {"Т1"}
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    ("path", "unit"),
+    [
+        ("/api/v1/readings", "K"),
+        ("/api/v1/temperatures", "K"),
+        ("/api/v1/pressure", "mbar"),
+    ],
+)
+def test_live_read_endpoints_emit_strict_json_null(client, path: str, unit: str, value: float) -> None:
+    """Pydantic is a second defense if a malformed cache bypasses ingress."""
+    from cryodaq.web import server
+
+    server._state.last_readings = {
+        "bad": {
+            "timestamp": "2026-07-19T00:00:00+00:00",
+            "channel": "bad",
+            "value": value,
+            "unit": unit,
+            "status": "sensor_error",
+        }
+    }
+
+    response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.json()[0]["value"] is None
+    assert "NaN" not in response.text
+    assert "Infinity" not in response.text
+
+
+def test_legacy_api_status_masks_nonfinite_cache_defensively(client) -> None:
+    """The unmodelled legacy aggregate also guarantees strict public JSON."""
+    from cryodaq.web import server
+
+    server._state.last_readings = {
+        "bad": {"channel": "bad", "value": float("nan"), "unit": "K", "status": "sensor_error"}
+    }
+
+    async def _unavailable(_cmd: dict) -> dict:
+        return {"ok": False}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_unavailable):
+        response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["readings"]["bad"]["value"] is None
+    assert "NaN" not in response.text
+
+
 def test_experiment_response_redacts_sensitive_fields(client) -> None:
     """/api/v1/experiment must not leak operator/sample/notes/config/artifacts."""
     full_payload = {
@@ -438,19 +488,55 @@ _AUTH = {"Authorization": f"Bearer {_TOKEN}"}
 
 
 def test_post_log_forwards_log_entry_command(auth_client) -> None:
-    """POST /log forwards cmd=log_entry with the operator's message."""
+    """An unscoped POST carries one exact idempotency key and explicit scope."""
     captured: dict = {}
 
     async def _fake(cmd: dict) -> dict:
         captured.update(cmd)
         return {"ok": True, "entry": {"id": 1, "message": cmd["message"]}}
 
-    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+    with (
+        patch("cryodaq.web.rest_api.secrets.token_hex", return_value="a" * 32) as token_hex,
+        patch("cryodaq.web.server._async_engine_command", side_effect=_fake),
+    ):
         resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": "проверка насоса"})
 
     assert resp.status_code == 200
-    assert captured["cmd"] == "log_entry"
-    assert captured["message"] == "проверка насоса"
+    token_hex.assert_called_once_with(16)
+    assert captured == {
+        "cmd": "log_entry",
+        "request_id": "a" * 32,
+        "message": "проверка насоса",
+        "author": _REST_IDENTITY,
+        "source": "rest",
+        "experiment_unbound": True,
+    }
+    assert "current_experiment" not in captured
+
+
+def test_post_log_forwards_exact_experiment_scope(auth_client) -> None:
+    """A caller-supplied experiment identity is forwarded exactly, never inferred."""
+    captured: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        captured.update(cmd)
+        return {"ok": True, "entry": {"id": 1}}
+
+    with (
+        patch("cryodaq.web.rest_api.secrets.token_hex", return_value="b" * 32),
+        patch("cryodaq.web.server._async_engine_command", side_effect=_fake),
+    ):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_AUTH,
+            json={"message": "scoped", "experiment_id": "exp-exact"},
+        )
+
+    assert response.status_code == 200
+    assert captured["request_id"] == "b" * 32
+    assert captured["experiment_id"] == "exp-exact"
+    assert "experiment_unbound" not in captured
+    assert "current_experiment" not in captured
 
 
 def test_post_log_author_is_server_set_not_spoofable(auth_client) -> None:
@@ -766,6 +852,21 @@ def test_invalid_json_wrong_token_is_401_not_422(monkeypatch, tmp_path) -> None:
     assert resp.status_code == 401
 
 
+def test_unauthorized_log_request_never_generates_mutation_identity(auth_client) -> None:
+    """Middleware rejects before body parsing and before producer-side mutation setup."""
+    with (
+        patch("cryodaq.web.rest_api.secrets.token_hex", side_effect=AssertionError),
+        patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError),
+    ):
+        response = auth_client.post(
+            "/api/v1/log",
+            content="{",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer wrong"},
+        )
+
+    assert response.status_code == 401
+
+
 def test_valid_auth_then_invalid_json_is_422(auth_client) -> None:
     """With valid auth the parser DOES run and rejects malformed JSON (422) —
     proving auth precedes, not replaces, body validation."""
@@ -793,8 +894,16 @@ def test_get_routes_bypass_write_auth_middleware(auth_client) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reserved", ["safety_fault", "phase_transition", "alarm", "ai"])
-def test_post_log_rejects_reserved_tag(auth_client, reserved: str) -> None:
+@pytest.mark.parametrize(
+    ("reserved", "canonical"),
+    [
+        ("safety_fault", "safety_fault"),
+        (" phase_transition ", "phase_transition"),
+        ("Alarm", "alarm"),
+        (" AI ", "ai"),
+    ],
+)
+def test_post_log_rejects_reserved_tag(auth_client, reserved: str, canonical: str) -> None:
     """A reserved (system-semantic) tag ⇒ 422 naming the tag, engine untouched."""
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
         resp = auth_client.post(
@@ -803,7 +912,7 @@ def test_post_log_rejects_reserved_tag(auth_client, reserved: str) -> None:
             json={"message": "ok", "tags": [reserved]},
         )
     assert resp.status_code == 422
-    assert reserved in resp.json()["detail"]
+    assert canonical in resp.json()["detail"]
 
 
 def test_post_log_freeform_tags_pass_through(auth_client) -> None:

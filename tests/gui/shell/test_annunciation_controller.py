@@ -43,7 +43,7 @@ def _ack_reply(identifier: str = "a1", *, revision: int = 2) -> dict[str, object
     return {
         "ok": True,
         "activation_id": identifier,
-        "event_emitted": False,
+        "event_emitted": True,
         "snapshot_revision": revision,
     }
 
@@ -111,6 +111,15 @@ def test_exact_successful_acknowledgement_can_silence_but_old_engine_cannot() ->
     assert not controller.audible
 
 
+def test_ack_without_event_emitted_cannot_silence() -> None:
+    beeps: list[str] = []
+    controller = _controller(beeps)
+    assert controller.accept_status(_status(activations=[_activation()]))
+    reply = {**_ack_reply(), "event_emitted": False}
+    assert not controller.accept_acknowledgement(reply, "engine-a", "a1")
+    assert controller.audible
+
+
 @pytest.mark.parametrize(
     "reply",
     [
@@ -157,3 +166,37 @@ def test_poller_is_serial_and_uses_only_the_exact_read_only_status_command() -> 
     controller.poll()
     controller.poll()
     assert _Worker.commands == [{"cmd": "annunciation_status"}]
+
+
+def test_close_stops_polling_and_settles_owned_workers() -> None:
+    class _Signal:
+        def connect(self, callback):  # noqa: ANN001
+            self.callback = callback
+
+    class _Worker:
+        def __init__(self, command, parent=None) -> None:  # noqa: ANN001
+            self.command = command
+            self.finished = _Signal()
+            self.running = True
+            self.wait_calls = 0
+
+        def isFinished(self) -> bool:
+            return not self.running
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def wait(self, timeout_ms: int) -> bool:
+            self.wait_calls += 1
+            self.running = False
+            return True
+
+        def start(self) -> None:
+            pass
+
+    controller = AnnunciationController(worker_factory=_Worker, beep=lambda: None)
+    controller._poll_timer.stop()
+    controller.poll()
+    assert controller.close(timeout_ms=100) is True
+    controller.poll()
+    assert controller._status_worker is None

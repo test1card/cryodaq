@@ -22,7 +22,7 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
-from cryodaq.drivers.transport.gpib import GPIBTransport
+from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
 
 
 async def test_gpib_open_stores_resource_str():
@@ -31,6 +31,35 @@ async def test_gpib_open_stores_resource_str():
     await t.open("GPIB0::12::INSTR")
     assert t._resource_str == "GPIB0::12::INSTR"
     assert t._bus_prefix == "GPIB0"
+
+
+async def test_gpib_rejects_double_open_until_clean_close() -> None:
+    t = GPIBTransport(mock=True)
+    await t.open("GPIB0::12::INSTR")
+    with pytest.raises(RuntimeError, match="already open"):
+        await t.open("GPIB0::13::INSTR")
+    await t.close()
+
+
+async def test_gpib_close_retains_owner_after_timeout() -> None:
+    release = threading.Event()
+
+    class _SlowResource:
+        def close(self) -> None:
+            release.wait(2.0)
+
+    t = GPIBTransport(mock=False)
+    t._resource_str = "GPIB0::12::INSTR"
+    t._resource = _SlowResource()
+    with pytest.raises(GPIBIncompleteCloseError, match="timed out"):
+        await t.close()
+    with pytest.raises(GPIBIncompleteCloseError, match="retained close owner"):
+        await t.close()
+    release.set()
+    await asyncio.sleep(0.05)
+    await t.close()
+    with pytest.raises(RuntimeError, match="not connected"):
+        await t.query("KRDG?")
 
 
 async def test_gpib_query_returns_mock_response():
@@ -367,13 +396,15 @@ async def test_cancelled_blocking_idn_rejects_overlap_until_executor_settles(mon
     task = asyncio.create_task(driver.connect())
     assert await asyncio.to_thread(read_started.wait, 1.0)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await asyncio.sleep(0)
+    assert task.done() is False
     with pytest.raises(RuntimeError, match="executor generation has not settled"):
         await driver.connect()
     assert resources_opened == 1
     assert driver._transport._executor is not None
     release_read.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert await asyncio.to_thread(closed.wait, 1.0)
     await driver.disconnect()
     assert driver._transport._executor is None

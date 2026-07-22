@@ -586,7 +586,7 @@ def test_ingress_foundation_has_no_control_remediation_shell_or_store_authority(
     ]
     imports: set[str] = set()
     for path in paths:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         imports.update(
             node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
         )

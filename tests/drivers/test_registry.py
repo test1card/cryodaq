@@ -194,6 +194,24 @@ def test_missing_empty_and_nan_configs_fail_only_as_registry_errors(
 
 
 @pytest.mark.parametrize(
+    "name",
+    ["line\nbreak", "path/segment", "path\\segment", " x ", "x" * 129, "e\u0301"],
+)
+def test_instrument_name_is_bounded_stable_identity(name: str) -> None:
+    with pytest.raises(DriverRegistryError, match="name"):
+        validate_instrument_entry({"type": "keithley_2604b", "name": name, "resource": "USB::1"})
+
+
+def test_instrument_name_accepts_exact_128_character_boundary() -> None:
+    name = "x" * 128
+
+    config = validate_instrument_entry({"type": "keithley_2604b", "name": name, "resource": "USB::1"})
+
+    assert config.name == name
+    assert config.values["name"] == name
+
+
+@pytest.mark.parametrize(
     ("type_name", "values"),
     [
         (
@@ -219,6 +237,41 @@ def test_private_provenance_factory_revalidates_all_values(type_name: str, value
         ValidatedInstrumentConfig._from_validated(
             spec=BUILTIN_DRIVER_SPECS[type_name],
             name=str(values["name"]),
+            values=values,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "x" * 129,
+        "sensor\x00name",
+        "../sensor",
+        "sensor..backup",
+        "folder/sensor",
+        "folder\\sensor",
+        "C:sensor",
+        ".",
+        "~",
+        " sensor",
+    ],
+)
+def test_private_provenance_factory_cannot_bypass_identity_contract(bad_name: str) -> None:
+    config = validate_instrument_entry(
+        {
+            "type": "keithley_2604b",
+            "name": "Keithley_1",
+            "resource": "USB0::FAKE::INSTR",
+            "poll_interval_s": 1.0,
+        }
+    )
+    values = dict(config.values)
+    values["name"] = bad_name
+
+    with pytest.raises(DriverRegistryError):
+        ValidatedInstrumentConfig._from_validated(
+            spec=config.spec,
+            name=bad_name,
             values=values,
         )
 

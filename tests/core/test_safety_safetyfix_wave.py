@@ -62,10 +62,10 @@ async def _make_manager(*, mock=True, keithley=None, stale=10.0):
     mgr._config.cooldown_before_rearm_s = 0.1
     mgr._config.require_keithley_for_run = not mock
     mgr._config.critical_channels = []
+    await mgr.start()
     if binding is not None:
         generation = await mgr.begin_reviewed_source_connect(keithley, binding, "test fixture")
         await mgr.complete_reviewed_source_connect(keithley, binding, generation, "test fixture")
-    await mgr.start()
     return mgr, broker
 
 
@@ -130,6 +130,9 @@ async def test_fault_keeps_active_sources_when_off_unconfirmed(caplog):
             "CRITICAL log naming the unverified output state is required"
         )
     finally:
+        # The test deliberately keeps the source unverified. Close the retained
+        # lifecycle only after supplying an explicit later exact OFF proof.
+        k.emergency_off = AsyncMock(return_value=True)
         await mgr.stop()
 
 

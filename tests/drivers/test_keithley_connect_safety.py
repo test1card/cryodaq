@@ -76,6 +76,25 @@ async def test_connect_forces_output_off_non_mock():
 
 
 @pytest.mark.asyncio
+async def test_configured_visa_serial_must_match_idn() -> None:
+    k = Keithley2604B(
+        name="test",
+        resource_str="USB0::0x05E6::0x2604::04052028::INSTR",
+        mock=False,
+    )
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.write = AsyncMock()
+    transport.query = AsyncMock(side_effect=_canonical_query)
+    k._transport = transport
+
+    with pytest.raises(ValueError, match="serial does not match"):
+        await k.connect()
+    assert k._connected is False
+
+
+@pytest.mark.asyncio
 async def test_connect_skips_force_off_in_mock_mode():
     """Mock mode must skip the force-off path entirely.
 

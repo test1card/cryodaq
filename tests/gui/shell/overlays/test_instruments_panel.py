@@ -461,6 +461,35 @@ def test_fresh_reading_recovers_to_ok(app):
     assert "Показания: 1" in card._counters_label.text()
 
 
+@pytest.mark.parametrize(
+    ("status", "operator_text"),
+    [
+        (ChannelStatus.OVERRANGE, "выше диапазона"),
+        (ChannelStatus.UNDERRANGE, "ниже диапазона"),
+        (ChannelStatus.SENSOR_ERROR, "ошибка датчика"),
+        (ChannelStatus.TIMEOUT, "тайм-аут"),
+    ],
+)
+def test_non_ok_instrument_status_uses_caution_wording(app, status, operator_text):
+    card = _InstrumentCard("inst")
+    card.update_from_reading(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="inst",
+            channel="x",
+            value=float("nan"),
+            unit="K",
+            metadata={},
+            status=status,
+        )
+    )
+    assert "Внимание" in card._status_label.text()
+    assert operator_text in card._status_label.text()
+    assert "Предупреждение" not in card._status_label.text()
+    assert status.value not in card._status_label.text()
+    assert card.indicator_color == theme.STATUS_CAUTION
+
+
 # ----------------------------------------------------------------------
 # Status indicator (painted widget, NOT text)
 # ----------------------------------------------------------------------
@@ -671,8 +700,44 @@ def test_summary_uses_severity_chip(app):
     chip_texts = [w.text() for w in section._chip_widgets]
     joined = " ".join(chip_texts)
     assert "18 ОК" in joined
-    assert "1 ПРЕД" in joined
+    assert "1 ВНИМАНИЕ" in joined
     assert "1 КРИТ" in joined
+    assert theme.STATUS_CAUTION in section._chip_widgets[1].styleSheet()
+
+
+def test_summary_chips_fit_at_minimum_shell_width(app):
+    panel = InstrumentsPanel()
+    try:
+        # MainWindowV2 minimum width minus the fixed ToolRail.
+        panel.resize(1280 - theme.TOOL_RAIL_WIDTH, 600)
+        panel.set_diagnostics(
+            {},
+            {
+                "healthy": MAX_CATALOG_DESCRIPTORS,
+                "warning": MAX_CATALOG_DESCRIPTORS,
+                "critical": MAX_CATALOG_DESCRIPTORS,
+            },
+        )
+        panel.show()
+        app.processEvents()
+
+        section = panel.sensor_diag_section
+        section.layout().activate()
+        section._chip_layout.activate()
+        container = section._summary_chip_container
+        chips = section._chip_widgets
+
+        assert len(chips) == 3
+        assert section.width() >= section.minimumSizeHint().width()
+        assert container.width() >= container.minimumSizeHint().width()
+
+        for chip in chips:
+            assert chip.isVisible()
+            assert chip.fontMetrics().horizontalAdvance(chip.text()) <= chip.contentsRect().width()
+            assert container.rect().contains(chip.geometry())
+    finally:
+        panel.close()
+        app.processEvents()
 
 
 def test_summary_no_emoji_in_labels(app):
@@ -708,7 +773,7 @@ def test_get_sensor_summary_text_plain(app):
     )
     text = panel.get_sensor_summary_text()
     assert "18 ОК" in text
-    assert "1 ПРЕД" in text
+    assert "1 ВНИМАНИЕ" in text
     assert "1 КРИТ" in text
     # No emoji.
     for ch in text:

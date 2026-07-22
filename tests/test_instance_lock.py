@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from cryodaq.instance_lock import release_lock, try_acquire_lock
+from cryodaq.instance_lock import release_lock, release_lock_exact, try_acquire_lock
 
 
 @pytest.fixture()
@@ -353,3 +353,42 @@ def test_release_never_unlinks_replacement_path(tmp_path: Path) -> None:
         path.write_text("attacker", encoding="ascii")
         release_lock(fd, path.name, lock_dir=tmp_path)
         assert path.read_text(encoding="ascii") == "attacker"
+
+
+def test_exact_release_keeps_stable_inode_and_allows_next_owner(tmp_path: Path) -> None:
+    name = ".launcher-exact.lock"
+    path = tmp_path / name
+    fd = try_acquire_lock(name, lock_dir=tmp_path)
+    assert fd is not None
+    before = path.stat()
+
+    release_lock_exact(fd, name, lock_dir=tmp_path)
+
+    assert path.is_file()
+    assert os.path.samestat(before, path.stat())
+    replacement = try_acquire_lock(name, lock_dir=tmp_path)
+    assert replacement is not None
+    release_lock_exact(replacement, name, lock_dir=tmp_path)
+
+
+def test_exact_release_surfaces_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.instance_lock as module
+
+    name = ".launcher-close-failure.lock"
+    fd = try_acquire_lock(name, lock_dir=tmp_path)
+    assert fd is not None
+    real_close = module.os.close
+
+    def fail_exact(candidate: int) -> None:
+        if candidate == fd:
+            raise OSError("close refused")
+        real_close(candidate)
+
+    monkeypatch.setattr(module.os, "close", fail_exact)
+    with pytest.raises(OSError, match="close refused"):
+        release_lock_exact(fd, name, lock_dir=tmp_path)
+    monkeypatch.setattr(module.os, "close", real_close)
+    release_lock_exact(fd, name, lock_dir=tmp_path)

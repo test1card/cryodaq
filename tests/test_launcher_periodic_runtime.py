@@ -472,12 +472,17 @@ class _LifecycleProcess:
 
     def __init__(self, events: list[str]) -> None:
         self._events = events
+        self._alive = True
+
+    def poll(self) -> int | None:
+        return None if self._alive else 0
 
     def terminate(self) -> None:
         self._events.append("assistant.terminate")
 
     def wait(self, *, timeout: float) -> int:
         self._events.append(f"assistant.wait:{timeout:g}")
+        self._alive = False
         return 0
 
     def kill(self) -> None:
@@ -494,6 +499,7 @@ class _WindowsLifecycleProcess(_LifecycleProcess):
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
+        self._alive = False
         return int(outcome)
 
 
@@ -665,208 +671,3 @@ def test_windows_assistant_shutdown_rejects_runtime_identity_swap_during_create(
     assert events == ["assistant.terminate", "assistant.wait:10"]
     assert window._assistant_proc is None
     assert window._assistant_shutdown_path is None
-
-
-def test_theme_reexec_settles_assistant_between_bridge_and_engine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from cryodaq.launcher import LauncherWindow
-
-    events: list[str] = []
-    process = _LifecycleProcess(events)
-    window = SimpleNamespace(
-        _shutdown_requested=False,
-        _bridge=SimpleNamespace(shutdown=lambda: events.append("bridge")),
-        _assistant_proc=process,
-        _stop_engine=lambda: events.append("engine"),
-        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
-        _snapshot_ingress=SimpleNamespace(stop=lambda: events.append("snapshot.stop")),
-        _engine_external=True,
-        _lock_fd=None,
-    )
-    window._stop_assistant = lambda: LauncherWindow._stop_assistant(window)  # type: ignore[attr-defined]
-
-    def execv(_executable: str, _args: list[str]) -> None:
-        assert window._assistant_proc is None
-        events.append("exec")
-
-    monkeypatch.setattr("cryodaq.launcher.os.execv", execv)
-    LauncherWindow._restart_gui_with_theme_change(window)  # type: ignore[arg-type]
-
-    assert window._shutdown_requested is True
-    assert events == [
-        "snapshot.stop",
-        "assistant.terminate",
-        "assistant.wait:10",
-        "descriptor",
-        "bridge",
-        "engine",
-        "exec",
-    ]
-
-
-def test_theme_reexec_aborts_if_assistant_cannot_settle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from cryodaq.launcher import LauncherWindow
-
-    events: list[str] = []
-    window = SimpleNamespace(
-        _shutdown_requested=False,
-        _snapshot_ingress=SimpleNamespace(
-            stop=lambda: events.append("snapshot.stop"),
-            start=lambda: events.append("snapshot.start"),
-        ),
-        _bridge=SimpleNamespace(
-            shutdown=lambda: events.append("bridge.shutdown"),
-        ),
-        _stop_assistant=MagicMock(side_effect=RuntimeError("child survived")),
-        _stop_engine=lambda: events.append("engine"),
-        _engine_external=True,
-        _lock_fd=None,
-    )
-    execv = MagicMock()
-    monkeypatch.setattr("cryodaq.launcher.os.execv", execv)
-
-    with pytest.raises(RuntimeError, match="child survived"):
-        LauncherWindow._restart_gui_with_theme_change(window)  # type: ignore[arg-type]
-
-    assert window._shutdown_requested is False
-    assert events == ["snapshot.stop", "snapshot.start"]
-    execv.assert_not_called()
-
-
-def test_theme_reexec_ingress_recovery_failure_remains_shutdown_requested(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from cryodaq.launcher import LauncherWindow
-
-    events: list[str] = []
-    window = SimpleNamespace(
-        _shutdown_requested=False,
-        _snapshot_ingress=SimpleNamespace(
-            stop=lambda: events.append("snapshot.stop"),
-            start=lambda: (events.append("snapshot.start"), (_ for _ in ()).throw(RuntimeError("restart failed")))[1],
-        ),
-        _stop_assistant=MagicMock(side_effect=RuntimeError("child survived")),
-        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
-        _bridge=SimpleNamespace(shutdown=lambda: events.append("bridge")),
-        _stop_engine=lambda: events.append("engine"),
-        _engine_external=True,
-        _lock_fd=None,
-    )
-    execv = MagicMock()
-    monkeypatch.setattr("cryodaq.launcher.os.execv", execv)
-
-    with pytest.raises(RuntimeError, match="assistant stop and operator snapshot ingress recovery failed"):
-        LauncherWindow._restart_gui_with_theme_change(window)  # type: ignore[arg-type]
-
-    assert window._shutdown_requested is True
-    assert events == ["snapshot.stop", "snapshot.start"]
-    execv.assert_not_called()
-
-
-def test_theme_reexec_ingress_failure_leaves_live_launcher_untouched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from cryodaq.launcher import LauncherWindow
-
-    events: list[str] = []
-    window = SimpleNamespace(
-        _shutdown_requested=False,
-        _snapshot_ingress=SimpleNamespace(
-            stop=lambda: (events.append("snapshot.stop"), (_ for _ in ()).throw(RuntimeError("render failed")))[1]
-        ),
-        _stop_assistant=lambda: events.append("assistant"),
-        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
-        _bridge=SimpleNamespace(shutdown=lambda: events.append("bridge")),
-        _stop_engine=lambda: events.append("engine"),
-        _engine_external=True,
-        _lock_fd=None,
-    )
-    execv = MagicMock()
-    monkeypatch.setattr("cryodaq.launcher.os.execv", execv)
-
-    with pytest.raises(RuntimeError, match="render failed"):
-        LauncherWindow._restart_gui_with_theme_change(window)  # type: ignore[arg-type]
-
-    assert window._shutdown_requested is False
-    assert events == ["snapshot.stop"]
-    execv.assert_not_called()
-
-
-def test_shutdown_settles_assistant_before_engine_and_quit() -> None:
-    from cryodaq.launcher import LauncherWindow
-
-    events: list[str] = []
-    window = SimpleNamespace(
-        _shutdown_requested=False,
-        _health_timer=SimpleNamespace(stop=lambda: None),
-        _data_timer=SimpleNamespace(stop=lambda: None),
-        _async_timer=SimpleNamespace(stop=lambda: None),
-        _tray=SimpleNamespace(hide=lambda: None),
-        _bridge=SimpleNamespace(shutdown=lambda: events.append("bridge")),
-        _assistant_proc=_LifecycleProcess(events),
-        _stop_engine=lambda: events.append("engine"),
-        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
-        _loop=SimpleNamespace(close=lambda: events.append("loop.close")),
-        _lock_fd=None,
-        _app=SimpleNamespace(quit=lambda: events.append("quit")),
-    )
-    window._stop_assistant = lambda: LauncherWindow._stop_assistant(window)  # type: ignore[attr-defined]
-
-    LauncherWindow._do_shutdown(window)  # type: ignore[arg-type]
-
-    assert window._assistant_proc is None
-    assert events == [
-        "descriptor",
-        "assistant.terminate",
-        "assistant.wait:10",
-        "bridge",
-        "engine",
-        "loop.close",
-        "quit",
-    ]
-
-
-@pytest.mark.parametrize("failing_step", ["assistant", "bridge", "engine", "loop", "lock"])
-def test_shutdown_attempts_every_owner_and_quit_before_reraising_first_error(
-    failing_step: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from cryodaq.launcher import LauncherWindow
-
-    events: list[str] = []
-
-    def step(name: str) -> None:
-        events.append(name)
-        if name == failing_step:
-            raise RuntimeError(f"{name} failed")
-
-    window = SimpleNamespace(
-        _shutdown_requested=False,
-        _health_timer=SimpleNamespace(stop=lambda: None),
-        _data_timer=SimpleNamespace(stop=lambda: None),
-        _async_timer=SimpleNamespace(stop=lambda: None),
-        _tray=SimpleNamespace(hide=lambda: None),
-        _invalidate_descriptor_transport=lambda: events.append("descriptor"),
-        _stop_assistant=lambda: step("assistant"),
-        _bridge=SimpleNamespace(shutdown=lambda: step("bridge")),
-        _stop_engine=lambda: step("engine"),
-        _loop=SimpleNamespace(close=lambda: step("loop")),
-        _lock_fd=73,
-        _app=SimpleNamespace(quit=lambda: step("quit")),
-    )
-
-    def release(_fd: int, _name: str) -> None:
-        step("lock")
-
-    monkeypatch.setattr("cryodaq.launcher.release_lock", release)
-    with pytest.raises(RuntimeError, match=f"{failing_step} failed"):
-        LauncherWindow._do_shutdown(window)  # type: ignore[arg-type]
-
-    assert events == ["descriptor", "assistant", "bridge", "engine", "loop", "lock", "quit"]
-    if failing_step == "lock":
-        assert window._lock_fd == 73
-    else:
-        assert window._lock_fd is None

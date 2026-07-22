@@ -50,6 +50,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Имя фазы (из ExperimentPhase).",
     )
     parser.add_argument(
+        "--experiment-id",
+        required=True,
+        help="Exact active experiment identity; stale or omitted mutations are rejected by Engine.",
+    )
+    parser.add_argument(
         "--address",
         default=DEFAULT_CMD_ADDR,
         help=f"ZMQ REQ адрес engine (default: {DEFAULT_CMD_ADDR}).",
@@ -72,7 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     # IV.3 F5 amend: engine handler reads cmd["phase"], not "target".
     # See src/cryodaq/engine.py::experiment_advance_phase. Also the
     # shape the rest of the shell uses.
-    cmd = {"cmd": "experiment_advance_phase", "phase": args.phase}
+    cmd = {
+        "cmd": "experiment_advance_phase",
+        "experiment_id": args.experiment_id,
+        "phase": args.phase,
+    }
     try:
         reply = send_command(cmd, address=args.address, timeout_s=args.timeout)
     except TimeoutError as exc:

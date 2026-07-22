@@ -30,13 +30,15 @@ docstring.
 from __future__ import annotations
 
 import hmac
+import math
+import secrets
 from typing import Annotated, Any
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from cryodaq.notifications._secrets import SecretStr
@@ -159,6 +161,18 @@ class ReadingOut(BaseModel):
     unit: str | None = None
     status: str | None = None
 
+    @field_validator("value", mode="before")
+    @classmethod
+    def mask_non_finite_value(cls, value: Any) -> Any:
+        """Never serialize NaN/Infinity as if they were measurements."""
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return value  # let normal Pydantic validation reject malformed data
+        return value if math.isfinite(numeric) else None
+
 
 class ActiveExperimentOut(BaseModel):
     """Whitelisted experiment fields. Omits operator, sample, notes,
@@ -260,6 +274,8 @@ def redact_public_payload(obj: Any, keys: frozenset[str] = _REDACT_KEYS) -> Any:
         return {k: redact_public_payload(v, keys) for k, v in obj.items() if k not in keys}
     if isinstance(obj, list):
         return [redact_public_payload(v, keys) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
     return obj
 
 
@@ -407,6 +423,7 @@ class LogAppendIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(min_length=1, max_length=MAX_LOG_MESSAGE_CHARS)
+    experiment_id: str | None = Field(default=None, min_length=1, max_length=256)
     tags: list[Annotated[str, Field(min_length=1, max_length=MAX_LOG_TAG_CHARS)]] | None = Field(
         default=None, max_length=MAX_LOG_TAGS
     )
@@ -441,15 +458,25 @@ async def post_log(payload: LogAppendIn) -> dict[str, Any]:
     """Добавить запись в операторский журнал (author = «REST API»)."""
     cmd: dict[str, Any] = {
         "cmd": "log_entry",
+        # One submission identity per HTTP request.  The engine owns retry
+        # deduplication and returns a durable commit receipt for this key.
+        "request_id": secrets.token_hex(16),
         "message": payload.message,
         "author": _REST_IDENTITY,
         "source": "rest",
     }
+    if payload.experiment_id is None:
+        # Never bind a delayed request to whichever experiment happens to be
+        # active when it arrives at the engine.
+        cmd["experiment_unbound"] = True
+    else:
+        cmd["experiment_id"] = payload.experiment_id
     if payload.tags is not None:
         # Reject reserved system tags (impersonation guard) — genuinely
-        # free-form tags pass through unchanged. Compare stripped, matching
-        # how the engine normalizes tags (operator_log.normalize_operator_log_tags).
-        reserved = _RESERVED_TAGS.intersection(t.strip() for t in payload.tags)
+        # free-form tags pass through unchanged.  The security comparison is
+        # stripped and case-insensitive so cosmetic spelling cannot forge a
+        # system-semantic tag; non-reserved values remain byte-for-byte intact.
+        reserved = _RESERVED_TAGS.intersection(t.strip().casefold() for t in payload.tags)
         if reserved:
             raise HTTPException(
                 status_code=422,

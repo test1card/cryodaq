@@ -339,3 +339,30 @@ def test_bridge_pid_accessor_is_read_only_hint_and_never_a_process_handle() -> N
     assert bridge.process_pid() is None
     bridge._process = None
     assert bridge.process_pid() is None
+
+
+def test_handshake_close_retains_same_descriptor_after_close_failure(monkeypatch) -> None:
+    read_fd, write_fd = os.pipe()
+    launcher._guard_soak_bridge_fd_from_descendants(write_fd)
+    owner = launcher._SoakBridgeHandshake(write_fd, "e" * 64)
+    real_close = launcher.os.close
+
+    def fail_owned(fd: int) -> None:
+        if fd == write_fd:
+            raise OSError("injected close failure")
+        real_close(fd)
+
+    monkeypatch.setattr(launcher.os, "close", fail_owned)
+    with pytest.raises(RuntimeError, match="remained open"):
+        owner.close()
+    assert owner._closed is False
+    assert write_fd in launcher._SOAK_BRIDGE_ACTIVE_FDS
+    os.fstat(write_fd)
+
+    monkeypatch.setattr(launcher.os, "close", real_close)
+    owner.close()
+    assert owner._closed is True
+    assert write_fd not in launcher._SOAK_BRIDGE_ACTIVE_FDS
+    with pytest.raises(OSError):
+        os.fstat(write_fd)
+    os.close(read_fd)

@@ -25,8 +25,10 @@ Out of scope (follow-ups):
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
@@ -56,6 +58,21 @@ _DEFAULT_LIMIT = 50
 _SEARCH_DEBOUNCE_MS = 250
 _BANNER_AUTO_CLEAR_MS = 4000
 _LOG_ENTRY_CHANNEL = "analytics/operator_log_entry"
+_LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
+_LOG_READ_SCOPE_SCHEMA = "operator_log_read_scope_v1"
+
+_KNOWN_UNCOMMITTED_LOG_ERRORS = frozenset(
+    {
+        "mutation_protocol_incompatible",
+        "operator_log_request_id_invalid",
+        "operator_log_scope_invalid",
+        "stale_experiment_command",
+        "operator_log_message_invalid",
+        "operator_log_persistence_failed",
+        "idempotency_key_conflict",
+        "operator_log_busy",
+    }
+)
 
 _FILTER_CHIP_ALL = "all"
 _FILTER_CHIP_CURRENT = "current"
@@ -172,6 +189,24 @@ def _sort_entries(entries: Iterable[dict]) -> list[dict]:
     return sorted(entries, key=key, reverse=True)
 
 
+def _result_is_unknown(result: object) -> bool:
+    """Return whether a command reply cannot prove commit or non-commit.
+
+    Transport timeouts and malformed replies may arrive after the engine has
+    already committed the append.  They must never be presented as an ordinary
+    retryable failure.
+    """
+
+    if not isinstance(result, dict):
+        return True
+    if result.get("_handler_timeout") or result.get("_unknown"):
+        return True
+    if result.get("committed") is True:
+        return False
+    error_code = result.get("error_code")
+    return not (result.get("ok") is False and error_code in _KNOWN_UNCOMMITTED_LOG_ERRORS)
+
+
 class OperatorLogPanel(QWidget):
     """Full operator journal overlay (Phase II.3)."""
 
@@ -188,7 +223,14 @@ class OperatorLogPanel(QWidget):
         self._filtered_entries: list[dict] = []
         self._active_filter: str = _DEFAULT_FILTER
         self._limit: int = _DEFAULT_LIMIT
+        self._state_generation: int = 0
         self._inflight_refresh: ZmqCommandWorker | None = None
+        self._refresh_context: dict[str, Any] | None = None
+        self._refresh_pending: bool = False
+        self._refresh_sequence: int = 0
+        self._submit_worker: ZmqCommandWorker | None = None
+        self._submit_context: dict[str, Any] | None = None
+        self._unresolved_submit: dict[str, Any] | None = None
         self._workers: list[ZmqCommandWorker] = []
         self._filter_buttons: dict[str, QPushButton] = {}
 
@@ -457,7 +499,16 @@ class OperatorLogPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_submit_clicked(self) -> None:
-        if self._read_only:
+        # The enabled state is presentation only.  Repeat the authority checks
+        # in the direct slot so keyboard/programmatic invocation cannot bypass
+        # a disconnect or replay transition.
+        if self._read_only or not self._connected or self._submit_worker is not None:
+            return
+        if self._unresolved_submit is not None:
+            # The engine idempotency key makes this an evidence lookup as well
+            # as a safe retry: identical content returns the cached receipt and
+            # different content is rejected.
+            self._start_submit(self._unresolved_submit)
             return
         message = self._message_edit.toPlainText().strip()
         if not message:
@@ -466,39 +517,133 @@ class OperatorLogPanel(QWidget):
         author = self._author_edit.text().strip()
         tags = list(normalize_operator_log_tags(self._tags_edit.text()))
         bind_experiment = self._bind_experiment_check.isChecked()
+        experiment_id = self._current_experiment_id if bind_experiment else None
+        if bind_experiment and experiment_id is None:
+            self.show_error("Нет точного идентификатора текущего эксперимента; запись не отправлена.")
+            return
         self.entry_submitted.emit(message, author, tags, bind_experiment)
 
         payload: dict = {
             "cmd": "log_entry",
+            "request_id": uuid.uuid4().hex,
             "message": message,
             "author": author,
             "source": "gui",
             "tags": tags,
-            "current_experiment": bind_experiment,
         }
+        if experiment_id is None:
+            payload["experiment_unbound"] = True
+        else:
+            payload["experiment_id"] = experiment_id
+        context: dict[str, Any] = {
+            "payload": payload,
+            "request_id": payload["request_id"],
+            "experiment_id": experiment_id,
+            "message": message,
+            "author": author,
+            "tags_text": self._tags_edit.text(),
+        }
+        self._start_submit(context)
+
+    def _start_submit(self, context: dict[str, Any]) -> None:
+        if self._read_only or not self._connected or self._submit_worker is not None:
+            return
+        context["attempt_generation"] = self._state_generation
+        self._submit_context = context
         self._submit_btn.setEnabled(False)
-        worker = ZmqCommandWorker(payload, parent=self)
-        worker.finished.connect(self._on_submit_result)
+        worker = ZmqCommandWorker(dict(context["payload"]), parent=self)
+        worker.finished.connect(
+            lambda result, expected=context, completed_worker=worker: self._on_submit_result(
+                result, expected, completed_worker
+            )
+        )
+        self._submit_worker = worker
         self._workers.append(worker)
+        self._update_composer_enablement()
         worker.start()
 
-    def _on_submit_result(self, result: dict) -> None:
-        self._submit_btn.setEnabled(self._connected and not self._read_only)
-        self._workers = [w for w in self._workers if w.isRunning()]
-        if not result.get("ok", False):
-            error = result.get("error", "Не удалось сохранить запись.")
-            self.show_error(str(error))
-            return
-        self._settings.setValue("last_log_author", self._author_edit.text().strip())
-        self._message_edit.clear()
+    @staticmethod
+    def _commit_receipt_matches(result: object, context: dict[str, Any]) -> bool:
+        if not isinstance(result, dict) or result.get("committed") is not True:
+            return False
+        receipt = result.get("commit_receipt")
         entry = result.get("entry")
-        if isinstance(entry, dict):
-            # Optimistic prepend: newer entries render first anyway.
-            self._entries_all = _sort_entries([*self._entries_all, entry])
-            self._apply_filters()
-        self.show_info("Запись сохранена.")
-        # Reconcile with server (picks up entries from other clients too).
-        self.refresh_entries()
+        if not isinstance(receipt, dict) or not isinstance(entry, dict):
+            return False
+        return (
+            receipt.get("schema") == _LOG_COMMIT_SCHEMA
+            and receipt.get("request_id") == context.get("request_id")
+            and receipt.get("experiment_id") == context.get("experiment_id")
+            and receipt.get("committed") is True
+            and receipt.get("entry_id") is not None
+            and receipt.get("entry_id") == entry.get("id")
+        )
+
+    def _on_submit_result(
+        self,
+        result: dict,
+        context: dict[str, Any] | None = None,
+        worker: ZmqCommandWorker | None = None,
+    ) -> None:
+        expected = context or self._submit_context or self._unresolved_submit
+        if expected is None:
+            self.show_error("Получен ответ журнала без идентификатора операции.", persistent=True)
+            return
+        if worker is not None and worker is not self._submit_worker:
+            return
+        if worker is not None:
+            self._submit_worker = None
+        if self._submit_context is expected:
+            self._submit_context = None
+        self._prune_workers()
+
+        if self._commit_receipt_matches(result, expected):
+            if self._unresolved_submit is expected:
+                self._unresolved_submit = None
+            self._settings.setValue("last_log_author", str(expected.get("author", "")))
+            if self._message_edit.toPlainText().strip() == expected.get("message"):
+                self._message_edit.clear()
+            if self._tags_edit.text() == expected.get("tags_text"):
+                self._tags_edit.clear()
+            if result.get("ok") is True:
+                self.show_info("Запись подтверждена журналом.")
+            else:
+                self.show_warning(
+                    "Запись сохранена, но публикация подтверждения требует сверки. Содержимое не потеряно.",
+                    persistent=True,
+                )
+            self._update_composer_enablement()
+            self.refresh_entries()
+            return
+
+        if result.get("committed") is True or _result_is_unknown(result):
+            self._mark_submit_unknown(
+                expected,
+                "Engine не подтвердил, сохранена ли запись. Текст сохранён; "
+                "нажмите «Сверить сохранение» после восстановления связи.",
+            )
+            return
+
+        if self._unresolved_submit is expected:
+            self._unresolved_submit = None
+        error = result.get("error", "Не удалось сохранить запись.")
+        self.show_error(str(error))
+        self._update_composer_enablement()
+
+    def _mark_submit_unknown(self, context: dict[str, Any], message: str) -> None:
+        self._unresolved_submit = context
+        self.show_unknown(message)
+        self._update_composer_enablement()
+
+    def _prune_workers(self) -> None:
+        remaining: list[ZmqCommandWorker] = []
+        for item in self._workers:
+            try:
+                if item.isRunning():
+                    remaining.append(item)
+            except (AttributeError, RuntimeError):
+                continue
+        self._workers = remaining
 
     # ------------------------------------------------------------------
     # Filters
@@ -533,27 +678,121 @@ class OperatorLogPanel(QWidget):
     # ------------------------------------------------------------------
 
     def refresh_entries(self) -> None:
+        if not self._connected:
+            return
+        if self._inflight_refresh is not None:
+            self._refresh_pending = True
+            return
+
         payload: dict = {"cmd": "log_get", "limit": self._limit}
+        experiment_id: str | None = None
         if self._active_filter == _FILTER_CHIP_CURRENT:
-            payload["current_experiment"] = True
+            experiment_id = self._current_experiment_id
+            if experiment_id is None:
+                self._entries_all = []
+                self._apply_filters()
+                self.show_warning("Нет активного эксперимента: текущий журнал пуст.")
+                return
+            payload.update(
+                {
+                    "log_scope": "experiment",
+                    "experiment_id": experiment_id,
+                }
+            )
+        else:
+            payload["log_scope"] = "all"
+
+        self._refresh_sequence += 1
+        context: dict[str, Any] = {
+            "sequence": self._refresh_sequence,
+            "generation": self._state_generation,
+            "filter": self._active_filter,
+            "log_scope": payload["log_scope"],
+            "experiment_id": experiment_id,
+        }
         worker = ZmqCommandWorker(payload, parent=self)
-        worker.finished.connect(self._on_refresh_result)
+        worker.finished.connect(
+            lambda result, expected=context, completed_worker=worker: self._on_refresh_result(
+                result, expected, completed_worker
+            )
+        )
         self._inflight_refresh = worker
+        self._refresh_context = context
         self._workers.append(worker)
         worker.start()
 
-    def _on_refresh_result(self, result: dict) -> None:
-        self._inflight_refresh = None
-        self._workers = [w for w in self._workers if w.isRunning()]
+    @staticmethod
+    def _scope_receipt_matches(result: object, context: dict[str, Any]) -> bool:
+        if not isinstance(result, dict):
+            return False
+        receipt = result.get("scope_receipt")
+        return (
+            isinstance(receipt, dict)
+            and receipt.get("schema") == _LOG_READ_SCOPE_SCHEMA
+            and receipt.get("log_scope") == context.get("log_scope")
+            and receipt.get("experiment_id") == context.get("experiment_id")
+        )
+
+    def _on_refresh_result(
+        self,
+        result: dict,
+        context: dict[str, Any] | None = None,
+        worker: ZmqCommandWorker | None = None,
+    ) -> None:
+        expected = context or self._refresh_context
+        if worker is not None and worker is not self._inflight_refresh:
+            return
+        if worker is not None:
+            self._inflight_refresh = None
+            self._refresh_context = None
+        self._prune_workers()
+        if expected is None:
+            self.show_error("Получен ответ журнала без области чтения.", persistent=True)
+            return
+
+        current_request = (
+            expected.get("generation") == self._state_generation
+            and self._connected
+            and expected.get("filter") == self._active_filter
+            and (
+                expected.get("log_scope") != "experiment"
+                or expected.get("experiment_id") == self._current_experiment_id
+            )
+        )
+        if not current_request:
+            self._finish_refresh_cycle()
+            return
         if not result.get("ok", False):
             error = result.get("error", "Не удалось загрузить журнал.")
-            self.show_error(str(error))
+            self.show_warning(f"Журнал не обновлён; показаны последние данные. {error}", persistent=True)
             # Keep existing timeline — don't wipe on failure.
+            self._finish_refresh_cycle()
             return
-        entries = list(result.get("entries", []))
+        if not self._scope_receipt_matches(result, expected):
+            self.show_warning(
+                "Engine вернул журнал без точного подтверждения области; показаны последние данные.",
+                persistent=True,
+            )
+            self._finish_refresh_cycle()
+            return
+        raw_entries = result.get("entries")
+        if not isinstance(raw_entries, list) or not all(isinstance(entry, dict) for entry in raw_entries):
+            self.show_warning("Engine вернул повреждённый журнал; показаны последние данные.", persistent=True)
+            self._finish_refresh_cycle()
+            return
+        entries = list(raw_entries)
         self._entries_all = _sort_entries(entries)
         self._apply_filters()
         self.entries_loaded.emit(len(self._entries_all))
+        if self._unresolved_submit is None:
+            self.clear_message()
+        self._finish_refresh_cycle()
+
+    def _finish_refresh_cycle(self) -> None:
+        if not self._refresh_pending:
+            return
+        self._refresh_pending = False
+        QTimer.singleShot(0, self.refresh_entries)
 
     def _on_load_more_clicked(self) -> None:
         self._limit += _LIMIT_STEP
@@ -723,25 +962,59 @@ class OperatorLogPanel(QWidget):
         self.refresh_entries()
 
     def set_connected(self, connected: bool) -> None:
+        connected = bool(connected)
         if connected == self._connected:
             return
         self._connected = connected
+        self._state_generation += 1
+        if not connected and self._submit_context is not None:
+            self._mark_submit_unknown(
+                self._submit_context,
+                "Связь потеряна до подтверждения записи. Исход неизвестен; текст и ключ операции сохранены.",
+            )
         self._update_composer_enablement()
         if not connected:
-            self.show_error("Нет связи с engine")
+            if self._unresolved_submit is None:
+                self.show_error("Нет связи с engine; показаны последние данные журнала.", persistent=True)
         else:
-            self.clear_message()
+            if self._unresolved_submit is not None:
+                self.show_unknown(
+                    "Предыдущая запись имеет неизвестный исход. "
+                    "Нажмите «Сверить сохранение»; новый текст не отправляется.",
+                )
+            else:
+                self.clear_message()
+            self.refresh_entries()
 
     def set_read_only(self, read_only: bool) -> None:
         """Keep the timeline searchable while disabling replay log writes."""
 
-        self._read_only = bool(read_only)
+        read_only = bool(read_only)
+        if read_only == self._read_only:
+            return
+        self._read_only = read_only
+        self._state_generation += 1
+        if read_only and self._submit_context is not None:
+            self._mark_submit_unknown(
+                self._submit_context,
+                "Режим изменился до подтверждения записи. Исход неизвестен; повторная мутация заблокирована.",
+            )
         self._update_composer_enablement()
 
     def set_current_experiment(self, exp_id: str | None) -> None:
+        exp_id = str(exp_id) if exp_id is not None else None
+        if exp_id == self._current_experiment_id:
+            return
         self._current_experiment_id = exp_id
+        self._state_generation += 1
         has_active = exp_id is not None
-        self._bind_experiment_check.setEnabled(has_active and not self._read_only)
+        self._bind_experiment_check.setEnabled(
+            has_active
+            and self._connected
+            and not self._read_only
+            and self._submit_worker is None
+            and self._unresolved_submit is None
+        )
         if not has_active:
             self._bind_experiment_check.setChecked(False)
         else:
@@ -749,14 +1022,25 @@ class OperatorLogPanel(QWidget):
         # The "current experiment" chip is only meaningful when there's
         # an active experiment. Keep it clickable regardless — server
         # returns empty list otherwise and that's a valid state.
+        if self._active_filter == _FILTER_CHIP_CURRENT:
+            self.refresh_entries()
 
     def _update_composer_enablement(self) -> None:
-        mutable = self._connected and not self._read_only
+        mutable = (
+            self._connected and not self._read_only and self._submit_worker is None and self._unresolved_submit is None
+        )
         self._bind_experiment_check.setEnabled(mutable and self._current_experiment_id is not None)
         self._author_edit.setEnabled(mutable)
         self._tags_edit.setEnabled(mutable)
         self._message_edit.setEnabled(mutable)
-        self._submit_btn.setEnabled(mutable)
+        can_reconcile = (
+            self._connected
+            and not self._read_only
+            and self._submit_worker is None
+            and self._unresolved_submit is not None
+        )
+        self._submit_btn.setText("Сверить сохранение" if self._unresolved_submit is not None else "Сохранить")
+        self._submit_btn.setEnabled(mutable or can_reconcile)
 
     # ------------------------------------------------------------------
     # Banner
@@ -765,18 +1049,21 @@ class OperatorLogPanel(QWidget):
     def show_info(self, text: str) -> None:
         self._set_banner(text, theme.STATUS_INFO)
 
-    def show_warning(self, text: str) -> None:
-        self._set_banner(text, theme.STATUS_WARNING)
+    def show_warning(self, text: str, *, persistent: bool = False) -> None:
+        self._set_banner(text, theme.STATUS_CAUTION, persistent=persistent)
 
-    def show_error(self, text: str) -> None:
-        self._set_banner(text, theme.STATUS_FAULT)
+    def show_unknown(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_CAUTION, persistent=True)
+
+    def show_error(self, text: str, *, persistent: bool = False) -> None:
+        self._set_banner(text, theme.STATUS_FAULT, persistent=persistent)
 
     def clear_message(self) -> None:
         self._banner_label.setText("")
         self._banner_label.setVisible(False)
         self._banner_timer.stop()
 
-    def _set_banner(self, text: str, color: str) -> None:
+    def _set_banner(self, text: str, color: str, *, persistent: bool = False) -> None:
         self._banner_label.setText(text)
         self._banner_label.setStyleSheet(
             f"#operatorLogBanner {{"
@@ -787,4 +1074,7 @@ class OperatorLogPanel(QWidget):
             f"}}"
         )
         self._banner_label.setVisible(True)
-        self._banner_timer.start()
+        if persistent:
+            self._banner_timer.stop()
+        else:
+            self._banner_timer.start()

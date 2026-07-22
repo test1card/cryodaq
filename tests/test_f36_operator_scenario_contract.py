@@ -225,7 +225,7 @@ SCENARIO_INVARIANTS = {
         False,
     ),
     "f36.operator.unsafe_preconditions": (
-        "warning",
+        "caution",
         "safety_manager_authority",
         "not_recording",
         "safe_off_verified_off_other_blocker",
@@ -236,7 +236,7 @@ SCENARIO_INVARIANTS = {
         False,
     ),
     "f36.operator.alarm_acknowledgement": (
-        "warning",
+        "caution",
         "alarm_authority",
         "recording",
         "safe_off_alarm_active",
@@ -258,7 +258,7 @@ SCENARIO_INVARIANTS = {
         False,
     ),
     "f36.operator.cooldown_deviation": (
-        "warning",
+        "caution",
         "cooldown_projection_authority",
         "recording",
         "running_observational_only",
@@ -280,7 +280,7 @@ SCENARIO_INVARIANTS = {
         False,
     ),
     "f36.operator.passive_infrastructure_degradation": (
-        "warning",
+        "caution",
         "passive_health_authority",
         "not_recording",
         "safe_off_passive_only",
@@ -313,7 +313,7 @@ SCENARIO_INVARIANTS = {
         False,
     ),
     "f36.operator.support_bundle_capture": (
-        "warning",
+        "caution",
         "support_bundle_authority",
         "unknown",
         "unknown_support_capture_only",

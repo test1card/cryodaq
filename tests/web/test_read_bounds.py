@@ -10,7 +10,10 @@ bound (the value actually used in the query / forwarded to the engine), not a
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 import cryodaq.web.server as server
 
@@ -167,3 +170,43 @@ def test_query_history_masks_sentinel(tmp_path, monkeypatch) -> None:
     assert not any(isinstance(v, float) and not math.isfinite(v) for v in vs), (
         "non-finite number leaked into history feed"
     )
+
+
+async def test_live_reading_cache_and_websocket_mask_nonfinite(monkeypatch) -> None:
+    """Live public surfaces retain status but serialize non-finite values as null."""
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    class _Client:
+        messages: list[str] = []
+
+        async def send_text(self, message: str) -> None:
+            self.messages.append(message)
+
+    client = _Client()
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+    monkeypatch.setattr(server._state, "last_readings", {})
+    monkeypatch.setattr(server._state, "clients", {client})
+    monkeypatch.setattr(server._state, "broadcast_q", queue)
+
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="ls218",
+            channel="T1",
+            value=float("nan"),
+            unit="K",
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+    )
+
+    cached = server._state.last_readings["T1"]
+    event = queue.get_nowait()
+    assert cached["value"] is None
+    assert cached["status"] == "sensor_error"
+    assert event["value"] is None
+
+    # _broadcast is defensive even if an unexpected producer bypasses the
+    # canonical reading callback.
+    await server._broadcast({"type": "reading", "value": float("inf")})
+    assert len(client.messages) == 1
+    assert json.loads(client.messages[0], parse_constant=lambda token: pytest.fail(token))["value"] is None

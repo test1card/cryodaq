@@ -156,7 +156,7 @@ _PERIODIC_TOKEN_PREFIX = "sha256:"
 # declaring its own: the ZMQ and REST surfaces ship together from one
 # package build, so one number is honest; a REST-only break would still
 # warrant bumping this the same way a ZMQ-only break would.
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 def encode_command_reply(reply: dict[str, Any]) -> bytes:

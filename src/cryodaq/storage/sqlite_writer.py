@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import stat
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
@@ -20,11 +21,18 @@ from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
 from cryodaq.channels.descriptors import ChannelCatalog
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
-from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
+from cryodaq.core.operator_log import (
+    OperatorLogCommitResult,
+    OperatorLogEntry,
+    OperatorLogIdempotencyConflictError,
+    OperatorLogIdempotencyUnavailableError,
+    normalize_operator_log_tags,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import (
     SQLITE_BACKPORT_SAFE,
@@ -93,7 +101,9 @@ CREATE TABLE IF NOT EXISTS operator_log (
     author        TEXT    NOT NULL DEFAULT '',
     source        TEXT    NOT NULL DEFAULT '',
     message       TEXT    NOT NULL,
-    tags          TEXT    NOT NULL DEFAULT '[]'
+    tags          TEXT    NOT NULL DEFAULT '[]',
+    request_id    TEXT,
+    request_fingerprint TEXT
 );
 """
 
@@ -104,6 +114,30 @@ CREATE INDEX IF NOT EXISTS idx_operator_log_ts ON operator_log (timestamp);
 INDEX_OPERATOR_LOG_EXPERIMENT = """
 CREATE INDEX IF NOT EXISTS idx_operator_log_experiment ON operator_log (experiment_id, timestamp);
 """
+
+INDEX_OPERATOR_LOG_REQUEST_ID = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_log_request_id
+ON operator_log (request_id) WHERE request_id IS NOT NULL;
+"""
+
+_OPERATOR_LOG_LEGACY_COLUMNS = (
+    (0, "id", "INTEGER", 0, None, 1),
+    (1, "timestamp", "REAL", 1, None, 0),
+    (2, "experiment_id", "TEXT", 0, None, 0),
+    (3, "author", "TEXT", 1, "''", 0),
+    (4, "source", "TEXT", 1, "''", 0),
+    (5, "message", "TEXT", 1, None, 0),
+    (6, "tags", "TEXT", 1, "'[]'", 0),
+)
+_OPERATOR_LOG_CURRENT_COLUMNS = (
+    *_OPERATOR_LOG_LEGACY_COLUMNS,
+    (7, "request_id", "TEXT", 0, None, 0),
+    (8, "request_fingerprint", "TEXT", 0, None, 0),
+)
+_OPERATOR_LOG_REGISTRY_DEADLINE_S = 10.0
+_OPERATOR_LOG_MAX_DIRECTORY_ENTRIES = 100_000
+_OPERATOR_LOG_MAX_HOT_DATABASES = 10_000
+_OPERATOR_LOG_MAX_KEYED_ROWS = 10_000
 
 
 def _parse_timestamp(raw) -> datetime:
@@ -275,6 +309,16 @@ class _CommitReceiptIntegrity:
     token: object
 
 
+@dataclass(frozen=True, slots=True)
+class _PersistedOperatorLogRequest:
+    """Persistence-private registry row; never serialized to operator clients."""
+
+    storage_day: date
+    entry: OperatorLogEntry
+    request_id: str
+    request_fingerprint: str
+
+
 class SQLiteWriter:
     """Асинхронный писатель показаний в SQLite.
 
@@ -319,6 +363,12 @@ class SQLiteWriter:
         self._commit_owner_key = object()
         self._commit_revision = 0
         self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
+        # Durable operator-log idempotency is a retained-data property, not an
+        # in-memory receipt cache. Startup explicitly builds this bounded
+        # registry before keyed writes are enabled. Slice B extends the same
+        # builder with indexed cold-v2 rows; normal appends never rescan cold
+        # storage.
+        self._operator_log_idempotency_registry: dict[str, _PersistedOperatorLogRequest] | None = None
 
         # Disk-full graceful degradation (Phase 2a H.1).
         # When the writer thread detects disk-full from sqlite3.OperationalError,
@@ -345,6 +395,54 @@ class SQLiteWriter:
 
     def _db_path(self, day: date) -> Path:
         return self._data_dir / f"data_{day.isoformat()}.db"
+
+    @staticmethod
+    def _operator_log_columns(conn: sqlite3.Connection) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            (int(row[0]), str(row[1]), str(row[2]).upper(), int(row[3]), row[4], int(row[5]))
+            for row in conn.execute("PRAGMA main.table_info(operator_log)")
+        )
+
+    @staticmethod
+    def _normalized_schema_sql(value: object) -> str:
+        if type(value) is not str:
+            return ""
+        return " ".join(value.strip().rstrip(";").split()).casefold()
+
+    @classmethod
+    def _verify_operator_log_storage(cls, conn: sqlite3.Connection) -> None:
+        if cls._operator_log_columns(conn) != _OPERATOR_LOG_CURRENT_COLUMNS:
+            raise RuntimeError("operator_log schema is not the exact current schema")
+        index_rows = conn.execute("PRAGMA main.index_list(operator_log)").fetchall()
+        matching = [row for row in index_rows if row[1] == "idx_operator_log_request_id"]
+        if len(matching) != 1 or int(matching[0][2]) != 1 or int(matching[0][4]) != 1:
+            raise RuntimeError("operator_log request-id index is missing or not unique/partial")
+        index_info = conn.execute("PRAGMA main.index_info(idx_operator_log_request_id)").fetchall()
+        if [(int(row[0]), int(row[1]), row[2]) for row in index_info] != [(0, 7, "request_id")]:
+            raise RuntimeError("operator_log request-id index targets unexpected columns")
+        stored = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_operator_log_request_id'"
+        ).fetchone()
+        actual_sql = cls._normalized_schema_sql(None if stored is None else stored[0])
+        expected_sql = cls._normalized_schema_sql(INDEX_OPERATOR_LOG_REQUEST_ID)
+        expected_without_guard = expected_sql.replace(" if not exists", "")
+        if actual_sql not in {expected_sql, expected_without_guard}:
+            raise RuntimeError("operator_log request-id index predicate is not exact")
+
+    @classmethod
+    def _ensure_operator_log_storage_in_transaction(cls, conn: sqlite3.Connection) -> None:
+        columns = cls._operator_log_columns(conn)
+        if not columns:
+            conn.execute(SCHEMA_OPERATOR_LOG)
+        elif columns == _OPERATOR_LOG_LEGACY_COLUMNS:
+            conn.execute("ALTER TABLE operator_log ADD COLUMN request_id TEXT")
+            conn.execute("ALTER TABLE operator_log ADD COLUMN request_fingerprint TEXT")
+        elif columns != _OPERATOR_LOG_CURRENT_COLUMNS:
+            raise RuntimeError("operator_log schema migration refused an unknown or partial schema")
+        conn.execute(INDEX_OPERATOR_LOG_TS)
+        conn.execute(INDEX_OPERATOR_LOG_EXPERIMENT)
+        conn.execute(INDEX_OPERATOR_LOG_REQUEST_ID)
+        cls._verify_operator_log_storage(conn)
 
     # ------------------------------------------------------------------
     # Disk-full graceful degradation (Phase 2a H.1)
@@ -477,15 +575,19 @@ class SQLiteWriter:
         conn.execute("PRAGMA cache_size=-16384;")  # 16 MB cache
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute(SCHEMA_READINGS)
-        conn.execute(SCHEMA_SOURCE_DATA)
-        conn.execute(SCHEMA_OPERATOR_LOG)
-        conn.execute(INDEX_READINGS_TS)
-        conn.execute(INDEX_SOURCE_DATA_TS)
-        conn.execute(INDEX_CHANNEL_TS)
-        conn.execute(INDEX_OPERATOR_LOG_TS)
-        conn.execute(INDEX_OPERATOR_LOG_EXPERIMENT)
-        conn.commit()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(SCHEMA_READINGS)
+            conn.execute(SCHEMA_SOURCE_DATA)
+            conn.execute(INDEX_READINGS_TS)
+            conn.execute(INDEX_SOURCE_DATA_TS)
+            conn.execute(INDEX_CHANNEL_TS)
+            self._ensure_operator_log_storage_in_transaction(conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
         try:
             initialize_descriptor_storage(conn)
         except Exception:
@@ -926,22 +1028,37 @@ class SQLiteWriter:
         source: str,
         message: str,
         tags: tuple[str, ...],
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> OperatorLogEntry:
+        if (request_id is None) != (request_fingerprint is None):
+            raise ValueError("operator-log private request fields must be supplied together")
+        if request_id is not None:
+            self._validate_operator_log_request(request_id, request_fingerprint)
         day = timestamp.date()
         conn = self._ensure_connection(day)
-        cursor = conn.execute(
-            "INSERT INTO operator_log (timestamp, experiment_id, author, source, message, tags) "
-            "VALUES (?, ?, ?, ?, ?, ?);",
-            (
-                timestamp.timestamp(),
-                experiment_id,
-                author,
-                source,
-                message,
-                json.dumps(list(tags), ensure_ascii=False),
-            ),
-        )
-        conn.commit()
+        if request_id is not None:
+            self._verify_operator_log_storage(conn)
+        try:
+            cursor = conn.execute(
+                "INSERT INTO operator_log "
+                "(timestamp, experiment_id, author, source, message, tags, request_id, request_fingerprint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                (
+                    timestamp.timestamp(),
+                    experiment_id,
+                    author,
+                    source,
+                    message,
+                    json.dumps(list(tags), ensure_ascii=False),
+                    request_id,
+                    request_fingerprint,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         return OperatorLogEntry(
             id=int(cursor.lastrowid),
             timestamp=timestamp,
@@ -951,6 +1068,292 @@ class SQLiteWriter:
             message=message,
             tags=tags,
         )
+
+    @staticmethod
+    def _validate_operator_log_request(request_id: object, request_fingerprint: object) -> None:
+        if (
+            type(request_id) is not str
+            or len(request_id) != 32
+            or any(char not in "0123456789abcdef" for char in request_id)
+        ):
+            raise ValueError("request_id must be exactly 32 lowercase hexadecimal characters")
+        if (
+            type(request_fingerprint) is not str
+            or len(request_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in request_fingerprint)
+        ):
+            raise ValueError("request_fingerprint must be a lowercase SHA-256 hexadecimal digest")
+
+    @staticmethod
+    def _operator_log_path_identity(path: Path) -> tuple[int, int, int, int]:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("operator-log source is not a regular file")
+        if getattr(info, "st_nlink", 1) != 1:
+            raise OSError("operator-log source has multiple links")
+        return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_nlink)
+
+    def _bounded_operator_log_hot_paths(self, deadline_monotonic: float) -> tuple[tuple[date, Path], ...]:
+        if not self._data_dir.exists():
+            return ()
+        paths: list[tuple[date, Path]] = []
+        visited = 0
+        try:
+            with os.scandir(self._data_dir) as entries:
+                for item in entries:
+                    visited += 1
+                    if visited > _OPERATOR_LOG_MAX_DIRECTORY_ENTRIES:
+                        raise OperatorLogIdempotencyUnavailableError(
+                            "operator-log hot directory exceeds the bounded entry cap"
+                        )
+                    if time.monotonic() >= deadline_monotonic:
+                        raise OperatorLogIdempotencyUnavailableError("operator-log hot registry deadline expired")
+                    name = item.name
+                    if len(name) != 18 or not name.startswith("data_") or not name.endswith(".db"):
+                        continue
+                    try:
+                        day = date.fromisoformat(name[5:15])
+                    except ValueError:
+                        continue
+                    if name != f"data_{day.isoformat()}.db":
+                        continue
+                    path = Path(item.path)
+                    self._operator_log_path_identity(path)
+                    paths.append((day, path))
+                    if len(paths) > _OPERATOR_LOG_MAX_HOT_DATABASES:
+                        raise OperatorLogIdempotencyUnavailableError(
+                            "operator-log hot database count exceeds the bounded cap"
+                        )
+        except OperatorLogIdempotencyUnavailableError:
+            raise
+        except Exception as exc:
+            raise OperatorLogIdempotencyUnavailableError("operator-log hot registry enumeration failed") from exc
+        return tuple(sorted(paths, key=lambda item: item[0]))
+
+    def _read_hot_operator_log_registry(
+        self,
+        deadline_monotonic: float,
+    ) -> dict[str, _PersistedOperatorLogRequest]:
+        registry: dict[str, _PersistedOperatorLogRequest] = {}
+        for storage_day, path in self._bounded_operator_log_hot_paths(deadline_monotonic):
+            identity = self._operator_log_path_identity(path)
+            uri = f"file:{quote(str(path), safe='/')}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=0.25, isolation_level=None)
+            expired = [False]
+            try:
+                if not hasattr(conn, "setlimit") or not hasattr(sqlite3, "SQLITE_LIMIT_LENGTH"):
+                    raise RuntimeError("SQLite allocation limits unavailable")
+                conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1_048_576)
+                conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 65_536)
+
+                def interrupt_on_deadline() -> int:
+                    if time.monotonic() >= deadline_monotonic:
+                        expired[0] = True
+                        return 1
+                    return 0
+
+                conn.set_progress_handler(interrupt_on_deadline, 2_000)
+                conn.execute("PRAGMA query_only=ON").close()
+                conn.execute("PRAGMA busy_timeout=250").close()
+                columns = self._operator_log_columns(conn)
+                if not columns:
+                    continue
+                if columns == _OPERATOR_LOG_LEGACY_COLUMNS:
+                    continue
+                self._verify_operator_log_storage(conn)
+                cursor = conn.execute(
+                    "SELECT id, timestamp, experiment_id, author, source, message, tags, "
+                    "request_id, request_fingerprint FROM operator_log "
+                    "INDEXED BY idx_operator_log_request_id WHERE request_id IS NOT NULL "
+                    "ORDER BY request_id LIMIT ?",
+                    (_OPERATOR_LOG_MAX_KEYED_ROWS + 1,),
+                )
+                try:
+                    rows = cursor.fetchall()
+                finally:
+                    cursor.close()
+                if len(rows) > _OPERATOR_LOG_MAX_KEYED_ROWS:
+                    raise RuntimeError("operator-log keyed row count exceeds the bounded cap")
+                for row in rows:
+                    (
+                        row_id,
+                        raw_timestamp,
+                        experiment_id,
+                        author,
+                        source,
+                        message,
+                        raw_tags,
+                        request_id,
+                        fingerprint,
+                    ) = row
+                    self._validate_operator_log_request(request_id, fingerprint)
+                    if type(row_id) is not int or row_id <= 0:
+                        raise ValueError("operator-log row id is invalid")
+                    if experiment_id is not None and type(experiment_id) is not str:
+                        raise ValueError("operator-log experiment id is invalid")
+                    if any(type(value) is not str for value in (author, source, message, raw_tags)):
+                        raise ValueError("operator-log text field is invalid")
+                    decoded_tags = json.loads(raw_tags)
+                    if type(decoded_tags) is not list or any(type(value) is not str for value in decoded_tags):
+                        raise ValueError("operator-log tags are invalid")
+                    entry = OperatorLogEntry(
+                        id=row_id,
+                        timestamp=_parse_timestamp(raw_timestamp),
+                        experiment_id=experiment_id,
+                        author=author,
+                        source=source,
+                        message=message,
+                        tags=tuple(decoded_tags),
+                    )
+                    if request_id in registry:
+                        raise RuntimeError("operator-log request id is ambiguous across retained hot databases")
+                    registry[request_id] = _PersistedOperatorLogRequest(
+                        storage_day=storage_day,
+                        entry=entry,
+                        request_id=request_id,
+                        request_fingerprint=fingerprint,
+                    )
+                    if len(registry) > _OPERATOR_LOG_MAX_KEYED_ROWS:
+                        raise RuntimeError("operator-log keyed row count exceeds the bounded cap")
+            except Exception as exc:
+                reason = (
+                    "operator-log hot registry deadline expired"
+                    if expired[0]
+                    else "operator-log hot registry is invalid"
+                )
+                raise OperatorLogIdempotencyUnavailableError(reason) from exc
+            finally:
+                conn.close()
+            if self._operator_log_path_identity(path) != identity:
+                raise OperatorLogIdempotencyUnavailableError("operator-log hot source identity changed")
+        if time.monotonic() >= deadline_monotonic:
+            raise OperatorLogIdempotencyUnavailableError("operator-log hot registry deadline expired")
+        return registry
+
+    def _initialize_operator_log_idempotency_sync(self, deadline_monotonic: float) -> None:
+        try:
+            registry = self._read_hot_operator_log_registry(deadline_monotonic)
+        except Exception:
+            self._operator_log_idempotency_registry = None
+            raise
+        self._operator_log_idempotency_registry = registry
+
+    async def initialize_operator_log_idempotency(self) -> None:
+        """Build the bounded retained-data registry before accepting keyed writes."""
+
+        deadline = time.monotonic() + _OPERATOR_LOG_REGISTRY_DEADLINE_S
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self._executor,
+            self._initialize_operator_log_idempotency_sync,
+            deadline,
+        )
+
+    def _resolve_operator_log_request_sync(
+        self,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> OperatorLogCommitResult | None:
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        registry = self._operator_log_idempotency_registry
+        if registry is None:
+            raise OperatorLogIdempotencyUnavailableError("operator-log deduplication registry is not initialized")
+        persisted = registry.get(request_id)
+        if persisted is None:
+            return None
+        if persisted.request_fingerprint != request_fingerprint:
+            raise OperatorLogIdempotencyConflictError("request_id was already committed with different content")
+        return OperatorLogCommitResult(entry=persisted.entry, replayed=True)
+
+    async def find_operator_log_request(
+        self,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> OperatorLogCommitResult | None:
+        """Resolve one key from the proven registry without touching disk."""
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            self._resolve_operator_log_request_sync,
+            request_id,
+            request_fingerprint,
+        )
+
+    def _append_operator_log_idempotent_sync(
+        self,
+        *,
+        message: str,
+        author: str,
+        source: str,
+        experiment_id: str | None,
+        tags: tuple[str, ...],
+        request_id: str,
+        request_fingerprint: str,
+    ) -> OperatorLogCommitResult:
+        resolved = self._resolve_operator_log_request_sync(request_id, request_fingerprint)
+        if resolved is not None:
+            return resolved
+        entry_time = datetime.now(UTC)
+        try:
+            entry = self._write_operator_log_entry(
+                timestamp=entry_time,
+                experiment_id=experiment_id,
+                author=author,
+                source=source,
+                message=message,
+                tags=tags,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+        except sqlite3.IntegrityError as exc:
+            # A collision not represented in the proven registry means its
+            # authority changed underneath us. Do not guess whether it is a
+            # replay; disable keyed writes until a fresh bounded rebuild.
+            self._operator_log_idempotency_registry = None
+            raise OperatorLogIdempotencyUnavailableError("operator-log request registry changed during append") from exc
+        registry = self._operator_log_idempotency_registry
+        if registry is None:
+            raise OperatorLogIdempotencyUnavailableError("operator-log request registry became unavailable")
+        registry[request_id] = _PersistedOperatorLogRequest(
+            storage_day=entry_time.date(),
+            entry=entry,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        return OperatorLogCommitResult(entry=entry, replayed=False)
+
+    async def append_operator_log_idempotent(
+        self,
+        *,
+        message: str,
+        request_id: str,
+        request_fingerprint: str,
+        author: str = "",
+        source: str = "command",
+        experiment_id: str | None = None,
+        tags: list[str] | tuple[str, ...] | str | None = None,
+    ) -> OperatorLogCommitResult:
+        """Append once using server-owned time, or return the original row."""
+
+        text = message.strip()
+        if not text:
+            raise ValueError("Operator log message must not be empty.")
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        normalized_tags = normalize_operator_log_tags(tags)
+        loop = asyncio.get_running_loop()
+        task = partial(
+            self._append_operator_log_idempotent_sync,
+            message=text,
+            author=author.strip(),
+            source=source.strip() or "command",
+            experiment_id=experiment_id,
+            tags=normalized_tags,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        return await loop.run_in_executor(self._executor, task)
 
     def _operator_log_db_paths(
         self,

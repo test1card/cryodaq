@@ -22,6 +22,7 @@ _POLL_INTERVAL_MS = 2_000
 _BEEP_INTERVAL_MS = 3_000
 _VALID_SOURCES = frozenset({"alarm_v2", "safety_fault"})
 _VALID_SEVERITIES = frozenset({"INFO", "WARNING", "CRITICAL"})
+_CLOSE_WAIT_MS = 2_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +135,7 @@ class AnnunciationController(QObject):
         self._audible_keys: frozenset[str] = frozenset()
         self._status_worker: Any | None = None
         self._ack_worker: Any | None = None
+        self._closing = False
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(_POLL_INTERVAL_MS)
@@ -149,6 +151,8 @@ class AnnunciationController(QObject):
 
     def poll(self) -> None:
         """Issue exactly one read-only status request at a time."""
+        if self._closing:
+            return
         if self._status_worker is not None and not self._status_worker.isFinished():
             return
         factory = self._worker_factory
@@ -184,7 +188,8 @@ class AnnunciationController(QObject):
     def acknowledge(self, activation_id: str, *, operator: str, reason: str) -> bool:
         """Request an exact engine-owned audio acknowledgement for one activation."""
         if (
-            self._engine_instance_id is None
+            self._closing
+            or self._engine_instance_id is None
             or _bounded_text(activation_id) is None
             or _bounded_text(operator) is None
             or _bounded_text(reason) is None
@@ -214,6 +219,35 @@ class AnnunciationController(QObject):
         self._ack_worker.start()
         return True
 
+    def close(self, *, timeout_ms: int = _CLOSE_WAIT_MS) -> bool:
+        """Stop polling and settle every owned command thread before teardown."""
+        if isinstance(timeout_ms, bool) or timeout_ms <= 0:
+            raise ValueError("timeout_ms must be positive")
+        self._closing = True
+        self._poll_timer.stop()
+        self._beep_timer.stop()
+        workers = tuple(worker for worker in (self._status_worker, self._ack_worker) if worker is not None)
+        if not workers:
+            return True
+        per_worker = max(1, timeout_ms // len(workers))
+        settled = True
+        for worker in workers:
+            try:
+                running = bool(worker.isRunning())
+            except (AttributeError, RuntimeError):
+                running = False
+            if not running:
+                continue
+            try:
+                if not bool(worker.wait(per_worker)):
+                    settled = False
+            except (AttributeError, RuntimeError):
+                settled = False
+        if settled:
+            self._status_worker = None
+            self._ack_worker = None
+        return settled
+
     def accept_acknowledgement(
         self,
         payload: object,
@@ -226,7 +260,7 @@ class AnnunciationController(QObject):
             or set(payload) != {"ok", "activation_id", "event_emitted", "snapshot_revision"}
             or payload.get("ok") is not True
             or payload.get("activation_id") != activation_id
-            or type(payload.get("event_emitted")) is not bool
+            or payload.get("event_emitted") is not True
             or type(payload.get("snapshot_revision")) is not int
             or payload["snapshot_revision"] < 0
             or self._engine_instance_id != engine_instance_id

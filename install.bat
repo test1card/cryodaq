@@ -13,7 +13,7 @@ python --version
 if errorlevel 1 goto :python_missing
 python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"
 if errorlevel 1 goto :python_old
-python -c "import sqlite3; v=tuple(sqlite3.sqlite_version_info); print('SQLite:', sqlite3.sqlite_version); raise SystemExit(0 if v in ((3,44,6),(3,50,7)) or v >= (3,51,3) else 1)"
+python -c "import sqlite3; v=tuple(sqlite3.sqlite_version_info); print('SQLite:', sqlite3.sqlite_version); raise SystemExit(0 if not ((3,7,0) <= v < (3,51,3)) or v in ((3,44,6),(3,50,7)) else 1)"
 if errorlevel 1 goto :sqlite_unsafe
 if not exist requirements-lock.txt goto :lock_missing
 
