@@ -5,7 +5,7 @@ applies_to: how design-system releases are numbered and what changes go into eac
 status: canonical
 references: governance/deprecation-policy.md, governance/contribution.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-07-15
+last_updated: 2026-07-20
 ---
 
 # Versioning
@@ -20,12 +20,18 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `4.0.0` — panoramic primary-surface and GUI tradeoff-review contract (see `CHANGELOG.md`).
+**Current version:** `4.0.3` — operator-state semantic correction: safety green
+is reserved for demonstrated health, ordinary activity/progress uses accent or
+neutral information, and new presentation producers use the single caution
+rung (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
-- `docs/design-system/CHANGELOG.md` — human-readable release notes
 - Top of `docs/design-system/README.md`
+- `docs/design-system/MANIFEST.md`
+- `docs/design-system/CHANGELOG.md` — human-readable release notes
+- `docs/design-system/GUI_MIGRATION_INVENTORY.md`
+- `docs/design-system/cryodaq-primitives/tray-status.md`
 - Tagged in git as `design-system-vX.Y.Z` (e.g., `design-system-v1.0.1`)
 
 ## What's in MAJOR

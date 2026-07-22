@@ -1,7 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-07-15
+last_updated: 2026-07-20
+version: 4.0.3
 ---
 
 # Design System Changelog
@@ -11,6 +12,88 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.0.3] — 2026-07-20
+
+### Corrected
+
+- Reserved `STATUS_OK` for demonstrated health or safety truth in the remaining
+  bottom-bar safety activity, conductivity settling/stability, and assistant
+  shift-handover paths. Ordinary activity and progress now use `ACCENT` or
+  neutral informational presentation without removing any operator data.
+- Normalized instrument summaries and new F36 operator-presentation fixtures to
+  the one visible caution rung. Legacy backend/history `warning` remains an
+  accepted compatibility input and still renders exactly as caution.
+- Reconciled stale color-rule examples and component references with the v4
+  semantic lock. Added focused regressions for running/authorized states,
+  settling percentages, shift handover, instrument wording, and F36 fixtures.
+
+## [4.0.2] — 2026-07-17
+
+### Corrected
+
+- Reconciled the release marker, README, manifest, changelog front matter, and
+  migration inventory on one v4.0.2 contract. Canonical referenced design
+  artifacts must be present in the Git index; an untracked local draft cannot
+  silently satisfy the design-system manifest.
+- Reserved safety colors for safety/health truth. Active phases, ordinary
+  actions, running/coverage identity, and measurement series use neutral or
+  accent/data tokens with non-color cues; current production exceptions remain
+  explicit migration gaps rather than normative examples.
+- Kept the shipped Keithley emergency interaction as a visible cancel-default
+  modal and the alternative hold/global gesture as an open hazard decision.
+  Documentation no longer promotes a proposed gesture to current behavior.
+- Removed stale links to deleted v1 widgets, superseded analytics modules/tests,
+  and retired handoff files. Proposed future modules are now named as proposals,
+  not represented as live repository paths.
+- Corrected the remaining hover/focus rule contradiction: focus, selection, and
+  ordinary activity use ACCENT; STATUS_OK is reserved for independently proven
+  health or safety truth.
+
+- Replaced automatic theme re-exec with a validated, atomic next-launch
+  selection. The checked menu action remains the theme actually loaded in the
+  current process, while a disabled line names the pending selection. Theme
+  choice no longer stops ingress, assistant, bridge, engine, or acquisition.
+- Made theme-pack inventory and persistence use the same strict identifier,
+  token, metadata, color, and caution-alias validation. Malformed existing
+  settings are preserved and refused instead of being overwritten.
+- Extended coarse tray truth with data freshness and periodic-reporting
+  evidence. Green now requires affirmative connection, accepted safety state,
+  exact zero alarms, fresh data, and known-good reporting. Tooltip text is
+  Russian, non-authoritative, and bounded to the Windows 127 UTF-16-unit limit.
+- Added a fail-visible shutdown override for the tray. The launcher now keeps
+  the application, tray, exact resource handles, and single-instance lock alive
+  while any process, worker, queue, descriptor, capability, or loop remains
+  unsettled; capped retries cannot respawn children after the shutdown latch.
+
+## [4.0.1] — 2026-07-17
+
+### Corrected
+
+- Replaced the unshipped global `Ctrl+Shift+X`, one-second hold, and
+  `Shift+Enter` emergency instructions with the current `Ctrl+K` navigation,
+  visible Keithley emergency action, and cancel-default modal. Alternative
+  emergency gestures remain an open hazard decision.
+- Aligned calibration import/export documentation with `.cof`, `.340`, JSON,
+  and CSV, and recorded safety-color reuse in the coverage display as an open
+  production migration rather than compliant behavior.
+- Added a canonical coarse, non-authoritative tray contract: missing alarm
+  authority is unknown, never zero, and green cannot prove readiness,
+  verified-OFF, or absence of alarms.
+- Implemented that tray contract in the resolver: malformed/unknown alarm
+  authority is fail-visible caution, fault takes precedence, and distinct
+  check/triangle/octagon silhouettes plus Russian tooltip duplicate color.
+  Launcher alarm-count authority and Windows visual acceptance remain open.
+- Defined the alarm badge as an unacknowledged active-attention count while
+  keeping acknowledged-active hazards visible in the alarm panel; corrected
+  alarm navigation to `Ctrl+M` and retained one caution rung.
+- Reconciled responsive bento behavior with automatic reflow, deliberate
+  evidence scrolling, and the prohibition on clipped current truth.
+- Removed stale four-vital and Tmin/Tmax language in favor of pressure, T12
+  second-stage, and T11 nitrogen-plate references; made experiment identity
+  neutral rather than safety green.
+- Defined theme application as an operational cold restart and prohibited any
+  automatic-resumption promise without measured end-to-end evidence.
 
 ## [4.0.0] — 2026-07-15
 

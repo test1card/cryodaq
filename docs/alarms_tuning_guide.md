@@ -1,6 +1,8 @@
 # CryoDAQ — Alarm / Interlock / Safety Tuning Guide
 
-> Живой документ. Обновлён 2026-07-08 по текущему дереву v0.64.0.
+> Живой документ. Обновлён 2026-07-17 для активного Montana candidate поверх
+> релизной основы v0.64.1. Candidate defaults не являются уже выпущенным
+> поведением и требуют гейтов из `PROJECT_STATUS.md`.
 >
 > **Цель:** дать инженеру установки понимание трёх слоёв защиты
 > CryoDAQ, где какие пороги живут, и какие значения предстоит подогнать
@@ -31,7 +33,8 @@
 Отдельно живут **physical alarms** (`config/physical_alarms.yaml`):
 `CooldownAlarm` и `VacuumGuard`. Это не entries в `alarms_v3.yaml`, а
 отдельные сервисы движка. `VacuumGuard` дополнительно латчит
-SafetyManager через `vacuum.escalate_to_safety` (по умолчанию `true` —
+SafetyManager через `vacuum.escalate_to_safety` (в Montana candidate по
+умолчанию `true`; в v0.64.1 было opt-in/`false`) —
 эскалация включена для необслуживаемых/холодных прогонов; выставь
 `false` для attended/debug-прогонов, где достаточно alarm-only).
 

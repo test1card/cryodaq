@@ -230,7 +230,12 @@ Canonical-target behavior (documented here for the post-alignment state;
 see the implementation-status callout at the top for the current code):
 
 - **No drag-to-reorder.** Tile layout is declarative at construction time. Operators cannot rearrange tiles by dragging. If dashboard customization becomes a requirement, that's a separate feature requiring state persistence.
-- **No responsive column reduction.** At narrow viewport widths, tiles with large `col_span` remain their assigned width — grid does not collapse to fewer columns. Because CryoDAQ is desktop-only (1280+ min viewport per `tokens/breakpoints.md`), this is acceptable.
+- **Truth-preserving responsive layout.** At constrained logical widths or high
+  DPI, the grid recomputes columns/spans and reflows tiles vertically without
+  hiding or reordering evidence. Dense tables and plots may use a deliberate,
+  labelled scroll region when reflow would destroy comparison. Current value,
+  state, freshness, and provenance must never be clipped without a complete
+  keyboard-accessible path. The 1280×800 baseline is not a waiver.
 - **No auto-placement.** All tiles require explicit `col, row, col_span, row_span`. There is no "auto-flow" mode that finds next free cell. Explicit placement prevents surprise layouts. *(Phase I.1 code permits auto-flow; Phase II alignment removes it.)*
 
 ## Common mistakes

@@ -3,8 +3,8 @@ title: Analytics Panel
 keywords: analytics, R_thermal, cooldown, ETA, prediction, vacuum trend, phase, аналитика, primary view
 applies_to: analytics primary view (Ctrl+A from ToolRail)
 status: active
-implements: src/cryodaq/gui/shell/views/analytics_view.py (revision 2). Legacy v1 at `src/cryodaq/gui/widgets/analytics_panel.py` kept alive until B.13.
-last_updated: 2026-04-17
+implements: src/cryodaq/gui/shell/views/analytics_view.py (revision 2); the removed v1 widget is historical only
+last_updated: 2026-07-19
 ---
 
 # Analytics Panel
@@ -36,11 +36,10 @@ the analytics slot on ToolRail (keyboard `Ctrl+A`, AD-002).
 >
 > **What changed from revision 1.** The ModalCard overlay base and
 > BentoGrid 8-col composition are gone — they were the architectural
-> bug this revision corrects. The old file
-> `src/cryodaq/gui/shell/overlays/analytics_panel.py` has been
-> removed; new location is `shell/views/`. The previous test file
-> `tests/gui/shell/overlays/test_analytics_panel.py` was replaced
-> by `tests/gui/shell/views/test_analytics_view.py`.
+> bug this revision corrects. The former overlay module has been
+> removed; the live implementation is in `shell/views/`. Its current
+> phase-aware regression lives at
+> `tests/gui/shell/views/test_analytics_view_phase_aware.py`.
 
 ## Architecture — primary view, NOT overlay
 

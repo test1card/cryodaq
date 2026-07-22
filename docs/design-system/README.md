@@ -3,13 +3,14 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-07-14
+last_updated: 2026-07-20
 status: canonical
+version: 4.0.3
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.0.0`
+**Current design-system version:** `4.0.3`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
@@ -157,6 +158,7 @@ docs/design-system/
 │   ├── sensor-cell.md
 │   ├── phase-stepper.md
 │   ├── alarm-badge.md
+│   ├── tray-status.md
 │   ├── alarm-panel.md
 │   ├── analytics-panel.md
 │   ├── archive-panel.md
@@ -304,6 +306,18 @@ From `src/cryodaq/gui/theme.py` inventory (v3.0.0, 142 exported uppercase consta
 
 ## Changelog
 
+- 2026-07-20: Released v4.0.3: removed remaining safety-green collisions from
+  running/authorized, conductivity settling, and shift-handover presentation;
+  normalized new operator-facing attention wording to the single caution rung
+  while preserving legacy `warning` as an accepted source value.
+- 2026-07-17: Released v4.0.2: theme selection is validated and atomically
+  deferred to the next ordinary launch without touching acquisition; tray
+  health now also requires fresh data and known reporting truth, and incomplete
+  launcher shutdown remains visible and locked until exact owners settle.
+- 2026-07-17: Released v4.0.1: corrected shipped emergency, calibration,
+  tray, alarm, responsive, TopWatchBar, experiment-identity, and theme-selection
+  contracts against current runtime behavior; open code migrations remain
+  explicit rather than being described as complete.
 - 2026-07-15: Released v4.0.0: restored panoramic observability as the
   mandatory primary-surface contract, made the shift briefing additive, and
   added an explicit operator/safety tradeoff gate for every GUI change.

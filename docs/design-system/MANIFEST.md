@@ -1,14 +1,15 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-14
+last_updated: 2026-07-20
+version: 4.0.3
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-15
-**Session:** v4 panoramic observability and operator-evidence reconciliation
-**Scope:** Design system v4.0.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-07-20
+**Session:** v4.0.3 operator-state semantic correction
+**Scope:** Design system v4.0.3 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -65,13 +66,14 @@ design-system/
     ├── tab-group.md                    # sibling view switcher
     └── chart-tile.md                   # BentoTile + pyqtgraph variant
 
-├── cryodaq-primitives/                 # Domain-specific: 18 files
-    ├── top-watch-bar.md                # 4 vitals + mode badge (B.4 + B.4.5.2)
+├── cryodaq-primitives/                 # Domain-specific: 19 files
+    ├── top-watch-bar.md                # pressure + T12 + T11 + mode badge
     ├── tool-rail.md                    # left icon nav (Phase 0)
     ├── bottom-status-bar.md            # system status strip
     ├── sensor-cell.md                  # single-channel cell (B.3)
     ├── phase-stepper.md                # 6-phase stepper (B.5/B.5.5/B.5.6)
     ├── alarm-badge.md                  # header alarm indicator
+    ├── tray-status.md                  # coarse, non-authoritative tray summary
     ├── alarm-panel.md                  # alarm detail surface
     ├── analytics-panel.md              # analysis surface
     ├── archive-panel.md                # persisted-data surface
@@ -118,12 +120,12 @@ design-system/
 
 ## Statistics
 
-- **81 Markdown files in the design-system tree**: 77 contract/specification
-  documents, README, MANIFEST, CHANGELOG, and the retained deep-audit report;
+- **84 Markdown files in the design-system tree**: 80 contract/specification
+  documents plus README, MANIFEST, CHANGELOG, and the GUI migration inventory;
   `VERSION` is the additional non-Markdown release marker.
 - **79 rule IDs** across 9 rule categories (Batches 1+2+6)
 - **14 generic components** specified (Batch 3)
-- **18 CryoDAQ domain primitives** specified (Batch 4 + F36)
+- **19 CryoDAQ domain primitives** specified (Batch 4 + F36 + tray contract)
 - **12 cross-surface patterns** specified (including operator evidence retention)
 - **5 accessibility documents** (Batch 6)
 - **7 governance documents** (including mandatory change-impact review)
@@ -185,10 +187,15 @@ design-system/
 43. **Initial-empty ≠ stale** — «Ожидание первого измерения» (TEXT_DISABLED) vs «Устарело NN с» (STATUS_STALE).
 44. **Desktop operator scope with responsive truth preservation** — logical DPI and available width drive vertical reflow/density; no value/status/provenance may be clipped without a complete accessible path.
 45. **Grid density may adapt without hiding or reordering sensors** — deliberate evidence-region scrolling is allowed; automatic channel hiding is forbidden.
-46. **Two-layer protection for safety-critical destructive** — HoldConfirmButton (1s gesture) + Dialog (cognitive confirmation).
+46. **Protection matches shipped authority** — use the implemented and tested
+    cancel-default modal or, only where actually shipped, a reviewed
+    HoldConfirm gesture. Never generalize a proposed hold to every emergency.
 47. **Directional safety in toggles** — enable destructive (confirm), disable safe (no confirm).
 48. **No «Don't show again» checkboxes** — creates state divergence + training regressions. Fix root cause instead.
-49. **Ctrl+Shift+X global emergency stop** — one exception to «shortcut without visible affordance» rule.
+49. **Current emergency action is visible, not global** — `Ctrl+K` opens the
+    Keithley panel; its visible «АВАР. ОТКЛ.» action uses a cancel-default modal.
+    A global or hold gesture remains an open hazard decision and MUST NOT be
+    taught as shipped behavior.
 50. **Canonical vocabulary table** — same concept = same word across all panels (see `patterns/copy-voice.md`).
 51. **Subsystem names stay Latin** — Engine, ZMQ, Safety, Keithley. Domain vocabulary exception.
 52. **FSM states displayed lowercase as-is** — `safe_off`, `fault_latched`. Operators learn from logs; don't translate.
@@ -202,12 +209,15 @@ Batch 6 — accessibility + governance:
 57. **No single-key shortcuts anywhere** — every shortcut uses Ctrl / Alt / Shift modifier. Function keys (F5, F11) OK as non-text-input.
 58. **Focus restoration mandatory** on overlay close — return to opener, not document start.
 59. **Destructive Dialog default-focus = Cancel** — operator Enter muscle-memory dismisses safely.
-60. **Shift+Enter keyboard alternative for HoldConfirmButton** — full keyboard accessibility without requiring held-key.
+60. **No unimplemented destructive-keyboard promise** — accessibility guidance
+    documents only shipped activation. Any future HoldConfirm keyboard gesture
+    requires implementation, discoverability, tests, and hazard review before
+    becoming canonical.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in the current v4.0.0 line** — the v2.0.0
+62. **Design system remains flat-token in the current v4.0.3 line** — the v2.0.0
     instrument-identity major and v3.0.0 composition-contract major did not
     perform the separately reviewed future three-layer token migration.
-63. **STONE_* remains deprecated/read-only in the current v4.0.0 line** — neither
+63. **STONE_* remains deprecated/read-only in the current v4.0.3 line** — neither
     major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
@@ -236,7 +246,7 @@ F36 operator-snapshot additions:
 
 ## Status
 
-**Design system v4.0.0 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+**Design system v4.0.3 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
 83 rules (79 widget rules plus 4 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
 ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
 remain open.

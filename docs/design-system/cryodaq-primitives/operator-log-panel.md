@@ -3,8 +3,8 @@ title: OperatorLogPanel
 keywords: operator, log, journal, shift handover, timeline, composer, filter chips, experiment, tags
 applies_to: Operator journal / service log overlay (shift handover + event record)
 status: active
-implements: src/cryodaq/gui/shell/overlays/operator_log_panel.py (Phase II.3); legacy src/cryodaq/gui/widgets/operator_log_panel.py retained (DEPRECATED) until Phase III.3
-last_updated: 2026-07-12
+implements: src/cryodaq/gui/shell/overlays/operator_log_panel.py; removed v1 widget is historical only
+last_updated: 2026-07-19
 references: rules/data-display-rules.md, rules/interaction-rules.md, rules/copy-rules.md, components/card.md, components/input-field.md, components/button.md, components/badge.md
 ---
 
@@ -99,7 +99,7 @@ Operator journal overlay. Full-featured surface for the shift-handover workflow:
 | **Tags field** | Yes | `QLineEdit` comma-separated; normalized via `normalize_operator_log_tags` |
 | **Message edit** | Yes | `QPlainTextEdit` min height 80 px; grows with content |
 | **Bind-experiment checkbox** | Yes | Auto-checked when `set_current_experiment(id)` is called with a non-null id; disabled when no active experiment |
-| **Save button** | Yes | DS primary variant (STATUS_OK / ON_PRIMARY); disabled when disconnected |
+| **Save button** | Yes | DS primary action variant (`ACCENT` / `ON_ACCENT`); disabled when disconnected. Saving is an action, not a healthy-state assertion. |
 | **Filter bar card** | Yes | `filterBarCard` SURFACE_CARD + BORDER_SUBTLE + RADIUS_MD |
 | **Filter chips** | Yes | Mutually exclusive: «Все» / «Текущий экспт.» / «Последние 8ч» / «За сутки». Default «Последние 8ч». Active chip uses `accent` variant |
 | **Search fields** | Yes | Text / author / tag `QLineEdit`s — debounced 250 ms; client-side filter on top of loaded entries |
@@ -205,7 +205,10 @@ class OperatorLogPanel(QWidget):
 7. **Filter chip toggle-off.** Re-clicking the active chip should stay on that chip (no implicit deactivation).
 8. **System-entry color in STATUS_FAULT.** Auto-generated entries are not errors; use MUTED_FOREGROUND.
 9. **Server-side day grouping.** Day boundaries are GUI-local; don't rely on engine pre-grouping.
-10. **Hardcoded pixel values.** Use SPACE_* and RADIUS_* tokens; raw pixel literals violate RULE-SPACE-001 / RULE-RADIUS-001.
+10. **Hardcoded pixel values.** Use canonical `SPACE_*` and `RADIUS_*` tokens;
+    raw spacing literals violate the applicable `RULE-SPACE-*` contract. Radius
+    tokens are governed by the token catalog; there is no `RULE-RADIUS-*`
+    identifier in the current design-system rules.
 
 ## Related components
 
@@ -218,4 +221,4 @@ class OperatorLogPanel(QWidget):
 ## Changelog
 
 - **2026-07-12 (v1.2.0)** — documented the archive/replay composer gate and handler-level rejection while preserving searchable history.
-- **2026-04-18 — Phase II.3 initial version.** Full rewrite from v1 widget at `src/cryodaq/gui/widgets/operator_log_panel.py`. Day-grouped timeline, filter chips (all / current / 8h / 24h), client-side text/author/tag search, composer with tags + experiment binding, DS v1.0.1 tokens, lazy host integration via `MainWindowV2._tick_status` / `_on_experiment_status_received` / `_ensure_overlay("log")` replay. Legacy widget marked DEPRECATED; removal scheduled for Phase III.3.
+- **2026-04-18 — Phase II.3 initial version.** Full rewrite from the former v1 operator-log widget. Day-grouped timeline, filter chips (all / current / 8h / 24h), client-side text/author/tag search, composer with tags + experiment binding, DS v1.0.1 tokens, lazy host integration via `MainWindowV2._tick_status` / `_on_experiment_status_received` / `_ensure_overlay("log")` replay. The superseded widget was removed in the Montana cleanup.

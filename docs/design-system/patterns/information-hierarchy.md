@@ -4,7 +4,7 @@ keywords: hierarchy, priority, emphasis, visual-weight, scan-order, prominence, 
 applies_to: ranking content by importance on every screen
 status: canonical
 references: tokens/typography.md, tokens/colors.md, rules/typography-rules.md, rules/color-rules.md
-last_updated: 2026-04-17
+last_updated: 2026-07-17
 ---
 
 # Information Hierarchy
@@ -20,8 +20,8 @@ Every screen has operator information split into three priority tiers. The desig
 Information an operator must see without conscious effort. These are the «одновзглядовые» values that answer "is anything wrong right now?"
 
 **Contains:**
-- The 4 TopWatchBar vitals: Pressure, fixed T11 N₂-plate reference, fixed T12
-  second-stage reference, Heater
+- The 3 TopWatchBar readings: pressure, fixed T12 second-stage reference, and
+  fixed T11 N₂-plate reference. Heater current remains in the Keithley panel.
 - Mode badge (Эксперимент / Отладка)
 - Active fault indicators (STATUS_FAULT coloring on any vital)
 - Active alarm count

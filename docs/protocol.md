@@ -10,7 +10,7 @@ no version negotiation handshake — see "The rule" below for why.
 |---|---|---|---|
 | Engine PUB | `tcp://127.0.0.1:5555`, topic `readings` | engine → GUI/subscribers | msgpack `Reading` dict: `ts,iid,ch,v,u,st,raw,meta` |
 | Engine PUB | `tcp://127.0.0.1:5555`, topic `events` | engine → assistant | JSON `EngineEvent` dict: `event_type,ts,payload,experiment_id` |
-| Engine PUB (reserved, not yet activated) | `tcp://127.0.0.1:5555`, topic `operator.snapshot` | future engine/replay → GUI | canonical UTF-8 JSON `cryodaq.operator-snapshot` envelope v1, exactly two bytes frames |
+| Engine PUB | `tcp://127.0.0.1:5555`, topic `operator.snapshot` | engine/replay-compatible producer → GUI | canonical UTF-8 JSON `cryodaq.operator-snapshot` envelope v1, exactly two bytes frames |
 | Engine REP | `tcp://127.0.0.1:5556` | GUI/web/assistant clients → engine | JSON command envelope, see below |
 | Assistant REP | `tcp://127.0.0.1:5557` | GUI (`assistant.*`/`rag.*` commands) → assistant | same JSON command envelope |
 | REST/web | `http://127.0.0.1:8080` (`/api/*`, `/api/v1/*`) | any HTTP client → web process | JSON over HTTP |
@@ -61,6 +61,29 @@ declaring its own constant — engine ZMQ, assistant ZMQ, and REST all ship
 from the same package build, so one number is honest. A REST-only breaking
 change still bumps the shared constant.
 
+The public live-reading surfaces use strict JSON. A non-finite instrument
+value (`NaN`, `+Infinity`, or `-Infinity`) is represented as JSON `null`; its
+status and identity remain present so a client can show unavailable/stale
+truth instead of accepting a non-standard numeric token.
+
+Exactly two REST routes mutate state and both require the configured bearer
+token before their request body is processed:
+
+- `POST /api/v1/log` accepts operator text, optional tags, and an optional
+  exact `experiment_id`. The web process creates one 32-character lowercase
+  hexadecimal `request_id` per request and owns the author/source identity.
+  When `experiment_id` is absent, the entry is explicitly
+  `experiment_unbound`; it is never attached to whichever experiment happens
+  to be current when the engine receives it. A supplied stale experiment ID
+  is rejected by the authoritative engine owner.
+- `POST /api/v1/alarms/{id}/ack` requires the exact `engine_instance_id` and
+  `activation_id` returned by the current alarm snapshot. Delayed or stale
+  acknowledgements fail closed.
+
+Clients cannot supply `author`, `source`, `request_id`,
+`experiment_unbound`, or a generic engine command through these routes.
+Reserved system tags are rejected rather than accepted as operator metadata.
+
 ## PUB stream (readings / events / operator snapshot)
 
 The PUB frames are **not** touched by this policy's `proto` injection —
@@ -76,9 +99,14 @@ frames are built-in bytes and `payload` is exactly the canonical UTF-8 output
 of `dump_operator_snapshot`. The receiver enforces the 8 MiB protocol cap
 before UTF-8 or JSON decoding, then requires canonical byte equality. The
 envelope's own `schema` and `version` fields govern snapshot compatibility.
-The pure frame codec reserves this contract but does not activate a publisher,
-subscriber, engine, replay, or GUI route; those remain separate reviewed
-slices.
+The production engine publishes only complete, ordered common-cut snapshots
+through its sole loop-owned publication service. The launcher and standalone
+GUI each own one bounded subscriber/ingress path and apply newer coherent
+revisions in the GUI thread. A pure replay-session/view-model contract accepts
+the same envelope with conservative unavailable semantics, but production
+`ReplayEngine` wiring remains an open reviewed slice. Missing authority fails
+dark rather than synthesizing ready/healthy/recording state. This topic is
+observational and grants no instrument, safety, or remediation authority.
 Adding this independent topic does not alter either existing PUB frame and
 therefore does not bump the shared REP/REST `PROTOCOL_VERSION`. A change to its
 topic, frame count, canonical representation, schema, or semantics requires a

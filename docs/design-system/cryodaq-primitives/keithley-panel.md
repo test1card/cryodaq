@@ -3,8 +3,8 @@ title: KeithleyPanel
 keywords: keithley, smu, power, current, voltage, resistance, tsp, dual-channel, smua, smub, source, measure, p-target
 applies_to: Keithley 2604B source-measure unit control overlay
 status: active
-implements: src/cryodaq/gui/shell/overlays/keithley_panel.py (Phase II.6 rewrite); legacy src/cryodaq/gui/widgets/keithley_panel.py retained (DEPRECATED) until Phase III.3
-last_updated: 2026-07-12
+implements: src/cryodaq/gui/shell/overlays/keithley_panel.py; removed v1 panel is historical only
+last_updated: 2026-07-19
 references: rules/data-display-rules.md, rules/interaction-rules.md, patterns/destructive-actions.md
 ---
 
@@ -41,9 +41,8 @@ Operator overlay for controlling and monitoring the Keithley 2604B source-measur
 >   inline QSS used where a DS primitive was not available. Reconcile
 >   when those primitives are defined.
 >
-> The legacy v1 panel at `src/cryodaq/gui/widgets/keithley_panel.py`
-> is marked DEPRECATED and stays alive for the transitional
-> `main_window.py` path only; removal is tracked under Phase III.3
+> The former v1 panel and transitional host path have been removed. The shell
+> overlay above is the only live Keithley presentation contract.
 > legacy cleanup. `MainWindowV2` imports the overlay from
 > `shell/overlays/keithley_panel.py` exclusively.
 
@@ -126,7 +125,10 @@ Fixed at codebase level; UI code must not violate:
 5. **Slew rate limit enforced server-side.** UI does NOT interpolate setpoints. Engine-side slew limiter ramps the output; UI sends the final target value.
 6. **Values display in SI units with Russian symbols.** V = «В», I = «А», R = «Ом», P = «Вт». (RULE-COPY-006.)
 7. **Live values use FONT_MONO with tabular figures.** `tnum` OpenType feature enabled when the Qt version supports it (graceful fallback). (RULE-TYPO-003.)
-8. **State badge uses redundant channels.** Text label (ВЫКЛ / ВКЛ / АВАРИЯ) + color (MUTED_FOREGROUND / STATUS_OK / STATUS_FAULT). Not color alone. (RULE-A11Y-002.)
+8. **State badge uses redundant channels.** Text label (ВЫКЛ / ВКЛ / АВАРИЯ)
+   plus shape/chrome (MUTED_FOREGROUND / ACCENT / STATUS_FAULT). Source ON is
+   activity, not proof of health, so it never consumes STATUS_OK. Not color
+   alone. (RULE-A11Y-002.)
 9. **Emergency stop guarded by destructive-variant confirmation.** `QMessageBox.warning` with Ok / Cancel (RULE-INTER-004). FU.5 tracks a future HoldConfirm 1 s hold upgrade. A+B emergency uses a single confirmation covering both channels, not two separate dialogs.
 10. **Emergency button stays enabled whenever connected.** Escape hatch — disabled only on full disconnect. Safety gating blocks Start/Stop/spins, not emergency.
 11. **No emoji.** (RULE-COPY-005.)
@@ -198,13 +200,13 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 |---|---|
 | **Disconnected** | All readouts «— В/А/Ом/Вт»; spins + start/stop disabled; emergency disabled (no link); «Нет связи» in STATUS_FAULT |
 | **Connected, both off** | Controls enabled, readouts show last sampled (likely zero), state badges «ВЫКЛ» in MUTED_FOREGROUND |
-| **Channel "on"** | State badge «ВКЛ» STATUS_OK; start disabled, stop/emergency enabled; spins debounced-live against engine |
+| **Channel "on"** | State badge «ВКЛ» with ACCENT outline and explicit text; start disabled, stop/emergency enabled; spins debounced-live against engine; health remains a separate fact |
 | **Channel "fault"** | State badge «АВАРИЯ» STATUS_FAULT; 3 px STATUS_FAULT border on channel block; start/stop/spins disabled on the faulted channel; emergency still enabled; sibling channel unaffected |
-| **Safety gated** | Start/Stop/spins disabled across both channels; emergency stays enabled; gate label «Управление заблокировано: {reason}» visible in STATUS_WARNING |
+| **Safety gated** | Start/Stop/spins disabled across both channels; emergency stays enabled; gate label «Управление заблокировано: {reason}» visible in STATUS_CAUTION |
 | **Cold start / unknown Safety** | Connected readings alone do not enable source controls; explicit «нет авторитетного состояния Safety» gate remains until an authoritative ready/run-permitted/running state arrives |
 | **Replay/read-only** | V/I/R/P and source-state evidence remains visible; spins, start/stop/set-target/set-limits and every emergency-off control are disabled; handler/dispatcher guards reject direct or queued commands |
-| **Stale reading (state="on")** | Readouts keep FOREGROUND text color (RULE-DATA-005 — never dim values); readouts card gets STATUS_STALE 1 px border; each readout suffix becomes «12.345 В (устар.)» |
-| **Transient banner** | Thin colored border (STATUS_INFO / STATUS_WARNING / STATUS_FAULT); auto-clear 4 s |
+| **Stale reading (state="on")** | Last-known readouts remain visible but intentionally dim to MUTED_FOREGROUND; STATUS_STALE border and «12.345 В (устар.)» suffix make uncertainty explicit without erasing the value |
+| **Transient banner** | Thin colored border (STATUS_INFO / STATUS_CAUTION / STATUS_FAULT); auto-clear 4 s |
 
 ## Common mistakes
 
@@ -234,5 +236,5 @@ A 500 ms `QTimer` drives plot refresh + stale detection (not per-reading — rea
 ## Changelog
 
 - **2026-07-12 (v1.2.0)** — source authority now defaults fail-closed until authoritative Safety truth. Documented the replay read-only gate, including the deliberate distinction: emergency-off remains reachable with a live link when Safety blocks normal live control, but replay removes all source command authority including emergency-off.
-- **2026-04-18 — Phase II.6 rewrite.** Full rebuild of `shell/overlays/keithley_panel.py` aligned with engine power-control API. Replaces dead B.7 (`920aa97`) mode-based overlay. Removes all `mode=current/voltage` content from this spec. Replaces legacy v1 surface (`widgets/keithley_panel.py` now DEPRECATED) behind `MainWindowV2` Ctrl+K. Follow-ups FU.4 (K4 custom-command popup) and FU.5 (HoldConfirm 1 s for emergency) explicitly deferred.
+- **2026-04-18 — Phase II.6 rewrite.** Full rebuild of `shell/overlays/keithley_panel.py` aligned with engine power-control API. Replaces dead B.7 (`920aa97`) mode-based overlay. Removes all `mode=current/voltage` content from this spec and supersedes the removed v1 surface behind `MainWindowV2` Ctrl+K. Follow-up K4 custom-command work remains deferred; any alternative emergency gesture remains a separately reviewed hazard decision.
 - **2026-04-17 — Initial version.** Documented mode-based Keithley 2604B control panel (B.7 design). Superseded by 2026-04-18 rewrite; entry preserved for historical trace.

@@ -4,7 +4,7 @@ keywords: rules, governance, token-naming, versioning, deprecation, RULE-GOV
 applies_to: meta-rules about how the design system itself evolves
 status: canonical
 references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md
-last_updated: 2026-07-15
+last_updated: 2026-07-20
 ---
 
 # Governance Rules
@@ -44,7 +44,9 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v4.0.0 (panoramic observability and operator-evidence gate; flat tokens unchanged).
+**Current version:** v4.0.3 (operator-state semantic correction: safety green is
+reserved for independently demonstrated health; ordinary activity uses accent,
+and new attention producers use the single caution rung; flat tokens unchanged).
 
 ## RULE-GOV-003
 
@@ -83,7 +85,7 @@ Other governance concerns (testing, performance, contribution workflow) are docu
 
 ## Rules applied to themselves
 
-These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.0.0 state: all four Active, no pending removals.
+These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.0.3 state: all four Active, no pending removals.
 
 ## Related rules and patterns
 
@@ -101,3 +103,8 @@ These four rules are themselves subject to the design system's evolution process
 - 2026-07-14 (v3.0.0): Applied governance to the breaking corpus-wide
   informative/beautiful composition contract and retained the flat-token and
   STONE_* lifecycle decisions.
+- 2026-07-17 (v4.0.2): Reconciled the current version marker and applied the
+  operator-impact gate to deferred theme selection and fail-visible shutdown.
+- 2026-07-20 (v4.0.3): Reconciled governance markers to the semantic correction
+  that reserves safety colors for health/attention/fault and requires every GUI
+  change to retain explicit better/worse evidence.

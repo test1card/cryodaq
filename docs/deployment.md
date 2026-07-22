@@ -90,6 +90,7 @@ cp cooldown_v5/predictor_model.json data/cooldown_model/
 Copy-Item config\instruments.local.yaml.example config\instruments.local.yaml
 Copy-Item config\notifications.local.yaml.example config\notifications.local.yaml
 Copy-Item config\web.local.yaml.example config\web.local.yaml
+Copy-Item config\channel_descriptors.local.yaml.example config\channel_descriptors.local.yaml
 ```
 
 Проверьте и заполните:
@@ -98,6 +99,9 @@ Copy-Item config\web.local.yaml.example config\web.local.yaml
 - `config/notifications.local.yaml`
 - `config/web.local.yaml` — нужен только для write-действий web dashboard;
   сгенерируйте случайный `web.api_token`
+- `config/channel_descriptors.local.yaml` — обязательная complete
+  machine-specific descriptor authority, когда выбран
+  `instruments.local.yaml`; не используйте её как частичный override
 
 Также в репозитории уже используются:
 
@@ -106,6 +110,15 @@ Copy-Item config\web.local.yaml.example config\web.local.yaml
 - `config/housekeeping.yaml`
 - `config/safety.yaml`
 - `config/experiment_templates/*.yaml`
+
+Перед реальным запуском сверьте physical roster с descriptor manifest. Каждый
+`(instrument_id, emitted_channel)` обязан ровно один раз связываться со
+стабильным `channel_id`; лишний, отсутствующий, malformed или неоднозначный
+binding завершает startup fail-closed. Descriptor задаёт идентичность для
+persistence/replay/report/GUI, но сам по себе не выдаёт capability и тем более
+source authority. Selection парный: local instruments требуют local
+descriptors; base instruments используют base descriptors, даже если local
+descriptor-файл существует.
 
 ## 5. Что настроить в instruments.local.yaml
 
@@ -171,6 +184,20 @@ Write-действия web dashboard ограничены двумя REST routes
 `config/web.local.yaml` (`web.api_token`). Пока токен не задан, write routes
 отвечают 403. Неверный или отсутствующий bearer-токен даёт 401.
 
+Для `POST /api/v1/log` клиент передаёт текст, необязательные теги и, если
+запись относится к эксперименту, его точный `experiment_id`. Устаревший ID
+отклоняется авторитетным engine. Без `experiment_id` запись помечается
+`experiment_unbound=true` и не привязывается неявно к эксперименту, который
+оказался текущим в момент доставки. Web-процесс сам назначает author/source и
+один `request_id` из 32 строчных шестнадцатеричных символов; клиент не может
+подменить эти системные поля. Проверка bearer-токена выполняется до обработки
+тела запроса.
+
+Публичные live-reading ответы используют строгий JSON: `NaN` и обе
+бесконечности передаются как `null`, при этом identity и status измерения не
+исчезают. Клиент должен показывать такое значение как недоступное/устаревшее,
+а не считать `null` нулём или нормальным измерением.
+
 Клиенты квитирования тревог должны использовать точную идентичность
 срабатывания. Сначала прочитайте `GET /api/v1/alarms`: ответ содержит
 `engine_instance_id`, `snapshot_revision` и `activation_id` внутри каждой
@@ -209,7 +236,11 @@ ACK отказывается fail-closed и клиент должен занов
 - ToolRail: `Ещё` → `Архив` открывается без ошибок
 - ToolRail: `Ещё` → `Калибровка` либо видит LakeShore channels, либо честно показывает, что они недоступны
 - ToolRail slot `База знаний` открывается; при пустом индексе показывает управляемое empty/error state
-- tray icon, если системный трей доступен, не показывает healthy без backend truth
+- tray icon, если системный трей доступен, показывает красный fault/active
+  alarm либо жёлтый disconnect/unknown/malformed state с отдельной формой и
+  русской подсказкой; alarm count в launcher пока не авторитетен, поэтому
+  зелёный намеренно недостижим. Всегда сверять dashboard + alarms: даже после
+  закрытия wiring зелёный coarse state не доказывает safe/ready/recording
 
 Текущая GUI-компоновка — MainWindowV2 shell, не вкладки:
 

@@ -11,11 +11,29 @@
 
 ### Added
 
-- Добавлен неактивированный чистый wire-контракт для авторитетного
-  operator snapshot: отдельный observational PUB topic `operator.snapshot`,
-  ровно два bytes-frame и канонический UTF-8 JSON существующей строгой схемы
-  snapshot v1. Кодек не импортирует ZMQ/Qt/engine/replay, ограничивает payload
-  до 8 MiB перед декодированием и выдаёт стабильные bounded reason codes.
+- Активирован end-to-end контракт авторитетного operator snapshot: отдельный
+  observational PUB topic `operator.snapshot`, ровно два bytes-frame и
+  канонический UTF-8 JSON строгой схемы snapshot v1. Единственный engine-owned
+  publisher формирует complete common-cut; launcher/standalone GUI используют
+  bounded ingress и GUI-thread Store. Pure replay session совместим с той же
+  схемой и conservative unavailable semantics, но production `ReplayEngine`
+  wiring остаётся открытым reviewed slice. Кодек ограничивает payload до 8 MiB
+  и не выдаёт instrument/control authority.
+- Добавлена каноническая descriptor authority для стабильной идентичности
+  приборов и каналов от acquisition и SQLite до archive/replay/report/GUI.
+  Machine-local manifest является whole-file replacement, проходит строгую
+  roster/binding validation и блокирует startup при неполной или противоречивой
+  конфигурации. Passive extension registry и ASC reference driver не могут
+  приобрести hazardous source authority через duck typing.
+- Добавлена точная Linux source-mode qualification для короткого mock-stack:
+  sealed exact-SHA source/config snapshot, один пассивный LS218 fixture,
+  locked process observer, subreaper-owned cleanup, bounded launcher log и две
+  соседние periodic deliveries через замену assistant с joined durable
+  receipts. Эта software evidence не заменяет Windows ONEDIR, 12/72-hour или
+  physical-hardware gates.
+- Добавлены полный отчёт Montana, воспроизводимые detailed/important
+  architecture SVG и расширенный лабораторный checklist с явной границей между
+  CI/mock/WSL, real-Windows, dummy-load и физической приёмкой.
 - Добавлено версионирование ZMQ/REST-протокола (`PROTOCOL_VERSION = 1`):
   каждый REP-ответ получает дополнительное поле `proto`; read-only команда
   `protocol_version` возвращает `{ok, proto, server, app_version}`, а
@@ -26,6 +44,17 @@
   описана в `docs/protocol.md`.
 
 ### Changed
+
+- Montana перераспределяет lifecycle и persistence authority из крупных
+  composition roots в узкие проверяемые владельцы: persistence-before-
+  publication, exact process identity, bounded cancellation/teardown,
+  fail-closed configuration и verified-OFF остаются обязательными. Report и
+  periodic-delivery workers являются observational, изолированы от engine event
+  loop и не могут управлять приборами.
+- GUI остаётся панорамной operator-centric поверхностью: summary/POD только
+  дополняет dashboard, acknowledged active hazards сохраняются в evidence,
+  stale/disconnected truth не превращается в optimistic green, а все новые UI
+  изменения проходят co-versioned `docs/design-system/` gate.
 
 - Квитирование Alarm Engine v2 переведено на точную идентичность отдельного
   срабатывания. `GET /api/v1/alarms` теперь возвращает

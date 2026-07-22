@@ -5,7 +5,7 @@ applies_to: global application shortcuts and panel-level shortcuts
 enforcement: required
 priority: high
 status: canonical
-last_updated: 2026-04-17
+last_updated: 2026-07-17
 architect_decision: AD-002 (mnemonic shortcuts canonical)
 ---
 
@@ -24,23 +24,23 @@ All keyboard shortcuts in CryoDAQ MUST be registered here. This prevents collisi
 
 Per **AD-002**, the canonical global-navigation shortcuts are **mnemonic** (Ctrl + first letter of the Russian / English panel name — whichever is clearest for operators). Numeric shortcuts (Ctrl+1 … Ctrl+9) are **legacy / transitional** — kept alive while rail slot ordering is still being finalized, but they are NOT the canonical scheme and new code should not rely on them.
 
-- **Canonical (learn these):** `Ctrl+L`, `Ctrl+E`, `Ctrl+A`, `Ctrl+K`, `Ctrl+M`, `Ctrl+R`, `Ctrl+C`, `Ctrl+D`, `Ctrl+Shift+X`.
+- **Canonical (learn these):** `Ctrl+L`, `Ctrl+E`, `Ctrl+A`, `Ctrl+K`, `Ctrl+M`, `Ctrl+R`, `Ctrl+C`, `Ctrl+D`.
 - **Transitional fallback (do not extend):** `Ctrl+1` … `Ctrl+9` to rail slots.
 
-Shortcut constants (`SHORTCUT_*`) are currently proposed Python names; most widgets still bind via `QKeySequence("Ctrl+L")` literals. Migration to a central `src/cryodaq/gui/shortcuts.py` registry is tracked but non-blocking — the *bindings* below are canonical today regardless of where the literals live.
+Shortcut constants (`SHORTCUT_*`) are currently proposed Python names; most widgets still bind via `QKeySequence("Ctrl+L")` literals. Migration to a central `cryodaq.gui.shortcuts` module is tracked but non-blocking — the *bindings* below are canonical today regardless of where the literals live.
 
 ## Shortcut grammar
 
 **Single key (no modifier):** only for in-focus context (text input, navigation). Never global.
 **Ctrl + key:** global operator action (open panel, save, etc.)
-**Ctrl + Shift + key:** global operator emergency or destructive action (e.g., emergency stop)
+**Ctrl + Shift + key:** reserved for explicitly implemented and hazard-reviewed global actions; no emergency binding is shipped today
 **Alt + key:** reserved, not used (Alt opens menu bar in Qt on some platforms)
 **F-keys:** reserved, use sparingly (F1 help, F5 refresh, F11 fullscreen)
 **Escape:** close overlay / cancel action (never global mode change)
 
 ## Canonical global shortcuts (mnemonic scheme)
 
-These are the canonical bindings per AD-002. Constant names are the proposed Python identifiers in the future `src/cryodaq/gui/shortcuts.py` registry.
+These are the canonical bindings per AD-002. Constant names are the proposed Python identifiers in the future `cryodaq.gui.shortcuts` registry.
 
 | Constant | Binding | Action | Scope |
 |---|---|---|---|
@@ -52,11 +52,17 @@ These are the canonical bindings per AD-002. Constant names are the proposed Pyt
 | `SHORTCUT_OPEN_ARCHIVE` | `Ctrl+R` | Open archive/records (**R**ecords) | Global |
 | `SHORTCUT_OPEN_CONDUCTIVITY` | `Ctrl+C` | Open conductivity panel (**C**onductivity) | Global |
 | `SHORTCUT_OPEN_SENSOR_DIAG` | `Ctrl+D` | Open sensor diagnostics (**D**iagnostics) | Global |
-| `SHORTCUT_EMERGENCY_STOP` | `Ctrl+Shift+X` | Emergency stop (hold-to-confirm) | Global, confirmation required |
 | `SHORTCUT_TOGGLE_MODE` | `Ctrl+Shift+M` | Toggle experiment/debug mode | Global |
 | `SHORTCUT_HELP` | `F1` | Open help / shortcut reference | Global |
 | `SHORTCUT_REFRESH` | `F5` | Refresh current view / reconnect instruments | Global |
 | `SHORTCUT_FULLSCREEN` | `F11` | Toggle fullscreen | Global |
+
+The shipped emergency path is visible rather than global: `Ctrl+K` opens the
+Keithley panel, where «АВАР. ОТКЛ.» opens a cancel-default confirmation modal.
+A future global or hold gesture is an open hazard decision. It MUST NOT appear
+in operator training, tooltips, or tests until its authority, confirmation,
+keyboard behavior, discoverability, and physical response have been approved
+and implemented.
 
 ## Transitional numeric navigation (Ctrl+[1-9]) — legacy
 
@@ -121,7 +127,7 @@ When operator log input field is focused:
 
 ## Registry implementation (proposed)
 
-Central module `src/cryodaq/gui/shortcuts.py`:
+Proposed central module `cryodaq.gui.shortcuts`:
 
 ```python
 # DESIGN: proposed

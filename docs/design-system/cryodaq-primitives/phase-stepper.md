@@ -4,7 +4,7 @@ keywords: phase, stepper, progression, experiment, cooldown, warmup, sequence, a
 applies_to: sequential phase progression display + manual advance controls
 status: active
 implements: src/cryodaq/gui/dashboard/phase_stepper.py (extracted Phase B.5.5); src/cryodaq/gui/dashboard/phase_aware_widget.py (parent; Phase B.5 + B.5.6)
-last_updated: 2026-04-17
+last_updated: 2026-07-19
 references: rules/color-rules.md, rules/typography-rules.md, tokens/colors.md
 ---
 
@@ -88,7 +88,8 @@ Health is rendered separately and owns STATUS_OK.
 1. **Active phase uses ACCENT; completed uses neutral progress chrome.** Neither
    may use STATUS_OK. (RULE-COLOR-002, RULE-COLOR-004)
 2. **Fixed phase order.** Phases cannot be reordered at runtime. The sequence is part of the experiment template.
-3. **Only one phase active at a time.** No two circles simultaneously filled green with glow. Progression is strictly sequential.
+3. **Only one phase active at a time.** No two nodes may carry the active
+   ACCENT ring simultaneously. Progression is strictly sequential.
 4. **Labels UPPERCASE for active phase only** per RULE-TYPO-008 category emphasis. Other labels sentence case.
 5. **Manual advance button only active when allowed.** Automatic transitions (time-based, temperature-based) do not need manual advance; button hidden or disabled. Button enable state driven by engine.
 6. **Abort requires confirmation.** Destructive action — uses Dialog confirm or hold-confirm button pattern. (RULE-INTER-004)
@@ -180,7 +181,7 @@ class PhaseNode(QWidget):
         self._apply_state()
     
     def _apply_state(self) -> None:
-        # DESIGN: RULE-COLOR-002, RULE-COLOR-004 (active=STATUS_OK not ACCENT)
+        # DESIGN: RULE-COLOR-002, RULE-COLOR-004 (active=ACCENT, never STATUS_OK)
         node_style_map = {
             "pending":   (theme.SURFACE_CARD, theme.BORDER),         # hollow, BORDER
             "active":    (theme.ACCENT,       theme.SECONDARY),       # selected progress
@@ -407,11 +408,15 @@ B.5.5 added 7th phase (`preflight`) before index 0.
 
 3. **Advance button always enabled.** Operator clicks, engine rejects — frustration. Button enable state mirrors engine's `phase_can_advance` signal.
 
-4. **Abort as regular button.** Single click aborts experiment. Violates RULE-INTER-004. Use HoldConfirmButton.
+4. **Abort as an unconfirmed regular button.** A direct single-click abort
+   violates RULE-INTER-004. Use the action's implemented reviewed confirmation
+   pattern; do not claim a HoldConfirm gesture unless it actually ships.
 
 5. **Animated node fill on transition.** Glitch-prone. Atomic is safer.
 
-6. **Connector state from wrong side.** Connector between active and pending: using active side (STATUS_OK) makes upcoming path look "already done". Should use pending side (BORDER).
+6. **Connector state from wrong side.** Connector between active and pending:
+   using active ACCENT makes the upcoming path look already traversed. Keep the
+   connector neutral BORDER.
 
 7. **Latin phase keys in operator-facing labels.** `"cooldown"` shown to operator; should be `«Захолаживание»`. Keys stay internal, labels are Russian.
 

@@ -2,7 +2,7 @@
 
 **Released baseline:** v0.64.1
 **Document scope:** active Montana candidate architecture on `feat/montana-phase-a`
-**Date:** 2026-07-16
+**Date:** 2026-07-17
 
 ---
 
@@ -13,10 +13,16 @@ acquisition and control. It replaces a LabVIEW VI stack and adds a scripted
 FSM-driven experiment lifecycle, multi-format calibration export, automated
 DOCX reports, Telegram notifications, and a sensor-anomaly alarm pipeline.
 
-The system runs as two cooperating processes — a headless engine and a Qt
-desktop client — connected by ZeroMQ. A third optional process serves a
-FastAPI monitoring dashboard. All three share the same Python package
-(`cryodaq`) and are started as separate entry points.
+The core runtime roles are a headless engine and a Qt desktop client connected
+by ZeroMQ. In the full operator path the lifecycle-owning launcher process hosts
+the Qt GUI and supervises a separate engine process, a separate ZMQ bridge
+process, and the optional observational assistant. Bounded report children are
+owned by the engine or assistant component that requested them, not by the
+launcher directly. The standalone `cryodaq-gui` entry point is a reduced client
+for an already-running engine; on-demand engine reporting remains available,
+while assistant/periodic delivery is absent. An optional FastAPI process serves
+the monitoring dashboard. Only the engine has instrument or actuator authority;
+none of the other roles is a fallback owner.
 
 This document is intentionally high-level; per-subsystem details live in
 module docstrings and the design system (`docs/design-system/`).
@@ -51,8 +57,19 @@ Primary Operator Display is an additive summary, not a replacement or a black
 box. Specialist functions remain explicit overlays, and current values, status,
 provenance, and acknowledged active hazards stay reachable. Ingress drains the
 newest coherent revisions into the GUI-thread Store and settles before normal
-shutdown or theme re-exec. The legacy 10-tab `MainWindow` is retired; there is
-no v1 fallback.
+shutdown. Theme selection is only a validated, atomically persisted preference
+for the next ordinary launch; it never restarts ingress or the process tree.
+The legacy 10-tab `MainWindow` is retired; there is no v1 fallback.
+
+The lifecycle-owning launcher uses a monotonic, retry-safe shutdown state
+machine. It first quiesces timers, restart callbacks, descriptor transport, and
+snapshot ingress; then it proves assistant, bridge reply thread/process,
+launcher safety worker, bridge queues, engine/stderr pump, soak capabilities,
+and the asyncio loop terminal before requesting Qt application exit. An
+unsettled owner remains retained and operator-visible in the tray and is retried
+with bounded backoff; the application does not disappear or release the
+single-instance lock. `main()` owns that lock outside the window and releases
+its stable inode only after the Qt event loop has actually returned.
 
 ### cryodaq.web.server (optional FastAPI)
 
@@ -89,6 +106,37 @@ ZMQ IPC:
 - PUB `:5555` — msgpack telemetry (readings, events, status)
 - REP `:5556` — JSON commands (GUI → engine, Telegram bot → engine)
 
+### Mutating experiment-command timeout semantics
+
+The REP timeout bounds how long a client waits; it is not a rollback boundary.
+Experiment mutations execute in `asyncio.to_thread` under the
+`ExperimentManager` per-root lifecycle lock and durable transition journal. A
+single retained, shielded task owns each accepted mutation through commit and
+all completion side effects. A bounded REP waiter may time out or be cancelled,
+but it cannot cancel that authoritative owner.
+
+Accordingly, a client timeout still means **outcome unknown**; it does not mean
+rollback or failure. Clients must not retry a mutating experiment command
+automatically or blindly. They must re-query authoritative `experiment_status`
+and the operator snapshot, reconcile durable identity/state, and present the
+ambiguity to the operator. An accepted successful reply carries
+`committed: true`, `retry_safe: false`, and an
+`experiment_command_commit_v1` `commit_receipt`. If a receipt or post-commit
+side effect fails, the owner continues attempting the remaining reconciliation
+steps once and reports `committed_reconciliation_failed`, `committed: true`,
+`retry_safe: false`, and explicit `reconciliation_failures`; that response is
+not a rollback claim.
+
+Only one mutation owner runs at a time. Status reads coalesce behind one owner,
+other experiment reads are capped, and shutdown freezes command ingress before
+draining mutation/read/status/operator-log owners. The shutdown timeout is an
+escalation boundary, not permission to dismantle dependent resources while an
+owner remains unsettled. Deterministic timeout-then-late-commit,
+partial-reconciliation, bounded-read, and shutdown-drain regressions close the
+previous software reconciliation gap. Exact-candidate CI and physical lab gates
+remain separate and open until their prescribed evidence exists. This is an
+open final-candidate gate until the frozen object passes the named regressions.
+
 ---
 
 ### Operator snapshot publication
@@ -104,11 +152,27 @@ lane has no command, driver, actuator, or fallback-writer capability.
 ### Source-mode soak execution
 
 The integrated short-soak runner is enabled only for the POSIX source profile.
-Its registry is the sole authority that invokes the exact owned execution path,
-validates the process/artifact/receipt cut, issues and consumes opaque evidence,
-and settles cleanup. Unsupported platforms fail closed. This architecture does
-not itself satisfy the final-SHA 15-minute run, the 12/72-hour duration gates,
-or Windows ONEDIR evidence.
+Its registry is the sole authority that invokes the exact owned execution path.
+Both the exact-six prerequisite and the 15-minute source stack execute from
+read-only Git-archive snapshots of the manifest SHA; live checkout edits cannot
+enter the claimed run. The source fixture is explicitly passive: one mocked
+`LS218_1`, 16 descriptor/binding pairs and eight readings, with production
+alarms, interlocks, and physical-alarm actions disabled. The complete generated
+configuration topology and hashes are sealed into the manifest and checked
+before launch and after process settlement.
+
+The runner binds launcher PID/start/session authority before exec, acts as a
+temporary Linux child subreaper, continuously drains launcher output into a
+bounded tail, joins pre-ACK `DELIVERING` ownership to post-ACK durable
+`last_terminal=SUCCEEDED` state, and requires two adjacent receipts across an
+assistant replacement. Evidence files remain tied to the private authority cut
+through final PASS validation; coordinated replacement, hardlinks, inode swaps,
+and content mutation fail closed. Prior subreaper state is restored before PASS.
+
+Unsupported platforms fail closed. This architecture does not itself satisfy
+the final-SHA 15-minute execution until that exact run is recorded, the 12/72-hour
+duration gates, Windows ONEDIR evidence, production alarm-topology qualification,
+or any physical-hardware gate.
 
 ---
 
@@ -183,7 +247,7 @@ Config files in `config/`:
 | `interlocks.yaml` | Interlock conditions + actions |
 | `channels.yaml` | Display names, visibility, groupings |
 | `channel_descriptors.yaml` + `channel_descriptors.local.yaml` | Canonical channel-identity descriptor authority (see below) |
-| `notifications.yaml` | Telegram credentials + escalation |
+| `notifications.yaml` | Tracked placeholder/schema for Telegram delivery and escalation; real token/destination values belong only in gitignored `notifications.local.yaml` |
 | `housekeeping.yaml` | Throttle, retention, cold rotation |
 | `plugins.yaml` | sensor_diagnostics + vacuum_trend config |
 | `cooldown.yaml` | Cooldown predictor parameters |
@@ -194,6 +258,8 @@ Config files in `config/`:
 
 `*.local.yaml` overrides base files. Local configs are gitignored and intended
 for machine-specific deployment settings (COM ports, GPIB addresses, tokens).
+The tracked `notifications.yaml` must retain placeholders: it documents shape
+and safe defaults, not deployable secrets.
 
 ### Channel descriptor authority
 

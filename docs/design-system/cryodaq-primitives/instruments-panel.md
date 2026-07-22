@@ -3,8 +3,8 @@ title: InstrumentsPanel
 keywords: instruments, sensor diagnostics, liveness, adaptive timeout, health score, card grid, K2 pre-experiment
 applies_to: Instrument card grid + sensor diagnostics overlay (merged)
 status: active
-implements: src/cryodaq/gui/shell/overlays/instruments_panel.py (Phase II.8); legacy src/cryodaq/gui/widgets/instrument_status.py and sensor_diag_panel.py retained (DEPRECATED) until Phase II.13
-last_updated: 2026-07-14
+implements: src/cryodaq/gui/shell/overlays/instruments_panel.py; removed legacy widgets are historical only
+last_updated: 2026-07-20
 references: rules/data-display-rules.md, rules/color-rules.md, cryodaq-primitives/alarm-panel.md (SeverityChip reuse), components/card.md
 ---
 
@@ -14,15 +14,15 @@ K2-critical overlay. The pre-experiment verification surface: operator opens it 
 
 ## Rebuild scope (II.8)
 
-Two legacy widgets folded into one overlay:
+Two legacy responsibilities were folded into one overlay:
 
-- `src/cryodaq/gui/widgets/instrument_status.py` — card grid + 1 s liveness timer + adaptive timeout.
-- `src/cryodaq/gui/widgets/sensor_diag_panel.py` — 7-column health table + 10 s polling + summary.
+- instrument card grid — 1 s liveness timer + adaptive timeout;
+- sensor diagnostics — 7-column health table + 10 s polling + summary.
 
 Changes on merge:
 
 - Unicode circle indicator glyph replaced by `_StatusIndicator` (painted `QFrame` with QSS `border-radius`). No glyph dependency, no font fallback surprises.
-- Summary emoji replaced by `SeverityChip` widgets imported from `shell/overlays/alarm_panel.py` (reuse the exact DS status pill pattern). Labels become plain Russian («ОК / ПРЕД / КРИТ»).
+- Summary emoji replaced by `SeverityChip` widgets imported from `shell/overlays/alarm_panel.py` (reuse the exact DS status pill pattern). Labels are plain Russian («ОК / ВНИМАНИЕ / КРИТ»); the middle rung is canonical caution, never a second warning color.
 - Row tints migrated from hardcoded `QColor(r, g, b, a)` to `QColor(theme.STATUS_*)` with an alpha setter. No raw rgba.
 - `apply_panel_frame_style` helper and `TEXT_MUTED` / `TEXT_PRIMARY` deprecated tokens replaced by direct DS QSS + `FOREGROUND` / `MUTED_FOREGROUND`.
 - `set_connected(bool)` gates 10 s diag polling only — cards keep drawing stale indicators by design.
@@ -57,10 +57,10 @@ bounded: raw channel, vendor, diagnostic, and payload text is never echoed.
 - `FOREGROUND` — titles, card name, card status text, diag cell text.
 - `MUTED_FOREGROUND` — last-response / counters / empty-state / summary placeholder.
 - `STATUS_OK` — healthy card border + indicator fill + health cell text (≥80).
-- `STATUS_CAUTION` — warning card border + indicator fill + health cell text (50–79) + row tint base.
+- `STATUS_CAUTION` — non-OK card border + indicator fill + health cell text (50–79) + row tint base.
 - `STATUS_FAULT` — fault card border + indicator fill + health cell text (<50) + row tint base.
 - `STATUS_STALE` — cold-start indicator before first reading.
-- `STATUS_INFO` / `STATUS_WARNING` — `SeverityChip` summary pills.
+- `STATUS_INFO` / `STATUS_CAUTION` / `STATUS_FAULT` — informational aggregate, attention, and critical `SeverityChip` summary pills. The INFO «ОК» count is not a global safe/healthy assertion.
 - Spacing: `SPACE_1 / SPACE_2 / SPACE_3 / SPACE_4`.
 - Radii: `RADIUS_MD` (sections + cards), `RADIUS_SM` (table + chip).
 - Typography: `FONT_BODY` throughout; `FONT_MONO` for card counters + diag numeric cells.
@@ -81,7 +81,7 @@ No hardcoded hex outside DS tokens. No emoji (including `⬤ ✓ ⚠ ✘`). No d
 │ │ │...  │ │...  │ │...  │                                    │ │
 │ │ └────┘ └────┘ └────┘                                       │ │
 │ └────────────────────────────────────────────────────────────┘ │
-│ ┌ Card: ДИАГНОСТИКА ДАТЧИКОВ     [18 ОК][1 ПРЕД][1 КРИТ] ───┐  │
+│ ┌ Card: ДИАГНОСТИКА ДАТЧИКОВ [18 ОК][1 ВНИМАНИЕ][1 КРИТ] ──┐  │
 │ │ Канал | T(K) | Шум | Дрейф | Выбр. | Корр. | Здоровье    │  │
 │ │  ...                                                      │  │
 │ └───────────────────────────────────────────────────────────┘  │
@@ -137,6 +137,12 @@ See `src/cryodaq/gui/shell/main_window_v2.py` for the canonical wiring.
 
 ## Performance evidence
 
+- A summary refresh creates at most three severity chips, independent of the
+  descriptor count, so summary-chip creation remains O(1). The deterministic
+  `test_summary_chips_fit_at_minimum_shell_width` geometry check renders maximum
+  4096-count «ОК», «ВНИМАНИЕ», and «КРИТ» labels at the supported 1280 px shell
+  floor (1224 px after the fixed ToolRail) and proves that every label fits its
+  contents rectangle and remains inside the summary container.
 - Notice text, visibility, and QSS are mutated only when presentation changes
   among `waiting | hidden | absent | refused`; steady accepted/refused readings
   perform no repeated notice stylesheet work.
@@ -159,10 +165,13 @@ and is prohibited.
 ## Rules cross-reference
 
 - `rules/color-rules.md` RULE-COLOR-010 — no hardcoded hex (satisfied).
-- `rules/color-rules.md` RULE-COLOR-015 — status tokens used semantically.
+- `rules/color-rules.md` RULE-COLOR-002 — status tokens used semantically.
 - `rules/copy-rules.md` RULE-COPY-005 — no emoji in labels (SeverityChip + plain Russian).
-- `rules/data-display-rules.md` RULE-TABLE-002 — monospace numeric cells with tabular figures.
-- `rules/interaction-rules.md` RULE-INTERACT-001 — connection-dependent operations (diag polling) explicitly gated.
+- `rules/data-display-rules.md` RULE-DATA-003 — numeric diagnostic cells use
+  the canonical monospaced/tabular presentation.
+- Component invariant — connection-dependent diagnostic polling is explicitly
+  gated; there is no separate canonical `RULE-INTERACT-*` identifier for this
+  component-specific contract.
 
 ## Fail-conservative identity
 
@@ -176,6 +185,11 @@ and is prohibited.
 
 ## Changelog
 
+- **2026-07-20 (v4.0.3)** — canonical caution uses the full Russian
+  «ВНИМАНИЕ» non-color cue; unknown backend status is bounded Russian text, and
+  activity/summary colors no longer make false healthy assertions. Added the
+  maximum-count 1280 px shell-floor geometry regression and corrected canonical
+  rule references.
 - **2026-04-18 (Phase II.8)** — merged rebuild landed. Unicode circle indicator replaced by painted widget; summary emoji replaced by `SeverityChip`; `apply_panel_frame_style` + deprecated `TEXT_*` tokens removed.
 - **2026-07-14 (F35 D7.2)** — removed vendor/channel-name identity inference;
   instrument cards now consume only authoritative connected descriptor views,

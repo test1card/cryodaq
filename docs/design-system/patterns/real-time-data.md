@@ -197,6 +197,18 @@ Two data points from different channels arriving in different orders than they w
 
 Within a single channel, engine guarantees monotonic timestamps. UI should never display an older value on a channel that already showed a newer one.
 
+A timestamp more than one second ahead of the GUI wall clock is not accepted as
+quiet ordering truth. TopWatchBar presents a static Russian clock-skew caution,
+retains the event in its constant-size interval cut, and temporarily uses
+arrival order until a non-skewed sample arrives. This narrow fallback prevents
+a poisoned future timestamp from pinning an old OK digit above later fault
+evidence; it does not reorder persistence, alarms, or cross-channel history.
+
+Critical numeric accessibility detail names both the latest received source
+and the provenance/time of the displayed last-usable value. Interval extrema
+include their own source times. Stale age, disconnect, physical invalidity, and
+clock skew remain explicit orthogonal facts rather than replacing one another.
+
 ## Missing-data handling
 
 If a single sample is missing (dropped):
@@ -253,13 +265,16 @@ If the whole channel goes silent (stale_timeout exceeded):
 | Better | Digits and plots remain readable because one latest-value cut repaints at 2 Hz instead of once per incoming sample. |
 | Worse | An intermediate sample may not appear as a standalone digit. |
 | Safety/workflow justification | Presentation cadence is for human legibility only; ingestion, buffering, persistence, and alarms remain full-rate. |
-| Mitigation and tests | The full-rate buffer receives every sample; peak-preserving plot decimation retains interval extrema; deterministic tests prove no pre-tick repaint, latest-value digits, transient status evidence, and source-timestamp staleness. |
-| Revise/revert trigger | Revise if coalescing drops stored samples, delays alarm evaluation, exceeds 2 Hz, or fails to show the latest value on the next tick. |
+| Mitigation and tests | The full-rate buffer receives every sample; peak-preserving plot decimation retains interval extrema; deterministic tests prove no pre-tick repaint, latest-value digits, source-ordered transient fault/skew evidence, extrema times, disconnect retention, and constant-size state across 10,000 updates. |
+| Revise/revert trigger | Revise if coalescing drops stored samples, delays alarm evaluation, exceeds 2 Hz, hides a fault behind a future timestamp, erases the last usable value/provenance, or fails to show the latest trustworthy value on the next tick. |
 
-A persistent excursion badge is intentionally open: the GUI interval aggregate
-does not invent or latch alarm truth. Persistence requires an authoritative
-backend alarm/event record and its acknowledgement workflow.
+A transient per-interval range marker is presentation evidence, not an alarm:
+TopWatchBar may show `↕` until the next clean interval while Russian accessible
+detail names the min/max/status cut. A persistent excursion badge remains open;
+the GUI aggregate must not invent or latch alarm truth. Persistence requires an
+authoritative backend alarm/event record and its acknowledgement workflow.
 
 ## Changelog
 
+- 2026-07-17: Defined future-source clock-skew caution and bounded arrival-order recovery; required provenance/extrema times, disconnect retention, and O(1) interval state evidence.
 - 2026-04-17: Initial version. Coalescing pattern. Stale / initial-empty / missing-data handling. Update frequency table per element type. Rationale for 2 Hz cap and no-animation rules.

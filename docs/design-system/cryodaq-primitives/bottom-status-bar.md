@@ -1,309 +1,217 @@
 ---
 title: BottomStatusBar
-keywords: status-bar, bottom-bar, connection, engine, safety-state, fsm, heartbeat, time
-applies_to: bottom chrome strip showing system-level status
+keywords: status-bar, bottom-bar, connection, safety-state, uptime, disk, data-rate, local-time
+applies_to: bottom chrome strip showing passive system-level evidence
 status: active
 implements: src/cryodaq/gui/shell/bottom_status_bar.py
-last_updated: 2026-04-17
-references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voice-rules.md
+last_updated: 2026-07-20
+references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voice-rules.md, governance/change-impact.md
 ---
 
 # BottomStatusBar
 
-Thin chrome strip at the bottom of every screen. Shows system-level status: engine connection, safety FSM state, ZMQ heartbeat, timestamp. Low-priority information; operator rarely looks at it unless something is wrong.
+The shipped `BottomStatusBar` is the thin, persistent technical strip at the
+bottom of the v2 shell. Its active contract is the production implementation,
+not the older proposed Engine/Safety/ZMQ four-field mock-up.
 
-> **Implementation status.** The shipped BottomStatusBar at
-> `src/cryodaq/gui/shell/bottom_status_bar.py` is partially aligned
-> with this spec: height = `BOTTOM_BAR_HEIGHT` (28px, invariant #1)
-> and the safety FSM label is rendered lowercase as-is (`safe_off`,
-> `running`, `fault_latched`) per invariant #3. The shipped widget
-> still uses a different information model than the canonical target
-> (safety + uptime + disk + data-rate + connection + local clock
-> rather than engine / safety / ZMQ-heartbeat / UTC-offset timestamp),
-> and connection state is derived in
-> `src/cryodaq/gui/shell/main_window_v2.py` from recent-reading
-> silence rather than from an explicit ZMQ heartbeat interval.
-> Migrating to the canonical 4-field model + heartbeat source is
-> tracked as later Phase II work.
+The bar presents six fields in this order:
 
-**When to use:**
-- Singleton in `MainWindow`, always visible at bottom
-- Any system-level info that should be reachable at a glance but doesn't warrant top-bar prominence
+1. current SafetyManager state supplied by the host;
+2. launcher/UI uptime measured from this widget's construction;
+3. free space for the configured data directory;
+4. the latest data rate supplied by the host;
+5. recent-reading connection evidence supplied by the host;
+6. the GUI host's current local time.
 
-**When NOT to use:**
-- High-priority alerts — use `TopWatchBar` vitals or alarm badge
-- Per-panel status — panel has its own footer
-- Operator action feedback — use `Toast`
+This is supporting evidence, not the primary alarm or verified-OFF surface.
+Nothing in the bar grants control authority.
 
-## Anatomy
+## When to use
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│  ● Engine: connected    ● Safety: running    ● ZMQ: 0.5с    14:32:15 UTC+3 │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-  ◀── height: BOTTOM_BAR_HEIGHT (28)
-  ◀── background: SURFACE_CARD
-  ◀── border-top: 1px BORDER
-  ◀── padding-left aligns with TOOL_RAIL_WIDTH (56)
-  ◀── 3 status items left-aligned + timestamp right-aligned
+- Instantiate once in `MainWindowV2` and keep it visible across shell views.
+- Use it for passive, glanceable technical evidence that must not replace the
+  primary physical vitals, alarm list, source controls, or experiment state.
+- Keep values static between updates; do not animate, cycle, or hide them.
+
+Do not use it for per-panel state, transient action feedback, alarm
+acknowledgement, or any command.
+
+## Shipped anatomy
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ● safety │ Лаунчер 00:00:00 │ Диск 120 ГБ │ 10 изм/с │ ● Подключено │ 14:32:15 │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Parts
-
-| Part | Required | Description |
+| Part | Owner and provenance | Current presentation |
 |---|---|---|
-| **Bar frame** | Yes | Horizontal strip, `BOTTOM_BAR_HEIGHT` (28) tall |
-| **Engine indicator** | Yes | Dot + label: «Engine: connected / disconnected» |
-| **Safety FSM indicator** | Yes | Dot + label: current FSM state (safe_off / ready / run_permitted / running / fault_latched) |
-| **ZMQ heartbeat** | Yes | Dot + label showing last heartbeat interval |
-| **Timestamp** | Yes | Right-aligned, local time + UTC offset |
+| Safety | `MainWindowV2` calls `set_safety_state` from backend state | lowercase state ID with a dot glyph |
+| Launcher uptime | widget-local monotonic clock | `Лаунчер HH:MM:SS` |
+| Data disk | widget-local `get_data_dir()` and `shutil.disk_usage` | `Диск N ГБ` |
+| Data rate | last value passed to `set_data_rate` | integer `изм/с` |
+| Connection | host calls `set_connected` from recent-reading evidence | Russian connected/disconnected label |
+| Clock | widget-local wall clock | local `HH:MM:SS` |
+
+Separators are visible `│` glyphs using `BORDER_SUBTLE`. The rightmost clock is
+pushed to the far edge by a stretch.
 
 ## Invariants
 
-1. **Height = BOTTOM_BAR_HEIGHT (28).** Smaller than TopWatchBar because lower priority. (RULE-SPACE-007 exception for chrome)
-2. **Padding-left aligns with TOOL_RAIL_WIDTH.** Content starts past the rail.
-3. **Safety state lowercase.** Display «safe_off», «fault_latched» — matches engine's internal representation. (CryoDAQ absolute rule)
-4. **Instant fault state rendering.** (RULE-INTER-006)
-5. **Stale indicator when heartbeat late.** If ZMQ heartbeat > stale_timeout, mark as stale — critical operator info.
-6. **Text is sentence case with colon separator.** «Engine: connected» not «ENGINE: CONNECTED» or «engine connected». Status labels are data readouts, not category headers.
-7. **Timestamp uses FONT_MONO.** Prevents visual jitter as seconds tick. (RULE-TYPO-003)
-8. **Font sizes small but readable.** `FONT_LABEL_SIZE` (12) works; `FONT_SIZE_XS` (11) in extreme compact.
-9. **Each status item has dot + label.** Two redundant channels — color (status) + text. (RULE-A11Y-002)
-10. **Not interactive by default.** Clicking status items does nothing. Hover may show tooltip with detail.
+1. The strip is exactly `BOTTOM_BAR_HEIGHT` (28 px), uses `SURFACE_PANEL`, and
+   has a one-pixel `BORDER_SUBTLE` top edge.
+2. Safety IDs remain lowercase (`safe_off`, `ready`, `run_permitted`,
+   `running`, `fault_latched`) so the display matches authoritative log/state
+   vocabulary.
+3. Missing safety evidence renders `● —` in muted text. Unknown states remain
+   muted; they never become green.
+4. `running` and `run_permitted` use `ACCENT`, because activity or permission is
+   not evidence of health. `ready` uses `STATUS_INFO`.
+5. Any safety state containing `fault` uses `STATUS_FAULT`.
+   Exact `fault_latched` also sounds immediately and repeats the application
+   beep every three seconds until the state changes or becomes unavailable.
+6. Disk free space below 10 GiB uses `STATUS_FAULT`; 10 GiB through less than
+   50 GiB uses `STATUS_CAUTION`; 50 GiB or more is muted technical information.
+7. Connected and disconnected states include both text and a dot glyph. The
+   connected color is `STATUS_OK`; disconnected is `STATUS_FAULT`.
+8. “Connected” currently means the host has recent-reading evidence. It is not
+   an independent ZMQ heartbeat, engine-process proof, persistence proof, or
+   verified-OFF proof.
+9. Disconnect does not erase the last supplied rate. The retained number is
+   last-known evidence and must not be interpreted as current without the
+   adjacent connection state.
+10. The clock is local host time in `HH:MM:SS`. The shipped widget does not
+    display a timezone or UTC offset.
+11. The bar is passive and has no click, hover-command, or keyboard-command
+    behavior.
 
-## Status labels (Russian operator text)
+## Safety state mapping
 
-| Item | Display | Status key | Color |
-|---|---|---|---|
-| Engine | «Engine: подключён» / «Engine: нет связи» / «Engine: запуск» | connected / disconnected / connecting | OK / FAULT / WARNING |
-| Safety FSM | «Safety: safe_off» / «Safety: ready» / «Safety: run_permitted» / «Safety: running» / «Safety: fault_latched» | matches FSM state | STATUS_* matching state |
-| ZMQ | «ZMQ: 0.5с» / «ZMQ: 12с · нет связи» | interval; stale marker | OK if < threshold, STATUS_STALE if exceeded |
-| Time | «14:32:15 UTC+3» | — | FOREGROUND |
-
-**Note on Engine label:** «Engine» stays in Latin — it's the subsystem name, not operator-facing vocabulary (RULE-COPY-002 exception for subsystem names). `safe_off` / `fault_latched` also stay in code form — these are precise FSM state IDs that operators recognize from logs.
-
-## Safety state → color mapping
-
-| FSM state | Color | Meaning |
+| Backend text | Token | Meaning |
 |---|---|---|
-| `safe_off` | STATUS_STALE (neutral) | Default — nothing running |
-| `ready` | STATUS_INFO | Preconditions met, awaiting command |
-| `run_permitted` | STATUS_INFO | Authorized to run, awaiting start |
-| `running` | STATUS_OK | Active operation |
-| `fault_latched` | STATUS_FAULT | Fault; operator must acknowledge |
+| missing/empty | `TEXT_MUTED` | no current safety evidence |
+| contains `fault` | `STATUS_FAULT` | fault evidence; exact `fault_latched` repeats the beep |
+| contains `running` | `ACCENT` | current activity, not health |
+| contains `permitted` | `ACCENT` | authorization, not health |
+| contains `ready` | `STATUS_INFO` | informational readiness, not health |
+| any other value | `TEXT_MUTED` | bounded unknown state |
 
-## API
+Substring matching is the current implementation. It is intentionally
+fail-conservative for green: no safety-state string maps to `STATUS_OK`.
+
+## Public API
+
+The active public setter contract is exactly:
 
 ```python
-# src/cryodaq/gui/shell/bottom_status_bar.py
-
-class StatusItem(QWidget):
-    """One status item: dot + label."""
-    
-    def __init__(
+class BottomStatusBar(QWidget):
+    def set_safety_state(self, state: str | None) -> None: ...
+    def set_data_rate(self, rate_per_sec: float) -> None: ...
+    def set_connected(
         self,
-        key: str,
-        initial_label: str = "—",
-        parent: QWidget | None = None,
+        connected: bool,
+        label: str | None = None,
     ) -> None: ...
-    
-    def set(self, label: str, status: str = "ok") -> None:
-        """Update label text and status color."""
-
-
-class BottomStatusBar(QWidget):
-    """Bottom chrome strip showing system status."""
-    
-    def __init__(self, parent: QWidget) -> None: ...
-    
-    def set_engine(self, state: str) -> None:
-        """state: 'connected' | 'disconnected' | 'connecting'."""
-    
-    def set_safety(self, fsm_state: str) -> None:
-        """fsm_state matches one of safe_off / ready / run_permitted / running / fault_latched."""
-    
-    def set_heartbeat(self, interval_s: float, stale: bool = False) -> None: ...
-    
-    def set_time(self, t: datetime) -> None:
-        """Update displayed timestamp."""
 ```
 
-## Reference: StatusItem
+There is no shipped `StatusItem`, `set_engine`, `set_safety`, `set_heartbeat`,
+or `set_time` API. Documentation and tests must not imply otherwise.
 
-```python
-class StatusItem(QWidget):
-    def __init__(self, key: str, initial_label: str = "—", parent=None):
-        super().__init__(parent)
-        self._key = key
-        
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(theme.SPACE_1)
-        row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        
-        # DESIGN: RULE-A11Y-002 — dot + label = redundant channels
-        self._dot = QFrame()
-        self._dot.setFixedSize(8, 8)
-        self._dot.setStyleSheet(f"""
-            QFrame {{
-                background: {theme.STATUS_STALE};
-                border-radius: 4px;
-            }}
-        """)
-        row.addWidget(self._dot)
-        
-        self._label = QLabel(initial_label)
-        font = QFont(theme.FONT_BODY, theme.FONT_LABEL_SIZE)
-        self._label.setFont(font)
-        self._label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        row.addWidget(self._label)
-    
-    def set(self, label: str, status: str = "ok") -> None:
-        self._label.setText(label)
-        
-        color = {
-            "ok":      theme.STATUS_OK,
-            "info":    theme.STATUS_INFO,
-            "warning": theme.STATUS_CAUTION,
-            "caution": theme.STATUS_CAUTION,
-            "fault":   theme.STATUS_FAULT,
-            "stale":   theme.STATUS_STALE,
-        }.get(status, theme.STATUS_STALE)
-        
-        # Color the dot only; label stays MUTED_FOREGROUND for readability
-        # DESIGN: RULE-A11Y-003 — STATUS_FAULT fails body contrast (3.94:1);
-        # so label text stays MUTED_FOREGROUND (passes AA) and dot carries color.
-        self._dot.setStyleSheet(f"""
-            QFrame {{
-                background: {color};
-                border-radius: 4px;
-            }}
-        """)
-```
+## Update ownership and failure behavior
 
-## Reference: BottomStatusBar
+- A one-second widget timer updates uptime, disk space, and local time.
+- Safety, rate, and connection change only through the public setters.
+- A disk-query exception is swallowed by the current implementation and leaves
+  the prior disk label visible. This retained display has no explicit stale
+  marker and is an open gap.
+- The last data rate is not cleared or marked stale on disconnect.
+- The connection field receives already-derived host evidence; it cannot
+  distinguish a disconnected socket from a live transport with silent
+  acquisition.
+- The fault beep timer is owned by the widget and stops on every non-latched or
+  missing safety state.
 
-```python
-class BottomStatusBar(QWidget):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setFixedHeight(theme.BOTTOM_BAR_HEIGHT)
-        self.setObjectName("bottomStatusBar")
-        self.setStyleSheet(f"""
-            #bottomStatusBar {{
-                background: {theme.SURFACE_CARD};
-                border: none;
-                border-top: 1px solid {theme.BORDER};
-            }}
-        """)
-        
-        row = QHBoxLayout(self)
-        row.setContentsMargins(
-            theme.TOOL_RAIL_WIDTH + theme.SPACE_5,
-            0,
-            theme.SPACE_5,
-            0,
-        )
-        row.setSpacing(theme.SPACE_5)
-        row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-        
-        self._engine = StatusItem("engine", "Engine: —")
-        self._safety = StatusItem("safety", "Safety: —")
-        self._heartbeat = StatusItem("zmq", "ZMQ: —")
-        
-        row.addWidget(self._engine)
-        row.addWidget(self._safety)
-        row.addWidget(self._heartbeat)
-        row.addStretch()
-        
-        # DESIGN: RULE-TYPO-003 — tabular numbers for time
-        self._time = QLabel("—")
-        time_font = QFont(theme.FONT_MONO, theme.FONT_LABEL_SIZE)
-        time_font.setFeature("tnum", 1)
-        time_font.setFeature("liga", 0)
-        self._time.setFont(time_font)
-        self._time.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        row.addWidget(self._time)
-    
-    def set_engine(self, state: str) -> None:
-        configs = {
-            "connected":    ("Engine: подключён", "ok"),
-            "disconnected": ("Engine: нет связи", "fault"),
-            "connecting":   ("Engine: запуск",    "warning"),
-        }
-        label, status = configs.get(state, (f"Engine: {state}", "stale"))
-        self._engine.set(label, status)
-    
-    def set_safety(self, fsm_state: str) -> None:
-        # DESIGN: absolute rule — FSM states lowercase
-        status = {
-            "safe_off":       "stale",
-            "ready":          "info",
-            "run_permitted":  "info",
-            "running":        "ok",
-            "fault_latched":  "fault",
-        }.get(fsm_state, "stale")
-        self._safety.set(f"Safety: {fsm_state}", status)
-    
-    def set_heartbeat(self, interval_s: float, stale: bool = False) -> None:
-        if stale:
-            self._heartbeat.set(f"ZMQ: {interval_s:.1f}с · нет связи", "stale")
-        elif interval_s > 2.0:
-            self._heartbeat.set(f"ZMQ: {interval_s:.1f}с", "warning")
-        else:
-            self._heartbeat.set(f"ZMQ: {interval_s:.1f}с", "ok")
-    
-    def set_time(self, t: datetime) -> None:
-        # DESIGN: RULE-COPY-008 (point decimal default), monospace digits
-        # Display: "14:32:15 UTC+3"
-        offset = t.utcoffset()
-        offset_hours = int(offset.total_seconds() / 3600) if offset else 0
-        self._time.setText(f"{t.strftime('%H:%M:%S')} UTC{offset_hours:+d}")
-```
+## Accessibility and operator trade-offs
 
-## States
+Better:
 
-| Bar state | Treatment |
-|---|---|
-| **Everything OK** | All dots OK color, labels MUTED text |
-| **Engine down** | Engine dot FAULT (red); other items likely also fault or stale |
-| **Fault latched** | Safety dot FAULT red; label «Safety: fault_latched»; operator attention required |
-| **Stale heartbeat** | ZMQ dot STATUS_STALE; indicates engine process alive but not publishing |
-| **Time lost** | If system clock can't be read, show «—» instead of time |
+- all six values stay visible in one fixed, quiet strip;
+- lowercase safety text, Russian connection text, and dot glyphs provide
+  non-color cues;
+- activity no longer trains operators to interpret green as “running”;
+- caution and fault disk thresholds use the canonical three-rung safety
+  language.
 
-## Stale ZMQ vs disconnected engine
+Worse or still open:
 
-These are different failure modes:
-- **Disconnected engine** = ZMQ socket can't connect at all; bar shows both Engine: disconnected AND ZMQ: stale.
-- **Stale ZMQ** = socket connected but no messages arriving. Engine process may be deadlocked or frozen. Bar shows Engine: connected BUT ZMQ stale. This is an important diagnostic signal that should not be hidden.
+- status color is applied to body text rather than to a separate high-contrast
+  shape; physical contrast/NVDA evidence remains open;
+- the clock is proportional, has no timezone, and may jitter;
+- rate and disk values can remain last-known without an explicit stale cue;
+- disk probing runs on the one-second GUI timer;
+- recent-reading connection evidence is weaker than an independent transport
+  heartbeat;
+- audible alarm ownership is not yet consolidated across all producers.
+
+No future improvement may hide these fields or replace an explicit unavailable
+state with optimistic green. A desired heartbeat/timezone redesign belongs in
+`GUI_MIGRATION_INVENTORY.md` and requires live wiring plus tests before it can
+replace this contract.
+
+## Responsive and performance evidence
+
+The bar is a single non-wrapping row. Its supported geometry is the shell's
+minimum width and above; it is not a small-screen responsive layout. At the
+supported floor, every current value and status must remain visible. If future
+fields make that impossible, low-priority technical fields may move into an
+accessible secondary row or deliberate detail surface, but current
+safety/connection/provenance evidence must not be clipped without a complete
+keyboard-accessible path.
+
+The one-second timer bounds ordinary presentation updates. No task, thread, or
+queue is created per tick. Full Windows ONEDIR high-DPI, long-session memory,
+screen-reader, and operator-night-shift evidence remains open.
+
+## Regression evidence
+
+- `test_ready_is_informational_not_healthy` prevents readiness from becoming a
+  green health assertion.
+- `test_activity_state_uses_accent_without_claiming_healthy` locks running and
+  run-permitted activity to `ACCENT`.
+- `test_disk_space_thresholds_use_canonical_safety_rungs` covers both disk
+  boundaries.
+- fault-beep tests cover exact activation, immediate/repeating timer ownership,
+  idempotent repeated updates, and stop-on-state-change behavior.
+- documentation freshness must assert that this setter list exactly matches the
+  live production setter list and that no fictional `StatusItem` API returns.
 
 ## Common mistakes
 
-1. **Uppercase FSM states.** «SAFE_OFF», «FAULT_LATCHED» — violates absolute codebase rule (lowercase). Display as `safe_off`, `fault_latched`.
-
-2. **Merging dot + colored text.** Putting status color on label text. STATUS_FAULT text fails AA contrast (3.94:1) at body size. Keep text MUTED_FOREGROUND; color the dot. RULE-A11Y-003.
-
-3. **Proportional font on timestamp.** Clock digits shift as seconds tick. Use FONT_MONO. RULE-TYPO-003.
-
-4. **Bar too tall.** Matching HEADER_HEIGHT (56). Bottom bar is lower priority; 28-32 is correct. Oversized bottom bar steals content space.
-
-5. **Missing timestamp timezone.** Just «14:32:15» ambiguous. Include UTC offset or explicit TZ.
-
-6. **Translating Engine / ZMQ / Safety.** These are subsystem names (domain vocabulary). Stay in Latin. Per RULE-COPY-002 exception.
-
-7. **No indication when bar itself becomes stale.** If the GUI process can't reach the engine at all, bar should make this prominent — not just one dot, all items → stale, plus maybe red border-top.
-
-8. **Bar content animating / moving.** Values update in place, no animation. RULE-DATA-001, RULE-INTER-006.
+1. Calling launcher/UI uptime “engine uptime.”
+2. Calling recent-reading evidence a ZMQ heartbeat.
+3. Treating `ready`, `running`, or `run_permitted` as healthy/safe.
+4. Clearing a retained value merely because freshness is unknown.
+5. Presenting a retained rate or disk number as current without adjacent
+   freshness/connection truth.
+6. Adding a seventh field without checking the supported minimum-width truth
+   path.
+7. Claiming timezone, monospace clock, independent heartbeat, or stale markers
+   before they are implemented and tested.
 
 ## Related components
 
-- `cryodaq-primitives/top-watch-bar.md` — High-priority vitals counterpart
-- `cryodaq-primitives/tool-rail.md` — Left navigation chrome
-- `cryodaq-primitives/alarm-badge.md` — Alarm indicator (lives in top area, not bottom)
-- `components/toast.md` — Transient notifications (complement to persistent status)
+- `cryodaq-primitives/top-watch-bar.md` — primary physical vitals and provenance
+- `cryodaq-primitives/alarm-badge.md` — alarm attention
+- `cryodaq-primitives/tool-rail.md` — persistent navigation chrome
+- `governance/change-impact.md` — better/worse review record
+- `GUI_MIGRATION_INVENTORY.md` — open heartbeat, provenance, accessibility, and
+  performance work
 
 ## Changelog
 
-- 2026-04-17: Initial version. Documents existing BottomStatusBar. 3 persistent status items (Engine / Safety / ZMQ) + right-aligned timestamp. FSM states displayed lowercase per codebase absolute rule.
+- **2026-07-20 (v4.0.3)** — reconciled the active specification to the shipped
+  six-field widget, removed the fictional `StatusItem`/four-setter API,
+  documented activity and readiness colors, and recorded the open heartbeat,
+  stale-provenance, accessibility, and timer-performance gaps.
+- **2026-04-17** — initial proposed four-field Engine/Safety/ZMQ/time
+  specification; superseded as an active contract by the v4.0.3 reconciliation.

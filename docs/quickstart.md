@@ -26,19 +26,20 @@ Windows, воспроизводимая установка из lockfile (рек
 операторского ПК):
 
 ```powershell
-install.bat
+.\install.bat
 ```
 
-Делает: проверяет Python 3.12+, запускает
-`python -m pip install -r requirements-lock.txt`, затем
-`python -m pip install -e . --no-deps --no-build-isolation` и создаёт ярлык
-`CryoDAQ` на рабочем столе. Командный слой batch-файла намеренно ASCII-only для
-надёжного запуска в штатном `cmd.exe`; русские инструкции находятся здесь.
+Делает: проверяет Python 3.12+ и fail-closed SQLite policy, устанавливает
+`requirements-lock.txt` и проект без повторного dependency resolution,
+выполняет `pip check`, затем создаёт ярлык `CryoDAQ` на рабочем столе. Если
+SQLite попадает в запрещённый WAL-reset диапазон, установка останавливается;
+см. раздел SQLite в `docs/deployment.md`. Командный слой batch-файла намеренно
+ASCII-only для надёжного запуска в штатном `cmd.exe`.
 
 Ручная установка (Windows/Linux, dev-окружение):
 
 ```bash
-pip install -e ".[dev,web]"
+python -m pip install -e ".[dev,web]"
 ```
 
 ## 4. Локальная конфигурация
@@ -46,16 +47,31 @@ pip install -e ".[dev,web]"
 ```powershell
 Copy-Item config\instruments.local.yaml.example config\instruments.local.yaml
 Copy-Item config\notifications.local.yaml.example config\notifications.local.yaml
+Copy-Item config\channel_descriptors.local.yaml.example config\channel_descriptors.local.yaml
 ```
 
 Заполните адреса приборов в `config/instruments.local.yaml` и токен
-Telegram-бота в `config/notifications.local.yaml`.
+Telegram-бота в `config/notifications.local.yaml`. Descriptor local-файл —
+обязательная парная authority при выбранном `instruments.local.yaml` и полная
+замена base manifest, не частичный merge. Если используется base
+`instruments.yaml`, engine выбирает base descriptor manifest независимо от
+наличия local descriptor-файла. Сверьте физический roster и свяжите каждый
+`(instrument_id, emitted_channel)` ровно с одним стабильным `channel_id`.
+Ошибка или неполный roster блокирует startup; descriptor задаёт идентичность,
+но не выдаёт capability или source authority.
 
-## 5. Bootstrap модели предиктора охлаждения (один раз на новой машине)
+## 5. Bootstrap модели предиктора охлаждения
+
+Текущий tracked helper требует POSIX-compatible `make` и shell:
 
 ```bash
 make bootstrap-predictor
 ```
+
+Это **не** поддерживаемая команда развёртывания на Windows. Пока отдельный
+кроссплатформенный helper не поставлен, Windows launcher честно показывает
+предиктор как недоступный; этот packaging gap нельзя закрывать ручным
+копированием, не зафиксированным в процедуре развёртывания.
 
 ## 6. Проверка без приборов (mock mode)
 
@@ -69,14 +85,22 @@ cryodaq-engine --mock
 cryodaq-gui
 ```
 
-## 7. Запуск с реальными приборами
+## 7. Реальные приборы — только после допуска
+
+Не запускайте candidate на реальном стенде, пока descriptor roster не сверен и
+не выполнены применимые гейты из `docs/lab_verification_checklist.md`.
 
 ```bash
 cryodaq-engine
 cryodaq-gui
 ```
 
-Либо одной командой (операторский launcher, engine + GUI в одном процессе):
+Для полного операторского runtime используйте lifecycle-owning launcher: его
+процесс содержит Qt GUI и наблюдает отдельные engine/bridge/optional
+assistant. Bounded report children принадлежат engine или assistant, который
+их запросил. Прямой `cryodaq-engine` + `cryodaq-gui` выше — сокращённый
+диагностический путь без launcher-owned assistant/periodic delivery; on-demand
+engine reporting остаётся доступным:
 
 ```bash
 cryodaq
@@ -101,8 +125,10 @@ cryodaq
 Не нужны для первого измерения, но существуют в комплекте:
 
 ```bash
-cryodaq-cooldown build/predict   # cooldown ML: обучение и прогноз ETA
-cryodaq-trends scan/drift        # межэкспериментные тренды: feature-таблица / drift-проверка
+cryodaq-cooldown build --help    # параметры обучения cooldown ML
+cryodaq-cooldown predict --help  # параметры прогноза ETA
+cryodaq-trends scan --help       # параметры межэкспериментной feature-таблицы
+cryodaq-trends drift --help      # параметры drift-проверки
 cryodaq-replay-curve             # трансформация кривых для replay
 cryodaq-rag-index                # построение индекса базы знаний (RAG)
 cryodaq-rag-search               # семантический поиск по базе знаний

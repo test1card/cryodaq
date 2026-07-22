@@ -312,7 +312,8 @@ Per `tokens/keyboard-shortcuts.md` (canonical registry, AD-002):
 - **Canonical (mnemonic):** `Ctrl+L`, `Ctrl+E`, `Ctrl+A`, `Ctrl+K`, `Ctrl+M`, `Ctrl+C`, `Ctrl+D` (and others in the registry) route to their respective rail slots by panel identity, independent of slot position.
 - **Transitional fallback:** `Ctrl+1` … `Ctrl+9` route to rail slots 1–9 by position. Being phased out — do not extend.
 - `F11` — toggle fullscreen.
-- `Ctrl+Shift+X` — emergency stop (hold-to-confirm).
+- Emergency stop has no shipped global shortcut. `Ctrl+K` opens the Keithley
+  panel; the operator uses its visible emergency action and confirmation modal.
 
 ToolRail registers both the canonical mnemonic and the numeric-fallback shortcut at application level (not rail-local) so shortcuts work from anywhere. When mnemonics are finalized for all nine slots, the numeric registrations will be removed per deprecation policy.
 

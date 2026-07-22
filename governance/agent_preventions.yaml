@@ -1,0 +1,1595 @@
+schema_version: 2
+registry_id: AI-FIRST-PREVENTION-MAP-001
+status_definitions:
+  open: Required correction or evidence is incomplete.
+  reopened: A previously disposed invariant lost, weakened, skipped, or misbound enforcement.
+  closed: Invariant and guard are green with immutable reviewer-bound evidence.
+  expired: Campaign-local coordination no longer applies after its named expiry and immutable final disposition.
+scope_definitions:
+  repository: Universal developer-agent, evidence, review, or publication invariant.
+  product_contract: Durable CryoDAQ runtime or test invariant independent of the current campaign mechanics.
+  campaign_local: Temporary branch, worktree, lane, ordering, freeze, or completion rule with an explicit expiry.
+ownership_semantics:
+  correction_owner: Default durable role that maintains the affected runtime, governance, evidence, or integration state outside an active campaign override.
+  guard_owner: Default durable implementation role that maintains the machine-testable guard outside an active campaign override.
+  disposition_owner: Reviewer; no author self-closes its correction or guard.
+  campaign_edit_owner_override: Exact campaign-local path or node assignment that supersedes durable owners for authoring only and expires with the campaign.
+  edit_owner_precedence: Active exact campaign override, then durable owner; every active path and guard node resolves to exactly one editor.
+  allowed_owners:
+    - reviewer
+    - primary
+    - cli
+    - each_agent
+campaign_expiry_semantics:
+  required_terminal_status: expired
+  immutable_final_disposition: required
+  history_retention: permanent_non_authoritative
+  may_authorize_after_expiry: false
+durable_product_contract_authority: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+policy_refs:
+  - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+  - docs/adr/003-governance-as-enforcement.md
+  - docs/MONTANA_IMPLEMENTATION_AGENT_SPEC.md#3-slice-and-review-protocol
+default_ci_jobs:
+  core:
+    - test (ubuntu-latest, core)
+    - test (windows-latest, core)
+  gui:
+    - test (ubuntu-latest, gui)
+    - test (windows-latest, gui)
+  agents:
+    - test (ubuntu-latest, agents)
+    - test (windows-latest, agents)
+  remaining:
+    - test (ubuntu-latest, remaining)
+    - test (windows-latest, remaining)
+
+false_green_pair_semantics:
+  status: required_and_independent
+  scope: required
+  correction_owner: inherited_from_runtime_prevention_id
+  guard_owner: inherited_from_runtime_prevention_id
+  disposition_owner: reviewer
+  close_requires_runtime_closed: true
+  close_requires_immutable_red_and_green_evidence: true
+  guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
+
+false_green_pairs:
+  - id: AGENT-CONTEXT-DIRTY-BLOB-FALSE-GREEN-001
+    status: open
+    scope: repository
+    runtime_prevention_id: AGENT-CONTEXT-COMPACTION-001
+    guard: tests/governance/test_agent_context_contract.py::test_status_only_digest_cannot_validate_changed_dirty_blob
+    ci_partition: remaining
+    red_evidence: git_status_digest_remained_identical_while_primary_dirty_source_hashes_changed_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: AGENT-CONTEXT-CANONICALIZATION-FALSE-GREEN-002
+    status: open
+    scope: repository
+    runtime_prevention_id: AGENT-CONTEXT-COMPACTION-001
+    guard: tests/governance/test_agent_context_contract.py::test_nested_mapping_order_and_forbidden_path_patterns_fail_closed
+    ci_partition: remaining
+    red_evidence: reviewer_capsule_used_noncanonical_nested_key_order_and_prose_forbidden_path_pending_immutable_capture
+    green_evidence: pending
+  - id: AGENT-CONTEXT-ORDINAL-SORT-FALSE-GREEN-003
+    status: open
+    scope: repository
+    runtime_prevention_id: AGENT-CONTEXT-COMPACTION-001
+    guard: tests/governance/test_agent_context_contract.py::test_owned_manifest_uses_cross_platform_ordinal_path_order
+    ci_partition: remaining
+    red_evidence: reviewer_capsule_used_powershell_case_insensitive_sort_and_produced_platform_dependent_manifest_digest_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: AGENT-CONTEXT-LEGACY-SELF-ASSERTED-FALSE-GREEN-004
+    status: open
+    scope: repository
+    runtime_prevention_id: AGENT-CONTEXT-COMPACTION-001
+    guard: tests/governance/test_agent_context_contract.py::test_legacy_or_self_asserted_capsule_cannot_claim_continuity
+    ci_partition: remaining
+    red_evidence: cli_capsule_at_870607ff_still_used_unregistered_legacy_schema_and_self_asserted_ready_state_while_primary_capsule_at_c16cabc_bound_obsolete_governing_hashes_and_await_reviewer_state_after_explicit_rejection_then_reported_no_external_progress_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: EXACT-TREE-FALSE-GREEN-001
+    status: open
+    scope: repository
+    runtime_prevention_id: REVIEW-EXACT-TREE-001
+    guard: tests/governance/test_candidate_evidence_binding.py::test_candidate_tests_execute_exported_committed_tree
+    ci_partition: remaining
+    red_evidence: dirty_primary_passed_while_exported_8ff15811_failed_collection_and_exported_c16cabc_imported_uncommitted_context_reader_and_failed_three_collection_modules_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ZMQ-QUARANTINE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ZMQ-MUTATION-QUARANTINE-001
+    guard: tests/core/test_zmq_command_server_supervision.py::test_timeout_quarantines_mutations_but_allows_read_and_global_off
+    ci_partition: core
+    red_evidence: focused_zmq_serialization_tests_passed_without_admission_quarantine_pending_immutable_capture
+    green_evidence: pending
+  - id: ZMQ-STOP-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ZMQ-MUTATION-QUARANTINE-001
+    guard: tests/core/test_zmq_command_server_supervision.py::test_stop_waits_for_cancellation_resistant_handler_without_late_commit
+    ci_partition: core
+    red_evidence: cooperative_handler_tests_passed_while_resistant_owner_outlived_stop_pending_immutable_capture
+    green_evidence: pending
+  - id: GLOBAL-OFF-COALESCE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SAFETY-GLOBAL-OFF-COALESCE-001
+    guard: tests/core/test_safety_manager.py::test_simultaneous_global_off_requests_share_one_driver_owner
+    ci_partition: core
+    red_evidence: focused_safety_tests_passed_with_two_concurrent_off_owners_pending_immutable_capture
+    green_evidence: pending
+  - id: OFF-SCOPE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SAFETY-GLOBAL-OFF-COALESCE-001
+    guard: tests/core/test_experiment_commands.py::test_omitted_emergency_off_channel_is_verified_global_scope
+    ci_partition: core
+    red_evidence: legacy_smua_only_expectation_passed_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-RECEIPT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/integration/test_launcher_shutdown_ownership.py::test_windows_child_death_without_shutdown_receipt_is_hold
+    ci_partition: remaining
+    red_evidence: fake_process_success_tests_missed_windows_cleanup_bypass_pending_immutable_capture
+    green_evidence: pending
+  - id: OPLOG-ROTATION-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPLOG-COLD-IDEMP-001
+    guard: tests/storage/test_operator_log_idempotency.py::test_rotation_restart_returns_original_request_receipt
+    ci_partition: remaining
+    red_evidence: exact_c16cabc_storage_101_passed_1_skipped_while_cold_rotation_dropped_request_id_and_fingerprint_then_restart_committed_the_same_request_as_new_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: OPLOG-OUTBOX-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPLOG-OUTBOX-002
+    guard: tests/storage/test_operator_log_idempotency.py::test_publish_failure_restart_replays_pending_outbox_once
+    ci_partition: remaining
+    red_evidence: exact_c16cabc_storage_tests_called_outbox_methods_directly_while_production_had_zero_outbox_callers_or_startup_recovery_worker_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ARCHIVE-EXPERIMENT-BINDING-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/storage/test_parquet_archive_provenance.py::test_production_cross_experiment_export_requires_expected_experiment_id
+    ci_partition: remaining
+    red_evidence: exact_c16cabc_storage_101_passed_1_skipped_while_production_cross_experiment_export_omitted_expected_experiment_id_and_cold_rows_carried_null_identity_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: OPLOG-KEY-CAPACITY-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPLOG-COLD-IDEMP-001
+    guard: tests/storage/test_operator_log_idempotency.py::test_keyed_registry_capacity_rejects_before_append_without_eviction
+    ci_partition: remaining
+    red_evidence: exact_c16cabc_storage_101_passed_1_skipped_while_the_keyed_registry_cap_was_checked_only_at_startup_and_live_appends_exceeded_10000_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: OPLOG-STRANDED-SWEEP-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPLOG-COLD-IDEMP-001
+    guard: tests/storage/test_operator_log_idempotency.py::test_legacy_stranded_index_cannot_delete_unproven_operator_log_rows
+    ci_partition: remaining
+    red_evidence: exact_c16cabc_storage_101_passed_1_skipped_while_a_legacy_index_without_operator_metadata_could_delete_a_byte_identical_hot_db_containing_unarchived_operator_rows_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ALARM-ACK-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-ACK-OUTBOX-003
+    guard: tests/core/test_annunciation_protocol.py::test_ack_publish_failure_retry_emits_one_durable_event
+    ci_partition: core
+    red_evidence: ack_state_tests_passed_without_publication_recovery_pending_immutable_capture
+    green_evidence: pending
+  - id: PERSISTENCE-STOP-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERSISTENCE-STOP-004
+    guard: tests/storage/test_sqlite_writer_settlement.py::test_persistence_stopped_waits_for_cancelled_executor_commit
+    ci_partition: remaining
+    red_evidence: cooperative_shutdown_tests_passed_while_commit_landed_after_stopped_pending_immutable_capture
+    green_evidence: pending
+  - id: PERSISTENCE-LATE-RECEIPT-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERSISTENCE-RECEIPT-RECONCILIATION-005
+    guard: tests/storage/test_scheduler_persistence_cancellation.py::test_cancelled_batch_reconciles_late_commit_receipt_exactly_once
+    ci_partition: remaining
+    red_evidence: exact_c16cabc_scheduler_30_passed_while_scheduler_drained_before_the_shielded_owner_settled_stranding_or_cross_attributing_the_late_receipt_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: PERSISTENCE-RECEIPT-CONTENT-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERSISTENCE-RECEIPT-RECONCILIATION-005
+    guard: tests/storage/test_scheduler_persistence_cancellation.py::test_receipt_fingerprint_mismatch_never_settles_admitted_batch
+    ci_partition: remaining
+    red_evidence: scheduler_receipt_test_passed_when_value_two_substituted_for_admitted_value_one_pending_immutable_capture
+    green_evidence: pending
+  - id: EXPERIMENT-BINDING-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/core/test_experiment_commands.py::test_delayed_a_commands_cannot_mutate_b
+    ci_partition: core
+    red_evidence: exact_cli_870607ff_forwarded_expected_id_but_unlocked_check_then_write_allowed_a_delayed_a_phase_mutation_to_overwrite_b_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: EXPERIMENT-QUICK-LOG-BINDING-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/core/test_experiment_commands.py::test_delayed_quick_log_cannot_attach_to_replacement_experiment
+    ci_partition: core
+    red_evidence: exact_cli_870607ff_dashboard_omitted_experiment_identity_and_engine_bound_the_delayed_quick_log_to_whichever_experiment_was_current_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: REPLAY-PHASE-VALIDATION-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/replay_engine/test_replay_phases.py::test_handle_command_rejects_invalid_phase_with_exact_identity_without_persisting
+    ci_partition: remaining
+    red_evidence: exact_cli_870607ff_telegram_test_omitted_identity_and_rejected_parser_shape_while_replay_accepted_and_persisted_not_a_phase_with_exact_identity_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: REPLAY-PHASE-TIMESTAMP-FALSE-GREEN-007
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/replay_engine/test_replay_phases.py::test_replay_phase_status_timestamp_tracks_exact_transition_not_session_start
+    ci_partition: remaining
+    red_evidence: exact_cli_870607ff_status_tests_passed_while_current_phase_and_experiment_status_returned_session_start_for_every_later_phase_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: REPLAY-NESTED-COPY-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/replay_engine/test_replay_phases.py::test_active_experiment_copy_recursively_detaches_custom_fields
+    ci_partition: remaining
+    red_evidence: exact_cli_870607ff_top_level_copy_test_passed_while_nested_custom_fields_remained_aliased_into_internal_replay_state_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: EXPERIMENT-ASYNC-RLOCK-FALSE-GREEN-009
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXP-RECEIPT-PROVENANCE-009
+    guard: tests/core/test_experiment_commands.py::test_async_quick_log_cas_blocks_replacement_during_durable_await
+    ci_partition: core
+    red_evidence: moving_cli_correction_after_870607ff_held_threading_rlock_across_await_and_deterministic_same_event_loop_reproduction_entered_the_lock_from_a_second_coroutine_before_first_exit_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-READY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-LIFECYCLE-INGRESS-001
+    guard: tests/engine_wiring/test_operator_safety_live_authority.py::test_cached_ready_expires_to_unknown
+    ci_partition: core
+    red_evidence: lifecycle_tests_passed_while_cached_ready_never_expired_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-BATCH-IDENTITY-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-LIFECYCLE-INGRESS-001
+    guard: tests/gui/state/test_operator_snapshot_ingress.py::test_mixed_identity_batch_is_quarantined_atomically
+    ci_partition: gui
+    red_evidence: per_item_validation_tests_missed_mixed_identity_batch_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-PRODUCER-REPLACEMENT-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-LIFECYCLE-INGRESS-001
+    guard: tests/gui/state/test_operator_view_models.py::test_explicit_generation_replacement_rejects_old_producer
+    ci_partition: gui
+    red_evidence: ordering_tests_reset_without_explicit_producer_replacement_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-LIFECYCLE-DEFAULT-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-LIFECYCLE-INGRESS-001
+    guard: tests/test_operator_snapshot.py::test_lifecycle_fields_have_no_constructor_defaults
+    ci_partition: remaining
+    red_evidence: typed_lifecycle_tests_passed_with_constructor_defaults_and_omitted_callers_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-SHELL-TELEMETRY-AUTHORITY-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-LIFECYCLE-INGRESS-001
+    guard: tests/gui/shell/test_main_window_v2_safety_staleness.py::test_analytics_safety_reading_never_enables_mutation_authority
+    ci_partition: gui
+    red_evidence: shell_tests_blessed_legacy_safety_state_strings_as_keithley_mutation_authority_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-OLD-QUEUE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/core/test_operator_snapshot_subprocess_ingress.py::test_old_child_data_cannot_inherit_new_incarnation
+    ci_partition: core
+    red_evidence: queue_replacement_tests_missed_old_data_restamped_as_new_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-CANCEL-RECONCILIATION-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_post_enqueue_cancel_retains_unknown_outcome_reconciliation
+    ci_partition: gui
+    red_evidence: cancellation_tests_discarded_live_request_identity_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-NONCE-COLLISION-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_nonce_collision_never_overwrites_pending_owner
+    ci_partition: gui
+    red_evidence: random_shape_tests_missed_32_bit_pending_overwrite_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-REPLY-PENDING-LEAK-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_successful_reply_removes_pending_owner_exactly_once
+    ci_partition: gui
+    red_evidence: one_hundred_forty_seven_focused_tests_passed_while_successful_reply_left_pending_owner_forever_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-LATE-RECONCILIATION-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_late_reply_is_queryable_by_request_id_exactly_once
+    ci_partition: gui
+    red_evidence: exact_cli_870607ff_had_no_retrieval_api_and_moving_correction_added_storage_but_interrupted_worker_still_suppressed_request_id_delivery_while_restart_removed_pending_owners_without_moving_them_to_reconciliation_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-REPLY-CONSUMER-GENERATION-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_shutdown.py::test_restart_settles_old_reply_consumer_before_queue_replacement
+    ci_partition: gui
+    red_evidence: timed_out_old_reply_consumer_was_dropped_then_shared_stop_event_cleared_for_new_queues_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-UNKNOWN-NONCE-COLLISION-FALSE-GREEN-007
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_nonce_collision_with_outcome_unknown_never_overwrites_owner
+    ci_partition: gui
+    red_evidence: exact_cli_97cff82c_collision_test_checked_pending_only_and_ignored_the_outcome_unknown_owner_map_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-UNKNOWN-CAPACITY-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_outcome_unknown_capacity_fails_closed_without_eviction
+    ci_partition: gui
+    red_evidence: exact_cli_97cff82c_retained_unbounded_outcome_unknown_owners_without_capacity_or_admission_guard_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-TIMEOUT-REPLY-RACE-FALSE-GREEN-009
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_timeout_reply_race_settles_exactly_once
+    ci_partition: gui
+    red_evidence: exact_cli_97cff82c_tests_retained_local_future_but_never_proved_timeout_reply_race_terminal_ownership_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-PRECANCEL-DISPATCH-FALSE-GREEN-010
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-COMMAND-SETTLEMENT-002
+    guard: tests/gui/test_zmq_client_mutation_handshake.py::test_pre_enqueue_cancel_is_definitely_not_dispatched
+    ci_partition: gui
+    red_evidence: exact_cli_97cff82c_pre_cancel_path_still_enqueued_mutation_and_had_no_registered_guard_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: DASHBOARD-AUTHORITY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-DASHBOARD-AUTHORITY-003A
+    guard: tests/gui/dashboard/test_dashboard_view.py::test_telemetry_does_not_enable_mutations
+    ci_partition: gui
+    red_evidence: dashboard_construction_tests_blessed_arbitrary_telemetry_authority_pending_immutable_capture
+    green_evidence: pending
+  - id: ANNUNCIATION-SILENCE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-ANNUNCIATION-SILENCE-003B
+    guard: tests/gui/shell/test_annunciation_controller.py::test_event_emitted_false_does_not_silence
+    ci_partition: gui
+    red_evidence: ack_tests_blessed_event_emitted_false_silence_pending_immutable_capture
+    green_evidence: pending
+  - id: QTHREAD-SETTLEMENT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-QTHREAD-SETTLEMENT-003C
+    guard: tests/gui/test_zmq_client_shutdown.py::test_application_close_settles_all_real_qthreads
+    ci_partition: gui
+    red_evidence: exact_cli_870607ff_generic_runtimeerror_and_component_tests_passed_without_real_mainwindow_child_thread_deleted_child_race_or_zero_late_callback_proof_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-PLAINTEXT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-PLAINTEXT-RENDERING-003D
+    guard: tests/gui/shell/test_top_watch_bar_persistent_context.py::test_experiment_identity_is_plain_text_and_tooltip_escaped
+    ci_partition: gui
+    red_evidence: benign_text_tests_missed_autotext_identity_interpretation_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-DISK-FRESHNESS-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-DISK-EVIDENCE-FRESHNESS-003E
+    guard: tests/gui/shell/test_main_window_v2_disk_evidence.py::test_disk_evidence_expires_while_measurement_stream_remains_live
+    ci_partition: gui
+    red_evidence: forty_four_adjacent_tests_passed_while_unrelated_measurements_kept_old_disk_evidence_current_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-STALE-EPOCH-SIDE-EFFECT-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-LIFECYCLE-INGRESS-001
+    guard: tests/gui/state/test_operator_snapshot_ingress.py::test_malformed_old_epoch_after_stop_has_zero_side_effects
+    ci_partition: gui
+    red_evidence: exact_cli_97cff82c_valid_old_epoch_tests_missed_validation_side_effects_before_active_epoch_rejection_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: DASHBOARD-RECEIPT-DEFAULT-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CLI-DASHBOARD-AUTHORITY-003A
+    guard: tests/gui/dashboard/test_dashboard_view.py::test_authority_receipt_requires_explicit_lifecycle_and_exact_identity
+    ci_partition: gui
+    red_evidence: exact_cli_97cff82c_dashboard_test_omitted_lifecycle_and_readiness_passed_experiment_none_and_enabled_mutations_via_ready_defaults_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: CLI-CODEC-VERSION-TEXT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SNAPSHOT-CODEC-VERSION-004
+    guard: tests/test_operator_snapshot.py::test_codec_version_text_matches_wire_schema
+    ci_partition: remaining
+    red_evidence: exact_cli_97cff82c_wire_schema_constant_was_2_while_module_error_and_codec_text_repeatedly_claimed_v1_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: PHYSICAL-CONFIG-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PHYSICAL-CONFIG-WIRING-001
+    guard: tests/core/test_physical_alarm_exactness.py::test_engine_uses_strict_atomic_physical_alarm_loader
+    ci_partition: core
+    red_evidence: strict_loader_unit_tests_passed_while_production_used_permissive_loader_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-CLOSE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_retains_owner_until_settlement
+    ci_partition: remaining
+    red_evidence: cooperative_close_tests_missed_cancelled_live_handle_pending_immutable_capture
+    green_evidence: pending
+  - id: KEITHLEY-PARTIAL-CONNECT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: KEITHLEY-IDENTITY-OFF-001A
+    guard: tests/drivers/test_keithley_connect_safety.py::test_invalid_identity_with_unverified_off_returns_explicit_recovery_receipt_without_connected_authority
+    ci_partition: remaining
+    red_evidence: test_bad_serial_with_unverified_off_retains_recovery_without_identity_passed_while_connect_raised_and_connected_remained_true_pending_immutable_capture
+    green_evidence: pending
+  - id: KEITHLEY-FORCE-OFF-FAILURE-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: KEITHLEY-IDENTITY-OFF-001A
+    guard: tests/drivers/test_keithley_connect_safety.py::test_force_off_failure_never_grants_connected_authority
+    ci_partition: remaining
+    red_evidence: test_connect_does_not_fail_on_force_off_error_explicitly_required_connected_true_after_the_safety_off_write_failed_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: KEITHLEY-IDENTITY-MISMATCH-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: KEITHLEY-IDENTITY-OFF-001A
+    guard: tests/drivers/test_keithley_connect_safety.py::test_configured_identity_and_serial_are_exact
+    ci_partition: remaining
+    red_evidence: exact_cli_97cff82c_accepted_unrelated_test_serial_04089762_while_configured_visa_identity_embedded_04052028_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: KEITHLEY-CLOSE-SETTLEMENT-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: KEITHLEY-IDENTITY-OFF-001A
+    guard: tests/drivers/test_keithley_disconnect_verified_off.py::test_cancelled_disconnect_close_late_success_settles_exact_generation
+    ci_partition: remaining
+    red_evidence: exact_cli_870607ff_typed_immediate_close_error_tests_passed_while_cancelled_close_had_no_generation_bound_late_success_or_failure_reconciliation_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: GPIB-CLOSE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: GPIB-HANDLE-SETTLEMENT-001C
+    guard: tests/drivers/test_visa_executors.py::test_gpib_terminal_close_intent_survives_cancelled_operation_settlement_and_closes_exact_handle
+    ci_partition: remaining
+    red_evidence: exact_cli_870607ff_overlap_tests_passed_while_terminal_close_intent_was_discarded_and_required_an_unowned_second_close_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: GPIB-RECOVERY-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: GPIB-HANDLE-SETTLEMENT-001C
+    guard: tests/drivers/test_visa_executors.py::test_gpib_successful_recovery_clears_query_quarantine_only_after_both_steps
+    ci_partition: remaining
+    red_evidence: exact_cli_870607ff_recover_returned_true_after_clear_bus_and_ifc_but_never_cleared_query_desynchronization_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: GPIB-CANCELLED-CONNECT-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: GPIB-HANDLE-SETTLEMENT-001C
+    guard: tests/drivers/test_gpib_bus_lock.py::test_cancelled_connect_late_success_closes_exact_handle_automatically
+    ci_partition: remaining
+    red_evidence: exact_cli_870607ff_test_asserted_cancelled_connect_handle_remained_open_then_used_a_later_manual_disconnect_to_clean_it_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-DELIVERY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/agents/assistant/test_output_router.py::test_http_failure_is_not_reported_as_dispatched
+    ci_partition: agents
+    red_evidence: 122_passing_tests_missed_http_500_marked_dispatched_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-AUDIT-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/agents/assistant/test_output_router.py::test_audit_failure_prevents_external_egress
+    ci_partition: agents
+    red_evidence: output_tests_missed_external_egress_before_durable_audit_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-RAG-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-RAG-CAPABILITY-002A
+    guard: tests/agents/rag/test_bootstrap.py::test_live_runtime_has_no_rag_rebuild_capability
+    ci_partition: agents
+    red_evidence: registry_rejection_tests_passed_while_direct_live_sink_remained_callable_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-LOOPBACK-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-LOOPBACK-002B
+    guard: tests/agents/assistant/test_ollama_client.py::test_redirect_and_nonliteral_loopback_are_rejected_before_egress
+    ci_partition: agents
+    red_evidence: initial_origin_tests_passed_while_redirects_and_localhost_remap_escaped_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-CONTEXT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-CONTEXT-FRESHNESS-002C
+    guard: tests/agents/assistant/test_periodic_runtime.py::test_engine_disconnect_invalidates_cached_context
+    ci_partition: agents
+    red_evidence: periodic_tests_passed_while_cached_remote_state_never_expired_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-PLAINTEXT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-PLAINTEXT-002D
+    guard: tests/agents/assistant/test_output_router.py::test_untrusted_telegram_text_is_escaped_before_markup
+    ci_partition: agents
+    red_evidence: benign_output_tests_missed_raw_telegram_html_and_qt_autotext_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-QT-PLAINTEXT-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-PLAINTEXT-002D
+    guard: tests/gui/shell/views/test_assistant_insight_panel.py::test_untrusted_assistant_text_is_plain_text
+    ci_partition: gui
+    red_evidence: exact_cli_870607ff_used_autotext_and_moving_correction_set_only_body_plaintext_while_configurable_brand_identity_title_and_placeholder_remained_autotext_without_hostile_identity_guard_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-SHUTDOWN-UNWIRED-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/agents/assistant/test_output_router.py::test_production_shutdown_calls_and_joins_audit_chart_and_router_owners
+    ci_partition: agents
+    red_evidence: moving_primary_correction_added_close_methods_but_assistant_main_called_none_of_them_and_live_stop_cancelled_handlers_without_terminal_settlement_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-PER-DESTINATION-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/agents/assistant/test_output_router.py::test_production_sender_retains_per_destination_terminal_outcomes
+    ci_partition: agents
+    red_evidence: moving_primary_router_supported_dict_outcomes_but_production_send_to_all_still_collapsed_every_chat_to_one_boolean_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-QUERY-AUDIT-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/agents/assistant/test_query_agent.py::test_query_audit_failure_prevents_chart_and_response_egress
+    ci_partition: agents
+    red_evidence: moving_primary_query_scheduled_chart_before_audit_then_swallowed_audit_failure_and_returned_the_unaudited_response_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-UNWIRED-CONTEXT-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-CONTEXT-FRESHNESS-002C
+    guard: tests/agents/assistant/test_periodic_runtime.py::test_live_runtime_consumes_context_receipt_and_expires_it
+    ci_partition: agents
+    red_evidence: moving_primary_added_validated_context_authority_cache_and_unit_guard_but_live_remote_state_cache_never_instantiated_it_and_retained_state_forever_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-REPORT-INTRO-REDIRECT-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-LOOPBACK-002B
+    guard: tests/agents/assistant/test_report_intro.py::test_report_intro_rejects_redirects_and_nonliteral_loopback
+    ci_partition: agents
+    red_evidence: moving_primary_narrow_ollama_client_guard_passed_while_report_intro_and_live_telegram_paths_still_followed_redirects_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: MONTANA-PREMATURE-PROPOSAL-FALSE-GREEN-001
+    status: open
+    scope: campaign_local
+    runtime_prevention_id: MONTANA-INTEGRATION-SEQUENCE-001
+    guard: tests/governance/test_montana_integration_contract.py::test_proposal_freeze_requires_collectable_registered_guards_and_green_evidence
+    ci_partition: remaining
+    red_evidence: exact_cli_97cff82c_and_870607ff_froze_on_nearby_passes_with_registered_guards_absent_and_live_post_correction_audit_still_found_primary_0_of_61_and_cli_1_of_54_effective_exact_nodes_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: MONTANA-AFFECTED-PARTITION-FALSE-GREEN-002
+    status: open
+    scope: campaign_local
+    runtime_prevention_id: MONTANA-INTEGRATION-SEQUENCE-001
+    guard: tests/governance/test_montana_integration_contract.py::test_proposal_freeze_requires_green_affected_partition_manifest
+    ci_partition: remaining
+    red_evidence: exact_exported_cli_97cff82c_had_10_affected_failures_outside_the_reported_selection_and_exact_exported_cli_870607ff_left_experiment_zmq_gpib_keithley_plaintext_and_qthread_boundaries_without_exact_guards_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: PARALLEL-GUARD-OWNER-OVERRIDE-FALSE-GREEN-001
+    status: open
+    scope: repository
+    runtime_prevention_id: PARALLEL-PATH-OWNERSHIP-001
+    guard: tests/governance/test_standing_lane_authority.py::test_campaign_edit_owner_overrides_durable_owner_without_overlap_or_unassigned_guard
+    ci_partition: remaining
+    red_evidence: reviewer_conflated_durable_guard_owner_with_active_montana_edit_authority_and_ordered_cross_lane_guard_edits_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: MONTANA-LANE-FREEZE-SCOPE-FALSE-GREEN-003
+    status: open
+    scope: campaign_local
+    runtime_prevention_id: MONTANA-INTEGRATION-SEQUENCE-001
+    guard: tests/governance/test_montana_integration_contract.py::test_lane_freeze_requires_owned_affected_guards_and_combined_freeze_requires_union
+    ci_partition: remaining
+    red_evidence: reviewer_used_all_registry_durable_owner_counts_as_each_lane_freeze_scope_and_created_cross_lane_deadlock_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: MONTANA-REVIEWER-GUARD-AUTHORSHIP-FALSE-GREEN-004
+    status: open
+    scope: campaign_local
+    runtime_prevention_id: MONTANA-INTEGRATION-SEQUENCE-001
+    guard: tests/governance/test_montana_integration_contract.py::test_campaign_reviewer_guard_author_override_forbids_worker_test_edits_and_product_edits
+    ci_partition: remaining
+    red_evidence: primary_and_cli_workers_authored_helper_level_renamed_and_private_state_tests_that_left_registered_production_boundaries_unexercised_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: PHYSICAL-SAFETY-PATTERN-BINDING-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PHYSICAL-CONFIG-WIRING-001
+    guard: tests/core/test_safety_pattern_liveness.py::test_safety_critical_pattern_matches_raw_channel
+    ci_partition: core
+    red_evidence: exact_cli_97cff82c_changed_safety_patterns_to_canonical_t11_t12_while_production_safetymanager_consumed_raw_labels_and_two_liveness_cases_failed_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-SETTLED-CANCEL-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_commits_success_before_propagating_cancellation
+    ci_partition: remaining
+    red_evidence: exact_cli_97cff82c_test_blessed_terminal_incomplete_state_after_the_owned_handle_close_had_successfully_settled_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+  - id: TEST-ASSERTION-SWALLOW-FALSE-GREEN-001
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/governance/test_agent_preventions.py::test_test_assertions_cannot_be_swallowed_by_broad_exception_handlers
+    ci_partition: remaining
+    red_evidence: test_zmq_safety_except_exception_swallowed_assertion_json_and_unsafe_success_reply_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+
+records:
+  - id: GOVERNANCE-PREVENTION-MAP-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md
+    applies_to: All confirmed developer-agent mistakes and their review dispositions.
+    classification: governance_escape
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Confirmed mistakes can disappear from handoffs or close without executable prevention.
+    invariant: Every prevention ID maps to a rule, collectable guard, default CI job, and immutable evidence state.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_registry_schema_ids_and_references_are_exact
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_closed_records_have_collectable_default_ci_guards_and_immutable_evidence
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_invalid_registry_fixtures_fail_closed
+        ci_partition: remaining
+    red_evidence: pending_immutable_capture
+    green_evidence: pending
+
+  - id: GOVERNANCE-SCOPE-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#rule-scope-and-promotion
+    applies_to: Every governing rule, prevention record, agent handoff, and review summary.
+    classification: scope_leak
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A one-off branch or integration procedure can be misrepresented as universal day-to-day policy.
+    invariant: Every rule is explicitly repository, product-contract, or campaign-local; local rules name authority, applicability, and expiry.
+    rule_refs:
+      - AGENTS.md#rule-scope-and-promotion
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_every_record_declares_valid_scope_authority_and_applicability
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_campaign_records_require_expiry_and_cannot_be_summarized_as_universal
+        ci_partition: remaining
+    red_evidence: montana_integration_sequence_was_summarized_without_local_scope_pending_immutable_capture
+    green_evidence: pending
+
+  - id: GOVERNANCE-ARTIFACT-TRACKING-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every canonical policy, ADR, schema, registry, validator, and reviewed governance commit.
+    classification: candidate_omission
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: An ignored or untracked canonical governance artifact can disappear from the PR while dependent rules appear complete.
+    invariant: Every canonical governance artifact is intentionally tracked and present in the exact reviewed candidate manifest.
+    rule_refs:
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_canonical_governance_artifacts_are_tracked_and_in_candidate_manifest
+        ci_partition: remaining
+    red_evidence: adr_003_ignored_and_spec_registry_schema_untracked_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+
+  - id: MONTANA-INTEGRATION-SEQUENCE-001
+    status: open
+    scope: campaign_local
+    authority_source: ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    applies_to: feat/montana-phase-a and review/montana-cli-corrections-staging during the Montana completion campaign.
+    expires_when: Final reviewed Montana campaign disposition is recorded after the master integration gate.
+    expiry_disposition: Bind the final reviewed Montana commit/tree, master integration commit/tree, disposition evidence digest, and expiry timestamp before status becomes expired.
+    classification: campaign_coordination
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Integrating unreviewed CLI content, freezing a proposal before its effective lane-owned affected guards are collectable and green, requiring unrelated other-lane guards, or confusing slice, integration, PR, and publication states can contaminate or deadlock the candidate.
+    invariant: A lane proposal freeze requires its exact changed-path and known-finding closure resolved through the active campaign edit-owner map; combined Montana requires the union plus integration guards; final PR/master requires the complete candidate closure; CLI remains separate until exact-object approval; integration and master merge each receive a separate freeze and review.
+    campaign_edit_owner_overrides:
+      - edit_owner: cli
+        path: src/cryodaq/core/experiment.py
+      - edit_owner: cli
+        path: src/cryodaq/engine.py
+      - edit_owner: reviewer
+        path: tests/core/test_experiment_adversarial.py
+      - edit_owner: reviewer
+        path: tests/core/test_experiment_commands.py
+      - edit_owner: reviewer
+        path: tests/gui/shell/views/test_assistant_insight_panel.py
+      - edit_owner: cli
+        path: src/cryodaq/replay_engine/replay_experiment_stub.py
+      - edit_owner: cli
+        path: src/cryodaq/replay_engine/server.py
+      - edit_owner: reviewer
+        path: tests/notifications/test_telegram.py
+      - edit_owner: reviewer
+        path: tests/replay_engine/test_replay_phases.py
+    campaign_guard_authorship:
+      author: reviewer
+      path_source: all_exact_guard_nodes_in_registry
+      implementation_worker_guard_authoring: forbidden
+      reviewer_product_authoring: forbidden
+      freeze_requires_worker_test_path_manifest: true
+      independent_guard_review: required
+      expires_when: Combined Montana candidate receives its final campaign disposition.
+    proposal_guard_scope:
+      combined_montana: Union of accepted primary and CLI lane manifests plus integration and governance guards on the exact combined tree.
+      final_candidate: Complete candidate-required registry and default-CI closure on the exact PR/master object.
+      lane_completion: Union of accepted tranches plus every still-assigned obligation for that effective campaign editor.
+      lane_proposal: Exact changed-path and known-finding closure whose effective campaign editor is the proposing lane.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+      - docs/MONTANA_IMPLEMENTATION_AGENT_SPEC.md
+    guards:
+      - node: tests/governance/test_montana_integration_contract.py::test_cli_ancestry_and_manifest_require_exact_approval_before_integration
+        ci_partition: remaining
+      - node: tests/governance/test_montana_integration_contract.py::test_montana_and_master_integrations_are_separately_frozen
+        ci_partition: remaining
+      - node: tests/governance/test_montana_integration_contract.py::test_proposal_freeze_requires_collectable_registered_guards_and_green_evidence
+        ci_partition: remaining
+      - node: tests/governance/test_montana_integration_contract.py::test_proposal_freeze_requires_green_affected_partition_manifest
+        ci_partition: remaining
+      - node: tests/governance/test_montana_integration_contract.py::test_lane_freeze_requires_owned_affected_guards_and_combined_freeze_requires_union
+        ci_partition: remaining
+      - node: tests/governance/test_montana_integration_contract.py::test_campaign_reviewer_guard_author_override_forbids_worker_test_edits_and_product_edits
+        ci_partition: remaining
+    human_gate: Reviewer semantically dispositions the exact CLI object, combined Montana object, and master integration as distinct states.
+    automation_limit: Code can verify ancestry, manifests, object identity, and state transitions; only semantic approval of reviewed behavior remains human.
+    red_evidence: prior_unapproved_squash_staging_merge_pressure_and_premature_cli_97cff82c_proposal_documented_pending_immutable_capture
+    green_evidence: pending
+
+  - id: AUTH-HANDSHAKE-006
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#role-separated-campaign-execution
+    applies_to: Role-separated campaigns using an isolated autonomous implementation lane.
+    classification: coordination_deadlock
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A path typo or stale lease can indefinitely stop an isolated autonomous worker.
+    invariant: Standing authority is worktree, branch, role, and objective scoped; it does not depend on password-like per-file tokens.
+    rule_refs:
+      - AGENTS.md#role-separated-campaign-execution
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/governance/test_standing_lane_authority.py::test_wrong_root_branch_role_or_forbidden_path_fails_closed
+        ci_partition: remaining
+      - node: tests/governance/test_standing_lane_authority.py::test_missing_or_malformed_legacy_handshake_does_not_block_valid_standing_lane
+        ci_partition: remaining
+    human_gate: Reviewer verifies that the frozen proposal semantically remains within its standing objective and role boundary.
+    automation_limit: Root, branch, role, path, and forbidden-surface checks are automated; semantic objective fit remains human.
+    red_evidence: reviewer_transcript_available_not_yet_immutable
+    green_evidence: pending
+
+  - id: PARALLEL-PATH-OWNERSHIP-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#role-separated-campaign-execution
+    applies_to: Every pair of simultaneously active implementation lanes or delegated authors.
+    classification: ownership_overlap
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Two workers can independently edit the same semantic authority, or durable maintenance ownership can be mistaken for live campaign authority, producing unsafe conflict resolution, lost work, or deadlock.
+    invariant: Active lane manifests have disjoint owned paths; an exact active campaign edit-owner override precedes durable ownership for authoring only; every active path and guard node resolves to one editor; shared paths transfer serially through an explicit reviewer disposition.
+    rule_refs:
+      - AGENTS.md#role-separated-campaign-execution
+      - docs/MONTANA_IMPLEMENTATION_AGENT_SPEC.md#11-shared-repository-and-parallel-worktree-rule
+    guards:
+      - node: tests/governance/test_standing_lane_authority.py::test_parallel_lane_manifests_reject_overlapping_owned_paths
+        ci_partition: remaining
+      - node: tests/governance/test_standing_lane_authority.py::test_shared_path_transfer_requires_prior_lane_freeze_and_reviewer_disposition
+        ci_partition: remaining
+      - node: tests/governance/test_standing_lane_authority.py::test_campaign_edit_owner_overrides_durable_owner_without_overlap_or_unassigned_guard
+        ci_partition: remaining
+    red_evidence: reviewer_issued_overlapping_primary_and_cli_lifecycle_experiment_off_steering_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+
+  - id: AGENT-CONTEXT-COMPACTION-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#compaction-resilient-agent-context
+    applies_to: Every long-running implementation, reviewer, coordinator, and delegated-review agent.
+    classification: context_loss
+    correction_owner: each_agent
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Compaction can resume an agent from another lane's stale state, lose blockers, accept ambiguous path prose or noncanonical evidence, or misrepresent a moved candidate as reviewed.
+    invariant: Every agent owns one ignored non-authoritative capsule with canonical nested mappings and normalized path patterns, then revalidates live authority, Git objects, ownership, and evidence before resuming.
+    rule_refs:
+      - AGENTS.md#compaction-resilient-agent-context
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+      - governance/agent_context_schema.yaml
+    guards:
+      - node: tests/governance/test_agent_context_contract.py::test_schema_requires_exact_identity_authority_git_and_evidence_bindings
+        ci_partition: remaining
+      - node: tests/governance/test_agent_context_contract.py::test_missing_stale_moved_or_cross_owned_capsule_fails_closed
+        ci_partition: remaining
+      - node: tests/governance/test_agent_context_contract.py::test_duplicate_writer_overlap_and_secret_shaped_values_are_rejected
+        ci_partition: remaining
+      - node: tests/governance/test_agent_context_contract.py::test_campaign_instance_paths_are_ignored_and_one_writer
+        ci_partition: remaining
+      - node: tests/governance/test_agent_context_contract.py::test_status_only_digest_cannot_validate_changed_dirty_blob
+        ci_partition: remaining
+      - node: tests/governance/test_agent_context_contract.py::test_nested_mapping_order_and_forbidden_path_patterns_fail_closed
+        ci_partition: remaining
+      - node: tests/governance/test_agent_context_contract.py::test_owned_manifest_uses_cross_platform_ordinal_path_order
+        ci_partition: remaining
+      - node: tests/governance/test_agent_context_contract.py::test_legacy_or_self_asserted_capsule_cannot_claim_continuity
+        ci_partition: remaining
+    red_evidence: missing_capsules_status_only_digest_and_invalid_reviewer_canonicalization_reproduced_2026_07_22_pending_immutable_capture
+    green_evidence: pending
+
+  - id: REVIEW-EXACT-TREE-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md
+    applies_to: Every commit, integration candidate, PR head, and release candidate review.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Dirty working-tree production bytes can make a test-only commit appear green and reviewable.
+    invariant: Every approval and test receipt binds the exact committed tree under review, never an ambient checkout.
+    rule_refs:
+      - ROADMAP.md#montana-final-engineering-review-and-publication-checklist
+      - docs/MONTANA_IMPLEMENTATION_AGENT_SPEC.md#3-slice-and-review-protocol
+    guards:
+      - node: tests/governance/test_candidate_evidence_binding.py::test_candidate_tests_execute_exported_committed_tree
+        ci_partition: remaining
+      - node: tests/governance/test_candidate_evidence_binding.py::test_manifest_rejects_dirty_or_missing_product_dependencies
+        ci_partition: remaining
+    red_evidence: exact_tree_8ff15811_failed_while_dirty_tree_passed_then_exact_tree_c16cabc_omitted_required_context_reader_and_failed_three_assistant_collection_modules_2026_07_22_pending_artifact_binding
+    green_evidence: pending
+
+  - id: FALSE-GREEN-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every deterministic reviewer reproduction contradicted by passing automated tests.
+    classification: coverage_escape
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Passing test counts can conceal a deterministic safety, authority, persistence, or shutdown failure.
+    invariant: Every confirmed deterministic reproduction is a named red-before-fix regression in a required default CI partition.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_every_machine_testable_record_names_a_collectable_guard
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_skipped_xfailed_deselected_or_nondefault_guards_do_not_close
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_false_green_pairs_have_unique_ids_runtime_links_and_exact_default_ci_guards
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_test_assertions_cannot_be_swallowed_by_broad_exception_handlers
+        ci_partition: remaining
+    red_evidence: multiple_reviewer_reproductions_contradict_green_counts_pending_artifact_binding
+    green_evidence: pending
+
+  - id: ZMQ-MUTATION-QUARANTINE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: ZMQ command-server mutation admission, cancellation, reconciliation, and shutdown.
+    classification: authority_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A timed-out mutation can commit late while another mutation executes and shutdown reports completion.
+    invariant: Cancellation-resistant mutation owners remain retained and quarantine ordinary mutations while READ and exact global OFF stay available.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/core/test_zmq_command_server_supervision.py::test_timeout_quarantines_mutations_but_allows_read_and_global_off
+        ci_partition: core
+      - node: tests/core/test_zmq_command_server_supervision.py::test_stop_waits_for_cancellation_resistant_handler_without_late_commit
+        ci_partition: core
+    red_evidence: deterministic_late_commit_reproduction_pending_artifact_binding
+    green_evidence: pending
+
+  - id: SAFETY-GLOBAL-OFF-COALESCE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Every operator, fault, interlock, child-death, and shutdown global-OFF request.
+    classification: safety_owner_split
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Operator and fault paths can invoke overlapping global OFF operations against one driver.
+    invariant: Operator, fault, interlock, child-death, and shutdown share one retained coalesced global-OFF owner and receipt.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/core/test_safety_manager.py::test_simultaneous_global_off_requests_share_one_driver_owner
+        ci_partition: core
+      - node: tests/core/test_experiment_commands.py::test_omitted_emergency_off_channel_is_verified_global_scope
+        ci_partition: core
+    red_evidence: max_inflight_two_reproduction_pending_artifact_binding
+    green_evidence: pending
+
+  - id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Launcher-owned engine shutdown on every supported operating system.
+    classification: false_shutdown_success
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Windows terminate or kill can bypass engine cleanup while process death is reported as successful shutdown.
+    invariant: Launcher success requires engine-incarnation-bound global OFF, teardown, and exit receipts; forced death remains HOLD.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/integration/test_launcher_shutdown_ownership.py::test_windows_child_death_without_shutdown_receipt_is_hold
+        ci_partition: remaining
+      - node: tests/integration/test_launcher_shutdown_ownership.py::test_launcher_retains_command_path_until_exact_shutdown_receipt
+        ci_partition: remaining
+    red_evidence: windows_terminate_cleanup_bypass_pending_artifact_binding
+    green_evidence: pending
+
+  - id: OPLOG-COLD-IDEMP-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Operator-log keyed persistence, cold rotation, restart, replay, and conflict handling.
+    classification: durable_identity_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Cold rotation can delete request identity, live admission can exceed the bounded keyed registry, or an under-proven stranded sweep can delete hot operator rows, allowing duplicate events or irreversible evidence loss.
+    invariant: Request ID and fingerprint survive verified rotation, deletion, restart, replay, and conflict detection; keyed capacity fails closed before admission without eviction; deletion requires positive proof that every operator row and identity was archived.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/storage/test_operator_log_idempotency.py::test_rotation_restart_returns_original_request_receipt
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_corrupt_or_ambiguous_cold_identity_disables_writes
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_keyed_registry_capacity_rejects_before_append_without_eviction
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_legacy_stranded_index_cannot_delete_unproven_operator_log_rows
+        ci_partition: remaining
+    red_evidence: exact_c16cabc_rotation_restart_duplicate_capacity_over_admission_and_legacy_stranded_sweep_deletion_reproductions_pending_immutable_capture
+    green_evidence: pending
+
+  - id: OPLOG-OUTBOX-002
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Operator-log database commitment and broker publication settlement.
+    classification: publication_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A committed operator-log row can permanently lose its broker event while retry falsely reports success.
+    invariant: Row commitment and publication use one durable idempotent outbox and terminal receipt.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/storage/test_operator_log_idempotency.py::test_publish_failure_restart_replays_pending_outbox_once
+        ci_partition: remaining
+    red_evidence: exact_c16cabc_definitions_only_outbox_without_production_caller_or_startup_recovery_reproduction_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ALARM-ACK-OUTBOX-003
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Alarm acknowledgement state, activation identity, publication, retry, and rendering.
+    classification: publication_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Alarm state can become acknowledged without its required durable acknowledgement event.
+    invariant: ACK state and publication intent commit atomically and retry settles the original activation-bound receipt.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/core/test_annunciation_protocol.py::test_ack_publish_failure_retry_emits_one_durable_event
+        ci_partition: core
+      - node: tests/core/test_annunciation_protocol.py::test_ack_event_emitted_false_never_silences_activation
+        ci_partition: core
+    red_evidence: state_committed_event_lost_reproduction_pending_artifact_binding
+    green_evidence: pending
+
+  - id: PERSISTENCE-STOP-004
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: SQLite writes and reads, callbacks, sinks, scheduler feed, and persistence shutdown.
+    classification: late_side_effect
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Executor commits, reads, callbacks, or sink effects can land after persistence_stopped or clean drain.
+    invariant: Stopped truth requires zero live persistence operations and exact terminal settlement; unresolved work remains HOLD.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/storage/test_sqlite_writer_settlement.py::test_persistence_stopped_waits_for_cancelled_executor_commit
+        ci_partition: remaining
+      - node: tests/storage/test_sqlite_writer_settlement.py::test_stop_owns_callbacks_reads_and_sink_side_effects
+        ci_partition: remaining
+    red_evidence: post_stopped_commit_and_callback_reproductions_pending_artifact_binding
+    green_evidence: pending
+
+  - id: PERSISTENCE-RECEIPT-RECONCILIATION-005
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Scheduler admission identity, cancellation, shielded SQLite commits, retained receipt capacity, and stop admission.
+    classification: durable_receipt_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Cancellation can drain or misattribute another batch before a shielded commit settles, cardinality-only checks can accept different committed content, and a bounded deque can silently evict proof.
+    invariant: Every accepted write retains exact admission ID, ordered content fingerprint, producer and experiment generation, and receipt owner until its matching terminal receipt is consumed exactly once; capacity exhaustion and stop admission fail closed without eviction.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/storage/test_scheduler_persistence_cancellation.py::test_cancelled_batch_reconciles_late_commit_receipt_exactly_once
+        ci_partition: remaining
+      - node: tests/storage/test_scheduler_persistence_cancellation.py::test_receipt_capacity_never_silently_evicts_unsettled_proof
+        ci_partition: remaining
+      - node: tests/storage/test_scheduler_persistence_cancellation.py::test_receipt_fingerprint_mismatch_never_settles_admitted_batch
+        ci_partition: remaining
+      - node: tests/storage/test_scheduler_persistence_cancellation.py::test_stop_rejects_new_operations_synchronously
+        ci_partition: remaining
+    red_evidence: exact_c16cabc_scheduler_drained_before_shielded_owner_settlement_cross_attributed_late_receipts_cardinality_only_accepted_different_content_and_maxlen_deque_silently_evicted_proof_pending_immutable_capture
+    green_evidence: pending
+
+  - id: EXP-RECEIPT-PROVENANCE-009
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Experiment identity, lifecycle mutations, quick-log attribution, replay phase validation and timestamps, detached replay state, recording, journaling, receipts, archive export, and replay.
+    classification: identity_replay
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Delayed or replayed commands can mutate the wrong experiment, invalid replay phases or aliased nested state can be persisted, phase duration can use the wrong epoch, and archive/export callers can read or emit cold data without proving expected identity.
+    invariant: Every mutation binds exact experiment and manager incarnation, predecessor revision, request ID, payload fingerprint, canonical phase, exact transition timestamp, recursively detached returned state, and durable result; every hot/cold archive read and export binds and validates a non-null expected experiment identity.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/core/test_experiment_commands.py::test_delayed_a_commands_cannot_mutate_b
+        ci_partition: core
+      - node: tests/core/test_experiment_adversarial.py::test_stale_journal_and_restart_replay_fail_durable_cas
+        ci_partition: core
+      - node: tests/core/test_experiment_commands.py::test_delayed_quick_log_cannot_attach_to_replacement_experiment
+        ci_partition: core
+      - node: tests/core/test_experiment_commands.py::test_async_quick_log_cas_blocks_replacement_during_durable_await
+        ci_partition: core
+      - node: tests/gui/dashboard/test_dashboard_view.py::test_quick_log_binds_exact_experiment_identity
+        ci_partition: gui
+      - node: tests/replay_engine/test_replay_phases.py::test_handle_command_rejects_invalid_phase_with_exact_identity_without_persisting
+        ci_partition: remaining
+      - node: tests/notifications/test_telegram.py::test_invalid_phase_with_exact_identity_never_dispatches
+        ci_partition: remaining
+      - node: tests/replay_engine/test_replay_phases.py::test_replay_phase_status_timestamp_tracks_exact_transition_not_session_start
+        ci_partition: remaining
+      - node: tests/replay_engine/test_replay_phases.py::test_active_experiment_copy_recursively_detaches_custom_fields
+        ci_partition: remaining
+      - node: tests/storage/test_parquet_archive_provenance.py::test_production_cross_experiment_export_requires_expected_experiment_id
+        ci_partition: remaining
+    red_evidence: missing_id_stale_journal_unbound_archive_invalid_phase_wrong_timestamp_nested_alias_and_moving_cli_thread_rlock_across_await_reproductions_pending_immutable_capture
+    green_evidence: pending
+
+  - id: CLI-LIFECYCLE-INGRESS-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Explicit lifecycle construction, authoritative freshness, batch coherence, producer replacement, and shell mutation gating.
+    classification: optimistic_authority
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Defaults, legacy telemetry strings, cached READY, or a mixed-identity batch can become current GUI or mutation authority.
+    invariant: Lifecycle is explicit at every boundary, READY expires by authoritative age, observational strings never grant mutations, and every batch is atomically coherent across lifecycle, producer, experiment, mode, and incarnation.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/engine_wiring/test_operator_safety_live_authority.py::test_cached_ready_expires_to_unknown
+        ci_partition: core
+      - node: tests/gui/state/test_operator_snapshot_ingress.py::test_mixed_identity_batch_is_quarantined_atomically
+        ci_partition: gui
+      - node: tests/gui/state/test_operator_view_models.py::test_explicit_generation_replacement_rejects_old_producer
+        ci_partition: gui
+      - node: tests/gui/state/test_operator_snapshot_ingress.py::test_malformed_old_epoch_after_stop_has_zero_side_effects
+        ci_partition: gui
+      - node: tests/test_operator_snapshot.py::test_lifecycle_fields_have_no_constructor_defaults
+        ci_partition: remaining
+      - node: tests/gui/shell/test_main_window_v2_safety_staleness.py::test_analytics_safety_reading_never_enables_mutation_authority
+        ci_partition: gui
+    red_evidence: lifecycle_defaults_stale_ready_mixed_batch_and_legacy_string_mutation_reproductions_pending_artifact_binding
+    green_evidence: pending
+
+  - id: CLI-COMMAND-SETTLEMENT-002
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: GUI subprocess queues, reply-consumer generations, command nonces, cancellation, and late-reply reconciliation.
+    classification: outcome_unknown_loss
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Old-child data or a timed-out reply consumer can enter a new incarnation, while post-enqueue cancellation can discard a live mutation identity.
+    invariant: Every child queue and consumer is generation-bound and terminally settled before replacement, and every dispatched mutation retains a full nonce until reconciliation.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/core/test_operator_snapshot_subprocess_ingress.py::test_old_child_data_cannot_inherit_new_incarnation
+        ci_partition: core
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_post_enqueue_cancel_retains_unknown_outcome_reconciliation
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_nonce_collision_never_overwrites_pending_owner
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_successful_reply_removes_pending_owner_exactly_once
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_late_reply_is_queryable_by_request_id_exactly_once
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_shutdown.py::test_restart_settles_old_reply_consumer_before_queue_replacement
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_nonce_collision_with_outcome_unknown_never_overwrites_owner
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_outcome_unknown_capacity_fails_closed_without_eviction
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_timeout_reply_race_settles_exactly_once
+        ci_partition: gui
+      - node: tests/gui/test_zmq_client_mutation_handshake.py::test_pre_enqueue_cancel_is_definitely_not_dispatched
+        ci_partition: gui
+    red_evidence: old_child_restamp_cancelled_pending_and_old_reply_consumer_reactivation_reproductions_pending_artifact_binding
+    green_evidence: pending
+
+  - id: CLI-DASHBOARD-AUTHORITY-003A
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Dashboard mutation enablement and live command authority.
+    classification: ui_authority_escape
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Arbitrary telemetry can enable mutating controls without authoritative transport and lifecycle receipts.
+    invariant: Dashboard mutations enable only from exact fresh live command authority; telemetry alone is observational.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/gui/dashboard/test_dashboard_view.py::test_telemetry_does_not_enable_mutations
+        ci_partition: gui
+      - node: tests/gui/dashboard/test_dashboard_view.py::test_authority_receipt_requires_explicit_lifecycle_and_exact_identity
+        ci_partition: gui
+    red_evidence: arbitrary_telemetry_enabled_dashboard_mutations_pending_artifact_binding
+    green_evidence: pending
+
+  - id: CLI-ANNUNCIATION-SILENCE-003B
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Alarm acknowledgement, event publication, and annunciation silence.
+    classification: false_silence
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: A state-only acknowledgement with event_emitted false can silence an active alarm.
+    invariant: Silence requires an exact activation-bound durable ACK event receipt; missing or false event state stays audible.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/gui/shell/test_annunciation_controller.py::test_event_emitted_false_does_not_silence
+        ci_partition: gui
+    red_evidence: event_emitted_false_silenced_activation_pending_artifact_binding
+    green_evidence: pending
+
+  - id: CLI-QTHREAD-SETTLEMENT-003C
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Every real GUI QThread, worker object, queued callback, and application-close path.
+    classification: late_side_effect
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: A real worker thread or late callback can survive application close and access destroyed Qt objects.
+    invariant: Close freezes admission, cancels, quits, joins, and deletes every real QThread owner before stopped truth.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/gui/test_zmq_client_shutdown.py::test_application_close_settles_all_real_qthreads
+        ci_partition: gui
+    red_evidence: real_qthread_survived_close_pending_artifact_binding
+    green_evidence: pending
+
+  - id: CLI-PLAINTEXT-RENDERING-003D
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Untrusted experiment, producer, alarm, transport, tooltip, and operator-facing GUI text.
+    classification: markup_interpretation
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Untrusted identity can be interpreted as rich text or an active tooltip link.
+    invariant: Every untrusted identity and message is forced to plain text and escaped at rich-text boundaries.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/gui/shell/test_top_watch_bar_persistent_context.py::test_experiment_identity_is_plain_text_and_tooltip_escaped
+        ci_partition: gui
+    red_evidence: raw_identity_interpreted_as_autotext_pending_artifact_binding
+    green_evidence: pending
+
+  - id: CLI-DISK-EVIDENCE-FRESHNESS-003E
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Disk evidence producer and bridge incarnation, monotonic order, independent freshness, and shell presentation.
+    classification: stale_authority
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Unrelated live measurements or a bridge replacement can keep old disk evidence looking current.
+    invariant: Disk evidence binds the exact producer and bridge incarnation plus its own monotonic sequence and age; unrelated traffic never refreshes it and replacement immediately revokes prior current truth.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/gui/shell/test_main_window_v2_disk_evidence.py::test_disk_evidence_expires_while_measurement_stream_remains_live
+        ci_partition: gui
+      - node: tests/gui/shell/test_main_window_v2_disk_evidence.py::test_bridge_replacement_immediately_stales_prior_disk_evidence
+        ci_partition: gui
+    red_evidence: stale_disk_evidence_survived_own_deadline_and_bridge_replacement_while_other_measurements_flowed_pending_artifact_binding
+    green_evidence: pending
+
+  - id: KEITHLEY-IDENTITY-OFF-001A
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Keithley configured identity, serial binding, connect, generation-bound transport-close settlement, recovery, and global OFF proof.
+    classification: instrument_authority_escape
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: A wrong instrument or incomplete two-channel OFF can acquire measurement authority.
+    invariant: Exact configured identity and serial plus nonce-bound verified two-channel OFF precede Keithley authority.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/drivers/test_keithley_connect_safety.py::test_configured_identity_and_serial_are_exact
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_connect_safety.py::test_invalid_identity_with_unverified_off_returns_explicit_recovery_receipt_without_connected_authority
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_connect_safety.py::test_force_off_failure_never_grants_connected_authority
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_cancelled_disconnect_close_late_success_settles_exact_generation
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_cancelled_disconnect_close_late_failure_keeps_reconnect_blocked
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_wrong_generation_late_close_cannot_settle_current_connection
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_connect_safety.py::test_gpib_incomplete_close_normalizes_to_instrument_settlement_receipt
+        ci_partition: remaining
+    red_evidence: incomplete_identity_and_off_proof_pending_artifact_binding
+    green_evidence: pending
+
+  - id: USBTMC-CLOSE-SETTLEMENT-001B
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: USBTMC cancellation, close, handle ownership, recovery, and shutdown.
+    classification: retained_handle_loss
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Cancellation can clear ownership while an I/O or close operation remains live.
+    invariant: Incomplete close retains one bounded recovery owner and visible HOLD until the handle is exactly settled.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_retains_owner_until_settlement
+        ci_partition: remaining
+      - node: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_commits_success_before_propagating_cancellation
+        ci_partition: remaining
+    red_evidence: usbtmc_cancelled_close_lost_owner_pending_artifact_binding
+    green_evidence: pending
+
+  - id: GPIB-HANDLE-SETTLEMENT-001C
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: GPIB open, I/O, desynchronization, close, manager ownership, and clean-generation recovery.
+    classification: retained_handle_loss
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Double-open, cancelled connect, or incomplete close can leak a resource, discard terminal close intent, report false success, or admit ordinary writes after desynchronization.
+    invariant: One generation and one retained settlement owner own one handle and manager; cancellation preserves terminal close intent and closes or quarantines the exact handle automatically; incomplete close remains HOLD; only typed bus recovery clears quarantine for a fresh generation.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/drivers/test_visa_executors.py::test_gpib_double_open_and_incomplete_close_fail_closed
+        ci_partition: remaining
+      - node: tests/drivers/test_visa_executors.py::test_gpib_clean_new_generation_recovers_from_desynchronization
+        ci_partition: remaining
+      - node: tests/drivers/test_visa_executors.py::test_gpib_terminal_close_intent_survives_cancelled_operation_settlement_and_closes_exact_handle
+        ci_partition: remaining
+      - node: tests/drivers/test_visa_executors.py::test_gpib_successful_recovery_clears_query_quarantine_only_after_both_steps
+        ci_partition: remaining
+      - node: tests/drivers/test_gpib_bus_lock.py::test_cancelled_connect_late_success_closes_exact_handle_automatically
+        ci_partition: remaining
+      - node: tests/drivers/test_gpib_bus_lock.py::test_cancelled_connect_late_failure_retains_quarantined_owner
+        ci_partition: remaining
+      - node: tests/drivers/test_gpib_bus_lock.py::test_close_during_cancelled_connect_joins_same_terminal_owner
+        ci_partition: remaining
+      - node: tests/drivers/test_gpib_bus_lock.py::test_reopen_blocked_until_cancelled_connect_terminal_settlement
+        ci_partition: remaining
+    red_evidence: exact_cli_870607ff_false_close_double_open_desync_and_cancelled_connect_live_handle_reproductions_pending_immutable_capture
+    green_evidence: pending
+
+  - id: PHYSICAL-CONFIG-WIRING-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Production physical-alarm and landmark configuration parsing and engine construction.
+    classification: production_test_divergence
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Production can use permissive physical-alarm defaults while strict exactness exists only in tests.
+    invariant: Engine construction consumes one strict atomic cooldown, vacuum, and landmark document or publishes no authority.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/core/test_physical_alarm_exactness.py::test_engine_uses_strict_atomic_physical_alarm_loader
+        ci_partition: core
+      - node: tests/core/test_physical_alarm_exactness.py::test_landmark_schema_and_aliases_are_exact
+        ci_partition: core
+      - node: tests/core/test_safety_pattern_liveness.py::test_safety_critical_pattern_matches_raw_channel
+        ci_partition: core
+    red_evidence: production_permissive_loader_trace_pending_artifact_binding
+    green_evidence: pending
+
+  - id: OPERATOR-SNAPSHOT-CODEC-VERSION-004
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Operator-snapshot wire schema constants, codec errors, module descriptions, diagnostics, and migration text.
+    classification: protocol_version_misstatement
+    correction_owner: cli
+    guard_owner: cli
+    disposition_owner: reviewer
+    consequence: Operators and maintainers can diagnose or migrate a version-2 payload using stale version-1 semantics.
+    invariant: Every machine and human-visible codec version statement matches the exact wire schema constant and decoded envelope.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/test_operator_snapshot.py::test_codec_version_text_matches_wire_schema
+        ci_partition: remaining
+    red_evidence: schema_constant_2_with_v1_module_error_and_codec_text_in_exact_97cff82c_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ASSISTANT-EGRESS-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Assistant audit, Telegram, GUI, chart, and other output delivery ownership.
+    classification: unaudited_or_false_egress
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: External output can occur without durable audit and HTTP failure can be labeled delivered.
+    invariant: Durable intent precedes egress and exact per-destination settlement follows; audit failure yields zero external output.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/agents/assistant/test_output_router.py::test_http_failure_is_not_reported_as_dispatched
+        ci_partition: agents
+      - node: tests/agents/assistant/test_output_router.py::test_audit_failure_prevents_external_egress
+        ci_partition: agents
+      - node: tests/agents/assistant/test_output_router.py::test_shutdown_settles_audit_chart_and_message_owners
+        ci_partition: agents
+      - node: tests/agents/assistant/test_output_router.py::test_production_shutdown_calls_and_joins_audit_chart_and_router_owners
+        ci_partition: agents
+      - node: tests/agents/assistant/test_output_router.py::test_production_sender_retains_per_destination_terminal_outcomes
+        ci_partition: agents
+      - node: tests/agents/assistant/test_query_agent.py::test_query_audit_failure_prevents_chart_and_response_egress
+        ci_partition: agents
+    red_evidence: http_500_egress_before_audit_unwired_shutdown_aggregate_sender_and_query_chart_before_audit_reproductions_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ASSISTANT-RAG-CAPABILITY-002A
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Live assistant, engine, GUI, and sink access to RAG index mutation.
+    classification: capability_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A live sink, GUI, or compatibility API can rebuild trusted retrieval state outside the offline procedure.
+    invariant: RAG index mutation is structurally reachable only from the reviewed offline CLI; live runtimes expose no rebuild capability.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/agents/rag/test_bootstrap.py::test_live_runtime_has_no_rag_rebuild_capability
+        ci_partition: agents
+    red_evidence: directly_importable_live_rag_sink_and_gui_command_pending_artifact_binding
+    green_evidence: pending
+
+  - id: ASSISTANT-LOOPBACK-002B
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Every assistant HTTP connection, hostname resolution, redirect, and peer identity.
+    classification: endpoint_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Localhost remapping or an HTTP redirect can transmit prompt or context data outside loopback.
+    invariant: Assistant egress uses literal or peer-pinned loopback only and refuses every redirect before a second connection.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/agents/assistant/test_ollama_client.py::test_redirect_and_nonliteral_loopback_are_rejected_before_egress
+        ci_partition: agents
+      - node: tests/agents/assistant/test_report_intro.py::test_report_intro_rejects_redirects_and_nonliteral_loopback
+        ci_partition: agents
+    red_evidence: localhost_redirect_report_intro_and_live_telegram_escape_pending_artifact_binding
+    green_evidence: pending
+
+  - id: ASSISTANT-CONTEXT-FRESHNESS-002C
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Cached experiment, diagnostic, reading, and schedule context consumed by the live assistant.
+    classification: stale_authority
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Disconnected or old remote state can remain current-looking and drive scheduled output.
+    invariant: Context binds engine and experiment incarnation, revision, query interval, receive age, and disconnect invalidation.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_engine_disconnect_invalidates_cached_context
+        ci_partition: agents
+      - node: tests/agents/assistant/test_context_reader.py::test_history_receipt_binds_scope_order_and_freshness
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_live_runtime_consumes_context_receipt_and_expires_it
+        ci_partition: agents
+    red_evidence: cached_remote_state_never_expired_and_validated_cache_remained_unwired_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ASSISTANT-PLAINTEXT-002D
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: LLM, configuration, event, Telegram, and GUI assistant text.
+    classification: markup_interpretation
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Untrusted text can become Telegram HTML or Qt AutoText links and formatting.
+    invariant: Raw text is escaped before any allowed Telegram markup and every GUI label carrying untrusted text is forced plain text.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/agents/assistant/test_output_router.py::test_untrusted_telegram_text_is_escaped_before_markup
+        ci_partition: agents
+      - node: tests/gui/shell/views/test_assistant_insight_panel.py::test_untrusted_assistant_text_is_plain_text
+        ci_partition: gui
+    red_evidence: raw_html_and_qt_autotext_reproduction_pending_artifact_binding
+    green_evidence: pending
+
+  - id: ASSISTANT-REPARSE-BOUNDARY-003
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Assistant audit and retention filesystem ownership on Windows and POSIX.
+    classification: filesystem_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Audit or retention check-use races can follow a Windows junction or replacement outside the owned data root.
+    invariant: Every write/delete uses stable no-follow containment and rejects symlink, junction, and reparse components.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/agents/assistant/test_retention.py::test_windows_junction_and_swap_cannot_escape_root
+        ci_partition: agents
+      - node: tests/agents/assistant/test_audit_logger.py::test_atomic_audit_write_rejects_reparse_parent_swap
+        ci_partition: agents
+    red_evidence: static_toc_reparse_boundary_confirmed_pending_runtime_artifact
+    green_evidence: pending
+
+  - id: EVIDENCE-BINDING-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md
+    applies_to: Every local or hosted candidate, package, artifact, CI, and publication evidence receipt.
+    classification: ci_artifact_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: CI can execute one tree while hashing or uploading another and omit exact run or artifact identity.
+    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, and uploaded artifact digest.
+    rule_refs:
+      - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+    guards:
+      - node: tests/test_ci_candidate_evidence.py::test_executed_and_uploaded_candidate_manifests_are_identical
+        ci_partition: remaining
+      - node: tests/test_ci_candidate_evidence.py::test_receipt_binds_commit_tree_workflow_run_attempt_and_artifact_digest
+        ci_partition: remaining
+    red_evidence: ci_line_review_confirmed_misbinding_pending_hosted_artifact
+    green_evidence: pending

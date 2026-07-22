@@ -4,7 +4,7 @@ keywords: top-bar, watch-bar, header, chrome, vitals, at-a-glance, pressure, tem
 applies_to: persistent top chrome showing engine, experiment, fixed physical references, channel summary, alarms, and mode
 status: active
 implements: src/cryodaq/gui/shell/top_watch_bar.py (Phase B.4/B.4.5.2)
-last_updated: 2026-07-16
+last_updated: 2026-07-17
 references: rules/data-display-rules.md, rules/color-rules.md, rules/content-voice-rules.md
 ---
 
@@ -23,6 +23,12 @@ channel health, and alarm count visible across operator surfaces.
 > time, and mode; persistent pressure/T12/T11 context; channel summary; and
 > alarms. Heater current is intentionally absent here and remains available in
 > the Keithley panel.
+> Fixed vital ingestion remains full-rate while human-readable digits repaint
+> on one 500 ms presentation tick. Each tick normally shows the newest
+> source-timestamp value and retains O(1) interval range/status/clock evidence.
+> A source timestamp more than one second in the future is visibly cautioned;
+> arrival order is used only until a non-skewed sample restores trustworthy
+> source-time ordering, so a poisoned timestamp cannot hide later faults.
 >
 > **Batch A (2026-04-17) cleanup:** zone separators now carry explicit
 > `background: transparent` (Fusion palette was painting them as
@@ -82,7 +88,33 @@ cues must not be replaced by a summary-only presentation.
     `Тревоги: нет данных` in the stale/neutral presentation. A valid nonzero
     count uses `STATUS_INFO`, `STATUS_CAUTION`, or `STATUS_FAULT` according to
     the worst unacknowledged alarm; unknown severity fails closed to fault.
-10. **No background shift on hover.** Bar is chrome, not interactive surface.
+11. **No background shift on hover.** Bar is chrome, not interactive surface.
+12. **Bounded digits do not discard interval evidence.** Normal physical digits
+    repaint at most every 500 ms and show the latest source-timestamp sample.
+    A visible `↕` marker means that interval minimum and maximum differ at
+    displayed precision; Russian accessible detail names the range, sample
+    count, status, and source time.
+13. **Invalid truth is immediate and non-color.** A non-OK or non-finite fixed
+    vital immediately adds explicit unavailable text while retaining the last
+    usable numeric value. A later OK sample cannot erase that interval's fault
+    evidence before the next presentation tick. Color is only redundant.
+14. **Physical-domain validity is explicit.** Pressure must be finite and
+    strictly positive. An OK-status zero/negative pressure is still rendered as
+    unavailable with the last usable number retained and a Russian reason.
+15. **Disconnect never erases digits.** Loss of Engine data flow adds visible
+    `НЕТ СВЯЗИ` to every fixed vital while retaining the last usable
+    number, canonical numeric typography, source provenance, and any stronger
+    interval-fault evidence.
+16. **Clock skew is caution, not freshness.** A source timestamp more than one
+    second ahead of the GUI clock adds `РАССИНХР. ЧАСОВ` plus
+    `STATUS_CAUTION`. The bounded cut retains a transient skew sample until a
+    source-newer clean cut; arrival-order recovery prevents a future timestamp
+    from pinning out later real-time evidence.
+17. **Accessible evidence is complete.** Accessible description and tooltip
+    state displayed-value provenance, latest-source provenance/time/status,
+    stale age, disconnect, interval extrema and their source times, invalid
+    reason, and clock-skew evidence. Tooltip detail supplements rather than
+    replaces the visible state cue.
 
 ## Layout structure
 
@@ -99,8 +131,9 @@ Bar frame (HBoxLayout)
 ## Physical-value anatomy
 
 Each physical reference pairs an explicit location/quantity label with its
-current value. Stale state retains the last value, dims it, and adds visible
-stale wording; unavailable state shows an em dash rather than invented truth.
+current value. Stale and disconnected states retain the last usable value,
+dim it, and add visible Russian wording. Only an initial state with no usable
+measurement shows an em dash; unavailable input never invents a replacement.
 
 ```
 ┌──────────────────────┐
@@ -328,8 +361,10 @@ Scheduler / DataBroker (engine process)
 ```
 
 Human-readable presentation must not exceed 2 Hz per RULE-DATA-002. The shipped
-channel summary/context refresh is currently 1 Hz; faster engine readings
-update the cache without making the digits fly.
+physical context uses a 500 ms presentation tick; the independent channel
+summary remains at 1 Hz. Faster engine readings update an O(1) latest/min/max/
+worst-status cut without making digits fly. Acquisition, persistence, alarm
+evaluation, dashboard buffering, and safety paths do not wait for this tick.
 
 Stale detection for this header uses the shipped `_STALE_TIMEOUT_S = 30.0`.
 This presentation threshold does not replace backend safety freshness truth.
@@ -351,9 +386,11 @@ This presentation threshold does not replace backend safety freshness truth.
 | **Normal operation** | Physical values use FOREGROUND; experiment mode is neutral; debug/replay uses STATUS_CAUTION |
 | **Cold start / no channel readings** | Diamond cue + persistent «Нет текущих данных · N ожидают» in stale treatment; never seeded or rendered as OK |
 | **Vital in caution / legacy warning input** | That vital's value → STATUS_CAUTION color; others unchanged |
-| **Vital in fault** | Value → STATUS_FAULT; immediate no-fade (RULE-INTER-006) |
-| **Vital stale** | Value → STATUS_STALE; tooltip describes |
-| **Engine disconnected** | All three physical readings → STATUS_STALE + explicit unavailable/stale wording; mode badge to `—` greyed |
+| **Vital in fault** | Last usable value remains visible with immediate `НЕТ ДАННЫХ`; fault border/color is redundant and no-fade (RULE-INTER-006) |
+| **Vital stale** | Last usable value stays visible and dim with `(ustar.)`; accessible detail states age, provenance, and threshold |
+| **Interval range** | Latest value remains primary; visible `↕` marks differing displayed min/max and Russian accessible detail gives the full interval cut |
+| **Engine disconnected** | All three physical readings retain digits and add `НЕТ СВЯЗИ`; canonical type and stronger fault evidence remain |
+| **Future source time** | `РАССИНХР. ЧАСОВ` + STATUS_CAUTION; O(1) cut retains the event and arrival-order recovery prevents timestamp pinning |
 | **Replay** | `REPLAY` badge is pinned before asynchronous polling and cannot be overwritten by a later live/debug/unknown status result |
 
 ## Common mistakes
@@ -376,6 +413,23 @@ This presentation threshold does not replace backend safety freshness truth.
 
 9. **Latin T for channel labels.** `T 2-й ступени` with Latin T is invalid; use Cyrillic `Т`. RULE-COPY-001.
 
+10. **Repainting on every reading.** The engine and evidence paths may run
+    faster than 2 Hz, but normal header digits wait for the 500 ms presentation
+    tick. Never move this cap upstream into acquisition, persistence, alarms,
+    safety evaluation, or the dashboard buffer.
+
+11. **Making interval evidence hover-only.** A tooltip alone can be missed.
+    Keep the `↕` or explicit interval-fault text visible; tooltip and accessible
+    description provide detail rather than the only indication.
+
+12. **Clearing digits on disconnect.** Connectivity is an orthogonal axis.
+    Retain the last usable number and add `НЕТ СВЯЗИ`; an em dash destroys
+    operator context.
+
+13. **Trusting a far-future timestamp for ordering.** It can pin an old OK
+    value above later faults. Show clock-skew caution and temporarily recover
+    by arrival order until source time is trustworthy again.
+
 ## Change-impact record: physical labels
 
 | Field | Assessment |
@@ -385,6 +439,16 @@ This presentation threshold does not replace backend safety freshness truth.
 | Safety/operator goal | Stable physical identity improves anomaly interpretation and prevents an operator from mistaking one fixed sensor for a fleet-wide extremum. |
 | Mitigation and evidence | Preserve the existing order, values, stale treatment, and update cadence; focused widget tests assert both exact Russian labels and channel-to-widget routing. |
 | Revert trigger | If the labels clip at the supported minimum viewport or operators cannot identify the two locations in scenario review, adjust spacing or wording without restoring false min/max semantics. |
+
+## Change-impact record: bounded physical-value presentation
+
+| Field | Assessment |
+|---|---|
+| Better | Fixed vital digits remain readable at 2 Hz while visible cues retain short interval range/fault/clock evidence; disconnect and invalid pressure no longer erase the last usable number or provenance. |
+| Worse | Intermediate samples do not appear as standalone digits; `↕`, `НЕТ СВЯЗИ`, and clock-skew wording add abnormal-state density; a clock more than one second ahead produces a deliberate caution until clean evidence arrives. |
+| Safety/operator goal | Human legibility is a presentation concern only; full-rate persistence, alarms, safety evaluation, and evidence remain independent. Invalid truth appears immediately without erasing the last usable number. |
+| Mitigation and evidence | O(1) latest/min/max/worst-status/clock cuts, source-time ordering with bounded skew recovery, Russian accessible provenance/extrema times, and deterministic 10,000-update, disconnect, invalid-pressure, out-of-order, transient-fault, and stale tests. |
+| Revert trigger | Revise if digits exceed 2 Hz, a newer trustworthy source value is rolled back, a future timestamp hides later evidence, retained digits/cues clip without a complete path, or any upstream truth path waits for the GUI tick. |
 
 ## Related components
 
@@ -396,6 +460,8 @@ This presentation threshold does not replace backend safety freshness truth.
 
 ## Changelog
 
+- 2026-07-17: Retained fixed-vital digits/provenance across stale, disconnect, and invalid pressure; added source-ordered interval evidence, extrema times, future-clock caution/recovery, and a constant-size 10,000-update regression.
+- 2026-07-17: Bounded fixed-vital digits to a 500 ms presentation tick, retained source-time latest/min/max/status evidence, and added immediate textual invalid plus visible interval-range cues.
 - 2026-07-16: Made the shipped zone layout canonical, removed the stale heater/extrema anatomy, kept experiment identity neutral, and mapped legacy warning input onto the single operator-facing caution rung.
 - 2026-07-15: Replaced comparative `Т мин` / `Т макс` copy with physical labels `Т 2-й ступени` (Т12) and `Т плиты N₂` (Т11); recorded the operator/safety tradeoff and retained fixed-channel, stale, and cadence semantics.
 - 2026-07-12 (v1.2.0): Cold start no longer seeds channel OK truth; unavailable/stale text plus diamond is shown until real readings arrive. Replay mode is pinned before polling so the archive identity cannot be overwritten.

@@ -1,0 +1,156 @@
+schema_version: 1
+contract_id: AGENT-CONTEXT-COMPACTION-001
+authority: AGENTS.md#compaction-resilient-agent-context
+persistence: ignored_non_authoritative
+instance_ownership: one_writer_per_file
+allowed_roles:
+  - implementation
+  - reviewer
+  - coordinator
+  - delegated_reviewer
+required_fields:
+  - schema_version
+  - agent_id
+  - path_slug
+  - role
+  - sequence
+  - supersedes
+  - canonical_root
+  - branch
+  - head
+  - tree
+  - dirty_inventory_digest
+  - governing_set_id
+  - governing_hashes
+  - acknowledged_instruction
+  - assignment
+  - owned_paths
+  - owned_blob_manifest_digest
+  - owned_current_blobs
+  - owned_preimages
+  - forbidden_paths
+  - excluded_worktrees
+  - proposal_state
+  - dependencies
+  - open_findings
+  - prevention_ids
+  - evidence
+  - next_action
+  - updated_at
+  - authority
+  - event_history
+constraints:
+  authority: none
+  sequence: monotonically_increasing_integer
+  supersedes: null_or_sha256_colon_64_lower_hex_of_previous_exact_capsule_bytes
+  head: full_40_lower_hex_or_explicit_unborn
+  tree: full_40_lower_hex_or_explicit_unavailable
+  governing_hashes: exact_required_set_of_normalized_path_to_sha256_colon_64_lower_hex
+  event_history: bounded_latest_20
+  update: atomic_replace
+  secrets: forbidden
+  cross_agent_copy: forbidden
+  capsule_can_authorize: false
+  capsule_can_approve: false
+  capsule_can_certify_tests: false
+canonical_serialization:
+  encoding: utf-8
+  format: yaml_1_2_safe_subset
+  line_endings: lf
+  mapping_key_order: lexicographic
+  final_newline: required
+  digest: sha256_over_exact_serialized_bytes
+field_shapes:
+  agent_id: canonical_runtime_agent_or_task_id
+  path_slug: lower_ascii_regex_[a-z0-9][a-z0-9._-]*
+  role: allowed_roles_member
+  canonical_root: absolute_normalized_forward_slash_path_without_traversal
+  branch: exact_nonempty_git_branch_or_explicit_detached
+  dirty_inventory_digest:
+    command: git status --porcelain=v2 -z --untracked-files=all
+    value: sha256_colon_64_lower_hex_over_exact_stdout_bytes
+  governing_set_id: campaign_selected_nonempty_identifier
+  governing_hashes:
+    keys: exact_normalized_paths_declared_by_governing_set
+    values: sha256_colon_64_lower_hex_over_exact_file_bytes
+  acknowledged_instruction:
+    required_keys:
+      - sequence
+      - source
+      - digest
+      - summary
+    digest: sha256_colon_64_lower_hex_over_exact_instruction_bytes
+  assignment:
+    required_keys:
+      - objective
+      - state
+      - scope
+  owned_paths:
+    items: normalized_repo_relative_path_no_glob_alias_or_traversal
+  owned_blob_manifest_digest:
+    records: sorted_owned_path_nul_mode_nul_git_blob_nul
+    value: sha256_colon_64_lower_hex_over_exact_record_bytes
+    purpose: detect byte_or_mode_changes_inside_already_dirty_owned_paths
+  owned_current_blobs:
+    keys: exact_owned_paths
+    values: current_mode_colon_git_blob_or_explicit_deleted
+  owned_preimages:
+    keys: exact_owned_paths
+    values: mode_colon_git_blob_or_explicit_untracked
+  forbidden_paths:
+    items: normalized_path_or_governing_pattern
+  excluded_worktrees:
+    items: absolute_normalized_forward_slash_path
+  proposal_state:
+    required_keys:
+      - state
+      - commit
+      - tree
+      - frozen
+  dependencies:
+    items: stable_dependency_or_prevention_id
+  open_findings:
+    items: stable_finding_or_prevention_id
+  prevention_ids:
+    items: id_resolving_in_governance_agent_preventions
+  evidence:
+    item_required_keys:
+      - kind
+      - command
+      - cwd
+      - exit_code
+      - stdout_sha256
+      - stderr_sha256
+      - object_binding
+      - result
+  next_action:
+    required_keys:
+      - kind
+      - description
+      - command
+  updated_at: rfc3339_with_explicit_offset
+  event_history:
+    item_required_keys:
+      - sequence
+      - event_id
+      - object_binding
+      - evidence_digest
+    max_items: 20
+resume_validation:
+  - canonical_root
+  - branch
+  - head
+  - tree
+  - governing_hashes
+  - dirty_inventory_digest
+  - governing_set_id
+  - owned_paths_preimages_and_current_blobs
+  - owned_blob_manifest_digest
+  - proposal_state
+failure_behavior:
+  missing_or_invalid: zero_write_reconstruct_then_write_own_capsule
+  moved_or_stale: fail_closed_without_revert_or_cleanup
+  duplicate_writer: fail_closed_and_report_ownership_conflict
+  secret_shaped_value: reject_and_redact_report
+required_validator: tests/governance/test_agent_context_contract.py
+required_ci_partition: remaining

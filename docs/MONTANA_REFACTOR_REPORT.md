@@ -3,8 +3,9 @@
 **Document status:** living report for the `feat/montana-phase-a` campaign
 **Comparison baseline:** pinned commit `f5d6434d20dffae62c9f03fbc12f68b03f48351b`
 (CryoDAQ v0.64.1)
-**Measurement target:** final candidate worktree immediately before sealing; tracked checkpoint `f5946b9` plus the explicitly owned final slice
-**Report date:** 2026-07-16
+**Measurement target:** interim indexed-worktree inventory recorded during final
+integration; regenerate from the quiescent sealed candidate before publication
+**Report date:** 2026-07-19
 **Audience:** cryogenic engineers, operators, maintainers, reviewers, and future extension authors
 
 > **Evidence boundary.** This report describes a large software refactor and the
@@ -13,9 +14,11 @@
 > and frozen-build tests cannot replace the real-Windows, dummy-load,
 > independent-final-element, host-death, and physical-hardware procedures in
 > [`lab_verification_checklist.md`](lab_verification_checklist.md). The measurements
-> below describe the final candidate worktree immediately before sealing. Release
-> evidence must record the exact Git/CI SHA externally after commit, because
-> embedding that final identifier in this commit would be self-referential.
+> below are an **interim integration snapshot**, not final-candidate metrics.
+> Regenerate the inventory and SVG fingerprints only after all intended files
+> are tracked and concurrent writers have stopped. Release evidence must record
+> the exact Git/CI SHA externally after commit, because embedding that final
+> identifier in this commit would be self-referential.
 
 ## Executive summary
 
@@ -64,15 +67,15 @@ flows:
 - the design system is now an operator-safety contract as well as a visual system.
 
 Measured from `f5d6434` to the candidate source inventory, the campaign changes
-**489 files**, with **133,961 inserted lines** and **9,522 deleted lines**, or a
-**net increase of 124,439 lines**. These figures are Git line-change statistics,
-not "133,961 new production lines." The baseline repository had **188,539 text
+**489 files**, with **134,090 inserted lines** and **9,554 deleted lines**, or a
+**net increase of 124,536 lines**. These figures are Git line-change statistics,
+not "134,090 new production lines." The baseline repository had **188,539 text
 lines**, including **68,857 lines of production Python** and **80,529 lines of test
-Python**. The candidate source inventory has **312,978 text lines**, including
-**111,809 production-Python lines** and **145,456 test-Python lines**.
+Python**. The candidate source inventory has **313,075 text lines**, including
+**111,810 production-Python lines** and **145,532 test-Python lines**.
 Much of the growth is deliberate executable evidence: tests, fixtures, process
-harnesses, protocol contracts, and documentation. These figures measure the final
-candidate worktree immediately before sealing. Release evidence must record the
+harnesses, protocol contracts, and documentation. These figures measure the
+current candidate worktree while the repair slice still awaits sealing. Release evidence must record the
 exact Git/CI SHA externally after commit because embedding it here is self-referential.
 
 The central result is therefore not merely "more code." It is a shift from
@@ -253,24 +256,24 @@ The following table distinguishes three numbers that are easy to confuse:
 | Measure | Value | Meaning |
 |---|---:|---|
 | Baseline production Python | 68,857 lines | Python under `src/cryodaq` at `f5d6434`. |
-| Git insertions in the campaign | 133,961 lines | Lines added across the intended source inventory: tracked source plus the explicitly owned final additions, excluding the four generated architecture SVGs. Not all are net-new production code. |
-| Git deletions in the campaign | 9,522 lines | Lines removed or replaced. |
-| Net source-inventory growth | 124,439 lines | Insertions minus deletions. |
-| Delivered-tree Git churn | 139,514 insertions / 9,522 deletions / 129,992 net | Source inventory plus the four regenerated architecture SVGs. |
+| Git insertions in the campaign | 134,090 lines | Lines added across the intended source inventory: tracked source plus the explicitly owned final additions, excluding the four generated architecture SVGs. Not all are net-new production code. |
+| Git deletions in the campaign | 9,554 lines | Lines removed or replaced. |
+| Net source-inventory growth | 124,536 lines | Insertions minus deletions. |
+| Delivered-tree Git churn | 139,644 insertions / 9,554 deletions / 130,090 net | Source inventory plus the four regenerated architecture SVGs. |
 | Baseline repository text | 188,539 lines | Measured text inventory across the baseline tree. |
-| Candidate source-inventory text | 312,978 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the four generated architecture SVGs. |
-| Delivered-tree text | 318,531 lines | Final source inventory plus the four regenerated architecture SVGs. |
+| Candidate source-inventory text | 313,075 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the four generated architecture SVGs. |
+| Delivered-tree text | 318,629 lines | Final source inventory plus the four regenerated architecture SVGs. |
 | Baseline test Python | 80,529 lines | Python under `tests`. |
-| Candidate production Python | 111,809 lines | Candidate `src/cryodaq` inventory, not 133,961. |
-| Candidate test Python | 145,456 lines | Candidate `tests` inventory. |
+| Candidate production Python | 111,810 lines | Candidate `src/cryodaq` inventory, not 134,090. |
+| Candidate test Python | 145,532 lines | Candidate `tests` inventory. |
 | Paths changed in candidate comparison | 489 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
 | Paths changed in delivered comparison | 493 | Candidate comparison plus four generated architecture SVG paths. |
 | Baseline repository files | 779 | Inventory at `f5d6434`. |
 | Architecture source manifest | 1,035 | Every intended source file except the four self-referential generated `docs/refactor/architecture-*.svg` outputs. |
 | Delivered-tree files | 1,039 | Source manifest plus the four regenerated architecture SVGs. |
-| Commits from baseline to sealed checkpoint | 166 | Commit count including the final working slice. |
+| Commits from baseline to recorded checkpoint | 166 | Committed history through `7607bc1`; the measured working slice is not yet included. |
 
-The repository added **42,952 lines of production Python** and **64,927
+The repository added **42,953 lines of production Python** and **65,003
 lines of test Python** by inventory. This is a healthier explanation of the
 campaign than saying the project "added 130k lines of code": most growth is not
 application logic alone, and test growth exceeds production growth.
@@ -291,19 +294,22 @@ rg --files tests -g '*.py'
 ```
 
 For the baseline inventory, read every blob named by `git ls-tree -r --name-only
-<sha>`. For the candidate source inventory, take `git ls-files` plus the explicit
-`INTENDED_ADDITIONS` tuple in the SVG generator. Exclude the four generated
-architecture SVGs until their final regeneration; this avoids self-referential
-source metrics. Count a file as text only when it contains no NUL byte and decodes
+<sha>`. For the candidate source inventory, take only paths from `git ls-files`:
+every intended new file must first be explicitly reviewed and staged/tracked,
+while arbitrary untracked workspace debris is excluded. Exclude the four
+generated architecture SVGs until their final regeneration; this avoids
+self-referential source metrics. Count a file as text only when it contains no NUL byte and decodes
 as strict UTF-8, and count lines with `splitlines()`. This method measured **767
 text files and 12 binary files (3,878,632 bytes)** in the baseline, and **1,023
 text files and the same 12 binary files** in the candidate source inventory.
 Untracked test artifacts, caches, local outputs, and machine-local configuration
 are not part of either inventory. Binary files and Git's `-` numstat entries must
 be reported separately. The companion SVG generator records the pinned baseline
-plus manifest and content fingerprints in its metadata. The candidate commit is
-recorded in external exact-SHA CI evidence so generated files remain byte-stable
-after they are committed.
+plus manifest and content fingerprints in its metadata. Content fingerprints
+normalize checkout CRLF to LF before hashing, so Windows and POSIX checkouts
+reproduce the same Git-tree identity. The candidate commit is recorded in
+external exact-SHA CI evidence so generated files remain byte-stable after they
+are committed.
 
 ### 4.3 Why so much code was added
 
@@ -350,6 +356,35 @@ Montana's recurring design rule is that every important truth has one owner:
 This makes absence explicit. If the required owner cannot prove a fact, the result
 is unavailable, stale, disconnected, not-recording, or fail-dark—not a fallback
 writer, guessed identity, or optimistic status.
+
+#### Hardened experiment timeout/reconciliation boundary
+
+Mutating experiment commands run in a worker thread under the lifecycle lock
+and durable transition journal, while the REP request uses a bounded coroutine
+wait. Montana now retains and shields one serialized authoritative owner from
+that waiter through commit and every completion side effect. If the waiter times
+out or is cancelled, the owner is not cancelled and still attempts every
+reconciliation step once.
+
+The safe client interpretation of a timeout remains **outcome unknown**.
+Automatic and blind retries are forbidden; the client must re-query authoritative
+`experiment_status` and the operator snapshot, reconcile durable experiment
+identity/state, and show the ambiguity explicitly. A successful accepted reply
+now carries `committed: true`, `retry_safe: false`, and an
+`experiment_command_commit_v1` `commit_receipt`. A post-commit receipt or side-
+effect failure is surfaced as `committed_reconciliation_failed` with
+`committed: true`, `retry_safe: false`, explicit `reconciliation_failures`, and
+a receipt; it is never represented as rollback. Remaining steps are still
+covered by named `timeout-then-late-commit` and `post-commit` deterministic
+gates; both remain open until the exact frozen candidate passes them.
+attempted once.
+
+Shutdown freezes ingress and drains mutation, read, status, and operator-log
+owners before dependent teardown. Exceeding the drain deadline escalates the
+event but does not release those resources early. Deterministic late-commit,
+partial-reconciliation, bounded-read, and shutdown-drain regressions close the
+previous software gap. They do not close exact-candidate CI, real-Windows,
+frozen-build, dummy-load, or physical-laboratory gates.
 
 ### 5.2 Current high-level flow
 
@@ -415,9 +450,12 @@ missing authority, cancellation settlement, and exception propagation.
 The engine supervises long-lived tasks rather than letting them disappear as
 unobserved background work. Per-iteration alarm guards, bounded shutdown, restart
 ordering, and startup channel-pattern liveness make failure visible. The launcher
-uses bounded backoff and operator-visible restart behavior. Theme-driven GUI
-restart is transactional: ingress settles before re-exec instead of leaving two
-owners alive.
+uses bounded backoff and operator-visible restart behavior. Its normal shutdown
+is monotonic and retry-safe: child process, thread, IPC queue, descriptor, loop,
+and capability handles remain owned until terminal state is proven; the
+single-instance lock remains held until the Qt loop returns. Theme selection is
+validated and atomically deferred to the next ordinary launch, so a display
+preference never interrupts acquisition or creates a second owner.
 
 ### 6.2 Acquisition, driver registry, and capabilities
 
@@ -665,12 +703,14 @@ available.
 - acknowledgement may remove an item from audible/attention burden to prevent
   alarm fatigue, but active truth remains available and operator responsibility is
   explicit;
-- emergency-off hold-to-confirm is retained as startle protection against an
-  accidental destructive action; keyboard access and clear progress are required;
+- the shipped Keithley emergency action is a visible button protected by a
+  cancel-default confirmation modal; a hold gesture or global shortcut remains
+  an open hazard decision and must not be taught as current behavior;
 - overnight phase changes should attract attention rather than animate continuously;
 - controls reflow vertically at constrained widths; dense evidence tables may use
   deliberate scrolling; no value is clipped without a complete accessible path;
-- theme restart and ingress ownership are transactional.
+- theme selection is atomically deferred and does not touch ingress or process
+  ownership; normal launcher shutdown is fail-visible and exact-owner based.
 
 #### Responsive and future scale behavior
 
@@ -732,14 +772,43 @@ candidate binary is built and tested under the checklist.
 
 ### 6.15 Soak runner and evidence authority
 
-The short-soak path has an owned registry, exact-six execution authority, bounded
-artifacts, receipts, and cleanup. It is active only for supported POSIX source
-profiles; unsupported platforms fail closed. Process identity uses PID plus
-creation time, and monotonic durations are not reconstructed from wall-clock time.
+The short-soak path has an owned registry and exact-six execution authority. Its
+source and configuration are taken from read-only Git-archive snapshots of the
+manifest SHA rather than from the mutable checkout. The generated fixture is
+intentionally narrow: one passive mocked `LS218_1`, 16 descriptors, 16 bindings,
+and eight readings per sample. Production alarm, interlock, and physical-alarm
+topology is disabled, so this qualification proves lifecycle, persistence,
+restart, report generation/delivery, and evidence settlement—not production
+hazard coverage.
 
-Source-mode mock soaks are useful software evidence. They do not close the final
-15-minute exact-SHA run, 12/72-hour duration gates, Windows ONEDIR evidence, or
-physical instrument gates.
+At startup the coordinator immediately allocates the latest completed periodic
+slot. After the assistant replacement, exactly one dynamically aligned later
+boundary is admitted inside the 15-minute window. Each delivery joins two cuts:
+the pre-ACK `DELIVERING` state supplies exact owner authority, while the post-ACK
+rotated `last_terminal=SUCCEEDED` state supplies durable completion and ready
+health. The slots must be adjacent; assistant identity and generation must change;
+destination, artifact, ledger, receipt, state, and process evidence must agree.
+
+Before exec the runner binds exact PID/start/session identity. It temporarily
+becomes a Linux child subreaper, so even a descendant that creates a new session
+cannot escape shutdown accounting. The launcher log is continuously drained into
+an 8 MiB retained tail; a prospective PASS rejects truncation, while an already
+failing run may retain a marked, redacted bounded tail only after process writers
+settle. Prior subreaper state is restored before terminal acceptance.
+
+Periodic result, receipt ledger, and both content-addressed PNGs receive a private
+authority-bound identity/content seal. In-place mutation, hardlink creation,
+same-byte inode replacement, coordinated rewrite, and mutation interposed during
+PASS summary publication are rechecked and fail closed. The fixture topology and
+per-file hashes are recorded in the manifest and compared before launch and after
+shutdown. This is mutation-evident through terminal acceptance; permanent
+post-process authenticity still belongs to external access-controlled or signed
+evidence storage.
+
+The expanded focused Linux contract gate is green. Source-mode mock soaks remain
+software evidence: they do not close the clean final-SHA 15-minute execution until
+it is recorded, the 12/72-hour duration gates, Windows ONEDIR evidence, production
+alarm-topology qualification, or physical instrument gates.
 
 ## 7. Important file load before and after
 
@@ -823,7 +892,8 @@ GitHub Actions checkpoint passed Windows and Ubuntu partitions.
 ### 8.6 July 15–16: operator correction, final candidate, and exact ACK
 
 The GUI direction was corrected back toward panoramic observability, with the POD
-retained as an additive summary. Theme restart and ingress were made transactional.
+retained as an additive summary. Theme selection was changed to a validated
+next-launch preference so it cannot interrupt ingress or acquisition.
 Operator values were retained through stale/fault states; color semantics, 2 Hz
 digits, peak-preserving plots, physical labels, responsive reflow, and design-system
 v4 governance were aligned. Windows ONEDIR gates and WSL process-identity patches
@@ -835,7 +905,7 @@ sequence at report-authoring time.
 
 ### 9.1 Test architecture
 
-The test tree grew from **80,529 to 145,456 lines of Python**. It
+The test tree grew from **80,529 to 145,532 lines of Python**. It
 mirrors production subsystems and adds substantial contract, integration, E2E,
 process, and platform coverage.
 
@@ -869,21 +939,18 @@ when that is not what ran.
 
 ### 9.3 Recorded evidence and its limits
 
-The latest historical exact-SHA checkpoint, GitHub Actions run `29468630626` at
-`f5946b9`, passed all eight Windows/Ubuntu agents, core, GUI, and remaining jobs.
-Safe SQLite verification passed in every job; lint and requirements-lock checks
-passed in the remaining jobs. The exact `f5946b9` WSL archive
-`21FD239EFF747A3C02BC653D1056EC7036CA7C3A6D38E1BEAF6E86F29BB6A20E`
-matched 1,039/1,039 paths with zero blob mismatches and passed the recorded
-Ubuntu/WSL core, agent, H4, POSIX, and real-ZMQ checks.
+| Evidence object | Exact SHA | OS / environment | Reproducible command or record | Verdict and limit |
+|---|---|---|---|---|
+| Historical Montana CI checkpoint | `7607bc19eca51e5d76d917be2c7a27a6788ff62f` | GitHub-hosted `windows-latest` + `ubuntu-latest` | `gh run view 29488046377` | Eight agents/core/GUI/remaining jobs passed. This result cannot certify a later SHA. |
+| Latest published checkpoint | `e38930df6b2d823de55dddbc9224c129c4cc63e3` | GitHub-hosted `windows-latest` + `ubuntu-latest` | `gh run view 29657622723 --json headSha,status,conclusion,jobs,url` | Eight matrix jobs passed; safe-SQLite ran in every job and lint/format/lock ran in the remaining shards. It excludes the current dirty integration tree. |
+| Recorded source archive comparison | `f5946b99961989e63ca9af878c25976310251c08` | Recorded WSL/Linux source run; exact distro/kernel were not embedded in this report | Archive SHA-256 `21FD239EFF747A3C02BC653D1056EC7036CA7C3A6D38E1BEAF6E86F29BB6A20E` | Recorded 1,039/1,039 path agreement and zero blob mismatch; historical only and not a final-SHA qualification. |
+| Final candidate | pending | Windows, native-ext4 WSL/Linux, Windows ONEDIR, then hosted CI | Freeze `git rev-parse HEAD` and clean status; run the laboratory-checklist commands and `gh run view <new-run-id>` | No PASS claim until the same frozen SHA completes every applicable gate. |
 
-Subsequent candidate work has focused evidence including GUI, design-system,
-storage, periodic, WSL, alarm-acknowledgement, Ruff, formatter, and diff checks.
-Those passes are useful but cannot be carried forward automatically from
-`f5946b9`. The final sealed candidate requires its **own** full local verdict,
-15-minute clean-SHA soak, combined Windows ONEDIR smoke, and **own** eight-job CI
-pass. This report intentionally does not freeze a final count before those runs
-are complete.
+Focused GUI, design-system, storage, periodic, WSL, acknowledgement, Ruff,
+formatter, and diff checks remain useful diagnostic evidence, but this report
+does not aggregate moving-worktree counts into a release verdict. The final
+sealed candidate requires its **own** full local verdict, 15-minute clean-SHA
+native-ext4 soak, combined Windows ONEDIR smoke, and **own** eight-job CI pass.
 
 ### 9.4 Windows-specific hardening
 
@@ -899,7 +966,7 @@ The Windows campaign addressed:
 - TCP port/excluded-range behavior;
 - path escaping and regex fixtures;
 - temporary-directory cleanup and file locks;
-- Qt offscreen isolation and theme restart;
+- Qt offscreen isolation, deferred theme selection, and exact launcher shutdown;
 - frozen/ONEDIR resource, driver, and launcher contracts.
 
 The principle was capability-accurate tests. A host may skip a property it truly
@@ -909,9 +976,11 @@ and integrity test must still run.
 ### 9.5 What WSL proves—and does not prove
 
 WSL gives a genuine Linux userspace and POSIX source profile on the same physical
-developer machine. It helps compare process, path, monotonic time, filesystem, ZMQ,
-and soak behavior. It does not prove native Windows behavior, a frozen Windows
-binary, real hardware, or independent shutdown circuitry.
+developer machine. Developer checks from a Windows-mounted `/mnt/<drive>`
+`drvfs` tree are useful for lint and focused diagnostics, but only a clean clone
+on the distro's native ext4 filesystem qualifies filesystem/process/soak
+behavior. Neither mode proves native Windows behavior, a frozen Windows binary,
+real hardware, or independent shutdown circuitry.
 
 Final evidence should record distro, kernel, Python, SQLite, source SHA, filesystem
 location, commands, pass/skip counts, and artifact hashes.
@@ -1072,9 +1141,9 @@ what software tests can prove and what only the apparatus can prove.
 - durable attention and incident history across GUI restarts;
 - unified cooldown mission view with reference comparison and skew visibility;
 - measured operator-scenario improvements;
-- passive infrastructure presentation at fleet scale;
+- passive infrastructure presentation at ordinary configured-lab scale;
 - version-matched onboard help and documented read-only snapshot API;
-- 100+ sensor / 4K projector mode using virtualization, aggregation, search,
+- deferred F37 100+ sensor / 4K projector mode using virtualization, aggregation, search,
   filtering, semantic zoom, and explicit density controls;
 - consolidation of large test harnesses and periodic modules after behavior is
   sealed;
@@ -1302,10 +1371,11 @@ $env:PYTHONPATH = "$PWD\src"
 git diff --check
 ```
 
-Typical WSL/Linux commands:
+Typical WSL/Linux developer commands (a mounted `drvfs` checkout is acceptable
+for lint/focused diagnostics, not for the qualification soak):
 
 ```bash
-cd /mnt/c/Users/3fall/Projects/cryodaq
+cd /path/to/cryodaq
 export PYTHONPATH="$PWD/src"
 .venv/bin/python -m pytest -q <focused-paths>
 .venv/bin/python -m pytest -q tests/
@@ -1390,20 +1460,28 @@ beautiful, but it must preserve the panoramic truth that experienced cryogenic
 operators depend on. Summary surfaces are useful only when they remain additive,
 provenance-rich, and honest about what they do not know.
 
-The campaign is large: 489 paths changed in the candidate source comparison, 166 commits through
-final sealing, 133,961 insertions, and a source inventory that grew from 188,539
-to 312,978 text lines. The delivered tree contains 1,039 files and 318,531 text
-lines. That scale justifies this report, the companion architecture graphs, strict
-review, and a deliberate release boundary. It also creates a future obligation:
+The interim integration snapshot is large: it recorded 489 changed paths,
+166 committed changesets through checkpoint `7607bc1` plus the then-owned
+working slice, 134,090 insertions, and source inventory growth from 188,539 to
+313,075 text lines. Those figures must be regenerated from the final quiescent
+index before publication; they are scale evidence, not a final release
+fingerprint. That scale justifies this report, the companion architecture graphs,
+strict review, and a deliberate release boundary. It also creates a future obligation:
 maintainers must prevent the new contracts and evidence harnesses from becoming a
 second generation of hotspots.
 
 The software is materially harder to fool and easier to extend than the v0.64.1
-baseline. It is not yet permissible to call the system physically lab-accepted
-until the final SHA passes its own CI and the prescribed Windows, dummy-load,
-independent-final-element, operator, and physical verification gates. That is not a
-qualification of Montana's value; it is the evidence discipline Montana was built
-to enforce.
+baseline, but the roadmap is not code-complete. Production still lacks the
+reasoned safety-recovery GUI, durable alarm-attention/cooldown mission authority,
+ordinary-scale passive infrastructure-health wiring, and the executable
+support-capture/status/offline-docs path. The F37 100+ sensor / 4K projector,
+semantic-zoom, and fleet-virtualization mode remains explicitly deferred.
+Whole-shell operator,
+accessibility, and performance evidence also remains open. After those software
+slices close, the frozen final SHA must still pass its own CI and the prescribed
+Windows, dummy-load, independent-final-element, operator, and physical
+verification gates. This is not a qualification of Montana's value; it is the
+evidence discipline Montana was built to enforce.
 
 ---
 
