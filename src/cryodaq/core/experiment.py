@@ -7,7 +7,10 @@ import json
 import logging
 import os
 import shutil
+import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum, StrEnum
@@ -354,6 +357,7 @@ class ExperimentManager:
         self._state = ExperimentState(app_mode=AppMode.EXPERIMENT)
         self._operator_phase: str | None = None
         self._operator_snapshot = OperatorExperimentSnapshot(0, None, None, None)
+        self._mutation_lock = threading.RLock()
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
         self._load_state()
         if self._active is not None:
@@ -384,6 +388,18 @@ class ExperimentManager:
         """
 
         return self._operator_snapshot
+
+    @contextmanager
+    def experiment_cas(self, expected_experiment_id: str) -> Iterator[str]:
+        """Hold the admission-to-durable-mutation experiment CAS lock."""
+        if type(expected_experiment_id) is not str or not expected_experiment_id:
+            raise RuntimeError("Experiment identity is required.")
+        with self._mutation_lock:
+            if self._active is None or self._active.experiment_id != expected_experiment_id:
+                raise RuntimeError("Experiment identity mismatch.")
+            yield expected_experiment_id
+            if self._active is None or self._active.experiment_id != expected_experiment_id:
+                raise RuntimeError("Experiment identity changed during mutation.")
 
     def get_templates(self) -> list[ExperimentTemplate]:
         if self._templates_cache is None:
@@ -1146,29 +1162,31 @@ class ExperimentManager:
         return AppMode(value)
 
     def _set_active(self, info: ExperimentInfo) -> None:
-        if self._active is None or self._active.experiment_id != info.experiment_id:
-            self._operator_phase = None
-        self._active = info
-        self._state = ExperimentState(
-            app_mode=self._state.app_mode,
-            active_experiment_id=info.experiment_id,
-        )
-        try:
-            self._write_state()
-        finally:
-            # _write_state already follows the manager's in-memory commit.
-            # If durability fails, preserve the exception while ensuring the
-            # observational cut cannot publish the previous lifecycle state.
-            self._refresh_operator_snapshot()
+        with self._mutation_lock:
+            if self._active is None or self._active.experiment_id != info.experiment_id:
+                self._operator_phase = None
+            self._active = info
+            self._state = ExperimentState(
+                app_mode=self._state.app_mode,
+                active_experiment_id=info.experiment_id,
+            )
+            try:
+                self._write_state()
+            finally:
+                # _write_state already follows the manager's in-memory commit.
+                # If durability fails, preserve the exception while ensuring
+                # the observational cut cannot publish the previous state.
+                self._refresh_operator_snapshot()
 
     def _clear_active(self) -> None:
-        self._active = None
-        self._operator_phase = None
-        self._state = ExperimentState(app_mode=self._state.app_mode, active_experiment_id=None)
-        try:
-            self._write_state()
-        finally:
-            self._refresh_operator_snapshot()
+        with self._mutation_lock:
+            self._active = None
+            self._operator_phase = None
+            self._state = ExperimentState(app_mode=self._state.app_mode, active_experiment_id=None)
+            try:
+                self._write_state()
+            finally:
+                self._refresh_operator_snapshot()
 
     def _refresh_operator_snapshot(self, *, force: bool = False) -> None:
         previous = self._operator_snapshot
@@ -1476,6 +1494,15 @@ class ExperimentManager:
         operator: str = "",
         *,
         expected_experiment_id: str,
+    ) -> dict[str, Any]:
+        with self.experiment_cas(expected_experiment_id):
+            return self._advance_phase_locked(phase, operator, expected_experiment_id)
+
+    def _advance_phase_locked(
+        self,
+        phase: str,
+        operator: str = "",
+        expected_experiment_id: str = "",
     ) -> dict[str, Any]:
         """Transition phase only for the exact currently-authoritative experiment."""
         if self._active is None:

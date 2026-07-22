@@ -65,9 +65,7 @@ class _TriggerChip(QLabel):
         self.setFont(font)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setContentsMargins(6, 0, 6, 0)
-        self.setStyleSheet(
-            f"background: {color}; color: {theme.BACKGROUND}; border-radius: 3px;"
-        )
+        self.setStyleSheet(f"background: {color}; color: {theme.BACKGROUND}; border-radius: 3px;")
 
 
 class _InsightCard(QFrame):
@@ -77,8 +75,7 @@ class _InsightCard(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setStyleSheet(
-            f"background: {theme.SURFACE_CARD}; border-radius: 6px;"
-            f" border: 1px solid {theme.BORDER_SUBTLE};"
+            f"background: {theme.SURFACE_CARD}; border-radius: 6px; border: 1px solid {theme.BORDER_SUBTLE};"
         )
 
         root = QVBoxLayout(self)
@@ -100,11 +97,11 @@ class _InsightCard(QFrame):
         root.addLayout(header)
 
         # LLM text
-        text_label = QLabel(entry.text)
+        text_label = QLabel()
+        text_label.setTextFormat(Qt.TextFormat.PlainText)
+        text_label.setText(entry.text)
         text_label.setWordWrap(True)
-        text_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         text_font = QFont(theme.FONT_BODY, theme.FONT_SIZE_SM)
         text_label.setFont(text_font)
         text_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
@@ -142,10 +139,7 @@ class AssistantInsightPanel(QWidget):
         # Panel header
         header_frame = QFrame()
         header_frame.setFixedHeight(40)
-        header_frame.setStyleSheet(
-            f"background: {theme.SURFACE_PANEL};"
-            f" border-bottom: 1px solid {theme.BORDER};"
-        )
+        header_frame.setStyleSheet(f"background: {theme.SURFACE_PANEL}; border-bottom: 1px solid {theme.BORDER};")
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(12, 0, 12, 0)
 
@@ -188,9 +182,7 @@ class AssistantInsightPanel(QWidget):
         self._placeholder.setFont(placeholder_font)
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
-        self._placeholder.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        self._placeholder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._cards_layout.addWidget(self._placeholder)
 
     def push_insight(

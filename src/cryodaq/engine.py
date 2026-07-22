@@ -307,17 +307,17 @@ async def _run_operator_log_command(
             raise ValueError("Operator log message must not be empty.")
 
         experiment_id = cmd.get("experiment_id")
-        if experiment_id is None and cmd.get("current_experiment", True):
-            experiment_id = experiment_manager.active_experiment_id
-
-        entry = await writer.append_operator_log(
-            message=message,
-            author=str(cmd.get("author", "")).strip(),
-            source=str(cmd.get("source", "")).strip() or "command",
-            experiment_id=str(experiment_id) if experiment_id is not None else None,
-            tags=cmd.get("tags"),
-            timestamp=_parse_log_time(cmd.get("timestamp")),
-        )
+        if type(experiment_id) is not str or not experiment_id.strip():
+            raise ValueError("experiment_id is required for operator log mutations.")
+        with experiment_manager.experiment_cas(experiment_id):
+            entry = await writer.append_operator_log(
+                message=message,
+                author=str(cmd.get("author", "")).strip(),
+                source=str(cmd.get("source", "")).strip() or "command",
+                experiment_id=experiment_id,
+                tags=cmd.get("tags"),
+                timestamp=_parse_log_time(cmd.get("timestamp")),
+            )
         await _publish_operator_log_entry(broker, entry)
         return {"ok": True, "entry": entry.to_payload()}
 

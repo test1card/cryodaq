@@ -320,8 +320,14 @@ class TelegramCommandBot:
         elif command in ("/help", "/start"):
             await self._send(chat_id, _HELP_TEXT)
         elif command == "/log":
-            log_text = text[len("/log") :].strip()
-            await self._cmd_log(chat_id, log_text, msg)
+            log_args = text[len("/log") :].strip().split(maxsplit=1)
+            if len(log_args) != 2:
+                await self._send(
+                    chat_id,
+                    "вќЊ РЈРєР°Р¶РёС‚Рµ experiment_id Рё С‚РµРєСЃС‚: /log <experiment_id> <text>",
+                )
+                return
+            await self._cmd_log(chat_id, log_args[1], log_args[0], msg)
         elif command == "/phase":
             phase_args = text[len("/phase") :].strip().split()
             if len(phase_args) != 2:
@@ -475,7 +481,7 @@ class TelegramCommandBot:
     def _cmd_help(self) -> str:
         return _HELP_TEXT
 
-    async def _cmd_log(self, chat_id: int, text: str, msg: dict) -> None:
+    async def _cmd_log(self, chat_id: int, text: str, experiment_id: str, msg: dict) -> None:
         if not text:
             await self._send(chat_id, "❌ Укажите текст: /log &lt;текст&gt;")
             return
@@ -490,6 +496,7 @@ class TelegramCommandBot:
                 "message": text,
                 "author": username,
                 "source": "telegram",
+                "experiment_id": experiment_id,
             }
         )
         if result.get("ok"):

@@ -365,10 +365,19 @@ class DashboardView(QScrollArea):
         """Send log entry via ZMQ and refresh visible entries."""
         if self._read_only or not self._connected or not self._authority_valid:
             return
+        experiment_id = self._authority_experiment_id
+        if type(experiment_id) is not str or not experiment_id:
+            logger.warning("log mutation rejected without originating experiment identity")
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         self._log_submit_worker = ZmqCommandWorker(
-            {"cmd": "log_entry", "message": message, "source": "dashboard"},
+            {
+                "cmd": "log_entry",
+                "message": message,
+                "source": "dashboard",
+                "experiment_id": experiment_id,
+            },
             parent=self,
         )
         self._log_submit_worker.finished.connect(self._on_log_entry_result)

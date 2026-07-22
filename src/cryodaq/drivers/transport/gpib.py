@@ -78,6 +78,8 @@ class GPIBTransport:
         self._close_done: threading.Event | None = None
         self._close_error: BaseException | None = None
         self._cancelled_operation_pending = False
+        self._settlement_owner: threading.Thread | None = None
+        self._operation_active = False
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -211,6 +213,15 @@ class GPIBTransport:
                 self._executor = None
                 resource = None
             else:
+                settlement_owner = self._settlement_owner
+                if settlement_owner is not None and settlement_owner.is_alive():
+                    self._terminal_unsettled = True
+                    raise GPIBIncompleteCloseError("GPIB terminal settlement owner is still running")
+                if self._close_error is not None:
+                    self._terminal_unsettled = True
+                    raise GPIBIncompleteCloseError(
+                        "GPIB resource close failed; handle remains quarantined"
+                    ) from self._close_error
                 resource = self._resource
                 executor = None
                 if resource is None:
@@ -318,12 +329,21 @@ class GPIBTransport:
 
     async def recover(self) -> bool:
         """Run explicit SDC/IFC recovery before a fresh generation is used."""
-        if not self._query_desynchronized:
-            return True
+        with self._state_lock:
+            if not self._query_desynchronized:
+                return True
+            if not self._session_open or not self._open_settled.is_set() or self._terminal_unsettled:
+                return False
+            generation = self._open_generation
         if not await self.clear_bus():
             return False
         if not await self.send_ifc():
             return False
+        with self._state_lock:
+            if generation != self._open_generation or not self._open_settled.is_set() or self._terminal_unsettled:
+                return False
+            self._open_generation += 1
+            self._query_desynchronized = False
         return True
 
     async def flush_input(self) -> None:
@@ -363,8 +383,12 @@ class GPIBTransport:
             self._open_settled.clear()
         loop = asyncio.get_running_loop()
         try:
+            with self._state_lock:
+                self._operation_active = True
             pending = loop.run_in_executor(self._get_executor(), self._tracked_operation, operation, args)
         except BaseException:
+            with self._state_lock:
+                self._operation_active = False
             self._open_settled.set()
             raise
         caller_cancelled: asyncio.CancelledError | None = None
@@ -373,10 +397,32 @@ class GPIBTransport:
                 await asyncio.shield(pending)
             except asyncio.CancelledError as exc:
                 # Cancellation of the asyncio wrapper must not wait for an
-                # arbitrary VISA read.  Retain the executor owner until its
-                # worker settles; overlap remains blocked by open_settled.
+                # arbitrary VISA read.  Retain terminal-close intent until
+                # the exact worker settles; overlap remains blocked by
+                # open_settled and the retained handle is then closed.
                 with self._state_lock:
                     self._cancelled_operation_pending = True
+                    self._terminal_unsettled = True
+                    self._open_settled.clear()
+                # The worker can finish in the cancellation race between the
+                # loop condition and ``shield`` delivery.  In that case its
+                # normal ``finally`` ran before terminal intent was recorded;
+                # enqueue the retained-handle settlement explicitly so the
+                # generation cannot remain falsely open forever.
+                with self._state_lock:
+                    operation_already_settled = not self._operation_active
+                if operation_already_settled:
+                    with self._state_lock:
+                        owner = self._settlement_owner
+                        if owner is None or not owner.is_alive():
+                            owner = threading.Thread(
+                                target=self._settle_executor_operation,
+                                kwargs={"operation_succeeded": True},
+                                daemon=True,
+                                name=f"gpib-settle-{self._resource_str or 'gpib'}",
+                            )
+                            self._settlement_owner = owner
+                            owner.start()
                 raise exc
             except BaseException:
                 break
@@ -407,6 +453,7 @@ class GPIBTransport:
         resource = None
         terminal = False
         with self._state_lock:
+            self._operation_active = False
             cancelled = self._cancelled_operation_pending
             if cancelled and operation_succeeded is not None:
                 # Reconcile a cancelled wrapper only after the retained VISA
@@ -415,9 +462,7 @@ class GPIBTransport:
                 self._cancelled_operation_pending = False
             if self._terminal_unsettled:
                 terminal = True
-                if not cancelled:
-                    resource = self._resource
-                    self._resource = None
+                resource = self._resource
         if resource is not None:
             try:
                 # This runs inside the transport's dedicated executor.  A
@@ -426,14 +471,26 @@ class GPIBTransport:
                 # call returns (or raises) in the same generation.
                 resource.close()
             except Exception as exc:
-                log.warning("GPIB: error closing unsettled %s — %s", self._resource_str, exc)
+                with self._state_lock:
+                    self._close_error = exc
+                    self._terminal_unsettled = True
+                    self._session_open = True
+                    self._open_settled.set()
+                return
         if terminal and resource is not None:
             with self._state_lock:
+                if self._resource is resource:
+                    self._resource = None
                 self._session_open = False
+                self._terminal_unsettled = False
+                self._close_error = None
         self._open_settled.set()
         if terminal and resource is not None and self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
+        with self._state_lock:
+            if self._settlement_owner is threading.current_thread():
+                self._settlement_owner = None
 
     # ------------------------------------------------------------------
     # Blocking methods (run in executor)
