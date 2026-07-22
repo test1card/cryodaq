@@ -257,6 +257,15 @@ class SafetyManager:
         self._abort_generation = 0
         self._full_abort_generation = 0
 
+        # A global OFF is one physical operation for one exact driver/source
+        # generation and abort epoch. Concurrent callers share this retained
+        # owner instead of issuing competing bus writes. Caller cancellation
+        # never cancels the owner; the task is cleared only after settlement.
+        self._global_off_owner_task: asyncio.Task[Any] | None = None
+        self._global_off_owner_driver: object | None = None
+        self._global_off_owner_generation: _ReviewedSourceGeneration | None = None
+        self._global_off_owner_abort_generation = -1
+
         self._keithley_patterns = [re.compile(p) for p in self._config.keithley_channel_patterns]
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
         self._broker.set_overflow_callback(lambda: self._fault("SafetyBroker overflow - data lost"))
@@ -2360,6 +2369,45 @@ class SafetyManager:
         if caller_cancelled is not None:
             raise caller_cancelled
 
+    async def _run_global_output_off(self) -> Any:
+        """Execute one complete driver-compatible global-OFF operation."""
+        try:
+            return await self._keithley.emergency_off(None)
+        except TypeError:
+            # Keep the legacy fallback inside the retained owner so
+            # concurrent waiters cannot fan out into duplicate operations.
+            return await self._keithley.emergency_off()
+
+    def _global_output_off_owner(self) -> asyncio.Task[Any]:
+        """Return the retained owner for this exact source/abort generation."""
+        task = self._global_off_owner_task
+        if (
+            task is not None
+            and not task.done()
+            and self._global_off_owner_driver is self._keithley
+            and self._global_off_owner_generation is self._reviewed_source_generation
+            and self._global_off_owner_abort_generation == self._abort_generation
+        ):
+            return task
+
+        task = asyncio.create_task(
+            self._run_global_output_off(),
+            name="safety_manager_global_off_owner",
+        )
+        self._global_off_owner_task = task
+        self._global_off_owner_driver = self._keithley
+        self._global_off_owner_generation = self._reviewed_source_generation
+        self._global_off_owner_abort_generation = self._abort_generation
+        return task
+
+    def _release_global_output_off_owner(self, task: asyncio.Task[Any]) -> None:
+        """Release only the exact retained owner after it is terminal."""
+        if self._global_off_owner_task is task and task.done():
+            self._global_off_owner_task = None
+            self._global_off_owner_driver = None
+            self._global_off_owner_generation = None
+            self._global_off_owner_abort_generation = -1
+
     async def _ensure_output_off(self, channel: str | None = None) -> bool:
         """Force Keithley output OFF. True iff the driver CONFIRMED it.
 
@@ -2370,15 +2418,15 @@ class SafetyManager:
         if self._keithley is None:
             return True
         caller_cancelled: asyncio.CancelledError | None = None
-        off_task = asyncio.create_task(self._keithley.emergency_off(channel))
+        off_task = (
+            self._global_output_off_owner()
+            if channel is None
+            else asyncio.create_task(self._keithley.emergency_off(channel))
+        )
         confirmed, error, cancelled = await _settle_shielded_hardware_task(off_task)
         caller_cancelled = cancelled
-        if isinstance(error, TypeError) and channel is None:
-            # Legacy drivers may expose only emergency_off().  Its fallback
-            # remains separately owned and cancellation-resistant.
-            off_task = asyncio.create_task(self._keithley.emergency_off())
-            confirmed, error, cancelled = await _settle_shielded_hardware_task(off_task)
-            caller_cancelled = caller_cancelled or cancelled
+        if channel is None:
+            self._release_global_output_off_owner(off_task)
         if error is not None:
             logger.critical("_ensure_output_off failed: %s", error)
             confirmed = False

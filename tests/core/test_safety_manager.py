@@ -788,6 +788,109 @@ async def test_safe_off_fault_latched_shields_emergency_off():
     assert off_completed.is_set(), "Cancellation of _safe_off swallowed shielded _ensure_output_off"
 
 
+async def test_simultaneous_global_off_requests_share_one_driver_owner():
+    """Concurrent global-OFF waiters must produce one physical operation."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def blocked_off(channel=None):
+        nonlocal calls
+        assert channel is None
+        calls += 1
+        entered.set()
+        await release.wait()
+        return True
+
+    k = _mock_keithley()
+    k.emergency_off.side_effect = blocked_off
+    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
+
+    first = asyncio.create_task(manager._ensure_output_off())
+    await entered.wait()
+    second = asyncio.create_task(manager._ensure_output_off())
+    await asyncio.sleep(0)
+    assert calls == 1
+
+    release.set()
+    assert await first is True
+    assert await second is True
+    assert calls == 1
+
+
+async def test_cancelled_global_off_waiter_does_not_cancel_shared_owner():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+    calls = 0
+
+    async def blocked_off(channel=None):
+        nonlocal calls
+        assert channel is None
+        calls += 1
+        entered.set()
+        await release.wait()
+        completed.set()
+        return True
+
+    k = _mock_keithley()
+    k.emergency_off.side_effect = blocked_off
+    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
+
+    cancelled_waiter = asyncio.create_task(manager._ensure_output_off())
+    await entered.wait()
+    surviving_waiter = asyncio.create_task(manager._ensure_output_off())
+    await asyncio.sleep(0)
+    cancelled_waiter.cancel()
+    await asyncio.sleep(0)
+    assert not completed.is_set()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    assert await surviving_waiter is True
+    assert completed.is_set()
+    assert calls == 1
+
+
+async def test_settled_global_off_owner_is_not_reused_by_later_request():
+    k = _mock_keithley()
+    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
+
+    assert await manager._ensure_output_off() is True
+    assert await manager._ensure_output_off() is True
+    assert k.emergency_off.await_count == 2
+
+
+async def test_shared_global_off_failure_is_fail_closed_for_all_waiters():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def failing_off(channel=None):
+        nonlocal calls
+        assert channel is None
+        calls += 1
+        entered.set()
+        await release.wait()
+        raise RuntimeError("driver OFF failure")
+
+    k = _mock_keithley()
+    k.emergency_off.side_effect = failing_off
+    manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
+
+    first = asyncio.create_task(manager._ensure_output_off())
+    await entered.wait()
+    second = asyncio.create_task(manager._ensure_output_off())
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await first is False
+    assert await second is False
+    assert calls == 1
+    assert manager.snapshot_operator_safety().verified_off is False
+
+
 @pytest.mark.parametrize("cancel_after_write", range(8))
 async def test_cancelled_start_settles_before_full_off_at_every_write_boundary(
     cancel_after_write: int,
