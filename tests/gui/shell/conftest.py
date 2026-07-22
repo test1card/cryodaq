@@ -18,6 +18,10 @@ from __future__ import annotations
 import pytest
 from PySide6.QtCore import QObject, Signal
 
+import cryodaq.gui.zmq_client as _zmq_client
+
+_REAL_ZMQ_COMMAND_WORKER = _zmq_client.ZmqCommandWorker
+
 
 class _SyncCommandWorkerStub(QObject):
     finished = Signal(dict)
@@ -43,6 +47,13 @@ class _SyncCommandWorkerStub(QObject):
 
     def quit(self) -> None:
         return None
+
+
+@pytest.fixture
+def real_zmq_worker(monkeypatch):
+    """Opt a test into the real QThread worker for settlement coverage."""
+
+    monkeypatch.setattr(_zmq_client, "ZmqCommandWorker", _REAL_ZMQ_COMMAND_WORKER)
 
 
 @pytest.fixture(autouse=True)

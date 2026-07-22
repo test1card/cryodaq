@@ -77,6 +77,7 @@ class GPIBTransport:
         self._close_owner: threading.Thread | None = None
         self._close_done: threading.Event | None = None
         self._close_error: BaseException | None = None
+        self._cancelled_operation_pending = False
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -371,8 +372,12 @@ class GPIBTransport:
             try:
                 await asyncio.shield(pending)
             except asyncio.CancelledError as exc:
-                caller_cancelled = caller_cancelled or exc
-                continue
+                # Cancellation of the asyncio wrapper must not wait for an
+                # arbitrary VISA read.  Retain the executor owner until its
+                # worker settles; overlap remains blocked by open_settled.
+                with self._state_lock:
+                    self._cancelled_operation_pending = True
+                raise exc
             except BaseException:
                 break
         try:
@@ -386,19 +391,33 @@ class GPIBTransport:
         return result
 
     def _tracked_operation(self, operation, args):
+        succeeded = False
         try:
-            return operation(*args)
+            result = operation(*args)
+            succeeded = True
+            return result
+        except BaseException:
+            if operation == self._blocking_query:
+                self._query_desynchronized = True
+            raise
         finally:
-            self._settle_executor_operation()
+            self._settle_executor_operation(operation_succeeded=succeeded)
 
-    def _settle_executor_operation(self) -> None:
+    def _settle_executor_operation(self, *, operation_succeeded: bool | None = None) -> None:
         resource = None
         terminal = False
         with self._state_lock:
+            cancelled = self._cancelled_operation_pending
+            if cancelled and operation_succeeded is not None:
+                # Reconcile a cancelled wrapper only after the retained VISA
+                # call settles.  Failed queries remain quarantined; a
+                # successful query is explicitly non-poisoning.
+                self._cancelled_operation_pending = False
             if self._terminal_unsettled:
                 terminal = True
-                resource = self._resource
-                self._resource = None
+                if not cancelled:
+                    resource = self._resource
+                    self._resource = None
         if resource is not None:
             try:
                 # This runs inside the transport's dedicated executor.  A
@@ -408,11 +427,11 @@ class GPIBTransport:
                 resource.close()
             except Exception as exc:
                 log.warning("GPIB: error closing unsettled %s — %s", self._resource_str, exc)
-        if terminal:
+        if terminal and resource is not None:
             with self._state_lock:
                 self._session_open = False
         self._open_settled.set()
-        if terminal and self._executor is not None:
+        if terminal and resource is not None and self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 

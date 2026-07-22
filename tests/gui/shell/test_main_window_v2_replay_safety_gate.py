@@ -64,7 +64,7 @@ def test_recent_reading_before_safety_cannot_enable_source() -> None:
         _stop(window)
 
 
-def test_authoritative_live_safety_transition_enables_then_revokes_source() -> None:
+def test_telemetry_safety_state_cannot_enable_source_mutations() -> None:
     _app()
     window = MainWindowV2()
     try:
@@ -72,8 +72,10 @@ def test_authoritative_live_safety_transition_enables_then_revokes_source() -> N
         window._ensure_overlay("source")
         panel = window._keithley_panel
         assert panel is not None
-        assert panel._smua_block._start_btn.isEnabled() is True
-        assert panel._start_both_btn.isEnabled() is True
+        # A telemetry reading is not Safety-owner authority.  The controls
+        # remain fail-closed until a coherent typed readiness receipt arrives.
+        assert panel._smua_block._start_btn.isEnabled() is False
+        assert panel._start_both_btn.isEnabled() is False
 
         window._dispatch_reading(_reading("analytics/safety_state", state="fault_latched"))
         assert panel._smua_block._start_btn.isEnabled() is False
@@ -100,7 +102,9 @@ def test_replay_recent_readings_leave_every_mutating_panel_read_only(monkeypatch
         alarm = window._alarm_panel
         assert source is not None and experiment is not None and log is not None
 
-        assert source._connected and source._safety_ready and source._read_only
+        assert not source._connected
+        assert not source._safety_ready
+        assert source._read_only
         assert source._smua_block._start_btn.isEnabled() is False
         assert source._smua_block._emergency_btn.isEnabled() is False
         assert source._start_both_btn.isEnabled() is False

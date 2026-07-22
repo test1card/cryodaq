@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -849,12 +849,18 @@ def test_hostile_backend_copy_remains_literal_and_bidi_visible(qapp):
     assert "&lt;b&gt;Не готово&lt;/b&gt;" in label.toolTip()
 
 
-def test_unexpected_child_qt_failure_hides_and_permanently_fails_display(qapp):
+def test_unexpected_child_qt_failure_hides_and_permanently_fails_display(qapp, monkeypatch):
     display = OperatorDisplay()
     display.show()
     footer = display._sections["support"].card.footer
-    footer.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    # Exercise the same failed-closed boundary without manually draining a
+    # global DeferredDelete queue.  That Qt operation is order-dependent on
+    # Windows when a preceding shell test has nested widgets pending teardown.
+    def fail_commit(*_args, **_kwargs):
+        raise RuntimeError("simulated child Qt commit failure")
+
+    monkeypatch.setattr(footer, "_commit_render", fail_commit)
 
     with pytest.raises(RuntimeError):
         display.render(_snapshot("normal"))

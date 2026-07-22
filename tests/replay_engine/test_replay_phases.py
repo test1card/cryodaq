@@ -38,7 +38,9 @@ def stub(tmp_path: Path) -> ReplayExperimentStub:
 
 def test_create_retroactive_returns_active_marker(stub: ReplayExperimentStub) -> None:
     exp = stub.create_retroactive(
-        title="Test", sample="S-1", operator="op",
+        title="Test",
+        sample="S-1",
+        operator="op",
         start_time="2026-05-07T10:00:00+00:00",
     )
     assert exp["title"] == "Test"
@@ -50,11 +52,11 @@ def test_create_retroactive_returns_active_marker(stub: ReplayExperimentStub) ->
     assert "experiment_id" in exp
 
 
-def test_create_retroactive_persists_metadata_with_is_replay_marker(
-    stub: ReplayExperimentStub, tmp_path: Path
-) -> None:
+def test_create_retroactive_persists_metadata_with_is_replay_marker(stub: ReplayExperimentStub, tmp_path: Path) -> None:
     exp = stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
     )
     md_path = tmp_path / "experiments" / exp["experiment_id"] / "metadata.json"
@@ -66,19 +68,25 @@ def test_create_retroactive_persists_metadata_with_is_replay_marker(
 
 def test_create_retroactive_rejects_when_already_active(stub: ReplayExperimentStub) -> None:
     stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
     )
     with pytest.raises(RuntimeError, match="already active"):
         stub.create_retroactive(
-            title="T2", sample="S2", operator="o",
+            title="T2",
+            sample="S2",
+            operator="o",
             start_time="2026-05-07T11:00:00+00:00",
         )
 
 
 def test_create_retroactive_optional_fields(stub: ReplayExperimentStub) -> None:
     exp = stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
         description="desc text",
         notes="notes text",
@@ -91,10 +99,12 @@ def test_create_retroactive_optional_fields(stub: ReplayExperimentStub) -> None:
 
 def test_advance_phase_records_transition(stub: ReplayExperimentStub) -> None:
     stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
     )
-    stub.advance_phase("cooldown")
+    stub.advance_phase("cooldown", expected_experiment_id=stub.active_experiment["experiment_id"])
     phases = stub.phases
     assert len(phases) == 1
     assert phases[0]["phase"] == "preparation"
@@ -105,12 +115,14 @@ def test_advance_phase_records_transition(stub: ReplayExperimentStub) -> None:
 
 def test_advance_phase_chain_records_each_transition(stub: ReplayExperimentStub) -> None:
     stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
     )
-    stub.advance_phase("cooldown")
-    stub.advance_phase("measurement")
-    stub.advance_phase("warmup")
+    stub.advance_phase("cooldown", expected_experiment_id=stub.active_experiment["experiment_id"])
+    stub.advance_phase("measurement", expected_experiment_id=stub.active_experiment["experiment_id"])
+    stub.advance_phase("warmup", expected_experiment_id=stub.active_experiment["experiment_id"])
     phases = stub.phases
     assert [p["phase"] for p in phases] == ["preparation", "cooldown", "measurement"]
     assert stub.current_phase == "warmup"
@@ -118,17 +130,17 @@ def test_advance_phase_chain_records_each_transition(stub: ReplayExperimentStub)
 
 def test_advance_phase_without_active_raises(stub: ReplayExperimentStub) -> None:
     with pytest.raises(RuntimeError, match="No active"):
-        stub.advance_phase("cooldown")
+        stub.advance_phase("cooldown", expected_experiment_id="missing")
 
 
-def test_advance_phase_persists_to_metadata(
-    stub: ReplayExperimentStub, tmp_path: Path
-) -> None:
+def test_advance_phase_persists_to_metadata(stub: ReplayExperimentStub, tmp_path: Path) -> None:
     exp = stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
     )
-    stub.advance_phase("cooldown")
+    stub.advance_phase("cooldown", expected_experiment_id=exp["experiment_id"])
     md_path = tmp_path / "experiments" / exp["experiment_id"] / "metadata.json"
     data = json.loads(md_path.read_text(encoding="utf-8"))
     assert data["phase"] == "cooldown"
@@ -139,7 +151,9 @@ def test_advance_phase_persists_to_metadata(
 def test_active_experiment_returns_copy(stub: ReplayExperimentStub) -> None:
     """Mutating the returned dict must NOT affect internal state."""
     exp = stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
     )
     exp["title"] = "MUTATED"
@@ -148,10 +162,12 @@ def test_active_experiment_returns_copy(stub: ReplayExperimentStub) -> None:
 
 def test_phases_returns_copy(stub: ReplayExperimentStub) -> None:
     stub.create_retroactive(
-        title="T", sample="S", operator="o",
+        title="T",
+        sample="S",
+        operator="o",
         start_time="2026-05-07T10:00:00+00:00",
     )
-    stub.advance_phase("cooldown")
+    stub.advance_phase("cooldown", expected_experiment_id=stub.active_experiment["experiment_id"])
     phases = stub.phases
     phases[0]["phase"] = "MUTATED"
     assert stub.phases[0]["phase"] == "preparation"
@@ -167,10 +183,12 @@ def test_current_phase_none_when_no_active(stub: ReplayExperimentStub) -> None:
 
 
 def test_allowlist_contains_exactly_two_phase_commands() -> None:
-    assert _REPLAY_ALLOWED_EXPERIMENT_CMDS == frozenset({
-        "experiment_create_retroactive",
-        "experiment_advance_phase",
-    })
+    assert _REPLAY_ALLOWED_EXPERIMENT_CMDS == frozenset(
+        {
+            "experiment_create_retroactive",
+            "experiment_advance_phase",
+        }
+    )
 
 
 def test_blocked_keithley_set_target() -> None:
@@ -232,9 +250,7 @@ def replay_engine_with_stub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from cryodaq.replay_engine import server as server_module
     from cryodaq.replay_engine.server import ReplayEngine
 
-    monkeypatch.setattr(
-        server_module, "get_data_dir", lambda: tmp_path, raising=False
-    )
+    monkeypatch.setattr(server_module, "get_data_dir", lambda: tmp_path, raising=False)
     # Also patch the import inside __init__
     import cryodaq.paths as paths_module
 
@@ -249,6 +265,7 @@ def replay_engine_with_stub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from cryodaq.replay_engine.replay_experiment_stub import (
         ReplayExperimentStub,
     )
+
     engine._exp_stub = ReplayExperimentStub(tmp_path)
     return engine
 
@@ -282,8 +299,13 @@ async def test_handle_command_advance_phase_returns_experiment(
             "start_time": "2026-05-07T10:00:00+00:00",
         }
     )
+    experiment_id = replay_engine_with_stub._exp_stub.active_experiment["experiment_id"]
     result = await replay_engine_with_stub._handle_command(
-        {"cmd": "experiment_advance_phase", "phase": "cooldown"}
+        {
+            "cmd": "experiment_advance_phase",
+            "phase": "cooldown",
+            "expected_experiment_id": experiment_id,
+        }
     )
     assert result["ok"] is True
     assert result["experiment"]["phase"] == "cooldown"
@@ -292,9 +314,7 @@ async def test_handle_command_advance_phase_returns_experiment(
 async def test_handle_command_blocks_experiment_finalize(
     replay_engine_with_stub,
 ) -> None:
-    result = await replay_engine_with_stub._handle_command(
-        {"cmd": "experiment_finalize"}
-    )
+    result = await replay_engine_with_stub._handle_command({"cmd": "experiment_finalize"})
     assert result["ok"] is False
     assert result["reason"] == "REPLAY_MODE_READONLY"
 
@@ -307,9 +327,7 @@ async def test_handle_command_blocks_safety_command(
     assert _is_command_blocked("safety_acknowledge") is True, (
         "safety_acknowledge must be in the blocked prefixes (safety_*)"
     )
-    result = await replay_engine_with_stub._handle_command(
-        {"cmd": "safety_acknowledge"}
-    )
+    result = await replay_engine_with_stub._handle_command({"cmd": "safety_acknowledge"})
     assert result["ok"] is False
 
 
@@ -327,8 +345,13 @@ async def test_handle_command_status_includes_replay_experiment(
             "start_time": "2026-05-07T10:00:00+00:00",
         }
     )
+    experiment_id = replay_engine_with_stub._exp_stub.active_experiment["experiment_id"]
     await replay_engine_with_stub._handle_command(
-        {"cmd": "experiment_advance_phase", "phase": "cooldown"}
+        {
+            "cmd": "experiment_advance_phase",
+            "phase": "cooldown",
+            "expected_experiment_id": experiment_id,
+        }
     )
     status = await replay_engine_with_stub._handle_command({"cmd": "/status"})
     assert status["ok"] is True
@@ -351,9 +374,7 @@ async def test_handle_command_experiment_status_includes_stub_state(
             "start_time": "2026-05-07T10:00:00+00:00",
         }
     )
-    out = await replay_engine_with_stub._handle_command(
-        {"cmd": "experiment_status"}
-    )
+    out = await replay_engine_with_stub._handle_command({"cmd": "experiment_status"})
     assert out["ok"] is True
     assert out["active_experiment"] is not None
     assert out["active_experiment"]["title"] == "T2"
@@ -364,9 +385,7 @@ async def test_handle_command_create_retroactive_default_args(
 ) -> None:
     """Missing fields fall back to sensible defaults — operator can
     create a session with just `cmd`."""
-    result = await replay_engine_with_stub._handle_command(
-        {"cmd": "experiment_create_retroactive"}
-    )
+    result = await replay_engine_with_stub._handle_command({"cmd": "experiment_create_retroactive"})
     assert result["ok"] is True
     assert result["experiment"]["title"] == "Replay session"
     assert result["experiment"]["is_replay"] is True
@@ -402,8 +421,6 @@ async def test_handle_command_double_create_returns_error_dict(
 async def test_handle_command_advance_phase_without_active_returns_error_dict(
     replay_engine_with_stub,
 ) -> None:
-    result = await replay_engine_with_stub._handle_command(
-        {"cmd": "experiment_advance_phase", "phase": "cooldown"}
-    )
+    result = await replay_engine_with_stub._handle_command({"cmd": "experiment_advance_phase", "phase": "cooldown"})
     assert result["ok"] is False
     assert "No active" in result["error"]

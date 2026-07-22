@@ -1723,12 +1723,14 @@ async def test_gpib_cancelled_queued_query_keeps_settlement_owner() -> None:
 
     task.cancel()
     await asyncio.sleep(0)
-    assert task.done() is False
+    # Cancellation returns immediately; the retained executor owner settles
+    # the queued VISA call before the next generation is admitted.
+    assert task.done() is True
     blocker_release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert transport._open_settled.is_set() is True
+    assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
     assert transport._query_desynchronized is False
     assert calls == [("write", "queued"), ("read", None)]
     assert await transport.query("next") == "settled-response"

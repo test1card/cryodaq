@@ -584,6 +584,18 @@ class MainWindowV2(QMainWindow):
             if self._operator_log_panel is not None:
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
+                if self._replay_mode:
+                    # Replay telemetry is historical evidence, never current
+                    # Safety-owner authority.  Keep lifecycle unknown and
+                    # controls fail-closed for the entire replay session.
+                    self._last_safety_state = None
+                    self._last_safety_reason = ""
+                    self._bottom_bar.set_safety_state(None, stale=True)
+                    if self._keithley_panel is not None:
+                        self._keithley_panel.set_safety_ready(
+                            False, "Режим replay — текущее состояние Safety неизвестно"
+                        )
+                    return
                 state_name = reading.metadata.get("state")
                 reason = reading.metadata.get("reason", "") or ""
                 self._last_safety_state = str(state_name) if state_name is not None else None

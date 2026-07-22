@@ -810,10 +810,18 @@ class ExperimentOverlay(QWidget):
     def _send_advance(self, target: str) -> None:
         if self._read_only:
             return
+        experiment_id = self._experiment.get("experiment_id") if self._experiment else None
+        if type(experiment_id) is not str or not experiment_id:
+            logger.warning("advance_phase rejected without exact experiment identity")
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         self._phase_worker = ZmqCommandWorker(
-            {"cmd": "experiment_advance_phase", "phase": target},
+            {
+                "cmd": "experiment_advance_phase",
+                "phase": target,
+                "expected_experiment_id": experiment_id,
+            },
             parent=self,
         )
         self._phase_worker.finished.connect(self._on_advance_result)

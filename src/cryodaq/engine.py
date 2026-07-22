@@ -1431,7 +1431,11 @@ def _run_experiment_command(
     if action == "experiment_advance_phase":
         phase = str(cmd.get("phase", "")).strip()
         operator = str(cmd.get("operator", "")).strip()
-        entry = experiment_manager.advance_phase(phase, operator)
+        entry = experiment_manager.advance_phase(
+            phase,
+            operator,
+            expected_experiment_id=cmd.get("expected_experiment_id"),
+        )
         return {"ok": True, "phase": entry}
 
     if action == "experiment_phase_status":

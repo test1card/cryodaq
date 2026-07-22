@@ -108,7 +108,9 @@ def test_panel_constructs_with_categories(app: QApplication) -> None:
 
 def test_clicking_category_switches_to_rag_page(app: QApplication) -> None:
     """MED: drive real itemClicked signal path; spy exact rag.search command."""
-    from cryodaq.gui.zmq_client import ZmqCommandWorker
+    from cryodaq.gui.shell.overlays import knowledge_base_panel
+
+    ZmqCommandWorker = knowledge_base_panel.ZmqCommandWorker
 
     panel = KnowledgeBasePanel(categories=_custom_categories())
     dispatched: list[dict] = []
@@ -121,12 +123,13 @@ def test_clicking_category_switches_to_rag_page(app: QApplication) -> None:
         # Prevent actual ZMQ connection; stub start/finished.
         original_init(self_w, cmd, **kwargs)
 
-    with patch.object(ZmqCommandWorker, "__init__", _fake_init):
-        with patch.object(ZmqCommandWorker, "start", lambda self_w: None):
-            # Click first item via the real list itemClicked signal.
-            item = panel._list.item(0)
-            panel._list.setCurrentItem(item)
-            panel._list.itemClicked.emit(item)
+    with patch.object(knowledge_base_panel, "ZmqCommandWorker", ZmqCommandWorker):
+        with patch.object(ZmqCommandWorker, "__init__", _fake_init):
+            with patch.object(ZmqCommandWorker, "start", lambda self_w: None):
+                # Click first item via the real list itemClicked signal.
+                item = panel._list.item(0)
+                panel._list.setCurrentItem(item)
+                panel._list.itemClicked.emit(item)
 
     assert panel._stack.currentIndex() == _PAGE_RAG
     # Loading state visible.

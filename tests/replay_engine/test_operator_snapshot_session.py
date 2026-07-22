@@ -117,7 +117,7 @@ async def test_same_publisher_codec_decoder_and_store_accept_replay_without_gui_
 
     owner = OperatorSnapshotIngressOwner(_IngressBridge())
     owner.start()
-    owner._apply_snapshot_batch(owner._epoch, decoded)
+    owner._apply_snapshot_batch(owner._epoch, (decoded,))
     assert owner.snapshot is not None
     assert owner.snapshot.cut == decoded.cut
     assert owner.snapshot.cut.mode is SnapshotMode.REPLAY

@@ -374,8 +374,10 @@ async def test_cancelled_blocking_idn_rejects_overlap_until_executor_settles(mon
     assert resources_opened == 1
     assert driver._transport._executor is not None
     release_read.set()
-    assert await asyncio.to_thread(closed.wait, 1.0)
+    assert await asyncio.to_thread(driver._transport._open_settled.wait, 2.0)
+    assert not closed.is_set(), "successful cancelled IDN must retain the live resource"
     await driver.disconnect()
+    assert await asyncio.to_thread(closed.wait, 1.0)
     assert driver._transport._executor is None
     assert resources_opened == 1
 

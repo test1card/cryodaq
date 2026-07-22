@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -41,12 +42,15 @@ class _Transport:
     async def query(self, command: str, timeout_ms: int | None = None) -> str:
         del timeout_ms
         if "*IDN?" in command:
-            return "Keithley 2604B"
+            return "Keithley Instruments Inc.,Model 2604B,04052028,1.0"
         if "source.output" in command:
             self.output_queries += 1
             if self.fail_read:
                 raise OSError("read failed")
-            return self.readbacks.pop(0) if len(self.readbacks) > 1 else self.readbacks[0]
+            value = self.readbacks.pop(0) if len(self.readbacks) > 1 else self.readbacks[0]
+            match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|", command)
+            assert match is not None
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|{value}"
         return "0"
 
 

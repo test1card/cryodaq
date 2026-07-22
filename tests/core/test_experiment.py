@@ -120,9 +120,7 @@ async def test_debug_mode_blocks_experiment_creation(manager: ExperimentManager)
         manager.create_experiment("Lambda run", "Ivanov", template_id="thermal_conductivity")
 
 
-async def test_start_experiment_creates_artifact_metadata(
-    manager: ExperimentManager, tmp_path: Path
-) -> None:
+async def test_start_experiment_creates_artifact_metadata(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
         name="Lambda run",
         title="Lambda run",
@@ -175,9 +173,7 @@ async def test_active_experiment_is_restored_from_persisted_state(
     assert reloaded.get_app_mode() is AppMode.EXPERIMENT
 
 
-async def test_finalize_persists_metadata_and_sqlite(
-    manager: ExperimentManager, tmp_path: Path
-) -> None:
+async def test_finalize_persists_metadata_and_sqlite(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
         name="Cooldown",
         title="Cooldown",
@@ -238,9 +234,7 @@ async def test_update_preserves_existing_fields_after_save(
     assert updated.notes == "Updated note"
     assert updated.custom_fields == {"sample_id": "S-1", "heater_geometry": "spiral"}
 
-    payload = json.loads(
-        (tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8")
-    )
+    payload = json.loads((tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8"))
     assert payload["experiment"]["sample"] == "Cu-01"
     assert payload["experiment"]["description"] == "Original description"
     assert payload["experiment"]["notes"] == "Updated note"
@@ -248,9 +242,7 @@ async def test_update_preserves_existing_fields_after_save(
     assert payload["experiment"]["custom_fields"]["heater_geometry"] == "spiral"
 
 
-async def test_report_disabled_template_is_stored(
-    manager: ExperimentManager, tmp_path: Path
-) -> None:
+async def test_report_disabled_template_is_stored(manager: ExperimentManager, tmp_path: Path) -> None:
     exp_id = manager.start_experiment(
         name="Checkout",
         title="Checkout",
@@ -373,16 +365,10 @@ def test_no_english_debug_switch_string_remains_in_src(
     except RuntimeError as exc:
         msg = str(exc)
         # Must contain no English debug-switch phrasing
-        assert "Cannot switch to debug" not in msg, (
-            f"English debug-switch string in error message: {msg!r}"
-        )
-        assert "debug mode" not in msg, (
-            f"English 'debug mode' string in error message: {msg!r}"
-        )
+        assert "Cannot switch to debug" not in msg, f"English debug-switch string in error message: {msg!r}"
+        assert "debug mode" not in msg, f"English 'debug mode' string in error message: {msg!r}"
         # Must be in Russian (the Russian guard word that was ratified)
-        assert "режим отладки" in msg or "карточка эксперимента" in msg, (
-            f"Expected Russian error message, got: {msg!r}"
-        )
+        assert "режим отладки" in msg or "карточка эксперимента" in msg, f"Expected Russian error message, got: {msg!r}"
     else:
         pytest.fail("Expected RuntimeError when switching to debug with active experiment")
 
@@ -443,9 +429,7 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
     manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
 
     archive_root = tmp_path / "experiments" / exp_id / "archive"
-    metadata = json.loads(
-        (tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8")
-    )
+    metadata = json.loads((tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8"))
     assert (archive_root / "tables" / "measured_values.csv").exists()
     assert (archive_root / "tables" / "setpoint_values.csv").exists()
     assert (archive_root / "tables" / "run_results.csv").exists()
@@ -483,7 +467,7 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
 
 async def test_advance_phase_creates_entry(manager: ExperimentManager) -> None:
     manager.start_experiment("PhaseTest", "Op1", template_id="custom")
-    entry = manager.advance_phase("cooldown", "Op1")
+    entry = manager.advance_phase("cooldown", "Op1", expected_experiment_id=manager.active_experiment_id)
     assert entry["phase"] == "cooldown"
     assert entry["operator"] == "Op1"
     assert entry["ended_at"] is None
@@ -491,8 +475,8 @@ async def test_advance_phase_creates_entry(manager: ExperimentManager) -> None:
 
 async def test_advance_phase_closes_previous(manager: ExperimentManager) -> None:
     manager.start_experiment("PhaseTest2", "Op1", template_id="custom")
-    manager.advance_phase("preparation", "Op1")
-    manager.advance_phase("cooldown", "Op1")
+    manager.advance_phase("preparation", "Op1", expected_experiment_id=manager.active_experiment_id)
+    manager.advance_phase("cooldown", "Op1", expected_experiment_id=manager.active_experiment_id)
 
     history = manager.get_phase_history()
     assert len(history) == 2
@@ -506,7 +490,7 @@ async def test_get_current_phase(manager: ExperimentManager) -> None:
     assert manager.get_current_phase() is None  # no experiment
     manager.start_experiment("PhaseTest3", "Op1", template_id="custom")
     assert manager.get_current_phase() is None  # no phase yet
-    manager.advance_phase("vacuum")
+    manager.advance_phase("vacuum", expected_experiment_id=manager.active_experiment_id)
     assert manager.get_current_phase() == "vacuum"
 
 
@@ -514,7 +498,7 @@ async def test_phase_persisted_in_metadata(manager: ExperimentManager, tmp_path:
     import json as _json
 
     manager.start_experiment("PhaseTest4", "Op1", template_id="custom")
-    manager.advance_phase("measurement", "Op1")
+    manager.advance_phase("measurement", "Op1", expected_experiment_id=manager.active_experiment_id)
 
     exp_id = manager.active_experiment_id
     metadata_path = tmp_path / "experiments" / exp_id / "metadata.json"
@@ -538,9 +522,7 @@ async def test_no_phases_backward_compat(manager: ExperimentManager) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_experiment_sidecars_use_atomic_write(
-    tmp_path: Path, instruments_yaml: Path, templates_dir: Path
-) -> None:
+def test_experiment_sidecars_use_atomic_write(tmp_path: Path, instruments_yaml: Path, templates_dir: Path) -> None:
     """B-1.1: sidecar JSON writes route through atomic_write_text (runtime proof)."""
     from unittest.mock import patch
 
@@ -565,6 +547,7 @@ def test_experiment_sidecars_use_atomic_write(
 
         try:
             from PIL import Image
+
             img = Image.new("RGB", (32, 32), color=(0, 128, 0))
             buf = BytesIO()
             img.save(buf, format="JPEG")
@@ -583,27 +566,17 @@ def test_experiment_sidecars_use_atomic_write(
         )
 
     # The photo sidecar under composition/ must have been written via atomic_write_text
-    composition_sidecar_writes = [
-        p for p in written_paths
-        if p.suffix == ".json" and "composition" in p.parts
-    ]
+    composition_sidecar_writes = [p for p in written_paths if p.suffix == ".json" and "composition" in p.parts]
     assert composition_sidecar_writes, (
         f"No composition/ .json sidecar written via atomic_write_text; calls: {written_paths}"
     )
 
     # metadata.json (experiment-level) must also have been written via atomic_write_text
-    metadata_writes = [
-        p for p in written_paths
-        if p.name == "metadata.json"
-    ]
-    assert metadata_writes, (
-        f"No metadata.json written via atomic_write_text; calls: {written_paths}"
-    )
+    metadata_writes = [p for p in written_paths if p.name == "metadata.json"]
+    assert metadata_writes, f"No metadata.json written via atomic_write_text; calls: {written_paths}"
 
 
-def test_experiment_wal_verification(
-    tmp_path: Path, instruments_yaml: Path, templates_dir: Path
-) -> None:
+def test_experiment_wal_verification(tmp_path: Path, instruments_yaml: Path, templates_dir: Path) -> None:
     """B-1.3: start_experiment raises RuntimeError when PRAGMA journal_mode returns non-WAL.
 
     The fake cursor's execute() inspects the SQL: only the WAL PRAGMA returns "delete";

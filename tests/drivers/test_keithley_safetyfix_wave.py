@@ -11,6 +11,7 @@ F2: connect() crash-recovery force-OFF must readback-verify both channels; an
 from __future__ import annotations
 
 import logging
+import re
 
 import pytest
 
@@ -23,7 +24,12 @@ from cryodaq.drivers.instruments.keithley_2604b import (
 class _FakeTransport:
     """Fake TSP transport whose source.output readback is configurable."""
 
-    def __init__(self, *, output_readback: str = "0", idn: str = "MODEL 2604B") -> None:
+    def __init__(
+        self,
+        *,
+        output_readback: str = "0",
+        idn: str = "Keithley Instruments Inc.,Model 2604B,04052028,1.0",
+    ) -> None:
         self.output_readback = output_readback
         self._idn = idn
         self.writes: list[str] = []
@@ -39,7 +45,9 @@ class _FakeTransport:
         if "*idn?" in c:
             return self._idn
         if "source.output" in c:
-            return self.output_readback
+            match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|", cmd)
+            assert match is not None
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|{self.output_readback}"
         if "measure.iv()" in c:
             return "0.0\t0.0"
         if "source.compliance" in c:

@@ -198,7 +198,7 @@ def test_shutdown_stops_timers_settles_owned_workers_and_rejects_late_work() -> 
     assert not controller.accept_status(_status())
 
 
-def test_real_status_worker_cancels_and_settles_during_shutdown(monkeypatch) -> None:
+def test_real_status_worker_cancels_and_settles_during_shutdown(monkeypatch, real_zmq_worker) -> None:
     """A real QThread must not wait for the normal 65-second command limit."""
     from cryodaq.gui import zmq_client
 

@@ -74,7 +74,7 @@ def _check_port_available(addr: str, *, force: bool) -> None:
 _READONLY_PREFIXES: tuple[str, ...] = (
     "set_target",
     "keithley_",
-    "experiment.",   # F30 query agent subspace (experiment.fetch / .list)
+    "experiment.",  # F30 query agent subspace (experiment.fetch / .list)
     "source_on",
     "source_off",
     "emergency_off",
@@ -90,10 +90,12 @@ _READONLY_PREFIXES: tuple[str, ...] = (
 # markers. The blanket "experiment_" prefix that was previously in
 # _READONLY_PREFIXES has been split out so the allowlist below can
 # carve out the demo-friendly phase commands.
-_REPLAY_ALLOWED_EXPERIMENT_CMDS: frozenset[str] = frozenset({
-    "experiment_create_retroactive",
-    "experiment_advance_phase",
-})
+_REPLAY_ALLOWED_EXPERIMENT_CMDS: frozenset[str] = frozenset(
+    {
+        "experiment_create_retroactive",
+        "experiment_advance_phase",
+    }
+)
 
 
 def _is_command_blocked(cmd: str) -> bool:
@@ -265,8 +267,7 @@ class ReplayEngine:
                 hours, remainder = divmod(int(uptime_s), 3600)
                 minutes, secs = divmod(remainder, 60)
                 logger.info(
-                    "HEARTBEAT | uptime=%02d:%02d:%02d | "
-                    "readings_published=%d | source=%s | speed=%.1fx",
+                    "HEARTBEAT | uptime=%02d:%02d:%02d | readings_published=%d | source=%s | speed=%.1fx",
                     hours,
                     minutes,
                     secs,
@@ -437,9 +438,7 @@ class ReplayEngine:
                     title=cmd.get("title", "Replay session"),
                     sample=cmd.get("sample", ""),
                     operator=cmd.get("operator", "replay"),
-                    start_time=cmd.get(
-                        "start_time", datetime.now(UTC).isoformat()
-                    ),
+                    start_time=cmd.get("start_time", datetime.now(UTC).isoformat()),
                     description=cmd.get("description", ""),
                     notes=cmd.get("notes", ""),
                     custom_fields=cmd.get("custom_fields"),
@@ -453,6 +452,7 @@ class ReplayEngine:
                 result = self._exp_stub.advance_phase(
                     phase=cmd.get("phase", "cooldown"),
                     operator=cmd.get("operator", "operator"),
+                    expected_experiment_id=cmd.get("expected_experiment_id"),
                 )
                 return {"ok": True, "experiment": result}
             except Exception as exc:  # noqa: BLE001

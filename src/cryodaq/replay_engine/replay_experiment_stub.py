@@ -64,9 +64,7 @@ class ReplayExperimentStub:
         custom_fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self._active is not None:
-            raise RuntimeError(
-                "Experiment already active in replay session — finalize first"
-            )
+            raise RuntimeError("Experiment already active in replay session — finalize first")
         exp_id = uuid.uuid4().hex[:12]
         exp_dir = self._data_dir / exp_id
         exp_dir.mkdir(parents=True, exist_ok=True)
@@ -88,25 +86,27 @@ class ReplayExperimentStub:
         if custom_fields:
             self._active["custom_fields"] = dict(custom_fields)
         self._persist()
-        logger.info(
-            "ReplayExperimentStub created: %s ('%s')", exp_id, title
-        )
+        logger.info("ReplayExperimentStub created: %s ('%s')", exp_id, title)
         return dict(self._active)
 
     def advance_phase(
-        self, phase: str, operator: str = "operator"
+        self,
+        phase: str,
+        operator: str = "operator",
+        *,
+        expected_experiment_id: str,
     ) -> dict[str, Any]:
         if self._active is None:
             raise RuntimeError("No active replay experiment")
+        if type(expected_experiment_id) is not str or expected_experiment_id != self._active["experiment_id"]:
+            raise RuntimeError("Replay experiment identity mismatch")
         now_iso = datetime.now(UTC).isoformat()
         previous_phase = self._active.get("phase")
         if previous_phase:
             self._phases.append(
                 {
                     "phase": previous_phase,
-                    "started_at": self._active.get(
-                        "phase_started_at", now_iso
-                    ),
+                    "started_at": self._active.get("phase_started_at", now_iso),
                     "ended_at": now_iso,
                     "operator": operator,
                 }
@@ -114,9 +114,7 @@ class ReplayExperimentStub:
         self._active["phase"] = phase
         self._active["phase_started_at"] = now_iso
         self._persist()
-        logger.info(
-            "ReplayExperimentStub phase: %s → %s", previous_phase, phase
-        )
+        logger.info("ReplayExperimentStub phase: %s → %s", previous_phase, phase)
         return dict(self._active)
 
     def _persist(self) -> None:

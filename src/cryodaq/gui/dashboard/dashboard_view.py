@@ -334,7 +334,7 @@ class DashboardView(QScrollArea):
                 "cmd": "experiment_advance_phase",
                 "phase": phase,
                 "operator": "",
-                "experiment_id": experiment_id,
+                "expected_experiment_id": experiment_id,
             },
             parent=self,
         )

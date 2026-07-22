@@ -17,8 +17,8 @@ Canonical phase names match ``cryodaq.core.experiment.ExperimentPhase``:
 
 Usage::
 
-    python -m tools.force_phase cooldown
-    python -m tools.force_phase measurement
+    python -m tools.force_phase cooldown --expected-experiment-id <id>
+    python -m tools.force_phase measurement --expected-experiment-id <id>
 """
 
 from __future__ import annotations
@@ -60,6 +60,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=5.0,
         help="Сколько секунд ждать ответ engine (default: 5).",
     )
+    parser.add_argument(
+        "--expected-experiment-id",
+        required=True,
+        help="Exact active experiment identity required by the engine.",
+    )
     return parser.parse_args(argv)
 
 
@@ -72,7 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     # IV.3 F5 amend: engine handler reads cmd["phase"], not "target".
     # See src/cryodaq/engine.py::experiment_advance_phase. Also the
     # shape the rest of the shell uses.
-    cmd = {"cmd": "experiment_advance_phase", "phase": args.phase}
+    cmd = {
+        "cmd": "experiment_advance_phase",
+        "phase": args.phase,
+        "expected_experiment_id": args.expected_experiment_id,
+    }
     try:
         reply = send_command(cmd, address=args.address, timeout_s=args.timeout)
     except TimeoutError as exc:

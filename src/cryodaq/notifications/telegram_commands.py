@@ -323,8 +323,14 @@ class TelegramCommandBot:
             log_text = text[len("/log") :].strip()
             await self._cmd_log(chat_id, log_text, msg)
         elif command == "/phase":
-            phase_arg = text[len("/phase") :].strip()
-            await self._cmd_phase(chat_id, phase_arg, msg)
+            phase_args = text[len("/phase") :].strip().split()
+            if len(phase_args) != 2:
+                await self._send(
+                    chat_id,
+                    "❌ Укажите фазу и точный experiment_id: /phase <фаза> <experiment_id>",
+                )
+                return
+            await self._cmd_phase(chat_id, phase_args[0], phase_args[1], msg)
         elif command == "/ask":
             query_text = text[len("/ask") :].strip()
             if not query_text:
@@ -351,9 +357,7 @@ class TelegramCommandBot:
             return
 
         if self._query_agent is None:
-            await self._send(
-                chat_id, "Я понимаю только команды с косой чертой. /help для списка."
-            )
+            await self._send(chat_id, "Я понимаю только команды с косой чертой. /help для списка.")
             return
 
         try:
@@ -494,15 +498,13 @@ class TelegramCommandBot:
             logger.warning("Telegram /log failed: %s", result.get("error"))
             await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
-    async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
+    async def _cmd_phase(self, chat_id: int, phase: str, expected_experiment_id: str, msg: dict) -> None:
         # Phase 2c I.2: accept legacy aliases (cooling/warming) and
         # canonicalise to ExperimentPhase enum values.
         normalized = phase.strip().lower()
         normalized = _PHASE_ALIASES.get(normalized, normalized)
         if normalized not in VALID_PHASES:
-            phases_ru = ", ".join(
-                phase_display_name(p) for p in sorted(VALID_PHASES)
-            )
+            phases_ru = ", ".join(phase_display_name(p) for p in sorted(VALID_PHASES))
             await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_ru}")
             return
         phase = normalized
@@ -516,6 +518,7 @@ class TelegramCommandBot:
                 "cmd": "experiment_advance_phase",
                 "phase": phase,
                 "operator": username,
+                "expected_experiment_id": expected_experiment_id,
             }
         )
         if result.get("ok"):
@@ -561,6 +564,7 @@ class TelegramCommandBot:
         """Отправить PNG-изображение в указанный chat_id через sendPhoto."""
         try:
             import aiohttp  # noqa: PLC0415
+
             session = await self._get_session()
             form = aiohttp.FormData()
             form.add_field("chat_id", str(chat_id))
@@ -582,9 +586,7 @@ class TelegramCommandBot:
         """Resolve Telegram file_id к downloadable path via getFile API."""
         session = await self._get_session()
         try:
-            async with session.get(
-                f"{self._api}/getFile", params={"file_id": file_id}
-            ) as resp:
+            async with session.get(f"{self._api}/getFile", params={"file_id": file_id}) as resp:
                 if resp.status != 200:
                     logger.error("Telegram getFile %d", resp.status)
                     return None
@@ -626,14 +628,10 @@ class TelegramCommandBot:
         }
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/sendMessage", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/sendMessage", json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(
-                        "Telegram sendMessage (keyboard) %d: %s", resp.status, body[:200]
-                    )
+                    logger.error("Telegram sendMessage (keyboard) %d: %s", resp.status, body[:200])
                     return None
                 data = await resp.json()
                 return data.get("result", {}).get("message_id")
@@ -641,9 +639,7 @@ class TelegramCommandBot:
             logger.error("sendMessage keyboard error: %s", exc)
             return None
 
-    async def edit_message(
-        self, chat_id: int, message_id: int, text: str
-    ) -> None:
+    async def edit_message(self, chat_id: int, message_id: int, text: str) -> None:
         """Edit existing message text (used after inline keyboard tap)."""
         payload = {
             "chat_id": chat_id,
@@ -653,14 +649,10 @@ class TelegramCommandBot:
         }
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/editMessageText", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/editMessageText", json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(
-                        "Telegram editMessage %d: %s", resp.status, body[:200]
-                    )
+                    logger.error("Telegram editMessage %d: %s", resp.status, body[:200])
         except Exception as exc:
             logger.error("editMessage error: %s", exc)
 
@@ -671,9 +663,7 @@ class TelegramCommandBot:
             payload["text"] = text
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/answerCallbackQuery", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/answerCallbackQuery", json=payload) as resp:
                 if resp.status != 200:
                     logger.warning("Telegram answerCallback %d", resp.status)
         except Exception as exc:

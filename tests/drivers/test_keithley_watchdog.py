@@ -8,6 +8,7 @@ strings). Tests drive a fake TSP transport and assert exact command strings.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,7 @@ class _RecordingTransport:
         self.calls.append(("query", cmd))
         c = cmd.lower()
         if "*idn?" in c:
-            return "Keithley Instruments Inc., Model 2604B"
+            return "Keithley Instruments Inc.,Model 2604B,04052028,1.0"
         if "cryodaq_wdog_version" in c:
             return self.wdog_version_raw
         if "cryodaq_wdog_autonomous" in c:
@@ -63,7 +64,9 @@ class _RecordingTransport:
         if "cryodaq_wdog_tripped" in c:
             return self.wdog_tripped_raw
         if "source.output" in c:
-            return "0"
+            match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|", cmd)
+            assert match is not None
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|0"
         if "errorqueue.count" in c:
             return "0"
         return "0"
@@ -88,6 +91,12 @@ class _RecordingTransport:
 
 def _wdog_writes(transport: _RecordingTransport) -> list[str]:
     return [w for w in transport.writes if "cryodaq_wdog" in w or "CRYODAQ_WDOG" in w]
+
+
+def _normalize_off_nonce(calls: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    return [
+        (kind, re.sub(r"CRYODAQ_OFF_V1\|[0-9a-f]{32}\|", "CRYODAQ_OFF_V1|<nonce>|", command)) for kind, command in calls
+    ]
 
 
 def _lua_script() -> str:
@@ -401,7 +410,7 @@ async def test_off_and_default_command_streams_byte_identical() -> None:
         await d.disconnect()
 
     assert t_off.calls  # non-empty: the bus was actually exercised
-    assert t_off.calls == t_default.calls
+    assert _normalize_off_nonce(t_off.calls) == _normalize_off_nonce(t_default.calls)
 
 
 async def test_flag_on_off_streams_differ_only_by_wdog() -> None:

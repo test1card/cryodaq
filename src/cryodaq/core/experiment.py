@@ -293,9 +293,7 @@ class RunRecord:
             finished_at=_parse_time(payload.get("finished_at")),
             parameters=dict(payload.get("parameters") or {}),
             result_summary=dict(payload.get("result_summary") or {}),
-            artifact_paths=tuple(
-                str(item).strip() for item in payload.get("artifact_paths", []) if str(item).strip()
-            ),
+            artifact_paths=tuple(str(item).strip() for item in payload.get("artifact_paths", []) if str(item).strip()),
             experiment_context=dict(payload.get("experiment_context") or {}),
         )
 
@@ -407,9 +405,7 @@ class ExperimentManager:
             "current_phase": self.get_current_phase(),
             "phase_started_at": phase_started_at,
             "phases": self.get_phase_history(),
-            "run_records": [
-                record.to_payload() for record in self.list_run_records(active_only=True)
-            ],
+            "run_records": [record.to_payload() for record in self.list_run_records(active_only=True)],
             "templates": [template.to_payload() for template in self.get_templates()],
         }
 
@@ -434,9 +430,7 @@ class ExperimentManager:
     def set_app_mode(self, mode: AppMode | str) -> AppMode:
         next_mode = self._normalize_app_mode(mode)
         if next_mode is AppMode.DEBUG and self._active is not None:
-            raise RuntimeError(
-                "Нельзя переключиться в режим отладки, пока карточка эксперимента активна."
-            )
+            raise RuntimeError("Нельзя переключиться в режим отладки, пока карточка эксперимента активна.")
         if next_mode == self._state.app_mode:
             return self._state.app_mode
         self._state = ExperimentState(
@@ -468,15 +462,10 @@ class ExperimentManager:
         entries: list[ArchiveEntry] = []
         data_root = self._data_dir.resolve()
         if self._artifacts_dir.is_symlink():
-            logger.warning(
-                "Ignoring symlinked experiments archive root: %s", self._artifacts_dir
-            )
+            logger.warning("Ignoring symlinked experiments archive root: %s", self._artifacts_dir)
             return entries
         resolved_artifacts = self._artifacts_dir.resolve()
-        if (
-            resolved_artifacts != data_root
-            and data_root not in resolved_artifacts.parents
-        ):
+        if resolved_artifacts != data_root and data_root not in resolved_artifacts.parents:
             logger.warning("Ignoring experiments archive root outside data directory")
             return entries
         if not self._artifacts_dir.exists():
@@ -495,19 +484,11 @@ class ExperimentManager:
                 payload = json.loads(metadata_path.read_text(encoding="utf-8"))
                 experiment = payload.get("experiment", {})
                 template = payload.get("template", {})
-                run_records = tuple(
-                    dict(item) for item in payload.get("run_records", []) if isinstance(item, dict)
-                )
+                run_records = tuple(dict(item) for item in payload.get("run_records", []) if isinstance(item, dict))
                 artifact_index = tuple(
-                    dict(item)
-                    for item in payload.get("artifact_index", [])
-                    if isinstance(item, dict)
+                    dict(item) for item in payload.get("artifact_index", []) if isinstance(item, dict)
                 )
-                result_tables = tuple(
-                    dict(item)
-                    for item in payload.get("result_tables", [])
-                    if isinstance(item, dict)
-                )
+                result_tables = tuple(dict(item) for item in payload.get("result_tables", []) if isinstance(item, dict))
                 artifact_dir = metadata_path.parent
                 manifest = None
                 report_paths = None
@@ -519,9 +500,7 @@ class ExperimentManager:
                     report_paths = resolve_report_paths(artifact_dir)
                     manifest = load_current_manifest(artifact_dir)
                 except (OSError, ReportContractError) as exc:
-                    logger.warning(
-                        "Ignoring unsafe report manifest %s: %s", artifact_dir, exc
-                    )
+                    logger.warning("Ignoring unsafe report manifest %s: %s", artifact_dir, exc)
                     if pointer_present:
                         report_authority = "invalid"
                 if pointer_present and manifest is None:
@@ -536,11 +515,7 @@ class ExperimentManager:
                     report = manifest["report"]
                     manifest_docx = artifact_dir / report["docx_path"]
                     docx_path = manifest_docx if manifest_docx.is_file() else None
-                    pdf_path = (
-                        artifact_dir / report["pdf_path"]
-                        if report["pdf_path"] is not None
-                        else None
-                    )
+                    pdf_path = artifact_dir / report["pdf_path"] if report["pdf_path"] is not None else None
                 elif not pointer_present and report_paths is not None:
                     docx_path = None
                     pdf_path = None
@@ -602,17 +577,13 @@ class ExperimentManager:
                     and report_authority != "invalid"
                 )
                 force_context = (
-                    report_force_context(state, manifest)
-                    if report_force_required and state is not None
-                    else None
+                    report_force_context(state, manifest) if report_force_required and state is not None else None
                 )
                 entry = ArchiveEntry(
                     experiment_id=_clean_text(experiment.get("experiment_id")),
                     title=_clean_text(experiment.get("title") or experiment.get("name")),
                     template_id=_clean_text(experiment.get("template_id") or template.get("id")),
-                    template_name=_clean_text(
-                        template.get("name") or experiment.get("template_id")
-                    ),
+                    template_name=_clean_text(template.get("name") or experiment.get("template_id")),
                     operator=_clean_text(experiment.get("operator")),
                     sample=_clean_text(experiment.get("sample")),
                     status=_clean_text(experiment.get("status")),
@@ -620,12 +591,8 @@ class ExperimentManager:
                     end_time=_parse_time(experiment.get("end_time")),
                     artifact_dir=artifact_dir,
                     metadata_path=metadata_path,
-                    docx_path=docx_path
-                    if docx_path is not None and docx_path.exists()
-                    else None,
-                    pdf_path=pdf_path
-                    if pdf_path is not None and pdf_path.exists()
-                    else None,
+                    docx_path=docx_path if docx_path is not None and docx_path.exists() else None,
+                    pdf_path=pdf_path if pdf_path is not None and pdf_path.exists() else None,
                     report_enabled=bool(experiment.get("report_enabled", True)),
                     report_present=(docx_path is not None and docx_path.exists())
                     or (pdf_path is not None and pdf_path.exists()),
@@ -640,9 +607,7 @@ class ExperimentManager:
                         else None
                     ),
                     report_error_text=(
-                        _report_error_display(state["error_code"], state["error_text"])
-                        if state is not None
-                        else ""
+                        _report_error_display(state["error_code"], state["error_text"]) if state is not None else ""
                     ),
                     report_force_required=report_force_required,
                     report_force_context=force_context,
@@ -717,9 +682,7 @@ class ExperimentManager:
         if active is None:
             return None
         if experiment_id is not None and experiment_id != active.experiment_id:
-            raise ValueError(
-                f"experiment_id '{experiment_id}' does not match active '{active.experiment_id}'."
-            )
+            raise ValueError(f"experiment_id '{experiment_id}' does not match active '{active.experiment_id}'.")
         started_dt = _parse_time(started_at)
         if started_dt is None:
             raise ValueError("started_at is required for run record attachment.")
@@ -736,9 +699,7 @@ class ExperimentManager:
             finished_at=finished_dt,
             parameters=dict(parameters or {}),
             result_summary=dict(result_summary or {}),
-            artifact_paths=tuple(
-                str(item).strip() for item in (artifact_paths or []) if str(item).strip()
-            ),
+            artifact_paths=tuple(str(item).strip() for item in (artifact_paths or []) if str(item).strip()),
             experiment_context={
                 "experiment_id": active.experiment_id,
                 "title": active.title,
@@ -750,9 +711,7 @@ class ExperimentManager:
         )
         payload = self._read_metadata_payload(active.experiment_id)
         existing_records = [
-            RunRecord.from_payload(item)
-            for item in payload.get("run_records", [])
-            if isinstance(item, dict)
+            RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)
         ]
         updated_records: list[RunRecord] = []
         replaced = False
@@ -780,11 +739,7 @@ class ExperimentManager:
         if not experiment_id:
             return []
         payload = self._read_metadata_payload(experiment_id)
-        records = [
-            RunRecord.from_payload(item)
-            for item in payload.get("run_records", [])
-            if isinstance(item, dict)
-        ]
+        records = [RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)]
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
 
@@ -820,9 +775,7 @@ class ExperimentManager:
         # can turn off the auto-report for a one-off run without
         # editing the template YAML. None (default) keeps the
         # template's configured value.
-        effective_report_enabled = (
-            template.report_enabled if report_enabled is None else bool(report_enabled)
-        )
+        effective_report_enabled = template.report_enabled if report_enabled is None else bool(report_enabled)
 
         info = ExperimentInfo(
             experiment_id=experiment_id,
@@ -946,9 +899,7 @@ class ExperimentManager:
             "phase_at_upload": phase_at_upload,
             "channels_mentioned": list(channels_mentioned or []),
         }
-        atomic_write_text(
-            sidecar_path, json.dumps(sidecar_meta, ensure_ascii=False, indent=2)
-        )
+        atomic_write_text(sidecar_path, json.dumps(sidecar_meta, ensure_ascii=False, indent=2))
 
         artifact_entry: dict[str, Any] = {
             "artifact_id": f"composition_photo:operator:{filename}",
@@ -969,9 +920,7 @@ class ExperimentManager:
 
         return {"filename": filename, "path": str(photo_path), "metadata": sidecar_meta}
 
-    def _append_composition_photo_to_metadata(
-        self, experiment_id: str, entry: dict[str, Any]
-    ) -> None:
+    def _append_composition_photo_to_metadata(self, experiment_id: str, entry: dict[str, Any]) -> None:
         """Atomically append a composition_photo entry to artifact_index in metadata.json."""
         metadata_path = self._metadata_path(experiment_id)
         from cryodaq.core.atomic_write import atomic_write_text
@@ -980,9 +929,7 @@ class ExperimentManager:
         artifact_index: list[dict[str, Any]] = list(payload.get("artifact_index", []))
         artifact_index.append(entry)
         payload["artifact_index"] = artifact_index
-        atomic_write_text(
-            metadata_path, json.dumps(payload, ensure_ascii=False, indent=2)
-        )
+        atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def update_experiment(
         self,
@@ -1179,9 +1126,7 @@ class ExperimentManager:
 
     def _require_experiment_mode(self) -> None:
         if self.app_mode is not AppMode.EXPERIMENT:
-            raise RuntimeError(
-                "Experiment lifecycle commands are only available in experiment mode."
-            )
+            raise RuntimeError("Experiment lifecycle commands are only available in experiment mode.")
 
     def _require_active(self, experiment_id: str | None = None) -> ExperimentInfo:
         if self._active is None:
@@ -1250,9 +1195,7 @@ class ExperimentManager:
         if self._state_path.exists():
             try:
                 payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-                app_mode = self._normalize_app_mode(
-                    payload.get("app_mode", AppMode.EXPERIMENT.value)
-                )
+                app_mode = self._normalize_app_mode(payload.get("app_mode", AppMode.EXPERIMENT.value))
                 active_experiment_id = _clean_text(payload.get("active_experiment_id")) or None
             except Exception as exc:
                 logger.warning("Failed to load experiment state %s: %s", self._state_path, exc)
@@ -1293,15 +1236,11 @@ class ExperimentManager:
             notes=_clean_text(experiment.get("notes")),
             start_time=_parse_time(experiment.get("start_time")) or datetime.now(UTC),
             end_time=_parse_time(experiment.get("end_time")),
-            status=ExperimentStatus(
-                _clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value
-            ),
+            status=ExperimentStatus(_clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value),
             config_snapshot=dict(experiment.get("config_snapshot") or {}),
             custom_fields=_normalize_custom_fields(experiment.get("custom_fields")),
             report_enabled=bool(experiment.get("report_enabled", True)),
-            sections=tuple(
-                str(item) for item in experiment.get("sections", []) if str(item).strip()
-            ),
+            sections=tuple(str(item) for item in experiment.get("sections", []) if str(item).strip()),
             artifact_dir=self._artifact_dir(experiment_id),
             metadata_path=metadata_path,
             retroactive=bool(experiment.get("retroactive", False)),
@@ -1337,9 +1276,7 @@ class ExperimentManager:
                 name=name,
                 sections=sections,
                 report_enabled=bool(raw.get("report_enabled", True)),
-                report_sections=tuple(
-                    str(item) for item in raw.get("report_sections", []) if str(item).strip()
-                ),
+                report_sections=tuple(str(item) for item in raw.get("report_sections", []) if str(item).strip()),
                 custom_fields=custom_fields,
             )
         if "custom" not in templates:
@@ -1510,17 +1447,13 @@ class ExperimentManager:
             "artifact_index": [
                 dict(item)
                 for item in (
-                    artifact_index
-                    if artifact_index is not None
-                    else list(existing_payload.get("artifact_index", []))
+                    artifact_index if artifact_index is not None else list(existing_payload.get("artifact_index", []))
                 )
             ],
             "result_tables": [
                 dict(item)
                 for item in (
-                    result_tables
-                    if result_tables is not None
-                    else list(existing_payload.get("result_tables", []))
+                    result_tables if result_tables is not None else list(existing_payload.get("result_tables", []))
                 )
             ],
             "summary_metadata": dict(
@@ -1537,10 +1470,18 @@ class ExperimentManager:
     # Phase tracking
     # ------------------------------------------------------------------
 
-    def advance_phase(self, phase: str, operator: str = "") -> dict[str, Any]:
-        """Transition to a new experiment phase. Closes the current phase."""
+    def advance_phase(
+        self,
+        phase: str,
+        operator: str = "",
+        *,
+        expected_experiment_id: str,
+    ) -> dict[str, Any]:
+        """Transition phase only for the exact currently-authoritative experiment."""
         if self._active is None:
             raise RuntimeError("No active experiment.")
+        if type(expected_experiment_id) is not str or expected_experiment_id != self._active.experiment_id:
+            raise RuntimeError("Experiment identity mismatch.")
         # Validate phase name
         try:
             ExperimentPhase(phase)
@@ -1739,8 +1680,7 @@ class ExperimentManager:
             readings,
             artifact_index,
             channel_filter=lambda item: (
-                "pressure" in str(item["channel"]).lower()
-                or str(item["unit"]).lower() in {"mbar", "pa"}
+                "pressure" in str(item["channel"]).lower() or str(item["unit"]).lower() in {"mbar", "pa"}
             ),
             role="pressure",
             title="Pressure",
@@ -1801,9 +1741,7 @@ class ExperimentManager:
                     for row in conn.execute(query, params).fetchall():
                         rows.append(
                             {
-                                "timestamp": datetime.fromtimestamp(
-                                    float(row["timestamp"]), tz=UTC
-                                ),
+                                "timestamp": datetime.fromtimestamp(float(row["timestamp"]), tz=UTC),
                                 "instrument_id": str(row["instrument_id"] or ""),
                                 "channel": str(row["channel"] or ""),
                                 "value": decode(float(row["value"]), str(row["status"] or "")),
@@ -1985,9 +1923,7 @@ class ExperimentManager:
             writer = csv.writer(handle)
             writer.writerow(["temperature_k", "conductance_wk", "resistance_kw"])
             for item in rows:
-                writer.writerow(
-                    [item["temperature_k"], item["conductance_wk"], item["resistance_kw"]]
-                )
+                writer.writerow([item["temperature_k"], item["conductance_wk"], item["resistance_kw"]])
 
     def _maybe_write_channel_plot(
         self,
@@ -2030,13 +1966,9 @@ class ExperimentManager:
             plt.figure(figsize=(8, 3.5))
             series: dict[str, list[tuple[datetime, float]]] = {}
             for item in readings:
-                series.setdefault(str(item["channel"]), []).append(
-                    (item["timestamp"], float(item["value"]))
-                )
+                series.setdefault(str(item["channel"]), []).append((item["timestamp"], float(item["value"])))
             for channel, values in sorted(series.items()):
-                plt.plot(
-                    [stamp for stamp, _ in values], [value for _, value in values], label=channel
-                )
+                plt.plot([stamp for stamp, _ in values], [value for _, value in values], label=channel)
             plt.title(title)
             plt.ylabel(y_label)
             if len(series) <= 6:

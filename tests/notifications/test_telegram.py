@@ -345,11 +345,12 @@ async def test_cmd_phase_advances() -> None:
     ExperimentPhase enum value 'cooldown' before being dispatched."""
     handler = AsyncMock(return_value={"ok": True})
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/phase cooling"))
+    await bot._handle_message(_tg_msg("/phase cooling exp-1"))
     handler.assert_called_once()
     cmd = handler.call_args[0][0]
     assert cmd["cmd"] == "experiment_advance_phase"
     assert cmd["phase"] == "cooldown", "legacy 'cooling' must canonicalise to enum value 'cooldown'"
+    assert cmd["expected_experiment_id"] == "exp-1"
     assert "✅" in bot._send.call_args[0][1]
 
 
@@ -358,6 +359,14 @@ async def test_cmd_phase_invalid_returns_error() -> None:
     await bot._handle_message(_tg_msg("/phase nonexistent_phase"))
     bot._send.assert_called_once()
     assert "❌" in bot._send.call_args[0][1]
+
+
+async def test_cmd_phase_without_identity_is_rejected() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/phase cooling"))
+    handler.assert_not_called()
+    assert "experiment_id" in bot._send.call_args[0][1]
 
 
 # ===========================================================================
@@ -421,8 +430,7 @@ async def test_escalation_cancel_stops() -> None:
     # Task must be registered immediately after escalate()
     pending_key = "shift_missed_111"
     assert pending_key in svc._pending, (
-        f"Expected task key '{pending_key}' in _pending after escalate(), "
-        f"got keys: {list(svc._pending)}"
+        f"Expected task key '{pending_key}' in _pending after escalate(), got keys: {list(svc._pending)}"
     )
     task_ref = svc._pending[pending_key]
     assert not task_ref.done(), "Task should be waiting (not done) before cancel()"
@@ -432,8 +440,6 @@ async def test_escalation_cancel_stops() -> None:
     # cancel() awaits the task cancellation — task must be done and cancelled
     assert task_ref.cancelled(), "Task must be in cancelled state after cancel()"
     # Key must be removed from _pending
-    assert pending_key not in svc._pending, (
-        f"Key '{pending_key}' must be removed from _pending after cancel()"
-    )
+    assert pending_key not in svc._pending, f"Key '{pending_key}' must be removed from _pending after cancel()"
     # Belt-and-suspenders: send_message must not have been called
     notifier.send_message.assert_not_called()
