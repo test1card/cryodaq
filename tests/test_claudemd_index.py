@@ -146,7 +146,7 @@ def test_safety_and_design_system_floors_remain_present() -> None:
         "## GUI, UX, and design-system gate",
         "Every GUI/UI/UX change is also a design-system change assessment",
         "## Stop conditions",
-        ".claude/claude-mem-context.md",
+        "Machine-generated assistant memory or injected context",
     )
     missing = [phrase for phrase in required if phrase not in agents_text]
     assert not missing, f"canonical safety/design guidance was removed: {missing}"

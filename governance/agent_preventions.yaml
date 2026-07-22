@@ -403,7 +403,7 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: CLI-PLAINTEXT-RENDERING-003D
-    guard: tests/gui/shell/test_top_watch_bar_persistent_context.py::test_experiment_identity_is_plain_text_and_tooltip_escaped
+    guard: tests/gui/shell/test_top_watch_bar_persistent_context.py::test_provenance_identity_is_escaped_as_literal_tooltip_text
     ci_partition: gui
     red_evidence: benign_text_tests_missed_autotext_identity_interpretation_pending_immutable_capture
     green_evidence: pending
@@ -651,7 +651,7 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: PHYSICAL-CONFIG-WIRING-001
-    guard: tests/core/test_safety_pattern_liveness.py::test_safety_critical_pattern_matches_raw_channel
+    guard: tests/core/test_safety_pattern_liveness.py::test_safety_critical_patterns_resolve_to_exact_raw_channels
     ci_partition: core
     red_evidence: exact_cli_97cff82c_changed_safety_patterns_to_canonical_t11_t12_while_production_safetymanager_consumed_raw_labels_and_two_liveness_cases_failed_2026_07_22_pending_immutable_capture
     green_evidence: pending
@@ -1059,8 +1059,8 @@ records:
     guards:
       - node: tests/core/test_annunciation_protocol.py::test_ack_publish_failure_retry_emits_one_durable_event
         ci_partition: core
-      - node: tests/core/test_annunciation_protocol.py::test_ack_event_emitted_false_never_silences_activation
-        ci_partition: core
+      - node: tests/gui/shell/test_annunciation_controller.py::test_event_emitted_false_does_not_silence
+        ci_partition: gui
     red_evidence: state_committed_event_lost_reproduction_pending_artifact_binding
     green_evidence: pending
 
@@ -1132,7 +1132,7 @@ records:
         ci_partition: core
       - node: tests/core/test_experiment_commands.py::test_async_quick_log_cas_blocks_replacement_during_durable_await
         ci_partition: core
-      - node: tests/gui/dashboard/test_dashboard_view.py::test_quick_log_binds_exact_experiment_identity
+      - node: tests/gui/dashboard/test_dashboard_view.py::test_dashboard_quick_log_requires_exact_commit_receipt
         ci_partition: gui
       - node: tests/replay_engine/test_replay_phases.py::test_handle_command_rejects_invalid_phase_with_exact_identity_without_persisting
         ci_partition: remaining
@@ -1286,7 +1286,7 @@ records:
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
-      - node: tests/gui/shell/test_top_watch_bar_persistent_context.py::test_experiment_identity_is_plain_text_and_tooltip_escaped
+      - node: tests/gui/shell/test_top_watch_bar_persistent_context.py::test_provenance_identity_is_escaped_as_literal_tooltip_text
         ci_partition: gui
     red_evidence: raw_identity_interpreted_as_autotext_pending_artifact_binding
     green_evidence: pending
@@ -1338,7 +1338,7 @@ records:
         ci_partition: remaining
       - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_wrong_generation_late_close_cannot_settle_current_connection
         ci_partition: remaining
-      - node: tests/drivers/test_keithley_connect_safety.py::test_gpib_incomplete_close_normalizes_to_instrument_settlement_receipt
+      - node: tests/drivers/test_keithley_connect_safety.py::test_incomplete_transport_close_blocks_keithley_disconnect_and_reconnect
         ci_partition: remaining
     red_evidence: incomplete_identity_and_off_proof_pending_artifact_binding
     green_evidence: pending
@@ -1415,7 +1415,7 @@ records:
         ci_partition: core
       - node: tests/core/test_physical_alarm_exactness.py::test_landmark_schema_and_aliases_are_exact
         ci_partition: core
-      - node: tests/core/test_safety_pattern_liveness.py::test_safety_critical_pattern_matches_raw_channel
+      - node: tests/core/test_safety_pattern_liveness.py::test_safety_critical_patterns_resolve_to_exact_raw_channels
         ci_partition: core
     red_evidence: production_permissive_loader_trace_pending_artifact_binding
     green_evidence: pending

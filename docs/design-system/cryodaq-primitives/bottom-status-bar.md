@@ -48,7 +48,7 @@ acknowledgement, or any command.
 |---|---|---|
 | Safety | `MainWindowV2` calls `set_safety_state` from backend state | lowercase state ID with a dot glyph |
 | Launcher uptime | widget-local monotonic clock | `Лаунчер HH:MM:SS` |
-| Data disk | widget-local `get_data_dir()` and `shutil.disk_usage` | `Диск N ГБ` |
+| Data disk | `MainWindowV2` passes fresh, incarnation-bound `disk_monitor` evidence | `Диск N ГБ`; stale or disconnected history is marked explicitly |
 | Data rate | last value passed to `set_data_rate` | integer `изм/с` |
 | Connection | host calls `set_connected` from recent-reading evidence | Russian connected/disconnected label |
 | Clock | widget-local wall clock | local `HH:MM:SS` |
@@ -107,6 +107,13 @@ The active public setter contract is exactly:
 class BottomStatusBar(QWidget):
     def set_safety_state(self, state: str | None) -> None: ...
     def set_data_rate(self, rate_per_sec: float) -> None: ...
+    def set_disk_evidence(
+        self,
+        value: float,
+        *,
+        source: str,
+        state: str,
+    ) -> bool: ...
     def set_connected(
         self,
         connected: bool,
@@ -119,11 +126,15 @@ or `set_time` API. Documentation and tests must not imply otherwise.
 
 ## Update ownership and failure behavior
 
-- A one-second widget timer updates uptime, disk space, and local time.
+- A one-second widget timer updates only uptime and local time.
 - Safety, rate, and connection change only through the public setters.
-- A disk-query exception is swallowed by the current implementation and leaves
-  the prior disk label visible. This retained display has no explicit stale
-  marker and is an open gap.
+- Disk evidence is accepted only from the exact `disk_monitor` source when its
+  typed state agrees with the numeric threshold. Invalid, negative, non-finite,
+  foreign-source, or state/value-inconsistent input is rejected without
+  replacing the last accepted evidence.
+- `MainWindowV2` owns disk freshness and bridge-incarnation binding. On expiry
+  or disconnect it retains the last numeric value only with an explicit
+  stale/disconnected marker; no retained number is presented as current.
 - The last data rate is not cleared or marked stale on disconnect.
 - The connection field receives already-derived host evidence; it cannot
   distinguish a disconnected socket from a live transport with silent
@@ -147,8 +158,8 @@ Worse or still open:
 - status color is applied to body text rather than to a separate high-contrast
   shape; physical contrast/NVDA evidence remains open;
 - the clock is proportional, has no timezone, and may jitter;
-- rate and disk values can remain last-known without an explicit stale cue;
-- disk probing runs on the one-second GUI timer;
+- the rate can remain last-known without its own explicit stale cue;
+- disk evidence still depends on the backend monitor and GUI transport path;
 - recent-reading connection evidence is weaker than an independent transport
   heartbeat;
 - audible alarm ownership is not yet consolidated across all producers.
