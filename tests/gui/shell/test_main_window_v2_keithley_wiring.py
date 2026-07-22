@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,6 +22,32 @@ from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2, _map_safety_state
+from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
+from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.operator_snapshot import (
+    AttentionQueue,
+    AvailabilityTruth,
+    CooldownHistorySummary,
+    CooldownSample,
+    DataIntegritySummary,
+    ExperimentOperatingState,
+    InfrastructureNode,
+    InfrastructureNodeHealth,
+    OperatorPresentationState,
+    OperatorSnapshot,
+    PlantHealthItem,
+    PlantHealthSummary,
+    ReadinessSummary,
+    ReadinessTruth,
+    RecordingTruth,
+    SafetyLifecycle,
+    SnapshotCut,
+    SnapshotMode,
+    SummaryStatus,
+    SupportBundleEntry,
+    SupportBundleManifest,
+    SupportBundleSummary,
+)
 
 
 def _app() -> QApplication:
@@ -36,14 +62,23 @@ def _stop_timers(w: MainWindowV2) -> None:
             pass
 
 
-def _safety_reading(state: str, reason: str = "") -> Reading:
+def _safety_reading(
+    state: str,
+    reason: str = "",
+    *,
+    observed_at: datetime | None = None,
+    bridge_id: str | None = None,
+) -> Reading:
+    metadata = {"state": state, "reason": reason}
+    if bridge_id is not None:
+        metadata["bridge_instance_id"] = bridge_id
     return Reading(
-        timestamp=datetime.now(UTC),
+        timestamp=observed_at or datetime.now(UTC),
         instrument_id="safety_manager",
         channel="analytics/safety_state",
         value=0.0,
         unit="",
-        metadata={"state": state, "reason": reason},
+        metadata=metadata,
     )
 
 
@@ -55,6 +90,44 @@ def _source_state_reading(channel: str, state: str) -> Reading:
         value=0.0,
         unit="",
         metadata={"state": state},
+    )
+
+
+def _typed_ready_snapshot() -> OperatorSnapshot:
+    observed = datetime.now(UTC) - timedelta(seconds=1)
+    cut = SnapshotCut(42, observed, observed, "engine-v1", SnapshotMode.LIVE, "exp-1", "engine-v1")
+    status = SummaryStatus(OperatorPresentationState.OK, 1.0, 0.0, ("authoritative",), "Подтверждено")
+    manifest = SupportBundleManifest(
+        "bundle-42",
+        cut.received_at,
+        (SupportBundleEntry("status/status.json", 123, "a" * 64),),
+    )
+    return OperatorSnapshot(
+        cut,
+        ReadinessSummary(cut, status, ReadinessTruth.READY, (), SafetyLifecycle.READY),
+        PlantHealthSummary(
+            cut,
+            status,
+            (PlantHealthItem("plant", "Установка", OperatorPresentationState.OK, ()),),
+        ),
+        InfrastructureNodeHealth(
+            cut,
+            status,
+            (InfrastructureNode("ups", "ИБП", OperatorPresentationState.OK, ()),),
+        ),
+        AttentionQueue(cut, status, ()),
+        ExperimentOperatingState(
+            cut,
+            status,
+            "exp-1",
+            "Эксперимент",
+            "cooldown",
+            RecordingTruth.RECORDING,
+            "rec-1",
+        ),
+        DataIntegritySummary(cut, status, 42, 41, 0, 0, AvailabilityTruth.AVAILABLE),
+        CooldownHistorySummary(cut, status, (CooldownSample(0, 300),), None, ()),
+        SupportBundleSummary(cut, status, AvailabilityTruth.AVAILABLE, manifest),
     )
 
 
@@ -196,16 +269,204 @@ def test_exact_internal_source_state_event_updates_real_panel():
 
 def test_keithley_overlay_receives_safety_ready_via_dispatch():
     _app()
-    w = MainWindowV2()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
     try:
+        assert bridge.bridge_instance_id is not None
         w._ensure_overlay("source")
         # First transition to blocked.
-        w._dispatch_reading(_safety_reading("fault_latched", "boom"))
+        w._dispatch_reading(
+            _safety_reading(
+                "fault_latched",
+                "boom",
+                bridge_id=bridge.bridge_instance_id,
+            )
+        )
         assert w._keithley_panel._safety_ready is False
         # Then back to ready — gate label hides.
-        w._dispatch_reading(_safety_reading("ready", ""))
+        w._dispatch_reading(_safety_reading("ready", "", bridge_id=bridge.bridge_instance_id))
         assert w._keithley_panel._safety_ready is True
         assert w._keithley_panel._gate_reason_label.isHidden()
+    finally:
+        _stop_timers(w)
+
+
+def test_legacy_safety_ready_expires_while_measurement_traffic_continues() -> None:
+    _app()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
+    try:
+        assert bridge.bridge_instance_id is not None
+        w._ensure_overlay("source")
+        w._last_reading_time = time.monotonic()
+        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        assert w._keithley_panel._safety_ready is True
+
+        w._last_safety_observed_at = datetime.now(UTC) - timedelta(seconds=11)
+        w._last_reading_time = time.monotonic()
+        w._tick_status()
+
+        assert w._keithley_panel._connected is True
+        assert w._keithley_panel._safety_ready is False
+    finally:
+        _stop_timers(w)
+
+
+def test_bridge_replacement_revokes_legacy_safety_ready() -> None:
+    _app()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
+    try:
+        assert bridge.bridge_instance_id is not None
+        w._ensure_overlay("source")
+        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        assert w._keithley_panel._safety_ready is True
+
+        bridge._bridge_instance_id = "f" * 32
+        w._last_reading_time = time.monotonic()
+        w._tick_status()
+
+        assert w._keithley_panel._safety_ready is False
+        assert w._accepted_safety_bridge_instance_id is None
+    finally:
+        _stop_timers(w)
+
+
+def test_experiment_change_revokes_legacy_safety_ready() -> None:
+    _app()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
+    try:
+        assert bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-a"}}
+        w._ensure_overlay("source")
+        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        assert w._keithley_panel._safety_ready is True
+
+        w._on_experiment_status_received(
+            {
+                "active_experiment": {"experiment_id": "exp-b"},
+                "phases": [],
+            }
+        )
+
+        assert w._keithley_panel._safety_ready is False
+        assert w._accepted_safety_experiment_id is None
+    finally:
+        _stop_timers(w)
+
+
+def test_older_ready_cannot_resurrect_newer_blocked_legacy_safety() -> None:
+    _app()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
+    try:
+        assert bridge.bridge_instance_id is not None
+        w._ensure_overlay("source")
+        observed = datetime.now(UTC) - timedelta(seconds=2)
+        w._dispatch_reading(
+            _safety_reading(
+                "ready",
+                observed_at=observed,
+                bridge_id=bridge.bridge_instance_id,
+            )
+        )
+        assert w._keithley_panel._safety_ready is True
+        w._dispatch_reading(
+            _safety_reading(
+                "fault_latched",
+                "newer block",
+                observed_at=observed + timedelta(seconds=1),
+                bridge_id=bridge.bridge_instance_id,
+            )
+        )
+        assert w._keithley_panel._safety_ready is False
+
+        w._dispatch_reading(
+            _safety_reading(
+                "ready",
+                observed_at=observed + timedelta(milliseconds=500),
+                bridge_id=bridge.bridge_instance_id,
+            )
+        )
+
+        assert w._keithley_panel._safety_ready is False
+        assert w._last_safety_state == "fault_latched"
+    finally:
+        _stop_timers(w)
+
+
+def test_foreign_ready_destroys_prior_legacy_replay_binding() -> None:
+    _app()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
+    try:
+        assert bridge.bridge_instance_id is not None
+        w._ensure_overlay("source")
+        observed = datetime.now(UTC) - timedelta(seconds=1)
+        w._dispatch_reading(
+            _safety_reading(
+                "fault_latched",
+                observed_at=observed,
+                bridge_id=bridge.bridge_instance_id,
+            )
+        )
+        w._dispatch_reading(
+            _safety_reading(
+                "ready",
+                observed_at=observed + timedelta(milliseconds=500),
+                bridge_id="f" * 32,
+            )
+        )
+
+        assert w._keithley_panel._safety_ready is False
+        assert w._accepted_safety_bridge_instance_id is None
+        assert w._current_keithley_safety_gate()[0] is False
+    finally:
+        _stop_timers(w)
+
+
+def test_typed_snapshot_staleness_revokes_gate_and_legacy_ready_cannot_resurrect_it() -> None:
+    _app()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._ensure_overlay("source")
+        ready = store.accept_snapshot(_typed_ready_snapshot())
+        w.render_operator_snapshot(ready)
+        assert w._keithley_panel._safety_ready is True
+
+        w._apply_operator_snapshot_safety(object())
+        assert w._keithley_panel._safety_ready is False
+
+        stale = store.observe_transport(connected=True, transport_age_s=11.0, stale_after_s=10.0)
+        w._apply_operator_snapshot_safety(stale)
+        assert w._keithley_panel._safety_ready is False
+
+        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        assert w._keithley_panel._safety_ready is False
+        assert w._last_safety_state == SafetyLifecycle.UNKNOWN.value
+    finally:
+        _stop_timers(w)
+
+
+def test_malformed_typed_snapshot_permanently_disables_legacy_ready_fallback() -> None:
+    _app()
+    bridge = ZmqBridge()
+    w = MainWindowV2(bridge=bridge)
+    try:
+        assert bridge.bridge_instance_id is not None
+        w._ensure_overlay("source")
+
+        w._apply_operator_snapshot_safety(object())
+        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+
+        assert w._typed_safety_authority_seen is True
+        assert w._keithley_panel._safety_ready is False
+        assert w._current_keithley_safety_gate()[0] is False
     finally:
         _stop_timers(w)
 
@@ -304,9 +565,7 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
         # Click the REAL Start button (enabled by connected + safety-ready) so
         # the rendered clicked → _on_start_clicked → _dispatch_command wiring is
         # exercised end-to-end, not a private handler call.
-        assert block._start_btn.isEnabled(), (
-            "Start requires connected + safety-ready + exact OFF observation"
-        )
+        assert block._start_btn.isEnabled(), "Start requires connected + safety-ready + exact OFF observation"
         block._start_btn.click()
 
         assert len(captured_cmds) == 1, "exactly one command must be dispatched"

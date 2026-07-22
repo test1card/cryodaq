@@ -64,6 +64,13 @@ from cryodaq.gui.state.descriptor_store import (
     IngestResult,
 )
 from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.operator_snapshot import (
+    OperatorPresentationState,
+    OperatorSnapshot,
+    ReadinessTruth,
+    SafetyLifecycle,
+    SnapshotMode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +78,8 @@ _SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
 _SAFETY_REASON_MAX_CHARS = 120
 _DISK_FUTURE_TOLERANCE_S = 5.0
 _DISK_MAX_SOURCE_AGE_S = 600.0
+_SAFETY_FUTURE_TOLERANCE_S = 5.0
+_SAFETY_MAX_SOURCE_AGE_S = 10.0
 _WORKER_SETTLE_MS = 1_500
 
 
@@ -140,6 +149,13 @@ class MainWindowV2(QMainWindow):
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
+        self._last_safety_observed_at: datetime | None = None
+        self._accepted_safety_bridge_instance_id: str | None = None
+        self._accepted_safety_experiment_id: str | None = None
+        self._typed_safety_authority_seen = False
+        self._typed_safety_producer_id: str | None = None
+        self._typed_safety_revision: int | None = None
+        self._typed_safety_ready = False
         self._last_disk_observed_at: datetime | None = None
         self._accepted_disk_bridge_instance_id: str | None = None
 
@@ -279,8 +295,68 @@ class MainWindowV2(QMainWindow):
     @Slot(object)
     def render_operator_snapshot(self, snapshot: object) -> None:
         """Present one ingress-qualified cut through the POD transaction."""
+        # Actuator gating is the fail-closed edge of the transaction. Revoke
+        # it before any passive presentation sink is allowed to reject/raise.
+        self._apply_operator_snapshot_safety(snapshot)
         self._operator_display.render(snapshot)
         self._overview_panel.set_operator_snapshot(snapshot)
+
+    def _apply_operator_snapshot_safety(self, snapshot: object) -> None:
+        """Use only exact, current POD readiness as Keithley gate authority."""
+        # Once the typed POD path is present, legacy analytics remains
+        # observational forever for this window. A malformed typed delivery
+        # must fail closed, not silently reactivate the legacy fallback.
+        self._typed_safety_authority_seen = True
+        if type(snapshot) is not OperatorSnapshot:
+            self._invalidate_safety_authority("Некорректный снимок состояния Safety")
+            return
+        cut = snapshot.cut
+        readiness = snapshot.readiness
+        bridge_instance_id = self._current_bridge_instance_id()
+        producer_changed = self._typed_safety_producer_id not in (None, cut.producer_id)
+        if producer_changed:
+            self._typed_safety_revision = None
+            self._typed_safety_ready = False
+        if (
+            self._typed_safety_revision is not None
+            and cut.producer_id == self._typed_safety_producer_id
+            and cut.revision < self._typed_safety_revision
+        ):
+            self._invalidate_safety_authority("Safety snapshot revision regressed")
+            return
+        ready = (
+            bridge_instance_id is not None
+            and cut.mode is SnapshotMode.LIVE
+            and readiness.readiness is ReadinessTruth.READY
+            and readiness.lifecycle is SafetyLifecycle.READY
+            and readiness.status.state is OperatorPresentationState.OK
+            and not readiness.status.transport_reason_codes
+        )
+        if (
+            self._typed_safety_revision is not None
+            and cut.producer_id == self._typed_safety_producer_id
+            and cut.revision == self._typed_safety_revision
+            and ready
+            and not self._typed_safety_ready
+        ):
+            # A same-cut degraded state cannot recover authority. Only a newer
+            # coherent Safety-owner cut can re-enable controls.
+            return
+        self._typed_safety_producer_id = cut.producer_id
+        self._typed_safety_revision = cut.revision
+        self._typed_safety_ready = ready
+        self._accepted_safety_experiment_id = snapshot.experiment.experiment_id
+        self._accepted_safety_bridge_instance_id = bridge_instance_id
+        self._last_safety_state = readiness.lifecycle.value
+        self._last_safety_reason = readiness.status.operator_text
+        transport_stale = readiness.status.state in {
+            OperatorPresentationState.STALE,
+            OperatorPresentationState.DISCONNECTED,
+        }
+        self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_stale)
+        if self._keithley_panel is not None:
+            reason = "" if ready else "Состояние Safety устарело" if transport_stale else readiness.status.operator_text
+            self._keithley_panel.set_safety_ready(ready, reason)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -337,14 +413,8 @@ class MainWindowV2(QMainWindow):
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
-            if self._last_safety_state is not None:
-                ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
-                widget.set_safety_ready(ready, reason_text)
-            else:
-                widget.set_safety_ready(
-                    False,
-                    "Нет авторитетного состояния Safety",
-                )
+            ready, reason_text = self._current_keithley_safety_gate()
+            widget.set_safety_ready(ready, reason_text)
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -584,26 +654,119 @@ class MainWindowV2(QMainWindow):
             if self._operator_log_panel is not None:
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
-                if self._replay_mode:
-                    # Replay telemetry is historical evidence, never current
-                    # Safety-owner authority.  Keep lifecycle unknown and
-                    # controls fail-closed for the entire replay session.
-                    self._last_safety_state = None
-                    self._last_safety_reason = ""
-                    self._bottom_bar.set_safety_state(None, stale=True)
-                    if self._keithley_panel is not None:
-                        self._keithley_panel.set_safety_ready(
-                            False, "Режим replay — текущее состояние Safety неизвестно"
-                        )
-                    return
-                state_name = reading.metadata.get("state")
-                reason = reading.metadata.get("reason", "") or ""
-                self._last_safety_state = str(state_name) if state_name is not None else None
-                self._last_safety_reason = str(reason) if reason else ""
-                self._bottom_bar.set_safety_state(self._last_safety_state)
-                if self._keithley_panel is not None:
-                    ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
-                    self._keithley_panel.set_safety_ready(ready, reason_text)
+                self._dispatch_safety_evidence(reading)
+
+    def _current_bridge_instance_id(self) -> str | None:
+        value = getattr(self._bridge, "bridge_instance_id", None)
+        return value if type(value) is str and len(value) == 32 else None
+
+    def _dispatch_safety_evidence(self, reading: Reading) -> None:
+        """Present ordered legacy telemetry without outranking typed authority."""
+        if self._replay_mode:
+            self._last_safety_state = None
+            self._last_safety_reason = ""
+            self._invalidate_safety_authority(
+                "Режим replay — текущее состояние Safety неизвестно",
+                disconnected=True,
+            )
+            return
+        metadata = reading.metadata
+        if type(metadata) is not dict:
+            self._invalidate_safety_authority("Некорректное состояние Safety")
+            return
+        state_name = metadata.get("state")
+        if type(state_name) is not str or not state_name:
+            self._invalidate_safety_authority("Некорректное состояние Safety")
+            return
+        if (
+            type(reading.timestamp) is not datetime
+            or reading.timestamp.tzinfo is None
+            or reading.timestamp.utcoffset() is None
+        ):
+            self._invalidate_safety_authority("Время состояния Safety не подтверждено")
+            return
+        observed_at = reading.timestamp.astimezone(UTC)
+        wall_now = datetime.now(UTC)
+        if observed_at > wall_now + timedelta(seconds=_SAFETY_FUTURE_TOLERANCE_S):
+            self._invalidate_safety_authority("Состояние Safety получено из будущего")
+            return
+        if observed_at < wall_now - timedelta(seconds=_SAFETY_MAX_SOURCE_AGE_S):
+            self._invalidate_safety_authority("Состояние Safety устарело")
+            return
+        if self._last_safety_observed_at is not None and observed_at <= self._last_safety_observed_at:
+            if state_name not in _SAFETY_READY_STATES:
+                self._invalidate_safety_authority("Нарушен порядок состояния Safety")
+            return
+        if self._typed_safety_authority_seen:
+            # The POD cut is coherent, freshness-qualified, experiment-bound,
+            # and producer-bound. Legacy analytics telemetry is display-only
+            # and cannot overwrite or resurrect that authority.
+            return
+
+        reason = metadata.get("reason", "") or ""
+        self._last_safety_state = state_name
+        self._last_safety_reason = str(reason) if reason else ""
+        self._last_safety_observed_at = observed_at
+        self._bottom_bar.set_safety_state(self._last_safety_state)
+
+        bridge_instance_id = self._current_bridge_instance_id()
+        current_experiment_id = self._active_experiment_id()
+        authority_current = (
+            reading.instrument_id == "safety_manager"
+            and bridge_instance_id is not None
+            and metadata.get("bridge_instance_id") == bridge_instance_id
+        )
+        if authority_current:
+            self._accepted_safety_bridge_instance_id = bridge_instance_id
+            self._accepted_safety_experiment_id = current_experiment_id
+        else:
+            # Invalid telemetry may be useful historical display evidence, but
+            # it must also destroy any prior enabling replay binding.
+            self._accepted_safety_bridge_instance_id = None
+            self._accepted_safety_experiment_id = None
+        ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
+        ready = ready and authority_current
+        if self._keithley_panel is not None:
+            self._keithley_panel.set_safety_ready(
+                ready,
+                reason_text if not ready else "",
+            )
+
+    def _current_keithley_safety_gate(self) -> tuple[bool, str]:
+        bridge_instance_id = self._current_bridge_instance_id()
+        binding_current = (
+            bridge_instance_id is not None
+            and self._accepted_safety_bridge_instance_id == bridge_instance_id
+            and (
+                self._latest_experiment_status is None
+                or self._accepted_safety_experiment_id == self._active_experiment_id()
+            )
+        )
+        if self._typed_safety_authority_seen:
+            if self._typed_safety_ready and binding_current:
+                return True, ""
+            return False, self._last_safety_reason or "Нет текущего состояния Safety"
+        if self._last_safety_state is None:
+            return False, "Нет авторитетного состояния Safety"
+        observed_at = self._last_safety_observed_at
+        source_current = observed_at is not None and observed_at >= datetime.now(UTC) - timedelta(
+            seconds=_SAFETY_MAX_SOURCE_AGE_S
+        )
+        ready, reason = _map_safety_state(self._last_safety_state, self._last_safety_reason)
+        if ready and binding_current and source_current:
+            return True, ""
+        return False, reason if not ready else "Нет текущего состояния Safety"
+
+    def _invalidate_safety_authority(self, reason: str, *, disconnected: bool = False) -> None:
+        self._accepted_safety_bridge_instance_id = None
+        self._accepted_safety_experiment_id = None
+        self._typed_safety_ready = False
+        if self._last_safety_state is not None:
+            self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
+        elif disconnected:
+            self._bottom_bar.set_safety_state(None, stale=True)
+        if self._keithley_panel is not None:
+            self._keithley_panel.set_safety_ready(False, reason)
 
     def _dispatch_disk_evidence(self, reading: Reading) -> None:
         """Accept only current, ordered disk evidence from this bridge instance."""
@@ -620,6 +783,7 @@ class MainWindowV2(QMainWindow):
         if metadata.get("bridge_instance_id") != bridge_instance_id:
             if self._accepted_disk_bridge_instance_id not in (None, bridge_instance_id):
                 self._last_disk_observed_at = None
+                self._accepted_disk_bridge_instance_id = None
                 self._bottom_bar.mark_disk_stale(disconnected=False)
             return
         if (
@@ -842,6 +1006,45 @@ class MainWindowV2(QMainWindow):
         now = time.monotonic()
         silence = now - self._last_reading_time if self._last_reading_time > 0 else 999.0
         connected = silence < 3.0
+        wall_now = datetime.now(UTC)
+        current_bridge_instance_id = self._current_bridge_instance_id()
+        disk_marked_stale = False
+        if (
+            self._accepted_disk_bridge_instance_id is not None
+            and self._accepted_disk_bridge_instance_id != current_bridge_instance_id
+        ):
+            # Bridge replacement is an authority boundary: clear both halves
+            # of the accepted record before presenting the retained history.
+            self._accepted_disk_bridge_instance_id = None
+            self._last_disk_observed_at = None
+            self._bottom_bar.mark_disk_stale(disconnected=not connected)
+            disk_marked_stale = True
+        elif self._last_disk_observed_at is not None and self._last_disk_observed_at < wall_now - timedelta(
+            seconds=_DISK_MAX_SOURCE_AGE_S
+        ):
+            self._bottom_bar.mark_disk_stale(disconnected=not connected)
+            disk_marked_stale = True
+
+        safety_binding_changed = (
+            self._accepted_safety_bridge_instance_id is not None
+            and self._accepted_safety_bridge_instance_id != current_bridge_instance_id
+        )
+        safety_experiment_changed = (
+            self._accepted_safety_bridge_instance_id is not None
+            and self._latest_experiment_status is not None
+            and self._accepted_safety_experiment_id != self._active_experiment_id()
+        )
+        safety_source_expired = (
+            not self._typed_safety_authority_seen
+            and self._last_safety_observed_at is not None
+            and self._last_safety_observed_at < wall_now - timedelta(seconds=_SAFETY_MAX_SOURCE_AGE_S)
+        )
+        if safety_binding_changed:
+            self._invalidate_safety_authority("Поколение связи Safety изменилось")
+        elif safety_experiment_changed:
+            self._invalidate_safety_authority("Эксперимент Safety изменился")
+        elif safety_source_expired:
+            self._invalidate_safety_authority("Состояние Safety устарело")
         # Engine state derives from data flow — single source of truth
         self._top_bar.set_engine_state(connected)
         self._overview_panel.set_connected(connected)
@@ -864,10 +1067,12 @@ class MainWindowV2(QMainWindow):
             # not-ready. The GUI never erases operator evidence into a quiet
             # blank or presents a stale runtime state as current.
             if self._last_safety_state is not None:
-                self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
-                if self._keithley_panel is not None:
-                    self._keithley_panel.set_safety_ready(False, "Engine потерян — состояние безопасности неизвестно")
-            self._bottom_bar.mark_disk_stale(disconnected=True)
+                self._invalidate_safety_authority(
+                    "Engine потерян — состояние безопасности неизвестно",
+                    disconnected=True,
+                )
+            if not disk_marked_stale:
+                self._bottom_bar.mark_disk_stale(disconnected=True)
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
@@ -969,6 +1174,7 @@ class MainWindowV2(QMainWindow):
 
     def _on_experiment_status_received(self, status: dict) -> None:
         """Forward status to dashboard + overlay, cache for routing."""
+        previous_exp_id = self._active_experiment_id()
         self._latest_experiment_status = status
 
         # F4: invalidate experiment-scoped analytics snapshot on boundary.
@@ -977,6 +1183,12 @@ class MainWindowV2(QMainWindow):
         # so a newly-opened AnalyticsView does not replay stale data.
         active = status.get("active_experiment")
         new_exp_id = active.get("experiment_id") if isinstance(active, dict) else None
+        if (
+            self._accepted_safety_bridge_instance_id is not None
+            and new_exp_id != self._accepted_safety_experiment_id
+            and new_exp_id != previous_exp_id
+        ):
+            self._invalidate_safety_authority("Эксперимент Safety изменился")
         if new_exp_id != self._analytics_last_exp_id:
             self._analytics_snapshot.pop("set_cooldown", None)
             self._analytics_snapshot.pop("set_experiment_status", None)
