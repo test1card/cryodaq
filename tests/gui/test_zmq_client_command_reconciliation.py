@@ -16,6 +16,11 @@ class _Queue:
         if self.on_put:
             self.on_put(item)
 
+    def get_nowait(self):
+        if not self.items:
+            raise __import__("queue").Empty
+        return self.items.pop(0)
+
 
 def test_post_enqueue_cancellation_retains_outcome_unknown_until_reply(monkeypatch):
     cancelled = threading.Event()
@@ -40,6 +45,11 @@ def test_post_enqueue_cancellation_retains_outcome_unknown_until_reply(monkeypat
     bridge._reply_stop.set()
     consumer.join(timeout=1.0)
     assert not consumer.is_alive()
+    assert request_id in bridge._outcome_unknown
+    late = bridge.reconcile_late_result(request_id)
+    assert late is not None
+    assert late.request_id == request_id
+    assert late.reply == {"ok": True}
     assert request_id not in bridge._outcome_unknown
     assert future.result(timeout=0.1) == {"ok": True}
 
@@ -63,3 +73,22 @@ def test_request_nonce_collision_never_overwrites_pending_owner(monkeypatch):
     assert result["request_id"] == "fresh-owner"
     assert bridge._pending["deadbeef"] is existing
     assert "fresh-owner" in bridge._outcome_unknown
+
+
+def test_shutdown_retains_late_reply_for_exact_generation() -> None:
+    bridge = ZmqBridge()
+    bridge._generation = 7
+    request_id = "request-7"
+    owner = Future()
+    bridge._outcome_unknown[request_id] = owner
+    bridge._request_generation[request_id] = 7
+    bridge._reply_queue = _Queue()
+    bridge._reply_queue.put({"_rid": request_id, "ok": True, "revision": 4})
+
+    bridge.shutdown()
+
+    result = bridge.reconcile_late_result(request_id, generation=7)
+    assert result is not None
+    assert result.generation == 7
+    assert result.reply == {"ok": True, "revision": 4}
+    assert bridge.reconcile_late_result(request_id, generation=8) is None

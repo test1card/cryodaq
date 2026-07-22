@@ -1188,7 +1188,21 @@ class SQLiteWriter:
             message=text,
             tags=normalized_tags,
         )
-        return await loop.run_in_executor(self._executor, task)
+        owner = loop.run_in_executor(self._executor, task)
+        caller_cancelled: asyncio.CancelledError | None = None
+        while True:
+            try:
+                entry = await asyncio.shield(owner)
+                break
+            except asyncio.CancelledError as exc:
+                # The SQLite call is already admitted to the single-owner
+                # executor.  Keep this coroutine (and therefore the caller's
+                # experiment CAS) alive until that exact write settles.
+                if caller_cancelled is None:
+                    caller_cancelled = exc
+        if caller_cancelled is not None:
+            raise caller_cancelled
+        return entry
 
     async def get_operator_log(
         self,

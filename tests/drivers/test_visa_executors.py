@@ -1435,10 +1435,10 @@ async def test_usbtmc_incomplete_or_noop_close_cannot_enable_quarantine_recovery
 
 
 @pytest.mark.asyncio
-async def test_usbtmc_cancelled_close_is_terminal_even_after_handle_settlement() -> None:
+async def test_usbtmc_cancelled_close_after_success_is_not_terminal() -> None:
     import asyncio
 
-    from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
 
     close_started = threading.Event()
     close_release = threading.Event()
@@ -1467,11 +1467,372 @@ async def test_usbtmc_cancelled_close_is_terminal_even_after_handle_settlement()
     assert await asyncio.to_thread(close_started.wait, 1.0)
     close_task.cancel()
     close_release.set()
-    with pytest.raises(USBTMCIncompleteCloseError, match="terminally quarantined"):
+    with pytest.raises(asyncio.CancelledError):
         await close_task
-    assert transport._close_incomplete is True
-    with pytest.raises(RuntimeError, match="terminal"):
-        await transport.open("USB0::UNSAFE-RECOVERY::INSTR")
+    assert transport._resource is None
+    assert transport._rm is None
+    assert transport._close_incomplete is False
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_cancelled_close_retains_owner_until_settlement() -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    close_started = threading.Event()
+    close_release = threading.Event()
+    resource_closed = threading.Event()
+    manager_closed = threading.Event()
+
+    class _Resource:
+        def close(self) -> None:
+            close_started.set()
+            assert close_release.wait(3.0)
+            resource_closed.set()
+
+    class _Manager:
+        def close(self) -> None:
+            manager_closed.set()
+
+    resource = _Resource()
+    manager = _Manager()
+    transport = USBTMCTransport(mock=False)
+    transport._resource = resource
+    transport._rm = manager
+
+    close_task = asyncio.create_task(transport.close())
+    try:
+        assert await asyncio.to_thread(close_started.wait, 1.0)
+        assert close_task.cancel()
+        assert close_task.cancelling() == 1
+        await asyncio.sleep(0)
+
+        assert close_task.done() is False
+        assert transport._resource is resource
+        assert transport._rm is manager
+        assert resource_closed.is_set() is False
+        assert manager_closed.is_set() is False
+
+        close_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+        assert resource_closed.is_set()
+        assert manager_closed.is_set()
+    finally:
+        close_release.set()
+        if not close_task.done():
+            await asyncio.gather(close_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_cancelled_close_commits_success_before_propagating_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    close_started = threading.Event()
+    close_release = threading.Event()
+    calls: list[tuple[str, object]] = []
+
+    class _Resource:
+        def close(self) -> None:
+            close_started.set()
+            assert close_release.wait(3.0)
+            calls.append(("resource", self))
+
+    class _Manager:
+        def close(self) -> None:
+            calls.append(("manager", self))
+
+    resource = _Resource()
+    manager = _Manager()
+    transport = USBTMCTransport(mock=False)
+    transport._resource = resource
+    transport._rm = manager
+    replacement_resource = object()
+    replacement_manager = object()
+
+    close_task = asyncio.create_task(transport.close())
+    try:
+        assert await asyncio.to_thread(close_started.wait, 1.0)
+        assert close_task.cancel()
+        assert close_task.cancelling() == 1
+        close_release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+        assert calls == [("resource", resource), ("manager", manager)]
+        assert transport._resource is None
+        assert transport._rm is None
+        assert transport._close_incomplete is False
+
+        opened: list[str] = []
+
+        def _fresh_blocking_open(resource_str: str) -> tuple[object, object]:
+            opened.append(resource_str)
+            return replacement_manager, replacement_resource
+
+        monkeypatch.setattr(transport, "_blocking_open", _fresh_blocking_open)
+        await transport.open("USB0::FRESH-GENERATION::INSTR")
+        assert opened == ["USB0::FRESH-GENERATION::INSTR"]
+        assert transport._resource is replacement_resource
+        assert transport._rm is replacement_manager
+    finally:
+        close_release.set()
+        if not close_task.done():
+            await asyncio.gather(close_task, return_exceptions=True)
+        if transport._resource is replacement_resource:
+            transport._resource = None
+            transport._rm = None
+            transport._shutdown_executor()
+
+
+@pytest.mark.asyncio
+async def test_gpib_double_open_and_incomplete_close_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    import cryodaq.drivers.transport.gpib as gpib_module
+    from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
+
+    close_entered = threading.Event()
+    release_close = threading.Event()
+    exact_handle = object()
+    close_calls: list[object] = []
+
+    class Resource:
+        def close(self) -> None:
+            close_entered.set()
+            assert release_close.wait(3.0)
+            close_calls.append(exact_handle)
+
+    resource = Resource()
+    transport = GPIBTransport(mock=False)
+    transport._resource = resource
+    transport._resource_str = "GPIB0::12::INSTR"
+    transport._session_open = True
+    initial_generation = transport._open_generation
+    monkeypatch.setattr(gpib_module, "_CLOSE_TIMEOUT_S", 0.01)
+
+    close_task: asyncio.Task | None = None
+    try:
+        with pytest.raises(RuntimeError, match="generation has not settled"):
+            await transport.open("GPIB0::13::INSTR")
+        assert transport._open_generation == initial_generation
+
+        close_task = asyncio.create_task(transport.close())
+        assert await asyncio.to_thread(close_entered.wait, 1.0)
+        with pytest.raises(GPIBIncompleteCloseError, match="did not settle"):
+            await close_task
+        assert transport._resource is resource
+        assert transport._terminal_unsettled is True
+        with pytest.raises(RuntimeError, match="generation has not settled"):
+            await transport.open("GPIB0::13::INSTR")
+
+        release_close.set()
+        assert transport._close_done is not None
+        assert await asyncio.to_thread(transport._close_done.wait, 2.0)
+        await transport.close()
+        assert close_calls == [exact_handle]
+        assert transport._resource is None
+        assert transport._terminal_unsettled is False
+    finally:
+        release_close.set()
+        if close_task is not None:
+            await asyncio.gather(close_task, return_exceptions=True)
+        if transport._executor is not None:
+            transport._executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.asyncio
+async def test_gpib_clean_new_generation_recovers_from_desynchronization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.drivers.transport.gpib as gpib_module
+    from cryodaq.drivers.transport.gpib import GPIBTransport
+
+    events: list[tuple[str, object]] = []
+
+    class Resource:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def __init__(self, name: str, *, fail_query: bool) -> None:
+            self.name = name
+            self.fail_query = fail_query
+
+        def clear(self) -> None:
+            events.append(("sdc", self))
+
+        def set_visa_attribute(self, _attr, _value) -> None:
+            pass
+
+        def write(self, command: str) -> None:
+            events.append((command, self))
+
+        def read(self) -> str:
+            if self.fail_query:
+                raise OSError("GPIB response provenance lost")
+            return "fresh-response"
+
+        def close(self) -> None:
+            events.append(("close", self))
+
+    class Interface:
+        def send_ifc(self) -> None:
+            events.append(("ifc", self))
+
+        def close(self) -> None:
+            events.append(("close", self))
+
+    failed = Resource("failed", fail_query=True)
+    fresh = Resource("fresh", fail_query=False)
+    interface = Interface()
+    normal_resources = iter((failed, fresh))
+
+    class ResourceManager:
+        def open_resource(self, resource_str: str):
+            if resource_str.endswith("::INTFC"):
+                return interface
+            resource = next(normal_resources)
+            events.append(("open", resource))
+            return resource
+
+    manager = ResourceManager()
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {"GPIB0": manager}, raising=False)
+    monkeypatch.setattr(gpib_module, "_WRITE_READ_DELAY_S", 0.0)
+    transport = GPIBTransport(mock=False)
+    try:
+        await transport.open("GPIB0::12::INSTR")
+        with pytest.raises(OSError, match="provenance lost"):
+            await transport.query("KRDG?")
+        assert transport._query_desynchronized is True
+        await transport.close()
+        assert ("close", failed) in events
+
+        await transport.open("GPIB0::12::INSTR")
+        assert transport._resource is fresh
+        assert transport._query_desynchronized is True
+        assert await transport.recover() is True
+        assert transport._query_desynchronized is False
+        assert await transport.query("KRDG?") == "fresh-response"
+        assert ("sdc", fresh) in events
+        assert ("ifc", interface) in events
+    finally:
+        if transport._resource is not None:
+            await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_gpib_successful_recovery_clears_query_quarantine_only_after_both_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.gpib import GPIBTransport
+
+    transport = GPIBTransport(mock=False)
+    transport._resource = object()
+    transport._session_open = True
+    transport._query_desynchronized = True
+    generation = transport._open_generation
+    clear_entered = asyncio.Event()
+    release_clear = asyncio.Event()
+    ifc_entered = asyncio.Event()
+    release_ifc = asyncio.Event()
+
+    async def clear_bus() -> bool:
+        clear_entered.set()
+        await release_clear.wait()
+        return True
+
+    async def send_ifc() -> bool:
+        ifc_entered.set()
+        await release_ifc.wait()
+        return True
+
+    monkeypatch.setattr(transport, "clear_bus", clear_bus)
+    monkeypatch.setattr(transport, "send_ifc", send_ifc)
+    recovery = asyncio.create_task(transport.recover())
+    try:
+        await asyncio.wait_for(clear_entered.wait(), 1.0)
+        assert transport._query_desynchronized is True
+        assert transport._open_generation == generation
+        release_clear.set()
+        await asyncio.wait_for(ifc_entered.wait(), 1.0)
+        assert transport._query_desynchronized is True
+        assert transport._open_generation == generation
+        release_ifc.set()
+        assert await recovery is True
+        assert transport._query_desynchronized is False
+        assert transport._open_generation == generation + 1
+
+        transport._query_desynchronized = True
+
+        async def fail_ifc() -> bool:
+            return False
+
+        monkeypatch.setattr(transport, "send_ifc", fail_ifc)
+        assert await transport.recover() is False
+        assert transport._query_desynchronized is True
+    finally:
+        release_clear.set()
+        release_ifc.set()
+        await asyncio.gather(recovery, return_exceptions=True)
+        transport._resource = None
+        transport._session_open = False
+
+
+@pytest.mark.asyncio
+async def test_gpib_terminal_close_intent_survives_cancelled_operation_settlement_and_closes_exact_handle() -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
+
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    closes: list[object] = []
+
+    class Resource:
+        def write(self, _command: str) -> None:
+            write_entered.set()
+            assert release_write.wait(3.0)
+
+        def close(self) -> None:
+            closes.append(self)
+
+    exact_handle = Resource()
+    transport = GPIBTransport(mock=False)
+    transport._resource = exact_handle
+    transport._resource_str = "GPIB0::12::INSTR"
+    transport._session_open = True
+    operation = asyncio.create_task(transport.write("OUTPUT 0"))
+    try:
+        assert await asyncio.to_thread(write_entered.wait, 1.0)
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+        with pytest.raises(GPIBIncompleteCloseError, match="still running|incomplete"):
+            await transport.close()
+        assert transport._resource is exact_handle
+        assert transport._terminal_unsettled is True
+
+        release_write.set()
+        assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+        assert closes == [exact_handle]
+        assert transport._resource is None
+        assert transport._session_open is False
+        assert transport._terminal_unsettled is False
+    finally:
+        release_write.set()
+        await asyncio.gather(operation, return_exceptions=True)
+        if transport._executor is not None:
+            transport._executor.shutdown(wait=False, cancel_futures=True)
 
 
 @pytest.mark.asyncio
@@ -1569,7 +1930,7 @@ async def test_usbtmc_mock_queries_require_exact_allowlisted_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gpib_late_failed_query_is_quarantined_but_recovery_remains_available(
+async def test_gpib_late_failed_query_is_quarantined_until_fresh_recovery(
     monkeypatch,
 ) -> None:
     import asyncio
@@ -1615,7 +1976,7 @@ async def test_gpib_late_failed_query_is_quarantined_but_recovery_remains_availa
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+    assert transport._open_settled.wait(5.0)
     assert transport._query_desynchronized is True
 
     writes_before_refusal = list(resource.writes)
@@ -1627,14 +1988,28 @@ async def test_gpib_late_failed_query_is_quarantined_but_recovery_remains_availa
     with pytest.raises(RuntimeError, match="quarantined"):
         await transport.write(off_command)
     assert resource.writes == writes_before_refusal
-    assert await transport.clear_bus() is True
+    # Cancellation settles and closes the retained handle; recovery cannot
+    # operate on a retired generation.  A fresh validated open is required.
+    assert await transport.clear_bus() is False
+
+    reopened = _Resource()
+
+    def _reopen(generation, _resource_str, _bus_prefix, _timeout_ms) -> None:
+        with transport._state_lock:
+            if generation == transport._open_generation:
+                transport._resource = reopened
+                transport._session_open = True
+        transport._settle_executor_operation()
+
+    monkeypatch.setattr(transport, "_blocking_connect", _reopen)
+    await transport.open("GPIB0::12::INSTR")
     monkeypatch.setattr(transport, "_blocking_ifc", lambda: True)
-    assert await transport.send_ifc() is True
+    assert await transport.recover() is True
     await transport.close()
 
 
 @pytest.mark.asyncio
-async def test_gpib_cancelled_successful_query_does_not_poison_next_query() -> None:
+async def test_gpib_cancelled_successful_query_closes_retained_handle() -> None:
     import asyncio
 
     from cryodaq.drivers.transport.gpib import GPIBTransport
@@ -1672,11 +2047,12 @@ async def test_gpib_cancelled_successful_query_does_not_poison_next_query() -> N
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+    assert transport._open_settled.wait(5.0)
 
     assert transport._query_desynchronized is False
-    assert await transport.query("second") == "next-response"
-    await transport.close()
+    assert transport._resource is None
+    with pytest.raises(RuntimeError, match="not connected"):
+        await transport.query("second")
 
 
 @pytest.mark.asyncio
@@ -1730,11 +2106,12 @@ async def test_gpib_cancelled_queued_query_keeps_settlement_owner() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+    assert transport._open_settled.wait(5.0)
     assert transport._query_desynchronized is False
     assert calls == [("write", "queued"), ("read", None)]
-    assert await transport.query("next") == "settled-response"
-    await transport.close()
+    assert transport._resource is None
+    with pytest.raises(RuntimeError, match="not connected"):
+        await transport.query("next")
 
 
 @pytest.mark.asyncio

@@ -178,20 +178,29 @@ class GPIBTransport:
         log.info("GPIB: %s opened (persistent session)", resource_str)
 
     async def abort_open(self) -> None:
-        """Invalidate a partial open; a late blocking result closes itself."""
+        """Invalidate a partial open without abandoning its retained owner.
 
-        try:
-            await self.close()
-        except GPIBIncompleteCloseError:
-            return
+        Cancellation cleanup only records terminal-close intent.  The public
+        :meth:`close` path is the joining owner; it waits for the exact
+        executor generation and then observes the worker's terminal result.
+        """
+        with self._state_lock:
+            self._open_generation += 1
+            self._terminal_unsettled = True
 
     async def close(self) -> None:
         """Close the retained VISA resource with typed settlement."""
+        settle_event: threading.Event | None = None
         with self._state_lock:
             self._open_generation += 1
             if not self._open_settled.is_set():
                 self._terminal_unsettled = True
+                settle_event = self._open_settled
+        if settle_event is not None:
+            if not await asyncio.to_thread(settle_event.wait, _CLOSE_TIMEOUT_S):
                 raise GPIBIncompleteCloseError("GPIB I/O is still running; retained resource close is incomplete")
+            return await self.close()
+        with self._state_lock:
             owner = self._close_owner
             if owner is not None:
                 if owner.is_alive():
@@ -522,6 +531,12 @@ class GPIBTransport:
         timeout_ms = self._timeout_ms if timeout_ms is None else timeout_ms
         rm = self._get_rm(bus_prefix)
         res = rm.open_resource(resource_str)
+        # Retain the exact handle immediately.  If configuration or clear
+        # fails after open_resource returned, cancellation/close settlement
+        # must still own and quarantine this handle rather than losing it.
+        with self._state_lock:
+            self._resource = res
+            self._session_open = True
         try:
             res.write_termination = "\n"
             res.read_termination = "\n"
@@ -537,10 +552,8 @@ class GPIBTransport:
             except Exception:
                 log.debug("GPIB unaddressing not available on %s", resource_str)
         except Exception:
-            try:
-                res.close()
-            except Exception:
-                pass
+            with self._state_lock:
+                self._terminal_unsettled = True
             raise
         with self._state_lock:
             if generation == self._open_generation:

@@ -21,7 +21,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from PySide6.QtCore import QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
@@ -926,21 +926,36 @@ class MainWindowV2(QMainWindow):
             except RuntimeError:
                 pass
         # Child overlays may own command workers independently of the
-        # annunciation controller.  Freeze their admission and settle every
-        # real QThread before QObject destruction; parenting alone is not a
-        # thread join.
-        for thread in self.findChildren(QThread):
+        # annunciation controller. Snapshot the descendants first, then try
+        # every valid owner even if one wrapper is already deleting. A single
+        # RuntimeError must not prevent later workers from being joined.
+        settlement_failures: list[str] = []
+        try:
+            candidates = list(self.findChildren(QThread))
+        except RuntimeError:
+            candidates = []
+            settlement_failures.append("QThread descendant inventory unavailable")
+        for index, thread in enumerate(candidates):
+            owner = f"QThread[{index}]"
             try:
                 if thread.isRunning():
                     thread.requestInterruption()
                     thread.quit()
                     if not thread.wait(_WORKER_SETTLE_MS):
-                        logger.critical("GUI child QThread did not settle during shutdown")
-                        event.ignore()
-                        return
+                        settlement_failures.append(f"{owner} did not settle")
+                        continue
+                # Keep settled workers alive until deferred callbacks have
+                # drained; QObject parenting is not a substitute for join.
+                app = QCoreApplication.instance()
+                if app is not None and thread.parent() is not app:
+                    thread.setParent(app)
             except RuntimeError:
-                event.ignore()
-                return
+                settlement_failures.append(f"{owner} became invalid during shutdown")
+                continue
+        if settlement_failures:
+            logger.critical("GUI child QThread shutdown incomplete: %s", "; ".join(settlement_failures))
+            event.ignore()
+            return
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

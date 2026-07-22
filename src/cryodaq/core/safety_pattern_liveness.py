@@ -76,6 +76,138 @@ class _DeadPattern:
     source: str
 
 
+def _resolve_critical_patterns_to_raw(
+    *,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+    canonical_ids: list[str],
+    raw_labels: list[str],
+    patterns: list[re.Pattern[str]],
+) -> tuple[list[re.Pattern[str]], list[_DeadPattern]]:
+    """Resolve canonical critical identities to exact raw emitted labels.
+
+    ``safety.yaml`` names the stable canonical identities.  SafetyManager's
+    broker still receives the pre-bind emitted label, so production startup
+    must resolve each canonical identity through the selected descriptor
+    bindings and install a full-string escaped raw matcher.  A zero, multiple,
+    missing, or colliding mapping is a configuration fault; silently falling
+    back to a substring or alias would make the safety plane ambiguous.
+    """
+
+    storage_catalog = descriptor_catalog.storage_catalog_snapshot()
+    raw_by_canonical: dict[str, list[str]] = {channel_id: [] for channel_id in canonical_ids}
+    for (instrument_id, emitted_channel), channel_id in descriptor_catalog._bindings.items():
+        if channel_id not in raw_by_canonical or emitted_channel not in raw_labels:
+            continue
+        descriptor = storage_catalog.by_channel_id.get(channel_id)
+        if descriptor is None or descriptor.instrument_id != instrument_id:
+            continue
+        raw_by_canonical[channel_id].append(emitted_channel)
+    raw_owners: dict[str, set[str]] = {}
+    for channel_id, labels in raw_by_canonical.items():
+        for label in labels:
+            raw_owners.setdefault(label, set()).add(channel_id)
+    colliding_raw = {label for label, owners in raw_owners.items() if len(owners) > 1}
+
+    resolved: list[re.Pattern[str]] = []
+    dead: list[_DeadPattern] = []
+    for pattern in patterns:
+        matches = [channel_id for channel_id in canonical_ids if pattern.fullmatch(channel_id)]
+        if len(matches) != 1:
+            dead.append(
+                _DeadPattern(
+                    pattern=pattern.pattern,
+                    plane="canonical identity resolution to raw emitted label",
+                    source="safety.yaml critical_channels",
+                )
+            )
+            continue
+        raw_matches = raw_by_canonical.get(matches[0], [])
+        if len(raw_matches) != 1 or raw_matches[0] in colliding_raw:
+            dead.append(
+                _DeadPattern(
+                    pattern=pattern.pattern,
+                    plane="descriptor reverse binding to raw emitted label",
+                    source="safety.yaml critical_channels",
+                )
+            )
+            continue
+        resolved.append(re.compile(rf"^{re.escape(raw_matches[0])}$"))
+    return resolved, dead
+
+
+def _resolve_adaptive_patterns_to_raw(
+    *,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+    canonical_ids: list[str],
+    raw_labels: list[str],
+    patterns: Collection[str],
+) -> tuple[list[str], list[_DeadPattern]]:
+    """Expand canonical AdaptiveThrottle expressions to exact raw labels.
+
+    AdaptiveThrottle consumes pre-bind emitted labels.  Passing the canonical
+    interlock expressions directly to its substring matcher is unsafe (and
+    can make ``Т1`` collide with ``Т10``/``Т19``).  Every canonical match is
+    therefore reverse-mapped to one full-string escaped raw label.  The disk
+    channel is the sole explicit bypass because it is published directly to
+    the broker and has no descriptor binding.
+    """
+
+    storage_catalog = descriptor_catalog.storage_catalog_snapshot()
+    raw_by_canonical: dict[str, list[str]] = {channel_id: [] for channel_id in canonical_ids}
+    for (instrument_id, emitted_channel), channel_id in descriptor_catalog._bindings.items():
+        if channel_id not in raw_by_canonical or emitted_channel not in raw_labels:
+            continue
+        descriptor = storage_catalog.by_channel_id.get(channel_id)
+        if descriptor is not None and descriptor.instrument_id == instrument_id:
+            raw_by_canonical[channel_id].append(emitted_channel)
+    raw_owners: dict[str, set[str]] = {}
+    for channel_id, labels in raw_by_canonical.items():
+        for label in labels:
+            raw_owners.setdefault(label, set()).add(channel_id)
+    colliding_raw = {label for label, owners in raw_owners.items() if len(owners) > 1}
+
+    resolved: list[str] = []
+    dead: list[_DeadPattern] = []
+    for ref in sorted(set(patterns)):
+        if ref in _THROTTLE_BYPASS_PATTERNS:
+            resolved.append(ref)
+            continue
+        try:
+            compiled = re.compile(ref)
+        except re.error:
+            dead.append(
+                _DeadPattern(
+                    pattern=ref,
+                    plane="canonical AdaptiveThrottle expression",
+                    source="AdaptiveThrottle protected patterns",
+                )
+            )
+            continue
+        canonical_matches = [channel_id for channel_id in canonical_ids if compiled.fullmatch(channel_id)]
+        if not canonical_matches:
+            dead.append(
+                _DeadPattern(
+                    pattern=ref,
+                    plane="canonical AdaptiveThrottle expression",
+                    source="AdaptiveThrottle protected patterns",
+                )
+            )
+            continue
+        for channel_id in canonical_matches:
+            raw_matches = raw_by_canonical.get(channel_id, [])
+            if len(raw_matches) != 1 or raw_matches[0] in colliding_raw:
+                dead.append(
+                    _DeadPattern(
+                        pattern=ref,
+                        plane="descriptor reverse binding to raw emitted label",
+                        source="AdaptiveThrottle protected patterns",
+                    )
+                )
+                continue
+            resolved.append(rf"^{re.escape(raw_matches[0])}$")
+    return resolved, dead
+
+
 def _load_interlock_conditions(config_path: Path) -> list[InterlockCondition]:
     """Parse interlocks.yaml into InterlockConditions.
 
@@ -124,7 +256,7 @@ def validate_safety_pattern_liveness(
     interlocks_config_path: Path,
     safety_manager: SafetyManager,
     adaptive_throttle_patterns: Collection[str],
-) -> None:
+) -> list[str]:
     """Raise if any CRITICAL/safety channel-pattern is dead against the
     SELECTED descriptor manifest, on the plane its consumer sees.
 
@@ -184,16 +316,54 @@ def validate_safety_pattern_liveness(
                 )
             )
 
-    # Plane 2: safety.yaml critical_channels (RAW, .match).
-    for pattern in safety_manager._config.critical_channels:
-        if not any(pattern.match(ch) for ch in raw_labels):
-            dead.append(
-                _DeadPattern(
-                    pattern=pattern.pattern,
-                    plane="raw (SafetyManager pre-bind emitted label, .match)",
-                    source="safety.yaml critical_channels",
-                )
+    # Plane 2: safety.yaml names canonical identities, while SafetyManager
+    # consumes raw labels. Resolve and install the exact reverse bindings
+    # before any safety monitor starts.
+    # Keep the canonical source immutable and resolve it on every validation.
+    # The descriptor authority can be replaced at runtime, so a previously
+    # resolved raw matcher must never be reused for a new descriptor snapshot.
+    # ``load_config`` refreshes this source whenever safety.yaml is reloaded;
+    # the fallback is only for test doubles that expose a SafetyConfig without
+    # the normal loader.
+    canonical_patterns = getattr(safety_manager, "_canonical_critical_patterns", None)
+    if canonical_patterns is None:
+        canonical_patterns = list(safety_manager._config.critical_channels)
+        safety_manager._canonical_critical_patterns = list(canonical_patterns)
+    else:
+        canonical_patterns = list(canonical_patterns)
+    resolved_critical, critical_dead = _resolve_critical_patterns_to_raw(
+        descriptor_catalog=descriptor_catalog,
+        canonical_ids=canonical_ids,
+        raw_labels=raw_labels,
+        patterns=list(canonical_patterns),
+    )
+    dead.extend(critical_dead)
+    critical_manifest_ids = {
+        channel_id
+        for channel_id, descriptor in catalog.by_channel_id.items()
+        if getattr(getattr(descriptor, "quantity", None), "value", None) == "temperature"
+        and getattr(getattr(descriptor, "safety_class", None), "value", None) == "safety_critical_input"
+    }
+    matched_critical_ids: set[str] = set()
+    for pattern in canonical_patterns:
+        for channel_id in canonical_ids:
+            if pattern.fullmatch(channel_id):
+                matched_critical_ids.add(channel_id)
+    if critical_manifest_ids and matched_critical_ids != critical_manifest_ids:
+        dead.append(
+            _DeadPattern(
+                pattern=f"manifest={sorted(critical_manifest_ids)!r}",
+                plane="canonical critical-temperature identity union",
+                source="selected descriptor manifest vs safety.yaml critical_channels",
             )
+        )
+    if critical_dead:
+        # Do not leave an earlier successful raw resolution installed after a
+        # failed descriptor/configuration replacement. Boot fails below, and
+        # an empty runtime matcher is fail-closed if inspected before raise.
+        safety_manager._config.critical_channels = []
+    else:
+        safety_manager._config.critical_channels = resolved_critical
 
     # Plane 3: safety.yaml keithley_channels (RAW, .match). Source heartbeat.
     # ``_keithley_patterns`` holds the YAML-loaded compiled patterns
@@ -209,20 +379,16 @@ def validate_safety_pattern_liveness(
                 )
             )
 
-    # Plane 4: the exact AdaptiveThrottle protected-pattern union (RAW,
-    # .search substring), MINUS the direct-to-DataBroker bypass set
-    # (system/disk_free_gb etc.).
-    for ref in sorted(set(adaptive_throttle_patterns) - _THROTTLE_BYPASS_PATTERNS):
-        compiled = re.compile(ref)
-        if not any(compiled.search(ch) for ch in raw_labels):
-            dead.append(
-                _DeadPattern(
-                    pattern=ref,
-                    plane="raw substring (AdaptiveThrottle pre-bind, .search)",
-                    source="AdaptiveThrottle protected patterns "
-                    "(legacy interlocks + alarms_v3 CRITICAL/HIGH/interlocks)",
-                )
-            )
+    # Plane 4: canonical protected expressions must be resolved before they
+    # reach AdaptiveThrottle's raw substring matcher.  The returned list is
+    # the only production input accepted by that plane.
+    resolved_adaptive, adaptive_dead = _resolve_adaptive_patterns_to_raw(
+        descriptor_catalog=descriptor_catalog,
+        canonical_ids=canonical_ids,
+        raw_labels=raw_labels,
+        patterns=adaptive_throttle_patterns,
+    )
+    dead.extend(adaptive_dead)
 
     if dead:
         lines = [
@@ -235,3 +401,4 @@ def validate_safety_pattern_liveness(
             lines.append(f"  - pattern={d.pattern!r} plane={d.plane} source={d.source}")
         lines.append(f"Canonical roster sample: {canonical_ids[:6]}. Raw roster sample: {raw_labels[:6]}.")
         raise SafetyPatternLivenessError("\n".join(lines))
+    return resolved_adaptive

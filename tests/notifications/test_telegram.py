@@ -292,12 +292,13 @@ async def test_cmd_status_formats_message() -> None:
 async def test_cmd_log_writes_entry() -> None:
     handler = AsyncMock(return_value={"ok": True})
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/log Всё штатно"))
+    await bot._handle_message(_tg_msg("/log exp-1 Всё штатно"))
     handler.assert_called_once()
     cmd = handler.call_args[0][0]
     assert cmd["cmd"] == "log_entry"
     assert "Всё штатно" in cmd["message"]
     assert cmd["author"] == "testuser"
+    assert cmd["experiment_id"] == "exp-1"
     bot._send.assert_called_once()
     assert "✅" in bot._send.call_args[0][1]
 
@@ -315,7 +316,7 @@ async def test_query_agent_missing_reply_has_no_english_terms() -> None:
 async def test_unavailable_command_handler_reply_has_no_english_terms() -> None:
     bot = _make_bot(command_handler=None)
 
-    await bot._handle_message(_tg_msg("/log запись"))
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "command_handler" not in text
@@ -326,7 +327,7 @@ async def test_command_handler_failure_does_not_expose_raw_english_error() -> No
     handler = AsyncMock(return_value={"ok": False, "error": "backend failure"})
     bot = _make_bot(command_handler=handler)
 
-    await bot._handle_message(_tg_msg("/log запись"))
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "backend failure" not in text
@@ -337,7 +338,7 @@ async def test_cmd_log_empty_text_returns_error() -> None:
     bot = _make_bot()
     await bot._handle_message(_tg_msg("/log"))
     bot._send.assert_called_once()
-    assert "❌" in bot._send.call_args[0][1]
+    assert "experiment_id" in bot._send.call_args[0][1]
 
 
 async def test_cmd_phase_advances() -> None:
@@ -361,6 +362,17 @@ async def test_cmd_phase_invalid_returns_error() -> None:
     assert "❌" in bot._send.call_args[0][1]
 
 
+async def test_invalid_phase_with_exact_identity_never_dispatches() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/phase definitely-not-a-phase exp-A"))
+
+    handler.assert_not_awaited()
+    bot._send.assert_awaited_once()
+    assert "\u274c" in bot._send.await_args.args[1]
+
+
 async def test_cmd_phase_without_identity_is_rejected() -> None:
     handler = AsyncMock(return_value={"ok": True})
     bot = _make_bot(command_handler=handler)
@@ -370,6 +382,14 @@ async def test_cmd_phase_without_identity_is_rejected() -> None:
 
 
 # ===========================================================================
+async def test_cmd_log_without_identity_is_rejected() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/log запись"))
+    handler.assert_not_called()
+    assert "experiment_id" in bot._send.call_args[0][1]
+
+
 # EscalationService tests
 # ===========================================================================
 

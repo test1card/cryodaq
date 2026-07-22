@@ -69,6 +69,16 @@ def test_advance_phase_rejects_mismatched_experiment_identity(tmp_path):
         mgr.advance_phase("preparation", expected_experiment_id="other-experiment")
 
 
+def test_experiment_cas_rechecks_identity_after_durable_mutation(tmp_path):
+    mgr = _make_manager(tmp_path)
+    mgr.create_experiment(name="Test", operator="op", template_id="custom")
+    experiment_id = mgr.active_experiment_id
+
+    with pytest.raises(RuntimeError, match="changed during mutation"):
+        with mgr.experiment_cas(experiment_id):
+            mgr._clear_active()
+
+
 def test_status_payload_includes_phase_started_at(tmp_path):
     mgr = _make_manager(tmp_path)
     mgr.create_experiment(name="Test", operator="op", template_id="custom")

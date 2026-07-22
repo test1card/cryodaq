@@ -100,6 +100,7 @@ class USBTMCTransport:
         # the exact future owned until its late handles have been closed.
         self._open_future: ConcurrentFuture[tuple[Any, Any]] | None = None
         self._close_incomplete = False
+        self._close_cancellation: asyncio.CancelledError | None = None
         # A failed query may leave an unread or partial response in the VISA
         # session. Once that happens no later response can be attributed to
         # its command with confidence. Recovery requires a clean close and a
@@ -368,8 +369,10 @@ class USBTMCTransport:
             self._quarantine_clean_close = True
         if caller_cancelled is None and task is not None and task.cancelling() > cancelling_at_start:
             caller_cancelled = asyncio.CancelledError()
-        if caller_cancelled is not None:
-            raise caller_cancelled
+        # Re-propagate cancellation only after ``close`` commits the settled
+        # handle state; raising here would falsely quarantine a successful
+        # close.
+        self._close_cancellation = caller_cancelled
         return closed
 
     # ------------------------------------------------------------------
@@ -428,18 +431,9 @@ class USBTMCTransport:
 
             resource = self._resource
             manager = self._rm
+            self._close_cancellation = None
             try:
                 closed = await self._settle_handle_close(resource, manager)
-            except asyncio.CancelledError as exc:
-                self._close_incomplete = True
-                self._shutdown_executor()
-                log.critical(
-                    "USBTMC: close of resource %s was cancelled before a usable settlement receipt",
-                    self._resource_str,
-                )
-                raise USBTMCIncompleteCloseError(
-                    "USBTMC close cancellation leaves the retained VISA handle terminally quarantined"
-                ) from exc
             except BaseException as exc:
                 self._close_incomplete = True
                 self._shutdown_executor()
@@ -449,12 +443,17 @@ class USBTMCTransport:
                 self._close_incomplete = True
                 self._shutdown_executor()
                 raise USBTMCIncompleteCloseError(
-                    "USBTMC close timed out while the retained VISA handle remains owned by a worker"
+                    "USBTMC close timed out while the retained VISA handle remains owned by a worker; "
+                    "terminally quarantined until settlement"
                 )
 
             self._resource = None
             self._rm = None
             self._shutdown_executor()
+            caller_cancelled = self._close_cancellation
+            self._close_cancellation = None
+            if caller_cancelled is not None:
+                raise caller_cancelled
             log.info("USBTMC: ресурс %s закрыт", self._resource_str)
 
     async def write(self, cmd: str) -> None:

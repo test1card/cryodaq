@@ -386,13 +386,19 @@ class ReplayEngine:
             # replay experiment exists, falling back to the static
             # session phase otherwise.
             stub_phase = self._exp_stub.current_phase
+            experiment_error = self._exp_stub.availability_error
             return {
-                "ok": True,
+                "ok": experiment_error is None,
+                "error": experiment_error,
                 "phase": stub_phase or self._phase,
-                "phase_started_at": self._session_start,
+                # The replay stub owns the authoritative transition instant;
+                # a session-start fallback would misreport a phase that has
+                # not yet transitioned (or has no active experiment).
+                "phase_started_at": self._exp_stub.phase_started_at,
             }
 
         if action == "/status":
+            experiment_error = self._exp_stub.availability_error
             return {
                 "ok": True,
                 "mode": "replay",
@@ -403,6 +409,8 @@ class ReplayEngine:
                 # active retroactive experiment without polling
                 # experiment_status separately.
                 "active_experiment": self._exp_stub.active_experiment,
+                "experiment_available": experiment_error is None,
+                "experiment_error": experiment_error,
                 "phases": self._exp_stub.phases,
                 "current_phase": self._exp_stub.current_phase or self._phase,
                 "temperature_targets": {},
@@ -411,14 +419,16 @@ class ReplayEngine:
             }
 
         if action == "experiment_status":
+            experiment_error = self._exp_stub.availability_error
             return {
-                "ok": True,
+                "ok": experiment_error is None,
+                "error": experiment_error,
                 "app_mode": "replay",
                 # F-ReplayPhases: surface the replay-stub state where
                 # previously this returned None unconditionally.
                 "active_experiment": self._exp_stub.active_experiment,
                 "current_phase": self._exp_stub.current_phase or self._phase,
-                "phase_started_at": self._session_start,
+                "phase_started_at": self._exp_stub.phase_started_at,
                 "phases": self._exp_stub.phases,
                 "run_records": [],
                 "templates": [],

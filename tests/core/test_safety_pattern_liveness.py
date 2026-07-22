@@ -62,10 +62,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
+from cryodaq.core.housekeeping import (
+    load_critical_channels_from_alarms_v3,
+    load_protected_channel_patterns,
+)
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
@@ -176,27 +180,37 @@ def test_interlock_pattern_matches_canonical_channel(condition: InterlockConditi
     )
 
 
-@pytest.mark.parametrize(
-    "pattern",
-    SAFETY_CRITICAL_PATTERNS,
-    ids=[_node_id(p.pattern) for p in SAFETY_CRITICAL_PATTERNS],
-)
-def test_safety_critical_pattern_matches_raw_channel(pattern: re.Pattern[str]) -> None:
-    """safety.yaml critical_channels pattern must match >=1 raw emitted label.
+def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
+    """Canonical safety identities must install exact raw-plane matchers.
 
-    SafetyManager consumes the RAW plane (SafetyBroker pre-bind stream), so a
-    pattern written for the canonical id (e.g. ``Т11$`` with no display-name
-    suffix) would match nothing, defeat the stale/invalid-input gate, and let
-    RUN proceed without monitoring the critical channel.
+    safety.yaml deliberately names stable canonical identities. Startup
+    resolves them through the selected descriptor authority before
+    SafetyManager consumes pre-bind readings. This guard proves the complete
+    production transformation instead of matching across identity planes.
     """
-    matched = [ch for ch in RAW_EMITTED_CHANNELS if pattern.match(ch)]
-    assert matched, (
-        f"safety.yaml critical_channels pattern {pattern.pattern!r} matches NO "
-        f"raw emitted_channel (SafetyManager plane = pre-bind SafetyBroker "
-        f"output). If it was written for canonical channel_id, that is the "
-        f"F-1 class bug. Roster had {len(RAW_EMITTED_CHANNELS)} raw labels; "
-        f"sample: {RAW_EMITTED_CHANNELS[:6]}."
+    descriptor_catalog = load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
+    manager = SafetyManager(SafetyBroker())
+    manager.load_config(_SAFETY_PATH)
+    canonical_before = [pattern.pattern for pattern in manager._config.critical_channels]
+    protected = [
+        *load_protected_channel_patterns(_INTERLOCKS_PATH),
+        *load_critical_channels_from_alarms_v3(_ALARMS_V3_PATH),
+    ]
+
+    validate_safety_pattern_liveness(
+        descriptor_catalog=descriptor_catalog,
+        interlocks_config_path=_INTERLOCKS_PATH,
+        safety_manager=manager,
+        adaptive_throttle_patterns=protected,
     )
+
+    assert [pattern.pattern for pattern in manager._canonical_critical_patterns] == canonical_before
+    assert len(manager._config.critical_channels) == len(canonical_before)
+    for pattern in manager._config.critical_channels:
+        matched = [channel for channel in RAW_EMITTED_CHANNELS if pattern.fullmatch(channel)]
+        assert len(matched) == 1, (
+            f"resolved safety matcher {pattern.pattern!r} must select exactly one raw emitted channel; got {matched!r}"
+        )
 
 
 @pytest.mark.parametrize(

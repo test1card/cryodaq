@@ -206,9 +206,28 @@ class ZmqBridge:
         """Start the ZMQ bridge subprocess."""
         if self._process is not None and self._process.is_alive():
             return
-        # Invalidate presentation freshness before any restart cleanup or
-        # spawn operation that may raise.  Failure must remain unavailable.
+        # Revoke the retired presentation authority before any join, drain,
+        # close, allocation, or spawn operation that can fail.  A failed
+        # restart must never leave the previous snapshot looking fresh.
         self._last_snapshot_time = 0.0
+        self._bridge_instance_id = None
+        # A reply consumer owns the old reply queue.  It must settle before
+        # any queue is drained, closed, or replaced; otherwise a late reply
+        # can be consumed by the replacement generation.
+        old_consumer = self._reply_consumer
+        if old_consumer is not None:
+            self._reply_stop.set()
+            if old_consumer.is_alive():
+                old_consumer.join(timeout=1.0)
+            if old_consumer.is_alive():
+                raise RuntimeError("ZMQ reply consumer did not settle before restart")
+            self._reply_consumer = None
+        # Route every reply already buffered on the retired queue before it is
+        # closed.  The same locked ownership function is used by the live
+        # consumer, so timeout/cancellation evidence cannot disappear at a
+        # generation boundary.
+        with self._pending_lock:
+            self._drain_replies_locked(self._reply_queue)
         # A dead or partially started subprocess may still have feeder-
         # buffered cuts.  A fresh queue on every spawn attempt makes restart
         # invalidation atomic even when later cleanup or Process.start fails.
@@ -221,14 +240,11 @@ class ZmqBridge:
         self._snapshot_queue = mp.JoinableQueue(maxsize=2)
         self._bridge_instance_id = uuid.uuid4().hex
         self._generation += 1
-        if self._reply_consumer is not None and self._reply_consumer.is_alive():
-            self._reply_stop.set()
-            self._reply_consumer.join(timeout=1.0)
-            self._reply_consumer = None
         with self._pending_lock:
-            for future in (*self._pending.values(), *self._outcome_unknown.values()):
+            for rid, future in tuple(self._pending.items()):
                 if not future.done():
                     future.set_result({"ok": False, "error": "bridge generation replaced; outcome unknown"})
+                self._outcome_unknown[rid] = future
             self._pending.clear()
             # Outcome-unknown owners remain addressable until explicit
             # reconciliation; generation replacement must not erase them.
@@ -506,10 +522,17 @@ class ZmqBridge:
         correlation entry is then removed, so a late reply cannot be delivered
         to a new owner or treated as current command truth.
         """
+        if cancellation_requested is not None and cancellation_requested.is_set():
+            return {
+                "ok": False,
+                "dispatched": False,
+                "error": "ZMQ command cancelled before dispatch",
+            }
         if not self.is_alive():
             return {"ok": False, "error": "ZMQ bridge subprocess not running"}
 
         future: Future = Future()
+        rid: str | None = None
 
         with self._pending_lock:
             if len(self._outcome_unknown) >= _MAX_UNRESOLVED_COMMANDS:
@@ -527,14 +550,29 @@ class ZmqBridge:
 
         enqueued = False
         try:
+            if cancellation_requested is not None and cancellation_requested.is_set():
+                with self._pending_lock:
+                    self._pending.pop(rid, None)
+                    self._request_generation.pop(rid, None)
+                return {
+                    "ok": False,
+                    "dispatched": False,
+                    "error": "ZMQ command cancelled before dispatch",
+                }
             self._cmd_queue.put(cmd, timeout=2.0)
             enqueued = True
             deadline = time.monotonic() + _CMD_REPLY_TIMEOUT_S
             while True:
                 if cancellation_requested is not None and cancellation_requested.is_set():
+                    direct_result: dict[str, Any] | None = None
                     with self._pending_lock:
-                        self._pending.pop(rid, None)
-                        self._outcome_unknown[rid] = future
+                        if self._pending.get(rid) is future:
+                            self._pending.pop(rid, None)
+                            self._outcome_unknown[rid] = future
+                        elif future.done():
+                            direct_result = future.result()
+                    if direct_result is not None:
+                        return direct_result
                     return {
                         "ok": False,
                         "error": "ZMQ command outcome unknown after cancellation",
@@ -542,9 +580,15 @@ class ZmqBridge:
                     }
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    direct_result = None
                     with self._pending_lock:
-                        self._pending.pop(rid, None)
-                        self._outcome_unknown[rid] = future
+                        if self._pending.get(rid) is future:
+                            self._pending.pop(rid, None)
+                            self._outcome_unknown[rid] = future
+                        elif future.done():
+                            direct_result = future.result()
+                    if direct_result is not None:
+                        return direct_result
                     return {
                         "ok": False,
                         "error": "ZMQ command outcome unknown after timeout",
@@ -557,7 +601,7 @@ class ZmqBridge:
         except Exception as exc:
             return {"ok": False, "error": f"Engine не отвечает ({type(exc).__name__}: {exc})"}
         finally:
-            if not enqueued:
+            if not enqueued and rid is not None:
                 with self._pending_lock:
                     self._pending.pop(rid, None)
                     self._request_generation.pop(rid, None)
@@ -598,19 +642,8 @@ class ZmqBridge:
                     continue
                 self._check_proto(reply)
                 rid = reply.get("_rid")
-                if rid:
-                    with self._pending_lock:
-                        pending_owner = self._pending.pop(rid, None)
-                        unknown_owner = self._outcome_unknown.get(rid)
-                        future = pending_owner or unknown_owner
-                        generation = self._request_generation.get(rid, self._generation)
-                        clean_reply = {key: value for key, value in reply.items() if key != "_rid"}
-                        if unknown_owner is not None:
-                            self._late_results[rid] = LateCommandResult(rid, generation, clean_reply)
-                        else:
-                            self._request_generation.pop(rid, None)
-                    if future and not future.done():
-                        future.set_result(clean_reply)
+                with self._pending_lock:
+                    if self._route_reply_locked(reply):
                         continue
                 logger.debug("Unmatched ZMQ reply (rid=%s)", rid)
             except Exception:
@@ -624,24 +657,12 @@ class ZmqBridge:
                     future.set_result({"ok": False, "error": "ZMQ bridge shutting down"})
                 self._outcome_unknown[rid] = future
             self._pending.clear()
-            while True:
-                try:
-                    reply = self._reply_queue.get_nowait()
-                except (queue.Empty, EOFError, OSError):
-                    break
-                if isinstance(reply, dict):
-                    rid = reply.get("_rid")
-                    if isinstance(rid, str) and rid in self._outcome_unknown:
-                        generation = self._request_generation.get(rid, self._generation)
-                        self._late_results[rid] = LateCommandResult(
-                            rid,
-                            generation,
-                            {key: value for key, value in reply.items() if key != "_rid"},
-                        )
         # Stop reply consumer thread after queued replies are retained.
         self._reply_stop.set()
         if self._reply_consumer is not None and self._reply_consumer.is_alive():
             self._reply_consumer.join(timeout=3.0)
+        with self._pending_lock:
+            self._drain_replies_locked(self._reply_queue)
 
         # Stop subprocess
         self._shutdown_event.set()
@@ -657,6 +678,11 @@ class ZmqBridge:
                 logger.info("ZMQ bridge subprocess stopped (exitcode=%s)", exit_code)
             else:
                 logger.warning("ZMQ bridge subprocess stopped (exitcode=None after kill)")
+            # The child can emit its terminal command reply while join/kill is
+            # settling.  The retired queue remains owned until this final
+            # locked drain, so outcome-unknown requests stay reconcilable.
+            with self._pending_lock:
+                self._drain_replies_locked(self._reply_queue)
             self._process = None
         else:
             logger.info("ZMQ bridge subprocess stopped")
@@ -673,6 +699,38 @@ class ZmqBridge:
             self._outcome_unknown.pop(request_id, None)
             self._request_generation.pop(request_id, None)
             return result
+
+    def _route_reply_locked(self, reply: object) -> bool:
+        """Route one reply; caller must hold ``_pending_lock``."""
+        if not isinstance(reply, dict):
+            return False
+        rid = reply.get("_rid")
+        if not isinstance(rid, str) or not rid:
+            return False
+        pending_owner = self._pending.pop(rid, None)
+        unknown_owner = self._outcome_unknown.get(rid)
+        generation = self._request_generation.get(rid, self._generation)
+        clean_reply = {key: value for key, value in reply.items() if key != "_rid"}
+        if unknown_owner is not None:
+            self._late_results[rid] = LateCommandResult(rid, generation, clean_reply)
+            if not unknown_owner.done():
+                unknown_owner.set_result(clean_reply)
+            return True
+        if pending_owner is None:
+            return False
+        self._request_generation.pop(rid, None)
+        if not pending_owner.done():
+            pending_owner.set_result(clean_reply)
+        return True
+
+    def _drain_replies_locked(self, reply_queue: Any) -> None:
+        """Route all currently queued replies before retiring ``reply_queue``."""
+        while True:
+            try:
+                reply = reply_queue.get_nowait()
+            except (queue.Empty, EOFError, OSError):
+                return
+            self._route_reply_locked(reply)
 
 
 def _drain(q: Any, *, task_done: bool = False) -> None:

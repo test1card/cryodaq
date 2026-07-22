@@ -358,6 +358,7 @@ class ExperimentManager:
         self._operator_phase: str | None = None
         self._operator_snapshot = OperatorExperimentSnapshot(0, None, None, None)
         self._mutation_lock = threading.RLock()
+        self._durable_mutation_id: str | None = None
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
         self._load_state()
         if self._active is not None:
@@ -391,15 +392,42 @@ class ExperimentManager:
 
     @contextmanager
     def experiment_cas(self, expected_experiment_id: str) -> Iterator[str]:
-        """Hold the admission-to-durable-mutation experiment CAS lock."""
+        """Reserve an experiment identity across an asynchronous durable mutation.
+
+        The reservation is deliberately not held as a native thread lock while
+        the caller awaits its writer.  Other lifecycle callers can therefore
+        keep the event loop live, but they observe the reservation and fail
+        closed.  The owner must call :meth:`assert_experiment_cas` immediately
+        before its durable write; exit revalidates the identity once more.
+        """
         if type(expected_experiment_id) is not str or not expected_experiment_id:
             raise RuntimeError("Experiment identity is required.")
         with self._mutation_lock:
             if self._active is None or self._active.experiment_id != expected_experiment_id:
                 raise RuntimeError("Experiment identity mismatch.")
+            if self._durable_mutation_id is not None:
+                raise RuntimeError("A durable experiment mutation is already in progress.")
+            self._durable_mutation_id = expected_experiment_id
+        try:
             yield expected_experiment_id
+            self.assert_experiment_cas(expected_experiment_id)
+        finally:
+            with self._mutation_lock:
+                if self._durable_mutation_id == expected_experiment_id:
+                    self._durable_mutation_id = None
+
+    def assert_experiment_cas(self, expected_experiment_id: str) -> None:
+        """Revalidate the reserved identity immediately before durable I/O."""
+        with self._mutation_lock:
+            if self._durable_mutation_id != expected_experiment_id:
+                raise RuntimeError("Experiment mutation reservation is not owned by this caller.")
             if self._active is None or self._active.experiment_id != expected_experiment_id:
                 raise RuntimeError("Experiment identity changed during mutation.")
+
+    def _assert_mutation_available(self) -> None:
+        with self._mutation_lock:
+            if self._durable_mutation_id is not None:
+                raise RuntimeError("A durable experiment mutation is in progress.")
 
     def get_templates(self) -> list[ExperimentTemplate]:
         if self._templates_cache is None:
@@ -774,6 +802,7 @@ class ExperimentManager:
         start_time: datetime | str | None = None,
         report_enabled: bool | None = None,
     ) -> ExperimentInfo:
+        self._assert_mutation_available()
         self._require_experiment_mode()
         if self._active is not None:
             raise RuntimeError(
@@ -957,6 +986,7 @@ class ExperimentManager:
         description: str | None = None,
         custom_fields: dict[str, Any] | None = None,
     ) -> ExperimentInfo:
+        self._assert_mutation_available()
         self._require_experiment_mode()
         active = self._require_active(experiment_id)
         updated = ExperimentInfo(
@@ -1000,6 +1030,7 @@ class ExperimentManager:
         custom_fields: dict[str, Any] | None = None,
         end_time: datetime | str | None = None,
     ) -> ExperimentInfo:
+        self._assert_mutation_available()
         self._require_experiment_mode()
         active = self._require_active(experiment_id)
 
