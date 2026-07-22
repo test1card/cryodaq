@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
+
+import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.instruments.thyracont_vsp63d import _FALLBACK_BAUDRATES, ThyracontVSP63D
@@ -89,7 +93,8 @@ async def test_parse_overrange() -> None:
     reading = driver._parse_response("2,1.000E+03\r")
 
     assert reading.status == ChannelStatus.OVERRANGE
-    assert math.isclose(reading.value, 1000.0, rel_tol=1e-4)
+    assert reading.value == float("inf")
+    assert reading.raw == 1000.0
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +108,8 @@ async def test_parse_underrange() -> None:
     reading = driver._parse_response("1,0.000E+00\r")
 
     assert reading.status == ChannelStatus.UNDERRANGE
-    assert reading.value == 0.0
+    assert reading.value == float("-inf")
+    assert reading.raw == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +123,156 @@ async def test_parse_sensor_error() -> None:
     reading = driver._parse_response("3,0.000E+00\r")
 
     assert reading.status == ChannelStatus.SENSOR_ERROR
+    assert math.isnan(reading.value)
+
+
+async def test_parse_nonfinite_pressure_masks_value_and_keeps_json_safe_evidence() -> None:
+    driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
+
+    reading = driver._parse_response("0,nan\r")
+
+    assert reading.status == ChannelStatus.SENSOR_ERROR
+    assert math.isnan(reading.value)
+    assert reading.raw is None
+    assert reading.metadata["reported_value"] is None
+    assert reading.metadata["reported_value_raw"] == "nan"
+    json.dumps(reading.metadata, allow_nan=False)
+
+
+async def test_mv00_probe_rejects_unknown_or_malformed_status() -> None:
+    class _ProbeTransport:
+        def __init__(self, response: str) -> None:
+            self.response = response
+
+        async def flush_input(self) -> None:
+            return None
+
+        async def query(self, _command: str) -> str:
+            return self.response
+
+    driver = ThyracontVSP63D("vsp63d", "COM3", mock=False)
+    for response in (
+        "9,1.0",
+        "status,1.0",
+        "+0,1.0",
+        "０,1.0",
+        "0,garbage",
+        "0,nan",
+        "0,inf",
+        "0,0",
+        "0,-1.0",
+        "a,b",
+    ):
+        driver._transport = _ProbeTransport(response)  # type: ignore[assignment]
+        assert await driver._try_mv00_probe() is False
+
+    driver._transport = _ProbeTransport("0,1.234E-06")  # type: ignore[assignment]
+    assert await driver._try_mv00_probe() is True
+
+
+@pytest.mark.parametrize("response", ["+0,1.0", "０,1.0", "0,0", "0,-1.0"])
+async def test_mv00_nonprotocol_status_or_nonpositive_ok_value_is_sensor_error(response: str) -> None:
+    driver = ThyracontVSP63D("vsp63d", "COM3", mock=True)
+
+    reading = driver._parse_response(response)
+
+    assert reading.status is ChannelStatus.SENSOR_ERROR
+    assert math.isnan(reading.value)
+
+
+async def test_serial_flush_input_stops_on_eof() -> None:
+    from cryodaq.drivers.transport.serial import SerialTransport
+
+    class _EofReader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def read(self, _size: int) -> bytes:
+            self.calls += 1
+            return b""
+
+    transport = SerialTransport(mock=False)
+    reader = _EofReader()
+    transport._reader = reader
+
+    await asyncio.wait_for(transport.flush_input(), timeout=0.05)
+
+    assert reader.calls == 1
+
+
+async def test_serial_open_runs_os_handle_creation_off_event_loop(monkeypatch) -> None:
+    import sys
+    import threading
+    from types import SimpleNamespace
+
+    from cryodaq.drivers.transport.serial import SerialTransport
+
+    event_loop_thread = threading.get_ident()
+    open_threads: list[int] = []
+
+    class _SerialInstance:
+        def close(self) -> None:
+            return None
+
+    class _AsyncTransport:
+        def is_closing(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    def _serial_for_url(_port: str, *, baudrate: int):
+        assert baudrate == 9600
+        open_threads.append(threading.get_ident())
+        return _SerialInstance()
+
+    async def _connection_for_serial(_loop, protocol_factory, _serial_instance):
+        return _AsyncTransport(), protocol_factory()
+
+    fake_module = SimpleNamespace(
+        serial=SimpleNamespace(serial_for_url=_serial_for_url),
+        connection_for_serial=_connection_for_serial,
+    )
+    monkeypatch.setitem(sys.modules, "serial_asyncio", fake_module)
+    transport = SerialTransport(mock=False)
+
+    await transport.open("COM_TEST", timeout=1.0)
+
+    assert open_threads and open_threads[0] != event_loop_thread
+    assert transport._reader is not None
+    assert transport._writer is not None
+
+
+async def test_serial_open_timeout_closes_late_handle(monkeypatch) -> None:
+    import sys
+    import threading
+    from types import SimpleNamespace
+
+    from cryodaq.drivers.transport.serial import SerialTransport
+
+    release = threading.Event()
+    closed = threading.Event()
+
+    class _SerialInstance:
+        def close(self) -> None:
+            closed.set()
+
+    def _serial_for_url(_port: str, *, baudrate: int):
+        del baudrate
+        assert release.wait(2.0)
+        return _SerialInstance()
+
+    fake_module = SimpleNamespace(serial=SimpleNamespace(serial_for_url=_serial_for_url))
+    monkeypatch.setitem(sys.modules, "serial_asyncio", fake_module)
+    transport = SerialTransport(mock=False)
+
+    with pytest.raises(TimeoutError):
+        await transport.open("COM_SLOW", timeout=0.05)
+
+    release.set()
+    assert await asyncio.to_thread(closed.wait, 1.0)
+    assert transport._reader is None
+    assert transport._writer is None
 
 
 # ---------------------------------------------------------------------------
@@ -154,9 +310,7 @@ async def test_thyracont_parse_pressure() -> None:
     of validate_checksum to True). They test the *parser*, not the
     checksum validator, so explicit opt-out is correct.
     """
-    driver = ThyracontVSP63D(
-        "vsm77dl", "COM3", mock=True, baudrate=115200, address="001", validate_checksum=False
-    )
+    driver = ThyracontVSP63D("vsm77dl", "COM3", mock=True, baudrate=115200, address="001", validate_checksum=False)
 
     reading = driver._parse_v1_response("001M260017N\r")
 
@@ -252,6 +406,31 @@ async def test_parse_v1_response_invalid() -> None:
     assert math.isnan(reading.value)
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        "001X100014X",
+        "001M１００014X",
+        "001M10_014X",
+        "001M000014X",
+        "001M100014XX",
+    ],
+)
+async def test_v1_requires_exact_command_ascii_digits_and_positive_pressure(response: str) -> None:
+    driver = ThyracontVSP63D(
+        "vsm77dl",
+        "COM3",
+        mock=True,
+        address="001",
+        validate_checksum=False,
+    )
+
+    reading = driver._parse_v1_response(response)
+
+    assert reading.status is ChannelStatus.SENSOR_ERROR
+    assert math.isnan(reading.value)
+
+
 # ---------------------------------------------------------------------------
 # 13. Connect via V1 protocol probe (mock transport)
 # ---------------------------------------------------------------------------
@@ -322,9 +501,7 @@ async def test_connect_falls_back_to_secondary_baudrate(monkeypatch) -> None:
 
     assert driver.connected
     assert driver._protocol_v1 is True
-    assert fake.opened_bauds == [9600, 115200], (
-        f"must try primary then fall back, got {fake.opened_bauds}"
-    )
+    assert fake.opened_bauds == [9600, 115200], f"must try primary then fall back, got {fake.opened_bauds}"
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +528,68 @@ async def test_connect_no_fallback_when_primary_succeeds(monkeypatch) -> None:
     await driver.connect()
 
     assert driver.connected
-    assert fake.opened_bauds == [115200], (
-        f"primary success must not trigger a fallback open, got {fake.opened_bauds}"
-    )
+    assert fake.opened_bauds == [115200], f"primary success must not trigger a fallback open, got {fake.opened_bauds}"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"baudrate": True}, "positive integer"),
+        ({"baudrate": 9600.0}, "positive integer"),
+        ({"baudrate": 0}, "positive integer"),
+        ({"address": "01"}, "three ASCII digits"),
+        ({"address": "０" * 3}, "three ASCII digits"),
+        ({"validate_checksum": 1}, "boolean"),
+    ],
+)
+def test_constructor_rejects_ambiguous_protocol_configuration(kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        ThyracontVSP63D("vsp63d", "COM3", mock=False, **kwargs)
+
+
+async def test_disconnect_close_failure_still_revokes_connection_truth() -> None:
+    class _FailedCloseTransport:
+        async def close(self) -> None:
+            raise OSError("close failed")
+
+    driver = ThyracontVSP63D("vsp63d", "COM3", mock=False)
+    driver._transport = _FailedCloseTransport()  # type: ignore[assignment]
+    driver._connected = True
+
+    with pytest.raises(OSError, match="close failed"):
+        await driver.disconnect()
+
+    assert driver.connected is False
+
+
+async def test_connect_cancellation_settles_open_transport(monkeypatch) -> None:
+    probe_started = asyncio.Event()
+
+    class _Transport:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        async def open(self, _resource: str, *, baudrate: int) -> None:
+            assert baudrate == 9600
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    async def _blocking_probe() -> bool:
+        probe_started.set()
+        await asyncio.Event().wait()
+        return False
+
+    driver = ThyracontVSP63D("vsp63d", "COM3", baudrate=9600, mock=False)
+    transport = _Transport()
+    driver._transport = transport  # type: ignore[assignment]
+    monkeypatch.setattr(driver, "_try_v1_probe", _blocking_probe)
+    task = asyncio.create_task(driver.connect())
+    await probe_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert transport.closed == 1
+    assert driver.connected is False

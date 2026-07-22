@@ -367,13 +367,15 @@ async def test_cancelled_blocking_idn_rejects_overlap_until_executor_settles(mon
     task = asyncio.create_task(driver.connect())
     assert await asyncio.to_thread(read_started.wait, 1.0)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await asyncio.sleep(0)
+    assert task.done() is False
     with pytest.raises(RuntimeError, match="executor generation has not settled"):
         await driver.connect()
     assert resources_opened == 1
     assert driver._transport._executor is not None
     release_read.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert await asyncio.to_thread(closed.wait, 1.0)
     await driver.disconnect()
     assert driver._transport._executor is None

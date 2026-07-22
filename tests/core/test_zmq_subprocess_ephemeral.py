@@ -75,6 +75,7 @@ def _run_cmd_forward(
         import sys
 
         fake_zmq = MagicMock(name="zmq_module")
+
         # zmq.ZMQError must be a real exception class so ``except
         # zmq.ZMQError`` in the production code actually catches
         # side_effect-raised instances.
@@ -160,8 +161,7 @@ def test_cmd_forward_creates_fresh_socket_per_command(_sockets):
     assert len(replies) == 5
     # 1 SUB socket (sub_drain_loop) + 5 REQ sockets (one per command).
     assert len(_sockets) == 6, (
-        f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)} — "
-        "ephemeral REQ lifecycle regressed"
+        f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)} — ephemeral REQ lifecycle regressed"
     )
 
 
@@ -188,6 +188,55 @@ def test_assistant_protocol_discovery_routes_and_normalizes_command(_sockets):
     request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
     wire_payload = request.send_string.call_args.args[0]
     assert json.loads(wire_payload) == {"cmd": "protocol_version"}
+
+
+@pytest.mark.parametrize("action", ["rag.rebuild_index", "rag.rebuild_status"])
+def test_assistant_mutation_is_rejected_before_req_socket_creation(_sockets, action):
+    commands = [
+        {
+            "cmd": action,
+            "_rid": "rebuild-1",
+        }
+    ]
+
+    replies, _control = _run_cmd_forward(commands, sockets=_sockets)
+
+    assert replies == [
+        {
+            "ok": False,
+            "error_code": "assistant_read_only",
+            "error": "Помощник работает только для чтения; команда не отправлена",
+            "cause": "Команда не входит в точный список разрешённых запросов помощника",
+            "next_step": "Используйте отдельно утверждённую офлайн-процедуру",
+            "delivery_state": "not_dispatched",
+            "commit_state": "not_committed",
+            "retry_safe": False,
+            "_rid": "rebuild-1",
+        }
+    ]
+    assert len(_sockets) == 1
+
+
+def test_assistant_read_with_mutation_envelope_is_rejected_before_req_socket(_sockets):
+    commands = [
+        {
+            "cmd": "assistant.query",
+            "query": "status",
+            "protocol_major": 1,
+            "mutation_capability": "cryodaq_mutation_v1",
+            "capability_token": "a" * 32,
+            "_rid": "query-1",
+        }
+    ]
+
+    replies, _control = _run_cmd_forward(commands, sockets=_sockets)
+
+    assert replies[0]["error_code"] == "assistant_mutation_envelope_forbidden"
+    assert replies[0]["delivery_state"] == "not_dispatched"
+    assert replies[0]["commit_state"] == "not_committed"
+    assert replies[0]["retry_safe"] is False
+    assert replies[0]["_rid"] == "query-1"
+    assert len(_sockets) == 1
 
 
 def test_cmd_forward_closes_socket_after_zmq_error(_sockets):
@@ -251,9 +300,7 @@ def test_cmd_forward_closes_socket_after_zmq_error(_sockets):
         def _factory(*args, **kwargs):
             sock = original_side_effect(*args, **kwargs)
             if len(_sockets) == 2:  # the REQ socket we care about
-                sock.recv_string.side_effect = _FakeZMQError(
-                    "Resource temporarily unavailable"
-                )
+                sock.recv_string.side_effect = _FakeZMQError("Resource temporarily unavailable")
             return sock
 
         fake_zmq.Context.return_value.socket.side_effect = _factory
@@ -317,9 +364,7 @@ def test_cmd_timeout_emits_structured_message(_sockets):
         def _factory(*args, **kwargs):
             sock = original_side_effect(*args, **kwargs)
             if len(_sockets) == 2:
-                sock.recv_string.side_effect = _FakeZMQError(
-                    "Resource temporarily unavailable"
-                )
+                sock.recv_string.side_effect = _FakeZMQError("Resource temporarily unavailable")
             return sock
 
         fake_zmq.Context.return_value.socket.side_effect = _factory
@@ -363,9 +408,7 @@ def test_cmd_timeout_emits_structured_message(_sockets):
         if isinstance(msg, dict) and msg.get("__type") == "cmd_timeout":
             cmd_timeouts.append(msg)
 
-    assert len(cmd_timeouts) == 1, (
-        f"expected exactly one cmd_timeout envelope, got {len(cmd_timeouts)}"
-    )
+    assert len(cmd_timeouts) == 1, f"expected exactly one cmd_timeout envelope, got {len(cmd_timeouts)}"
     envelope = cmd_timeouts[0]
     assert envelope["cmd"] == "safety_status"
     assert isinstance(envelope["ts"], float)
@@ -445,9 +488,7 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
             sock = original_side_effect(*args, **kwargs)
             # Every REQ socket (all after the initial SUB) raises on recv.
             if len(_sockets) >= 2:
-                sock.recv_string.side_effect = _FakeZMQError(
-                    "Resource temporarily unavailable"
-                )
+                sock.recv_string.side_effect = _FakeZMQError("Resource temporarily unavailable")
             return sock
 
         fake_zmq.Context.return_value.socket.side_effect = _factory
@@ -481,8 +522,7 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
         thread.join(timeout=5.0)
 
     assert len(replies) == 3, (
-        f"expected 3 replies across 3 timeouts, got {len(replies)} — "
-        "shared-state poisoning across ephemeral sockets"
+        f"expected 3 replies across 3 timeouts, got {len(replies)} — shared-state poisoning across ephemeral sockets"
     )
     # 1 SUB + 3 REQ (one per command).
     req_sockets = _sockets[1:]

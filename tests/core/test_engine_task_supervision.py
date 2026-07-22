@@ -8,7 +8,9 @@ logic is exercised directly (same rationale as ``_drain_dispatch_tasks``):
   * ``_handle_supervised_task_exit`` — the done-callback decision core:
     CRITICAL + operator alarm + exponential-backoff restart on unexpected
     death, and FAULT-latch for the two safety tasks after 2 failed restarts.
-    Clean shutdown / cancellation must never restart or alarm.
+    Ordinary clean shutdown / cancellation must never restart or alarm. A
+    safety-critical child returning or being cancelled while the engine is
+    live is authority loss and must alarm/restart just like an exception.
 """
 
 from __future__ import annotations
@@ -17,9 +19,11 @@ import asyncio
 import logging
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cryodaq.core.safety_manager import SafetyShutdownUnverifiedError
 from cryodaq.engine import (
     _SAFETY_TASK_MAX_RESTARTS,
     _SUPERVISE_BACKOFF_BASE_S,
@@ -31,6 +35,7 @@ from cryodaq.engine_wiring import supervision as supervision_mod
 from cryodaq.engine_wiring.supervision import (
     TaskSupervisor,
     install_loop_exception_backstop,
+    stop_safety_manager_with_hold,
 )
 
 # --------------------------------------------------------------------------
@@ -204,6 +209,77 @@ async def test_clean_return_is_ignored() -> None:
     verdict, calls, _ = _invoke(task)
     assert verdict == "ignored"
     assert calls["alarm"] == []
+
+
+async def test_unexpected_safety_task_cancellation_alarms_and_restarts() -> None:
+    task = await _cancelled_task()
+    verdict, calls, counts = _invoke(task, safety=True)
+    assert verdict == "restart"
+    assert counts["widget"] == 1
+    assert calls["alarm"]
+    assert "cancelled unexpectedly" in calls["alarm"][0][1]
+    assert calls["restart"] == [_SUPERVISE_BACKOFF_BASE_S]
+
+
+async def test_unexpected_safety_task_clean_return_alarms_and_restarts() -> None:
+    task = await _clean_task()
+    verdict, calls, counts = _invoke(task, safety=True)
+    assert verdict == "restart"
+    assert counts["widget"] == 1
+    assert calls["alarm"]
+    assert "returned unexpectedly" in calls["alarm"][0][1]
+    assert calls["restart"] == [_SUPERVISE_BACKOFF_BASE_S]
+
+
+async def test_stopping_safety_task_cancellation_is_expected() -> None:
+    task = await _cancelled_task()
+    verdict, calls, counts = _invoke(task, safety=True, stopping=True)
+    assert verdict == "ignored"
+    assert counts == {}
+    assert calls == {"alarm": [], "restart": [], "fault": []}
+
+
+async def test_safety_shutdown_hold_retries_until_exact_settlement(caplog: pytest.LogCaptureFixture) -> None:
+    manager = MagicMock()
+    manager.stop = AsyncMock(
+        side_effect=[
+            SafetyShutdownUnverifiedError("OFF unverified"),
+            None,
+        ]
+    )
+    sleep = AsyncMock()
+
+    await stop_safety_manager_with_hold(manager, logging.getLogger("test-hold"), retry_delay_s=0.0, sleep=sleep)
+
+    assert manager.stop.await_count == 2
+    sleep.assert_awaited_once_with(0.0)
+    assert "Safety shutdown HOLD" in caplog.text
+
+
+async def test_safety_shutdown_owner_absorbs_repeated_caller_cancellation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_stop() -> None:
+        entered.set()
+        await release.wait()
+
+    manager = MagicMock()
+    manager.stop = AsyncMock(side_effect=blocked_stop)
+    owner = asyncio.create_task(
+        stop_safety_manager_with_hold(manager, logging.getLogger("test-hold-cancel"), retry_delay_s=0.0)
+    )
+    await entered.wait()
+    owner.cancel()
+    await asyncio.sleep(0)
+    owner.cancel()
+    release.set()
+    await owner
+
+    manager.stop.assert_awaited_once_with()
+    assert "retained until exact settlement" in caplog.text
 
 
 async def test_crash_alarms_and_restarts_with_backoff() -> None:
@@ -459,9 +535,7 @@ async def test_loop_exception_backstop_logs_named_task(
     try:
         await task
     except RuntimeError as exc:
-        loop.call_exception_handler(
-            {"message": "manual backstop", "exception": exc, "task": task}
-        )
+        loop.call_exception_handler({"message": "manual backstop", "exception": exc, "task": task})
     finally:
         loop.set_exception_handler(previous)
 

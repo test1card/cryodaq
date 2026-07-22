@@ -229,7 +229,10 @@ async def test_handler_timeout_returns_error_reply_not_silence() -> None:
     assert isinstance(reply, dict)
     assert reply["ok"] is False
     assert reply.get("_handler_timeout") is True
-    assert "timeout" in reply.get("error", "").lower()
+    assert reply["error_code"] == "command_handler_timeout"
+    assert reply["delivery_state"] == "dispatched"
+    assert reply["commit_state"] == "not_applicable"
+    assert reply["retry_safe"] is True
 
 
 @pytest.mark.asyncio
@@ -243,10 +246,46 @@ async def test_handler_exception_returns_error_reply() -> None:
     reply = await server._run_handler({"cmd": "safety_status"})
     assert isinstance(reply, dict)
     assert reply["ok"] is False
-    assert "boom" in reply.get("error", "")
+    assert reply["error_code"] == "command_handler_failed"
+    assert reply["delivery_state"] == "dispatched"
+    assert reply["commit_state"] == "not_applicable"
+    assert reply["retry_safe"] is True
+    assert "boom" not in reply.get("error", "")
     # Exceptions are NOT timeouts — the marker must only fire for
     # the wait_for path.
     assert "_handler_timeout" not in reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "exception"])
+async def test_handler_failure_logs_never_expose_command_credentials(
+    failure: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Capability material is authorization, never diagnostic payload."""
+
+    secret = "secret-capability-token-must-not-be-logged"
+
+    async def handler(cmd: dict) -> dict:
+        if failure == "timeout":
+            await asyncio.sleep(5.0)
+        raise RuntimeError("injected failure")
+
+    server = ZMQCommandServer(handler=handler, handler_timeout_s=0.01)
+    with caplog.at_level("ERROR"):
+        reply = await server._run_handler(
+            {
+                "cmd": "experiment_finalize",
+                "capability_token": secret,
+                "mutation_capability": "cryodaq_mutation_v1",
+            }
+        )
+
+    assert reply["ok"] is False
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert secret not in rendered
+    assert "capability_token" not in rendered
+    assert "action=experiment_finalize" in rendered
 
 
 @pytest.mark.asyncio
@@ -322,7 +361,7 @@ async def test_valid_json_non_dict_payload_returns_error_reply() -> None:
 
 def test_protocol_version_constant_is_a_positive_int() -> None:
     assert isinstance(PROTOCOL_VERSION, int)
-    assert PROTOCOL_VERSION >= 1
+    assert PROTOCOL_VERSION == 2
 
 
 @pytest.mark.asyncio
@@ -365,7 +404,7 @@ def test_client_and_server_protocol_versions_match() -> None:
     """The GUI mirrors the constant to preserve its no-pyzmq import boundary."""
     from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 
-    assert CLIENT_PROTOCOL_VERSION == PROTOCOL_VERSION
+    assert CLIENT_PROTOCOL_VERSION == PROTOCOL_VERSION == 2
 
 
 def test_encode_reply_adds_protocol_version() -> None:

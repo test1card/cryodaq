@@ -66,6 +66,8 @@ def _manager(driver: _FakeKeithley) -> tuple[SafetyManager, object]:
 
 
 async def _qualify(sm: SafetyManager, driver: _FakeKeithley, binding: object) -> None:
+    if sm._collect_task is None and sm._monitor_task is None:
+        await sm.start()
     generation = await sm.begin_reviewed_source_connect(
         driver,
         binding,  # type: ignore[arg-type]
@@ -136,24 +138,28 @@ async def test_reconcile_skipped_in_mock_mode() -> None:
 async def test_trip_acknowledge_recovery_does_not_refault_on_stale_latch() -> None:
     k = _FakeKeithley(tripped=True)
     sm, binding = _manager(k)
-    await _qualify(sm, k, binding)
-    sm._config.cooldown_before_rearm_s = 0
-    sm._config.require_keithley_for_run = False
-    sm._state = SafetyState.RUNNING
+    try:
+        await _qualify(sm, k, binding)
+        sm._config.cooldown_before_rearm_s = 0
+        sm._config.require_keithley_for_run = False
+        sm._state = SafetyState.RUNNING
 
-    await sm._run_checks()
-    assert sm.state == SafetyState.FAULT_LATCHED
+        await sm._run_checks()
+        assert sm.state == SafetyState.FAULT_LATCHED
 
-    result = await sm.acknowledge_fault("Late-pet trip inspected; outputs OFF")
-    assert result["ok"] is True
-    assert k.ack_called is True
-    assert sm.state == SafetyState.MANUAL_RECOVERY
+        result = await sm.acknowledge_fault("Late-pet trip inspected; outputs OFF")
+        assert result["ok"] is True
+        assert k.ack_called is True
+        assert sm.state == SafetyState.MANUAL_RECOVERY
 
-    await sm._run_checks()
-    assert sm.state == SafetyState.READY
-    sm._state = SafetyState.RUNNING
-    await sm._run_checks()
-    assert sm.state == SafetyState.RUNNING
+        await sm._run_checks()
+        assert sm.state == SafetyState.READY
+        sm._state = SafetyState.RUNNING
+        await sm._run_checks()
+        assert sm.state == SafetyState.RUNNING
+    finally:
+        if sm._collect_task is not None or sm._monitor_task is not None:
+            await sm.stop()
 
 
 async def test_trip_acknowledge_failure_stays_fault_latched_and_actionable() -> None:
@@ -174,10 +180,14 @@ async def test_trip_acknowledge_failure_stays_fault_latched_and_actionable() -> 
 async def test_pending_trip_blocks_immediate_run_before_monitor_tick() -> None:
     k = _FakeKeithley(tripped=True)
     sm, _ = _manager(k)
-    sm._state = SafetyState.SAFE_OFF
+    await sm.start()
+    try:
+        sm._state = SafetyState.SAFE_OFF
 
-    result = await sm.request_run(0.1, 1.0, 0.1)
+        result = await sm.request_run(0.1, 1.0, 0.1)
 
-    assert result["ok"] is False
-    assert "unconsumed prior-trip evidence" in result["error"]
-    assert sm.state == SafetyState.SAFE_OFF
+        assert result["ok"] is False
+        assert "unconsumed prior-trip evidence" in result["error"]
+        assert sm.state == SafetyState.SAFE_OFF
+    finally:
+        await sm.stop()

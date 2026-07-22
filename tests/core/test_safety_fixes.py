@@ -533,6 +533,9 @@ async def test_interlock_stop_source_faults_when_off_unconfirmed():
             f"unconfirmed OFF on interlock stop must latch FAULT, got {mgr.state}"
         )
     finally:
+        # The assertion intentionally leaves OFF unverified. The hardened
+        # lifecycle retains HOLD until this explicit later exact proof.
+        k.emergency_off = AsyncMock(return_value=True)
         await mgr.stop()
 
 
@@ -568,6 +571,9 @@ async def test_interlock_stop_source_rejects_truthy_non_bool_off_evidence(
         source = next(fact for fact in snapshot.plant_health if fact.subsystem_id == "reviewed_source")
         assert source.reason_code == "reviewed_source_off_unverified"
     finally:
+        # Truthy non-bools are correctly rejected as OFF evidence. Restore an
+        # exact bool only for teardown so the stronger HOLD contract can close.
+        k.emergency_off = AsyncMock(return_value=True)
         await mgr.stop()
 
 

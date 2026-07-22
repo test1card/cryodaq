@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import threading
+from concurrent.futures import Future
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -14,6 +18,50 @@ _DEFAULT_READ_TIMEOUT_S: float = 3.0
 # Mock-ответы для известных команд
 _MOCK_IDN = "Thyracont,VSP63D,MOCK001,1.0"
 _MOCK_PRESSURE_RESPONSE = "0,1.234E-06\r"
+
+
+def _start_serial_open(serial_for_url, port: str, baudrate: int) -> Future[Any]:
+    """Start the potentially blocking OS serial open on a daemon thread."""
+
+    future: Future[Any] = Future()
+
+    def _open() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            serial_instance = serial_for_url(port, baudrate=baudrate)
+        except BaseException as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(serial_instance)
+
+    threading.Thread(
+        target=_open,
+        daemon=True,
+        name=f"serial-open-{port}",
+    ).start()
+    return future
+
+
+def _reap_late_serial_open(future: Future[Any], port: str) -> None:
+    """Close a handle returned after its async caller timed out/cancelled."""
+
+    def _close() -> None:
+        try:
+            serial_instance = future.result()
+        except BaseException as exc:
+            log.warning("Serial: late open for %s eventually failed: %s", port, exc)
+            return
+        try:
+            serial_instance.close()
+        except BaseException as exc:
+            log.critical("Serial: late-open handle cleanup failed for %s: %s", port, exc)
+
+    threading.Thread(
+        target=_close,
+        daemon=True,
+        name=f"serial-close-late-{port}",
+    ).start()
 
 
 class SerialTransport:
@@ -50,8 +98,16 @@ class SerialTransport:
         baudrate:
             Скорость обмена в бодах (по умолчанию 9600).
         timeout:
-            Таймаут чтения в секундах (по умолчанию 2.0).
+            Таймаут открытия и чтения в секундах (по умолчанию 2.0).
         """
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise ValueError("Serial timeout must be a finite positive number")
+        timeout = float(timeout)
         self._resource_str = port
         self._read_timeout_s = timeout
 
@@ -62,9 +118,39 @@ class SerialTransport:
         try:
             import serial_asyncio  # type: ignore[import]
 
-            self._reader, self._writer = await serial_asyncio.open_serial_connection(
-                url=port, baudrate=baudrate
-            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            open_future = _start_serial_open(serial_asyncio.serial.serial_for_url, port, baudrate)
+            try:
+                serial_instance = await asyncio.wait_for(
+                    asyncio.shield(asyncio.wrap_future(open_future)),
+                    timeout=timeout,
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                open_future.add_done_callback(lambda completed: _reap_late_serial_open(completed, port))
+                raise
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await asyncio.to_thread(serial_instance.close)
+                raise TimeoutError(f"Serial open timed out for {port}")
+
+            reader = asyncio.StreamReader(loop=loop)
+            protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+            try:
+                serial_transport, _ = await asyncio.wait_for(
+                    serial_asyncio.connection_for_serial(
+                        loop,
+                        lambda: protocol,
+                        serial_instance,
+                    ),
+                    timeout=remaining,
+                )
+            except BaseException:
+                await asyncio.to_thread(serial_instance.close)
+                raise
+            self._reader = reader
+            self._writer = asyncio.StreamWriter(serial_transport, protocol, reader, loop)
             log.info("Serial: порт %s @ %d бод успешно открыт", port, baudrate)
         except Exception as exc:
             log.error("Serial: ошибка открытия порта %s — %s", port, exc)
@@ -178,7 +264,9 @@ class SerialTransport:
         try:
             # Прочитать всё, что есть в буфере, с минимальным таймаутом
             while True:
-                await asyncio.wait_for(self._reader.read(4096), timeout=0.1)
+                data = await asyncio.wait_for(self._reader.read(4096), timeout=0.1)
+                if not data:
+                    break
         except TimeoutError:
             pass
         except Exception:

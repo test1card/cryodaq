@@ -156,8 +156,7 @@ def test_overflow_counter_emits_warning_on_queue_full() -> None:
         seq = 0
         while not stop_pub.is_set():
             payload = _msgpack.packb(
-                {"ts": _time.time(), "iid": "mock", "ch": f"CH{seq % 4}",
-                 "v": float(seq), "u": "K", "st": "ok"},
+                {"ts": _time.time(), "iid": "mock", "ch": f"CH{seq % 4}", "v": float(seq), "u": "K", "st": "ok"},
                 use_bin_type=True,
             )
             try:
@@ -284,12 +283,13 @@ async def test_serve_loop_sends_reply_on_serialization_error() -> None:
 
         # First reply: must be the serialization-error fallback (not the bad value)
         assert isinstance(first, dict), "first reply must be a dict"
-        assert first.get("ok") is False, (
-            f"serialization-error fallback must have ok=False; got {first}"
-        )
-        assert first.get("error") == "serialization error", (
-            f"fallback error key must be 'serialization error'; got {first}"
-        )
+        assert first.get("ok") is False, f"serialization-error fallback must have ok=False; got {first}"
+        assert first.get("error_code") == "command_reply_serialization_failed"
+        assert first.get("error") == ("Command reply could not be serialized; outcome may be unknown.")
+        assert first.get("delivery_state") == "dispatched"
+        assert first.get("commit_state") == "unknown"
+        assert first.get("retry_safe") is False
+        assert first.get("proto") == 2
         # Second reply: server was not wedged
         assert second.get("ok") is True, f"second command must succeed; got {second}"
         assert second.get("call") == 2
@@ -354,11 +354,9 @@ async def test_serve_loop_handles_cancelled_error() -> None:
         raw = await asyncio.wait_for(req.recv(), timeout=3.0)
         reply = json.loads(raw)
         # If a reply arrived it MUST be an error dict — not a success response
-        assert reply.get("ok") is False, (
-            f"CancelledError path must not return ok=True; got {reply}"
-        )
+        assert reply.get("ok") is False, f"CancelledError path must not return ok=True; got {reply}"
         assert "error" in reply, f"error key must be present in cancellation reply; got {reply}"
-    except (TimeoutError, Exception):
+    except (TimeoutError, zmq.ZMQError):
         # Reply was lost during ZMQ teardown — within contract, not a regression.
         pass
     finally:

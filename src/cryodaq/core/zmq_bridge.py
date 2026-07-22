@@ -72,6 +72,7 @@ import zmq.asyncio
 
 from cryodaq.channels.persistence import MAX_PERSISTED_ENVELOPE_BYTES
 from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, PublishedReading
+from cryodaq.core.command_authority import CommandClass, classify_engine_command
 from cryodaq.core.descriptor_transport import (
     DescriptorQualifiedReading,
     qualify_reading_descriptor,
@@ -102,6 +103,15 @@ def _parse_finite_float(token: str) -> float:
     return value
 
 
+def _parse_bounded_int(token: str) -> int:
+    """Reject integer literals too large for any CryoDAQ command field."""
+
+    digits = token.removeprefix("-")
+    if len(digits) > MAX_COMMAND_JSON_INTEGER_DIGITS:
+        raise ValueError("JSON integer literal is too large")
+    return int(token)
+
+
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -111,7 +121,39 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _decode_command(raw: bytes | str) -> dict:
+def _validate_command_json(value: object) -> dict[str, Any]:
+    """Validate root shape and bound aggregate JSON structure iteratively."""
+
+    if type(value) is not dict:
+        raise ValueError("command JSON root must be an object")
+
+    item_count = 0
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        current, depth = pending.pop()
+        item_count += 1
+        if item_count > MAX_COMMAND_JSON_ITEMS:
+            raise ValueError("command JSON contains too many items")
+        if depth > MAX_COMMAND_JSON_DEPTH:
+            raise ValueError("command JSON is nested too deeply")
+
+        if type(current) is dict:
+            for key, child in current.items():
+                if type(key) is not str or len(key) > MAX_COMMAND_JSON_KEY_CHARS:
+                    raise ValueError("command JSON key is invalid or too long")
+                pending.append((child, depth + 1))
+        elif type(current) is list:
+            pending.extend((child, depth + 1) for child in current)
+        elif type(current) is str:
+            if len(current.encode("utf-8")) > MAX_CMD_MSG_SIZE:
+                raise ValueError("command JSON string is too long")
+        elif current is not None and type(current) not in {bool, int, float}:
+            raise ValueError("command JSON contains an unsupported value")
+
+    return value
+
+
+def _decode_command(raw: bytes | str) -> dict[str, Any]:
     """Decode a command frame, rejecting non-finite numeric values.
 
     Python's ``json`` accepts the non-standard ``NaN``/``Infinity``/``-Infinity``
@@ -122,12 +164,20 @@ def _decode_command(raw: bytes | str) -> dict:
     command surface finite-clean. A rejected value surfaces as a ``ValueError``,
     handled identically to malformed JSON by the caller.
     """
-    return json.loads(
-        raw,
-        parse_constant=_reject_nonfinite,
-        parse_float=_parse_finite_float,
-        object_pairs_hook=_reject_duplicate_pairs,
-    )
+    encoded_size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
+    if encoded_size > MAX_CMD_MSG_SIZE:
+        raise ValueError("command frame exceeds maximum size")
+    try:
+        decoded = json.loads(
+            raw,
+            parse_constant=_reject_nonfinite,
+            parse_float=_parse_finite_float,
+            parse_int=_parse_bounded_int,
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+    except (RecursionError, OverflowError) as exc:
+        raise ValueError("command JSON structure is invalid") from exc
+    return _validate_command_json(decoded)
 
 
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
@@ -156,15 +206,52 @@ _PERIODIC_TOKEN_PREFIX = "sha256:"
 # declaring its own: the ZMQ and REST surfaces ship together from one
 # package build, so one number is honest; a REST-only break would still
 # warrant bumping this the same way a ZMQ-only break would.
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+
+
+def _bounded_action_label(action: object) -> str:
+    """Return a bounded log label that cannot inject control characters."""
+
+    if type(action) is not str or not action:
+        return "<invalid>"
+    return "".join(char if char.isascii() and (char.isalnum() or char in "._-") else "?" for char in action[:128])
+
+
+def _post_dispatch_failure(
+    action: object,
+    *,
+    error_code: str,
+    error: str,
+) -> dict[str, Any]:
+    """Describe a failure after a handler may have changed state."""
+
+    command_class = classify_engine_command(action)
+    return {
+        "ok": False,
+        "error_code": error_code,
+        "error": error,
+        "delivery_state": "dispatched",
+        "commit_state": ("not_applicable" if command_class is CommandClass.READ else "unknown"),
+        "retry_safe": command_class is CommandClass.READ,
+    }
 
 
 def encode_command_reply(reply: dict[str, Any]) -> bytes:
     """Serialize the one authoritative REP envelope used on the wire."""
-    return json.dumps(
-        {**reply, "proto": PROTOCOL_VERSION},
-        default=str,
-    ).encode()
+    if type(reply) is not dict:
+        raise TypeError("command reply must be an exact dict")
+    try:
+        wire = json.dumps(
+            {**reply, "proto": PROTOCOL_VERSION},
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (RecursionError, OverflowError) as exc:
+        raise ValueError("command reply structure is invalid") from exc
+    if len(wire) > MAX_COMMAND_REPLY_SIZE:
+        raise ValueError("command reply exceeds maximum size")
+    return wire
 
 
 class PeriodicCommandReply(dict[str, Any]):
@@ -203,6 +290,22 @@ _SERVER_LABELS = frozenset({"engine", "assistant"})
 # vs. real traffic so legitimate payloads are never clipped.
 MAX_CMD_MSG_SIZE = 256 * 1024  # 256 KiB — commands are tiny JSON objects
 MAX_DATA_MSG_SIZE = 2 * 1024 * 1024  # 2 MiB — one msgpack Reading, generous
+MAX_COMMAND_REPLY_SIZE = 4 * 1024 * 1024
+MAX_COMMAND_JSON_DEPTH = 16
+MAX_COMMAND_JSON_ITEMS = 2048
+MAX_COMMAND_JSON_KEY_CHARS = 256
+MAX_COMMAND_JSON_INTEGER_DIGITS = 64
+
+_SERIALIZATION_ERROR_WIRE = encode_command_reply(
+    {
+        "ok": False,
+        "error_code": "command_reply_serialization_failed",
+        "error": "Command reply could not be serialized; outcome may be unknown.",
+        "delivery_state": "dispatched",
+        "commit_state": "unknown",
+        "retry_safe": False,
+    }
+)
 
 # IV.3 Finding 7: per-command tiered handler timeout.
 # A flat 2 s envelope was wrong for stateful transitions —
@@ -1153,6 +1256,9 @@ class ZMQCommandServer:
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
         self._task: asyncio.Task[None] | None = None
+        self._restart_task: asyncio.Task[None] | None = None
+        self._handler_tasks: set[asyncio.Task[Any]] = set()
+        self._uncertain_authority_tasks: set[asyncio.Task[Any]] = set()
         self._running = False
         self._shutdown_requested = False
 
@@ -1165,6 +1271,103 @@ class ZMQCommandServer:
         loop = asyncio.get_running_loop()
         self._task = loop.create_task(self._serve_loop(), name="zmq_cmd_server")
         self._task.add_done_callback(self._on_serve_task_done)
+
+    def _observe_handler_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        action: str,
+    ) -> None:
+        """Consume a detached handler result without exposing its payload."""
+
+        self._handler_tasks.discard(task)
+        self._uncertain_authority_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.error(
+                "ZMQ detached command handler failed: action=%s exception=%s",
+                action,
+                type(exc).__name__,
+            )
+        else:
+            logger.warning(
+                "ZMQ detached command handler settled after reply: action=%s",
+                action,
+            )
+
+    def _detach_handler_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        action: str,
+        command_class: CommandClass,
+    ) -> None:
+        """Cancel without waiting and quarantine uncertain command authority."""
+
+        if command_class is not CommandClass.READ:
+            self._uncertain_authority_tasks.add(task)
+        task.add_done_callback(
+            lambda settled, label=action: self._observe_handler_task(
+                settled,
+                action=label,
+            )
+        )
+        if command_class is CommandClass.READ:
+            task.cancel()
+
+    async def _open_bound_socket(self) -> zmq.asyncio.Socket:
+        """Create and bind a fresh REP socket with the full boundary policy."""
+
+        if self._ctx is None:
+            raise RuntimeError("ZMQ command context is not available")
+        socket = self._ctx.socket(zmq.REP)
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.MAXMSGSIZE, MAX_CMD_MSG_SIZE)
+        try:
+            await _bind_with_retry(socket, self._address)
+        except BaseException:
+            socket.close(linger=0)
+            raise
+        return socket
+
+    async def _restart_after_unexpected_exit(self) -> None:
+        """Replace a possibly poisoned REP socket before restarting its loop."""
+
+        current = asyncio.current_task()
+        try:
+            old_socket, self._socket = self._socket, None
+            if old_socket is not None:
+                old_socket.close(linger=0)
+            if self._shutdown_requested or not self._running:
+                return
+            self._socket = await self._open_bound_socket()
+            if self._shutdown_requested or not self._running:
+                self._socket.close(linger=0)
+                self._socket = None
+                return
+            # Release recovery ownership before the replacement task can run.
+            # If that task exits immediately, its done callback must be able to
+            # schedule a second socket replacement rather than observe this
+            # almost-finished recovery task and leave the server ownerless.
+            if self._restart_task is current:
+                self._restart_task = None
+            self._start_serve_task()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._running = False
+            logger.error(
+                "ZMQCommandServer socket recovery failed: exception=%s",
+                type(exc).__name__,
+            )
+        finally:
+            if self._restart_task is current:
+                self._restart_task = None
 
     def _on_serve_task_done(self, task: asyncio.Task[None]) -> None:
         """Restart the REP loop after unexpected task exit."""
@@ -1182,17 +1385,21 @@ class ZMQCommandServer:
 
         if exc is not None:
             logger.error(
-                "ZMQCommandServer serve loop crashed; restarting",
-                exc_info=(type(exc), exc, exc.__traceback__),
+                "ZMQCommandServer serve loop crashed; replacing socket: exception=%s",
+                type(exc).__name__,
             )
         else:
-            logger.error("ZMQCommandServer serve loop exited unexpectedly; restarting")
+            logger.error("ZMQCommandServer serve loop exited unexpectedly; replacing socket")
 
         loop = task.get_loop()
         if loop.is_closed():
             logger.error("ZMQCommandServer loop is closed; cannot restart serve loop")
             return
-        loop.call_soon(self._start_serve_task)
+        if self._restart_task is None or self._restart_task.done():
+            self._restart_task = loop.create_task(
+                self._restart_after_unexpected_exit(),
+                name="zmq_cmd_server_recover",
+            )
 
     async def _run_handler(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Execute the command handler with a bounded wall-clock timeout.
@@ -1235,7 +1442,8 @@ class ZMQCommandServer:
                 "error": f"invalid payload: expected object, got {type(cmd).__name__}",
             }
 
-        action = str(cmd.get("cmd", ""))
+        raw_action = cmd.get("cmd")
+        action = _bounded_action_label(raw_action)
         timeout = (
             self._handler_timeout_override_s if self._handler_timeout_override_s is not None else _timeout_for(cmd)
         )
@@ -1246,46 +1454,89 @@ class ZMQCommandServer:
                 result = await result
             return result
 
+        handler_task = asyncio.create_task(
+            _invoke(),
+            name=f"zmq_command_handler:{action}",
+        )
+        self._handler_tasks.add(handler_task)
         try:
-            result = await asyncio.wait_for(_invoke(), timeout=timeout)
-        except TimeoutError as exc:
-            # Preserve inner wrapper message when present (e.g.
-            # "log_get timeout (1.5s)"). Falls back to the generic
-            # envelope message when the timeout fired at the outer
-            # asyncio.wait_for layer.
-            inner_message = str(exc).strip()
-            error_message = (
-                inner_message if inner_message else f"handler timeout ({timeout:g}s); operation may still be running."
-            )
-            logger.error(
-                "ZMQ command handler timeout: action=%s error=%s payload=%r",
-                action,
-                error_message,
-                cmd,
-            )
-            return {
-                "ok": False,
-                "error": error_message,
-                "_handler_timeout": True,
-            }
+            done, _pending = await asyncio.wait({handler_task}, timeout=timeout)
         except asyncio.CancelledError:
-            # Cancellation is not a handler failure — propagate so the
-            # serve loop can still try to send its own short error
-            # reply before the task itself tears down.
-            raise
-        except Exception as exc:
-            # Belt-and-suspenders: the outer serve loop already catches
-            # exceptions and sends an error reply, but pushing the
-            # dict back through the normal return path keeps the REP
-            # state-machine handling uniform with the timeout branch.
-            logger.exception(
-                "ZMQ command handler failed: action=%s payload=%r",
-                action,
-                cmd,
+            handler_task.add_done_callback(
+                lambda settled, label=action: self._observe_handler_task(
+                    settled,
+                    action=label,
+                )
             )
-            return {"ok": False, "error": str(exc) or type(exc).__name__}
+            handler_task.cancel()
+            raise
 
-        return result if isinstance(result, dict) else {"ok": True}
+        if not done:
+            handler_task.add_done_callback(
+                lambda settled, label=action: self._observe_handler_task(
+                    settled,
+                    action=label,
+                )
+            )
+            handler_task.cancel()
+            logger.error(
+                "ZMQ command handler timeout: action=%s",
+                action,
+            )
+            reply = _post_dispatch_failure(
+                raw_action,
+                error_code="command_handler_timeout",
+                error="Command handler timed out; outcome may be unknown.",
+            )
+            reply["_handler_timeout"] = True
+            return reply
+
+        self._handler_tasks.discard(handler_task)
+        try:
+            result = handler_task.result()
+        except TimeoutError:
+            logger.error(
+                "ZMQ command handler reported timeout: action=%s",
+                action,
+            )
+            reply = _post_dispatch_failure(
+                raw_action,
+                error_code="command_handler_timeout",
+                error="Command handler timed out; outcome may be unknown.",
+            )
+            reply["_handler_timeout"] = True
+            return reply
+        except asyncio.CancelledError:
+            logger.error("ZMQ command handler cancelled itself: action=%s", action)
+            return _post_dispatch_failure(
+                raw_action,
+                error_code="command_handler_cancelled",
+                error="Command handler was cancelled; outcome may be unknown.",
+            )
+        except Exception as exc:
+            logger.error(
+                "ZMQ command handler failed: action=%s exception=%s",
+                action,
+                type(exc).__name__,
+            )
+            return _post_dispatch_failure(
+                raw_action,
+                error_code="command_handler_failed",
+                error="Command handler failed; outcome may be unknown.",
+            )
+
+        if isinstance(result, dict):
+            return result
+        logger.error(
+            "ZMQ command handler returned invalid type: action=%s result_type=%s",
+            action,
+            type(result).__name__,
+        )
+        return _post_dispatch_failure(
+            raw_action,
+            error_code="command_handler_contract_invalid",
+            error="Command handler returned an invalid reply; outcome may be unknown.",
+        )
 
     def _server_label(self) -> str:
         """Return the explicit role advertised by ``protocol_version``."""
@@ -1306,78 +1557,99 @@ class ZMQCommandServer:
 
     async def _serve_loop(self) -> None:
         while self._running:
+            socket = self._socket
+            if socket is None:
+                raise RuntimeError("ZMQ command socket is not available")
             try:
-                events = await self._socket.poll(timeout=1000)
+                events = await socket.poll(timeout=1000)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("Ошибка poll команды ZMQ")
-                continue
+            except Exception as exc:
+                logger.error(
+                    "ZMQ command poll failed: exception=%s",
+                    type(exc).__name__,
+                )
+                raise
             if not (events & zmq.POLLIN):
                 continue
             try:
-                raw = await self._socket.recv()
+                raw = await socket.recv()
             except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Ошибка приёма команды ZMQ")
-                continue
-
-            # Once recv() succeeds, the REP socket is in "awaiting send" state.
-            # We MUST send a reply — otherwise the socket is stuck forever.
-            try:
-                cmd = _decode_command(raw)
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-                await self._socket.send(self._encode_reply({"ok": False, "error": "invalid JSON"}))
-                continue
-
-            try:
-                reply = await self._run_handler(cmd)
-            except asyncio.CancelledError:
-                # CancelledError during handler — must still send reply
-                # to avoid leaving REP socket in stuck state.
-                try:
-                    await self._socket.send(self._encode_reply({"ok": False, "error": "internal"}))
-                except Exception:
-                    pass
                 raise
             except Exception as exc:
-                logger.exception("Ошибка обработки команды: %s", cmd)
-                reply = {"ok": False, "error": str(exc)}
+                logger.error(
+                    "ZMQ command receive failed: exception=%s",
+                    type(exc).__name__,
+                )
+                raise
+
+            # Exactly one send attempt follows each successful recv. If that
+            # attempt fails or is cancelled, the REP state is unknowable and
+            # the task exits so its supervisor replaces the socket.
+            try:
+                cmd = _decode_command(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
+                reply = {
+                    "ok": False,
+                    "error_code": "command_request_invalid",
+                    "error": "Command request is invalid.",
+                    "delivery_state": "not_dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
+                raw_action: object = None
+            else:
+                raw_action = cmd.get("cmd")
+                try:
+                    reply = await self._run_handler(cmd)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "ZMQ command dispatch failed unexpectedly: action=%s exception=%s",
+                        _bounded_action_label(raw_action),
+                        type(exc).__name__,
+                    )
+                    reply = _post_dispatch_failure(
+                        raw_action,
+                        error_code="command_dispatch_failed",
+                        error="Command dispatch failed; outcome may be unknown.",
+                    )
 
             try:
-                await self._socket.send(self._encode_reply(reply))
+                wire = self._encode_reply(reply)
+            except Exception as exc:
+                logger.error(
+                    "ZMQ command reply serialization failed: action=%s exception=%s",
+                    _bounded_action_label(raw_action),
+                    type(exc).__name__,
+                )
+                try:
+                    wire = self._encode_reply(
+                        _post_dispatch_failure(
+                            raw_action,
+                            error_code="command_reply_serialization_failed",
+                            error=("Command reply could not be serialized; outcome may be unknown."),
+                        )
+                    )
+                except Exception:
+                    wire = _SERIALIZATION_ERROR_WIRE
+
+            try:
+                await socket.send(wire)
             except asyncio.CancelledError:
-                # Shutting down — try best-effort send
-                try:
-                    await self._socket.send(self._encode_reply({"ok": False, "error": "internal"}))
-                except Exception:
-                    pass
                 raise
-            except Exception:
-                logger.exception("Ошибка отправки ответа ZMQ")
-                # Serialization or send failure — must still send a reply
-                # to avoid leaving the REP socket in stuck state.
-                try:
-                    await self._socket.send(self._encode_reply({"ok": False, "error": "serialization error"}))
-                except Exception:
-                    pass
+            except Exception as exc:
+                logger.error(
+                    "ZMQ command reply send failed: action=%s exception=%s",
+                    _bounded_action_label(raw_action),
+                    type(exc).__name__,
+                )
+                raise
 
     async def start(self) -> None:
         self._ctx = zmq.asyncio.Context()
-        self._socket = self._ctx.socket(zmq.REP)
-        # Phase 2b H.4: LINGER=0 + EADDRINUSE retry (see _bind_with_retry).
-        self._socket.setsockopt(zmq.LINGER, 0)
-        # Audit C.2 / D6: cap inbound command frames at the socket
-        # level so libzmq drops an oversize command before allocation
-        # (set before bind()).
-        self._socket.setsockopt(zmq.MAXMSGSIZE, MAX_CMD_MSG_SIZE)
-        # IV.6: TCP_KEEPALIVE previously added on the idle-reap
-        # hypothesis (commit f5f9039). Reverted — the actual fix is
-        # an ephemeral per-command REQ socket on the GUI subprocess
-        # side (zmq_subprocess.cmd_forward_loop). With a fresh TCP
-        # connection per command, loopback kernel reaping is moot.
-        await _bind_with_retry(self._socket, self._address)
+        self._socket = await self._open_bound_socket()
         self._running = True
         self._shutdown_requested = False
         self._start_serve_task()
@@ -1393,6 +1665,13 @@ class ZMQCommandServer:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._restart_task:
+            self._restart_task.cancel()
+            try:
+                await self._restart_task
+            except asyncio.CancelledError:
+                pass
+            self._restart_task = None
         if self._socket:
             self._socket.close(linger=0)
             self._socket = None

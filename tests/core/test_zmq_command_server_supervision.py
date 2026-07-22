@@ -23,9 +23,7 @@ def _free_tcp_address() -> str:
     return f"tcp://{host}:{port}"
 
 
-async def _send_command(
-    address: str, payload: dict[str, object], *, timeout_s: float = 5.0
-) -> dict:
+async def _send_command(address: str, payload: dict[str, object], *, timeout_s: float = 5.0) -> dict:
     ctx = zmq.asyncio.Context()
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.LINGER, 0)
@@ -57,6 +55,23 @@ async def _send_raw(address: str, payload: bytes, *, timeout_s: float = 5.0) -> 
         ctx.term()
 
 
+def _assert_failure_envelope(
+    reply: dict,
+    *,
+    error_code: str,
+    delivery_state: str,
+    commit_state: str,
+    retry_safe: bool,
+) -> None:
+    assert reply["ok"] is False
+    assert reply["error_code"] == error_code
+    assert isinstance(reply["error"], str)
+    assert reply["delivery_state"] == delivery_state
+    assert reply["commit_state"] == commit_state
+    assert reply["retry_safe"] is retry_safe
+    assert reply["proto"] == PROTOCOL_VERSION
+
+
 async def test_command_server_restarts_after_unexpected_task_error(caplog) -> None:
     caplog.set_level(logging.ERROR)
     address = _free_tcp_address()
@@ -86,7 +101,7 @@ async def test_command_server_restarts_after_unexpected_task_error(caplog) -> No
         assert calls >= 2
         # Every REP reply carries the additive protocol version.
         assert reply == {"ok": True, "cmd": "ping", "proto": PROTOCOL_VERSION}
-        assert "serve loop crashed; restarting" in caplog.text
+        assert "serve loop crashed; replacing socket" in caplog.text
     finally:
         await server.stop()
 
@@ -105,24 +120,25 @@ async def test_command_server_times_out_slow_handler_and_keeps_serving(caplog) -
     await server.start()
     try:
         slow_reply = await _send_command(address, {"cmd": "slow"})
-        fast_reply = await _send_command(address, {"cmd": "fast"})
+        read_reply = await _send_command(address, {"cmd": "safety_status"})
 
-        # IV.3 F7: timeout reply now includes the _handler_timeout marker
-        # and the "operation may still be running." suffix so callers
-        # can distinguish envelope timeout from a handler-reported error.
-        assert slow_reply["ok"] is False
+        _assert_failure_envelope(
+            slow_reply,
+            error_code="command_handler_timeout",
+            delivery_state="dispatched",
+            commit_state="unknown",
+            retry_safe=False,
+        )
         assert slow_reply.get("_handler_timeout") is True
-        assert slow_reply["proto"] == PROTOCOL_VERSION
-        assert "handler timeout (2s)" in slow_reply["error"]
-        assert "operation may still be running" in slow_reply["error"]
-        assert fast_reply == {"ok": True, "cmd": "fast", "proto": PROTOCOL_VERSION}
+        assert slow_reply["error"] == "Command handler timed out; outcome may be unknown."
+        assert read_reply == {"ok": True, "cmd": "safety_status", "proto": PROTOCOL_VERSION}
         assert "action=slow" in caplog.text
     finally:
         await server.stop()
 
 
 async def test_command_server_preserves_inner_timeout_message(caplog) -> None:
-    """Inner TimeoutError messages from handler wrappers must reach the client."""
+    """Inner TimeoutError messages stay redacted from the public envelope."""
     caplog.set_level(logging.ERROR)
     address = _free_tcp_address()
 
@@ -133,15 +149,17 @@ async def test_command_server_preserves_inner_timeout_message(caplog) -> None:
     await server.start()
     try:
         reply = await _send_command(address, {"cmd": "log_get"})
-        # IV.3 F7: inner-wrapper message still wins, but the reply now
-        # also carries the _handler_timeout marker since this is still
-        # a timeout path.
-        assert reply["ok"] is False
-        assert reply["error"] == "log_get timeout (1.5s)"
+        _assert_failure_envelope(
+            reply,
+            error_code="command_handler_timeout",
+            delivery_state="dispatched",
+            commit_state="not_applicable",
+            retry_safe=True,
+        )
+        assert reply["error"] == "Command handler timed out; outcome may be unknown."
         assert reply.get("_handler_timeout") is True
-        assert reply["proto"] == PROTOCOL_VERSION
-        assert "log_get timeout (1.5s)" in caplog.text
-        assert "handler timeout (2s)" not in caplog.text
+        assert "action=log_get" in caplog.text
+        assert "exception=TimeoutError" not in caplog.text
     finally:
         await server.stop()
 
@@ -195,7 +213,14 @@ async def test_malformed_json_reply_still_carries_proto() -> None:
             req.close(linger=0)
             ctx.term()
 
-        assert reply == {"ok": False, "error": "invalid JSON", "proto": PROTOCOL_VERSION}
+        _assert_failure_envelope(
+            reply,
+            error_code="command_request_invalid",
+            delivery_state="not_dispatched",
+            commit_state="not_committed",
+            retry_safe=True,
+        )
+        assert reply["error"] == "Command request is invalid."
     finally:
         await server.stop()
 
@@ -211,9 +236,14 @@ async def test_valid_non_object_json_reply_still_carries_proto(payload: bytes) -
     await server.start()
     try:
         reply = await _send_raw(address, payload)
-        assert reply["ok"] is False
-        assert "invalid payload" in reply["error"]
-        assert reply["proto"] == PROTOCOL_VERSION
+        _assert_failure_envelope(
+            reply,
+            error_code="command_request_invalid",
+            delivery_state="not_dispatched",
+            commit_state="not_committed",
+            retry_safe=True,
+        )
+        assert reply["error"] == "Command request is invalid."
     finally:
         await server.stop()
 
@@ -237,17 +267,21 @@ async def test_handler_exception_reply_still_carries_proto() -> None:
     address = _free_tcp_address()
 
     async def handler(cmd: dict[str, object]) -> dict[str, object]:
-        raise RuntimeError("handler failed")
+        raise RuntimeError("SECRET internal handler details")
 
     server = ZMQCommandServer(address=address, handler=handler)
     await server.start()
     try:
         reply = await _send_command(address, {"cmd": "status"})
-        assert reply == {
-            "ok": False,
-            "error": "handler failed",
-            "proto": PROTOCOL_VERSION,
-        }
+        _assert_failure_envelope(
+            reply,
+            error_code="command_handler_failed",
+            delivery_state="dispatched",
+            commit_state="unknown",
+            retry_safe=False,
+        )
+        assert reply["error"] == "Command handler failed; outcome may be unknown."
+        assert "SECRET internal handler details" not in reply["error"]
     finally:
         await server.stop()
 
@@ -271,11 +305,14 @@ async def test_serialization_fallback_reply_carries_proto() -> None:
 
     socket_mock.send.assert_awaited_once()
     reply = json.loads(socket_mock.send.await_args.args[0])
-    assert reply == {
-        "ok": False,
-        "error": "serialization error",
-        "proto": PROTOCOL_VERSION,
-    }
+    _assert_failure_envelope(
+        reply,
+        error_code="command_reply_serialization_failed",
+        delivery_state="dispatched",
+        commit_state="unknown",
+        retry_safe=False,
+    )
+    assert reply["error"] == "Command reply could not be serialized; outcome may be unknown."
 
 
 async def test_handler_cancellation_best_effort_reply_carries_proto() -> None:
@@ -291,9 +328,7 @@ async def test_handler_cancellation_best_effort_reply_carries_proto() -> None:
     with pytest.raises(asyncio.CancelledError):
         await server._serve_loop()
 
-    socket_mock.send.assert_awaited_once()
-    reply = json.loads(socket_mock.send.await_args.args[0])
-    assert reply == {"ok": False, "error": "internal", "proto": PROTOCOL_VERSION}
+    socket_mock.send.assert_not_awaited()
 
 
 async def test_send_cancellation_best_effort_reply_carries_proto() -> None:
@@ -308,9 +343,7 @@ async def test_send_cancellation_best_effort_reply_carries_proto() -> None:
     with pytest.raises(asyncio.CancelledError):
         await server._serve_loop()
 
-    assert socket_mock.send.await_count == 2
-    fallback = json.loads(socket_mock.send.await_args_list[1].args[0])
-    assert fallback == {"ok": False, "error": "internal", "proto": PROTOCOL_VERSION}
+    socket_mock.send.assert_awaited_once()
 
 
 def test_engine_commands_keep_inner_timeouts_wired() -> None:

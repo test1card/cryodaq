@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from cryodaq.drivers.instruments.keithley_2604b import (
@@ -25,6 +27,10 @@ class _FakeKeithleyTransport:
 
     async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
         c = cmd.lower()
+        if "cryodaq_off_v1" in c:
+            match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", cmd)
+            assert match is not None
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|0\n"
         if "source.output" in c:
             return "0"  # inactive channels report OFF
         if "measure.iv()" in c:
@@ -35,6 +41,7 @@ class _FakeKeithleyTransport:
 
     async def write(self, cmd: str) -> None:
         self.writes.append(cmd)
+
 
 # ---------------------------------------------------------------------------
 # Slew rate limiting
@@ -55,6 +62,7 @@ async def test_slew_rate_normal_regulation() -> None:
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
     driver._channels["smua"].v_comp = 40.0
+    driver._source_regulation_epoch["smua"] = driver._source_command_epoch["smua"]
     driver._last_v["smua"] = 0.0
 
     for _ in range(5):
@@ -67,8 +75,7 @@ async def test_slew_rate_normal_regulation() -> None:
     steps = [commanded[0]] + [b - a for a, b in zip(commanded, commanded[1:])]
     for step in steps:
         assert abs(step) <= MAX_DELTA_V_PER_STEP + 1e-9, (
-            f"slew limiter must clamp every step to <= {MAX_DELTA_V_PER_STEP} V, "
-            f"saw step {step} V in {commanded}"
+            f"slew limiter must clamp every step to <= {MAX_DELTA_V_PER_STEP} V, saw step {step} V in {commanded}"
         )
 
 
@@ -86,6 +93,7 @@ async def test_slew_rate_limits_large_v_step() -> None:
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
     driver._channels["smua"].v_comp = 40.0
+    driver._source_regulation_epoch["smua"] = driver._source_command_epoch["smua"]
     driver._last_v["smua"] = 0.0
 
     await driver.read_channels()
@@ -94,8 +102,7 @@ async def test_slew_rate_limits_large_v_step() -> None:
     assert levelv_writes, "active channel must command a source.levelv write"
     commanded = float(levelv_writes[-1].split("=")[1])
     assert commanded == pytest.approx(MAX_DELTA_V_PER_STEP), (
-        f"slew limiter must clamp the step to {MAX_DELTA_V_PER_STEP} V, "
-        f"but commanded {commanded} V"
+        f"slew limiter must clamp the step to {MAX_DELTA_V_PER_STEP} V, but commanded {commanded} V"
     )
     assert driver._last_v["smua"] == pytest.approx(MAX_DELTA_V_PER_STEP)
 
@@ -123,9 +130,7 @@ async def test_last_v_resets_on_stop() -> None:
 
     await driver.stop_source("smua")
 
-    assert driver._last_v["smua"] == 0.0, (
-        "stop_source must reset _last_v to 0.0 (was 5.0)"
-    )
+    assert driver._last_v["smua"] == 0.0, "stop_source must reset _last_v to 0.0 (was 5.0)"
     assert driver._channels["smua"].active is False
 
 

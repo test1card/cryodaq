@@ -27,7 +27,7 @@ cooldown:
 
   # Watchdog mode — activated automatically after AUTO_DISARMED (cooldown complete).
   # Monitors T_cold against a fixed threshold; fires WARNING if T_cold climbs
-  # above base_temp_K + watchdog_margin_K for watchdog_sustained_min consecutive ticks.
+  # above base_temp_K + watchdog_margin_K for watchdog_sustained_s seconds.
   # Clears when operator calls disarm() or experiment is finalized.
   #
   # Architect rule (2026-05-07): post-cooldown watchdog disabled by
@@ -71,7 +71,7 @@ vacuum:
   severity: CRITICAL
 
   # On FIRED, also latch a SafetyManager fault (source OFF + FAULT_LATCHED),
-  # not just the alarm. Default true = escalation to SafetyManager is ON:
+  # not just the alarm. This is opt-in; if absent, alarm-only is the default.
   # unattended/cold runs need the source killed on a vacuum incident, not
   # just an alarm. No auto-clear on pressure recovery: the latch holds
   # through FAULT_LATCHED → acknowledge → MANUAL_RECOVERY so a vacuum

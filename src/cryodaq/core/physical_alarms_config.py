@@ -1,12 +1,14 @@
 """Loader for config/physical_alarms.yaml — tunables for CooldownAlarm and VacuumGuard.
 
-Graceful degradation: missing or partial YAML returns hard-coded defaults.
-No exceptions raised at load time — engine must start regardless.
+Missing YAML retains documented defaults. Existing invalid or safety-incomplete
+YAML strengthens vacuum escalation while keeping engine startup available.
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -60,54 +62,184 @@ _VACUUM_DEFAULTS: dict[str, Any] = {
 }
 
 
-def _merge_with_defaults(loaded: dict, defaults: dict) -> dict:
-    """Return defaults dict updated with values from loaded, type-checked per-key."""
-    result = dict(defaults)
-    for key, default_val in defaults.items():
-        if key not in loaded:
-            continue
-        val = loaded[key]
-        if val is None:
-            logger.warning("physical_alarms.yaml: '%s' is null, using default %r", key, default_val)
-            continue
-        if default_val is not None and not isinstance(val, type(default_val)):
-            try:
-                val = type(default_val)(val)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "physical_alarms.yaml: '%s' type mismatch (got %s, expected %s), using default %r",
-                    key,
-                    type(val).__name__,
-                    type(default_val).__name__,
-                    default_val,
-                )
-                continue
-        result[key] = val
+def _invalid_existing_config_defaults(reason: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Keep startup available but strengthen vacuum escalation on corrupt input."""
+
+    logger.critical(
+        "physical_alarms.yaml is invalid (%s); enabling fail-safe vacuum escalation",
+        reason,
+    )
+    vacuum = dict(_VACUUM_DEFAULTS)
+    vacuum["escalate_to_safety"] = True
+    return dict(_COOLDOWN_DEFAULTS), vacuum
+
+
+def _validate_complete_vacuum_config(loaded: dict[str, Any]) -> dict[str, Any]:
+    """Validate the complete safety-bearing vacuum section without coercion."""
+
+    expected = set(_VACUUM_DEFAULTS)
+    missing = sorted(expected - set(loaded))
+    unknown = sorted(set(loaded) - expected)
+    if missing:
+        raise ValueError(f"vacuum section is missing critical fields: {', '.join(missing)}")
+    if unknown:
+        raise ValueError(f"vacuum section has unknown fields: {', '.join(unknown)}")
+    for key in ("enabled", "escalate_to_safety"):
+        if type(loaded[key]) is not bool:
+            raise ValueError(f"vacuum.{key} must be a boolean")
+    for key in ("pressure_channel", "reference_temp_channel"):
+        value = loaded[key]
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise ValueError(f"vacuum.{key} must be a non-empty trimmed string")
+        if any(unicodedata.category(character).startswith("C") for character in value):
+            raise ValueError(f"vacuum.{key} contains control characters")
+    if loaded["severity"] != "CRITICAL":
+        raise ValueError("vacuum.severity must remain CRITICAL")
+
+    numeric: dict[str, float] = {}
+    for key in (
+        "eval_interval_s",
+        "arm_threshold_K",
+        "disarm_threshold_K",
+        "fire_pressure_mbar",
+        "clear_pressure_mbar",
+        "sustained_s",
+    ):
+        value = loaded[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"vacuum.{key} must be a number")
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            raise ValueError(f"vacuum.{key} must be finite")
+        numeric[key] = normalized
+    for key in ("eval_interval_s", "fire_pressure_mbar", "clear_pressure_mbar", "sustained_s"):
+        if numeric[key] <= 0:
+            raise ValueError(f"vacuum.{key} must be > 0")
+    for key in ("arm_threshold_K", "disarm_threshold_K"):
+        if numeric[key] < 0:
+            raise ValueError(f"vacuum.{key} must be >= 0")
+    if numeric["arm_threshold_K"] >= numeric["disarm_threshold_K"]:
+        raise ValueError("vacuum arm_threshold_K must be below disarm_threshold_K")
+    if numeric["clear_pressure_mbar"] >= numeric["fire_pressure_mbar"]:
+        raise ValueError("vacuum clear_pressure_mbar must be below fire_pressure_mbar")
+    upper_bounds = {
+        "eval_interval_s": 86_400.0,
+        "arm_threshold_K": 1_000.0,
+        "disarm_threshold_K": 1_000.0,
+        "fire_pressure_mbar": 1_000_000.0,
+        "clear_pressure_mbar": 1_000_000.0,
+        "sustained_s": 86_400.0,
+    }
+    for key, maximum in upper_bounds.items():
+        if numeric[key] > maximum:
+            raise ValueError(f"vacuum.{key} must be <= {maximum:g}")
+    return dict(loaded)
+
+
+def _validate_cooldown_config(loaded: dict[str, Any]) -> dict[str, Any]:
+    """Validate cooldown overrides without truthiness or non-finite coercion."""
+
+    unknown = sorted(set(loaded) - set(_COOLDOWN_DEFAULTS))
+    if unknown:
+        raise ValueError(f"cooldown section has unknown fields: {', '.join(unknown)}")
+    boolean_keys = {"enabled", "auto_arm", "watchdog_enabled"}
+    numeric_keys = {
+        key
+        for key, default in _COOLDOWN_DEFAULTS.items()
+        if isinstance(default, (int, float)) and not isinstance(default, bool)
+    }
+    string_keys = set(_COOLDOWN_DEFAULTS) - boolean_keys - numeric_keys
+
+    for key in boolean_keys & loaded.keys():
+        if type(loaded[key]) is not bool:
+            raise ValueError(f"cooldown.{key} must be a boolean")
+    for key in numeric_keys & loaded.keys():
+        value = loaded[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"cooldown.{key} must be a number")
+        if not math.isfinite(float(value)):
+            raise ValueError(f"cooldown.{key} must be finite")
+    if "sustained_min" in loaded and type(loaded["sustained_min"]) is not int:
+        raise ValueError("cooldown.sustained_min must be an integer")
+
+    positive_keys = {
+        "eval_interval_s",
+        "k_p",
+        "sustained_min",
+        "eta_slip_window_min",
+        "watchdog_sustained_s",
+    }
+    for key in positive_keys & loaded.keys():
+        if float(loaded[key]) <= 0:
+            raise ValueError(f"cooldown.{key} must be > 0")
+    nonnegative_keys = {
+        "base_temp_K",
+        "base_epsilon_K",
+        "eta_slip_message_threshold_h",
+        "watchdog_margin_K",
+        "cold_start_skip_margin_K",
+    }
+    for key in nonnegative_keys & loaded.keys():
+        if float(loaded[key]) < 0:
+            raise ValueError(f"cooldown.{key} must be >= 0")
+    upper_bounds = {
+        "eval_interval_s": 86_400.0,
+        "k_p": 100.0,
+        "sustained_min": 10_000.0,
+        "base_temp_K": 1_000.0,
+        "base_epsilon_K": 1_000.0,
+        "eta_slip_window_min": 10_080.0,
+        "eta_slip_message_threshold_h": 8_760.0,
+        "watchdog_margin_K": 1_000.0,
+        "watchdog_sustained_s": 604_800.0,
+        "cold_start_skip_margin_K": 1_000.0,
+    }
+    for key, maximum in upper_bounds.items():
+        if key in loaded and float(loaded[key]) > maximum:
+            raise ValueError(f"cooldown.{key} must be <= {maximum:g}")
+    if "auto_disarm_progress" in loaded and not (0 < float(loaded["auto_disarm_progress"]) <= 1):
+        raise ValueError("cooldown.auto_disarm_progress must be > 0 and <= 1")
+    for key in string_keys & loaded.keys():
+        value = loaded[key]
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
+            raise ValueError(f"cooldown.{key} must be a non-empty trimmed string")
+        if any(unicodedata.category(character).startswith("C") for character in value):
+            raise ValueError(f"cooldown.{key} contains control characters")
+    if "watchdog_level" in loaded and loaded["watchdog_level"] not in {
+        "INFO",
+        "WARNING",
+        "CRITICAL",
+    }:
+        raise ValueError("cooldown.watchdog_level must be one of INFO, WARNING, CRITICAL")
+    result = dict(_COOLDOWN_DEFAULTS)
+    result.update(loaded)
     return result
 
 
 def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """Load physical_alarms.yaml.
 
-    Returns (cooldown_cfg, vacuum_cfg). On any failure, returns hard-coded defaults
-    and logs a WARNING. Never raises.
+    Returns ``(cooldown_cfg, vacuum_cfg)`` and never raises. A genuinely
+    missing file retains the documented defaults. An existing unreadable,
+    corrupt, or safety-incomplete file instead enables fail-safe vacuum
+    escalation and emits a CRITICAL diagnostic.
     """
-    if not path.exists():
-        logger.warning("physical_alarms.yaml not found at %s — using built-in defaults", path)
+    try:
+        path.stat()
+    except FileNotFoundError:
+        logger.warning("physical_alarms.yaml not found at %s; using built-in defaults", path)
         return dict(_COOLDOWN_DEFAULTS), dict(_VACUUM_DEFAULTS)
+    except Exception as exc:
+        return _invalid_existing_config_defaults(f"file metadata error: {exc}")
 
     try:
         with path.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh)
-    except yaml.YAMLError as exc:
-        logger.warning("physical_alarms.yaml YAML error — using defaults: %s", exc)
-        return dict(_COOLDOWN_DEFAULTS), dict(_VACUUM_DEFAULTS)
+    except Exception as exc:  # existing corrupt input must never abort startup
+        return _invalid_existing_config_defaults(f"read/decode/YAML error: {exc}")
 
     if not isinstance(raw, dict):
-        logger.warning(
-            "physical_alarms.yaml: expected mapping, got %s — using defaults", type(raw).__name__
-        )
-        return dict(_COOLDOWN_DEFAULTS), dict(_VACUUM_DEFAULTS)
+        return _invalid_existing_config_defaults(f"expected mapping, got {type(raw).__name__}")
 
     cooldown_raw = raw.get("cooldown")
     if not isinstance(cooldown_raw, dict):
@@ -127,14 +259,24 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
             )
         vacuum_raw = {}
 
-    cooldown_cfg = _merge_with_defaults(cooldown_raw, _COOLDOWN_DEFAULTS)
-    vacuum_cfg = _merge_with_defaults(vacuum_raw, _VACUUM_DEFAULTS)
+    try:
+        cooldown_cfg = _validate_cooldown_config(cooldown_raw)
+    except Exception as exc:
+        logger.critical(
+            "physical_alarms.yaml cooldown schema is invalid (%s); using safe enabled defaults",
+            exc,
+        )
+        cooldown_cfg = dict(_COOLDOWN_DEFAULTS)
 
-    # escalate_to_safety is fail-closed strict bool: only YAML `true` (a real
-    # bool) may arm the source-killing safety escalation. The generic merge
-    # coerces non-bool scalars (e.g. "true"/1/"yes") to True — unacceptable for
-    # a safety opt-in — so re-derive it strictly from the raw value here.
-    vacuum_cfg["escalate_to_safety"] = vacuum_raw.get("escalate_to_safety") is True
+    try:
+        vacuum_cfg = _validate_complete_vacuum_config(vacuum_raw)
+    except Exception as exc:
+        logger.critical(
+            "physical_alarms.yaml vacuum safety schema is invalid (%s); enabling fail-safe vacuum escalation",
+            exc,
+        )
+        vacuum_cfg = dict(_VACUUM_DEFAULTS)
+        vacuum_cfg["escalate_to_safety"] = True
 
     return cooldown_cfg, vacuum_cfg
 
@@ -166,7 +308,7 @@ def load_channel_landmarks(path: Path) -> dict[str, dict[str, Any]]:
     try:
         with path.open(encoding="utf-8") as fh:
             raw = yaml.safe_load(fh)
-    except yaml.YAMLError as exc:
+    except Exception as exc:
         logger.warning("physical_alarms.yaml landmarks: YAML error — %s", exc)
         return {}
     if not isinstance(raw, dict):

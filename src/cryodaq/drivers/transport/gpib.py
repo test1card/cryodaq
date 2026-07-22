@@ -99,6 +99,10 @@ class GPIBTransport:
         self._open_settled = threading.Event()
         self._open_settled.set()
         self._terminal_unsettled = False
+        # A failed write/read transaction can leave a stale response queued.
+        # Never trust another query on this transport instance after that
+        # boundary; recovery writes and bus-clear operations remain available.
+        self._query_desynchronized = False
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -266,7 +270,12 @@ class GPIBTransport:
             log.debug("GPIB [mock] query '%s' → '%s'", cmd, response)
             return response
 
-        response: str = await self._run_executor_operation(self._blocking_query, cmd, timeout_ms)
+        response: str = await self._run_executor_operation(
+            self._blocking_query,
+            cmd,
+            timeout_ms,
+            quarantine_query_failure=True,
+        )
         log.debug("GPIB query '%s' → '%s'", cmd, response)
         return response
 
@@ -300,17 +309,57 @@ class GPIBTransport:
             return True
         return await self._run_executor_operation(self._blocking_ifc)
 
-    async def _run_executor_operation(self, operation, *args):
+    async def _run_executor_operation(self, operation, *args, quarantine_query_failure: bool = False):
         with self._state_lock:
             if not self._open_settled.is_set() or self._terminal_unsettled:
                 raise RuntimeError("previous GPIB executor generation has not settled")
+            if quarantine_query_failure and self._query_desynchronized:
+                raise RuntimeError("GPIB query channel is terminally desynchronized")
             self._open_settled.clear()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._get_executor(), self._tracked_operation, operation, args)
+        task = asyncio.current_task()
+        cancelling_at_start = task.cancelling() if task is not None else 0
+        try:
+            submitted = loop.run_in_executor(
+                self._get_executor(),
+                self._tracked_operation,
+                operation,
+                args,
+                quarantine_query_failure,
+            )
+        except BaseException:
+            # No worker owns settlement when submission itself fails.
+            self._open_settled.set()
+            raise
 
-    def _tracked_operation(self, operation, args):
+        caller_cancelled: asyncio.CancelledError | None = None
+        while not submitted.done():
+            try:
+                await asyncio.shield(submitted)
+            except asyncio.CancelledError as exc:
+                caller_cancelled = caller_cancelled or exc
+            except BaseException:
+                break
+        try:
+            result = submitted.result()
+        except BaseException as operation_error:
+            if caller_cancelled is not None:
+                raise caller_cancelled from operation_error
+            raise
+        if caller_cancelled is None and task is not None and task.cancelling() > cancelling_at_start:
+            caller_cancelled = asyncio.CancelledError()
+        if caller_cancelled is not None:
+            raise caller_cancelled
+        return result
+
+    def _tracked_operation(self, operation, args, quarantine_query_failure: bool = False):
         try:
             return operation(*args)
+        except BaseException:
+            if quarantine_query_failure:
+                with self._state_lock:
+                    self._query_desynchronized = True
+            raise
         finally:
             self._settle_executor_operation()
 
