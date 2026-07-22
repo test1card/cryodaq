@@ -42,11 +42,7 @@ def test_load_categories_returns_builtin_when_file_missing(tmp_path: Path) -> No
 def test_load_categories_parses_valid_yaml(tmp_path: Path) -> None:
     f = tmp_path / "cats.yaml"
     f.write_text(
-        "categories:\n"
-        "  - id: x\n"
-        "    label: 'X'\n"
-        "    query: 'q'\n"
-        "    limit: 3\n",
+        "categories:\n  - id: x\n    label: 'X'\n    query: 'q'\n    limit: 3\n",
         encoding="utf-8",
     )
     cats = _load_categories(f)
@@ -189,6 +185,7 @@ def test_snippet_pane_renders_results(app: QApplication) -> None:
     assert card is not None
     # Find body label (second child QLabel in the card).
     from PySide6.QtWidgets import QLabel
+
     labels = card.findChildren(QLabel)
     texts = [lbl.text() for lbl in labels]
     # Body text must appear.
@@ -213,123 +210,21 @@ def test_snippet_pane_empty_results(app: QApplication) -> None:
     panel.deleteLater()
 
 
-# ---------------------------------------------------------------------------
-# v0.55.7.1 PHASE 8 — rebuild button + status polling
-# ---------------------------------------------------------------------------
+def test_index_maintenance_is_visible_offline_and_has_no_live_mutation_path(app: QApplication) -> None:
+    import ast
+    from pathlib import Path
 
-
-def test_rebuild_initial_state_is_idle(app: QApplication) -> None:
     panel = KnowledgeBasePanel(categories=_custom_categories())
-    assert panel._rebuild_button.text() == "Обновить индекс"
-    assert panel._rebuild_button.isEnabled()
-    assert panel._rebuild_status_label.text() == "Готов"
-    assert panel._rebuild_running is False
-    assert not panel._rebuild_poll_timer.isActive()
-    panel.deleteLater()
-
-
-def test_rebuild_response_start_ok_disables_button(app: QApplication) -> None:
-    """Engine confirmed start — UI must disable button + show indexing."""
-    panel = KnowledgeBasePanel(categories=_custom_categories())
-    panel._on_rebuild_response(
-        "rag.rebuild_index",
-        {"ok": True, "state": "running", "started_at": 1.0},
-    )
-    assert panel._rebuild_running is True
+    assert panel._rebuild_button.text() == "Индексация офлайн"
     assert not panel._rebuild_button.isEnabled()
-    assert "Индексация" in panel._rebuild_status_label.text()
-    assert panel._rebuild_poll_timer.isActive()
-    panel.deleteLater()
+    assert "офлайн" in panel._rebuild_status_label.text().lower()
+    assert "cryodaq-rag-index" in panel._rebuild_button.toolTip()
+    assert "cryodaq-rag-index" in panel._rebuild_button.accessibleDescription()
 
-
-def test_rebuild_response_start_error_keeps_button_enabled(app: QApplication) -> None:
-    panel = KnowledgeBasePanel(categories=_custom_categories())
-    panel._on_rebuild_response(
-        "rag.rebuild_index",
-        {"ok": False, "error": "Rebuild уже идёт"},
-    )
-    assert panel._rebuild_running is False
-    assert panel._rebuild_button.isEnabled()
-    assert "Rebuild" in panel._rebuild_status_label.text() or \
-           "идёт" in panel._rebuild_status_label.text()
-    assert not panel._rebuild_poll_timer.isActive()
-    panel.deleteLater()
-
-
-def test_rebuild_response_status_complete_shows_chunks(app: QApplication) -> None:
-    panel = KnowledgeBasePanel(categories=_custom_categories())
-    panel._rebuild_running = True
-    panel._rebuild_button.setEnabled(False)
-    panel._rebuild_poll_timer.start()
-    panel._on_rebuild_response(
-        "rag.rebuild_status",
-        {
-            "ok": True,
-            "state": "complete",
-            "chunks_indexed": 1124,
-            "started_at": 1.0,
-            "finished_at": 2.0,
-            "error": None,
-        },
-    )
-    assert panel._rebuild_running is False
-    assert panel._rebuild_button.isEnabled()
-    assert "1124" in panel._rebuild_status_label.text()
-    assert "Индекс обновлён" in panel._rebuild_status_label.text()
-    assert not panel._rebuild_poll_timer.isActive()
-    panel.deleteLater()
-
-
-def test_rebuild_response_status_failed(app: QApplication) -> None:
-    panel = KnowledgeBasePanel(categories=_custom_categories())
-    panel._rebuild_running = True
-    panel._on_rebuild_response(
-        "rag.rebuild_status",
-        {
-            "ok": True,
-            "state": "failed",
-            "chunks_indexed": 0,
-            "error": "ollama unreachable",
-        },
-    )
-    assert panel._rebuild_running is False
-    assert panel._rebuild_button.isEnabled()
-    assert "ollama" in panel._rebuild_status_label.text()
-    panel.deleteLater()
-
-
-def test_rebuild_response_engine_disconnect(app: QApplication) -> None:
-    panel = KnowledgeBasePanel(categories=_custom_categories())
-    panel._rebuild_running = True
-    panel._on_rebuild_response("rag.rebuild_index", None)
-    assert panel._rebuild_running is False
-    assert panel._rebuild_button.isEnabled()
-    assert "не ответил" in panel._rebuild_status_label.text()
-    panel.deleteLater()
-
-
-def test_rebuild_concurrent_click_polls_status(app: QApplication) -> None:
-    """MED: if operator clicks while running, spy exact rag.rebuild_status command."""
-    from cryodaq.gui.zmq_client import ZmqCommandWorker
-
-    panel = KnowledgeBasePanel(categories=_custom_categories())
-    panel._confirm_rebuild = False
-    panel._rebuild_running = True
-    dispatched: list[dict] = []
-
-    original_init = ZmqCommandWorker.__init__
-
-    def _fake_init(self_w, cmd, **kwargs):
-        dispatched.append(dict(cmd))
-        original_init(self_w, cmd, **kwargs)
-
-    with patch.object(ZmqCommandWorker, "__init__", _fake_init):
-        with patch.object(ZmqCommandWorker, "start", lambda self_w: None):
-            panel._on_rebuild_clicked()
-
-    # Running flag stays True — no new start, just a status poll.
-    assert panel._rebuild_running is True
-    # MED: assert exact rag.rebuild_status command dispatched.
-    assert len(dispatched) >= 1
-    assert dispatched[0] == {"cmd": "rag.rebuild_status"}
+    source = Path(__file__).parents[4].joinpath("src/cryodaq/gui/shell/overlays/knowledge_base_panel.py")
+    literals = [
+        node.value for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))) if isinstance(node, ast.Constant)
+    ]
+    assert "rag.rebuild_index" not in literals
+    assert "rag.rebuild_status" not in literals
     panel.deleteLater()

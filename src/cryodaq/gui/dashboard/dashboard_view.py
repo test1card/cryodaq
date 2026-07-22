@@ -23,6 +23,7 @@ from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 from cryodaq.gui.dashboard.quick_log_block import QuickLogBlock
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
 from cryodaq.gui.state.descriptor_store import IdentityStatus
+from cryodaq.operator_snapshot import OperatorSnapshot, ReadinessTruth, SafetyLifecycle, SnapshotMode
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +57,14 @@ class DashboardView(QScrollArea):
         self._phase_widget: PhaseAwareWidget | None = None
         self._quick_log: QuickLogBlock | None = None
         self._read_only = False
+        self._connected = False
+        self._authority_valid = False
+        self._authority_experiment_id: str | None = None
+        self._authority_revision: int | None = None
         self._log_submit_worker = None
         self._log_poll_worker = None
         self._build_ui()
+        self._apply_mutation_availability()
         self._wire_x_link()
         self._start_refresh_timer()
 
@@ -203,6 +209,72 @@ class DashboardView(QScrollArea):
         """Keep dashboard evidence visible while removing replay mutations."""
 
         self._read_only = bool(read_only)
+        self._apply_mutation_availability()
+
+    def set_connected(self, connected: bool) -> None:
+        """Set live engine presence without erasing dashboard evidence.
+
+        This is the dashboard's single shell connection contract.  Loss of
+        transport disables every dashboard mutation immediately; historic
+        readings continue to render through ``on_reading``.
+        """
+        self._connected = bool(connected)
+        if not self._connected:
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._authority_revision = None
+        self._apply_mutation_availability()
+
+    def set_operator_snapshot(self, snapshot: object) -> None:
+        """Derive mutation authority only from a current live coherent cut."""
+        valid = (
+            type(snapshot) is OperatorSnapshot
+            and snapshot.cut.mode is SnapshotMode.LIVE
+            and snapshot.readiness.readiness is ReadinessTruth.READY
+            and snapshot.readiness.lifecycle is SafetyLifecycle.READY
+            and not snapshot.readiness.transport_reason_codes
+        )
+        if not valid:
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._authority_revision = None
+        elif self._authority_revision is None or snapshot.cut.revision > self._authority_revision:
+            self._authority_valid = True
+            self._authority_experiment_id = snapshot.cut.experiment_id
+            self._authority_revision = snapshot.cut.revision
+        self._apply_mutation_availability()
+
+    def set_authority_receipt(
+        self,
+        *,
+        experiment_id: str | None,
+        producer_id: str,
+        revision: int,
+        lifecycle: SafetyLifecycle = SafetyLifecycle.READY,
+        readiness: ReadinessTruth = ReadinessTruth.READY,
+    ) -> None:
+        """Accept an explicit test/integration authority receipt, never cadence."""
+        valid = (
+            type(producer_id) is str
+            and bool(producer_id)
+            and (experiment_id is None or (type(experiment_id) is str and bool(experiment_id)))
+            and type(revision) is int
+            and revision >= 0
+            and lifecycle is SafetyLifecycle.READY
+            and readiness is ReadinessTruth.READY
+        )
+        if not valid:
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._authority_revision = None
+        elif self._authority_revision is None or revision > self._authority_revision:
+            self._authority_valid = True
+            self._authority_experiment_id = experiment_id
+            self._authority_revision = revision
+        self._apply_mutation_availability()
+
+    def _apply_mutation_availability(self) -> None:
+        enabled = self._connected and not self._read_only and self._authority_valid
         if self._phase_widget is not None:
             for widget in (
                 self._phase_widget._create_btn,
@@ -210,12 +282,12 @@ class DashboardView(QScrollArea):
                 self._phase_widget._forward_btn,
                 self._phase_widget._jump_combo,
             ):
-                widget.setEnabled(not self._read_only)
+                widget.setEnabled(enabled)
         if self._quick_log is not None:
-            self._quick_log._input.setEnabled(not self._read_only)
-            self._quick_log._send_btn.setEnabled(not self._read_only)
+            self._quick_log._input.setEnabled(enabled)
+            self._quick_log._send_btn.setEnabled(enabled)
         if self._sensor_grid is not None:
-            self._sensor_grid.set_read_only(self._read_only)
+            self._sensor_grid.set_read_only(not enabled)
 
     # ------------------------------------------------------------------
     # Sensor grid signal handlers
@@ -223,14 +295,14 @@ class DashboardView(QScrollArea):
 
     def _on_rename_requested(self, channel_id: str, new_name: str) -> None:
         """Operator renamed a channel via inline rename or context menu."""
-        if self._read_only:
+        if self._read_only or not self._connected or not self._authority_valid:
             return
         self._channel_mgr.set_name(channel_id, new_name)
         self._channel_mgr.save()
 
     def _on_hide_requested(self, channel_id: str) -> None:
         """Operator wants to hide a channel from the dashboard."""
-        if self._read_only:
+        if self._read_only or not self._connected:
             return
         self._channel_mgr.set_visible(channel_id, False)
         self._channel_mgr.save()
@@ -249,12 +321,21 @@ class DashboardView(QScrollArea):
 
     def _on_phase_transition_requested(self, phase: str) -> None:
         """Forward phase transition request to engine via ZMQ."""
-        if self._read_only:
+        if self._read_only or not self._connected or not self._authority_valid:
+            return
+        experiment_id = self._phase_widget.active_experiment_id if self._phase_widget is not None else None
+        if type(experiment_id) is not str or not experiment_id or experiment_id != self._authority_experiment_id:
+            logger.warning("phase mutation rejected without exact current experiment authority")
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         worker = ZmqCommandWorker(
-            {"cmd": "experiment_advance_phase", "phase": phase, "operator": ""},
+            {
+                "cmd": "experiment_advance_phase",
+                "phase": phase,
+                "operator": "",
+                "experiment_id": experiment_id,
+            },
             parent=self,
         )
         worker.finished.connect(self._on_phase_advance_result)
@@ -282,7 +363,7 @@ class DashboardView(QScrollArea):
 
     def _on_log_entry_submitted(self, message: str) -> None:
         """Send log entry via ZMQ and refresh visible entries."""
-        if self._read_only:
+        if self._read_only or not self._connected or not self._authority_valid:
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 

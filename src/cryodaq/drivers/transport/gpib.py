@@ -29,35 +29,8 @@ _WRITE_READ_DELAY_S = 0.1
 _CLOSE_TIMEOUT_S = 1.0
 
 
-def _run_with_timeout(fn, *, timeout_s: float, label: str) -> bool:
-    """Run a blocking cleanup function with a bounded wait.
-
-    The underlying VISA call may wedge inside a C extension. In that case
-    we log and detach instead of blocking the scheduler forever.
-    """
-    done = threading.Event()
-    error: list[Exception] = []
-
-    def _runner() -> None:
-        try:
-            fn()
-        except Exception as exc:  # noqa: BLE001
-            error.append(exc)
-        finally:
-            done.set()
-
-    thread = threading.Thread(target=_runner, daemon=True, name=f"gpib-close-{label}")
-    thread.start()
-    if not done.wait(timeout_s):
-        log.warning(
-            "GPIB: timed out closing %s after %.1fs; detaching close thread",
-            label,
-            timeout_s,
-        )
-        return False
-    if error:
-        raise error[0]
-    return True
+class GPIBIncompleteCloseError(RuntimeError):
+    """The retained VISA resource has not reached terminal close settlement."""
 
 
 class GPIBTransport:
@@ -99,6 +72,11 @@ class GPIBTransport:
         self._open_settled = threading.Event()
         self._open_settled.set()
         self._terminal_unsettled = False
+        self._query_desynchronized = False
+        self._session_open = False
+        self._close_owner: threading.Thread | None = None
+        self._close_done: threading.Event | None = None
+        self._close_error: BaseException | None = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -159,7 +137,12 @@ class GPIBTransport:
         if isinstance(timeout_ms, bool) or timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
         with self._state_lock:
-            if not self.mock and (not self._open_settled.is_set() or self._terminal_unsettled):
+            if (
+                not self._open_settled.is_set()
+                or self._terminal_unsettled
+                or self._session_open
+                or self._resource is not None
+            ):
                 raise RuntimeError("previous GPIB executor generation has not settled")
             self._open_generation += 1
             generation = self._open_generation
@@ -168,6 +151,9 @@ class GPIBTransport:
             self._timeout_ms = timeout_ms
 
         if self.mock:
+            with self._state_lock:
+                self._session_open = True
+                self._open_settled.set()
             log.info("GPIB [mock]: open %s", resource_str)
             return
 
@@ -191,44 +177,99 @@ class GPIBTransport:
     async def abort_open(self) -> None:
         """Invalidate a partial open; a late blocking result closes itself."""
 
-        await self.close()
+        try:
+            await self.close()
+        except GPIBIncompleteCloseError:
+            return
 
     async def close(self) -> None:
-        """Close the persistent VISA resource."""
+        """Close the retained VISA resource with typed settlement."""
         with self._state_lock:
             self._open_generation += 1
             if not self._open_settled.is_set():
                 self._terminal_unsettled = True
-                return
-            self._terminal_unsettled = False
-            resource = self._resource
-            self._resource = None
+                raise GPIBIncompleteCloseError("GPIB I/O is still running; retained resource close is incomplete")
+            owner = self._close_owner
+            if owner is not None:
+                if owner.is_alive():
+                    self._terminal_unsettled = True
+                    raise GPIBIncompleteCloseError("GPIB close owner is still unsettled")
+                if self._close_error is not None:
+                    self._terminal_unsettled = True
+                    raise GPIBIncompleteCloseError(
+                        "GPIB resource close failed; handle remains quarantined"
+                    ) from self._close_error
+                self._close_owner = None
+                self._close_done = None
+                self._resource = None
+                self._session_open = False
+                self._terminal_unsettled = False
+                self._open_settled.set()
+                self._close_error = None
+                executor = self._executor
+                self._executor = None
+                resource = None
+            else:
+                resource = self._resource
+                executor = None
+                if resource is None:
+                    self._session_open = False
+                    self._terminal_unsettled = False
+                    self._open_settled.set()
+                    return
+                self._terminal_unsettled = True
         if self.mock:
+            with self._state_lock:
+                self._resource = None
+                self._session_open = False
+                self._terminal_unsettled = False
+                self._open_settled.set()
             log.info("GPIB [mock]: close %s", self._resource_str)
             return
-
-        close_settled = True
-        if resource is not None:
-            try:
-                close_settled = await asyncio.to_thread(
-                    _run_with_timeout,
-                    resource.close,
-                    timeout_s=_CLOSE_TIMEOUT_S,
-                    label=self._resource_str or "gpib",
-                )
-            except Exception as exc:
-                log.warning("GPIB: error closing %s — %s", self._resource_str, exc)
-            log.info("GPIB: %s closed", self._resource_str)
-        if not close_settled:
-            with self._state_lock:
-                self._terminal_unsettled = True
-                self._open_settled.clear()
+        if resource is None:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
             return
-        # Shut down the dedicated executor so threads don't accumulate
-        # across reconnect cycles.
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+        done = threading.Event()
+        with self._state_lock:
+            self._close_done = done
+
+        def _owner() -> None:
+            try:
+                resource.close()
+            except BaseException as exc:  # noqa: BLE001
+                with self._state_lock:
+                    self._close_error = exc
+            finally:
+                done.set()
+
+        owner = threading.Thread(
+            target=_owner,
+            daemon=True,
+            name=f"gpib-close-{self._resource_str or 'gpib'}",
+        )
+        with self._state_lock:
+            self._close_owner = owner
+        owner.start()
+        if not await asyncio.to_thread(done.wait, _CLOSE_TIMEOUT_S):
+            raise GPIBIncompleteCloseError("GPIB resource close did not settle within the bounded timeout")
+        with self._state_lock:
+            close_error = self._close_error
+        if close_error is not None:
+            raise GPIBIncompleteCloseError("GPIB resource close failed; handle remains quarantined") from close_error
+        with self._state_lock:
+            self._resource = None
+            self._session_open = False
+            self._terminal_unsettled = False
+            self._open_settled.set()
+            self._close_owner = None
+            self._close_done = None
+            self._close_error = None
+            executor = self._executor
             self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        log.info("GPIB: %s closed", self._resource_str)
 
     async def write(self, cmd: str) -> None:
         """Write command to persistent resource.
@@ -238,6 +279,8 @@ class GPIBTransport:
         cmd:
             SCPI command, e.g. ``"*RST"``.
         """
+        if self._query_desynchronized:
+            raise RuntimeError("GPIB session is quarantined after a failed query")
         if self.mock:
             log.debug("GPIB [mock] write: %s", cmd)
             return
@@ -261,6 +304,8 @@ class GPIBTransport:
         str
             Instrument response, stripped.
         """
+        if self._query_desynchronized:
+            raise RuntimeError("GPIB session is quarantined after a failed query")
         if self.mock:
             response = self._mock_response(cmd)
             log.debug("GPIB [mock] query '%s' → '%s'", cmd, response)
@@ -269,6 +314,16 @@ class GPIBTransport:
         response: str = await self._run_executor_operation(self._blocking_query, cmd, timeout_ms)
         log.debug("GPIB query '%s' → '%s'", cmd, response)
         return response
+
+    async def recover(self) -> bool:
+        """Run explicit SDC/IFC recovery before a fresh generation is used."""
+        if not self._query_desynchronized:
+            return True
+        if not await self.clear_bus():
+            return False
+        if not await self.send_ifc():
+            return False
+        return True
 
     async def flush_input(self) -> None:
         """No-op for API compatibility."""
@@ -306,7 +361,29 @@ class GPIBTransport:
                 raise RuntimeError("previous GPIB executor generation has not settled")
             self._open_settled.clear()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._get_executor(), self._tracked_operation, operation, args)
+        try:
+            pending = loop.run_in_executor(self._get_executor(), self._tracked_operation, operation, args)
+        except BaseException:
+            self._open_settled.set()
+            raise
+        caller_cancelled: asyncio.CancelledError | None = None
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError as exc:
+                caller_cancelled = caller_cancelled or exc
+                continue
+            except BaseException:
+                break
+        try:
+            result = pending.result()
+        except BaseException as exc:
+            if caller_cancelled is not None:
+                raise caller_cancelled from exc
+            raise
+        if caller_cancelled is not None:
+            raise caller_cancelled
+        return result
 
     def _tracked_operation(self, operation, args):
         try:
@@ -331,6 +408,9 @@ class GPIBTransport:
                 resource.close()
             except Exception as exc:
                 log.warning("GPIB: error closing unsettled %s — %s", self._resource_str, exc)
+        if terminal:
+            with self._state_lock:
+                self._session_open = False
         self._open_settled.set()
         if terminal and self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=True)
@@ -389,9 +469,11 @@ class GPIBTransport:
         with self._state_lock:
             if generation == self._open_generation:
                 self._resource = res
+                self._session_open = True
                 return
             self._terminal_unsettled = True
             self._resource = res
+            self._session_open = True
 
     def _blocking_query(self, cmd: str, timeout_ms: int | None = None) -> str:
         """Write → sleep(100ms) → read. Auto-clear + drain on error."""
@@ -407,6 +489,7 @@ class GPIBTransport:
             time.sleep(_WRITE_READ_DELAY_S)
             return res.read().strip()
         except Exception:
+            self._query_desynchronized = True
             # Timeout or bus error — clear device to release the bus
             try:
                 res.clear()

@@ -43,6 +43,18 @@ class ReadinessTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SafetyLifecycle(StrEnum):
+    """Exact owner lifecycle carried alongside readiness, never inferred."""
+
+    SAFE_OFF = "safe_off"
+    READY = "ready"
+    RUN_PERMITTED = "run_permitted"
+    RUNNING = "running"
+    FAULT_LATCHED = "fault_latched"
+    MANUAL_RECOVERY = "manual_recovery"
+    UNKNOWN = "unknown"
+
+
 class RecordingTruth(StrEnum):
     RECORDING = "recording"
     NOT_RECORDING = "not_recording"
@@ -78,6 +90,7 @@ MAX_PATH_UTF8_BYTES = 256
 MAX_NONNEGATIVE_INT = 2**63 - 1
 MAX_WIRE_BYTES = 8 * 1024 * 1024
 _TRANSPORT_REASON_CODES = frozenset({"snapshot_stale", "transport_disconnected"})
+_NO_ACTIVE_EXPERIMENT_ID = "no-active-experiment"
 
 STATE_PRECEDENCE = MappingProxyType(
     {
@@ -129,6 +142,7 @@ __all__ = [
     "ReadinessSummary",
     "ReadinessTruth",
     "RecordingTruth",
+    "SafetyLifecycle",
     "SnapshotCut",
     "SnapshotMode",
     "SummaryStatus",
@@ -276,6 +290,8 @@ class SnapshotCut:
     received_at: datetime
     source: str
     mode: SnapshotMode
+    experiment_id: str
+    producer_id: str
 
     def __post_init__(self) -> None:
         _non_negative_int(self.revision, field_name="revision")
@@ -293,6 +309,16 @@ class SnapshotCut:
             self,
             "source",
             _non_empty(self.source, field_name="source", max_bytes=MAX_ID_UTF8_BYTES),
+        )
+        object.__setattr__(
+            self,
+            "experiment_id",
+            _non_empty(self.experiment_id, field_name="experiment_id", max_bytes=MAX_ID_UTF8_BYTES),
+        )
+        object.__setattr__(
+            self,
+            "producer_id",
+            _non_empty(self.producer_id, field_name="producer_id", max_bytes=MAX_ID_UTF8_BYTES),
         )
 
 
@@ -583,11 +609,14 @@ class ReadinessSummary(_OperatorSummary):
 
     readiness: ReadinessTruth
     blockers: tuple[ReadinessBlocker, ...]
+    lifecycle: SafetyLifecycle = SafetyLifecycle.UNKNOWN
 
     def __post_init__(self) -> None:
         super(ReadinessSummary, self).__post_init__()
-        if not isinstance(self.readiness, ReadinessTruth):
-            raise TypeError("readiness must be a ReadinessTruth")
+        if type(self.readiness) is not ReadinessTruth:
+            raise TypeError("readiness must be an exact ReadinessTruth")
+        if type(self.lifecycle) is not SafetyLifecycle:
+            raise TypeError("lifecycle must be an exact SafetyLifecycle")
         _typed_tuple(self.blockers, ReadinessBlocker, field_name="blockers")
         _bounded_tuple(self.blockers, field_name="blockers", limit=MAX_CHANNELS)
         _unique(tuple(item.code for item in self.blockers), field_name="blocker codes")
@@ -615,6 +644,24 @@ class ReadinessSummary(_OperatorSummary):
                 required = _max_state(tuple(item.state for item in self.blockers))
                 if not _state_at_least(self.state, required):
                     raise ValueError("readiness state must cover its most severe blocker")
+        # Any loss of current authority must replace lifecycle with UNKNOWN;
+        # stale READY/RUN lifecycle labels are operator-dangerous even when
+        # readiness itself has already degraded.
+        if self.readiness is ReadinessTruth.READY and self.lifecycle is not SafetyLifecycle.READY:
+            raise ValueError("READY readiness requires READY safety lifecycle")
+        if self.lifecycle is SafetyLifecycle.READY and (
+            self.readiness is not ReadinessTruth.READY
+            or self.status.state is not OperatorPresentationState.OK
+            or self.status.transport_reason_codes
+        ):
+            raise ValueError("READY lifecycle requires a current unqualified Safety-owner cut")
+        if self.readiness is ReadinessTruth.UNKNOWN and self.lifecycle is not SafetyLifecycle.UNKNOWN:
+            raise ValueError("UNKNOWN readiness must erase prior lifecycle authority")
+        if self.readiness is ReadinessTruth.BLOCKED and self.lifecycle in {
+            SafetyLifecycle.READY,
+            SafetyLifecycle.UNKNOWN,
+        }:
+            raise ValueError("BLOCKED readiness requires a non-ready safety lifecycle")
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,6 +883,9 @@ class OperatorSnapshot:
             raise TypeError("each operator snapshot field must use its declared summary type")
         if any(summary.cut != self.cut for summary in summaries):
             raise ValueError("all summaries must belong to the same snapshot cut")
+        expected_experiment_id = self.experiment.experiment_id or _NO_ACTIVE_EXPERIMENT_ID
+        if self.cut.experiment_id != expected_experiment_id:
+            raise ValueError("snapshot cut experiment identity must equal the coherent experiment summary")
         transport_ages = {summary.transport_age_s for summary in summaries}
         if len(transport_ages) != 1:
             raise ValueError("all summaries must carry one coherent transport age")
@@ -888,7 +938,7 @@ class OperatorSnapshot:
 
 
 _SCHEMA = "cryodaq.operator-snapshot"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def encode_operator_snapshot(snapshot: OperatorSnapshot) -> dict[str, Any]:
@@ -1017,6 +1067,7 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             "snapshot.readiness.blockers",
             MAX_CHANNELS,
         ),
+        _enum(SafetyLifecycle, item["lifecycle"], "snapshot.readiness.lifecycle"),
     )
     (status, item) = status_and("plant_health")
     plant_health = PlantHealthSummary(
@@ -1156,6 +1207,8 @@ def _decode_cut(value: Any, *, path: str) -> SnapshotCut:
         _datetime(item["received_at"], f"{path}.received_at"),
         _string(item["source"], f"{path}.source"),
         _enum(SnapshotMode, item["mode"], f"{path}.mode"),
+        _string(item["experiment_id"], f"{path}.experiment_id"),
+        _string(item["producer_id"], f"{path}.producer_id"),
     )
 
 

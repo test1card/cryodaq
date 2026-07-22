@@ -10,6 +10,7 @@ import asyncio
 import logging
 import math
 import re
+import secrets
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -17,7 +18,7 @@ from typing import Any
 
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
-from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,11 @@ class OutputStateUnverifiedError(RuntimeError):
     (SafetyManager) must fail CLOSED and latch a fault rather than report a
     clean SAFE_OFF.
     """
+
+
+class TransportTeardownIncompleteError(RuntimeError):
+    """The source transport has not produced a terminal close settlement."""
+
 
 # Minimum measurable current for resistance calculation (avoid division by noise).
 # At 1 nA, R = V/I is dominated by noise.  For heaters with R ~ 10–1000 Ω,
@@ -137,6 +143,28 @@ def _validate_wdog_timeout_s(value: object) -> float:
     return timeout_s
 
 
+def _validate_keithley_idn_envelope(raw: object) -> tuple[str, str, str, str]:
+    """Accept only the exact vendor/model envelope before issuing TSP writes."""
+    if type(raw) is not str:
+        raise ValueError("Keithley IDN must be exact text")
+    fields = tuple(part.strip() for part in raw.split(","))
+    if len(fields) != 4:
+        raise ValueError(f"Keithley IDN has an invalid field count: {raw!r}")
+    manufacturer, model, serial, firmware = fields
+    if manufacturer != "Keithley Instruments Inc.":
+        raise ValueError(f"Keithley IDN manufacturer is not accepted: {manufacturer!r}")
+    if model != "Model 2604B":
+        raise ValueError(f"Keithley IDN model is not accepted: {model!r}")
+    if not firmware:
+        raise ValueError("Keithley IDN firmware is empty")
+    return manufacturer, model, serial, firmware
+
+
+def _validate_keithley_serial(serial: str) -> None:
+    if not serial or len(serial) > 128 or any(ord(char) < 32 for char in serial):
+        raise ValueError("Keithley IDN serial is invalid")
+
+
 class WatchdogMode(StrEnum):
     """Operator-selected TSP watchdog behaviour (config: keithley.watchdog.mode).
 
@@ -228,22 +256,27 @@ class Keithley2604B(InstrumentDriver):
         # Connection-scoped evidence: only OFF readback collected in the
         # current connection generation may authorize transport teardown.
         self._connection_generation = 0
+        self._teardown_incomplete = False
         self._output_off_verified: dict[SmuChannel, bool] = {
             "smua": False,
             "smub": False,
         }
 
     async def connect(self) -> None:
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(
+                f"{self.name}: reconnect refused while the previous VISA close remains unsettled"
+            )
         log.info("%s: connecting to %s", self.name, self._resource_str)
         self._connection_generation += 1
         self._output_off_verified = {"smua": False, "smub": False}
         self._unsafe_output_state = True
         await self._transport.open(self._resource_str)
+        recognized_device = False
         try:
             idn = await self._transport.query("*IDN?")
-            self._instrument_id = idn
-            if "2604B" not in idn:
-                raise RuntimeError(f"{self.name}: unexpected IDN {idn!r}")
+            _manufacturer, _model, serial, _firmware = _validate_keithley_idn_envelope(idn)
+            recognized_device = True
             # Drain stale errors so they don't confuse runtime error checks.
             await self._transport.write("errorqueue.clear()")
             # Mark connected BEFORE the crash-recovery readback so
@@ -307,9 +340,23 @@ class Keithley2604B(InstrumentDriver):
                             "(crash-recovery guard, readback-verified)",
                             self.name,
                         )
+            _validate_keithley_serial(serial)
+            self._instrument_id = idn
         except Exception:
+            # A recognized device with an invalid serial must retain the
+            # emergency-off recovery path if its outputs could not be proven
+            # OFF.  Identity is deliberately withheld in either case.
+            if recognized_device and self._unsafe_output_state:
+                self._instrument_id = ""
+                raise
             self._connected = False
-            await self._transport.close()
+            try:
+                await self._transport.close()
+            except USBTMCIncompleteCloseError as exc:
+                self._teardown_incomplete = True
+                raise TransportTeardownIncompleteError(
+                    f"{self.name}: failed connect left VISA teardown unsettled"
+                ) from exc
             raise
         try:
             await self._wdog_arm()
@@ -318,10 +365,20 @@ class Keithley2604B(InstrumentDriver):
             # (a latched past-trip does NOT raise — see _wdog_arm).
             # best_effort never raises here.
             self._connected = False
-            await self._transport.close()
+            try:
+                await self._transport.close()
+            except USBTMCIncompleteCloseError as exc:
+                self._teardown_incomplete = True
+                raise TransportTeardownIncompleteError(
+                    f"{self.name}: watchdog-arm failure left VISA teardown unsettled"
+                ) from exc
             raise
 
     async def disconnect(self) -> None:
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(
+                f"{self.name}: previous transport close remains unsettled"
+            )
         if not self._connected:
             return
         off_confirmed = all(self._output_off_verified.values())
@@ -349,17 +406,29 @@ class Keithley2604B(InstrumentDriver):
             pending = exc
         except Exception as exc:
             cleanup_error = exc
+        close_settled = False
         try:
             await self._transport.close()
+            close_settled = True
         except asyncio.CancelledError as exc:
             pending = pending or exc
         except Exception as exc:
             cleanup_error = cleanup_error or exc
         finally:
-            self._connected = False
+            if close_settled:
+                self._connected = False
+            else:
+                self._teardown_incomplete = True
+                self._unsafe_output_state = True
         if pending is not None:
-            raise pending
+            raise TransportTeardownIncompleteError(
+                f"{self.name}: disconnect cancellation left VISA teardown unsettled"
+            ) from pending
         if cleanup_error is not None:
+            if isinstance(cleanup_error, USBTMCIncompleteCloseError):
+                raise TransportTeardownIncompleteError(
+                    f"{self.name}: VISA teardown is incomplete; reconnect remains blocked"
+                ) from cleanup_error
             raise cleanup_error
 
     async def read_channels(self) -> list[Reading]:
@@ -1072,10 +1141,21 @@ class Keithley2604B(InstrumentDriver):
         if self.mock or not self._connected:
             return True
         smu_channel = normalize_smu_channel(channel)
+        nonce = secrets.token_hex(16)
+        prefix = f"CRYODAQ_OFF_V1|{nonce}|"
         response = await self._transport.query(
-            f"print({smu_channel}.source.output)", timeout_ms=3000
+            f'print(string.format("CRYODAQ_OFF_V1|{nonce}|%g", {smu_channel}.source.output))',
+            timeout_ms=3000,
         )
-        token = response.strip()
+        if type(response) is not str or not response.startswith(prefix):
+            log.critical(
+                "%s: %s output response does not bind the fresh OFF challenge: %r",
+                self.name,
+                smu_channel,
+                response,
+            )
+            return False
+        token = response[len(prefix) :].strip()
         try:
             if (
                 not token

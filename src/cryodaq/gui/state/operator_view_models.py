@@ -22,6 +22,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotMode,
     SupportBundleSummary,
     _OperatorSummary,
@@ -49,6 +50,7 @@ class OperatorSnapshotStore:
         "_connected",
         "_invalidated",
         "_live_observed_high_water",
+        "_live_producer_id",
         "_raw",
         "_stale_after_s",
         "_transport_age_s",
@@ -62,6 +64,7 @@ class OperatorSnapshotStore:
         self._stale_after_s: float | None = None
         self._invalidated = False
         self._live_observed_high_water: dict[str, datetime] = {}
+        self._live_producer_id: str | None = None
 
     def __copy__(self) -> OperatorSnapshotStore:
         raise TypeError("OperatorSnapshotStore is a single-owner GUI session")
@@ -114,6 +117,10 @@ class OperatorSnapshotStore:
             if snapshot.cut.received_at < current.cut.received_at:
                 raise ValueError("backend snapshot received_at cannot move backwards")
         if snapshot.cut.mode is SnapshotMode.LIVE:
+            if self._live_producer_id is None:
+                self._live_producer_id = snapshot.cut.producer_id
+            elif snapshot.cut.producer_id != self._live_producer_id:
+                raise ValueError("live snapshot producer incarnation changed without explicit replacement")
             previous_observed = self._live_observed_high_water.get(snapshot.cut.source)
             if previous_observed is None:
                 if len(self._live_observed_high_water) >= MAX_LIVE_SOURCES_PER_SESSION:
@@ -218,6 +225,7 @@ def _degrade_snapshot(
         }
         if isinstance(summary, ReadinessSummary):
             changes["readiness"] = ReadinessTruth.UNKNOWN
+            changes["lifecycle"] = SafetyLifecycle.UNKNOWN
             changes["blockers"] = tuple(
                 replace(
                     item,
@@ -338,6 +346,7 @@ def _recover_snapshot(raw: OperatorSnapshot, age_s: float) -> OperatorSnapshot:
         }
         if isinstance(summary, ReadinessSummary):
             changes["readiness"] = ReadinessTruth.UNKNOWN
+            changes["lifecycle"] = SafetyLifecycle.UNKNOWN
             changes["blockers"] = tuple(
                 replace(
                     item,

@@ -30,6 +30,10 @@ def cut_factory():
             received_at=observed + timedelta(milliseconds=100),
             source="engine/operator-snapshot-v1" if mode is SnapshotMode.LIVE else "replay/operator-snapshot-v1:test",
             mode=mode,
+            experiment_id="experiment-1",
+            producer_id=(
+                "engine/operator-snapshot-v1" if mode is SnapshotMode.LIVE else "replay/operator-snapshot-v1:test"
+            ),
         )
 
     return make

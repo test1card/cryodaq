@@ -37,6 +37,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -82,6 +83,8 @@ def _snapshot(
         received_at=observed + timedelta(milliseconds=100),
         source="replay/session-a" if mode is SnapshotMode.REPLAY else "engine/operator-snapshot-v1",
         mode=mode,
+        experiment_id="exp-42" if kind in {"cooldown", "storage", "handover", "replay"} else "no-active-experiment",
+        producer_id="replay/session-a" if mode is SnapshotMode.REPLAY else "engine/operator-snapshot-v1",
     )
     transport = {
         "disconnected": ("transport_disconnected",),
@@ -93,11 +96,13 @@ def _snapshot(
     }.get(kind)
 
     readiness_truth = ReadinessTruth.READY
+    lifecycle = SafetyLifecycle.READY
     readiness_state = transport_state or OperatorPresentationState.OK
     blockers: tuple[ReadinessBlocker, ...] = ()
     readiness_text = "Все серверные проверки готовы"
     if transport:
         readiness_truth = ReadinessTruth.UNKNOWN
+        lifecycle = SafetyLifecycle.UNKNOWN
         readiness_text = "Текущая готовность неизвестна"
         blockers = (
             ReadinessBlocker(
@@ -110,6 +115,7 @@ def _snapshot(
         )
     elif kind == "unsafe":
         readiness_truth = ReadinessTruth.BLOCKED
+        lifecycle = SafetyLifecycle.SAFE_OFF
         readiness_state = OperatorPresentationState.WARNING
         readiness_text = "Запуск запрещён серверной проверкой"
         blockers = (
@@ -122,6 +128,7 @@ def _snapshot(
         )
     elif kind == "safety":
         readiness_truth = ReadinessTruth.BLOCKED
+        lifecycle = SafetyLifecycle.FAULT_LATCHED
         readiness_state = OperatorPresentationState.FAULT
         readiness_text = "Safety остаётся fault_latched"
         blockers = (
@@ -134,6 +141,7 @@ def _snapshot(
         )
     elif kind == "storage":
         readiness_truth = ReadinessTruth.BLOCKED
+        lifecycle = SafetyLifecycle.SAFE_OFF
         readiness_state = OperatorPresentationState.FAULT
         readiness_text = "Запуск заблокирован: запись не подтверждена"
         blockers = (
@@ -146,6 +154,7 @@ def _snapshot(
         )
     elif kind == "replay":
         readiness_truth = ReadinessTruth.UNKNOWN
+        lifecycle = SafetyLifecycle.UNKNOWN
         readiness_state = OperatorPresentationState.CAUTION
         readiness_text = "Повтор не подтверждает текущую готовность"
 
@@ -154,6 +163,7 @@ def _snapshot(
         status=_status(readiness_state, readiness_text, transport=transport),
         readiness=readiness_truth,
         blockers=blockers,
+        lifecycle=lifecycle,
     )
 
     plant_state = transport_state or (
@@ -419,6 +429,8 @@ def test_one_snapshot_commits_all_eight_cards_at_one_revision(qapp):
     assert attention is not None and attention.isHidden()
     text = _visible_text(display)
     assert "ГОТОВО — только по текущему серверному разрешению" in text
+    assert "Safety: ГОТОВО" in text
+    assert "не разрешение запуска" in text
     assert "НЕ ЗАПИСЫВАЕТСЯ" in text
     assert "ЗАПИСЬ ПОДТВЕРЖДЕНА" not in text
 
@@ -653,10 +665,11 @@ def test_animate_click_scheduled_before_fail_close_cannot_escape_seal(qapp):
     route_spy = QSignalSpy(display.route_requested)
     intent_spy = QSignalSpy(display.navigation_requested)
 
-    display.next_action.animateClick()
+    # A queued click exercises the same post-seal race without relying on
+    # Qt's platform animation timer, which can outlive a prior shell widget.
+    QTimer.singleShot(0, display.next_action.click)
     display._failed_closed = True
     display._seal_failed_closed()
-    QTest.qWait(150)
     qapp.processEvents()
 
     assert route_spy.count() == intent_spy.count() == 0
@@ -771,6 +784,9 @@ def test_pod_composition_subset_is_visible_without_false_authority(qapp, kind, e
     if kind in {"disconnected", "stale", "replay", "storage"}:
         assert "ГОТОВО — только" not in text
         assert "ЗАПИСЬ ПОДТВЕРЖДЕНА" not in text
+    if kind in {"disconnected", "stale"}:
+        assert "Safety: ГОТОВО" not in text
+        assert "Текущая готовность неизвестна" in text or "Срез устарел" in text
 
 
 def test_legacy_route_keys_remain_exact_and_navigation_only(qapp):

@@ -30,6 +30,27 @@ def test_dashboard_view_constructs(app):
     assert view is not None
 
 
+def test_dashboard_connection_contract_disables_mutations_until_live_and_after_loss(app):
+    view = DashboardView(ChannelManager())
+
+    assert not view._connected
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
+
+    view.set_connected(True)
+    view.set_authority_receipt(
+        experiment_id=None,
+        producer_id="engine-test",
+        revision=1,
+    )
+    assert view._phase_widget._create_btn.isEnabled()
+    assert view._quick_log._send_btn.isEnabled()
+
+    view.set_connected(False)
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
+
+
 def test_dashboard_presentation_tick_is_bounded_to_two_hz(app):
     mgr = ChannelManager()
     view = DashboardView(mgr)
@@ -207,6 +228,12 @@ def test_dashboard_live_config_signals_still_persist(app, monkeypatch):
     saved: list[bool] = []
     monkeypatch.setattr(mgr, "save", lambda: saved.append(True))
     view = DashboardView(mgr)
+    view.set_connected(True)
+    view.set_authority_receipt(
+        experiment_id=None,
+        producer_id="engine-test",
+        revision=1,
+    )
 
     view._sensor_grid.rename_requested.emit("Т1", "Новое")
     view._sensor_grid.hide_requested.emit("Т1")

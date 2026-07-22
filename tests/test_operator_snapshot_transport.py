@@ -43,6 +43,8 @@ def _snapshot() -> OperatorSnapshot:
         observed + timedelta(seconds=1),
         "engine/operator-snapshot-v1/test",
         SnapshotMode.LIVE,
+        "experiment-1",
+        "engine/operator-snapshot-v1/test",
     )
     status = SummaryStatus(OperatorPresentationState.CAUTION, 0.5, 0.0, ("authority_pending",), "Ожидание")
     return OperatorSnapshot(
@@ -150,7 +152,7 @@ def test_decoder_rejects_invalid_utf8_before_protocol_decode(monkeypatch: pytest
         lambda wire: wire[:-1] + b',"schema":"cryodaq.operator-snapshot"}',
         lambda wire: wire.replace(b'"source_age_s":0.5', b'"source_age_s":NaN', 1),
         lambda wire: wire + b" trailing",
-        lambda wire: wire.replace(b'"version":1', b'"version":1,"unknown":true', 1),
+        lambda wire: wire.replace(b'"version":2', b'"version":2,"unknown":true', 1),
     ],
     ids=("duplicate-key", "nonfinite", "trailing", "unknown-field"),
 )

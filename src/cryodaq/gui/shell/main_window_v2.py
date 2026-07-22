@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtCore import QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
@@ -38,6 +39,7 @@ from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
+from cryodaq.gui.shell.annunciation_controller import AnnunciationController
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
@@ -67,6 +69,9 @@ logger = logging.getLogger(__name__)
 
 _SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
 _SAFETY_REASON_MAX_CHARS = 120
+_DISK_FUTURE_TOLERANCE_S = 5.0
+_DISK_MAX_SOURCE_AGE_S = 600.0
+_WORKER_SETTLE_MS = 1_500
 
 
 def _is_manifest_cold_stage_descriptor(descriptor: ChannelDescriptorV1) -> bool:
@@ -135,6 +140,8 @@ class MainWindowV2(QMainWindow):
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
+        self._last_disk_observed_at: datetime | None = None
+        self._accepted_disk_bridge_instance_id: str | None = None
 
         self.setWindowTitle("CryoDAQ")
         self.setMinimumSize(1280, 800)
@@ -178,6 +185,7 @@ class MainWindowV2(QMainWindow):
         self._overview_panel = DashboardView(self._channel_mgr)
         self._overview_panel.setParent(self)
         self._overview_panel.set_read_only(self._replay_mode)
+        self._overview_panel.set_connected(False)
         self._operator_display = OperatorDisplay()
         self._alarm_panel = AlarmPanel()
         self._alarm_panel.set_read_only(self._replay_mode)
@@ -214,6 +222,9 @@ class MainWindowV2(QMainWindow):
         self._top_bar.set_replay_mode(self._replay_mode)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
+        # The only in-shell owner of engine annunciation sound.  Launcher
+        # process-death sound remains deliberately separate.
+        self._annunciation_controller = AnnunciationController(self)
         self._overlay = OverlayContainer()
 
         self._overlay.register("home", self._overview_panel)
@@ -269,6 +280,7 @@ class MainWindowV2(QMainWindow):
     def render_operator_snapshot(self, snapshot: object) -> None:
         """Present one ingress-qualified cut through the POD transaction."""
         self._operator_display.render(snapshot)
+        self._overview_panel.set_operator_snapshot(snapshot)
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
@@ -314,11 +326,11 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
-        if name in {"source", "experiment", "log"}:
+        if name in {"source", "experiment", "log", "multiline"}:
             widget.set_read_only(self._replay_mode)
         # II.6 post-review: replay cached connection + safety state into
         # the Keithley overlay on first construction. Without this the
-        # overlay stays in its default (disconnected, safety_ready=True)
+        # overlay stays in its fail-closed default (disconnected, safety_ready=False)
         # until the next _tick_status / safety_state event arrives.
         if name == "source":
             derived_connected = False
@@ -527,11 +539,14 @@ class MainWindowV2(QMainWindow):
         reading: Reading,
         dashboard_identity: IdentityStatus = IdentityStatus.LEGACY_ABSENT,
     ) -> None:
-        self._reading_count += 1
-        self._rate_count += 1
-        self._last_reading_time = time.monotonic()
-
         channel = reading.channel
+        # System, analytics, and support messages are informative but cannot
+        # establish measurement flow, engine presence, or mutation authority.
+        is_measurement = not channel.startswith(("system/", "analytics/", "support/"))
+        if is_measurement:
+            self._reading_count += 1
+            self._rate_count += 1
+            self._last_reading_time = time.monotonic()
 
         # Eager sinks
         self._overview_panel.on_reading(reading, dashboard_identity)
@@ -539,6 +554,9 @@ class MainWindowV2(QMainWindow):
             self._top_bar.on_reading(reading)
         except Exception:
             logger.warning("TopWatchBar reading dispatch failed", exc_info=True)
+
+        if channel == "system/disk_free_gb":
+            self._dispatch_disk_evidence(reading)
 
         # Lazy sinks — only route if the panel has been opened at least once
         # B.8.0.2: route log entries to overlay for live timeline
@@ -574,6 +592,54 @@ class MainWindowV2(QMainWindow):
                 if self._keithley_panel is not None:
                     ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
                     self._keithley_panel.set_safety_ready(ready, reason_text)
+
+    def _dispatch_disk_evidence(self, reading: Reading) -> None:
+        """Accept only current, ordered disk evidence from this bridge instance."""
+        bridge = self._bridge
+        bridge_instance_id = getattr(bridge, "bridge_instance_id", None)
+        metadata = reading.metadata
+        if (
+            bridge is None
+            or type(bridge_instance_id) is not str
+            or len(bridge_instance_id) != 32
+            or type(metadata) is not dict
+        ):
+            return
+        if metadata.get("bridge_instance_id") != bridge_instance_id:
+            if self._accepted_disk_bridge_instance_id not in (None, bridge_instance_id):
+                self._last_disk_observed_at = None
+                self._bottom_bar.mark_disk_stale(disconnected=False)
+            return
+        if (
+            reading.instrument_id != "system"
+            or reading.unit != "GB"
+            or type(reading.timestamp) is not datetime
+            or reading.timestamp.tzinfo is None
+            or reading.timestamp.utcoffset() is None
+        ):
+            return
+        observed_at = reading.timestamp.astimezone(UTC)
+        now = datetime.now(UTC)
+        if observed_at > now + timedelta(seconds=_DISK_FUTURE_TOLERANCE_S):
+            return
+        if observed_at < now - timedelta(seconds=_DISK_MAX_SOURCE_AGE_S):
+            self._bottom_bar.mark_disk_stale(disconnected=False)
+            return
+        previous_instance = self._accepted_disk_bridge_instance_id
+        if previous_instance is not None and previous_instance != bridge_instance_id:
+            # A new bridge is a new authority. Never let prior-instance disk
+            # truth continue to look current while awaiting its first cut.
+            self._last_disk_observed_at = None
+            self._bottom_bar.mark_disk_stale(disconnected=False)
+        if self._last_disk_observed_at is not None and observed_at <= self._last_disk_observed_at:
+            return
+        if self._bottom_bar.set_disk_evidence(
+            reading.value,
+            source=metadata.get("source", ""),
+            state=metadata.get("operator_state", ""),
+        ):
+            self._last_disk_observed_at = observed_at
+            self._accepted_disk_bridge_instance_id = bridge_instance_id
 
     def _dispatch_descriptor_reading(
         self,
@@ -766,6 +832,7 @@ class MainWindowV2(QMainWindow):
         connected = silence < 3.0
         # Engine state derives from data flow — single source of truth
         self._top_bar.set_engine_state(connected)
+        self._overview_panel.set_connected(connected)
         if connected:
             elapsed = now - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
@@ -780,18 +847,15 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Нет данных")
             else:
                 self._bottom_bar.set_connected(False, "Engine потерян")
-            # Engine data flow lost — the last-known safety state is no longer
-            # trustworthy. The GUI must not present a stale runtime state as
-            # current (runtime invariant: GUI is not the source of truth for runtime
-            # state); a stale green "running" while the engine is gone is
-            # dangerous. Blank the safety strip and force the Keithley overlay
-            # to not-ready. Idempotent: only acts on the transition.
+            # Engine data flow lost — retain the last known state as evidence,
+            # but visibly revoke its current-truth claim and force controls
+            # not-ready. The GUI never erases operator evidence into a quiet
+            # blank or presents a stale runtime state as current.
             if self._last_safety_state is not None:
-                self._last_safety_state = None
-                self._last_safety_reason = ""
-                self._bottom_bar.set_safety_state(None)
+                self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
                 if self._keithley_panel is not None:
                     self._keithley_panel.set_safety_ready(False, "Engine потерян — состояние безопасности неизвестно")
+            self._bottom_bar.mark_disk_stale(disconnected=True)
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
@@ -831,6 +895,17 @@ class MainWindowV2(QMainWindow):
             self._status_timer.stop()
         except RuntimeError:
             pass
+        controller = getattr(self, "_annunciation_controller", None)
+        if controller is not None:
+            try:
+                if not controller.shutdown():
+                    logger.critical("Annunciation controller did not settle all owned workers during GUI shutdown")
+                    event.ignore()
+                    return
+            except RuntimeError:
+                logger.critical("Annunciation controller shutdown could not establish worker settlement", exc_info=True)
+                event.ignore()
+                return
         worker = getattr(self, "_create_exp_worker", None)
         if worker is not None:
             try:
@@ -838,6 +913,22 @@ class MainWindowV2(QMainWindow):
                     worker.wait(2000)
             except RuntimeError:
                 pass
+        # Child overlays may own command workers independently of the
+        # annunciation controller.  Freeze their admission and settle every
+        # real QThread before QObject destruction; parenting alone is not a
+        # thread join.
+        for thread in self.findChildren(QThread):
+            try:
+                if thread.isRunning():
+                    thread.requestInterruption()
+                    thread.quit()
+                    if not thread.wait(_WORKER_SETTLE_MS):
+                        logger.critical("GUI child QThread did not settle during shutdown")
+                        event.ignore()
+                        return
+            except RuntimeError:
+                event.ignore()
+                return
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

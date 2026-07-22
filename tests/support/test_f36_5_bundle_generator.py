@@ -91,7 +91,7 @@ def _snapshot(
     integrity_storage:
         Availability truth for the data-integrity section.
     """
-    cut = SnapshotCut(1, _OBS, _OBS + timedelta(seconds=1), "engine-v1", SnapshotMode.LIVE)
+    cut = SnapshotCut(1, _OBS, _OBS + timedelta(seconds=1), "engine-v1", SnapshotMode.LIVE, "exp-1", "engine-v1")
     ok = _status()
     manifest = SupportBundleManifest(
         "bundle-1",

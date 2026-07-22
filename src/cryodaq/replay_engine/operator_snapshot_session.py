@@ -250,6 +250,8 @@ def _build_replay_snapshot(
         received_at,
         source,
         SnapshotMode.REPLAY,
+        evidence.experiment_id or "no-active-experiment",
+        source,
     )
     source_age = (received_at - evidence.observed_at).total_seconds()
 

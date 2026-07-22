@@ -62,6 +62,21 @@ def _make_reading(channel: str, value: float, unit: str = "K") -> Reading:
     )
 
 
+def test_provenance_identity_is_escaped_as_literal_tooltip_text() -> None:
+    reading = Reading(
+        channel="<b>channel</b>\x01",
+        value=1.0,
+        unit="K",
+        timestamp=datetime.now(UTC),
+        status=ChannelStatus.OK,
+        instrument_id="<img src=x onerror=bad>",
+    )
+
+    detail = TopWatchBar._provenance_text(reading)
+    assert "&lt;img src=x onerror=bad&gt;" in detail
+    assert "&lt;b&gt;channel&lt;/b&gt;�" in detail
+
+
 def test_constructs_with_channel_mgr(app, mock_channel_mgr):
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
@@ -111,6 +126,7 @@ def test_pressure_reading_updates_display(app, mock_channel_mgr):
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)
     bar.on_reading(_make_reading("VSP63D_1/pressure", 1.2e-3, "mbar"))
+    bar._stale_check_tick()
     text = bar._ctx_pressure_value.text()
     # Compact scientific — no leading zeros in exponent ("1.2e-3" not
     # "1.20e-03"). See _format_pressure.
@@ -130,6 +146,7 @@ def test_physical_temperature_labels_and_channels_are_exact(app, mock_channel_mg
     bar.on_reading(_make_reading("\u042212 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 2", 4.2))
     # Т11 -> nitrogen-plate cell (~40 K)
     bar.on_reading(_make_reading("\u042211 \u0420\u0435\u0444\u0435\u0440\u0435\u043d\u0446 1", 76.5))
+    bar._stale_check_tick()
     assert "4.20" in bar._ctx_second_stage_value.text()
     assert "76.50" in bar._ctx_n2_plate_value.text()
 

@@ -64,7 +64,7 @@ def _snapshot(
     received_at: datetime | None = None,
 ) -> OperatorSnapshot:
     received = NOW + timedelta(seconds=revision) if received_at is None else received_at
-    cut = SnapshotCut(revision, NOW, received, SOURCE, SnapshotMode.LIVE)
+    cut = SnapshotCut(revision, NOW, received, SOURCE, SnapshotMode.LIVE, "experiment-1", SOURCE)
     status = SummaryStatus(
         OperatorPresentationState.CAUTION,
         float(revision),
@@ -548,7 +548,7 @@ def test_spawn_failure_invalidates_snapshot_age_and_queued_cut_before_attempt(mo
     assert bridge._last_reading_time == 222.0
 
 
-def test_restart_cleanup_failure_cannot_resurrect_old_snapshot_queue(monkeypatch) -> None:
+def test_restart_cleanup_failure_keeps_the_new_queue_and_quarantines_old_snapshot_state(monkeypatch) -> None:
     class BrokenReplyThread:
         def is_alive(self) -> bool:
             return True
@@ -566,7 +566,8 @@ def test_restart_cleanup_failure_cannot_resurrect_old_snapshot_queue(monkeypatch
     with pytest.raises(RuntimeError, match="reply cleanup failed"):
         bridge.start()
 
-    assert bridge._snapshot_queue is old_queue
+    assert bridge._snapshot_queue is not old_queue
+    assert bridge._snapshot_queue.empty()
     assert bridge._reply_consumer is broken
     assert bridge._last_snapshot_time == 0.0
     assert bridge.snapshot_flow_age_s() is None

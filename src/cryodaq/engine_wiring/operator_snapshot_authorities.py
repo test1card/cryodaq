@@ -41,6 +41,7 @@ from cryodaq.operator_snapshot import (
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
 )
 
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -234,6 +235,7 @@ class PlantHealthEvidence:
 @dataclass(frozen=True, slots=True)
 class SafetyReadinessReceipt(AuthorityReceipt):
     readiness: ReadinessTruth = ReadinessTruth.UNKNOWN
+    lifecycle: SafetyLifecycle = SafetyLifecycle.UNKNOWN
     verified_off: bool | None = None
     blockers: tuple[ReadinessEvidence, ...] = ()
     plant_health: tuple[PlantHealthEvidence, ...] = ()
@@ -242,6 +244,8 @@ class SafetyReadinessReceipt(AuthorityReceipt):
         super(SafetyReadinessReceipt, self).__post_init__()
         if type(self.readiness) is not ReadinessTruth:
             raise TypeError("readiness must be an exact ReadinessTruth")
+        if type(self.lifecycle) is not SafetyLifecycle:
+            raise TypeError("lifecycle must be an exact SafetyLifecycle")
         _typed_tuple(self.blockers, ReadinessEvidence, field="blockers", limit=MAX_CHANNELS)
         _typed_tuple(self.plant_health, PlantHealthEvidence, field="plant_health", limit=MAX_CHANNELS)
         _unique(tuple(item.code for item in self.blockers), field="blocker codes")
@@ -249,6 +253,7 @@ class SafetyReadinessReceipt(AuthorityReceipt):
         if self.availability is AuthorityAvailability.UNAVAILABLE:
             if (
                 self.readiness is not ReadinessTruth.UNKNOWN
+                or self.lifecycle is not SafetyLifecycle.UNKNOWN
                 or self.verified_off is not None
                 or self.blockers
                 or self.plant_health
@@ -260,6 +265,15 @@ class SafetyReadinessReceipt(AuthorityReceipt):
             raise ValueError("READY receipt cannot contain blockers")
         if self.readiness is ReadinessTruth.BLOCKED and not self.blockers:
             raise ValueError("BLOCKED receipt requires at least one blocker")
+        if self.lifecycle is SafetyLifecycle.READY and self.readiness is not ReadinessTruth.READY:
+            raise ValueError("READY lifecycle requires READY readiness")
+        if self.lifecycle is SafetyLifecycle.UNKNOWN and self.readiness is not ReadinessTruth.UNKNOWN:
+            raise ValueError("UNKNOWN lifecycle requires UNKNOWN readiness")
+        if (
+            self.lifecycle not in {SafetyLifecycle.READY, SafetyLifecycle.UNKNOWN}
+            and self.readiness is not ReadinessTruth.BLOCKED
+        ):
+            raise ValueError("non-ready lifecycle requires BLOCKED readiness")
 
 
 @dataclass(frozen=True, slots=True)
