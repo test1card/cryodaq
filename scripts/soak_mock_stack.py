@@ -1,9 +1,10 @@
-"""Fail-closed foundation for source-mode CryoDAQ mock-stack endurance evidence.
+"""Fail-closed source-mode CryoDAQ mock-stack qualification contracts.
 
-The source launcher is intentionally *not* started yet.  The repository lacks
-a locked process observer and a reviewed non-network H3 publisher seam.  This
-module freezes the profiles, evidence lifecycle, identity/classification,
-resource validation, and secrecy contracts without weakening either gate.
+The reviewed Linux source path activates only the exact-clean-SHA ``short``
+profile with the locked observer, non-network artifact capability, bounded
+process ownership, and joined periodic-delivery receipts. Longer 12/72-hour
+profiles, Windows/frozen execution, production alarm topology, and physical
+hardware evidence remain separate open gates.
 """
 
 from __future__ import annotations
@@ -936,6 +937,213 @@ class EvidenceCapabilityError(ValueError):
     """The pinned directory capability was lost; no terminal write is safe."""
 
 
+_PERIODIC_DELIVERY_RECORD_FIELDS = {
+    "assistant_pid",
+    "assistant_start_identity",
+    "assistant_generation",
+    "sequence",
+    "receipt_id",
+    "artifact_sha256",
+    "artifact_name",
+    "acknowledgement_sha256",
+    "ledger_record_sha256",
+    "destination_fingerprint",
+    "state_updated_at",
+    "health_updated_at",
+}
+
+
+def _validate_periodic_delivery_payload(
+    payload: object,
+    receipts: Sequence[object],
+    *,
+    ledger_validator: Callable[[dict[str, object]], bool],
+) -> tuple[list[str], tuple[str, ...]]:
+    """Revalidate the runner-issued result and its exact two ledger records."""
+
+    errors: list[str] = []
+    if (
+        type(payload) is not dict
+        or set(payload) != {"schema", "status", "pre_fault", "post_fault"}
+        or payload.get("schema") != "cryodaq-soak-periodic-delivery-result/v1"
+        or payload.get("status") != "PASS"
+        or len(receipts) != 2
+    ):
+        return ["periodic-delivery result schema is invalid"], ()
+    result_records = (payload.get("pre_fault"), payload.get("post_fault"))
+    artifact_names: list[str] = []
+    identities: list[tuple[int, str]] = []
+    destinations: list[str] = []
+    state_times: list[float] = []
+    health_times: list[float] = []
+    for index, (result, receipt) in enumerate(zip(result_records, receipts, strict=True), start=1):
+        label = "pre_fault" if index == 1 else "post_fault"
+        if type(result) is not dict or set(result) != _PERIODIC_DELIVERY_RECORD_FIELDS:
+            errors.append(f"periodic-delivery {label} record schema is invalid")
+            continue
+        if type(receipt) is not dict or not ledger_validator(receipt):
+            errors.append(f"periodic-delivery {label} ledger record is invalid")
+            continue
+        generation = result.get("assistant_generation")
+        sequence = result.get("sequence")
+        artifact_sha = result.get("artifact_sha256")
+        artifact_name = result.get("artifact_name")
+        pid = result.get("assistant_pid")
+        start_identity = result.get("assistant_start_identity")
+        state_updated = result.get("state_updated_at")
+        health_updated = result.get("health_updated_at")
+        destination = result.get("destination_fingerprint")
+        try:
+            start_identity_bytes = start_identity.encode("utf-8") if isinstance(start_identity, str) else b""
+        except UnicodeEncodeError:
+            start_identity_bytes = b""
+        expected_name = (
+            f"periodic-g{generation}-s{sequence}-{str(artifact_sha)[7:]}.png"
+            if type(generation) is int and type(sequence) is int and isinstance(artifact_sha, str)
+            else ""
+        )
+        ledger_hash = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            ).hexdigest()
+        )
+        if (
+            generation != index
+            or type(generation) is not int
+            or sequence != 1
+            or type(sequence) is not int
+            or result.get("receipt_id") != f"g{index}:s1"
+            or type(pid) is not int
+            or pid <= 0
+            or not isinstance(start_identity, str)
+            or not start_identity
+            or not start_identity_bytes
+            or len(start_identity_bytes) > 128
+            or any(ord(char) < 32 or ord(char) == 127 for char in start_identity)
+            or not isinstance(artifact_sha, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_sha) is None
+            or artifact_name != expected_name
+            or not isinstance(artifact_name, str)
+            or _flat_basename(artifact_name) != artifact_name
+            or result.get("acknowledgement_sha256") != receipt.get("acknowledgement_sha256")
+            or result.get("ledger_record_sha256") != ledger_hash
+            or not isinstance(destination, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", destination) is None
+            or type(state_updated) not in {int, float}
+            or not math.isfinite(float(state_updated))
+            or type(health_updated) not in {int, float}
+            or not math.isfinite(float(health_updated))
+            or float(health_updated) < float(state_updated)
+        ):
+            errors.append(f"periodic-delivery {label} result semantics are invalid")
+            continue
+        projected = {
+            "assistant_pid": receipt["assistant_pid"],
+            "assistant_start_identity": receipt["assistant_start_identity"],
+            "assistant_generation": receipt["assistant_generation"],
+            "sequence": receipt["sequence"],
+            "receipt_id": receipt["receipt_id"],
+            "artifact_sha256": receipt["artifact_sha256"],
+            "artifact_name": receipt["filename"],
+            "acknowledgement_sha256": receipt["acknowledgement_sha256"],
+        }
+        if any(result.get(field) != value for field, value in projected.items()):
+            errors.append(f"periodic-delivery {label} result differs from its ledger record")
+            continue
+        artifact_names.append(artifact_name)
+        identities.append((pid, start_identity))
+        destinations.append(destination)
+        state_times.append(float(state_updated))
+        health_times.append(float(health_updated))
+    if len(artifact_names) == 2:
+        if len(set(artifact_names)) != 2:
+            errors.append("periodic-delivery artifacts are not distinct")
+        if identities[0] == identities[1]:
+            errors.append("periodic-delivery assistant identity did not change")
+        if destinations[0] != destinations[1]:
+            errors.append("periodic-delivery destination changed")
+        if state_times[1] <= state_times[0] or health_times[1] <= health_times[0]:
+            errors.append("periodic-delivery post-fault cut is not newer")
+    return errors, tuple(artifact_names)
+
+
+def _validate_source_fixture(payload: object) -> list[str]:
+    expected_files = {
+        "agent.yaml",
+        "alarms_v3.yaml",
+        "channel_descriptors.yaml",
+        "channels.yaml",
+        "cooldown.yaml",
+        "housekeeping.yaml",
+        "instruments.yaml",
+        "interlocks.yaml",
+        "notifications.yaml",
+        "physical_alarms.yaml",
+        "plugins.yaml",
+        "safety.yaml",
+    }
+    expected_top = {
+        "schema",
+        "instrument_id",
+        "authority",
+        "mock",
+        "descriptor_count",
+        "binding_count",
+        "expected_readings_per_sample",
+        "entries",
+        "tree_sha256",
+    }
+    if type(payload) is not dict or set(payload) != expected_top:
+        return ["source fixture schema is invalid"]
+    entries = payload.get("entries")
+    if not isinstance(entries, list) or len(entries) != len(expected_files) + 1:
+        return ["source fixture entries are invalid"]
+    paths: list[str] = []
+    for entry in entries:
+        if type(entry) is not dict or not isinstance(entry.get("path"), str):
+            return ["source fixture entry schema is invalid"]
+        path = entry["path"]
+        paths.append(path)
+        if path == "experiment_templates":
+            if entry != {"path": path, "kind": "directory"}:
+                return ["source fixture directory entry is invalid"]
+        elif (
+            path not in expected_files
+            or set(entry) != {"path", "kind", "bytes", "sha256"}
+            or entry.get("kind") != "file"
+            or type(entry.get("bytes")) is not int
+            or entry["bytes"] < 0
+            or not isinstance(entry.get("sha256"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", entry["sha256"]) is None
+        ):
+            return ["source fixture file entry is invalid"]
+    canonical_entries = sorted(entries, key=lambda item: item["path"])
+    expected_tree = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(canonical_entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    if (
+        paths != sorted(paths)
+        or set(paths) != expected_files | {"experiment_templates"}
+        or payload.get("schema") != "cryodaq-soak-source-fixture/v1"
+        or payload.get("instrument_id") != "LS218_1"
+        or payload.get("authority") != "passive_measurement"
+        or payload.get("mock") is not True
+        or payload.get("descriptor_count") != 16
+        or type(payload.get("descriptor_count")) is not int
+        or payload.get("binding_count") != 16
+        or type(payload.get("binding_count")) is not int
+        or payload.get("expected_readings_per_sample") != 8
+        or type(payload.get("expected_readings_per_sample")) is not int
+        or payload.get("tree_sha256") != expected_tree
+    ):
+        return ["source fixture semantics or tree seal is invalid"]
+    return []
+
+
 @dataclass(frozen=True, slots=True)
 class RunIdentity:
     schema: str
@@ -1391,6 +1599,7 @@ class Evidence:
         self.state = RunState.INITIAL_FAIL
         self._manifest_sha256: str | None = None
         self._exact_six_provenance: object | None = None
+        self._periodic_delivery_seal: tuple[tuple[object, ...], ...] | None = None
         self._quarantines: list[Mapping[str, Any]] = []
         self._atomic_json(
             "summary.json",
@@ -1680,36 +1889,92 @@ class Evidence:
             )
             raise RuntimeError("periodic delivery requires execution-produced runner authority")
         payload = runner._consume_periodic_delivery_authority(authority, self)
-        expected_top = {"schema", "status", "pre_fault", "post_fault"}
-        expected_record = {
-            "assistant_pid",
-            "assistant_start_identity",
-            "assistant_generation",
-            "sequence",
-            "receipt_id",
-            "artifact_sha256",
-            "artifact_name",
-            "acknowledgement_sha256",
-            "ledger_record_sha256",
-            "destination_fingerprint",
-            "state_updated_at",
-            "health_updated_at",
-        }
-        if (
-            type(payload) is not dict
-            or set(payload) != expected_top
-            or payload.get("schema") != "cryodaq-soak-periodic-delivery-result/v1"
-            or payload.get("status") != "PASS"
-        ):
-            raise ValueError("periodic-delivery result schema is invalid")
-        records = (payload.get("pre_fault"), payload.get("post_fault"))
-        if any(type(record) is not dict or set(record) != expected_record for record in records):
-            raise ValueError("periodic-delivery result record schema is invalid")
+        receipts = self._json_lines("periodic-receipts.jsonl")
+        errors, artifact_names = _validate_periodic_delivery_payload(
+            payload,
+            receipts,
+            ledger_validator=runner._ArtifactReceiptSink._valid_ledger_record,
+        )
+        if errors:
+            raise ValueError("; ".join(errors))
+        for label, name, record in zip(("pre_fault", "post_fault"), artifact_names, receipts, strict=True):
+            artifact, _identity = self._read(name)
+            if not artifact.startswith(b"\x89PNG\r\n\x1a\n") or self._sha256(name) != record["artifact_sha256"]:
+                raise ValueError(f"periodic-delivery {label} PNG evidence is invalid")
         try:
             _atomic_json_at(self._directory_fd, "periodic-delivery-result.json", payload, replace=False)
         except FileExistsError:
             raise RuntimeError("periodic-delivery result is write-once") from None
+        captured_payload = json.loads(self._text("periodic-delivery-result.json"))
+        captured_receipts = self._json_lines("periodic-receipts.jsonl")
+        errors, captured_names = _validate_periodic_delivery_payload(
+            captured_payload,
+            captured_receipts,
+            ledger_validator=runner._ArtifactReceiptSink._valid_ledger_record,
+        )
+        if errors or captured_payload != payload or captured_names != artifact_names:
+            raise ValueError("periodic-delivery evidence changed before authority sealing")
+        captured_artifact_hashes = {
+            name: record["artifact_sha256"] for name, record in zip(captured_names, captured_receipts, strict=True)
+        }
+        seal: list[tuple[object, ...]] = []
+        for name in ("periodic-delivery-result.json", "periodic-receipts.jsonl", *artifact_names):
+            content, identity = self._read(name)
+            if name in captured_artifact_hashes and (
+                not content.startswith(b"\x89PNG\r\n\x1a\n")
+                or "sha256:" + hashlib.sha256(content).hexdigest() != captured_artifact_hashes[name]
+            ):
+                raise ValueError("periodic-delivery PNG changed before authority sealing")
+            if (
+                not stat.S_ISREG(identity.st_mode)
+                or stat.S_IMODE(identity.st_mode) != 0o600
+                or identity.st_uid != os.getuid()
+                or identity.st_nlink != 1
+            ):
+                raise ValueError("periodic-delivery evidence identity is unsafe")
+            seal.append(
+                (
+                    name,
+                    identity.st_dev,
+                    identity.st_ino,
+                    identity.st_uid,
+                    identity.st_gid,
+                    stat.S_IMODE(identity.st_mode),
+                    identity.st_nlink,
+                    identity.st_size,
+                    identity.st_mtime_ns,
+                    identity.st_ctime_ns,
+                    "sha256:" + hashlib.sha256(content).hexdigest(),
+                )
+            )
+        self._periodic_delivery_seal = tuple(seal)
+        self._verify_periodic_delivery_seal()
         self._assert_directory_path()
+
+    def _verify_periodic_delivery_seal(self) -> None:
+        if self._periodic_delivery_seal is None:
+            raise ValueError("execution-produced periodic-delivery seal is unavailable")
+        observed: list[tuple[object, ...]] = []
+        for expected in self._periodic_delivery_seal:
+            name = str(expected[0])
+            content, identity = self._read(name)
+            observed.append(
+                (
+                    name,
+                    identity.st_dev,
+                    identity.st_ino,
+                    identity.st_uid,
+                    identity.st_gid,
+                    stat.S_IMODE(identity.st_mode),
+                    identity.st_nlink,
+                    identity.st_size,
+                    identity.st_mtime_ns,
+                    identity.st_ctime_ns,
+                    "sha256:" + hashlib.sha256(content).hexdigest(),
+                )
+            )
+        if tuple(observed) != self._periodic_delivery_seal:
+            raise ValueError("authority-sealed periodic-delivery evidence changed")
 
     @_terminal_mutation("running")
     def begin_run(self) -> None:
@@ -1899,6 +2164,8 @@ class Evidence:
             "python",
             "source_command",
             "thresholds",
+            "periodic_schedule",
+            "source_fixture",
             "fatal_log_allowlist",
             "capture_policy",
         }
@@ -1915,6 +2182,28 @@ class Evidence:
         frozen_thresholds = json.loads(json.dumps(effective_thresholds(selected), sort_keys=True))
         if manifest.get("thresholds") != frozen_thresholds:
             errors.append("manifest thresholds differ from the frozen profile")
+        errors += _validate_source_fixture(manifest.get("source_fixture"))
+        periodic_schedule = manifest.get("periodic_schedule")
+        if not isinstance(periodic_schedule, Mapping):
+            errors.append("manifest periodic schedule is invalid")
+        else:
+            errors += _exact_keys(
+                periodic_schedule,
+                {"interval_s", "selection_boundary_offset_s", "expected_receipts"},
+                "manifest periodic schedule",
+            )
+            interval_s = periodic_schedule.get("interval_s")
+            boundary_offset_s = periodic_schedule.get("selection_boundary_offset_s")
+            if (
+                type(interval_s) is not int
+                or not 600 <= interval_s <= 3600
+                or type(boundary_offset_s) is not int
+                or not 450 <= boundary_offset_s <= 600
+                or boundary_offset_s + interval_s < 1050
+                or type(periodic_schedule.get("expected_receipts")) is not int
+                or periodic_schedule.get("expected_receipts") != 2
+            ):
+                errors.append("manifest periodic schedule is outside the reviewed short-run bounds")
         source_command = manifest.get("source_command")
         if (
             not isinstance(source_command, list)
@@ -1937,31 +2226,29 @@ class Evidence:
             errors += _validate_exact_six_result(exact_six_result, git_sha)
         if prerequisites.get("exact_six", {}).get("result_sha256") != self._sha256("exact-six-result.json"):
             errors.append("exact-six result artifact hash does not match prerequisite ledger")
-        if (
-            not isinstance(periodic_delivery, Mapping)
-            or periodic_delivery.get("schema") != "cryodaq-soak-periodic-delivery-result/v1"
-            or periodic_delivery.get("status") != "PASS"
-            or len(periodic_receipts) != 2
-        ):
-            errors.append("periodic-delivery evidence is absent or incomplete")
-        else:
-            for label, ledger_record in zip(("pre_fault", "post_fault"), periodic_receipts, strict=True):
-                result_record = periodic_delivery.get(label)
-                if not isinstance(result_record, Mapping):
-                    errors.append(f"periodic-delivery {label} record is invalid")
-                    continue
-                ledger_hash = (
-                    "sha256:"
-                    + hashlib.sha256(
-                        json.dumps(ledger_record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-                    ).hexdigest()
-                )
-                if result_record.get("ledger_record_sha256") != ledger_hash:
-                    errors.append(f"periodic-delivery {label} ledger hash differs")
-                artifact_name = result_record.get("artifact_name")
-                artifact_sha = result_record.get("artifact_sha256")
+        try:
+            self._verify_periodic_delivery_seal()
+        except (OSError, ValueError) as exc:
+            errors.append(f"periodic-delivery authority seal failed: {exc}")
+        periodic_errors, periodic_artifact_names = _validate_periodic_delivery_payload(
+            periodic_delivery,
+            periodic_receipts,
+            ledger_validator=runner._ArtifactReceiptSink._valid_ledger_record,
+        )
+        errors += periodic_errors
+        if not periodic_errors:
+            for label, artifact_name, ledger_record in zip(
+                ("pre_fault", "post_fault"),
+                periodic_artifact_names,
+                periodic_receipts,
+                strict=True,
+            ):
                 try:
-                    if not isinstance(artifact_name, str) or self._sha256(artifact_name) != artifact_sha:
+                    artifact, _identity = self._read(artifact_name)
+                    if (
+                        not artifact.startswith(b"\x89PNG\r\n\x1a\n")
+                        or self._sha256(artifact_name) != ledger_record["artifact_sha256"]
+                    ):
                         errors.append(f"periodic-delivery {label} artifact hash differs")
                 except (OSError, ValueError):
                     errors.append(f"periodic-delivery {label} artifact is absent or unsafe")
@@ -2030,11 +2317,7 @@ class Evidence:
         if retained:
             errors.append("final secrecy scan retained findings")
         accepted_names = required | set(str(name) for name in log_names)
-        if isinstance(periodic_delivery, Mapping):
-            for label in ("pre_fault", "post_fault"):
-                record = periodic_delivery.get(label)
-                if isinstance(record, Mapping) and isinstance(record.get("artifact_name"), str):
-                    accepted_names.add(str(record["artifact_name"]))
+        accepted_names.update(periodic_artifact_names)
         if self._exists("quarantine.json"):
             accepted_names.add("quarantine.json")
         for name in self._names():
@@ -2200,6 +2483,10 @@ class Evidence:
                     "state": RunState.PASS.value,
                 },
             )
+            self._verify_periodic_delivery_seal()
+            ledger_final, errors = self._build_ledger()
+            if ledger_final is None or errors or ledger_final.payload() != stored:
+                raise ValueError("post-summary artifact rehash failed")
             self._assert_directory_path()
             self.state = RunState.PASS
             self._terminal_summary_available = True
@@ -2346,12 +2633,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (FileExistsError, EvidenceCapabilityError):
         return 2
     previous_handlers: dict[int, Any] = {}
+    interrupt_handler = _first_signal_interrupt_handler()
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[signum] = signal.signal(
-                signum,
-                lambda received, _frame: (_ for _ in ()).throw(RunInterrupted(received)),
-            )
+            previous_handlers[signum] = signal.signal(signum, interrupt_handler)
         runner._PosixSoakRunner().run(evidence)
         return 0
     except RunInterrupted as exc:
@@ -2371,6 +2656,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
         evidence.close()
+
+
+def _first_signal_interrupt_handler() -> Callable[[int, object], None]:
+    """Raise once, then let fail-closed settlement finish despite signal storms."""
+
+    first_signum: int | None = None
+
+    def interrupt(received: int, _frame: object) -> None:
+        nonlocal first_signum
+        if first_signum is not None:
+            return
+        first_signum = received
+        raise RunInterrupted(received)
+
+    return interrupt
 
 
 if __name__ == "__main__":

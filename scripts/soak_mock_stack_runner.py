@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import io
 import json
@@ -18,12 +19,17 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
+from collections import deque
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Protocol
+
+import yaml
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 _TEST_FILE: Final = "tests/integration/test_periodic_png_multiprocess.py"
@@ -117,10 +123,39 @@ _ARTIFACT_FD_ENV: Final = "CRYODAQ_SOAK_ARTIFACT_FD"
 _ARTIFACT_NONCE_ENV: Final = "CRYODAQ_SOAK_ARTIFACT_NONCE"
 _FRAME_PREFIX: Final = struct.Struct("!I")
 _ARTIFACT_IO_TIMEOUT_S: Final = 10.0
+_POST_ACK_HEALTH_TIMEOUT_S: Final = 40.0
+_SHORT_SOAK_NEXT_REPORT_MIN_S: Final = 450
+_SHORT_SOAK_NEXT_REPORT_MAX_S: Final = 600
+_SHORT_SOAK_THIRD_REPORT_FLOOR_S: Final = 1050
 _MAX_RECEIPT_LEDGER_BYTES: Final = 8 * 1024 * 1024
 _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
+_MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
+_MAX_SOURCE_FIXTURE_FILE_BYTES: Final = 4 * 1024 * 1024
+_TRUNCATED_LAUNCHER_LOG_MARKER: Final = b"[launcher log truncated; bounded tail follows]\n"
 _LOCKED_PSUTIL_VERSION: Final = "7.2.2"
 _SOURCE_ARGV: Final = (sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray")
+_SOURCE_GATE_CODE: Final = """\
+import os, sys
+gate_fd = int(sys.argv[1])
+if os.read(gate_fd, 1) != b"G":
+    raise SystemExit(125)
+os.close(gate_fd)
+os.execve("/proc/self/exe", sys.argv[2:], os.environ)
+"""
+_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
+_ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
+_ISOLATED_STATIC_CONFIGS: Final = (
+    ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
+    ("interlocks.yaml", "interlocks: []\n"),
+    ("alarms_v3.yaml", "{}\n"),
+    ("housekeeping.yaml", "{}\n"),
+    (
+        "physical_alarms.yaml",
+        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n  escalate_to_safety: false\n",
+    ),
+    ("plugins.yaml", "{}\n"),
+    ("cooldown.yaml", "{}\n"),
+)
 _SOURCE_START_TIMEOUT_S: Final = 30.0
 _RECOVERY_TIMEOUT_S: Final = 60.0
 _SHUTDOWN_TIMEOUT_S: Final = 20.0
@@ -135,7 +170,7 @@ class _ObservedProcessGone(_RunnerFoundationError):
 
 
 class _RunnerActivationDisabled(RuntimeError):
-    """Production orchestration remains fused off until R2/R3 integration."""
+    """The requested host/profile is outside the reviewed Linux short path."""
 
 
 class _ShaBoundary(StrEnum):
@@ -278,12 +313,14 @@ def _controlled_git_environment() -> dict[str, str]:
 def _source_environment(
     root: Path,
     *,
+    source_root: Path,
     bridge_grant: dict[str, str],
     artifact_grant: dict[str, str],
 ) -> dict[str, str]:
     """Build the closed source-child environment without ambient inheritance."""
 
     resolved = Path(root).resolve(strict=True)
+    sealed_source = Path(source_root).resolve(strict=True)
     if not resolved.is_absolute() or resolved == _REPO_ROOT or resolved.is_relative_to(_REPO_ROOT):
         raise _RunnerFoundationError("source root is not isolated from the repository")
     if set(bridge_grant) != {_BRIDGE_FD_ENV, _BRIDGE_NONCE_ENV}:
@@ -304,7 +341,7 @@ def _source_environment(
         "PATH": "/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
-        "PYTHONPATH": os.pathsep.join((str(_REPO_ROOT / "src"), str(_REPO_ROOT))),
+        "PYTHONPATH": os.pathsep.join((str(sealed_source / "src"), str(sealed_source))),
         "PYTHONUNBUFFERED": "1",
         "QT_QPA_PLATFORM": "offscreen",
         "TMPDIR": str(temporary),
@@ -314,6 +351,447 @@ def _source_environment(
         **bridge_grant,
         **artifact_grant,
     }
+
+
+def _materialize_isolated_mock_config(
+    config_dir: Path,
+    *,
+    source_root: Path = _REPO_ROOT,
+    validation_interpreter: Path | None = None,
+    validation_environment: dict[str, str] | None = None,
+) -> int | None:
+    """Build an explicit passive-only config set from reviewed tracked bases."""
+
+    source_dir = Path(source_root).resolve(strict=True) / "config"
+    for name in _ISOLATED_TRACKED_CONFIG_FILES:
+        source = source_dir / name
+        if not source.is_file():
+            raise _RunnerFoundationError(f"required tracked soak config is unavailable: {name}")
+        (config_dir / name).write_bytes(source.read_bytes())
+    for name, content in _ISOLATED_STATIC_CONFIGS:
+        (config_dir / name).write_text(content, encoding="utf-8")
+
+    instruments_raw = yaml.safe_load((source_dir / "instruments.yaml").read_text(encoding="utf-8"))
+    if type(instruments_raw) is not dict or type(instruments_raw.get("instruments")) is not list:
+        raise _RunnerFoundationError("tracked instrument config is malformed")
+    selected = [
+        item
+        for item in instruments_raw["instruments"]
+        if type(item) is dict and item.get("name") == _ISOLATED_MOCK_INSTRUMENT_NAME
+    ]
+    if len(selected) != 1:
+        raise _RunnerFoundationError("tracked passive soak instrument is not unique")
+    instrument_path = config_dir / "instruments.yaml"
+    instrument_path.write_text(
+        yaml.safe_dump({"instruments": selected}, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    if validation_interpreter is None or validation_environment is None:
+        from cryodaq.drivers.registry import DriverAuthority, validate_instrument_entries
+
+        validated = validate_instrument_entries(selected)
+        if len(validated) != 1 or validated[0].spec.authority is not DriverAuthority.PASSIVE_MEASUREMENT:
+            raise _RunnerFoundationError("isolated soak instrument is not passive measurement authority")
+        readings_per_sample = None
+    else:
+        validation_code = """
+import asyncio
+import json
+import pathlib
+import sys
+
+import yaml
+
+from cryodaq.drivers.registry import (
+    DriverConstructionContext,
+    construct_driver,
+    validate_instrument_entries,
+)
+
+
+async def probe() -> None:
+    raw = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    items = validate_instrument_entries(raw["instruments"])
+    if len(items) != 1:
+        raise RuntimeError("fixture instrument is not unique")
+    driver = construct_driver(items[0], DriverConstructionContext(mock=True))
+    await driver.connect()
+    try:
+        readings = await driver.read_channels()
+    finally:
+        await driver.disconnect()
+    print(json.dumps({"authority": items[0].spec.authority.value, "readings": len(readings)}))
+
+
+asyncio.run(probe())
+"""
+        validated = subprocess.run(
+            (str(validation_interpreter), "-c", validation_code, str(instrument_path)),
+            cwd=Path(source_root).resolve(strict=True),
+            env=validation_environment,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        try:
+            behavior = json.loads(validated.stdout)
+        except json.JSONDecodeError:
+            behavior = None
+        if (
+            validated.returncode != 0
+            or validated.stderr.strip()
+            or type(behavior) is not dict
+            or set(behavior) != {"authority", "readings"}
+            or behavior["authority"] != "passive_measurement"
+            or type(behavior["readings"]) is not int
+            or behavior["readings"] <= 0
+        ):
+            raise _RunnerFoundationError("snapshot-bound passive instrument validation failed")
+        readings_per_sample = behavior["readings"]
+
+    descriptors_raw = yaml.safe_load((source_dir / "channel_descriptors.yaml").read_text(encoding="utf-8"))
+    if (
+        type(descriptors_raw) is not dict
+        or descriptors_raw.get("schema_version") != 1
+        or type(descriptors_raw.get("descriptors")) is not list
+        or type(descriptors_raw.get("bindings")) is not list
+    ):
+        raise _RunnerFoundationError("tracked descriptor config is malformed")
+    descriptor_manifest = {
+        "schema_version": 1,
+        "descriptors": [
+            item
+            for item in descriptors_raw["descriptors"]
+            if type(item) is dict and item.get("instrument_id") == _ISOLATED_MOCK_INSTRUMENT_NAME
+        ],
+        "bindings": [
+            item
+            for item in descriptors_raw["bindings"]
+            if type(item) is dict and item.get("instrument_id") == _ISOLATED_MOCK_INSTRUMENT_NAME
+        ],
+    }
+    if not descriptor_manifest["descriptors"] or not descriptor_manifest["bindings"]:
+        raise _RunnerFoundationError("tracked passive soak descriptors are unavailable")
+    descriptor_ids = {item["channel_id"] for item in descriptor_manifest["descriptors"]}
+    binding_ids = {item["channel_id"] for item in descriptor_manifest["bindings"]}
+    if len(descriptor_manifest["descriptors"]) != 16 or len(descriptor_manifest["bindings"]) != 16:
+        raise _RunnerFoundationError("tracked passive soak descriptor cardinality changed")
+    if descriptor_ids != binding_ids:
+        raise _RunnerFoundationError("tracked passive soak descriptor bindings do not match")
+    (config_dir / "channel_descriptors.yaml").write_text(
+        yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return readings_per_sample
+
+
+def _materialize_complete_soak_config(
+    config_dir: Path,
+    *,
+    report_interval_s: int,
+    source_snapshot: _ExecutionSnapshot,
+) -> int:
+    config_dir.mkdir(mode=0o700)
+    (config_dir / "agent.yaml").write_text(
+        "agent:\n  enabled: false\nreporting:\n  automatic_enabled: true\n",
+        encoding="utf-8",
+    )
+    (config_dir / "notifications.yaml").write_text(
+        "telegram:\n  bot_token: '123456:abcdefghijklmnopqrstuvwxyz'\n  chat_id: -100123\n"
+        "periodic_report:\n  enabled: true\n"
+        f"  report_interval_s: {report_interval_s}\n",
+        encoding="utf-8",
+    )
+    (config_dir / "experiment_templates").mkdir(mode=0o700)
+    readings_per_sample = _materialize_isolated_mock_config(
+        config_dir,
+        source_root=source_snapshot.root,
+        validation_interpreter=source_snapshot.interpreter,
+        validation_environment=source_snapshot.environment,
+    )
+    for path in config_dir.iterdir():
+        if path.is_file():
+            path.chmod(0o600)
+    if readings_per_sample is None:
+        raise _RunnerFoundationError("snapshot-bound fixture behavior was not measured")
+    return readings_per_sample
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceFixtureSeal:
+    payload: dict[str, object]
+    identities: tuple[tuple[object, ...], ...]
+
+
+def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int) -> _SourceFixtureSeal:
+    """Describe the complete passive fixture with a canonical no-link tree seal."""
+
+    expected_files = {
+        "agent.yaml",
+        "alarms_v3.yaml",
+        "channel_descriptors.yaml",
+        "channels.yaml",
+        "cooldown.yaml",
+        "housekeeping.yaml",
+        "instruments.yaml",
+        "interlocks.yaml",
+        "notifications.yaml",
+        "physical_alarms.yaml",
+        "plugins.yaml",
+        "safety.yaml",
+    }
+    if type(expected_readings_per_sample) is not int or expected_readings_per_sample <= 0:
+        raise _RunnerFoundationError("passive source fixture behavior is invalid")
+
+    def identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_mode,
+            info.st_dev,
+            info.st_ino,
+            info.st_uid,
+            info.st_gid,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    directory_before = config_dir.lstat()
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(config_dir, flags)
+    try:
+        directory_opened = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory_opened.st_mode)
+            or not os.path.samestat(directory_before, directory_opened)
+            or directory_opened.st_uid != os.getuid()
+            or stat.S_IMODE(directory_opened.st_mode) != 0o700
+        ):
+            raise _RunnerFoundationError("passive source fixture directory identity is unsafe")
+        expected_names = expected_files | {"experiment_templates"}
+        if set(os.listdir(directory_fd)) != expected_names:
+            raise _RunnerFoundationError("passive source fixture topology is not exact")
+
+        identities: list[tuple[object, ...]] = [(".", *identity(directory_opened))]
+        template_info = os.stat("experiment_templates", dir_fd=directory_fd, follow_symlinks=False)
+        template_fd = os.open("experiment_templates", flags, dir_fd=directory_fd)
+        try:
+            template_opened = os.fstat(template_fd)
+            if (
+                not stat.S_ISDIR(template_opened.st_mode)
+                or not os.path.samestat(template_info, template_opened)
+                or template_opened.st_uid != os.getuid()
+                or stat.S_IMODE(template_opened.st_mode) != 0o700
+                or os.listdir(template_fd)
+            ):
+                raise _RunnerFoundationError("passive source fixture template directory is unsafe")
+            identities.append(("experiment_templates", *identity(template_opened)))
+        finally:
+            os.close(template_fd)
+
+        entries: list[dict[str, object]] = [{"path": "experiment_templates", "kind": "directory"}]
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        for name in sorted(expected_files):
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            try:
+                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+            except OSError as exc:
+                raise _RunnerFoundationError("passive source fixture file identity is unsafe") from exc
+            try:
+                opened = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or not os.path.samestat(before, opened)
+                    or opened.st_nlink != 1
+                    or opened.st_uid != os.getuid()
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                ):
+                    raise _RunnerFoundationError("passive source fixture file identity is unsafe")
+                content_bytes = 0
+                content_sha256 = hashlib.sha256()
+                while chunk := os.read(fd, 1024 * 1024):
+                    content_bytes += len(chunk)
+                    if content_bytes > _MAX_SOURCE_FIXTURE_FILE_BYTES:
+                        raise _RunnerFoundationError("passive source fixture file exceeds the reviewed bound")
+                    content_sha256.update(chunk)
+                if identity(os.fstat(fd)) != identity(opened):
+                    raise _RunnerFoundationError("passive source fixture changed during sealing")
+            finally:
+                os.close(fd)
+            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if identity(after) != identity(opened):
+                raise _RunnerFoundationError("passive source fixture changed during sealing")
+            identities.append((name, *identity(opened)))
+            entries.append(
+                {
+                    "path": name,
+                    "kind": "file",
+                    "bytes": content_bytes,
+                    "sha256": f"sha256:{content_sha256.hexdigest()}",
+                }
+            )
+        if set(os.listdir(directory_fd)) != expected_names:
+            raise _RunnerFoundationError("passive source fixture topology changed during sealing")
+        if identity(os.fstat(directory_fd)) != identity(directory_opened):
+            raise _RunnerFoundationError("passive source fixture directory changed during sealing")
+    finally:
+        os.close(directory_fd)
+    entries.sort(key=lambda item: str(item["path"]))
+    tree_hash = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return _SourceFixtureSeal(
+        payload={
+            "schema": "cryodaq-soak-source-fixture/v1",
+            "instrument_id": _ISOLATED_MOCK_INSTRUMENT_NAME,
+            "authority": "passive_measurement",
+            "mock": True,
+            "descriptor_count": 16,
+            "binding_count": 16,
+            "expected_readings_per_sample": expected_readings_per_sample,
+            "entries": entries,
+            "tree_sha256": tree_hash,
+        },
+        identities=tuple(identities),
+    )
+
+
+def _select_short_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
+    """Choose exactly one post-fault aligned boundary inside the short run."""
+
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError("short-soak schedule epoch is invalid")
+    now_second = int(now_epoch)
+    for interval_s in range(600, 3601):
+        next_offset_s = (-now_second) % interval_s or interval_s
+        if (
+            _SHORT_SOAK_NEXT_REPORT_MIN_S <= next_offset_s <= _SHORT_SOAK_NEXT_REPORT_MAX_S
+            and next_offset_s + interval_s >= _SHORT_SOAK_THIRD_REPORT_FLOOR_S
+        ):
+            return interval_s, next_offset_s
+    raise _RunnerFoundationError("unable to align the reviewed short-soak report cadence")
+
+
+def _validate_short_soak_runtime_schedule(interval_s: int, now_epoch: float) -> int:
+    """Fail closed if startup latency consumed the two-receipt reservation."""
+
+    if type(interval_s) is not int or interval_s < 60 or interval_s > 86_400:
+        raise _RunnerFoundationError("short-soak report interval is invalid")
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError("short-soak runtime epoch is invalid")
+    next_offset_s = (-int(now_epoch)) % interval_s or interval_s
+    if not (395 <= next_offset_s <= 700 and next_offset_s + interval_s > 900):
+        raise _RunnerFoundationError("short-soak startup consumed the exact two-receipt cadence reservation")
+    return next_offset_s
+
+
+class _BoundedLauncherLogDrain:
+    """Continuously drain launcher output while retaining only a bounded tail."""
+
+    __slots__ = ("_chunks", "_error", "_read_fd", "_retained", "_thread", "_total", "writer")
+
+    def __init__(self) -> None:
+        read_fd, write_fd = os.pipe()
+        self._read_fd = read_fd
+        self.writer = os.fdopen(write_fd, "wb", buffering=0)
+        self._chunks: deque[bytes] = deque()
+        self._retained = 0
+        self._total = 0
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._drain, name="cryodaq-soak-log-drain", daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        try:
+            while chunk := os.read(self._read_fd, 64 * 1024):
+                self._total += len(chunk)
+                self._chunks.append(chunk)
+                self._retained += len(chunk)
+                while self._retained > _MAX_LAUNCHER_LOG_BYTES:
+                    excess = self._retained - _MAX_LAUNCHER_LOG_BYTES
+                    head = self._chunks[0]
+                    if len(head) <= excess:
+                        self._chunks.popleft()
+                        self._retained -= len(head)
+                    else:
+                        self._chunks[0] = head[excess:]
+                        self._retained -= excess
+        except BaseException as exc:  # noqa: BLE001 - transferred to the owner thread
+            self._error = exc
+        finally:
+            os.close(self._read_fd)
+
+    def finish(self) -> tuple[bytes, int]:
+        if not self.writer.closed:
+            self.writer.close()
+        self._thread.join(timeout=_PROCESS_GROUP_GRACE_S)
+        if self._thread.is_alive():
+            raise _RunnerFoundationError("launcher log writer did not settle")
+        if self._error is not None:
+            raise _RunnerFoundationError("launcher log drain failed") from self._error
+        return b"".join(self._chunks), self._total
+
+
+def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_truncated: bool) -> None:
+    """Publish one redacted, bounded snapshot from a completed pipe drain."""
+
+    from scripts.soak_mock_stack import redact_text
+
+    if not isinstance(raw, bytes) or type(total_bytes) is not int or total_bytes < len(raw):
+        raise _RunnerFoundationError("launcher log drain evidence is invalid")
+    truncated = total_bytes > _MAX_LAUNCHER_LOG_BYTES
+    encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
+    truncated = truncated or len(encoded) > _MAX_LAUNCHER_LOG_BYTES
+    if truncated and not allow_truncated:
+        raise _RunnerFoundationError("launcher log exceeded the reviewed evidence ceiling")
+    if truncated:
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
+        tail = encoded[-tail_bytes:]
+        while tail and tail[0] & 0xC0 == 0x80:
+            tail = tail[1:]
+        payload = _TRUNCATED_LAUNCHER_LOG_MARKER + tail.decode("utf-8", errors="ignore").encode("utf-8")
+    else:
+        payload = encoded
+    evidence.write_log("log-launcher.txt", payload.decode("utf-8"))
+
+
+@contextmanager
+def _launcher_log_capture(
+    evidence: Any,
+    path: Path,
+    *,
+    settle_writer: Callable[[], None] | None = None,
+):
+    """Capture stdout through a continuously drained, memory-bounded pipe."""
+
+    if path.exists():
+        raise FileExistsError(path)
+    drain = _BoundedLauncherLogDrain()
+    try:
+        yield drain.writer
+    except BaseException as primary:
+        settled = True
+        if settle_writer is not None:
+            try:
+                settle_writer()
+            except Exception as settle_error:  # noqa: BLE001 - retain the primary failure
+                settled = False
+                primary.add_note(f"launcher writer settlement failed: {settle_error}")
+        try:
+            if settled:
+                raw, total_bytes = drain.finish()
+                _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=True)
+            elif not drain.writer.closed:
+                drain.writer.close()
+        except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
+            primary.add_note(f"launcher diagnostic capture failed: {capture_error}")
+        raise
+    else:
+        raw, total_bytes = drain.finish()
+        _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,15 +808,62 @@ class _ExecutionSnapshot:
 
 def _tree_sha256(root: Path) -> str:
     digest = hashlib.sha256()
+    root_info = root.lstat()
+    digest.update(
+        json.dumps(
+            [
+                stat.S_IMODE(root_info.st_mode),
+                root_info.st_dev,
+                root_info.st_ino,
+                root_info.st_uid,
+                root_info.st_gid,
+                root_info.st_nlink,
+                root_info.st_mtime_ns,
+                root_info.st_ctime_ns,
+            ],
+            separators=(",", ":"),
+        ).encode("ascii")
+    )
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix().encode()
-        if path.is_symlink():
-            digest.update(b"L\0" + relative + b"\0" + os.readlink(path).encode() + b"\0")
-        elif path.is_file():
-            digest.update(b"F\0" + relative + b"\0")
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        info = path.lstat()
+        metadata = json.dumps(
+            [
+                info.st_mode,
+                info.st_dev,
+                info.st_ino,
+                info.st_uid,
+                info.st_gid,
+                info.st_nlink,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            ],
+            separators=(",", ":"),
+        ).encode("ascii")
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(path).encode()
+            if path.lstat() != info:
+                raise _RunnerFoundationError("sealed snapshot link changed during hashing")
+            digest.update(b"L\0" + relative + b"\0" + metadata + b"\0" + target + b"\0")
+        elif stat.S_ISREG(info.st_mode):
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            try:
+                opened = os.fstat(fd)
+                if not os.path.samestat(info, opened):
+                    raise _RunnerFoundationError("sealed snapshot file changed before hashing")
+                digest.update(b"F\0" + relative + b"\0" + metadata + b"\0")
+                while chunk := os.read(fd, 1024 * 1024):
                     digest.update(chunk)
+            finally:
+                os.close(fd)
+            if not os.path.samestat(info, path.lstat()):
+                raise _RunnerFoundationError("sealed snapshot file changed during hashing")
+        elif stat.S_ISDIR(info.st_mode):
+            digest.update(b"D\0" + relative + b"\0" + metadata + b"\0")
+        else:
+            raise _RunnerFoundationError("sealed snapshot contains a special file")
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -542,7 +1067,12 @@ class _LockedPsutilObserver:
                 raise _RunnerFoundationError("process-group membership cannot be proven") from exc
         return tuple(sorted(members, key=lambda item: item.pid))
 
-    def descendants(self, leader: _ProcessIdentity) -> tuple[_ProcessIdentity, ...]:
+    def descendants(
+        self,
+        leader: _ProcessIdentity,
+        *,
+        include_zombies: bool = False,
+    ) -> tuple[_ProcessIdentity, ...]:
         process = self._process(leader.pid)
         if self._identity(process, allow_zombie=True) != leader:
             raise _RunnerFoundationError("PID/start identity changed; refusing descendant scan")
@@ -553,9 +1083,9 @@ class _LockedPsutilObserver:
         observed: list[tuple[_ProcessIdentity, int]] = []
         for candidate in processes:
             try:
-                identity = self._identity(candidate)
+                identity = self._identity(candidate, allow_zombie=include_zombies)
                 parent_pid = int(candidate._proc.ppid())
-                if self._identity(self._process(identity.pid)) != identity:
+                if self._identity(self._process(identity.pid), allow_zombie=include_zombies) != identity:
                     raise _RunnerFoundationError("process identity changed during descendant scan")
             except _ObservedProcessGone:
                 continue
@@ -1318,16 +1848,17 @@ class _JoinedReceiptEvidence:
 def _validate_joined_receipt(
     *,
     ledger_record: dict[str, object],
-    state_payload: dict[str, object],
+    delivery_state_payload: dict[str, object],
+    terminal_state_payload: dict[str, object],
     artifact_bytes: bytes,
     assistant_observation: _AssistantProcessObservation,
     expected_launcher_pid: int,
 ) -> _JoinedReceiptEvidence:
     """Join one ACK/file/ledger/process/state cut without accepting PASS.
 
-    The durable state must still expose the successful slot as ``active``.
-    ``last_terminal`` deliberately omits the owner token and therefore cannot
-    satisfy the preflight's exact owner join on its own.
+    The pre-ACK DELIVERING cut supplies owner authority. The post-ACK
+    ``last_terminal`` cut supplies durable success; neither is sufficient
+    alone because terminal rotation deliberately omits the owner token.
     """
 
     from cryodaq.periodic_state import (
@@ -1337,10 +1868,11 @@ def _validate_joined_receipt(
 
     if type(ledger_record) is not dict or not _ArtifactReceiptSink._valid_ledger_record(ledger_record):
         raise _RunnerFoundationError("receipt ledger record is not valid joined evidence")
-    if type(state_payload) is not dict:
+    if type(delivery_state_payload) is not dict or type(terminal_state_payload) is not dict:
         raise _RunnerFoundationError("periodic state payload is not a mapping")
     try:
-        state = PeriodicStateDocument(state_payload).payload
+        delivery_state = PeriodicStateDocument(delivery_state_payload).payload
+        terminal_state = PeriodicStateDocument(terminal_state_payload).payload
     except (TypeError, ValueError) as exc:
         raise _RunnerFoundationError("periodic state payload is invalid") from exc
     if type(artifact_bytes) is not bytes:
@@ -1350,12 +1882,15 @@ def _validate_joined_receipt(
         assistant_observation,
         expected_launcher_pid=expected_launcher_pid,
     )
-    active = state["active"]
-    if type(active) is not dict or active["status"] != "SUCCEEDED":
-        raise _RunnerFoundationError("joined state must retain the successful active slot")
+    active = delivery_state["active"]
+    terminal = terminal_state["last_terminal"]
+    if type(active) is not dict or active["status"] != "DELIVERING":
+        raise _RunnerFoundationError("joined delivery state must retain the active owner")
+    if terminal_state["active"] is not None or type(terminal) is not dict or terminal["status"] != "SUCCEEDED":
+        raise _RunnerFoundationError("joined terminal state must durably rotate successful delivery")
     artifact = active["artifact"]
-    receipt = active["receipt"]
-    health = state["health"]
+    receipt = terminal["receipt"]
+    health = terminal_state["health"]
     if type(artifact) is not dict or type(receipt) is not dict or type(health) is not dict:
         raise _RunnerFoundationError("joined state lacks terminal artifact, receipt, or health evidence")
 
@@ -1365,13 +1900,15 @@ def _validate_joined_receipt(
         destination = periodic_local_destination_fingerprint(nonce)  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
         raise _RunnerFoundationError("local destination evidence is invalid") from exc
-    state_updated = state["updated_at"]
+    state_updated = terminal_state["updated_at"]
+    delivery_updated = delivery_state["updated_at"]
     health_updated = health["updated_at"]
-    finished_at = active["finished_at"]
-    if not all(type(value) in {int, float} for value in (state_updated, health_updated, finished_at)):
+    finished_at = terminal["finished_at"]
+    if not all(type(value) in {int, float} for value in (state_updated, delivery_updated, health_updated, finished_at)):
         raise _RunnerFoundationError("joined state timestamps are invalid")
     if (
-        float(state_updated) < float(finished_at)
+        float(finished_at) < float(delivery_updated)
+        or float(state_updated) < float(finished_at)
         or float(health_updated) < float(finished_at)
         or health["status"] != "ready"
         or health["error_code"] is not None
@@ -1396,9 +1933,13 @@ def _validate_joined_receipt(
     if (
         receipt["kind"] != "soak_local"
         or active["destination_fingerprint"] != destination
+        or terminal["destination_fingerprint"] != destination
+        or terminal["slot_id"] != active["slot_id"]
+        or terminal["generation_id"] != active["generation_id"]
+        or terminal["artifact_sha256"] != artifact["sha256"]
         or artifact_sha256 != ledger_record["artifact_sha256"]
         or len(artifact_bytes) != ledger_record["artifact_size"]
-        or state["unresolved_delivery"] != []
+        or terminal_state["unresolved_delivery"] != []
     ):
         raise _RunnerFoundationError("local receipt/file/state authority does not agree")
 
@@ -1439,14 +1980,17 @@ class _DeliveryEvidenceAuthority:
 @dataclass(frozen=True, slots=True)
 class _OwnedRunResult:
     pre_ledger_record: dict[str, object]
-    pre_state_payload: dict[str, object]
+    pre_delivery_state_payload: dict[str, object]
+    pre_terminal_state_payload: dict[str, object]
     pre_artifact_bytes: bytes
     pre_assistant_observation: _AssistantProcessObservation
     post_ledger_record: dict[str, object]
-    post_state_payload: dict[str, object]
+    post_delivery_state_payload: dict[str, object]
+    post_terminal_state_payload: dict[str, object]
     post_artifact_bytes: bytes
     post_assistant_observation: _AssistantProcessObservation
     expected_launcher_pid: int
+    report_interval_s: int
     ledger_records: tuple[dict[str, object], ...]
     observations: tuple[Any, ...]
     survivors: tuple[Any, ...]
@@ -1471,14 +2015,17 @@ class _DeliveryEvidenceRegistry:
             raise _RunnerFoundationError("owned runner returned an invalid private result")
         proof = _validate_pre_post_receipts(
             pre_ledger_record=result.pre_ledger_record,
-            pre_state_payload=result.pre_state_payload,
+            pre_delivery_state_payload=result.pre_delivery_state_payload,
+            pre_terminal_state_payload=result.pre_terminal_state_payload,
             pre_artifact_bytes=result.pre_artifact_bytes,
             pre_assistant_observation=result.pre_assistant_observation,
             post_ledger_record=result.post_ledger_record,
-            post_state_payload=result.post_state_payload,
+            post_delivery_state_payload=result.post_delivery_state_payload,
+            post_terminal_state_payload=result.post_terminal_state_payload,
             post_artifact_bytes=result.post_artifact_bytes,
             post_assistant_observation=result.post_assistant_observation,
             expected_launcher_pid=result.expected_launcher_pid,
+            expected_interval_s=result.report_interval_s,
             ledger_records=result.ledger_records,
         )
 
@@ -1533,28 +2080,33 @@ def _consume_periodic_delivery_authority(authority: object, evidence: Any) -> di
 def _validate_pre_post_receipts(
     *,
     pre_ledger_record: dict[str, object],
-    pre_state_payload: dict[str, object],
+    pre_delivery_state_payload: dict[str, object],
+    pre_terminal_state_payload: dict[str, object],
     pre_artifact_bytes: bytes,
     pre_assistant_observation: _AssistantProcessObservation,
     post_ledger_record: dict[str, object],
-    post_state_payload: dict[str, object],
+    post_delivery_state_payload: dict[str, object],
+    post_terminal_state_payload: dict[str, object],
     post_artifact_bytes: bytes,
     post_assistant_observation: _AssistantProcessObservation,
     expected_launcher_pid: int,
+    expected_interval_s: int,
     ledger_records: tuple[dict[str, object], ...],
 ) -> _PrePostReceiptEvidence:
     """Build both joins internally, then require exact assistant replacement."""
 
     pre_fault = _validate_joined_receipt(
         ledger_record=pre_ledger_record,
-        state_payload=pre_state_payload,
+        delivery_state_payload=pre_delivery_state_payload,
+        terminal_state_payload=pre_terminal_state_payload,
         artifact_bytes=pre_artifact_bytes,
         assistant_observation=pre_assistant_observation,
         expected_launcher_pid=expected_launcher_pid,
     )
     post_fault = _validate_joined_receipt(
         ledger_record=post_ledger_record,
-        state_payload=post_state_payload,
+        delivery_state_payload=post_delivery_state_payload,
+        terminal_state_payload=post_terminal_state_payload,
         artifact_bytes=post_artifact_bytes,
         assistant_observation=post_assistant_observation,
         expected_launcher_pid=expected_launcher_pid,
@@ -1564,6 +2116,18 @@ def _validate_pre_post_receipts(
         or pre_fault.destination_fingerprint != post_fault.destination_fingerprint
     ):
         raise _RunnerFoundationError("replacement assistant changed the retained local capability authority")
+    pre_active = pre_delivery_state_payload["active"]
+    post_active = post_delivery_state_payload["active"]
+    if (
+        type(pre_active) is not dict
+        or type(post_active) is not dict
+        or type(pre_active["interval_s"]) is not int
+        or pre_active["interval_s"] != expected_interval_s
+        or post_active["interval_s"] != pre_active["interval_s"]
+        or post_active["slot_end"] - pre_active["slot_end"] != pre_active["interval_s"]
+        or post_active["config_fingerprint"] != pre_active["config_fingerprint"]
+    ):
+        raise _RunnerFoundationError("qualification receipts are not adjacent slots under one schedule")
     if len(ledger_records) != 2:
         raise _RunnerFoundationError("qualification requires exactly two receipt ledger records")
     if any(type(item) is not dict or not _ArtifactReceiptSink._valid_ledger_record(item) for item in ledger_records):
@@ -1885,6 +2449,315 @@ def _require_posix_exact_six() -> None:
         raise _RunnerActivationDisabled("exact-six execution authority requires Linux subreaper ownership")
 
 
+def _runner_subreaper_state() -> bool:
+    """Return the verified Linux child-subreaper state."""
+
+    _require_posix_exact_six()
+    libc = ctypes.CDLL(None, use_errno=True)
+    observed = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(observed), 0, 0, 0) != 0:  # PR_GET_CHILD_SUBREAPER
+        raise _RunnerActivationDisabled("Linux child-subreaper authority is unavailable")
+    return bool(observed.value)
+
+
+def _apply_runner_subreaper(enabled: bool) -> None:
+    """Set and verify Linux child-subreaper state."""
+
+    _require_posix_exact_six()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, int(enabled), 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise _RunnerActivationDisabled("Linux child-subreaper activation failed")
+    observed = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(observed), 0, 0, 0) != 0 or observed.value != int(enabled):
+        raise _RunnerActivationDisabled("Linux child-subreaper authority is unavailable")
+
+
+def _set_runner_subreaper(enabled: bool) -> bool:
+    """Set Linux child-subreaper state and return the prior state."""
+
+    prior = _runner_subreaper_state()
+    _apply_runner_subreaper(enabled)
+    return prior
+
+
+@contextmanager
+def _block_termination_signals() -> Any:
+    """Defer SIGINT/SIGTERM until a fail-closed cleanup boundary is complete."""
+
+    if sys.platform != "linux" or not hasattr(signal, "pthread_sigmask"):
+        raise _RunnerActivationDisabled("Linux termination-signal masking is unavailable")
+    blocked = {signal.SIGINT, signal.SIGTERM}
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _enable_runner_subreaper() -> None:
+    """Make escaped descendants reparent to this qualification owner."""
+
+    _set_runner_subreaper(True)
+
+
+def _waitid_terminal_without_reap(pid: int, *, deadline: float) -> bool:
+    """Observe one owned child terminal while keeping its PID/PGID reserved."""
+
+    required = ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
+    if sys.platform != "linux" or not hasattr(os, "waitid") or any(not hasattr(os, name) for name in required):
+        raise _RunnerActivationDisabled("Linux waitid WNOWAIT authority is unavailable")
+    options = os.WEXITED | os.WNOHANG | os.WNOWAIT
+    while time.monotonic() < deadline:
+        try:
+            result = os.waitid(os.P_PID, pid, options)
+        except InterruptedError:
+            continue
+        except ChildProcessError as exc:
+            raise _RunnerFoundationError("owned launcher was reaped before settlement proof") from exc
+        if result is not None:
+            return True
+        time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
+    return False
+
+
+def _settle_unbound_session(process: subprocess.Popen[bytes]) -> None:
+    """Settle a new-session child while its unreaped PID makes numeric PGID safe."""
+
+    pid = process.pid
+    try:
+        owns_group = os.getpgid(pid) == pid
+    except ProcessLookupError:
+        owns_group = False
+    try:
+        if owns_group:
+            os.killpg(pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        pass
+    if not _waitid_terminal_without_reap(pid, deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S):
+        try:
+            if owns_group:
+                os.killpg(pid, getattr(signal, "SIGKILL", 9))
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        if not _waitid_terminal_without_reap(pid, deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S):
+            raise _RunnerFoundationError("unbound launcher did not settle")
+    if owns_group:
+        try:
+            os.killpg(pid, getattr(signal, "SIGKILL", 9))
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=_PROCESS_GROUP_GRACE_S)
+    except subprocess.TimeoutExpired as exc:
+        raise _RunnerFoundationError("unbound launcher could not be reaped") from exc
+
+
+def _spawn_gated_source(
+    *,
+    environment: dict[str, str],
+    stdout: Any,
+    inherited_fds: tuple[int, ...],
+    observer: _LockedPsutilObserver,
+    source_root: Path = _REPO_ROOT,
+) -> tuple[subprocess.Popen[bytes], _ProcessIdentity]:
+    """Bind exact same-PID session authority before the source launcher can exec."""
+
+    gate_read, gate_write = os.pipe()
+    argv = (sys.executable, "-I", "-c", _SOURCE_GATE_CODE, str(gate_read), *_SOURCE_ARGV)
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=Path(source_root).resolve(strict=True),
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            pass_fds=(gate_read, *inherited_fds),
+            start_new_session=True,
+        )
+    except BaseException:
+        os.close(gate_read)
+        os.close(gate_write)
+        raise
+    os.close(gate_read)
+    try:
+        identity = observer.identity_for_pid(process.pid)
+        if os.getpgid(process.pid) != process.pid:
+            raise _RunnerFoundationError("source launcher does not own its process group")
+        observer.recheck_exact(identity)
+        if os.write(gate_write, b"G") != 1:
+            raise _RunnerFoundationError("source launcher gate release was incomplete")
+    except BaseException:
+        os.close(gate_write)
+        _settle_unbound_session(process)
+        raise
+    os.close(gate_write)
+    return process, identity
+
+
+def _settle_adopted_owner_descendants(
+    *,
+    observer: _LockedPsutilObserver,
+    owner: _ProcessIdentity,
+    deadline: float,
+) -> tuple[_ProcessIdentity, ...]:
+    """Kill/reap late subreaper adoptees and prove two stable empty scans."""
+
+    settlement_deadline = max(deadline, time.monotonic() + _PROCESS_GROUP_GRACE_S)
+    observed: set[_ProcessIdentity] = set()
+    empty_scans = 0
+    while time.monotonic() < settlement_deadline and empty_scans < 2:
+        descendants = tuple(observer.descendants(owner, include_zombies=True))
+        if descendants:
+            observed.update(descendants)
+            empty_scans = 0
+            for identity in sorted(set(descendants), key=lambda item: item.pid, reverse=True):
+                try:
+                    observer.signal_exact_for_cleanup(identity, getattr(signal, "SIGKILL", 9))
+                except _ObservedProcessGone:
+                    pass
+                try:
+                    terminal = os.waitid(os.P_PID, identity.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                except ChildProcessError:
+                    terminal = None
+                if terminal is not None:
+                    try:
+                        os.waitpid(identity.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        pass
+        else:
+            empty_scans += 1
+        if empty_scans < 2:
+            time.sleep(min(0.05, max(0.001, settlement_deadline - time.monotonic())))
+    if empty_scans < 2:
+        raise _RunnerFoundationError("qualification owner did not reach a stable empty descendant cut")
+    return tuple(sorted(observed, key=lambda item: item.pid))
+
+
+def _reap_pinned_owned_session(
+    process: subprocess.Popen[bytes],
+    *,
+    observer: _LockedPsutilObserver,
+    expected: _ProcessIdentity,
+    owner: _ProcessIdentity,
+    deadline: float,
+    reject_survivors: bool,
+) -> int:
+    """Reap a terminal pinned leader after all adopted descendants settle."""
+
+    observer.recheck_exact(expected)
+    if os.getpgid(process.pid) != process.pid:
+        raise _RunnerFoundationError("source launcher lost process-group ownership before reap")
+    settlement_deadline = max(deadline, time.monotonic() + _PROCESS_GROUP_GRACE_S)
+    empty_group = 0
+    empty_descendants = 0
+    observed_survivors: set[_ProcessIdentity] = set()
+    while time.monotonic() < settlement_deadline and (empty_group < 2 or empty_descendants < 2):
+        members = tuple(identity for identity in observer.group_members(process.pid) if identity != expected)
+        descendants = tuple(
+            identity for identity in observer.descendants(owner, include_zombies=True) if identity != expected
+        )
+        if members:
+            observed_survivors.update(members)
+            empty_group = 0
+        else:
+            empty_group += 1
+        if descendants:
+            observed_survivors.update(descendants)
+            empty_descendants = 0
+        else:
+            empty_descendants += 1
+        for identity in sorted(set(members) | set(descendants), key=lambda item: item.pid, reverse=True):
+            try:
+                observer.signal_exact_for_cleanup(identity, getattr(signal, "SIGKILL", 9))
+            except _ObservedProcessGone:
+                pass
+            try:
+                terminal = os.waitid(os.P_PID, identity.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                terminal = None
+            if terminal is not None:
+                try:
+                    os.waitpid(identity.pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+        if empty_group < 2 or empty_descendants < 2:
+            time.sleep(min(0.05, max(0.001, settlement_deadline - time.monotonic())))
+    if empty_group < 2 or empty_descendants < 2:
+        raise _RunnerFoundationError("source launcher ownership did not reach a stable empty cut")
+    return_code = process.wait(timeout=_PROCESS_GROUP_GRACE_S)
+    observed_survivors.update(
+        _settle_adopted_owner_descendants(
+            observer=observer,
+            owner=owner,
+            deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
+        )
+    )
+    if observed_survivors and reject_survivors:
+        raise _RunnerFoundationError("source launcher left process survivors at graceful exit")
+    return return_code
+
+
+def _wait_and_reap_owned_session(
+    process: subprocess.Popen[bytes],
+    *,
+    observer: _LockedPsutilObserver,
+    expected: _ProcessIdentity,
+    owner: _ProcessIdentity,
+    timeout_s: float,
+) -> int:
+    """Pin the exited leader while proving its session and descendants empty."""
+
+    deadline = time.monotonic() + timeout_s
+    if not _waitid_terminal_without_reap(process.pid, deadline=deadline):
+        raise _RunnerFoundationError("source launcher exceeded graceful shutdown ceiling")
+    return _reap_pinned_owned_session(
+        process,
+        observer=observer,
+        expected=expected,
+        owner=owner,
+        deadline=deadline,
+        reject_survivors=True,
+    )
+
+
+def _force_settle_owned_session(
+    process: subprocess.Popen[bytes],
+    *,
+    observer: _LockedPsutilObserver,
+    expected: _ProcessIdentity,
+    owner: _ProcessIdentity,
+) -> None:
+    """Force a failed source run to a proven empty subreaper-owned cut."""
+
+    try:
+        observer.signal_exact_for_cleanup(expected, signal.SIGTERM)
+    except _ObservedProcessGone:
+        pass
+    deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
+    if not _waitid_terminal_without_reap(process.pid, deadline=deadline):
+        try:
+            observer.signal_exact_for_cleanup(expected, getattr(signal, "SIGKILL", 9))
+        except _ObservedProcessGone:
+            pass
+        deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
+        if not _waitid_terminal_without_reap(process.pid, deadline=deadline):
+            raise _RunnerFoundationError("failed source launcher could not be pinned terminal")
+    _reap_pinned_owned_session(
+        process,
+        observer=observer,
+        expected=expected,
+        owner=owner,
+        deadline=deadline,
+        reject_survivors=False,
+    )
+
+
 def _settle_process_group(
     process: subprocess.Popen[bytes],
     *,
@@ -2073,10 +2946,7 @@ def _execute_bounded_process(
             process.stdout.close()
         if process.stderr is not None:
             process.stderr.close()
-        try:
-            process.wait(timeout=_PROCESS_GROUP_GRACE_S)
-        except subprocess.TimeoutExpired:
-            pass
+        _settle_unbound_session(process)
         raise
     try:
         os.write(start_write, b"G")
@@ -2343,14 +3213,22 @@ class _CancellationCleanupContract:
 class _PosixSoakRunner:
     """Single-use owner of the real Linux source-mode short qualification."""
 
-    __slots__ = ("_used",)
+    __slots__ = ("_prior_subreaper", "_subreaper_restored", "_used")
 
     def __init__(self) -> None:
         self._used = False
+        self._prior_subreaper: bool | None = None
+        self._subreaper_restored = False
 
     @staticmethod
     def require_platform() -> None:
         _require_posix_exact_six()
+        if not hasattr(signal, "pthread_sigmask"):
+            raise _RunnerActivationDisabled("Linux termination-signal masking is unavailable")
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise _RunnerActivationDisabled("Linux termination-signal masking is unavailable") from exc
 
     @staticmethod
     def _pipe_records(pipe: _BridgeHandshakePipe, retained: bytearray) -> list[bytes]:
@@ -2388,8 +3266,7 @@ class _PosixSoakRunner:
             payload = load_periodic_state(data_dir).payload
         except (OSError, TypeError, ValueError):
             return None
-        active = payload.get("active")
-        return payload if type(active) is dict else None
+        return payload if type(payload) is dict else None
 
     def run(self, evidence: Any) -> None:
         self.require_platform()
@@ -2400,7 +3277,25 @@ class _PosixSoakRunner:
         if type(evidence) is not soak.Evidence:
             raise TypeError("evidence must be the exact Evidence type")
         self._used = True
-        _DELIVERY_EVIDENCE.run(self, evidence)
+        try:
+            # Begin the restoration guard before PR_SET so a failed
+            # verification or asynchronous interruption after mutation always
+            # rolls back to the observed prior state.
+            self._prior_subreaper = _runner_subreaper_state()
+            _apply_runner_subreaper(True)
+            _DELIVERY_EVIDENCE.run(self, evidence)
+        finally:
+            if self._prior_subreaper is not None and not self._subreaper_restored:
+                self._restore_subreaper()
+
+    def _restore_subreaper(self) -> None:
+        if self._subreaper_restored:
+            return
+        if self._prior_subreaper is None:
+            raise _RunnerFoundationError("qualification subreaper prior state is unavailable")
+        with _block_termination_signals():
+            _apply_runner_subreaper(self._prior_subreaper)
+            self._subreaper_restored = True
 
     def _run_owned(self, evidence: Any) -> _OwnedRunResult:
         """Run, validate, seal, and publish one short-soak terminal result."""
@@ -2416,7 +3311,11 @@ class _PosixSoakRunner:
         if selected.name != "short":
             raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
         locked = _LockedPsutilObserver(psutil)
+        owner_identity = locked.identity_for_pid(os.getpid())
+        if locked.descendants(owner_identity, include_zombies=True):
+            raise _RunnerFoundationError("qualification owner has unexpected live descendants")
         collector = _CleanShaCollector(_REPO_ROOT)
+        report_interval_s, report_boundary_offset_s = _select_short_soak_report_schedule(time.time())
         sha = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=_REPO_ROOT,
@@ -2426,6 +3325,18 @@ class _PosixSoakRunner:
             text=True,
             timeout=10,
         ).stdout.strip()
+        with _sealed_execution_snapshot(sha) as fixture_snapshot:
+            with tempfile.TemporaryDirectory(prefix="cryodaq-fixture-seal-") as fixture_temporary:
+                fixture_config = Path(fixture_temporary) / "config"
+                fixture_readings_per_sample = _materialize_complete_soak_config(
+                    fixture_config,
+                    report_interval_s=report_interval_s,
+                    source_snapshot=fixture_snapshot,
+                )
+                source_fixture = _source_fixture_seal(
+                    fixture_config,
+                    expected_readings_per_sample=fixture_readings_per_sample,
+                ).payload
         evidence.write_manifest(
             {
                 "profile": "short",
@@ -2435,6 +3346,12 @@ class _PosixSoakRunner:
                 "python": sys.version,
                 "source_command": list(_SOURCE_ARGV),
                 "thresholds": soak.effective_thresholds(selected),
+                "periodic_schedule": {
+                    "interval_s": report_interval_s,
+                    "selection_boundary_offset_s": report_boundary_offset_s,
+                    "expected_receipts": 2,
+                },
+                "source_fixture": source_fixture,
                 "fatal_log_allowlist": [],
                 "capture_policy": "allowlisted metadata only; environment values forbidden",
             }
@@ -2464,52 +3381,90 @@ class _PosixSoakRunner:
         os.chmod(evidence.directory, 0o700)
         broad = soak.PsutilObserver(psutil)
         observations: set[Any] = set()
-        receipt_cuts: list[tuple[dict[str, object], dict[str, object], bytes, _AssistantProcessObservation]] = []
+        receipt_cut_type = tuple[
+            dict[str, object],
+            dict[str, object],
+            dict[str, object],
+            bytes,
+            _AssistantProcessObservation,
+        ]
+        pre_assistant_fault_cut: receipt_cut_type | None = None
+        post_assistant_fault_cut: receipt_cut_type | None = None
+        assistant_fault_injected = False
         process: subprocess.Popen[bytes] | None = None
         launcher_identity: _ProcessIdentity | None = None
-        bridge_pipe = _BridgeHandshakePipe.create()
-        artifact_pair = _ArtifactCapabilityPair.create()
-        sink = _ArtifactReceiptSink(artifact_pair.runner, nonce=artifact_pair.nonce, evidence_dir=evidence.directory)
+        launcher_settled = False
+        bridge_pipe: _BridgeHandshakePipe | None = None
+        artifact_pair: _ArtifactCapabilityPair | None = None
+        sink: _ArtifactReceiptSink | None = None
         bridge_buffer = bytearray()
         log_path: Path | None = None
         graceful = False
         shutdown_elapsed = 0.0
+        source_snapshot_context = _sealed_execution_snapshot(sha)
+        source_snapshot = source_snapshot_context.__enter__()
         try:
+            bridge_pipe = _BridgeHandshakePipe.create()
+            artifact_pair = _ArtifactCapabilityPair.create()
+            sink = _ArtifactReceiptSink(
+                artifact_pair.runner,
+                nonce=artifact_pair.nonce,
+                evidence_dir=evidence.directory,
+            )
             with tempfile.TemporaryDirectory(prefix="cryodaq-source-soak-") as temporary:
                 root = Path(temporary).resolve()
                 root.chmod(0o700)
                 config_dir = root / "config"
                 data_dir = root / "data"
-                config_dir.mkdir(mode=0o700)
                 data_dir.mkdir(mode=0o700)
-                (config_dir / "agent.yaml").write_text(
-                    "agent:\n  enabled: false\nreporting:\n  automatic_enabled: true\n",
-                    encoding="utf-8",
+                source_readings_per_sample = _materialize_complete_soak_config(
+                    config_dir,
+                    report_interval_s=report_interval_s,
+                    source_snapshot=source_snapshot,
                 )
-                (config_dir / "notifications.yaml").write_text(
-                    "telegram:\n  bot_token: '123456:abcdefghijklmnopqrstuvwxyz'\n  chat_id: -100123\n"
-                    "periodic_report:\n  enabled: true\n  report_interval_s: 60\n",
-                    encoding="utf-8",
+                if source_readings_per_sample != fixture_readings_per_sample:
+                    raise _RunnerFoundationError("passive source fixture behavior differs from its manifest")
+                source_runtime_seal = _source_fixture_seal(
+                    config_dir,
+                    expected_readings_per_sample=source_readings_per_sample,
                 )
+                if source_runtime_seal.payload != source_fixture:
+                    raise _RunnerFoundationError("passive source fixture differs from its manifest seal")
                 log_path = root / "launcher.log"
                 environment = _source_environment(
                     root,
+                    source_root=source_snapshot.root,
                     bridge_grant=bridge_pipe.child_environment(),
                     artifact_grant=artifact_pair.child_environment(),
                 )
-                with log_path.open("wb") as log:
-                    process = subprocess.Popen(
-                        _SOURCE_ARGV,
-                        cwd=_REPO_ROOT,
-                        env=environment,
-                        stdin=subprocess.DEVNULL,
+
+                def settle_log_writer() -> None:
+                    nonlocal launcher_settled
+                    if process is not None and launcher_identity is not None and not launcher_settled:
+                        if process.returncode is not None:
+                            _settle_adopted_owner_descendants(
+                                observer=locked,
+                                owner=owner_identity,
+                                deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
+                            )
+                            launcher_settled = True
+                            return
+                        _force_settle_owned_session(
+                            process,
+                            observer=locked,
+                            expected=launcher_identity,
+                            owner=owner_identity,
+                        )
+                        launcher_settled = True
+
+                with _launcher_log_capture(evidence, log_path, settle_writer=settle_log_writer) as log:
+                    process, launcher_identity = _spawn_gated_source(
+                        environment=environment,
                         stdout=log,
-                        stderr=subprocess.STDOUT,
-                        close_fds=True,
-                        pass_fds=bridge_pipe.child_pass_fds() + artifact_pair.child_pass_fds(),
-                        start_new_session=True,
+                        inherited_fds=bridge_pipe.child_pass_fds() + artifact_pair.child_pass_fds(),
+                        observer=locked,
+                        source_root=source_snapshot.root,
                     )
-                    launcher_identity = locked.identity_for_pid(process.pid)
                     bridge_pipe.close_parent_write_end()
                     artifact_pair.close_launcher_end()
                     launcher = soak.ProcessIdentity(
@@ -2560,6 +3515,8 @@ class _PosixSoakRunner:
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
                         raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
 
+                    _validate_short_soak_runtime_schedule(report_interval_s, time.time())
+
                     start = time.monotonic()
                     next_sample = 0.0
                     event_index = 0
@@ -2603,7 +3560,8 @@ class _PosixSoakRunner:
 
                         state = self._periodic_cut(data_dir)
                         active = None if state is None else state["active"]
-                        if type(active) is dict and active["status"] == "DELIVERING" and len(receipt_cuts) < 2:
+                        if type(active) is dict and active["status"] == "DELIVERING":
+                            delivery_state = json.loads(json.dumps(state))
                             assistant_id = current["assistant"]
                             assistant_observation = locked.observe_assistant(
                                 assistant_id.pid,
@@ -2613,31 +3571,70 @@ class _PosixSoakRunner:
                             sink.accept_one(
                                 assistant_observation=assistant_observation,
                                 expected_launcher_pid=process.pid,
-                                expected_assistant_generation=len(receipt_cuts) + 1,
+                                expected_assistant_generation=epochs["assistant"] + 1,
                                 expected_slot_id=active["slot_id"],
                                 expected_generation_id=active["generation_id"],
                                 expected_owner_token=active["owner_token"],
                                 expected_artifact_sha256=artifact["sha256"],
                             )
-                            success_deadline = time.monotonic() + _ARTIFACT_IO_TIMEOUT_S
-                            while time.monotonic() < success_deadline:
-                                last_state = self._periodic_cut(data_dir)
-                                if last_state is not None and last_state["active"]["status"] == "SUCCEEDED":
-                                    break
-                                time.sleep(0.05)
-                            if last_state is None or last_state["active"]["status"] != "SUCCEEDED":
-                                raise _RunnerFoundationError("ACK did not reach durable successful periodic state")
                             ledger = evidence._json_lines("periodic-receipts.jsonl")[-1]
                             photo, _metadata = evidence._read(ledger["filename"])
-                            receipt_cuts.append((dict(ledger), last_state, photo, assistant_observation))
+                            terminal_deadline = time.monotonic() + _ARTIFACT_IO_TIMEOUT_S
+                            terminal_state = None
+                            while time.monotonic() < terminal_deadline:
+                                candidate_state = self._periodic_cut(data_dir)
+                                terminal = None if candidate_state is None else candidate_state["last_terminal"]
+                                if (
+                                    candidate_state is not None
+                                    and candidate_state["active"] is None
+                                    and type(terminal) is dict
+                                    and terminal["status"] == "SUCCEEDED"
+                                    and terminal["slot_id"] == active["slot_id"]
+                                    and terminal["generation_id"] == active["generation_id"]
+                                    and terminal["destination_fingerprint"] == active["destination_fingerprint"]
+                                    and terminal["artifact_sha256"] == artifact["sha256"]
+                                ):
+                                    terminal_state = candidate_state
+                                    break
+                                time.sleep(0.05)
+                            if terminal_state is None:
+                                raise _RunnerFoundationError("ACK did not reach durable successful periodic state")
+
+                            health_deadline = time.monotonic() + _POST_ACK_HEALTH_TIMEOUT_S
+                            last_state = None
+                            while time.monotonic() < health_deadline:
+                                candidate_state = self._periodic_cut(data_dir)
+                                if candidate_state is not None:
+                                    try:
+                                        _validate_joined_receipt(
+                                            ledger_record=ledger,
+                                            delivery_state_payload=delivery_state,
+                                            terminal_state_payload=candidate_state,
+                                            artifact_bytes=photo,
+                                            assistant_observation=assistant_observation,
+                                            expected_launcher_pid=process.pid,
+                                        )
+                                    except _RunnerFoundationError:
+                                        pass
+                                    else:
+                                        last_state = candidate_state
+                                        break
+                                time.sleep(0.05)
+                            if last_state is None:
+                                raise _RunnerFoundationError("durable terminal receipt did not reach ready health")
+                            cut = (dict(ledger), delivery_state, last_state, photo, assistant_observation)
+                            if not assistant_fault_injected:
+                                pre_assistant_fault_cut = cut
+                            elif post_assistant_fault_cut is None:
+                                post_assistant_fault_cut = cut
                             last_health = float(last_state["health"]["updated_at"])
 
                         if event_index < len(selected.events) and elapsed >= selected.events[event_index].at_s:
                             event = selected.events[event_index]
-                            if event.target == "assistant" and len(receipt_cuts) != 1:
-                                raise _RunnerFoundationError(
-                                    "assistant fault is not preceded by exactly one durable receipt"
-                                )
+                            if event.target == "assistant":
+                                if pre_assistant_fault_cut is None:
+                                    raise _RunnerFoundationError("assistant fault lacks a durable pre-fault receipt")
+                                assistant_fault_injected = True
                             old = current[event.target]
                             expected = locked.identity_for_pid(old.pid)
                             locked.signal_exact(expected, signal.SIGTERM)
@@ -2727,38 +3724,73 @@ class _PosixSoakRunner:
                             break
                         time.sleep(min(0.1, max(0.001, next_sample - (time.monotonic() - start))))
 
-                    if len(receipt_cuts) != 2:
+                    if pre_assistant_fault_cut is None or post_assistant_fault_cut is None:
                         raise _RunnerFoundationError("short qualification lacks exact pre/post fault receipts")
                     shutdown_start = time.monotonic()
                     locked.signal_exact(launcher_identity, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=_SHUTDOWN_TIMEOUT_S)
-                    except subprocess.TimeoutExpired:
-                        _settle_owned_tree(process, observer=locked, expected=launcher_identity)
-                        raise _RunnerFoundationError("source launcher exceeded graceful shutdown ceiling") from None
+                    return_code = _wait_and_reap_owned_session(
+                        process,
+                        observer=locked,
+                        expected=launcher_identity,
+                        owner=owner_identity,
+                        timeout_s=_SHUTDOWN_TIMEOUT_S,
+                    )
+                    launcher_settled = True
                     shutdown_elapsed = time.monotonic() - shutdown_start
-                    graceful = process.returncode == 0 and shutdown_elapsed <= _SHUTDOWN_TIMEOUT_S
-                evidence.write_log("log-launcher.txt", log_path.read_text(encoding="utf-8", errors="replace"))
+                    graceful = return_code == 0 and shutdown_elapsed <= _SHUTDOWN_TIMEOUT_S
+                    if (
+                        _source_fixture_seal(
+                            config_dir,
+                            expected_readings_per_sample=source_readings_per_sample,
+                        )
+                        != source_runtime_seal
+                    ):
+                        raise _RunnerFoundationError("passive source fixture changed during execution")
         finally:
-            if process is not None and process.poll() is None and launcher_identity is not None:
-                _settle_owned_tree(process, observer=locked, expected=launcher_identity)
-            sink.close()
-            artifact_pair.close()
-            bridge_pipe.close()
+            with _block_termination_signals():
+                try:
+                    if process is not None and launcher_identity is not None and not launcher_settled:
+                        if process.returncode is None:
+                            _force_settle_owned_session(
+                                process,
+                                observer=locked,
+                                expected=launcher_identity,
+                                owner=owner_identity,
+                            )
+                        else:
+                            _settle_adopted_owner_descendants(
+                                observer=locked,
+                                owner=owner_identity,
+                                deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
+                            )
+                        launcher_settled = True
+                    if sink is not None:
+                        sink.close()
+                    if artifact_pair is not None:
+                        artifact_pair.close()
+                    if bridge_pipe is not None:
+                        bridge_pipe.close()
+                finally:
+                    source_snapshot_context.__exit__(*sys.exc_info())
 
         collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
         survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)
+        assert pre_assistant_fault_cut is not None and post_assistant_fault_cut is not None
+        all_ledger_records = tuple(evidence._json_lines("periodic-receipts.jsonl"))
         return _OwnedRunResult(
-            pre_ledger_record=receipt_cuts[0][0],
-            pre_state_payload=receipt_cuts[0][1],
-            pre_artifact_bytes=receipt_cuts[0][2],
-            pre_assistant_observation=receipt_cuts[0][3],
-            post_ledger_record=receipt_cuts[1][0],
-            post_state_payload=receipt_cuts[1][1],
-            post_artifact_bytes=receipt_cuts[1][2],
-            post_assistant_observation=receipt_cuts[1][3],
+            pre_ledger_record=pre_assistant_fault_cut[0],
+            pre_delivery_state_payload=pre_assistant_fault_cut[1],
+            pre_terminal_state_payload=pre_assistant_fault_cut[2],
+            pre_artifact_bytes=pre_assistant_fault_cut[3],
+            pre_assistant_observation=pre_assistant_fault_cut[4],
+            post_ledger_record=post_assistant_fault_cut[0],
+            post_delivery_state_payload=post_assistant_fault_cut[1],
+            post_terminal_state_payload=post_assistant_fault_cut[2],
+            post_artifact_bytes=post_assistant_fault_cut[3],
+            post_assistant_observation=post_assistant_fault_cut[4],
             expected_launcher_pid=launcher_identity.pid,
-            ledger_records=(receipt_cuts[0][0], receipt_cuts[1][0]),
+            report_interval_s=report_interval_s,
+            ledger_records=all_ledger_records,
             observations=tuple(observations),
             survivors=tuple(survivors),
             graceful=graceful,
@@ -2784,6 +3816,7 @@ class _PosixSoakRunner:
         )
         result.collector.observe(_ShaBoundary.BEFORE_TERMINAL_ACCEPTANCE)
         _validate_clean_sha_chain(result.collector.observations)
+        self._restore_subreaper()
         evidence.seal()
         evidence.finish_pass()
 

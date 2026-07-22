@@ -475,7 +475,7 @@ def _run_job_timeout_cell(executable: Path, root: Path, evidence_dir: Path) -> d
     command = frozen_report_command(executable, "exp-timeout", generation)
     # Leave only a short child deadline so ReportGenerator must terminate the
     # fake soffice tree and degrade to DOCX-only.
-    command[-1] = f"--deadline-epoch={time.time() + 10:.6f}"
+    command[-1] = f"--deadline-epoch={time.time() + 16:.6f}"
     env = os.environ.copy()
     env.update(
         {

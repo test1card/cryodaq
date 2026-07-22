@@ -17,6 +17,20 @@ from scripts import soak_mock_stack as soak
 _POSIX_EVIDENCE = pytest.mark.skipif(os.name != "posix", reason="evidence capability is POSIX-only")
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    ((signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)),
+)
+def test_interrupt_handler_latches_first_signal(first: int, second: int) -> None:
+    handler = soak._first_signal_interrupt_handler()
+
+    with pytest.raises(soak.RunInterrupted) as caught:
+        handler(first, object())
+    handler(second, object())
+
+    assert caught.value.signum == first
+
+
 @pytest.mark.skipif(os.name == "posix", reason="Windows fail-closed contract")
 def test_windows_rejects_evidence_without_creating_artifacts(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
@@ -308,6 +322,51 @@ def test_redaction_covers_nested_logs_urls_assignments_bearer_and_adjacent_argv(
         assert secret not in encoded
 
 
+def _source_fixture() -> dict[str, object]:
+    files = (
+        "agent.yaml",
+        "alarms_v3.yaml",
+        "channel_descriptors.yaml",
+        "channels.yaml",
+        "cooldown.yaml",
+        "housekeeping.yaml",
+        "instruments.yaml",
+        "interlocks.yaml",
+        "notifications.yaml",
+        "physical_alarms.yaml",
+        "plugins.yaml",
+        "safety.yaml",
+    )
+    entries = [{"path": "experiment_templates", "kind": "directory"}]
+    entries.extend(
+        {
+            "path": name,
+            "kind": "file",
+            "bytes": 0,
+            "sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
+        }
+        for name in files
+    )
+    entries.sort(key=lambda item: item["path"])
+    tree_sha = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return {
+        "schema": "cryodaq-soak-source-fixture/v1",
+        "instrument_id": "LS218_1",
+        "authority": "passive_measurement",
+        "mock": True,
+        "descriptor_count": 16,
+        "binding_count": 16,
+        "expected_readings_per_sample": 8,
+        "entries": entries,
+        "tree_sha256": tree_sha,
+    }
+
+
 def _manifest(*, dirty: bool = False) -> dict[str, object]:
     selected = soak.profile("short")
     return {
@@ -318,6 +377,12 @@ def _manifest(*, dirty: bool = False) -> dict[str, object]:
         "python": "test-python",
         "source_command": [sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray"],
         "thresholds": soak.effective_thresholds(selected),
+        "periodic_schedule": {
+            "interval_s": 600,
+            "selection_boundary_offset_s": 450,
+            "expected_receipts": 2,
+        },
+        "source_fixture": _source_fixture(),
         "fatal_log_allowlist": [],
         "capture_policy": "allowlisted-test-schema/v1",
     }
@@ -1073,6 +1138,11 @@ def test_evidence_forbids_environment_capture_and_failure_has_typed_metadata(tmp
             "manifest.json",
             lambda value: {**value, "thresholds": {"sample_interval_s": 999}},
             "thresholds differ",
+        ),
+        (
+            "manifest.json",
+            lambda value: {**value, "periodic_schedule": {"interval_s": 60}},
+            "periodic schedule",
         ),
         (
             "log_capture.json",

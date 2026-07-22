@@ -8,7 +8,7 @@ import os
 import signal
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -436,6 +436,79 @@ def test_process_group_cleanup_refuses_reused_leader_before_any_probe_or_signal(
     assert operations == []
 
 
+def test_reap_settles_descendant_adopted_only_after_leader_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader = runner._ProcessIdentity(123, "leader")
+    owner = runner._ProcessIdentity(1, "owner")
+    late_child = runner._ProcessIdentity(456, "late-child")
+    state = {"leader_reaped": False, "child_live": True}
+    signaled: list[tuple[runner._ProcessIdentity, int]] = []
+    reaped: list[int] = []
+
+    class Process:
+        pid = leader.pid
+        returncode: int | None = None
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == runner._PROCESS_GROUP_GRACE_S
+            state["leader_reaped"] = True
+            self.returncode = 0
+            return 0
+
+    class Observer:
+        def recheck_exact(self, identity: runner._ProcessIdentity) -> None:
+            assert identity == leader
+
+        def group_members(self, pgid: int) -> tuple[runner._ProcessIdentity, ...]:
+            assert pgid == leader.pid
+            return ()
+
+        def descendants(
+            self,
+            identity: runner._ProcessIdentity,
+            *,
+            include_zombies: bool = False,
+        ) -> tuple[runner._ProcessIdentity, ...]:
+            assert identity == owner
+            assert include_zombies is True
+            if state["leader_reaped"] and state["child_live"]:
+                return (late_child,)
+            return ()
+
+        def signal_exact_for_cleanup(self, identity: runner._ProcessIdentity, signum: int) -> None:
+            signaled.append((identity, signum))
+            state["child_live"] = False
+
+    monkeypatch.setattr(runner.os, "getpgid", lambda _pid: leader.pid, raising=False)
+    monkeypatch.setattr(runner.os, "P_PID", 1, raising=False)
+    monkeypatch.setattr(runner.os, "WEXITED", 1, raising=False)
+    monkeypatch.setattr(runner.os, "WNOHANG", 2, raising=False)
+    monkeypatch.setattr(runner.os, "WNOWAIT", 4, raising=False)
+    monkeypatch.setattr(runner.os, "waitid", lambda *_args: object(), raising=False)
+    monkeypatch.setattr(
+        runner.os,
+        "waitpid",
+        lambda pid, _options: reaped.append(pid) or (pid, 0),
+        raising=False,
+    )
+    monkeypatch.setattr(runner.time, "sleep", lambda _duration: None)
+
+    result = runner._reap_pinned_owned_session(  # type: ignore[arg-type]
+        Process(),
+        observer=Observer(),  # type: ignore[arg-type]
+        expected=leader,
+        owner=owner,
+        deadline=runner.time.monotonic() + 1.0,
+        reject_survivors=False,
+    )
+
+    assert result == 0
+    assert signaled == [(late_child, getattr(signal, "SIGKILL", 9))]
+    assert reaped == [late_child.pid]
+    assert state["child_live"] is False
+
+
 @pytest.mark.parametrize("signum", [None, signal.SIGTERM])
 def test_descendant_cut_rejects_single_empty_before_late_survivor(
     monkeypatch: pytest.MonkeyPatch, signum: int | None
@@ -524,6 +597,87 @@ def test_cleanup_completes_after_second_run_interruption(monkeypatch: pytest.Mon
     assert attempts == [1, 2, 3]
 
 
+def test_termination_mask_defers_signal_until_cleanup_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[object] = []
+    pending = soak._first_signal_interrupt_handler()
+
+    def pthread_sigmask(operation: object, mask: object) -> set[int]:
+        events.append((operation, mask))
+        if operation == "SETMASK":
+            pending(signal.SIGINT, object())
+        return {99}
+
+    monkeypatch.setattr(runner.sys, "platform", "linux")
+    monkeypatch.setattr(runner.signal, "SIG_BLOCK", "BLOCK", raising=False)
+    monkeypatch.setattr(runner.signal, "SIG_SETMASK", "SETMASK", raising=False)
+    monkeypatch.setattr(runner.signal, "pthread_sigmask", pthread_sigmask, raising=False)
+
+    with pytest.raises(soak.RunInterrupted) as caught:
+        with runner._block_termination_signals():
+            events.append("cleanup-complete")
+
+    assert caught.value.signum == signal.SIGINT
+    assert events[1] == "cleanup-complete"
+    assert events[0][0] == "BLOCK"
+    assert events[2] == ("SETMASK", {99})
+
+
+@pytest.mark.parametrize("prior", [False, True])
+def test_subreaper_activation_rolls_back_after_interruption(monkeypatch: pytest.MonkeyPatch, prior: bool) -> None:
+    calls: list[object] = []
+
+    class Evidence:
+        pass
+
+    monkeypatch.setattr(soak, "Evidence", Evidence)
+    monkeypatch.setattr(runner._PosixSoakRunner, "require_platform", staticmethod(lambda: None))
+    monkeypatch.setattr(runner, "_runner_subreaper_state", lambda: calls.append("GET") or prior)
+    monkeypatch.setattr(runner, "_block_termination_signals", nullcontext)
+
+    def apply(enabled: bool) -> None:
+        calls.append(("SET", enabled))
+        if enabled:
+            raise soak.RunInterrupted(signal.SIGINT)
+
+    monkeypatch.setattr(runner, "_apply_runner_subreaper", apply)
+
+    with pytest.raises(soak.RunInterrupted):
+        runner._PosixSoakRunner().run(Evidence())
+
+    assert calls == ["GET", ("SET", True), ("SET", prior)]
+
+
+def test_subreaper_restore_failure_remains_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    class Evidence:
+        pass
+
+    monkeypatch.setattr(soak, "Evidence", Evidence)
+    monkeypatch.setattr(runner._PosixSoakRunner, "require_platform", staticmethod(lambda: None))
+    monkeypatch.setattr(runner, "_runner_subreaper_state", lambda: False)
+    monkeypatch.setattr(runner, "_block_termination_signals", nullcontext)
+    monkeypatch.setattr(
+        type(runner._DELIVERY_EVIDENCE),
+        "run",
+        lambda *_args: (_ for _ in ()).throw(soak.RunInterrupted(signal.SIGTERM)),
+    )
+
+    def apply(enabled: bool) -> None:
+        calls.append(enabled)
+        if not enabled:
+            raise runner._RunnerFoundationError("restore verification failed")
+
+    monkeypatch.setattr(runner, "_apply_runner_subreaper", apply)
+    instance = runner._PosixSoakRunner()
+
+    with pytest.raises(runner._RunnerFoundationError, match="restore verification failed"):
+        instance.run(Evidence())
+
+    assert calls == [True, False]
+    assert instance._subreaper_restored is False
+
+
 def test_native_windows_exact_six_authority_is_fail_closed(tmp_path: Path) -> None:
     if runner.os.name != "nt":
         pytest.skip("native Windows contract")
@@ -575,8 +729,11 @@ def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypa
         monkeypatch.setenv(name, value)
     root = tmp_path / "isolated"
     root.mkdir(mode=0o700)
+    source_root = tmp_path / "sealed-source"
+    source_root.mkdir(mode=0o500)
     environment = runner._source_environment(
         root,
+        source_root=source_root,
         bridge_grant={runner._BRIDGE_FD_ENV: "11", runner._BRIDGE_NONCE_ENV: "a" * 64},
         artifact_grant={runner._ARTIFACT_FD_ENV: "12", runner._ARTIFACT_NONCE_ENV: "b" * 64},
     )
@@ -597,6 +754,8 @@ def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypa
     assert observed["CRYODAQ_ROOT"] == str(root.resolve())
     assert observed[runner._BRIDGE_NONCE_ENV] == "a" * 64
     assert observed[runner._ARTIFACT_NONCE_ENV] == "b" * 64
+    assert observed["PYTHONPATH"] == os.pathsep.join((str(source_root.resolve() / "src"), str(source_root.resolve())))
+    assert str(runner._REPO_ROOT) not in observed["PYTHONPATH"]
     assert set(environment) == {
         "CRYODAQ_ROOT",
         "HOME",
