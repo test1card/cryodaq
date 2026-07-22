@@ -254,9 +254,7 @@ def test_overlay_abort_in_more_menu(app, monkeypatch):
             abort_action.trigger()
 
     abort_cmds = [p for p in sent_payloads if p.get("cmd") == "experiment_abort"]
-    assert len(abort_cmds) == 1, (
-        f"expected 1 experiment_abort ZMQ command, got: {sent_payloads!r}"
-    )
+    assert len(abort_cmds) == 1, f"expected 1 experiment_abort ZMQ command, got: {sent_payloads!r}"
     assert abort_cmds[0]["experiment_id"] == "e1"
 
 
@@ -292,9 +290,7 @@ def test_phase_labels_are_full_russian_names(app):
         label = pill.findChild(QLabel, f"expPillLabel_{phase}")
         assert label is not None, f"pill for {phase} missing full-name label"
         expected = PHASE_LABELS_RU[phase]
-        assert label.text() == expected, (
-            f"pill {phase}: expected '{expected}', got '{label.text()}'"
-        )
+        assert label.text() == expected, f"pill {phase}: expected '{expected}', got '{label.text()}'"
         # No ellipsis — full canonical name must appear verbatim.
         assert "\u2026" not in label.text()
         # Numbered prefix is the reading-order index (1..6, no leading zero).
@@ -335,10 +331,22 @@ def test_nav_buttons_hidden_when_unavailable(app):
 # ----------------------------------------------------------------------
 
 
-def test_set_connected_default_true(app):
+def test_set_connected_defaults_fail_closed(app):
     overlay = ExperimentOverlay()
-    # Default keeps actions functional until host pushes the first tick.
-    assert overlay._connected is True
+    overlay.set_experiment(
+        {
+            "name": "E",
+            "start_time": "2026-04-15T10:00:00+00:00",
+            "experiment_id": "e1",
+            "template_id": "custom",
+        }
+    )
+    assert overlay._connected is False
+    assert overlay._save_btn.isEnabled() is False
+    assert overlay._finalize_btn.isEnabled() is False
+    assert overlay._prev_btn.isEnabled() is False
+    assert overlay._next_btn.isEnabled() is False
+    assert overlay._landing_create_btn.isEnabled() is False
 
 
 def test_set_connected_false_disables_finalize_when_active(app):
@@ -399,7 +407,7 @@ def test_set_connected_reconnect_restores_finalize(app):
 
 def test_set_connected_idempotent(app):
     overlay = ExperimentOverlay()
-    overlay.set_connected(True)  # already True
+    overlay.set_connected(True)
     overlay.set_connected(True)
     assert overlay._connected is True
 
@@ -457,6 +465,7 @@ def test_save_result_reenables_when_connected(app):
         },
         phase_history=[],
     )
+    overlay.set_connected(True)
     # Disabled by save in flight.
     overlay._save_btn.setEnabled(False)
     overlay._on_save_result({"ok": True})
@@ -587,9 +596,7 @@ def test_format_time_older_than_yesterday_shows_date(app, monkeypatch):
 
     # Format "DD.MM HH:MM" — 11 chars total.
     assert len(text) == 11, f"older format should be DD.MM HH:MM (11 chars), got {text!r}"
-    assert text[2] == "." and text[5] == " " and text[8] == ":", (
-        f"format separators wrong in {text!r}"
-    )
+    assert text[2] == "." and text[5] == " " and text[8] == ":", f"format separators wrong in {text!r}"
     assert text == "10.06 08:00"
 
 
@@ -603,15 +610,9 @@ def test_no_close_button_on_experiment_overlay(app):
 
     overlay = ExperimentOverlay()
     for btn in overlay.findChildren(QPushButton):
-        assert btn.text() != "\u2715", (
-            f"× close button still present (objectName={btn.objectName()!r})"
-        )
-        assert "close" not in btn.objectName().lower(), (
-            f"close-named button still present: {btn.objectName()!r}"
-        )
-    assert not hasattr(overlay, "_close_btn"), (
-        "_close_btn attribute re-introduced on ExperimentOverlay"
-    )
+        assert btn.text() != "\u2715", f"× close button still present (objectName={btn.objectName()!r})"
+        assert "close" not in btn.objectName().lower(), f"close-named button still present: {btn.objectName()!r}"
+    assert not hasattr(overlay, "_close_btn"), "_close_btn attribute re-introduced on ExperimentOverlay"
 
 
 def test_landing_page_visible_on_empty_overlay(app):
@@ -641,6 +642,7 @@ def test_landing_page_text_mentions_required_action(app):
 def test_create_button_click_emits_signal(app):
     """Clicking the landing CTA fires experiment_create_requested."""
     overlay = ExperimentOverlay()
+    overlay.set_connected(True)
     received: list[None] = []
     overlay.experiment_create_requested.connect(lambda: received.append(None))
     overlay._landing_create_btn.click()
@@ -693,6 +695,7 @@ def test_current_phase_pill_uses_accent_not_status_ok(app, monkeypatch):
     monkeypatch.setattr(_theme_mod, "STATUS_OK", _SENTINEL_STATUS_OK)
     # experiment_overlay imports from theme at module level; patch there too.
     import cryodaq.gui.shell.experiment_overlay as _eo
+
     if hasattr(_eo, "theme"):
         monkeypatch.setattr(_eo.theme, "ACCENT", _SENTINEL_ACCENT)
         monkeypatch.setattr(_eo.theme, "STATUS_OK", _SENTINEL_STATUS_OK)
@@ -710,10 +713,345 @@ def test_current_phase_pill_uses_accent_not_status_ok(app, monkeypatch):
         phase_history=[],
     )
     ss = overlay._phase_pills["cooldown"].styleSheet()
-    assert _SENTINEL_ACCENT in ss, (
-        f"current phase pill missing ACCENT sentinel {_SENTINEL_ACCENT!r}: {ss!r}"
-    )
+    assert _SENTINEL_ACCENT in ss, f"current phase pill missing ACCENT sentinel {_SENTINEL_ACCENT!r}: {ss!r}"
     assert _SENTINEL_STATUS_OK not in ss, (
-        f"current phase pill leaked STATUS_OK sentinel {_SENTINEL_STATUS_OK!r} "
-        f"(reserved for safety): {ss!r}"
+        f"current phase pill leaked STATUS_OK sentinel {_SENTINEL_STATUS_OK!r} (reserved for safety): {ss!r}"
     )
+
+
+def test_periodic_status_refresh_preserves_dirty_card_and_name(app):
+    """A one-second status poll must not erase any unsaved operator field."""
+
+    overlay = ExperimentOverlay()
+    timeline_loads: list[str] = []
+    overlay._reload_timeline = lambda: timeline_loads.append("load")  # type: ignore[method-assign]
+    overlay.set_connected(True)
+    overlay.set_templates([{"id": "custom", "name": "Custom", "custom_fields": [{"id": "goal", "label": "Цель"}]}])
+    initial = {
+        "experiment_id": "exp-edit",
+        "name": "Исходное имя",
+        "start_time": "2026-04-15T10:00:00+00:00",
+        "template_id": "custom",
+        "current_phase": "preparation",
+        "sample": "backend sample",
+        "description": "backend description",
+        "notes": "backend notes",
+        "custom_fields": {"goal": "backend goal"},
+    }
+    overlay.set_experiment(initial)
+
+    overlay._sample_edit.setText("operator sample")
+    overlay._desc_edit.setPlainText("operator description")
+    overlay._notes_edit.setPlainText("operator notes")
+    overlay._custom_edits["goal"].setText("operator goal")
+    overlay._enter_name_edit()
+    overlay._name_edit.setText("Имя оператора")
+    overlay._commit_name_edit()
+
+    polled = {
+        **initial,
+        "name": "remote name",
+        "current_phase": "vacuum",
+        "sample": "remote sample",
+        "description": "remote description",
+        "notes": "remote notes",
+        "custom_fields": {"goal": "remote goal"},
+    }
+    overlay.set_experiment(polled)
+
+    assert overlay._displayed_name() == "Имя оператора"
+    assert overlay._sample_edit.text() == "operator sample"
+    assert overlay._desc_edit.toPlainText() == "operator description"
+    assert overlay._notes_edit.toPlainText() == "operator notes"
+    assert overlay._custom_edits["goal"].text() == "operator goal"
+    assert "Engine" in overlay._save_status.text()
+    assert "Откачка" in overlay._phase_status.text()
+    assert timeline_loads == ["load"], "ordinary status polls must not spawn timeline workers"
+
+
+class _DeferredSignal:
+    def __init__(self) -> None:
+        self._callbacks: list = []
+
+    def connect(self, callback) -> None:  # noqa: ANN001
+        self._callbacks.append(callback)
+
+    def emit(self, result: dict) -> None:
+        for callback in list(self._callbacks):
+            callback(result)
+
+
+class _DeferredWorker:
+    instances: list[_DeferredWorker] = []
+
+    def __init__(self, payload: dict, parent=None) -> None:  # noqa: ANN001
+        self.payload = payload
+        self.parent = parent
+        self.finished = _DeferredSignal()
+        self.started = False
+        type(self).instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+
+def _active_overlay_without_timeline() -> ExperimentOverlay:
+    overlay = ExperimentOverlay()
+    overlay._reload_timeline = lambda: None  # type: ignore[method-assign]
+    overlay.set_connected(True)
+    overlay.set_experiment(
+        {
+            "experiment_id": "exp-a",
+            "name": "A",
+            "start_time": "2026-07-19T00:00:00+00:00",
+            "template_id": "custom",
+            "current_phase": "preparation",
+            "sample": "initial",
+        }
+    )
+    return overlay
+
+
+def test_disconnected_direct_mutation_handlers_spawn_no_worker(app, monkeypatch):
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _DeferredWorker)
+    overlay = ExperimentOverlay()
+    overlay._reload_timeline = lambda: None  # type: ignore[method-assign]
+    overlay.set_experiment(
+        {
+            "experiment_id": "exp-a",
+            "name": "A",
+            "start_time": "2026-07-19T00:00:00+00:00",
+            "template_id": "custom",
+            "current_phase": "preparation",
+        }
+    )
+
+    overlay._on_save_card()
+    overlay._send_advance("vacuum")
+    overlay._do_finalize("experiment_finalize")
+
+    assert _DeferredWorker.instances == []
+
+
+def test_phase_command_carries_exact_active_experiment_id(app, monkeypatch):
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _DeferredWorker)
+    overlay = _active_overlay_without_timeline()
+
+    overlay._send_advance("vacuum")
+
+    assert [worker.payload for worker in _DeferredWorker.instances] == [
+        {
+            "cmd": "experiment_advance_phase",
+            "experiment_id": "exp-a",
+            "phase": "vacuum",
+        }
+    ]
+
+
+def test_stale_save_reply_cannot_mutate_replacement_experiment(app, monkeypatch):
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _DeferredWorker)
+    overlay = _active_overlay_without_timeline()
+    updates: list[None] = []
+    overlay.experiment_updated.connect(lambda: updates.append(None))
+    overlay._sample_edit.setText("A local")
+    overlay._mark_card_dirty()
+    overlay._on_save_card()
+    old_worker = _DeferredWorker.instances[-1]
+
+    overlay.set_experiment(
+        {
+            "experiment_id": "exp-b",
+            "name": "B",
+            "start_time": "2026-07-19T01:00:00+00:00",
+            "template_id": "custom",
+            "current_phase": "preparation",
+            "sample": "B backend",
+        }
+    )
+    overlay._sample_edit.setText("B local")
+    overlay._mark_card_dirty()
+    old_worker.finished.emit({"ok": True})
+
+    assert overlay._sample_edit.text() == "B local"
+    assert overlay._card_dirty is True
+    assert updates == []
+    assert overlay._save_btn.isEnabled() is False
+
+
+def test_disconnect_reconnect_invalidates_inflight_save_reply(app, monkeypatch):
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _DeferredWorker)
+    overlay = _active_overlay_without_timeline()
+    updates: list[None] = []
+    overlay.experiment_updated.connect(lambda: updates.append(None))
+    overlay._on_save_card()
+    old_worker = _DeferredWorker.instances[-1]
+
+    overlay.set_connected(False)
+    overlay.set_connected(True)
+    old_worker.finished.emit({"ok": True})
+
+    assert updates == []
+    assert overlay._save_btn.isEnabled() is False
+
+
+def test_save_timeout_retains_local_pending_truth(app, monkeypatch):
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _DeferredWorker)
+    overlay = _active_overlay_without_timeline()
+    overlay._sample_edit.setText("operator value")
+    overlay._mark_card_dirty()
+    overlay._on_save_card()
+    worker = _DeferredWorker.instances[-1]
+
+    worker.finished.emit({"ok": False, "_handler_timeout": True, "error": "Engine timed out"})
+
+    assert overlay._pending_card_snapshot is not None
+    assert overlay._card_dirty is True
+    assert overlay._sample_edit.text() == "operator value"
+    assert "неизвестен" in overlay._save_status.text()
+
+
+def test_finalize_confirmation_rechecks_authority_after_modal(app, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    import cryodaq.gui.zmq_client as _zmq_mod
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(_zmq_mod, "ZmqCommandWorker", _DeferredWorker)
+    overlay = _active_overlay_without_timeline()
+
+    def _disconnect_during_modal(_dialog) -> None:  # noqa: ANN001
+        overlay.set_connected(False)
+
+    monkeypatch.setattr(QMessageBox, "exec", _disconnect_during_modal)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda _dialog: None)
+    overlay._on_finalize_clicked()
+
+    assert _DeferredWorker.instances == []
+
+
+def test_timeline_failure_retains_last_known_entries(app):
+    overlay = ExperimentOverlay()
+    overlay._experiment = {"experiment_id": "exp-timeline"}
+    overlay._on_timeline_result(
+        {
+            "ok": True,
+            "scope_receipt": {
+                "schema": "operator_log_read_scope_v1",
+                "log_scope": "experiment",
+                "experiment_id": "exp-timeline",
+            },
+            "entries": [
+                {
+                    "timestamp": "2026-07-19T00:00:00+00:00",
+                    "author": "operator",
+                    "message": "stable evidence",
+                }
+            ],
+        },
+        experiment_id="exp-timeline",
+    )
+    previous = overlay._timeline_list.item(0).text()
+
+    overlay._on_timeline_result({"ok": False, "error": "disk temporarily busy"})
+
+    assert overlay._timeline_list.count() == 1
+    assert overlay._timeline_list.item(0).text() == previous
+    assert "последние известные" in overlay._timeline_status.text()
+    assert not overlay._timeline_status.isHidden()
+
+
+def test_malformed_timeline_reply_retains_last_known_entries(app):
+    overlay = ExperimentOverlay()
+    overlay._experiment = {"experiment_id": "exp-timeline"}
+    receipt = {
+        "schema": "operator_log_read_scope_v1",
+        "log_scope": "experiment",
+        "experiment_id": "exp-timeline",
+    }
+    overlay._on_timeline_result(
+        {
+            "ok": True,
+            "scope_receipt": receipt,
+            "entries": [{"message": "known", "timestamp": ""}],
+        },
+        experiment_id="exp-timeline",
+    )
+    previous = overlay._timeline_list.item(0).text()
+
+    overlay._on_timeline_result(
+        {"ok": True, "scope_receipt": receipt, "entries": "not-a-list"},
+        experiment_id="exp-timeline",
+    )
+
+    assert overlay._timeline_list.item(0).text() == previous
+    assert "некорректный формат" in overlay._timeline_status.text()
+
+
+def test_focused_clean_card_defers_then_applies_backend_refresh(app):
+    """Focus is retained without making a clean field permanently stale."""
+
+    overlay = ExperimentOverlay()
+    overlay._reload_timeline = lambda: None  # type: ignore[method-assign]
+    initial = {
+        "experiment_id": "exp-focus",
+        "name": "E",
+        "start_time": "2026-04-15T10:00:00+00:00",
+        "template_id": "custom",
+        "sample": "old",
+    }
+    overlay.set_experiment(initial)
+    overlay._card_editor_has_focus = lambda: True  # type: ignore[method-assign]
+    overlay.set_experiment({**initial, "sample": "new"})
+    assert overlay._sample_edit.text() == "old"
+
+    overlay._card_editor_has_focus = lambda: False  # type: ignore[method-assign]
+    overlay.set_experiment({**initial, "sample": "new"})
+    assert overlay._sample_edit.text() == "new"
+    assert overlay._save_status.text() == ""
+
+
+def test_saved_card_stays_local_until_exact_engine_ack(app):
+    """A successful command reply alone cannot let an older poll clobber the edit."""
+
+    overlay = ExperimentOverlay()
+    overlay._reload_timeline = lambda: None  # type: ignore[method-assign]
+    initial = {
+        "experiment_id": "exp-ack",
+        "name": "E",
+        "start_time": "2026-04-15T10:00:00+00:00",
+        "template_id": "custom",
+        "sample": "old",
+    }
+    overlay.set_experiment(initial)
+    overlay._sample_edit.setText("saved value")
+    overlay._mark_card_dirty()
+    payload = overlay._build_card_payload()
+    overlay._pending_card_snapshot = {
+        key: payload[key] for key in ("title", "sample", "description", "notes", "custom_fields")
+    }
+    overlay._on_save_result({"ok": True})
+
+    overlay.set_experiment(initial)
+    assert overlay._sample_edit.text() == "saved value"
+    assert overlay._card_dirty is True
+
+    overlay.set_experiment({**initial, "sample": "saved value"})
+    assert overlay._sample_edit.text() == "saved value"
+    assert overlay._pending_card_snapshot is None
+    assert overlay._card_dirty is False
+    assert overlay._save_status.text() == "Сохранено"

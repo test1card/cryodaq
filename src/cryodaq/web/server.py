@@ -30,6 +30,7 @@ except Exception:
 import json
 import logging
 import math
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,23 +62,204 @@ _CMD_ADDR = "tcp://127.0.0.1:5556"  # REP port = PUB + 1
 # and can OOM the web process. Clamp rather than 500.
 _HISTORY_MAX_MINUTES = 1440  # 24 h — covers the dashboard's longest window
 _LOG_MAX_LIMIT = 2000
+_MUTATION_PROTOCOL_MAJOR = 1
+_MUTATION_CAPABILITY = "cryodaq_mutation_v1"
+_MUTATION_RECEIPT_SCHEMA = "mutation_compatibility_v1"
+_MUTATION_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "accepted",
+        "server_protocol_major",
+        "required_capability",
+        "capability_token",
+    }
+)
+_MUTATION_ENVELOPE_KEYS = frozenset(
+    {"protocol_major", "mutation_capability", "capability_token"}
+)
+_WEB_READ_ONLY_COMMANDS = frozenset(
+    {
+        "mutation_capabilities",
+        "safety_status",
+        "alarm_v2_status",
+        "experiment_status",
+        "log_get",
+    }
+)
+_mutation_lock = threading.Lock()
+_mutation_receipt: dict[str, Any] | None = None
 
 
-def _send_engine_command(cmd: dict) -> dict:
-    """Send a command to the engine via ZMQ REQ/REP. Thread-safe per call."""
+def _json_safe_value(value: Any) -> Any:
+    """Return a strict-JSON projection with non-finite floats masked.
+
+    JSON's ``NaN``/``Infinity`` extensions are not valid RFC 8259 values and
+    browsers disagree about how to handle them.  Public monitoring surfaces
+    therefore preserve the reading/status evidence but represent an unknown
+    numeric value as ``null``.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_value(item) for item in value]
+    return value
+
+
+def _requires_mutation_envelope(action: object) -> bool:
+    """Default unknown web commands to the fail-closed mutation path."""
+    return type(action) is not str or not action or action not in _WEB_READ_ONLY_COMMANDS
+
+
+def _send_engine_command_once(cmd: dict[str, Any]) -> dict[str, Any]:
+    """Send exactly one REQ and classify whether a mutation may have landed."""
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.REQ)
     sock.setsockopt(zmq.RCVTIMEO, 5000)
     sock.setsockopt(zmq.SNDTIMEO, 5000)
     sock.setsockopt(zmq.LINGER, 0)
+    send_started = False
     try:
         sock.connect(_CMD_ADDR)
+        send_started = True
         sock.send_json(cmd)
-        return sock.recv_json()
-    except zmq.ZMQError:
-        return {"ok": False, "error": "Engine не отвечает"}
+        response = sock.recv_json()
+        if type(response) is not dict:
+            raise ValueError("engine response is not an object")
+        return response
+    except Exception as exc:  # noqa: BLE001 - turn transport/codec faults into evidence
+        logger.warning("Web engine command transport failed for %s: %s", cmd.get("cmd"), exc)
+        if send_started and _requires_mutation_envelope(cmd.get("cmd")):
+            return {
+                "ok": False,
+                "error_code": "mutation_outcome_unknown",
+                "error": "Engine did not return a valid mutation receipt; outcome is unknown",
+                "delivery_state": "unknown",
+                "commit_state": "unknown",
+                "retry_safe": False,
+            }
+        return {
+            "ok": False,
+            "error_code": "engine_unavailable",
+            "error": "Engine не отвечает",
+            "delivery_state": "not_confirmed",
+            "retry_safe": True,
+        }
     finally:
         sock.close()
+
+
+def _mutation_discovery_failure() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error_code": "mutation_protocol_incompatible",
+        "error": "Web mutation compatibility discovery failed; command was not dispatched",
+        "delivery_state": "not_dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": True,
+        "compatibility_receipt": {
+            "schema": _MUTATION_RECEIPT_SCHEMA,
+            "accepted": False,
+            "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "required_capability": _MUTATION_CAPABILITY,
+        },
+    }
+
+
+def _ensure_mutation_compatibility() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Discover one strict receipt; concurrent web writes share the flight."""
+    global _mutation_receipt
+    with _mutation_lock:
+        if _mutation_receipt is not None:
+            return dict(_mutation_receipt), None
+        discovery = _send_engine_command_once({"cmd": "mutation_capabilities"})
+        receipt = discovery.get("compatibility_receipt") if type(discovery) is dict else None
+        token = receipt.get("capability_token") if type(receipt) is dict else None
+        valid = (
+            discovery.get("ok") is True
+            and type(receipt) is dict
+            and set(receipt) == _MUTATION_RECEIPT_KEYS
+            and receipt.get("schema") == _MUTATION_RECEIPT_SCHEMA
+            and receipt.get("accepted") is True
+            and type(receipt.get("server_protocol_major")) is int
+            and receipt.get("server_protocol_major") == _MUTATION_PROTOCOL_MAJOR
+            and receipt.get("required_capability") == _MUTATION_CAPABILITY
+            and type(token) is str
+            and 16 <= len(token) <= 512
+            and token.isprintable()
+        )
+        if not valid:
+            _mutation_receipt = None
+            return None, _mutation_discovery_failure()
+        _mutation_receipt = {
+            "schema": receipt["schema"],
+            "accepted": True,
+            "server_protocol_major": receipt["server_protocol_major"],
+            "required_capability": receipt["required_capability"],
+            "capability_token": token,
+        }
+        return dict(_mutation_receipt), None
+
+
+def _invalidate_mutation_compatibility() -> None:
+    global _mutation_receipt
+    with _mutation_lock:
+        _mutation_receipt = None
+
+
+def _send_engine_command(cmd: dict) -> dict:
+    """Dispatch one web command with fail-closed mutation negotiation."""
+    if type(cmd) is not dict:
+        return {
+            "ok": False,
+            "error_code": "command_invalid",
+            "error": "Web engine command must be a plain mapping",
+            "retry_safe": True,
+        }
+    action = cmd.get("cmd")
+    if type(action) is not str or not action:
+        return {
+            "ok": False,
+            "error_code": "command_invalid",
+            "error": "Web engine command requires a non-empty string cmd",
+            "retry_safe": True,
+        }
+    command = {key: value for key, value in cmd.items() if key not in _MUTATION_ENVELOPE_KEYS}
+    if not _requires_mutation_envelope(action):
+        return _send_engine_command_once(command)
+
+    receipt, failure = _ensure_mutation_compatibility()
+    if failure is not None:
+        return failure
+    assert receipt is not None
+    command.update(
+        {
+            "protocol_major": receipt["server_protocol_major"],
+            "mutation_capability": receipt["required_capability"],
+            "capability_token": receipt["capability_token"],
+        }
+    )
+    result = _send_engine_command_once(command)
+    if result.get("error_code") == "mutation_protocol_incompatible":
+        # Refresh only for the next explicit HTTP request; never replay here.
+        _invalidate_mutation_compatibility()
+    return result
+
+
+def _global_log_scope_receipt_matches(result: object) -> bool:
+    if type(result) is not dict:
+        return False
+    receipt = result.get("scope_receipt")
+    return (
+        type(receipt) is dict
+        and set(receipt) == {"schema", "log_scope", "experiment_id"}
+        and receipt.get("schema") == "operator_log_read_scope_v1"
+        and receipt.get("log_scope") == "all"
+        and receipt.get("experiment_id") is None
+    )
 
 
 async def _async_engine_command(cmd: dict) -> dict:
@@ -117,7 +299,7 @@ class _ServerState:
         data = {
             "timestamp": reading.timestamp.isoformat(),
             "channel": reading.channel,
-            "value": reading.value,
+            "value": _json_safe_value(reading.value),
             "unit": reading.unit,
             "status": reading.status.value,
         }
@@ -175,7 +357,7 @@ async def _broadcast(data: dict[str, Any]) -> None:
     """Отправить JSON всем подключённым WebSocket-клиентам."""
     if not _state.clients:
         return
-    message = json.dumps(data, ensure_ascii=False)
+    message = json.dumps(_json_safe_value(data), ensure_ascii=False, allow_nan=False)
     disconnected: list[WebSocket] = []
     for ws in _state.clients:
         try:
@@ -226,14 +408,9 @@ def _on_reading_callback(reading: Reading) -> None:
     if q is None:
         return
 
-    data = {
-        "type": "reading",
-        "timestamp": reading.timestamp.isoformat(),
-        "channel": reading.channel,
-        "value": reading.value,
-        "unit": reading.unit,
-        "status": reading.status.value,
-    }
+    # Build the event from the already-normalised cache entry so the REST and
+    # WebSocket surfaces cannot drift on missing/non-finite value semantics.
+    data = {"type": "reading", **_state.last_readings[reading.channel]}
     try:
         q.put_nowait(data)
     except asyncio.QueueFull:

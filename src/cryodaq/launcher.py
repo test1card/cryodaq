@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import logging.handlers
@@ -28,11 +29,12 @@ import uuid
 import webbrowser
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from typing import IO, Any
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QActionGroup, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -50,8 +52,9 @@ from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.state.operator_snapshot_ingress import start_operator_snapshot_ingress
+from cryodaq.gui.tray_status import TrayLevel, resolve_tray_status, tray_icon_for_level
 from cryodaq.gui.zmq_client import ZmqBridge, ZmqCommandWorker, set_bridge
-from cryodaq.instance_lock import release_lock, try_acquire_lock
+from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
 
 logger = logging.getLogger("cryodaq.launcher")
 
@@ -63,6 +66,18 @@ _PERIODIC_HEALTH_FUTURE_SKEW_S = 300.0
 _PERIODIC_CONFIG_REJECTED_CODE = "H3_CONFIG_REJECTED"
 _PERIODIC_HEALTH_READ_FAILED_CODE = "H3_HEALTH_READ_FAILED"
 _PERIODIC_RUNTIME_UNAVAILABLE_CODE = "H3_RUNTIME_UNAVAILABLE"
+_SHUTDOWN_RETRY_DELAYS_MS = (1_000, 3_000, 10_000, 30_000)
+
+
+class _ShutdownPhase(Enum):
+    """Monotonic launcher shutdown phases."""
+
+    RUNNING = auto()
+    QUIESCING = auto()
+    SETTLING = auto()
+    RETRY_WAIT = auto()
+    FINALIZING = auto()
+    COMPLETE = auto()
 
 
 @dataclass(slots=True)
@@ -260,6 +275,35 @@ def _guard_soak_bridge_fd_from_descendants(fd: int) -> None:
     _SOAK_BRIDGE_ACTIVE_FDS.add(fd)
 
 
+def _close_owned_fd_exact(fd: int, *, label: str) -> None:
+    """Close one retained descriptor without ever closing a reused number.
+
+    Python cannot assume that a failed ``close(2)`` left the descriptor open.
+    Re-probe its identity: the same object is safe to retry later, ``EBADF``
+    proves it is already gone, and a different object must never be touched.
+    """
+
+    try:
+        before = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno == errno.EBADF:
+            return
+        raise RuntimeError(f"{label} descriptor identity could not be read") from exc
+    try:
+        os.close(fd)
+    except OSError as exc:
+        try:
+            after = os.fstat(fd)
+        except OSError as probe_error:
+            if probe_error.errno == errno.EBADF:
+                logger.warning("%s close reported %s but the descriptor is closed", label, exc)
+                return
+            raise RuntimeError(f"{label} close outcome is ambiguous") from probe_error
+        if os.path.samestat(before, after):
+            raise RuntimeError(f"{label} descriptor remained open after close failure") from exc
+        logger.critical("%s descriptor number was reused during close; replacement left untouched", label)
+
+
 @dataclass(slots=True)
 class _SoakBridgeHandshake:
     """Runner-owned pathless evidence stream for an isolated POSIX mock launcher."""
@@ -274,12 +318,9 @@ class _SoakBridgeHandshake:
     def close(self) -> None:
         if self._closed:
             return
+        _close_owned_fd_exact(self.fd, label="soak bridge")
         self._closed = True
         _SOAK_BRIDGE_ACTIVE_FDS.discard(self.fd)
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
 
     def emit(self, *, bridge_pid: int | None, restart_count: int) -> None:
         if self._closed or self._emitted:
@@ -404,13 +445,11 @@ class _SoakArtifactCapability:
         self.generation = candidate
 
     def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            _SOAK_BRIDGE_ACTIVE_FDS.discard(self.fd)
-            try:
-                os.close(self.fd)
-            except OSError:
-                pass
+        if self._closed:
+            return
+        _close_owned_fd_exact(self.fd, label="soak artifact")
+        self._closed = True
+        _SOAK_BRIDGE_ACTIVE_FDS.discard(self.fd)
 
 
 def _consume_soak_artifact_capability(
@@ -787,19 +826,6 @@ def _pump_engine_stderr(pipe: IO[bytes], stderr_logger: logging.Logger) -> None:
             pass
 
 
-def _make_icon(color: str) -> QIcon:
-    """Создать иконку-кружок указанного цвета (16×16)."""
-    pix = QPixmap(16, 16)
-    pix.fill(QColor(0, 0, 0, 0))
-    painter = QPainter(pix)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor(color))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(2, 2, 12, 12)
-    painter.end()
-    return QIcon(pix)
-
-
 def _is_port_busy(port: int) -> bool:
     """Check if engine is listening by probing BOTH PUB and CMD ports."""
     import socket
@@ -850,7 +876,6 @@ class LauncherWindow(QMainWindow):
         *,
         mock: bool = False,
         tray_only: bool = False,
-        lock_fd: int | None = None,
         replay_source: Path | None = None,
         replay_speed: float = 5.0,
         replay_phase: str = "cooldown",
@@ -864,7 +889,6 @@ class LauncherWindow(QMainWindow):
         self._app = app
         self._mock = mock
         self._tray_only = tray_only
-        self._lock_fd = lock_fd
         self._replay_source = replay_source
         self._replay_speed = replay_speed
         self._replay_phase = replay_phase
@@ -899,12 +923,23 @@ class LauncherWindow(QMainWindow):
         # actually runs.
         self._restart_pending: bool = False
         self._shutdown_requested: bool = False
+        self._shutdown_phase = _ShutdownPhase.RUNNING
+        self._shutdown_attempt_active = False
+        self._shutdown_retry_pending = False
+        self._shutdown_retry_index = 0
+        self._shutdown_quiesced = False
+        self._shutdown_settled: set[str] = set()
+        self._shutdown_last_errors: dict[str, Exception] = {}
+        self._shutdown_failure_notified = False
         self._replay_engine_failed: bool = False
         self._reading_count = 0
         self._has_errors = False
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
-        self._last_alarm_count: int = 0
+        # Alarm authority is not wired into this coarse launcher surface yet.
+        # Unknown must remain unknown: seeding zero could authorize a green
+        # tray despite an unavailable alarm feed.
+        self._last_alarm_count: int | None = None
         self._safety_worker: ZmqCommandWorker | None = None
 
         # cryodaq-assistant (Гемма + RAG + automatic report reconciliation)
@@ -1221,15 +1256,22 @@ class LauncherWindow(QMainWindow):
             self._wait_engine_ready()
 
     def _close_engine_stderr_stream(self) -> None:
-        if self._engine_stderr_thread is not None:
-            self._engine_stderr_thread.join(timeout=2.0)
+        thread = self._engine_stderr_thread
+        if thread is not None:
+            if thread.is_alive():
+                thread.join(timeout=2.0)
+            if thread.is_alive():
+                raise RuntimeError("engine stderr pump remained alive after bounded join")
             self._engine_stderr_thread = None
-        if self._engine_stderr_logger is not None and self._engine_stderr_handler is not None:
-            try:
-                self._engine_stderr_logger.removeHandler(self._engine_stderr_handler)
-            except Exception:
-                pass
-            self._engine_stderr_handler.close()
+
+        stderr_logger = self._engine_stderr_logger
+        stderr_handler = self._engine_stderr_handler
+        if stderr_logger is None and stderr_handler is None:
+            return
+        if stderr_logger is None or stderr_handler is None:
+            raise RuntimeError("engine stderr logger ownership is inconsistent")
+        stderr_logger.removeHandler(stderr_handler)
+        stderr_handler.close()
         self._engine_stderr_handler = None
         self._engine_stderr_logger = None
 
@@ -1272,23 +1314,48 @@ class LauncherWindow(QMainWindow):
 
     def _stop_engine(self) -> None:
         """Остановить engine подпроцесс."""
-        if self._engine_proc is None or self._engine_external:
+        process = self._engine_proc
+        if process is None:
+            self._close_engine_stderr_stream()
             return
 
-        logger.info("Остановка engine (PID=%d)...", self._engine_proc.pid)
-        self._engine_proc.terminate()
-        try:
-            self._engine_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            logger.warning("Engine не завершился за 10с, принудительное завершение")
-            self._engine_proc.kill()
-            self._engine_proc.wait(timeout=5)
+        if self._engine_external:
+            if process.poll() is None:
+                raise RuntimeError("external engine unexpectedly has a live launcher-owned process handle")
+            self._engine_proc = None
+            self._close_engine_stderr_stream()
+            return
+
+        logger.info("Остановка engine (PID=%d)...", process.pid)
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except Exception:
+                if process.poll() is None:
+                    raise
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    logger.warning("Engine не завершился за 10с, принудительное завершение")
+                    try:
+                        process.kill()
+                    except Exception:
+                        if process.poll() is None:
+                            raise
+                    if process.poll() is None:
+                        process.wait(timeout=5)
+        if process.poll() is None:
+            raise RuntimeError("engine process remained alive after bounded shutdown")
         self._engine_proc = None
         self._close_engine_stderr_stream()
         logger.info("Engine остановлен")
 
     def _restart_engine(self) -> None:
         """Restart engine AND bridge for clean ZMQ connections."""
+        if getattr(self, "_shutdown_requested", False):
+            logger.warning("Engine restart refused while launcher shutdown is pending")
+            return
         # A4: manual restart is the operator's recovery lever — clear the
         # config-error latch, reset backoff, and silence the alarm/banner so
         # a fixed config (or a manual retry) starts from a clean slate.
@@ -1401,12 +1468,14 @@ class LauncherWindow(QMainWindow):
     def _stop_assistant(self) -> None:
         """Остановить cryodaq-assistant подпроцесс, если он запущен."""
         if self._assistant_proc is None:
+            self._assistant_shutdown_path = None
+            self._assistant_shutdown_authority = None
             return
         process = self._assistant_proc
         logger.info("Остановка cryodaq-assistant (PID=%d)...", process.pid)
         shutdown_path = getattr(self, "_assistant_shutdown_path", None)
         shutdown_authority = getattr(self, "_assistant_shutdown_authority", None)
-        try:
+        if process.poll() is None:
             if (
                 sys.platform == "win32"
                 and shutdown_path is not None
@@ -1439,27 +1508,35 @@ class LauncherWindow(QMainWindow):
                 if sentinel_ready:
                     try:
                         process.wait(timeout=10)
-                        self._assistant_proc = None
-                        logger.info("cryodaq-assistant остановлен")
-                        return
                     except subprocess.TimeoutExpired:
                         logger.warning("cryodaq-assistant не завершился мягко за 10с")
 
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                logger.warning("cryodaq-assistant не завершился за 10с, принудительное завершение")
-                process.kill()
-                process.wait(timeout=5)
-        finally:
-            # Do not unlink by pathname: Windows has no portable atomic
-            # checked-unlink operation, so an attacker could replace the
-            # validated object while the launcher waits for process exit.
-            # Per-launch UUID names make a retained empty sentinel inert.
-            self._assistant_shutdown_path = None
-            self._assistant_shutdown_authority = None
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except Exception:
+                    if process.poll() is None:
+                        raise
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    logger.warning("cryodaq-assistant не завершился за 10с, принудительное завершение")
+                    try:
+                        process.kill()
+                    except Exception:
+                        if process.poll() is None:
+                            raise
+                    if process.poll() is None:
+                        process.wait(timeout=5)
+        if process.poll() is None:
+            raise RuntimeError("assistant process remained alive after bounded shutdown")
         self._assistant_proc = None
+        # Do not unlink by pathname: Windows has no portable atomic
+        # checked-unlink operation. Per-launch UUID names make the retained
+        # empty sentinel inert. Authority is released only after process death.
+        self._assistant_shutdown_path = None
+        self._assistant_shutdown_authority = None
         logger.info("cryodaq-assistant остановлен")
 
     def _check_assistant_health(self) -> None:
@@ -1681,14 +1758,20 @@ class LauncherWindow(QMainWindow):
 
     def _build_tray(self) -> None:
         """Создать иконку в системном трее."""
-        self._tray_icon_green = _make_icon("#2ECC40")
-        self._tray_icon_yellow = _make_icon("#FFDC00")
-        self._tray_icon_red = _make_icon("#FF4136")
+        self._tray_icon_green = tray_icon_for_level(TrayLevel.HEALTHY)
+        self._tray_icon_yellow = tray_icon_for_level(TrayLevel.CAUTION)
+        self._tray_icon_red = tray_icon_for_level(TrayLevel.FAULT)
 
         # Начальная иконка: если engine уже работает — жёлтый (ожидание данных),
         # иначе красный (engine не запущен).
-        initial_icon = self._tray_icon_yellow if self._engine_external else self._tray_icon_red
-        self._tray = QSystemTrayIcon(initial_icon, self)
+        initial_status = resolve_tray_status(
+            connected=None,
+            safety_state=None,
+            alarm_count=None,
+            data_fresh=None,
+            reporting_fault=None,
+        )
+        self._tray = QSystemTrayIcon(self._tray_icon_yellow, self)
 
         menu = QMenu()
         if self._tray_only:
@@ -1708,7 +1791,7 @@ class LauncherWindow(QMainWindow):
 
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
-        self._tray.setToolTip("CryoDAQ — запуск...")
+        self._tray.setToolTip(initial_status.tooltip)
         self._tray.show()
 
     def _merge_main_window_menus(self) -> None:
@@ -1729,10 +1812,8 @@ class LauncherWindow(QMainWindow):
         Сигнал / Приборный / Янтарь) sit together regardless of their
         filename spelling.
         """
-        from cryodaq.gui._theme_loader import (
-            _selected_theme_name,
-            available_themes,
-        )
+        from cryodaq.gui import theme as gui_theme
+        from cryodaq.gui._theme_loader import _selected_theme_name, available_themes
 
         # Renamed «Настройки» → «Вид»: the ToolRail already owns the canonical
         # «Настройки» (channel editor / connection params). This launcher menu
@@ -1741,7 +1822,8 @@ class LauncherWindow(QMainWindow):
         settings_menu = self.menuBar().addMenu("Вид")
         theme_menu = settings_menu.addMenu("Тема")
 
-        current = _selected_theme_name()
+        current = gui_theme.ACTIVE_THEME_ID
+        selected = _selected_theme_name()
         packs_by_id = {pack["id"]: pack for pack in available_themes()}
         ordered_ids = [pid for pid in _THEME_DISPLAY_ORDER if pid in packs_by_id]
         # Any pack not in the curated order (e.g. local dev pack dropped
@@ -1751,6 +1833,8 @@ class LauncherWindow(QMainWindow):
 
         group = QActionGroup(self)
         group.setExclusive(True)
+        self._theme_active_id = current
+        self._theme_actions: dict[str, QAction] = {}
 
         def _add_entry(pid: str) -> None:
             pack = packs_by_id[pid]
@@ -1761,6 +1845,7 @@ class LauncherWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, p=pack["id"]: self._on_theme_selected(p))
             group.addAction(action)
             theme_menu.addAction(action)
+            self._theme_actions[pid] = action
 
         added_any_dark = False
         for pid in ordered_ids:
@@ -1775,6 +1860,13 @@ class LauncherWindow(QMainWindow):
             theme_menu.addSeparator()
             for pid in extras:
                 _add_entry(pid)
+
+        theme_menu.addSeparator()
+        self._theme_pending_action = QAction(self)
+        self._theme_pending_action.setEnabled(False)
+        theme_menu.addAction(self._theme_pending_action)
+        pending_id = selected if selected != current and selected in packs_by_id else None
+        self._update_theme_pending_indicator(pending_id)
 
         # IV.4 F2: operator-level debug-logging toggle. Sits directly
         # under «Настройки» alongside «Тема» so it shares the same
@@ -1880,143 +1972,73 @@ class LauncherWindow(QMainWindow):
 
     @Slot(str)
     def _on_theme_selected(self, theme_id: str) -> None:
-        """Persist the selected theme and re-exec the launcher.
+        """Persist a validated theme for the next ordinary launcher start."""
+        return self._defer_theme_selection(theme_id)
 
-        Engine subprocess keeps running — it's a separate OS process that
-        survives launcher exit via reparenting to init. The new launcher
-        detects the busy ZMQ port on startup and attaches as an external
-        engine client instead of spawning a duplicate.
-        """
+    def _defer_theme_selection(self, theme_id: str) -> None:
+        """Persist a validated pack without touching the running process tree."""
+        from cryodaq.gui import theme as gui_theme
         from cryodaq.gui._theme_loader import (
             _selected_theme_name,
             available_themes,
             write_theme_selection,
         )
 
-        if theme_id == _selected_theme_name():
-            return
-
         pack_name = next(
-            (p["name"] for p in available_themes() if p["id"] == theme_id),
+            (item["name"] for item in available_themes() if item["id"] == theme_id),
             theme_id,
         )
-        reply = QMessageBox.question(
-            self,
-            "Применить тему",
-            f"Применить тему «{pack_name}»?\n\n"
-            "Engine и интерфейс будут перезапущены (≈3 секунды). "
-            "Активный эксперимент и запись данных возобновятся автоматически.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
         try:
             write_theme_selection(theme_id)
-        except Exception as exc:
+        except Exception:
             logger.exception("theme: failed to persist selection")
+            selected = _selected_theme_name()
+            pending_id = (
+                selected
+                if selected != gui_theme.ACTIVE_THEME_ID and selected in getattr(self, "_theme_actions", {})
+                else None
+            )
+            self._update_theme_pending_indicator(pending_id)
             QMessageBox.critical(
                 self,
-                "Ошибка",
-                f"Не удалось сохранить выбор темы:\n{exc}",
+                "Не удалось сохранить тему",
+                "Выбор темы не изменён. Проверьте локальные настройки и журнал launcher.",
             )
             return
 
-        self._restart_gui_with_theme_change()
+        pending_id = None if theme_id == gui_theme.ACTIVE_THEME_ID else theme_id
+        self._update_theme_pending_indicator(pending_id)
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.showMessage(
+                "Тема сохранена",
+                f"Тема «{pack_name}» будет применена при следующем обычном запуске.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
 
-    def _wait_engine_stopped(self, timeout: float = 15.0, interval: float = 0.2) -> bool:
-        """Poll until engine ports are free (engine fully terminated).
+    def _update_theme_pending_indicator(self, pending_id: str | None) -> None:
+        """Keep the checked action truthful to this process's loaded theme."""
+        active_id = getattr(self, "_theme_active_id", None)
+        actions = getattr(self, "_theme_actions", {})
+        active_action = actions.get(active_id)
+        if active_action is not None:
+            active_action.setChecked(True)
 
-        Returns True if ports are confirmed free, False if timeout exceeded.
-        This prevents race conditions where execv happens while the engine
-        is still releasing its ZMQ sockets.
-        """
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not _is_port_busy(_ZMQ_PORT):
-                return True
-            time.sleep(interval)
-        return False
+        pending_action = getattr(self, "_theme_pending_action", None)
+        if pending_action is None:
+            return
+        if pending_id is None or pending_id == active_id:
+            pending_action.setText("Следующий запуск: текущая тема")
+            return
 
-    def _restart_gui_with_theme_change(self) -> None:
-        """Re-exec the launcher process with the same arguments.
+        from cryodaq.gui._theme_loader import available_themes
 
-        Uses os.execv; importlib.reload cascade is intentionally NOT
-        attempted — Qt widget trees plus module-level pyqtgraph config
-        make partial reload fragile. A full process replacement is the
-        single robust path.
-
-        Engine, assistant, and bridge are shut down explicitly before execv. Letting the
-        orphaned engine survive re-parenting was deadlocking the REP port
-        (5556) — the orphaned bridge's mid-flight REQ was never consumed
-        by its dead peer, so every subsequent REQ from the new launcher's
-        bridge queued behind the stranded reply and timed out. Cold-start
-        everything from scratch is the only robust path.
-        """
-        logger.info("theme: stopping ingress + assistant + bridge + engine before exec")
-        self._shutdown_requested = True
-        # Stop the GUI ingress before any other irreversible teardown.  If its
-        # fail-closed degradation cannot be published, keep this launcher live.
-        snapshot_ingress = getattr(self, "_snapshot_ingress", None)
-        if snapshot_ingress is not None:
-            try:
-                snapshot_ingress.stop()
-            except Exception:
-                logger.exception("theme: operator snapshot ingress stop failed; aborting re-exec")
-                self._shutdown_requested = False
-                raise
-        try:
-            self._stop_assistant()
-        except Exception as assistant_error:
-            logger.exception("theme: assistant stop failed; aborting re-exec")
-            try:
-                if snapshot_ingress is not None:
-                    snapshot_ingress.start()
-            except Exception as recovery_error:
-                logger.exception("theme: operator snapshot ingress recovery failed")
-                raise RuntimeError("assistant stop and operator snapshot ingress recovery failed") from recovery_error
-            self._shutdown_requested = False
-            raise assistant_error
-        self._invalidate_descriptor_transport()
-        # With the assistant settled, shut down the bridge before the engine
-        # so no REQ is mid-flight. Same sequence as _do_shutdown but without
-        # QApplication.quit().
-        try:
-            self._bridge.shutdown()
-        except Exception:
-            logger.exception("theme: bridge shutdown failed (continuing)")
-        try:
-            self._stop_engine()
-        except Exception:
-            logger.exception("theme: engine stop failed (continuing)")
-
-        # Wait for engine ports to be fully released before execv.
-        # Prevents race where new launcher starts while old engine
-        # still holds port 5556 in TIME_WAIT or is mid-termination.
-        # Skip for external engines — we didn't stop them, so waiting is
-        # futile and would just add a 15s UI hang.
-        if not self._engine_external:
-            logger.info("theme: waiting for engine ports to release...")
-            ports_free = self._wait_engine_stopped(timeout=5.0)
-            if not ports_free:
-                logger.warning("theme: engine ports still busy after 5s, proceeding anyway")
-            else:
-                logger.info("theme: engine ports confirmed free")
-        else:
-            logger.info("theme: engine external, skipping port wait")
-
-        # Release launcher lock so the re-execed launcher can re-acquire
-        # it; otherwise it hits the "CryoDAQ Launcher уже запущен" modal.
-        if self._lock_fd is not None:
-            try:
-                release_lock(self._lock_fd, ".launcher.lock")
-            except Exception:
-                logger.exception("theme: launcher lock release failed")
-            self._lock_fd = None
-
-        logger.info("theme: re-executing launcher to apply new theme")
-        os.execv(sys.executable, [sys.executable, "-m", "cryodaq.launcher", *sys.argv[1:]])
+        name = next(
+            (item["name"] for item in available_themes() if item["id"] == pending_id),
+            pending_id,
+        )
+        pending_action.setText(f"Следующий запуск: {name}")
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -2158,54 +2180,198 @@ class LauncherWindow(QMainWindow):
             cmd.append("--mock")
         subprocess.Popen(cmd, env=env, creationflags=creationflags)
 
-    def _do_shutdown(self) -> None:
-        """Корректное завершение."""
-        if self._shutdown_requested:
+    def _ensure_shutdown_state(self) -> None:
+        """Initialize lifecycle fields for real instances and narrow test hosts."""
+
+        if not isinstance(getattr(self, "_shutdown_phase", None), _ShutdownPhase):
+            self._shutdown_phase = _ShutdownPhase.RUNNING
+        if not isinstance(getattr(self, "_shutdown_settled", None), set):
+            self._shutdown_settled = set()
+        if not isinstance(getattr(self, "_shutdown_last_errors", None), dict):
+            self._shutdown_last_errors = {}
+        for name, default in (
+            ("_shutdown_attempt_active", False),
+            ("_shutdown_retry_pending", False),
+            ("_shutdown_retry_index", 0),
+            ("_shutdown_quiesced", False),
+            ("_shutdown_failure_notified", False),
+        ):
+            if not isinstance(getattr(self, name, None), type(default)):
+                setattr(self, name, default)
+
+    def _set_shutdown_tray_state(self, *, failed: bool) -> None:
+        """Keep incomplete shutdown visible without claiming safety truth."""
+
+        tray = getattr(self, "_tray", None)
+        if tray is None:
             return
-        self._shutdown_requested = True
-        self._health_timer.stop()
-        self._data_timer.stop()
-        if hasattr(self, "_status_timer"):
-            self._status_timer.stop()
-        self._async_timer.stop()
-        self._tray.hide()
-        self._invalidate_descriptor_transport()
+        icon = getattr(self, "_tray_icon_red" if failed else "_tray_icon_yellow", None)
+        if icon is not None:
+            tray.setIcon(icon)
+        tray.setToolTip(
+            "CryoDAQ: завершение не окончено; ресурсы ещё завершаются."
+            if failed
+            else "CryoDAQ: выполняется контролируемое завершение."
+        )
+        tray.show()
+        if failed and not self._shutdown_failure_notified:
+            tray.showMessage(
+                "CryoDAQ — завершение не окончено",
+                "Один или несколько ресурсов ещё работают. "
+                "Экземпляр остаётся заблокирован; выполняется повторная попытка.",
+                QSystemTrayIcon.MessageIcon.Critical,
+                8_000,
+            )
+            self._shutdown_failure_notified = True
 
-        first_error: Exception | None = None
+    def _schedule_shutdown_retry(self) -> None:
+        if self._shutdown_retry_pending or self._shutdown_phase is _ShutdownPhase.COMPLETE:
+            return
+        index = min(self._shutdown_retry_index, len(_SHUTDOWN_RETRY_DELAYS_MS) - 1)
+        delay_ms = _SHUTDOWN_RETRY_DELAYS_MS[index]
+        self._shutdown_retry_index = min(index + 1, len(_SHUTDOWN_RETRY_DELAYS_MS) - 1)
+        self._shutdown_retry_pending = True
 
-        def attempt(label: str, action: Callable[[], Any]) -> None:
-            nonlocal first_error
+        def retry() -> None:
+            self._shutdown_retry_pending = False
+            LauncherWindow._do_shutdown(self)
+
+        QTimer.singleShot(delay_ms, retry)
+
+    def _shutdown_incomplete(self, errors: dict[str, Exception]) -> bool:
+        self._shutdown_last_errors = dict(errors)
+        self._shutdown_phase = _ShutdownPhase.RETRY_WAIT
+        for label, error in errors.items():
+            logger.error(
+                "Launcher shutdown owner remains unsettled: %s (%s)",
+                label,
+                type(error).__name__,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+        LauncherWindow._set_shutdown_tray_state(self, failed=True)
+        LauncherWindow._schedule_shutdown_retry(self)
+        return False
+
+    def _quiesce_for_shutdown(self) -> dict[str, Exception]:
+        errors: dict[str, Exception] = {}
+        self._shutdown_phase = _ShutdownPhase.QUIESCING
+        LauncherWindow._set_shutdown_tray_state(self, failed=False)
+        self._restart_pending = False
+        self._assistant_restart_pending = False
+
+        for name in ("_health_timer", "_data_timer", "_status_timer", "_async_timer"):
+            timer = getattr(self, name, None)
+            if timer is None:
+                continue
             try:
-                action()
+                timer.stop()
             except Exception as exc:
-                logger.exception("Launcher shutdown step failed: %s", label)
-                if first_error is None:
-                    first_error = exc
+                errors[name] = exc
+        try:
+            self._stop_engine_down_alarm()
+        except Exception as exc:
+            errors["engine_down_alarm"] = exc
+        try:
+            self._invalidate_descriptor_transport()
+        except Exception as exc:
+            errors["descriptor_transport"] = exc
 
         snapshot_ingress = getattr(self, "_snapshot_ingress", None)
         if snapshot_ingress is not None:
-            attempt("operator_snapshot_ingress", snapshot_ingress.stop)
-        attempt("assistant", self._stop_assistant)
-        soak_bridge = getattr(self, "_soak_bridge_handshake", None)
-        if soak_bridge is not None:
-            attempt("soak_bridge", soak_bridge.close)
-        soak_capability = getattr(self, "_soak_artifact_capability", None)
-        if soak_capability is not None:
-            attempt("soak_artifact", soak_capability.close)
-        attempt("bridge", self._bridge.shutdown)
-        attempt("engine", self._stop_engine)
-        attempt("event_loop", self._loop.close)
-        if self._lock_fd is not None:
-            lock_fd = self._lock_fd
+            try:
+                snapshot_ingress.stop()
+                if getattr(snapshot_ingress, "active", False):
+                    raise RuntimeError("operator snapshot ingress remained active")
+            except Exception as exc:
+                errors["operator_snapshot_ingress"] = exc
+        if not errors:
+            self._shutdown_quiesced = True
+            self._shutdown_settled.add("operator_snapshot_ingress")
+        return errors
 
-            def release_launcher_lock() -> None:
-                release_lock(lock_fd, ".launcher.lock")
-                self._lock_fd = None
+    def _settle_safety_worker(self) -> None:
+        worker = getattr(self, "_safety_worker", None)
+        if worker is None:
+            return
+        if not worker.isFinished():
+            worker.wait(3_000)
+        if not worker.isFinished():
+            raise RuntimeError("launcher safety-status worker remained alive after bridge shutdown")
+        self._safety_worker = None
 
-            attempt("launcher_lock", release_launcher_lock)
-        attempt("application", self._app.quit)
-        if first_error is not None:
-            raise first_error
+    def _close_event_loop_exact(self) -> None:
+        loop = self._loop
+        if loop.is_closed():
+            return
+        loop.close()
+        if not loop.is_closed():
+            raise RuntimeError("launcher asyncio loop did not report closed")
+        asyncio.set_event_loop(None)
+
+    def _do_shutdown(self) -> bool:
+        """Settle every launcher owner before quitting; retry incomplete work."""
+
+        LauncherWindow._ensure_shutdown_state(self)
+        if self._shutdown_phase is _ShutdownPhase.COMPLETE:
+            return True
+        if self._shutdown_attempt_active:
+            return False
+
+        self._shutdown_requested = True
+        self._shutdown_attempt_active = True
+        try:
+            if not self._shutdown_quiesced:
+                errors = LauncherWindow._quiesce_for_shutdown(self)
+                if errors:
+                    return LauncherWindow._shutdown_incomplete(self, errors)
+
+            self._shutdown_phase = _ShutdownPhase.SETTLING
+            errors: dict[str, Exception] = {}
+
+            def attempt(label: str, action: Callable[[], Any]) -> None:
+                if label in self._shutdown_settled:
+                    return
+                try:
+                    action()
+                except Exception as exc:
+                    errors[label] = exc
+                else:
+                    self._shutdown_settled.add(label)
+
+            attempt("assistant", self._stop_assistant)
+            attempt("bridge_shutdown", self._bridge.shutdown)
+            attempt("safety_worker", lambda: LauncherWindow._settle_safety_worker(self))
+            if "bridge_shutdown" in self._shutdown_settled:
+                attempt("bridge_terminal", self._bridge.close)
+            attempt("engine", self._stop_engine)
+            soak_capability = getattr(self, "_soak_artifact_capability", None)
+            if soak_capability is None:
+                self._shutdown_settled.add("soak_artifact")
+            else:
+                attempt("soak_artifact", soak_capability.close)
+            soak_bridge = getattr(self, "_soak_bridge_handshake", None)
+            if soak_bridge is None:
+                self._shutdown_settled.add("soak_bridge")
+            else:
+                attempt("soak_bridge", soak_bridge.close)
+            if errors:
+                return LauncherWindow._shutdown_incomplete(self, errors)
+
+            self._shutdown_phase = _ShutdownPhase.FINALIZING
+            attempt("event_loop", lambda: LauncherWindow._close_event_loop_exact(self))
+            attempt("application", self._app.quit)
+            if errors:
+                return LauncherWindow._shutdown_incomplete(self, errors)
+
+            self._shutdown_phase = _ShutdownPhase.COMPLETE
+            self._shutdown_last_errors = {}
+            self._shutdown_retry_index = 0
+            tray = getattr(self, "_tray", None)
+            if tray is not None:
+                tray.hide()
+            return True
+        finally:
+            self._shutdown_attempt_active = False
 
     def _tray_open(self) -> None:
         self.showNormal()
@@ -2306,7 +2472,8 @@ class LauncherWindow(QMainWindow):
             # port, misclassify it as external (_engine_external=True), and
             # then _stop_engine() would no-op at shutdown, leaving that engine
             # running. No-op unless this shot is still the live one.
-            if not self._restart_pending:
+            if self._shutdown_requested or not self._restart_pending:
+                self._restart_pending = False
                 return
             self._restart_pending = False
             self._invalidate_descriptor_transport()
@@ -2382,27 +2549,25 @@ class LauncherWindow(QMainWindow):
                 self._safety_worker = worker
                 worker.start()
 
-        # Tray icon color + tooltip — reflects engine safety state
-        data_flowing = (time.monotonic() - self._last_reading_time) < 5.0
-        safety = self._last_safety_state or ""
-        if not alive:
-            self._tray.setIcon(self._tray_icon_red)
-            self._tray.setToolTip("CryoDAQ — engine остановлен")
-        elif safety in ("fault_latched", "fault"):
-            self._tray.setIcon(self._tray_icon_red)
-            self._tray.setToolTip(f"CryoDAQ — АВАРИЯ ({safety})")
-        elif self._last_alarm_count > 0:
-            self._tray.setIcon(self._tray_icon_yellow)
-            self._tray.setToolTip(f"CryoDAQ — {self._last_alarm_count} алармов")
-        elif self._periodic_reporting_fault:
-            self._tray.setIcon(self._tray_icon_yellow)
-            self._tray.setToolTip(f"CryoDAQ — отчёты недоступны ({_PERIODIC_RUNTIME_UNAVAILABLE_CODE})")
-        elif not data_flowing:
-            self._tray.setIcon(self._tray_icon_yellow)
-            self._tray.setToolTip("CryoDAQ — ожидание данных")
-        else:
-            self._tray.setIcon(self._tray_icon_green)
-            self._tray.setToolTip("CryoDAQ — работает")
+        # Tray icon color + tooltip — coarse only. Green requires affirmative
+        # connection, safety, and alarm truth; unknown alarm authority must
+        # remain caution instead of being inferred as zero.
+        data_flowing = self._last_reading_time > 0.0 and (time.monotonic() - self._last_reading_time) < 5.0
+        bridge_alive = self._bridge.is_alive()
+        tray_truth = resolve_tray_status(
+            connected=alive and bridge_alive,
+            safety_state=self._last_safety_state,
+            alarm_count=self._last_alarm_count,
+            data_fresh=data_flowing,
+            reporting_fault=self._periodic_reporting_fault,
+        )
+        icon = {
+            TrayLevel.HEALTHY: self._tray_icon_green,
+            TrayLevel.CAUTION: self._tray_icon_yellow,
+            TrayLevel.FAULT: self._tray_icon_red,
+        }[tray_truth.level]
+        self._tray.setIcon(icon)
+        self._tray.setToolTip(tray_truth.tooltip)
 
     @Slot(dict)
     def _on_safety_result(self, result: dict) -> None:
@@ -2625,7 +2790,6 @@ def main() -> None:
             app,
             mock=mock,
             tray_only=args.tray,
-            lock_fd=lock_fd,
             replay_source=replay_source,
             replay_speed=args.replay_speed,
             replay_phase=args.replay_phase,
@@ -2659,7 +2823,14 @@ def main() -> None:
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, _signal_handler)
 
-    sys.exit(app.exec())
+    try:
+        exit_code = app.exec()
+    finally:
+        # The event-loop owner, not LauncherWindow, retains the single-instance
+        # lock until Qt has actually returned. Keep the inode stable so another
+        # process cannot acquire a replacement path while this process is live.
+        release_lock_exact(lock_fd, ".launcher.lock")
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

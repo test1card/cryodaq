@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import pyqtgraph as pg
 
-from cryodaq.gui._theme_loader import load_theme
+from cryodaq.gui._theme_loader import resolve_theme
 
-_pack = load_theme()
+ACTIVE_THEME_ID, _pack = resolve_theme()
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:

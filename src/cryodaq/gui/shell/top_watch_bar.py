@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -27,6 +28,141 @@ from cryodaq.gui.utils.plural import ru_plural
 logger = logging.getLogger(__name__)
 
 _STALE_TIMEOUT_S = 30.0  # [calibrate] seconds with no reading → "ожидают"
+_PRESENTATION_INTERVAL_MS = 500  # DESIGN: RULE-DATA-002 — at most 2 Hz
+_FUTURE_SOURCE_TOLERANCE_S = 1.0
+_PRESSURE_VITAL = "pressure"
+
+_STATUS_EVIDENCE_RANK = {
+    ChannelStatus.OK: 0,
+    ChannelStatus.TIMEOUT: 1,
+    ChannelStatus.UNDERRANGE: 2,
+    ChannelStatus.OVERRANGE: 3,
+    ChannelStatus.SENSOR_ERROR: 3,
+}
+_STATUS_LABELS_RU = {
+    ChannelStatus.OK: "норма",
+    ChannelStatus.TIMEOUT: "тайм-аут",
+    ChannelStatus.UNDERRANGE: "ниже диапазона",
+    ChannelStatus.OVERRANGE: "выше диапазона",
+    ChannelStatus.SENSOR_ERROR: "ошибка датчика",
+}
+
+
+def _invalid_value_reason(key: str, reading: Reading) -> str | None:
+    """Return a Russian reason when an OK-status vital is physically unusable."""
+    if reading.status is not ChannelStatus.OK:
+        return None
+    try:
+        value = float(reading.value)
+    except (TypeError, ValueError):
+        return "значение не является числом"
+    if not math.isfinite(value):
+        return "значение не является конечным"
+    if key == _PRESSURE_VITAL and value <= 0:
+        return "давление должно быть больше нуля"
+    return None
+
+
+def _usable_value(key: str, reading: Reading) -> float | None:
+    if reading.is_usable() and _invalid_value_reason(key, reading) is None:
+        return float(reading.value)
+    return None
+
+
+def _future_timestamp_at_receipt(reading: Reading, *, now: float | None = None) -> bool:
+    """Flag source time that is implausibly ahead of this GUI host."""
+    receipt_time = time.time() if now is None else now
+    return reading.timestamp.timestamp() - receipt_time > _FUTURE_SOURCE_TOLERANCE_S
+
+
+def _incoming_supersedes(
+    current: Reading,
+    current_future: bool,
+    incoming: Reading,
+    incoming_future: bool,
+) -> bool:
+    """Use source time normally and arrival order while either clock is untrusted."""
+    return current_future or incoming_future or incoming.timestamp >= current.timestamp
+
+
+@dataclass(slots=True)
+class _PendingVitalCut:
+    """O(1) human-presentation cut; persistence remains authoritative."""
+
+    latest: Reading
+    latest_future: bool
+    latest_usable: Reading | None
+    latest_usable_future: bool
+    minimum: Reading | None
+    maximum: Reading | None
+    status_evidence: Reading
+    invalid_value_evidence: Reading | None
+    invalid_value_future: bool
+    clock_skew_evidence: Reading | None
+    count: int = 1
+
+    @classmethod
+    def from_reading(cls, key: str, reading: Reading, *, future_timestamp: bool) -> _PendingVitalCut:
+        usable = reading if _usable_value(key, reading) is not None else None
+        invalid = reading if _invalid_value_reason(key, reading) is not None else None
+        return cls(
+            latest=reading,
+            latest_future=future_timestamp,
+            latest_usable=usable,
+            latest_usable_future=future_timestamp if usable is not None else False,
+            minimum=usable,
+            maximum=usable,
+            status_evidence=reading,
+            invalid_value_evidence=invalid,
+            invalid_value_future=future_timestamp if invalid is not None else False,
+            clock_skew_evidence=reading if future_timestamp else None,
+        )
+
+    def add(self, key: str, reading: Reading, *, future_timestamp: bool) -> None:
+        self.count += 1
+        if _incoming_supersedes(self.latest, self.latest_future, reading, future_timestamp):
+            self.latest = reading
+            self.latest_future = future_timestamp
+
+        value = _usable_value(key, reading)
+        if value is not None:
+            if self.latest_usable is None or _incoming_supersedes(
+                self.latest_usable,
+                self.latest_usable_future,
+                reading,
+                future_timestamp,
+            ):
+                self.latest_usable = reading
+                self.latest_usable_future = future_timestamp
+            minimum = _usable_value(key, self.minimum) if self.minimum is not None else None
+            maximum = _usable_value(key, self.maximum) if self.maximum is not None else None
+            if minimum is None or value < minimum:
+                self.minimum = reading
+            if maximum is None or value > maximum:
+                self.maximum = reading
+
+        incoming_rank = _STATUS_EVIDENCE_RANK[reading.status]
+        current_rank = _STATUS_EVIDENCE_RANK[self.status_evidence.status]
+        if incoming_rank > current_rank or (
+            incoming_rank == current_rank and reading.timestamp >= self.status_evidence.timestamp
+        ):
+            self.status_evidence = reading
+
+        invalid_reason = _invalid_value_reason(key, reading)
+        if invalid_reason is not None and (
+            self.invalid_value_evidence is None
+            or _incoming_supersedes(
+                self.invalid_value_evidence,
+                self.invalid_value_future,
+                reading,
+                future_timestamp,
+            )
+        ):
+            self.invalid_value_evidence = reading
+            self.invalid_value_future = future_timestamp
+        if future_timestamp:
+            self.clock_skew_evidence = reading
+
 
 # A3b: CRITICAL alarms beep three times, spaced so the operator hears three
 # distinct beeps rather than one stutter — same QApplication.beep() bell the
@@ -49,7 +185,7 @@ def _format_pressure(p: float) -> str:
     count. Non-positive values render as em-dash because pressure is
     log-quantity-only.
     """
-    if p <= 0:
+    if not math.isfinite(p) or p <= 0:
         return "\u2014"
     mantissa, exp = f"{p:.1e}".split("e")
     return f"{mantissa}e{int(exp)}"
@@ -122,6 +258,7 @@ class TopWatchBar(QWidget):
         self._channel_last_seen: dict[str, tuple[float, ChannelStatus]] = {}
         self._alarm_count: int | None = None
         self._replay_pinned = False
+        self._engine_alive: bool | None = None
 
         self._build_ui()
         self._build_persistent_context()
@@ -136,7 +273,7 @@ class TopWatchBar(QWidget):
         self._fast_timer.timeout.connect(self._poll_fast)
         self._fast_timer.start()
 
-        # 2 Hz channel summary refresh (cheap, just re-renders cache)
+        # 1 Hz channel summary refresh (cheap, just re-renders cache)
         self._channel_refresh_timer = QTimer(self)
         self._channel_refresh_timer.setInterval(1000)
         self._channel_refresh_timer.timeout.connect(self._refresh_channels)
@@ -155,10 +292,11 @@ class TopWatchBar(QWidget):
         self._alarm_sound_have_baseline = False
         self._alarm_sound_worker = None
 
-        # B.4: 1 Hz stale check for persistent context strip
+        # B.4: one bounded presentation/stale tick for persistent vitals.
+        # Ingestion remains full-rate; only human-readable repaint is capped.
         self._stale_timer = QTimer(self)
-        self._stale_timer.setInterval(1000)
-        self._stale_timer.timeout.connect(self._stale_check_tick)
+        self._stale_timer.setInterval(_PRESENTATION_INTERVAL_MS)
+        self._stale_timer.timeout.connect(self._flush_persistent_context)
         self._stale_timer.start()
 
         # One in-flight worker per poll stream — skip tick if previous
@@ -313,8 +451,14 @@ class TopWatchBar(QWidget):
         # Other cold channels are metrologically valid but not positionally
         # fixed, so using them would allow T-min / T-max to shift between
         # experiments depending on the visible-channel set.
-        self._latest_physical_temps: dict[str, tuple[float, float]] = {}
-        self._latest_pressure: tuple[float, float] | None = None
+        self._latest_physical_temps: dict[str, tuple[Reading, bool]] = {}
+        self._latest_pressure: tuple[Reading, bool] | None = None
+        self._latest_vital_sources: dict[str, Reading] = {}
+        self._latest_vital_source_future: dict[str, bool] = {}
+        self._pending_vital_cuts: dict[str, _PendingVitalCut] = {}
+        self._last_interval_cuts: dict[str, _PendingVitalCut] = {}
+        for key in (_PRESSURE_VITAL, SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
+            self._render_vital(key)
 
     @staticmethod
     def _make_ctx_dot() -> QLabel:
@@ -327,66 +471,200 @@ class TopWatchBar(QWidget):
     # Persistent context display updates
     # ------------------------------------------------------------------
 
-    def _update_pressure_display(self) -> None:
-        if self._latest_pressure is None:
-            self._ctx_pressure_value.setText("\u2014")
+    @staticmethod
+    def _vital_name(key: str) -> str:
+        return {
+            _PRESSURE_VITAL: "Давление",
+            SECOND_STAGE_CHANNEL: "Т 2-й ступени (Т12)",
+            N2_PLATE_CHANNEL: "Т плиты N₂ (Т11)",
+        }[key]
+
+    def _vital_widget(self, key: str) -> QLabel:
+        return {
+            _PRESSURE_VITAL: self._ctx_pressure_value,
+            SECOND_STAGE_CHANNEL: self._ctx_second_stage_value,
+            N2_PLATE_CHANNEL: self._ctx_n2_plate_value,
+        }[key]
+
+    @staticmethod
+    def _format_vital_value(key: str, value: float) -> str:
+        if key == _PRESSURE_VITAL:
+            formatted = _format_pressure(value)
+            return formatted if formatted == "\u2014" else f"{formatted} мбар"
+        return f"{value:.2f} K"
+
+    def _last_usable_entry(self, key: str) -> tuple[Reading, bool] | None:
+        if key == _PRESSURE_VITAL:
+            return self._latest_pressure
+        return self._latest_physical_temps.get(key)
+
+    def _set_last_usable(self, key: str, reading: Reading, *, future_timestamp: bool) -> None:
+        previous = self._last_usable_entry(key)
+        if previous is not None and not _incoming_supersedes(previous[0], previous[1], reading, future_timestamp):
             return
-        ts, value = self._latest_pressure
-        age = time.time() - ts
-        formatted = _format_pressure(value)
-        if formatted == "\u2014":
-            text = formatted
+        entry = (reading, future_timestamp)
+        if key == _PRESSURE_VITAL:
+            self._latest_pressure = entry
         else:
-            # DESIGN: RULE-COPY-006 — operator-facing pressure unit is мбар
-            # (Cyrillic), not ASCII mbar.
-            text = f"{formatted} мбар"
-        if age > _STALE_TIMEOUT_S:
-            text = f"{text} (\u0443\u0441\u0442\u0430\u0440.)"  # (устар.)
-            self._ctx_pressure_value.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            self._latest_physical_temps[key] = entry
+
+    @staticmethod
+    def _source_time_text(reading: Reading) -> str:
+        return reading.timestamp.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f UTC")
+
+    @classmethod
+    def _provenance_text(cls, reading: Reading) -> str:
+        instrument = str(reading.instrument_id).strip() or "не указан"
+        channel = str(reading.channel).strip() or "не указан"
+        return f"прибор: {instrument}; канал: {channel}; время: {cls._source_time_text(reading)}"
+
+    def _render_vital(self, key: str, cut: _PendingVitalCut | None = None) -> None:
+        """Render one bounded cut without hiding last-known numeric truth."""
+        widget = self._vital_widget(key)
+        source = self._latest_vital_sources.get(key)
+        source_future = self._latest_vital_source_future.get(key, False)
+        usable_entry = self._last_usable_entry(key)
+        usable = usable_entry[0] if usable_entry is not None else None
+        evidence = cut if cut is not None else self._last_interval_cuts.get(key)
+
+        value_text = "\u2014" if usable is None else self._format_vital_value(key, float(usable.value))
+        source_age = None if source is None else time.time() - source.timestamp.timestamp()
+        stale = source_age is not None and not source_future and source_age > _STALE_TIMEOUT_S
+        source_invalid = source is not None and _usable_value(key, source) is None
+        interval_invalid = evidence is not None and (
+            evidence.status_evidence.status is not ChannelStatus.OK or evidence.invalid_value_evidence is not None
+        )
+        interval_clock_skew = evidence is not None and evidence.clock_skew_evidence is not None
+        clock_skew = source_future or interval_clock_skew
+        disconnected = self._engine_alive is False
+
+        range_visible = False
+        if evidence is not None and evidence.minimum is not None and evidence.maximum is not None:
+            minimum = self._format_vital_value(key, float(evidence.minimum.value))
+            maximum = self._format_vital_value(key, float(evidence.maximum.value))
+            range_visible = minimum != maximum
+
+        text = value_text
+        if range_visible:
+            text += " ↕"
+        if source_invalid:
+            text += " · НЕТ ДАННЫХ"
+        elif interval_invalid:
+            text += " · СБОЙ ЗА ИНТ."
+        if stale:
+            text += " (устар.)"
+        if disconnected:
+            text += " · НЕТ СВЯЗИ"
+        if clock_skew:
+            text += " · РАССИНХР. ЧАСОВ"
+
+        value_color = theme.TEXT_PRIMARY
+        border = ""
+        if source_invalid or interval_invalid:
+            border = f" border-bottom: 2px solid {theme.STATUS_FAULT};"
+        elif clock_skew:
+            value_color = theme.STATUS_CAUTION
+            border = f" border-bottom: 2px solid {theme.STATUS_CAUTION};"
+        elif stale or disconnected or source is None:
+            value_color = theme.TEXT_MUTED
+        style = (
+            f"color: {value_color}; "
+            f"font-size: {theme.FONT_SIZE_SM}px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+            f"font-family: '{theme.FONT_MONO}', monospace;"
+            f"{border}"
+        )
+
+        details = [f"{self._vital_name(key)}. Отображаемое значение: {value_text}."]
+        if usable is None:
+            details.append("Пригодного измеренного значения ещё нет.")
         else:
-            self._ctx_pressure_value.setStyleSheet(
-                f"color: {theme.TEXT_PRIMARY}; "
-                f"font-size: {theme.FONT_SIZE_SM}px; font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
-                f"font-family: '{theme.FONT_MONO}', monospace;"
+            details.append(f"Происхождение отображаемого значения: {self._provenance_text(usable)}.")
+        if source is None:
+            details.append("Текущих данных нет.")
+        else:
+            details.append(f"Последний принятый источник: {self._provenance_text(source)}.")
+            details.append(f"Статус источника: {_STATUS_LABELS_RU[source.status]}.")
+            invalid_reason = _invalid_value_reason(key, source)
+            if invalid_reason is not None:
+                details.append(f"Причина непригодности: {invalid_reason}.")
+        if stale and source_age is not None:
+            details.append(f"Данные устарели: возраст {max(0.0, source_age):.1f} с; порог {_STALE_TIMEOUT_S:.0f} с.")
+        if disconnected:
+            details.append("Связь с Engine отсутствует; последнее пригодное значение сохранено.")
+        if source_future:
+            details.append(
+                "Метка времени источника была более чем на "
+                f"{_FUTURE_SOURCE_TOLERANCE_S:.0f} с впереди часов GUI при получении."
             )
-        self._ctx_pressure_value.setText(text)
+        if evidence is not None:
+            interval_parts = [f"отсчётов: {evidence.count}"]
+            if evidence.minimum is not None and evidence.maximum is not None:
+                interval_parts.extend(
+                    (
+                        f"минимум: {self._format_vital_value(key, float(evidence.minimum.value))}; "
+                        f"время минимума: {self._source_time_text(evidence.minimum)}",
+                        f"максимум: {self._format_vital_value(key, float(evidence.maximum.value))}; "
+                        f"время максимума: {self._source_time_text(evidence.maximum)}",
+                    )
+                )
+            interval_parts.append(
+                f"худший статус: {_STATUS_LABELS_RU[evidence.status_evidence.status]}; "
+                f"время статуса: {self._source_time_text(evidence.status_evidence)}"
+            )
+            if evidence.invalid_value_evidence is not None:
+                invalid_reason = _invalid_value_reason(key, evidence.invalid_value_evidence)
+                interval_parts.append(
+                    f"непригодное значение: {invalid_reason}; "
+                    f"время: {self._source_time_text(evidence.invalid_value_evidence)}"
+                )
+            if evidence.clock_skew_evidence is not None:
+                interval_parts.append(
+                    f"рассинхронизация часов; время источника: {self._source_time_text(evidence.clock_skew_evidence)}"
+                )
+            details.append(f"За интервал {_PRESENTATION_INTERVAL_MS} мс: {'; '.join(interval_parts)}.")
+        if range_visible:
+            details.append("Маркер ↕ означает видимый разброс за интервал.")
+        description = " ".join(details)
+
+        if widget.text() != text:
+            widget.setText(text)
+        if widget.styleSheet() != style:
+            widget.setStyleSheet(style)
+        accessible_name = f"{self._vital_name(key)}: {text}"
+        if widget.accessibleName() != accessible_name:
+            widget.setAccessibleName(accessible_name)
+        if widget.accessibleDescription() != description:
+            widget.setAccessibleDescription(description)
+        if widget.toolTip() != description:
+            widget.setToolTip(description)
+
+    def _flush_persistent_context(self) -> None:
+        """Render one latest-value cut at no more than two ticks per second."""
+        pending, self._pending_vital_cuts = self._pending_vital_cuts, {}
+        for key, cut in pending.items():
+            previous = self._last_interval_cuts.get(key)
+            if previous is None or _incoming_supersedes(
+                previous.latest,
+                previous.latest_future,
+                cut.latest,
+                cut.latest_future,
+            ):
+                self._last_interval_cuts[key] = cut
+
+        for key in (_PRESSURE_VITAL, SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
+            self._render_vital(key)
+
+    def _update_pressure_display(self) -> None:
+        self._render_vital(_PRESSURE_VITAL)
 
     def _update_physical_temp_display(self) -> None:
-        """Render the two fixed physical references from Т12 / Т11.
-
-        DESIGN: invariant #4, MANIFEST.md decision #21 — the second-stage
-        and nitrogen-plate values read specifically from Т12 and Т11. No fallback to other visible
-        cold channels: those are metrologically calibrated but not
-        positionally fixed, so using them would change the displayed
-        physical meaning between experiments when channels are toggled.
-        """
-        now = time.time()
-        val_style = (
-            f"color: {theme.TEXT_PRIMARY}; "
-            f"font-size: 12px; font-weight: 600; "
-            f"font-family: '{theme.FONT_MONO}', monospace;"
-        )
-        muted_style = f"color: {theme.TEXT_MUTED};"
-
-        def _render(ch_id: str, label_widget: QLabel) -> None:
-            entry = self._latest_physical_temps.get(ch_id)
-            if entry is None:
-                label_widget.setText("\u2014")
-                label_widget.setStyleSheet(muted_style)
-                return
-            ts, val = entry
-            if now - ts > _STALE_TIMEOUT_S:
-                label_widget.setText(f"{val:.2f} K (\u0443\u0441\u0442\u0430\u0440.)")
-                label_widget.setStyleSheet(muted_style)
-                return
-            label_widget.setText(f"{val:.2f} K")
-            label_widget.setStyleSheet(val_style)
-
-        _render(SECOND_STAGE_CHANNEL, self._ctx_second_stage_value)
-        _render(N2_PLATE_CHANNEL, self._ctx_n2_plate_value)
+        """Render only the fixed T12/T11 references; never substitute channels."""
+        self._render_vital(SECOND_STAGE_CHANNEL)
+        self._render_vital(N2_PLATE_CHANNEL)
 
     def _stale_check_tick(self) -> None:
-        """Re-run display updates to refresh stale markers."""
+        """Compatibility hook: refresh stale state without draining a cut."""
         self._update_pressure_display()
         self._update_physical_temp_display()
 
@@ -395,9 +673,9 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
-        """Update per-channel last-seen cache and persistent context."""
+        """Ingest full-rate evidence; human-readable values repaint at <=2 Hz."""
         ch = reading.channel
-        value = reading.value
+        vital_key: str | None = None
 
         if ch.startswith("\u0422") and reading.unit == "K":
             # v0.55.4 A5 fix: get_all_visible() returns short IDs like
@@ -408,17 +686,34 @@ class TopWatchBar(QWidget):
             # "0/16 \u043d\u043e\u0440\u043c\u0430".
             short_id = ch.split(" ", 1)[0]
             self._channel_last_seen[short_id] = (time.monotonic(), reading.status)
-            # Physical readouts are locked to positionally fixed reference channels.
-            if isinstance(value, (int, float)) and not math.isnan(value):
-                if short_id in (SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
-                    ts = reading.timestamp.timestamp()
-                    self._latest_physical_temps[short_id] = (ts, float(value))
-                    self._update_physical_temp_display()
+            if short_id in (SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
+                vital_key = short_id
         elif ch.endswith("/pressure"):
-            if isinstance(value, (int, float)) and not math.isnan(value):
-                ts = reading.timestamp.timestamp()
-                self._latest_pressure = (ts, float(value))
-                self._update_pressure_display()
+            vital_key = _PRESSURE_VITAL
+
+        if vital_key is None:
+            return
+        future_timestamp = _future_timestamp_at_receipt(reading)
+        pending = self._pending_vital_cuts.get(vital_key)
+        if pending is None:
+            pending = _PendingVitalCut.from_reading(vital_key, reading, future_timestamp=future_timestamp)
+            self._pending_vital_cuts[vital_key] = pending
+        else:
+            pending.add(vital_key, reading, future_timestamp=future_timestamp)
+
+        if _usable_value(vital_key, reading) is not None:
+            self._set_last_usable(vital_key, reading, future_timestamp=future_timestamp)
+
+        previous = self._latest_vital_sources.get(vital_key)
+        previous_future = self._latest_vital_source_future.get(vital_key, False)
+        is_newest = previous is None or _incoming_supersedes(previous, previous_future, reading, future_timestamp)
+        if is_newest:
+            self._latest_vital_sources[vital_key] = reading
+            self._latest_vital_source_future[vital_key] = future_timestamp
+            # RULE-INTER-006: invalid/fault truth is immediate and textual;
+            # normal numeric motion still waits for the bounded tick.
+            if _usable_value(vital_key, reading) is None:
+                self._render_vital(vital_key, pending)
 
     # ------------------------------------------------------------------
     # Zone refresh
@@ -568,12 +863,15 @@ class TopWatchBar(QWidget):
         and by the launcher (which owns the engine subprocess lifecycle).
         Single source of truth — no internal polling for engine state.
         """
-        if alive:
+        self._engine_alive = bool(alive)
+        if self._engine_alive:
             self._engine_label.setText("● Engine: работает")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_OK};")
         else:
             self._engine_label.setText("● Engine: нет связи")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+        for key in (_PRESSURE_VITAL, SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
+            self._render_vital(key)
 
     def set_replay_mode(self, replay: bool) -> None:
         """Pin archive/replay truth before the first asynchronous status poll."""

@@ -147,7 +147,8 @@ class SeverityChip(QLabel):
     """Small pill-shaped severity indicator using DS status tokens.
 
     Replaces the legacy emoji icons per RULE-COPY-005. Color comes
-    from STATUS_FAULT / STATUS_WARNING / STATUS_INFO; text is a short
+    from STATUS_FAULT / STATUS_CAUTION / STATUS_INFO; legacy warning input is
+    normalized before token lookup, and text is a short
     Russian uppercase label in MONO font, reused by alarm rows.
     """
 

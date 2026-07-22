@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -24,7 +25,7 @@ import signal
 import sys
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -46,11 +47,21 @@ from cryodaq.core.calibration_acquisition import (
 )
 from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
 from cryodaq.core.channel_state import ChannelStateTracker
+from cryodaq.core.command_authority import (
+    ENGINE_MUTATION_CAPABILITY,
+    MUTATION_ENVELOPE_KEYS,
+    MUTATION_PROTOCOL_MAJOR,
+    MUTATION_RECEIPT_SCHEMA,
+    is_mutation,
+    requires_compatibility,
+    strip_mutation_envelope,
+    valid_capability_token,
+)
 from cryodaq.core.cooldown_alarm import CooldownAlarm
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.event_logger import EventLogger
-from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
+from cryodaq.core.experiment import ExperimentIdentityMismatchError, ExperimentManager, ExperimentStatus
 from cryodaq.core.housekeeping import (
     AdaptiveThrottle,
     HousekeepingConfigError,
@@ -60,7 +71,11 @@ from cryodaq.core.housekeeping import (
     load_protected_channel_patterns,
 )
 from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
-from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.core.operator_log import (
+    OperatorLogEntry,
+    OperatorLogIdempotencyConflictError,
+    OperatorLogIdempotencyUnavailableError,
+)
 from cryodaq.core.path_jail import resolve_within
 from cryodaq.core.physical_alarms_config import (
     load_channel_landmarks,
@@ -134,6 +149,7 @@ from cryodaq.engine_wiring.supervision import (
     TaskSupervisor,
     _handle_supervised_task_exit,
     install_loop_exception_backstop,
+    stop_safety_manager_with_hold,
 )
 from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
 from cryodaq.notifications.escalation import EscalationService
@@ -1430,10 +1446,29 @@ def _run_experiment_command(
         }
 
     if action == "experiment_advance_phase":
+        expected_experiment_id = cmd.get("experiment_id")
+        if type(expected_experiment_id) is not str or not expected_experiment_id:
+            return {
+                "ok": False,
+                "error_code": "experiment_id_required",
+                "error": "experiment_id must identify the experiment that owns this phase command",
+            }
         phase = str(cmd.get("phase", "")).strip()
         operator = str(cmd.get("operator", "")).strip()
-        entry = experiment_manager.advance_phase(phase, operator)
-        return {"ok": True, "phase": entry}
+        try:
+            entry = experiment_manager.advance_phase(
+                phase,
+                operator,
+                expected_experiment_id=expected_experiment_id,
+            )
+        except ExperimentIdentityMismatchError as exc:
+            return {
+                "ok": False,
+                "error_code": "stale_experiment_command",
+                "error": str(exc),
+                "experiment_id": expected_experiment_id,
+            }
+        return {"ok": True, "phase": entry, "experiment_id": expected_experiment_id}
 
     if action == "experiment_phase_status":
         current = experiment_manager.get_current_phase()
@@ -1453,6 +1488,11 @@ def _run_experiment_command(
                 )
         return {
             "ok": True,
+            "experiment_id": (
+                experiment_manager.active_experiment.experiment_id
+                if experiment_manager.active_experiment is not None
+                else None
+            ),
             "current_phase": current,
             "phases": history,
             "elapsed_in_phase_s": elapsed,
@@ -1726,11 +1766,11 @@ async def _watchdog(
 # ---------------------------------------------------------------------------
 
 
-def _set_safety_task_ref(safety_manager: Any, attr: str, task: asyncio.Task[Any]) -> None:
+def _set_safety_task_ref(safety_manager: Any, role: str, task: asyncio.Task[Any]) -> None:
     """on_spawn-хук для safety_collect/safety_monitor: синхронизирует ссылку на
     перезапущенную задачу в SafetyManager, чтобы stop() и sweep завершения
     видели живую задачу (раньше — вложенная lambda в _run_engine)."""
-    setattr(safety_manager, attr, task)
+    safety_manager.replace_operator_child(role, task)
 
 
 def _engine_config_path(name: str) -> Path:
@@ -1957,6 +1997,41 @@ def _request_shutdown(shutdown_event: asyncio.Event, *_signal_args: Any) -> None
     shutdown_event.set()
 
 
+_EXPERIMENT_MUTATION_ACTIONS = frozenset(
+    {
+        "set_app_mode",
+        "experiment_start",
+        "experiment_create",
+        "experiment_update",
+        "experiment_finalize",
+        "experiment_stop",
+        "experiment_abort",
+        "experiment_attach_run_record",
+        "experiment_create_retroactive",
+        "experiment_generate_report",
+        "experiment_advance_phase",
+    }
+)
+_EXPERIMENT_READ_ACTIONS = frozenset(
+    {
+        "get_app_mode",
+        "experiment_templates",
+        "experiment_archive_list",
+        "experiment_list_archive",
+        "experiment_get_active",
+        "experiment_get_archive_item",
+        "experiment_phase_status",
+    }
+)
+_MAX_PENDING_EXPERIMENT_READS = 4
+_MAX_PENDING_OPERATOR_LOG_ENTRIES = 4
+_MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS = 4096
+_MUTATION_PROTOCOL_MAJOR = MUTATION_PROTOCOL_MAJOR
+_MUTATION_CAPABILITY = ENGINE_MUTATION_CAPABILITY
+_MUTATION_RECEIPT_SCHEMA = MUTATION_RECEIPT_SCHEMA
+_MUTATION_ENVELOPE_KEYS = MUTATION_ENVELOPE_KEYS
+
+
 @dataclass(slots=True)
 class EngineCommandContext:
     safety_manager: Any
@@ -1987,18 +2062,440 @@ class EngineCommandContext:
     zmq_publisher: ZMQPublisher | None = None
     recording_lifecycle_feed: RecordingLifecycleFeed | None = None
     annunciation_registry: AnnunciationRegistry | None = None
+    experiment_command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    experiment_command_tasks: set[asyncio.Task[dict[str, Any]]] = field(default_factory=set)
+    experiment_read_tasks: set[asyncio.Task[dict[str, Any]]] = field(default_factory=set)
+    experiment_status_task: asyncio.Task[dict[str, Any]] | None = None
+    experiment_commands_accepting: bool = True
+    mutation_capability_token: str | None = None
+    operator_log_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    operator_log_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+    alarm_ack_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    alarm_ack_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+
+
+def _is_mutating_command(action: object) -> bool:
+    return is_mutation(action)
+
+
+def _valid_mutation_capability_token(token: object) -> bool:
+    return valid_capability_token(token)
+
+
+def _mutation_protocol_failure(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any] | None:
+    if not requires_compatibility(cmd.get("cmd")):
+        return None
+    token = context.mutation_capability_token
+    major = cmd.get("protocol_major")
+    capability = cmd.get("mutation_capability")
+    presented_token = cmd.get("capability_token")
+    compatible = (
+        _valid_mutation_capability_token(token)
+        and type(major) is int
+        and major == _MUTATION_PROTOCOL_MAJOR
+        and capability == _MUTATION_CAPABILITY
+        and type(presented_token) is str
+        and secrets.compare_digest(presented_token, token)
+    )
+    if compatible:
+        return None
+    return {
+        "ok": False,
+        "error_code": "mutation_protocol_incompatible",
+        "error": "mutating command refused; perform mutation_capabilities discovery and retry explicitly",
+        "delivery_state": "not_dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": True,
+        "compatibility_receipt": {
+            "schema": _MUTATION_RECEIPT_SCHEMA,
+            "accepted": False,
+            "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "required_capability": _MUTATION_CAPABILITY,
+        },
+    }
+
+
+def _operator_log_fingerprint(cmd: dict[str, Any]) -> str:
+    semantic = {
+        key: value
+        for key, value in cmd.items()
+        if key not in {"request_id", "protocol_major", "mutation_capability", "capability_token"}
+    }
+    canonical = json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _execute_owned_operator_log_entry(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    request_id = cmd["request_id"]
+    try:
+        experiment_id = await asyncio.to_thread(
+            context.experiment_manager.resolve_operator_log_scope,
+            expected_experiment_id=cmd.get("experiment_id"),
+            unbound=cmd.get("experiment_unbound", False),
+        )
+    except ExperimentIdentityMismatchError as exc:
+        return {
+            "ok": False,
+            "error_code": "stale_experiment_command",
+            "error": str(exc),
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except (TypeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error_code": "operator_log_scope_invalid",
+            "error": str(exc),
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+
+    message = str(cmd.get("message", "")).strip()
+    if not message:
+        return {
+            "ok": False,
+            "error_code": "operator_log_message_invalid",
+            "error": "Operator log message must not be empty.",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+    try:
+        commit = await context.writer.append_operator_log_idempotent(
+            message=message,
+            request_id=request_id,
+            request_fingerprint=_operator_log_fingerprint(cmd),
+            author=str(cmd.get("author", "")).strip(),
+            source=str(cmd.get("source", "")).strip() or "command",
+            experiment_id=experiment_id,
+            tags=cmd.get("tags"),
+        )
+    except OperatorLogIdempotencyConflictError:
+        return {
+            "ok": False,
+            "error_code": "idempotency_key_conflict",
+            "error": "request_id was already committed with different content",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except OperatorLogIdempotencyUnavailableError:
+        logger.error("Operator log idempotency registry unavailable for request %s", request_id, exc_info=True)
+        return {
+            "ok": False,
+            "error_code": "operator_log_idempotency_unavailable",
+            "error": "operator log idempotency state is unavailable",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except Exception as exc:  # noqa: BLE001 - pre-commit persistence failure
+        logger.error("Operator log persistence failed for request %s: %s", request_id, exc, exc_info=True)
+        return {
+            "ok": False,
+            "error_code": "operator_log_persistence_failed",
+            "error": "operator log persistence failed",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+
+    entry = commit.entry
+    payload = entry.to_payload()
+    receipt = {
+        "schema": "operator_log_commit_v1",
+        "request_id": request_id,
+        "entry_id": entry.id,
+        "experiment_id": experiment_id,
+        "committed": True,
+    }
+    try:
+        publication = await context.writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=_operator_log_fingerprint(cmd),
+            event={"schema": "operator_log_commit_v1", "entry": payload},
+            receipt=receipt,
+        )
+        if publication.state != "published":
+            await _publish_operator_log_entry(context.broker, entry)
+            await context.writer.publish_operator_log_publication_outbox(
+                request_id=request_id,
+                request_fingerprint=_operator_log_fingerprint(cmd),
+            )
+    except Exception as exc:  # noqa: BLE001 - committed publication reconciliation
+        logger.error("Committed operator log publication failed: %s", exc, exc_info=True)
+        return {
+            "ok": False,
+            "committed": True,
+            "error_code": "committed_reconciliation_failed",
+            "error": "operator log committed, but publication reconciliation failed",
+            "retry_safe": False,
+            "entry": payload,
+            "commit_receipt": receipt,
+        }
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "entry": payload,
+        "commit_receipt": receipt,
+    }
+
+
+def _owned_operator_log_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.operator_log_tasks.get(request_id)
+    if current is not None and current[1] is task:
+        del context.operator_log_tasks[request_id]
+    if task.cancelled():
+        logger.critical("Operator log owner was cancelled: %s", request_id)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Operator log owner failed after submission (%s): %s",
+            request_id,
+            exception,
+            exc_info=(type(exception), exception, exception.__traceback__),
+        )
+        return
+    result = task.result()
+    if result.get("committed") is not True:
+        return
+    context.operator_log_receipts[request_id] = (fingerprint, dict(result))
+    while len(context.operator_log_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
+        context.operator_log_receipts.pop(next(iter(context.operator_log_receipts)))
+
+
+async def _submit_operator_log_entry(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    if not context.experiment_commands_accepting:
+        return {
+            "ok": False,
+            "error_code": "engine_shutting_down",
+            "error": "operator log submissions are frozen for shutdown",
+            "retry_safe": True,
+        }
+    request_id = cmd.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+    ):
+        return {
+            "ok": False,
+            "error_code": "operator_log_request_id_invalid",
+            "error": "request_id must be exactly 32 lowercase hexadecimal characters",
+            "retry_safe": True,
+        }
+    fingerprint = _operator_log_fingerprint(cmd)
+    completed = context.operator_log_receipts.get(request_id)
+    if completed is not None:
+        if completed[0] != fingerprint:
+            return {
+                "ok": False,
+                "error_code": "idempotency_key_conflict",
+                "error": "request_id was already committed with different content",
+                "retry_safe": False,
+            }
+        return dict(completed[1])
+    pending = context.operator_log_tasks.get(request_id)
+    if pending is not None:
+        if pending[0] != fingerprint:
+            return {
+                "ok": False,
+                "error_code": "idempotency_key_conflict",
+                "error": "request_id is already in flight with different content",
+                "retry_safe": False,
+            }
+        return await asyncio.shield(pending[1])
+    if len(context.operator_log_tasks) >= _MAX_PENDING_OPERATOR_LOG_ENTRIES:
+        return {
+            "ok": False,
+            "error_code": "operator_log_busy",
+            "error": "the bounded operator log commit lane is full",
+            "retry_safe": True,
+        }
+    task = asyncio.create_task(
+        _execute_owned_operator_log_entry(cmd, context),
+        name=f"operator_log_{request_id[:8]}",
+    )
+    context.operator_log_tasks[request_id] = (fingerprint, task)
+    task.add_done_callback(functools.partial(_owned_operator_log_done, context, request_id, fingerprint))
+    return await asyncio.shield(task)
+
+
+async def _execute_owned_alarm_ack(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+) -> dict[str, Any]:
+    alarm_name = cmd["alarm_name"]
+    activation_id = cmd["activation_id"]
+    operator = cmd["operator"].strip()
+    reason = cmd["reason"].strip()
+    try:
+        outbox = await context.writer.prepare_alarm_ack_outbox(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+            alarm_name=alarm_name,
+            activation_id=activation_id,
+            operator_name=operator,
+            reason=reason,
+        )
+    except OperatorLogIdempotencyConflictError:
+        return {
+            "ok": False,
+            "error_code": "idempotency_key_conflict",
+            "error": "request_id was already committed with different content",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except Exception:
+        logger.error("Alarm ACK outbox intent failed for request %s", request_id, exc_info=True)
+        return {
+            "ok": False,
+            "error_code": "alarm_ack_persistence_failed",
+            "error": "alarm acknowledgement persistence failed",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+
+    if outbox.state == "published" and outbox.receipt is not None:
+        return dict(outbox.receipt)
+
+    event = outbox.event
+    if outbox.state == "intent":
+        target = (
+            context.annunciation_registry.resolve(cmd["engine_instance_id"], activation_id)
+            if context.annunciation_registry is not None
+            else None
+        )
+        if target is None or target.source != "alarm_v2" or target.source_key != alarm_name:
+            return {
+                "ok": False,
+                "error_code": "stale_or_unknown_activation",
+                "error": "alarm activation is stale or unknown",
+                "retry_safe": False,
+                "request_id": request_id,
+            }
+        ack_event = context.alarm_v2_state_mgr.acknowledge(
+            alarm_name,
+            operator=operator,
+            reason=reason,
+            expected_activation_id=target.source_activation_id,
+        )
+        if ack_event is None:
+            return {
+                "ok": False,
+                "error_code": "activation_changed",
+                "error": "alarm activation changed before acknowledgement commit",
+                "retry_safe": False,
+                "request_id": request_id,
+            }
+        event = {**ack_event, "activation_id": activation_id, "engine_instance_id": cmd["engine_instance_id"]}
+        receipt = {
+            "ok": True,
+            "alarm_name": alarm_name,
+            "activation_id": activation_id,
+            "request_id": request_id,
+            "event_emitted": True,
+            "committed": True,
+        }
+        outbox = await context.writer.commit_alarm_ack_outbox(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+            event=event,
+            receipt=receipt,
+        )
+    if outbox.event is None or outbox.receipt is None:
+        raise RuntimeError("alarm ACK outbox is committed without event or receipt")
+    event = dict(outbox.event)
+    receipt = dict(outbox.receipt)
+    await context.broker.publish(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="alarm_v2",
+            channel="alarm_v2/acknowledged",
+            value=event["acknowledged_at"],
+            unit="",
+            metadata=event,
+        )
+    )
+    await context.writer.publish_alarm_ack_outbox(request_id=request_id, request_fingerprint=fingerprint)
+    return receipt
+
+
+def _owned_alarm_ack_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.alarm_ack_tasks.get(request_id)
+    if current is not None and current[1] is task:
+        del context.alarm_ack_tasks[request_id]
+    if task.cancelled() or task.exception() is not None:
+        return
+    result = task.result()
+    if result.get("committed") is True:
+        context.alarm_ack_receipts[request_id] = (fingerprint, dict(result))
+        while len(context.alarm_ack_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
+            context.alarm_ack_receipts.pop(next(iter(context.alarm_ack_receipts)))
+
+
+async def _submit_alarm_ack(cmd: dict[str, Any], context: EngineCommandContext) -> dict[str, Any]:
+    request_id = cmd.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+    ):
+        return {
+            "ok": False,
+            "error_code": "alarm_ack_request_id_invalid",
+            "error": "request_id must be exactly 32 lowercase hexadecimal characters",
+            "retry_safe": True,
+        }
+    fingerprint = _operator_log_fingerprint(cmd)
+    completed = context.alarm_ack_receipts.get(request_id)
+    if completed is not None:
+        if completed[0] != fingerprint:
+            return {"ok": False, "error_code": "idempotency_key_conflict", "retry_safe": False}
+        return dict(completed[1])
+    pending = context.alarm_ack_tasks.get(request_id)
+    if pending is not None:
+        if pending[0] != fingerprint:
+            return {"ok": False, "error_code": "idempotency_key_conflict", "retry_safe": False}
+        return await asyncio.shield(pending[1])
+    task = asyncio.create_task(
+        _execute_owned_alarm_ack(cmd, context, request_id, fingerprint),
+        name=f"alarm_ack_{request_id[:8]}",
+    )
+    context.alarm_ack_tasks[request_id] = (fingerprint, task)
+    task.add_done_callback(functools.partial(_owned_alarm_ack_done, context, request_id, fingerprint))
+    return await asyncio.shield(task)
 
 
 def _feed_recording_experiment_lifecycle(
     context: EngineCommandContext,
     action: str,
     result: dict[str, Any],
-) -> None:
+) -> str | None:
     """Reflect an already-committed experiment result into the dark feed."""
 
     feed = context.recording_lifecycle_feed
     if feed is None:
-        return
+        return None
     try:
         snapshot = context.experiment_manager.snapshot_operator_experiment()
         if action in {"experiment_finalize", "experiment_stop", "experiment_abort"}:
@@ -2009,7 +2506,7 @@ def _feed_recording_experiment_lifecycle(
                 feed.experiment_aborted(snapshot.revision, experiment_id)
             else:
                 feed.experiment_finalized(snapshot.revision, experiment_id)
-            return
+            return None
 
         result_experiment = result.get("experiment") or result.get("active_experiment")
         result_id = (
@@ -2031,6 +2528,8 @@ def _feed_recording_experiment_lifecycle(
         )
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
         logger.warning("Recording lifecycle feed unavailable after %s: %s", action, exc, exc_info=True)
+        return "recording_lifecycle_feed"
+    return None
 
 
 def _seed_recording_lifecycle(
@@ -2194,6 +2693,382 @@ def _periodic_snapshot_response(context: EngineCommandContext) -> dict[str, Any]
         return _periodic_query_failure("snapshot_unavailable")
 
 
+async def _execute_owned_experiment_read(
+    action: str,
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    """Run one retained read after earlier lifecycle mutations settle."""
+
+    async with context.experiment_command_lock:
+        return await asyncio.to_thread(
+            _run_experiment_command,
+            action,
+            cmd,
+            context.experiment_manager,
+        )
+
+
+def _owned_experiment_read_done(
+    context: EngineCommandContext,
+    action: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    context.experiment_read_tasks.discard(task)
+    if task.cancelled():
+        logger.critical("Experiment read owner was cancelled: %s", action)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Experiment read owner failed after submission (%s): %s",
+            action,
+            exception,
+            exc_info=(type(exception), exception, exception.__traceback__),
+        )
+
+
+def _owned_experiment_status_done(
+    context: EngineCommandContext,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    if context.experiment_status_task is task:
+        context.experiment_status_task = None
+    if task.cancelled():
+        logger.critical("Experiment status owner was cancelled")
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Experiment status owner failed after submission: %s",
+            exception,
+            exc_info=(type(exception), exception, exception.__traceback__),
+        )
+
+
+async def _drain_experiment_command_tasks(
+    context: EngineCommandContext,
+    logger_: logging.Logger,
+    timeout: float = 30.0,  # noqa: ASYNC109 - internal shutdown gate
+) -> bool:
+    """Freeze submissions and settle experiment owners before teardown.
+
+    The monotonic timeout is an escalation boundary, never a cancellation
+    boundary. If it expires, shutdown is held fail-closed until the retained
+    owners settle so a worker cannot commit after its reconciliation resources
+    have been dismantled. ``False`` means the visible deadline was exceeded.
+    """
+
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be numeric")
+    timeout_s = float(timeout)
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("timeout must be positive and finite")
+    context.experiment_commands_accepting = False
+    pending = set(context.experiment_command_tasks)
+    pending.update(context.experiment_read_tasks)
+    pending.update(task for _fingerprint, task in context.operator_log_tasks.values())
+    pending.update(task for _fingerprint, task in context.alarm_ack_tasks.values())
+    if context.experiment_status_task is not None:
+        pending.add(context.experiment_status_task)
+    pending = {task for task in pending if not task.done()}
+    if not pending:
+        return True
+
+    logger_.info("Draining %d retained experiment command task(s) before shutdown", len(pending))
+    drain = asyncio.gather(*pending, return_exceptions=True)
+    try:
+        await asyncio.wait_for(asyncio.shield(drain), timeout=timeout_s)
+        return True
+    except TimeoutError:
+        logger_.critical(
+            "Experiment command drain exceeded %.3fs; shutdown remains blocked until authority settles",
+            timeout_s,
+        )
+        await drain
+        return False
+
+
+def _note_experiment_reconciliation_failure(
+    failures: list[str],
+    step: str,
+    exc: BaseException,
+) -> None:
+    failures.append(step)
+    logger.error(
+        "Committed experiment command reconciliation failed at %s: %s",
+        step,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+def _attempt_experiment_reconciliation_sync(
+    failures: list[str],
+    step: str,
+    operation: Callable[[], Any],
+) -> Any | None:
+    try:
+        return operation()
+    except Exception as exc:  # noqa: BLE001 - classify committed partial outcome
+        _note_experiment_reconciliation_failure(failures, step, exc)
+        return None
+
+
+async def _attempt_experiment_reconciliation_async(
+    failures: list[str],
+    step: str,
+    operation: Callable[[], Awaitable[Any]],
+) -> Any | None:
+    try:
+        return await operation()
+    except Exception as exc:  # noqa: BLE001 - classify committed partial outcome
+        _note_experiment_reconciliation_failure(failures, step, exc)
+        return None
+
+
+def _experiment_commit_receipt(
+    action: str,
+    cmd: dict[str, Any],
+    result: dict[str, Any],
+    manager: ExperimentManager,
+) -> dict[str, Any]:
+    experiment = result.get("experiment") or result.get("active_experiment") or {}
+    experiment_id = result.get("experiment_id") or experiment.get("experiment_id") or cmd.get("experiment_id")
+    snapshot = manager.snapshot_operator_experiment()
+    return {
+        "schema": "experiment_command_commit_v1",
+        "action": action,
+        "experiment_id": experiment_id if type(experiment_id) is str else None,
+        "manager_revision": snapshot.revision,
+        "committed": True,
+    }
+
+
+async def _execute_owned_experiment_command(
+    action: str,
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    """Own a lifecycle command through commit and every completion side effect.
+
+    The task running this function is retained by ``EngineCommandContext`` and
+    shielded from a timed-out/cancelled reply waiter. A timeout therefore means
+    outcome unknown to the caller, while the single serialized owner still
+    completes reconciliation and side effects exactly once.
+    """
+
+    async with context.experiment_command_lock:
+        experiment_manager = context.experiment_manager
+        experiment_call = asyncio.to_thread(
+            _run_experiment_command,
+            action,
+            cmd,
+            experiment_manager,
+        )
+        result = await experiment_call
+
+        if not result.get("ok"):
+            return result
+        reconciliation_failures: list[str] = []
+        try:
+            receipt = _experiment_commit_receipt(action, cmd, result, experiment_manager)
+        except Exception as exc:  # noqa: BLE001 - state is already committed
+            _note_experiment_reconciliation_failure(
+                reconciliation_failures,
+                "commit_receipt_generation",
+                exc,
+            )
+            experiment = result.get("experiment") or result.get("active_experiment") or {}
+            experiment_id = result.get("experiment_id") or experiment.get("experiment_id") or cmd.get("experiment_id")
+            receipt = {
+                "schema": "experiment_command_commit_v1",
+                "action": action,
+                "experiment_id": experiment_id if type(experiment_id) is str else None,
+                "manager_revision": None,
+                "committed": True,
+            }
+
+        if action in {
+            "experiment_start",
+            "experiment_create",
+            "experiment_update",
+            "experiment_finalize",
+            "experiment_stop",
+            "experiment_abort",
+            "experiment_advance_phase",
+        }:
+            feed_failure = _feed_recording_experiment_lifecycle(context, action, result)
+            if feed_failure is not None:
+                reconciliation_failures.append(feed_failure)
+
+        if action in {"experiment_start", "experiment_create"}:
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "calibration_acquisition_activate",
+                lambda: asyncio.to_thread(
+                    _try_activate_calibration_acquisition,
+                    context.calibration_acquisition,
+                    experiment_manager,
+                    cmd,
+                ),
+            )
+            name = cmd.get("name") or cmd.get("title") or "?"
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_log_experiment_start",
+                lambda: context.event_logger.log_event("experiment", f"Эксперимент начат: {name}"),
+            )
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_bus_experiment_start",
+                lambda: context.event_bus.publish(
+                    EngineEvent(
+                        event_type="experiment_start",
+                        timestamp=datetime.now(UTC),
+                        payload={"name": name, "experiment_id": result.get("experiment_id")},
+                        experiment_id=result.get("experiment_id"),
+                    )
+                ),
+            )
+        elif action in {
+            "experiment_finalize",
+            "experiment_stop",
+            "experiment_abort",
+        }:
+            _attempt_experiment_reconciliation_sync(
+                reconciliation_failures,
+                "calibration_acquisition_deactivate",
+                context.calibration_acquisition.deactivate,
+            )
+            if action == "experiment_abort":
+                message = "⚠ Эксперимент прерван"
+            else:
+                message = "Эксперимент завершён"
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_log_experiment_terminal",
+                lambda: context.event_logger.log_event("experiment", message),
+            )
+            exp_info = result.get("experiment", {})
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_bus_experiment_terminal",
+                lambda: context.event_bus.publish(
+                    EngineEvent(
+                        event_type=action,
+                        timestamp=datetime.now(UTC),
+                        payload={"action": action, "experiment": exp_info},
+                        experiment_id=exp_info.get("experiment_id"),
+                    )
+                ),
+            )
+            if context.cooldown_alarm is not None:
+                _attempt_experiment_reconciliation_sync(
+                    reconciliation_failures,
+                    "cooldown_alarm_experiment_finalized",
+                    context.cooldown_alarm.notify_experiment_finalized,
+                )
+
+            if context.sink_registry.sinks:
+
+                async def dispatch_export() -> None:
+                    experiment_id = exp_info.get("experiment_id") or ""
+                    metadata: dict = {}
+                    if experiment_id:
+                        metadata_path = experiment_manager.data_dir / "experiments" / experiment_id / "metadata.json"
+                        metadata = await asyncio.to_thread(_load_experiment_metadata_sync, metadata_path)
+                    export = _build_experiment_export(exp_info, metadata)
+                    task = asyncio.create_task(
+                        context.sink_registry.dispatch(export),
+                        name=f"sinks_dispatch_{(experiment_id or 'noid')[:8]}",
+                    )
+                    context.alarm_dispatch_tasks.add(task)
+                    task.add_done_callback(context.alarm_dispatch_tasks.discard)
+
+                await _attempt_experiment_reconciliation_async(
+                    reconciliation_failures,
+                    "sink_dispatch_setup",
+                    dispatch_export,
+                )
+        elif action == "experiment_advance_phase":
+            phase = cmd.get("phase", "?")
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_log_phase_transition",
+                lambda: context.event_logger.log_event("phase", f"Фаза: → {phase}"),
+            )
+            active = experiment_manager.active_experiment
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_bus_phase_transition",
+                lambda: context.event_bus.publish(
+                    EngineEvent(
+                        event_type="phase_transition",
+                        timestamp=datetime.now(UTC),
+                        payload={"phase": phase, "entry": result.get("phase", {})},
+                        experiment_id=active.experiment_id if active else None,
+                    )
+                ),
+            )
+            cooldown_alarm = context.cooldown_alarm
+            if cooldown_alarm is not None:
+                _attempt_experiment_reconciliation_sync(
+                    reconciliation_failures,
+                    "cooldown_alarm_phase_change",
+                    lambda: cooldown_alarm.notify_phase_change(phase),
+                )
+            if phase == "cooldown" and cooldown_alarm is not None and cooldown_alarm.is_auto_arm_enabled:
+                armed = _attempt_experiment_reconciliation_sync(
+                    reconciliation_failures,
+                    "cooldown_alarm_arm",
+                    cooldown_alarm.arm,
+                )
+                if armed is not None:
+                    if not armed and cooldown_alarm.cold_start_skipped:
+                        logger.info("CooldownAlarm: auto-arm skipped — cold-start detected")
+                    else:
+                        logger.info(
+                            "CooldownAlarm: auto-arm на phase=cooldown → %s",
+                            "ARMED" if armed else "FAILED (no model)",
+                        )
+
+        result = dict(result)
+        result["committed"] = True
+        result["commit_receipt"] = receipt
+        result["retry_safe"] = False
+        if reconciliation_failures:
+            result.update(
+                {
+                    "ok": False,
+                    "committed": True,
+                    "error_code": "committed_reconciliation_failed",
+                    "error": "experiment state committed, but one or more completion steps failed",
+                    "reconciliation_failures": tuple(reconciliation_failures),
+                }
+            )
+        return result
+
+
+def _owned_experiment_task_done(
+    context: EngineCommandContext,
+    action: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    context.experiment_command_tasks.discard(task)
+    if task.cancelled():
+        logger.critical("Experiment command owner was cancelled: %s", action)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Experiment command owner failed after submission (%s): %s",
+            action,
+            exception,
+            exc_info=(type(exception), exception, exception.__traceback__),
+        )
+
+
 async def _handle_gui_command(
     cmd: dict[str, Any],
     *,
@@ -2226,6 +3101,27 @@ async def _handle_gui_command(
     escalation_service = context.escalation_service
     cooldown_service = context.cooldown_service
     action = cmd.get("cmd", "")
+    if action == "mutation_capabilities":
+        token = context.mutation_capability_token
+        accepted = _valid_mutation_capability_token(token)
+        receipt: dict[str, Any] = {
+            "schema": _MUTATION_RECEIPT_SCHEMA,
+            "accepted": accepted,
+            "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "required_capability": _MUTATION_CAPABILITY,
+        }
+        if accepted:
+            receipt["capability_token"] = token
+        return {
+            "ok": True,
+            "compatibility_receipt": receipt,
+        }
+    protocol_failure = _mutation_protocol_failure(cmd, context)
+    if protocol_failure is not None:
+        return protocol_failure
+    # Compatibility material is transport metadata, never handler input.  This
+    # also strips a forged envelope from direct read and safe-direction calls.
+    cmd = strip_mutation_envelope(cmd)
     try:
         if action == "periodic_subscription_barrier":
             if set(cmd) != {"cmd", "schema", "nonce"}:
@@ -2242,6 +3138,29 @@ async def _handle_gui_command(
             if set(cmd) != {"cmd", "schema"} or cmd.get("schema") != PERIODIC_QUERY_SCHEMA:
                 return _periodic_query_failure("snapshot_unavailable")
             return _periodic_snapshot_response(context)
+        if action == "keithley_emergency_off":
+            invalid_keys = set(cmd) - {"cmd", "channel"}
+            channel = cmd.get("channel")
+            if invalid_keys or ("channel" in cmd and (type(channel) is not str or not channel.strip())):
+                return {
+                    "ok": False,
+                    "error_code": "safe_direction_command_invalid",
+                    "error": "emergency-OFF accepts only cmd and an optional non-empty string channel",
+                    "delivery_state": "not_dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
+            try:
+                normalize_smu_channel(channel)
+            except (TypeError, ValueError) as exc:
+                return {
+                    "ok": False,
+                    "error_code": "safe_direction_command_invalid",
+                    "error": str(exc),
+                    "delivery_state": "not_dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
         if action in {
             "keithley_emergency_off",
             "keithley_stop",
@@ -2478,12 +3397,15 @@ async def _handle_gui_command(
                 "activation_id",
                 "operator",
                 "reason",
+                "request_id",
             }
             if set(cmd) != required or not all(
                 type(cmd[key]) is str and len(cmd[key]) <= 256 for key in required - {"cmd"}
             ):
                 return {"ok": False, "error": "invalid_alarm_ack_command"}
             if not cmd["alarm_name"] or not cmd["engine_instance_id"] or not cmd["activation_id"]:
+                return {"ok": False, "error": "invalid_alarm_ack_command"}
+            if any(not cmd[key].strip() or not cmd[key].isprintable() for key in ("operator", "reason")):
                 return {"ok": False, "error": "invalid_alarm_ack_command"}
             if annunciation_registry is None:
                 return {"ok": False, "error": "annunciation_unavailable"}
@@ -2495,197 +3417,78 @@ async def _handle_gui_command(
             target = annunciation_registry.resolve(cmd["engine_instance_id"], cmd["activation_id"])
             if target is None or target.source != "alarm_v2" or target.source_key != cmd["alarm_name"]:
                 return {"ok": False, "error": "stale_or_unknown_activation"}
-            name = cmd["alarm_name"]
-            operator = cmd["operator"]
-            reason = cmd["reason"]
-            ack_event = alarm_v2_state_mgr.acknowledge(
-                name,
-                operator=operator,
-                reason=reason,
-                expected_activation_id=target.source_activation_id,
+            return await _submit_alarm_ack(cmd, context)
+        if action in _EXPERIMENT_MUTATION_ACTIONS:
+            if not context.experiment_commands_accepting:
+                return {
+                    "ok": False,
+                    "error_code": "engine_shutting_down",
+                    "error": "experiment command submissions are frozen for shutdown",
+                }
+            if context.experiment_command_tasks:
+                return {
+                    "ok": False,
+                    "error_code": "experiment_command_pending",
+                    "error": "a prior experiment mutation is still authoritative; reconcile before retry",
+                    "retry_safe": False,
+                }
+            owner_task = asyncio.create_task(
+                _execute_owned_experiment_command(action, cmd, context),
+                name=f"experiment_command_{action}",
             )
-            if ack_event is not None:
-                await broker.publish(
-                    Reading(
-                        timestamp=datetime.now(UTC),
-                        instrument_id="alarm_v2",
-                        channel="alarm_v2/acknowledged",
-                        value=ack_event["acknowledged_at"],
-                        unit="",
-                        metadata=ack_event,
-                    )
+            context.experiment_command_tasks.add(owner_task)
+            owner_task.add_done_callback(functools.partial(_owned_experiment_task_done, context, action))
+            try:
+                return await asyncio.shield(owner_task)
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Experiment command reply cancelled (%s): outcome unknown; "
+                    "authoritative owner continues and automatic retry is unsafe",
+                    action,
                 )
-            return {
-                "ok": ack_event is not None or target.acknowledged,
-                "alarm_name": name,
-                "event_emitted": ack_event is not None,
-            }
-        if action in {
-            "get_app_mode",
-            "set_app_mode",
-            "experiment_templates",
-            "experiment_status",
-            "experiment_archive_list",
-            "experiment_list_archive",
-            "experiment_start",
-            "experiment_create",
-            "experiment_get_active",
-            "experiment_update",
-            "experiment_finalize",
-            "experiment_stop",
-            "experiment_abort",
-            "experiment_get_archive_item",
-            "experiment_attach_run_record",
-            "experiment_create_retroactive",
-            "experiment_generate_report",
-            "experiment_advance_phase",
-            "experiment_phase_status",
-        }:
-            experiment_call = asyncio.to_thread(
-                _run_experiment_command,
-                action,
-                cmd,
-                experiment_manager,
+                raise
+        if action == "experiment_status":
+            if not context.experiment_commands_accepting:
+                return {
+                    "ok": False,
+                    "error_code": "engine_shutting_down",
+                    "error": "experiment command submissions are frozen for shutdown",
+                }
+            status_task = context.experiment_status_task
+            if status_task is None or status_task.done():
+                status_task = asyncio.create_task(
+                    _execute_owned_experiment_read(action, cmd, context),
+                    name="experiment_status_coalesced",
+                )
+                context.experiment_status_task = status_task
+                status_task.add_done_callback(functools.partial(_owned_experiment_status_done, context))
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(status_task),
+                    timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)") from exc
+        if action in _EXPERIMENT_READ_ACTIONS:
+            if not context.experiment_commands_accepting:
+                return {
+                    "ok": False,
+                    "error_code": "engine_shutting_down",
+                    "error": "experiment command submissions are frozen for shutdown",
+                }
+            if len(context.experiment_read_tasks) >= _MAX_PENDING_EXPERIMENT_READS:
+                return {
+                    "ok": False,
+                    "error_code": "experiment_read_busy",
+                    "error": "the bounded experiment read lane is full",
+                }
+            read_task = asyncio.create_task(
+                _execute_owned_experiment_read(action, cmd, context),
+                name=f"experiment_read_{action}",
             )
-            if action == "experiment_status":
-                # NOTE: asyncio.wait_for on an asyncio.to_thread() call times out the AWAIT,
-                # not the worker thread. If get_status_payload() is pathologically slow, the
-                # background thread keeps running until it returns naturally. This is an
-                # accepted residual risk — REP is still protected by the outer 2.0s handler
-                # timeout envelope in ZMQCommandServer._run_handler(); this inner 1.5s wrapper
-                # only gives faster client feedback and frees the REP loop earlier. There is
-                # no safe way to terminate a Python thread mid-call, so Option C
-                # ("actually interrupt") is not available.
-                try:
-                    result = await asyncio.wait_for(
-                        experiment_call,
-                        timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
-                    )
-                except TimeoutError as exc:
-                    raise TimeoutError(f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)") from exc
-            else:
-                result = await experiment_call
-            if result.get("ok") and action in {
-                "experiment_start",
-                "experiment_create",
-                "experiment_update",
-                "experiment_finalize",
-                "experiment_stop",
-                "experiment_abort",
-                "experiment_advance_phase",
-            }:
-                _feed_recording_experiment_lifecycle(context, action, result)
-            # Hook calibration acquisition on experiment lifecycle
-            if result.get("ok") and action in {"experiment_start", "experiment_create"}:
-                await asyncio.to_thread(
-                    _try_activate_calibration_acquisition,
-                    calibration_acquisition,
-                    experiment_manager,
-                    cmd,
-                )
-                name = cmd.get("name") or cmd.get("title") or "?"
-                await event_logger.log_event("experiment", f"Эксперимент начат: {name}")
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="experiment_start",
-                        timestamp=datetime.now(UTC),
-                        payload={"name": name, "experiment_id": result.get("experiment_id")},
-                        experiment_id=result.get("experiment_id"),
-                    )
-                )
-            elif result.get("ok") and action in {
-                "experiment_finalize",
-                "experiment_stop",
-                "experiment_abort",
-            }:
-                calibration_acquisition.deactivate()
-                if action == "experiment_abort":
-                    await event_logger.log_event("experiment", "\u26a0 Эксперимент прерван")
-                else:
-                    await event_logger.log_event("experiment", "Эксперимент завершён")
-                _exp_info = result.get("experiment", {})
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type=action,
-                        timestamp=datetime.now(UTC),
-                        payload={"action": action, "experiment": _exp_info},
-                        experiment_id=_exp_info.get("experiment_id"),
-                    )
-                )
-                if _cooldown_alarm is not None:
-                    _cooldown_alarm.notify_experiment_finalized()
-
-                # F31: dispatch experiment export to sinks (fire-and-forget,
-                # strong-ref against GC via _alarm_dispatch_tasks).
-                if sink_registry.sinks:
-                    try:
-                        _exp_id = _exp_info.get("experiment_id") or ""
-                        _metadata: dict = {}
-                        if _exp_id:
-                            _meta_path = experiment_manager.data_dir / "experiments" / _exp_id / "metadata.json"
-                            # H2: offload metadata read to thread.
-                            _metadata = await asyncio.to_thread(_load_experiment_metadata_sync, _meta_path)
-                        # F31 H1: build the sink export via the extracted
-                        # helper — summary comes from the canonical
-                        # "summary_metadata" metadata key, not the empty
-                        # bare "summary" key.
-                        _export = _build_experiment_export(_exp_info, _metadata)
-                        _t = asyncio.create_task(
-                            sink_registry.dispatch(_export),
-                            name=f"sinks_dispatch_{(_exp_id or 'noid')[:8]}",
-                        )
-                        _alarm_dispatch_tasks.add(_t)
-                        _t.add_done_callback(_alarm_dispatch_tasks.discard)
-                    except Exception as _exc:  # noqa: BLE001 — fire-and-forget
-                        logger.warning("F31: sink dispatch setup failed: %s", _exc, exc_info=True)
-            elif result.get("ok") and action == "experiment_advance_phase":
-                phase = cmd.get("phase", "?")
-                await event_logger.log_event("phase", f"Фаза: → {phase}")
-                _active = experiment_manager.active_experiment
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="phase_transition",
-                        timestamp=datetime.now(UTC),
-                        payload={"phase": phase, "entry": result.get("phase", {})},
-                        experiment_id=_active.experiment_id if _active else None,
-                    )
-                )
-                # v0.55.12 — feed every phase transition into the
-                # CooldownAlarm so it can disarm itself when the
-                # operator advances away from cooldown and clear
-                # its cold-start flag
-                # on a fresh cooldown entry (finding 1.5). Runs
-                # BEFORE the auto-arm path so a phase=cooldown call
-                # always sees a cleared flag.
-                if _cooldown_alarm is not None:
-                    try:
-                        _cooldown_alarm.notify_phase_change(phase)
-                    except Exception as _exc:
-                        logger.warning(
-                            "CooldownAlarm: notify_phase_change ошибка: %s",
-                            _exc,
-                            exc_info=True,
-                        )
-                # v0.55.4 A1 — auto-arm CooldownAlarm on cooldown phase
-                # entry. Operator can still disarm manually via the
-                # alarm panel footer button. Idempotent: arm() is a
-                # no-op if already armed.
-                if phase == "cooldown" and _cooldown_alarm is not None and _cooldown_alarm.is_auto_arm_enabled:
-                    try:
-                        armed = _cooldown_alarm.arm()
-                        if not armed and _cooldown_alarm.cold_start_skipped:
-                            # v0.55.12 — surface the skip explicitly so
-                            # the operator log shows why auto-arm
-                            # didn't engage on this phase entry.
-                            logger.info("CooldownAlarm: auto-arm skipped — cold-start detected")
-                        else:
-                            logger.info(
-                                "CooldownAlarm: auto-arm на phase=cooldown → %s",
-                                "ARMED" if armed else "FAILED (no model)",
-                            )
-                    except Exception as _exc:
-                        logger.warning("CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True)
-            return result
+            context.experiment_read_tasks.add(read_task)
+            read_task.add_done_callback(functools.partial(_owned_experiment_read_done, context, action))
+            return await asyncio.shield(read_task)
         if action == "calibration_acquisition_status":
             return {"ok": True, **calibration_acquisition.stats}
         if action in {
@@ -2718,14 +3521,53 @@ async def _handle_gui_command(
             }
         if action == "cooldown_history_get":
             return await _run_cooldown_history_command(cmd, experiment_manager, writer)
-        if action in {"log_entry", "log_get"}:
-            return await _run_operator_log_command(
+        if action == "log_entry":
+            return await _submit_operator_log_entry(cmd, context)
+        if action == "log_get":
+            log_scope = cmd.get("log_scope")
+            requested_experiment = cmd.get("experiment_id")
+            if log_scope == "experiment":
+                if type(requested_experiment) is not str or not requested_experiment:
+                    return {
+                        "ok": False,
+                        "error_code": "operator_log_scope_invalid",
+                        "error": "log_scope=experiment requires a non-empty experiment_id",
+                    }
+                experiment_id = requested_experiment
+            elif log_scope == "all":
+                if requested_experiment is not None:
+                    return {
+                        "ok": False,
+                        "error_code": "operator_log_scope_invalid",
+                        "error": "log_scope=all cannot name an experiment_id",
+                    }
+                experiment_id = None
+            else:
+                return {
+                    "ok": False,
+                    "error_code": "operator_log_scope_invalid",
+                    "error": "log_get requires explicit log_scope=experiment or log_scope=all",
+                }
+            scoped_cmd = {
+                key: value
+                for key, value in cmd.items()
+                if key not in {"log_scope", "current_experiment", "experiment_id"}
+            }
+            if experiment_id is not None:
+                scoped_cmd["experiment_id"] = experiment_id
+            result = await _run_operator_log_command(
                 action,
-                cmd,
+                scoped_cmd,
                 writer,
                 experiment_manager,
                 broker,
             )
+            result["scope_receipt"] = {
+                "schema": "operator_log_read_scope_v1",
+                "log_scope": log_scope,
+                "experiment_id": experiment_id,
+            }
+            return result
         if action in {
             "calibration_curve_evaluate",
             "calibration_curve_list",
@@ -2855,8 +3697,17 @@ async def _handle_gui_command(
                     prev.cancel()
                 _multiline_burst_auto_stop_tasks[target_name] = _t
             return response
-        if action in ("rag.rebuild_index", "rag.rebuild_status"):
-            # B1 (2026-07): moved to cryodaq-assistant's own REP (:5557).
+        if action == "rag.rebuild_index":
+            return {
+                "ok": False,
+                "error_code": "assistant_read_only",
+                "error": "Live RAG index rebuild is disabled; use the approved offline procedure",
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": False,
+            }
+        if action == "rag.rebuild_status":
+            # B1 (2026-07): observational status moved to assistant REP (:5557).
             return _assistant_process_unavailable_reply(action)
         if action == "cooldown_eta_get":
             # B1 (2026-07): additive read-only command — exposes the
@@ -2870,7 +3721,16 @@ async def _handle_gui_command(
         return {"ok": False, "error": f"unknown command: {action}"}
     except Exception as exc:
         logger.error("Ошибка выполнения команды '%s': %s", action, exc)
-        return {"ok": False, "error": str(exc)}
+        if _is_mutating_command(action):
+            return {
+                "ok": False,
+                "error_code": "command_execution_failed",
+                "error": "command execution failed",
+                "delivery_state": "dispatched",
+                "commit_state": "unknown",
+                "retry_safe": False,
+            }
+        return {"ok": False, "error": "command execution failed"}
 
 
 def _zmq_publisher_drop_count(broker: DataBroker) -> int:
@@ -2982,6 +3842,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR, channel_catalog=live_descriptor_catalog)
     await writer.start_immediate()
+    # Keyed operator-log mutations require a bounded, retained-data registry
+    # before the command server can accept any request. A failed proof keeps
+    # the engine from exposing a mutation path with process-local deduplication.
+    await writer.initialize_operator_log_idempotency()
     # Disk-full graceful degradation (Phase 2a H.1): wire writer to the
     # engine event loop and SafetyManager so a disk-full error in the
     # writer thread can latch a safety fault via run_coroutine_threadsafe.
@@ -3329,6 +4193,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         zmq_publisher=zmq_pub,
         recording_lifecycle_feed=recording_lifecycle_feed,
         annunciation_registry=AnnunciationRegistry(),
+        mutation_capability_token=secrets.token_urlsafe(32),
     )
     handle_gui_command = functools.partial(
         _handle_gui_command,
@@ -3515,7 +4380,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     # за ними снаружи, не трогая safety_manager.py. Перезапуск повторно запускает
     # ту же петлю и синхронизирует ссылку в SafetyManager, чтобы stop() и sweep
     # завершения видели живую задачу.
-    for _sname, _sattr in (("safety_collect", "_collect_task"), ("safety_monitor", "_monitor_task")):
+    for _sname, _srole, _sattr in (
+        ("safety_collect", "collect", "_collect_task"),
+        ("safety_monitor", "monitor", "_monitor_task"),
+    ):
         _stask = getattr(safety_manager, _sattr, None)
         if _stask is not None:
             _loop_fn = getattr(safety_manager, f"_{_sname.split('_', 1)[1]}_loop")
@@ -3524,7 +4392,7 @@ async def _run_engine(*, mock: bool = False) -> None:
                 _stask,
                 _loop_fn,
                 safety_critical=True,
-                on_spawn=functools.partial(_set_safety_task_ref, safety_manager, _sattr),
+                on_spawn=functools.partial(_set_safety_task_ref, safety_manager, _srole),
             )
 
     install_loop_exception_backstop(asyncio.get_running_loop(), logger)
@@ -3731,9 +4599,25 @@ async def _run_engine(*, mock: bool = False) -> None:
     # --- Корректное завершение ---
     logger.info("═══ Завершение CryoDAQ Engine ═══")
 
+    # Freeze the command ingress before draining retained owners. Stopping the
+    # REP task may cancel a reply waiter, but shielded experiment owners remain
+    # authoritative and are settled below before any dependent resource stops.
+    command_context.experiment_commands_accepting = False
+    await cmd_server.stop()
+    logger.info("ZMQ CommandServer остановлен")
     # A2: гасим надзор до отмены задач — иначе done-callback перезапустит
     # только что отменённую задачу прямо во время завершения.
     supervisor.stop()
+
+    # Prove global OFF while the reviewed source is still connected and every
+    # observation/logging dependency remains alive. An unverified attempt is a
+    # process-retaining HOLD, never an exception path out of _run_engine.
+    await stop_safety_manager_with_hold(safety_manager, logger)
+
+    # Retained persistence owners drain only after the safety cutover.
+    await _drain_experiment_command_tasks(command_context, logger)
+    logger.info("SafetyManager остановлен: состояние=%s", safety_manager.state.value)
+
     if operator_snapshot_service is not None:
         operator_snapshot_service.request_stop()
         operator_snapshot_task = supervisor.supervised_tasks.get("operator_snapshot_publication")
@@ -3872,9 +4756,6 @@ async def _run_engine(*, mock: bool = False) -> None:
     await interlock_engine.stop()
     logger.info("Движок блокировок остановлен")
 
-    await safety_manager.stop()
-    logger.info("SafetyManager остановлен: состояние=%s", safety_manager.state.value)
-
     await disk_monitor.stop()
     logger.info("DiskMonitor остановлен")
 
@@ -3891,9 +4772,6 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     await writer.stop()
     logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))
-
-    await cmd_server.stop()
-    logger.info("ZMQ CommandServer остановлен")
 
     await zmq_pub.stop()
     logger.info("ZMQ Publisher остановлен")

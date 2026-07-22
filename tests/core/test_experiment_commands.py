@@ -1,12 +1,35 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from cryodaq.core.experiment import ExperimentManager
-from cryodaq.engine import _run_experiment_command
+from cryodaq.core.operator_log import OperatorLogCommitResult
+from cryodaq.engine import (
+    EngineCommandContext,
+    _drain_experiment_command_tasks,
+    _handle_gui_command,
+    _is_mutating_command,
+    _run_experiment_command,
+)
+from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+_MUTATION_TOKEN = "test-mutation-token-1"
+
+
+def _mutation(command: dict[str, object]) -> dict[str, object]:
+    return {
+        **command,
+        "protocol_major": 1,
+        "mutation_capability": "cryodaq_mutation_v1",
+        "capability_token": _MUTATION_TOKEN,
+    }
 
 
 @pytest.fixture()
@@ -41,6 +64,69 @@ def templates_dir(tmp_path: Path) -> Path:
 @pytest.fixture()
 def manager(tmp_path: Path, instruments_yaml: Path, templates_dir: Path) -> ExperimentManager:
     return ExperimentManager(tmp_path, instruments_yaml, templates_dir=templates_dir)
+
+
+class _EventLogger:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.events: list[tuple[str, str]] = []
+
+    async def log_event(self, category: str, message: str) -> None:
+        self.events.append((category, message))
+        if self.fail:
+            raise RuntimeError("injected event log failure")
+
+
+class _EventBus:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def publish(self, event) -> None:
+        self.events.append(event)
+
+
+class _Calibration:
+    def __init__(self) -> None:
+        self.deactivations = 0
+
+    def deactivate(self) -> None:
+        self.deactivations += 1
+
+
+def _context(
+    manager: ExperimentManager,
+    *,
+    event_logger: _EventLogger | None = None,
+    event_bus: _EventBus | None = None,
+    calibration: _Calibration | None = None,
+    writer=None,
+) -> EngineCommandContext:
+    return EngineCommandContext(
+        safety_manager=None,
+        event_logger=event_logger or _EventLogger(),
+        sink_registry=SimpleNamespace(sinks=[]),
+        interlock_engine=None,
+        leak_rate_estimator=None,
+        leak_cfg={},
+        alarm_v2_state_mgr=None,
+        alarm_ring=None,
+        broker=None,
+        experiment_manager=manager,
+        calibration_acquisition=calibration or _Calibration(),
+        event_bus=event_bus or _EventBus(),
+        cooldown_alarm=None,
+        vacuum_guard=None,
+        alarm_dispatch_tasks=set(),
+        calibration_store=None,
+        writer=writer,
+        drivers_by_name={},
+        sensor_diag=None,
+        vacuum_trend=None,
+        alarm_v2_state_tracker=None,
+        multiline_burst_auto_stop_meta={},
+        multiline_burst_auto_stop_tasks={},
+        mutation_capability_token=_MUTATION_TOKEN,
+    )
 
 
 async def test_experiment_templates_command_returns_templates(manager: ExperimentManager) -> None:
@@ -239,6 +325,796 @@ async def test_experiment_create_retroactive_command(manager: ExperimentManager)
     assert result["experiment"]["status"] == "COMPLETED"
 
 
+async def test_cancelled_reply_does_not_cancel_late_commit_or_completion_side_effects(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    created = _run_experiment_command(
+        "experiment_create",
+        {"title": "Late commit", "operator": "Operator"},
+        manager,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_build_archive_snapshot",
+        lambda *_args: {
+            "run_records": [],
+            "artifact_index": [],
+            "result_tables": [],
+            "summary_metadata": {},
+        },
+    )
+    monkeypatch.setattr(
+        "cryodaq.storage.parquet_archive.export_experiment_readings_to_parquet",
+        lambda **_kwargs: None,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    real_command = _run_experiment_command
+
+    def delayed_command(action, cmd, experiment_manager):
+        if action == "experiment_finalize":
+            entered.set()
+            assert release.wait(timeout=5)
+        return real_command(action, cmd, experiment_manager)
+
+    monkeypatch.setattr("cryodaq.engine._run_experiment_command", delayed_command)
+
+    class EventLogger:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, str]] = []
+
+        async def log_event(self, category: str, message: str) -> None:
+            self.events.append((category, message))
+
+    class EventBus:
+        def __init__(self) -> None:
+            self.events = []
+
+        async def publish(self, event) -> None:
+            self.events.append(event)
+
+    class Calibration:
+        def __init__(self) -> None:
+            self.deactivations = 0
+
+        def deactivate(self) -> None:
+            self.deactivations += 1
+
+    event_logger = EventLogger()
+    event_bus = EventBus()
+    calibration = Calibration()
+    context = EngineCommandContext(
+        safety_manager=None,
+        event_logger=event_logger,
+        sink_registry=SimpleNamespace(sinks=[]),
+        interlock_engine=None,
+        leak_rate_estimator=None,
+        leak_cfg={},
+        alarm_v2_state_mgr=None,
+        alarm_ring=None,
+        broker=None,
+        experiment_manager=manager,
+        calibration_acquisition=calibration,
+        event_bus=event_bus,
+        cooldown_alarm=None,
+        vacuum_guard=None,
+        alarm_dispatch_tasks=set(),
+        calibration_store=None,
+        writer=None,
+        drivers_by_name={},
+        sensor_diag=None,
+        vacuum_trend=None,
+        alarm_v2_state_tracker=None,
+        multiline_burst_auto_stop_meta={},
+        multiline_burst_auto_stop_tasks={},
+        mutation_capability_token=_MUTATION_TOKEN,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        reply_waiter = asyncio.create_task(
+            _handle_gui_command(
+                _mutation(
+                    {
+                        "cmd": "experiment_finalize",
+                        "experiment_id": created["experiment_id"],
+                    }
+                ),
+                context=context,
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 2)
+        reply_waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reply_waiter
+        release.set()
+        owners = tuple(context.experiment_command_tasks)
+        assert len(owners) == 1
+        await asyncio.wait_for(asyncio.gather(*owners), timeout=5)
+
+    assert manager.active_experiment is None
+    assert calibration.deactivations == 1
+    assert len(event_logger.events) == 1
+    assert len(event_bus.events) == 1
+    assert "outcome unknown" in caplog.text
+
+    reconciled = await _handle_gui_command({"cmd": "experiment_status"}, context=context)
+    assert reconciled["ok"] is True
+    assert reconciled["active_experiment"] is None
+
+
+async def test_status_timeouts_coalesce_behind_one_blocked_mutation(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = _run_experiment_command(
+        "experiment_create",
+        {"title": "blocked", "operator": "operator"},
+        manager,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_build_archive_snapshot",
+        lambda *_args: {
+            "run_records": [],
+            "artifact_index": [],
+            "result_tables": [],
+            "summary_metadata": {},
+        },
+    )
+    monkeypatch.setattr(
+        "cryodaq.storage.parquet_archive.export_experiment_readings_to_parquet",
+        lambda **_kwargs: None,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    status_calls = 0
+    real_command = _run_experiment_command
+
+    def delayed_command(action, cmd, experiment_manager):
+        nonlocal status_calls
+        if action == "experiment_finalize":
+            entered.set()
+            assert release.wait(timeout=5)
+        if action == "experiment_status":
+            status_calls += 1
+        return real_command(action, cmd, experiment_manager)
+
+    monkeypatch.setattr("cryodaq.engine._run_experiment_command", delayed_command)
+    monkeypatch.setattr("cryodaq.engine._EXPERIMENT_STATUS_TIMEOUT_S", 0.02)
+    context = _context(manager)
+    mutation = asyncio.create_task(
+        _handle_gui_command(
+            _mutation({"cmd": "experiment_finalize", "experiment_id": created["experiment_id"]}),
+            context=context,
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+
+    replies = await asyncio.gather(
+        *(_handle_gui_command({"cmd": "experiment_status"}, context=context) for _ in range(12)),
+        return_exceptions=True,
+    )
+    assert all(reply["ok"] is False and "experiment_status timeout" in reply["error"] for reply in replies)
+    assert len(context.experiment_command_tasks) == 1
+    assert context.experiment_status_task is not None
+    assert not context.experiment_status_task.done()
+    assert status_calls == 0
+
+    release.set()
+    assert (await mutation)["ok"] is True
+    status_task = context.experiment_status_task
+    assert status_task is not None
+    assert (await asyncio.wait_for(status_task, timeout=2))["ok"] is True
+    assert status_calls == 1
+
+
+async def test_other_experiment_reads_are_bounded_without_cancelling_owners(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    read_calls = 0
+    real_command = _run_experiment_command
+
+    def delayed_command(action, cmd, experiment_manager):
+        nonlocal read_calls
+        if action == "experiment_templates":
+            read_calls += 1
+            entered.set()
+            assert release.wait(timeout=5)
+        return real_command(action, cmd, experiment_manager)
+
+    monkeypatch.setattr("cryodaq.engine._run_experiment_command", delayed_command)
+    context = _context(manager)
+    owners = [
+        asyncio.create_task(_handle_gui_command({"cmd": "experiment_templates"}, context=context)) for _ in range(4)
+    ]
+    assert await asyncio.to_thread(entered.wait, 2)
+    assert len(context.experiment_read_tasks) == 4
+
+    overflow = await _handle_gui_command(
+        {"cmd": "experiment_templates"},
+        context=context,
+    )
+    assert overflow == {
+        "ok": False,
+        "error_code": "experiment_read_busy",
+        "error": "the bounded experiment read lane is full",
+    }
+    release.set()
+    replies = await asyncio.gather(*owners)
+    assert all(reply["ok"] is True for reply in replies)
+    assert read_calls == 4
+    assert context.experiment_read_tasks == set()
+
+
+async def test_shutdown_drain_holds_resources_until_owner_settles(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    created = _run_experiment_command(
+        "experiment_create",
+        {"title": "shutdown", "operator": "operator"},
+        manager,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_build_archive_snapshot",
+        lambda *_args: {
+            "run_records": [],
+            "artifact_index": [],
+            "result_tables": [],
+            "summary_metadata": {},
+        },
+    )
+    monkeypatch.setattr(
+        "cryodaq.storage.parquet_archive.export_experiment_readings_to_parquet",
+        lambda **_kwargs: None,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    real_command = _run_experiment_command
+
+    def delayed_command(action, cmd, experiment_manager):
+        if action == "experiment_finalize":
+            entered.set()
+            assert release.wait(timeout=5)
+        return real_command(action, cmd, experiment_manager)
+
+    monkeypatch.setattr("cryodaq.engine._run_experiment_command", delayed_command)
+    context = _context(manager)
+    mutation = asyncio.create_task(
+        _handle_gui_command(
+            _mutation({"cmd": "experiment_finalize", "experiment_id": created["experiment_id"]}),
+            context=context,
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 2)
+
+    with caplog.at_level(logging.CRITICAL):
+        drain = asyncio.create_task(_drain_experiment_command_tasks(context, logging.getLogger("test"), timeout=0.01))
+        await asyncio.sleep(0.05)
+        assert not drain.done()
+        assert context.experiment_commands_accepting is False
+        release.set()
+        assert await asyncio.wait_for(drain, timeout=2) is False
+    assert (await mutation)["ok"] is True
+    assert manager.active_experiment is None
+    assert "shutdown remains blocked" in caplog.text
+
+
+async def test_post_commit_failure_is_explicit_and_does_not_skip_later_steps(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = _run_experiment_command(
+        "experiment_create",
+        {"title": "partial", "operator": "operator"},
+        manager,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_build_archive_snapshot",
+        lambda *_args: {
+            "run_records": [],
+            "artifact_index": [],
+            "result_tables": [],
+            "summary_metadata": {},
+        },
+    )
+    monkeypatch.setattr(
+        "cryodaq.storage.parquet_archive.export_experiment_readings_to_parquet",
+        lambda **_kwargs: None,
+    )
+    event_logger = _EventLogger(fail=True)
+    event_bus = _EventBus()
+    calibration = _Calibration()
+    context = _context(
+        manager,
+        event_logger=event_logger,
+        event_bus=event_bus,
+        calibration=calibration,
+    )
+
+    reply = await _handle_gui_command(
+        _mutation({"cmd": "experiment_finalize", "experiment_id": created["experiment_id"]}),
+        context=context,
+    )
+
+    assert reply["ok"] is False
+    assert reply["committed"] is True
+    assert reply["retry_safe"] is False
+    assert reply["error_code"] == "committed_reconciliation_failed"
+    assert reply["reconciliation_failures"] == ("event_log_experiment_terminal",)
+    assert reply["commit_receipt"]["experiment_id"] == created["experiment_id"]
+    assert manager.active_experiment is None
+    assert calibration.deactivations == 1
+    assert len(event_logger.events) == 1
+    assert len(event_bus.events) == 1
+
+
+async def test_commit_receipt_failure_cannot_hide_committed_state(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context(manager)
+    monkeypatch.setattr(
+        "cryodaq.engine._experiment_commit_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("receipt fault")),
+    )
+
+    reply = await _handle_gui_command(
+        _mutation({"cmd": "set_app_mode", "app_mode": "debug"}),
+        context=context,
+    )
+
+    assert manager.get_app_mode().value == "debug"
+    assert reply["ok"] is False
+    assert reply["committed"] is True
+    assert reply["retry_safe"] is False
+    assert reply["error_code"] == "committed_reconciliation_failed"
+    assert reply["reconciliation_failures"] == ("commit_receipt_generation",)
+    assert reply["commit_receipt"] == {
+        "schema": "experiment_command_commit_v1",
+        "action": "set_app_mode",
+        "experiment_id": None,
+        "manager_revision": None,
+        "committed": True,
+    }
+
+
+async def test_mutation_protocol_gate_refuses_unknown_clients_before_dispatch(
+    manager: ExperimentManager,
+) -> None:
+    context = _context(manager)
+    context.mutation_capability_token = "current-token-1234"
+
+    discovery = await _handle_gui_command({"cmd": "mutation_capabilities"}, context=context)
+    receipt = discovery["compatibility_receipt"]
+    assert receipt == {
+        "schema": "mutation_compatibility_v1",
+        "accepted": True,
+        "server_protocol_major": 1,
+        "required_capability": "cryodaq_mutation_v1",
+        "capability_token": "current-token-1234",
+    }
+    assert (await _handle_gui_command({"cmd": "experiment_status"}, context=context))["ok"] is True
+
+    attempts = (
+        {"cmd": "experiment_create", "title": "missing", "operator": "operator"},
+        {
+            "cmd": "experiment_create",
+            "title": "newer",
+            "operator": "operator",
+            "protocol_major": 2,
+            "mutation_capability": "cryodaq_mutation_v1",
+            "capability_token": "current-token-1234",
+        },
+        {
+            "cmd": "experiment_create",
+            "title": "rotated",
+            "operator": "operator",
+            "protocol_major": 1,
+            "mutation_capability": "cryodaq_mutation_v1",
+            "capability_token": "old-token",
+        },
+    )
+    for command in attempts:
+        reply = await _handle_gui_command(command, context=context)
+        assert reply["ok"] is False
+        assert reply["error_code"] == "mutation_protocol_incompatible"
+        assert reply["delivery_state"] == "not_dispatched"
+        assert reply["commit_state"] == "not_committed"
+        assert reply["retry_safe"] is True
+    assert manager.active_experiment is None
+
+    compatible = await _handle_gui_command(
+        {
+            "cmd": "set_app_mode",
+            "app_mode": "debug",
+            "protocol_major": 1,
+            "mutation_capability": "cryodaq_mutation_v1",
+            "capability_token": "current-token-1234",
+        },
+        context=context,
+    )
+    assert compatible["ok"] is True
+    assert compatible["commit_receipt"]["committed"] is True
+    assert manager.get_app_mode().value == "debug"
+
+
+async def test_emergency_off_bypasses_compatibility_and_strips_forged_envelope(
+    manager: ExperimentManager,
+) -> None:
+    calls: list[str] = []
+
+    class Safety:
+        async def emergency_off(self, *, channel: str) -> dict[str, object]:
+            calls.append(channel)
+            return {"ok": True, "channel": channel}
+
+    context = _context(manager)
+    context.mutation_capability_token = "current-token-1234"
+    context.safety_manager = Safety()
+
+    direct = await _handle_gui_command(
+        {"cmd": "keithley_emergency_off", "channel": "smua"},
+        context=context,
+    )
+    stale_envelope = await _handle_gui_command(
+        {
+            "cmd": "keithley_emergency_off",
+            "channel": "smub",
+            "protocol_major": 999,
+            "mutation_capability": "forged",
+            "capability_token": "old-token",
+        },
+        context=context,
+    )
+
+    assert direct == {"ok": True, "channel": "smua"}
+    assert stale_envelope == {"ok": True, "channel": "smub"}
+    assert calls == ["smua", "smub"]
+
+
+async def test_emergency_off_omitted_channel_dispatches_once_to_legacy_smua(
+    manager: ExperimentManager,
+) -> None:
+    calls: list[str] = []
+
+    class Safety:
+        async def emergency_off(self, *, channel: str) -> dict[str, object]:
+            calls.append(channel)
+            return {"ok": True, "channel": channel}
+
+    context = _context(manager)
+    context.safety_manager = Safety()
+
+    reply = await _handle_gui_command({"cmd": "keithley_emergency_off"}, context=context)
+
+    assert reply == {"ok": True, "channel": "smua"}
+    assert calls == ["smua"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"cmd": "keithley_emergency_off", "channel": 1},
+        {"cmd": "keithley_emergency_off", "channel": ""},
+        {"cmd": "keithley_emergency_off", "channel": "   "},
+        {"cmd": "keithley_emergency_off", "channel": "smuc"},
+        {"cmd": "keithley_emergency_off", "channel": "smua", "p_target": 0},
+    ],
+)
+async def test_emergency_off_rejects_non_exact_wire_shape_before_safety_manager(
+    manager: ExperimentManager,
+    command: dict[str, object],
+) -> None:
+    calls: list[str] = []
+
+    class Safety:
+        async def emergency_off(self, *, channel: str) -> dict[str, object]:
+            calls.append(channel)
+            return {"ok": True}
+
+    context = _context(manager)
+    context.safety_manager = Safety()
+
+    reply = await _handle_gui_command(command, context=context)
+
+    assert reply["ok"] is False
+    assert reply["error_code"] == "safe_direction_command_invalid"
+    assert reply["delivery_state"] == "not_dispatched"
+    assert reply["commit_state"] == "not_committed"
+    assert calls == []
+
+
+async def test_unknown_engine_action_defaults_to_compatibility_gated_mutation(
+    manager: ExperimentManager,
+) -> None:
+    context = _context(manager)
+
+    refused = await _handle_gui_command({"cmd": "future_mutation"}, context=context)
+    dispatched = await _handle_gui_command(
+        _mutation({"cmd": "future_mutation"}),
+        context=context,
+    )
+
+    assert refused["error_code"] == "mutation_protocol_incompatible"
+    assert refused["delivery_state"] == "not_dispatched"
+    assert refused["commit_state"] == "not_committed"
+    assert dispatched == {"ok": False, "error": "unknown command: future_mutation"}
+
+
+async def test_mutation_protocol_gate_fails_closed_when_server_token_missing(
+    manager: ExperimentManager,
+) -> None:
+    context = _context(manager)
+    context.mutation_capability_token = None
+
+    discovery = await _handle_gui_command({"cmd": "mutation_capabilities"}, context=context)
+    assert discovery == {
+        "ok": True,
+        "compatibility_receipt": {
+            "schema": "mutation_compatibility_v1",
+            "accepted": False,
+            "server_protocol_major": 1,
+            "required_capability": "cryodaq_mutation_v1",
+        },
+    }
+
+    refused = await _handle_gui_command(
+        {"cmd": "set_app_mode", "app_mode": "debug"},
+        context=context,
+    )
+    assert refused["error_code"] == "mutation_protocol_incompatible"
+    assert refused["delivery_state"] == "not_dispatched"
+    assert refused["commit_state"] == "not_committed"
+    assert refused["retry_safe"] is True
+    assert manager.get_app_mode().value == "experiment"
+
+
+def test_mutation_protocol_inventory_covers_every_current_engine_mutation() -> None:
+    mutations = {
+        "set_app_mode",
+        "experiment_start",
+        "experiment_create",
+        "experiment_update",
+        "experiment_finalize",
+        "experiment_stop",
+        "experiment_abort",
+        "experiment_attach_run_record",
+        "experiment_create_retroactive",
+        "experiment_generate_report",
+        "experiment_advance_phase",
+        "annunciation_ack",
+        "alarm_v2_ack",
+        "interlock_acknowledge",
+        "safety_acknowledge",
+        "log_entry",
+        "keithley_emergency_off",
+        "keithley_stop",
+        "keithley_start",
+        "keithley_set_target",
+        "keithley_set_limits",
+        "multiline.set_channels",
+        "multiline.burst_start",
+        "multiline.burst_stop",
+        "cooldown_alarm.arm",
+        "cooldown_alarm.disarm",
+        "calibration_curve_assign",
+        "calibration_curve_export",
+        "calibration_curve_import",
+        "calibration_runtime_set_global",
+        "calibration_runtime_set_channel_policy",
+        "calibration_v2_fit",
+        "leak_rate_start",
+        "leak_rate_stop",
+        "shift_handover_summary",
+        "rag.rebuild_index",
+    }
+    assert all(_is_mutating_command(action) for action in mutations)
+    assert _is_mutating_command("future_mutation") is True
+    reads = {
+        "mutation_capabilities",
+        "protocol_version",
+        "experiment_status",
+        "experiment_phase_status",
+        "annunciation_status",
+        "alarm_v2_status",
+        "log_get",
+        "multiline.burst_status",
+        "calibration_curve_get",
+        "calibration_v2_extract",
+        "calibration_v2_coverage",
+        "readings_history",
+    }
+    assert not any(_is_mutating_command(action) for action in reads)
+
+
+async def test_operator_log_timeout_retry_commits_one_idempotent_entry(
+    manager: ExperimentManager,
+) -> None:
+    experiment_id = manager.create_experiment("log", "operator").experiment_id
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class Entry:
+        id = 71
+
+        def to_payload(self):
+            return {
+                "id": self.id,
+                "experiment_id": experiment_id,
+                "message": "stable",
+            }
+
+    class Writer:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.publication_calls = 0
+
+        async def append_operator_log_idempotent(self, **kwargs):
+            self.calls += 1
+            assert kwargs["experiment_id"] == experiment_id
+            assert len(kwargs["request_fingerprint"]) == 64
+            entered.set()
+            await release.wait()
+            return OperatorLogCommitResult(entry=Entry(), replayed=False)
+
+        async def prepare_operator_log_publication_outbox(self, **_kwargs):
+            self.publication_calls += 1
+            return SimpleNamespace(state="intent")
+
+        async def publish_operator_log_publication_outbox(self, **_kwargs):
+            return SimpleNamespace(state="published")
+
+    writer = Writer()
+    context = _context(manager, writer=writer)
+    command = _mutation(
+        {
+            "cmd": "log_entry",
+            "request_id": "a" * 32,
+            "experiment_id": experiment_id,
+            "message": "stable",
+            "author": "operator",
+            "source": "gui",
+        }
+    )
+    first_waiter = asyncio.create_task(_handle_gui_command(command, context=context))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    first_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_waiter
+
+    retry_waiter = asyncio.create_task(_handle_gui_command(command, context=context))
+    await asyncio.sleep(0)
+    assert writer.calls == 1
+    release.set()
+    retry = await asyncio.wait_for(retry_waiter, timeout=1)
+    assert retry["ok"] is True
+    assert retry["commit_receipt"] == {
+        "schema": "operator_log_commit_v1",
+        "request_id": "a" * 32,
+        "entry_id": 71,
+        "experiment_id": experiment_id,
+        "committed": True,
+    }
+    repeated = await _handle_gui_command(command, context=context)
+    assert repeated == retry
+    assert writer.calls == 1
+
+    conflict = await _handle_gui_command({**command, "message": "different"}, context=context)
+    assert conflict["error_code"] == "idempotency_key_conflict"
+    assert writer.calls == 1
+
+
+async def test_operator_log_stale_experiment_scope_is_rejected_before_write(
+    manager: ExperimentManager,
+) -> None:
+    first = manager.create_experiment("first", "operator")
+    manager.finalize_experiment(first.experiment_id)
+    second = manager.create_experiment("second", "operator")
+
+    class Writer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def append_operator_log_idempotent(self, **_kwargs):
+            self.calls += 1
+            raise AssertionError("stale command reached persistence")
+
+    writer = Writer()
+    context = _context(manager, writer=writer)
+    reply = await _handle_gui_command(
+        _mutation(
+            {
+                "cmd": "log_entry",
+                "request_id": "b" * 32,
+                "experiment_id": first.experiment_id,
+                "message": "late note",
+            }
+        ),
+        context=context,
+    )
+    assert reply["ok"] is False
+    assert reply["error_code"] == "stale_experiment_command"
+    assert reply["retry_safe"] is False
+    assert writer.calls == 0
+    assert manager.active_experiment_id == second.experiment_id
+
+
+async def test_operator_log_submission_is_frozen_before_shutdown_drain(
+    manager: ExperimentManager,
+) -> None:
+    class Writer:
+        async def append_operator_log_idempotent(self, **_kwargs):
+            raise AssertionError("shutdown-frozen log reached persistence")
+
+    context = _context(manager, writer=Writer())
+    context.experiment_commands_accepting = False
+
+    reply = await _handle_gui_command(
+        _mutation(
+            {
+                "cmd": "log_entry",
+                "request_id": "c" * 32,
+                "experiment_unbound": True,
+                "message": "too late",
+            }
+        ),
+        context=context,
+    )
+
+    assert reply == {
+        "ok": False,
+        "error_code": "engine_shutting_down",
+        "error": "operator log submissions are frozen for shutdown",
+        "retry_safe": True,
+    }
+    assert context.operator_log_tasks == {}
+
+
+async def test_log_get_requires_explicit_stable_scope(manager: ExperimentManager) -> None:
+    class Writer:
+        def __init__(self) -> None:
+            self.scopes: list[str | None] = []
+
+        async def get_operator_log(self, **kwargs):
+            self.scopes.append(kwargs["experiment_id"])
+            return []
+
+    writer = Writer()
+    context = _context(manager, writer=writer)
+    ambiguous = await _handle_gui_command(
+        {"cmd": "log_get", "current_experiment": True},
+        context=context,
+    )
+    assert ambiguous["error_code"] == "operator_log_scope_invalid"
+    assert writer.scopes == []
+
+    exact = await _handle_gui_command(
+        {"cmd": "log_get", "log_scope": "experiment", "experiment_id": "exp-stable"},
+        context=context,
+    )
+    assert exact["ok"] is True
+    assert exact["scope_receipt"] == {
+        "schema": "operator_log_read_scope_v1",
+        "log_scope": "experiment",
+        "experiment_id": "exp-stable",
+    }
+    all_entries = await _handle_gui_command(
+        {"cmd": "log_get", "log_scope": "all"},
+        context=context,
+    )
+    assert all_entries["scope_receipt"]["experiment_id"] is None
+    assert writer.scopes == ["exp-stable", None]
+
+
 async def test_manual_report_command_preserves_gui_response_schema(
     manager: ExperimentManager,
     monkeypatch: pytest.MonkeyPatch,
@@ -282,9 +1158,7 @@ def test_manual_report_command_rejects_non_boolean_force_without_spawning(
 ) -> None:
     monkeypatch.setattr(
         "cryodaq.engine.ReportProcessRunner",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("invalid force must not spawn")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("invalid force must not spawn")),
     )
     result = _run_experiment_command(
         "experiment_generate_report",
@@ -362,3 +1236,33 @@ def test_manual_report_command_rejects_invalid_force_context(
     )
     assert result["ok"] is False
     assert result["error_code"] == "invalid_force"
+
+
+async def test_operator_log_command_uses_durable_writer_identity(tmp_path: Path, manager: ExperimentManager) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    experiment_id = manager.create_experiment("durable log", "operator").experiment_id
+    context = _context(manager, writer=writer)
+    command = _mutation(
+        {
+            "cmd": "log_entry",
+            "request_id": "d" * 32,
+            "experiment_id": experiment_id,
+            "message": "one durable note",
+            "author": "operator",
+            "source": "gui",
+        }
+    )
+    try:
+        first = await _handle_gui_command(command, context=context)
+        replay = await _handle_gui_command(command, context=context)
+        conflict = await _handle_gui_command({**command, "message": "different"}, context=context)
+        rows = await writer.get_operator_log(experiment_id=experiment_id)
+    finally:
+        await writer.stop()
+
+    assert first["ok"] is True
+    assert replay == first
+    assert conflict["error_code"] == "idempotency_key_conflict"
+    assert [row.message for row in rows] == ["one durable note"]

@@ -129,3 +129,27 @@ def test_at_fork_guard_closes_retained_original_in_generic_child() -> None:
     retained.close()
     runner.close()
     os.close(read_fd)
+
+
+def test_artifact_close_retains_same_descriptor_after_close_failure(monkeypatch) -> None:
+    read_fd, write_fd = os.pipe()
+    launcher._guard_soak_bridge_fd_from_descendants(write_fd)
+    owner = launcher._SoakArtifactCapability(write_fd, "f" * 64)
+    real_close = launcher.os.close
+
+    def fail_owned(fd: int) -> None:
+        if fd == write_fd:
+            raise OSError("injected close failure")
+        real_close(fd)
+
+    monkeypatch.setattr(launcher.os, "close", fail_owned)
+    with pytest.raises(RuntimeError, match="remained open"):
+        owner.close()
+    assert owner._closed is False
+    assert write_fd in launcher._SOAK_BRIDGE_ACTIVE_FDS
+
+    monkeypatch.setattr(launcher.os, "close", real_close)
+    owner.close()
+    assert owner._closed is True
+    assert write_fd not in launcher._SOAK_BRIDGE_ACTIVE_FDS
+    os.close(read_fd)

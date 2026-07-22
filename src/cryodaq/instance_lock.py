@@ -160,3 +160,31 @@ def release_lock(
         os.close(fd)
     except OSError:
         pass
+
+
+def release_lock_exact(
+    fd: int,
+    lock_name: str,
+    *,
+    lock_dir: Path | None = None,
+) -> None:
+    """Release a process lock without an unlink race or swallowed close.
+
+    Long-lived single-instance owners use this terminal form after their event
+    loop has returned. Keeping the stable inode avoids the POSIX split-lock
+    race created by unlinking before the incumbent descriptor is closed.
+    """
+
+    lock_path = _lock_path(lock_name, lock_dir)
+    opened = os.fstat(fd)
+    try:
+        path_info = lock_path.lstat()
+    except OSError:
+        path_info = None
+    if path_info is not None and (
+        stat.S_ISLNK(path_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or not os.path.samestat(opened, path_info)
+    ):
+        logger.warning("Lock path identity changed before exact release: %s", lock_path)
+    os.close(fd)

@@ -29,18 +29,18 @@ def _make_manager(tmp_path: Path) -> ExperimentManager:
 
 def test_advance_phase_updates_current_phase(tmp_path):
     mgr = _make_manager(tmp_path)
-    mgr.create_experiment(name="Test", operator="op", template_id="custom")
+    experiment_id = mgr.create_experiment(name="Test", operator="op", template_id="custom").experiment_id
     assert mgr.get_current_phase() is None
-    entry = mgr.advance_phase("preparation", operator="op")
+    entry = mgr.advance_phase("preparation", operator="op", expected_experiment_id=experiment_id)
     assert entry["phase"] == "preparation"
     assert mgr.get_current_phase() == "preparation"
 
 
 def test_advance_phase_invalid_raises(tmp_path):
     mgr = _make_manager(tmp_path)
-    mgr.create_experiment(name="Test", operator="op", template_id="custom")
+    experiment_id = mgr.create_experiment(name="Test", operator="op", template_id="custom").experiment_id
     try:
-        mgr.advance_phase("invalid_phase")
+        mgr.advance_phase("invalid_phase", expected_experiment_id=experiment_id)
         assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "Unknown phase" in str(e)
@@ -49,7 +49,7 @@ def test_advance_phase_invalid_raises(tmp_path):
 def test_advance_phase_no_experiment_raises(tmp_path):
     mgr = _make_manager(tmp_path)
     try:
-        mgr.advance_phase("preparation")
+        mgr.advance_phase("preparation", expected_experiment_id="finished-experiment")
         assert False, "Should have raised RuntimeError"
     except RuntimeError:
         pass
@@ -57,12 +57,12 @@ def test_advance_phase_no_experiment_raises(tmp_path):
 
 def test_status_payload_includes_phase_started_at(tmp_path):
     mgr = _make_manager(tmp_path)
-    mgr.create_experiment(name="Test", operator="op", template_id="custom")
+    experiment_id = mgr.create_experiment(name="Test", operator="op", template_id="custom").experiment_id
     status = mgr.get_status_payload()
     assert "phase_started_at" in status
     assert status["phase_started_at"] is None  # no phase yet
 
-    mgr.advance_phase("vacuum", operator="op")
+    mgr.advance_phase("vacuum", operator="op", expected_experiment_id=experiment_id)
     status = mgr.get_status_payload()
     assert status["current_phase"] == "vacuum"
     assert isinstance(status["phase_started_at"], float)
@@ -71,9 +71,9 @@ def test_status_payload_includes_phase_started_at(tmp_path):
 
 def test_phase_history_tracks_transitions(tmp_path):
     mgr = _make_manager(tmp_path)
-    mgr.create_experiment(name="Test", operator="op", template_id="custom")
-    mgr.advance_phase("preparation")
-    mgr.advance_phase("vacuum")
+    experiment_id = mgr.create_experiment(name="Test", operator="op", template_id="custom").experiment_id
+    mgr.advance_phase("preparation", expected_experiment_id=experiment_id)
+    mgr.advance_phase("vacuum", expected_experiment_id=experiment_id)
     history = mgr.get_phase_history()
     assert len(history) == 2
     assert history[0]["phase"] == "preparation"

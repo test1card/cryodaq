@@ -23,8 +23,7 @@ def _create_db(db_path: Path, rows: list[tuple]) -> None:
         "value REAL NOT NULL, unit TEXT NOT NULL, status TEXT NOT NULL)"
     )
     conn.executemany(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()
@@ -61,7 +60,11 @@ def test_load_experiment_readings_masks_nonfinite(tmp_path: Path) -> None:
         status=ExperimentStatus.COMPLETED,
     )
 
-    rows = mgr._load_experiment_readings(info)
+    snapshot = mgr._load_experiment_readings(info)
+    assert snapshot.complete is True
+    assert snapshot.truncated is False
+    assert snapshot.issues == ()
+    rows = snapshot.rows
     vals = [r["value"] for r in rows]
     assert 77.0 in vals, "usable reading must survive"
     assert SENTINEL not in vals and not any(math.isinf(v) for v in vals), "non-finite leaked"

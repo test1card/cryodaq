@@ -273,11 +273,30 @@ def _make_bot(**kwargs):
     return bot
 
 
-def _tg_msg(text: str, chat_id: int = 1234, username: str = "testuser") -> dict:
+def _tg_msg(
+    text: str,
+    chat_id: int = 1234,
+    username: str = "testuser",
+    message_id: int = 77,
+) -> dict:
     return {
         "text": text,
+        "message_id": message_id,
         "chat": {"id": chat_id},
         "from": {"id": 9, "username": username, "first_name": "Test"},
+    }
+
+
+def _capability_response(token: str = "token-1") -> dict:
+    return {
+        "ok": True,
+        "compatibility_receipt": {
+            "schema": "mutation_compatibility_v1",
+            "accepted": True,
+            "server_protocol_major": 1,
+            "required_capability": "cryodaq_mutation_v1",
+            "capability_token": token,
+        },
     }
 
 
@@ -290,14 +309,36 @@ async def test_cmd_status_formats_message() -> None:
 
 
 async def test_cmd_log_writes_entry() -> None:
-    handler = AsyncMock(return_value={"ok": True})
+    async def dispatch(command: dict) -> dict:
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response()
+        return {"ok": True}
+
+    handler = AsyncMock(side_effect=dispatch)
     bot = _make_bot(command_handler=handler)
     await bot._handle_message(_tg_msg("/log Всё штатно"))
-    handler.assert_called_once()
-    cmd = handler.call_args[0][0]
+    assert handler.await_count == 2
+    cmd = handler.await_args_list[1].args[0]
     assert cmd["cmd"] == "log_entry"
     assert "Всё штатно" in cmd["message"]
     assert cmd["author"] == "testuser"
+    assert cmd["experiment_unbound"] is True
+    assert len(cmd["request_id"]) == 32
+    assert set(cmd["request_id"]) <= set("0123456789abcdef")
+    assert set(cmd) == {
+        "cmd",
+        "request_id",
+        "experiment_unbound",
+        "message",
+        "author",
+        "source",
+        "protocol_major",
+        "mutation_capability",
+        "capability_token",
+    }
+    assert cmd["protocol_major"] == 1
+    assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
+    assert cmd["capability_token"] == "token-1"
     bot._send.assert_called_once()
     assert "✅" in bot._send.call_args[0][1]
 
@@ -343,13 +384,28 @@ async def test_cmd_log_empty_text_returns_error() -> None:
 async def test_cmd_phase_advances() -> None:
     """Phase 2c I.2: legacy 'cooling' alias canonicalises to the
     ExperimentPhase enum value 'cooldown' before being dispatched."""
-    handler = AsyncMock(return_value={"ok": True})
+
+    async def dispatch(command: dict) -> dict:
+        if command == {"cmd": "experiment_status"}:
+            return {
+                "ok": True,
+                "active_experiment": {"experiment_id": "exp-current"},
+            }
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response()
+        return {"ok": True}
+
+    handler = AsyncMock(side_effect=dispatch)
     bot = _make_bot(command_handler=handler)
     await bot._handle_message(_tg_msg("/phase cooling"))
-    handler.assert_called_once()
-    cmd = handler.call_args[0][0]
+    assert handler.await_count == 3
+    cmd = handler.await_args_list[2].args[0]
     assert cmd["cmd"] == "experiment_advance_phase"
+    assert cmd["experiment_id"] == "exp-current"
     assert cmd["phase"] == "cooldown", "legacy 'cooling' must canonicalise to enum value 'cooldown'"
+    assert cmd["protocol_major"] == 1
+    assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
+    assert cmd["capability_token"] == "token-1"
     assert "✅" in bot._send.call_args[0][1]
 
 
@@ -358,6 +414,125 @@ async def test_cmd_phase_invalid_returns_error() -> None:
     await bot._handle_message(_tg_msg("/phase nonexistent_phase"))
     bot._send.assert_called_once()
     assert "❌" in bot._send.call_args[0][1]
+
+
+@pytest.mark.parametrize(
+    "discovery_response",
+    [
+        {"ok": True},
+        {"ok": True, "compatibility_receipt": None},
+        {
+            "ok": True,
+            "compatibility_receipt": {
+                **_capability_response()["compatibility_receipt"],
+                "unexpected": True,
+            },
+        },
+        {
+            "ok": True,
+            "compatibility_receipt": {
+                **_capability_response()["compatibility_receipt"],
+                "server_protocol_major": 2,
+            },
+        },
+        {
+            "ok": True,
+            "compatibility_receipt": {
+                **_capability_response()["compatibility_receipt"],
+                "capability_token": "",
+            },
+        },
+    ],
+)
+async def test_mutation_discovery_refuses_missing_or_malformed_receipts(
+    discovery_response: dict,
+) -> None:
+    handler = AsyncMock(return_value=discovery_response)
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/log запись"))
+
+    handler.assert_awaited_once_with({"cmd": "mutation_capabilities"})
+    assert bot._mutation_envelope is None
+    assert "Подробности" in bot._send.await_args.args[1]
+
+
+async def test_rotated_token_is_invalidated_without_automatic_mutation_replay() -> None:
+    discoveries = iter(("token-old", "token-new"))
+    commands: list[dict] = []
+
+    async def dispatch(command: dict) -> dict:
+        commands.append(command)
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response(next(discoveries))
+        if command.get("capability_token") == "token-old":
+            return {
+                "ok": False,
+                "error_code": "mutation_protocol_incompatible",
+                "retry_safe": True,
+            }
+        return {"ok": True}
+
+    bot = _make_bot(command_handler=dispatch)
+
+    await bot._handle_message(_tg_msg("/log first", message_id=91))
+
+    assert len(commands) == 2
+    assert [command["cmd"] for command in commands] == [
+        "mutation_capabilities",
+        "log_entry",
+    ]
+    assert bot._mutation_envelope is None
+
+    await bot._handle_message(_tg_msg("/log second", message_id=92))
+
+    assert [command["cmd"] for command in commands] == [
+        "mutation_capabilities",
+        "log_entry",
+        "mutation_capabilities",
+        "log_entry",
+    ]
+    assert commands[-1]["capability_token"] == "token-new"
+    assert commands[1]["request_id"] != commands[-1]["request_id"]
+
+
+async def test_concurrent_mutations_share_one_capability_discovery() -> None:
+    discovery_entered = asyncio.Event()
+    release_discovery = asyncio.Event()
+    commands: list[dict] = []
+
+    async def dispatch(command: dict) -> dict:
+        commands.append(command)
+        if command == {"cmd": "mutation_capabilities"}:
+            discovery_entered.set()
+            await release_discovery.wait()
+            return _capability_response("shared-token")
+        return {"ok": True}
+
+    bot = _make_bot(command_handler=dispatch)
+    first = asyncio.create_task(bot._handle_message(_tg_msg("/log first", message_id=101)))
+    second = asyncio.create_task(bot._handle_message(_tg_msg("/log second", message_id=102)))
+    await asyncio.wait_for(discovery_entered.wait(), timeout=1)
+    assert [command["cmd"] for command in commands] == ["mutation_capabilities"]
+    release_discovery.set()
+    await asyncio.gather(first, second)
+
+    assert sum(command["cmd"] == "mutation_capabilities" for command in commands) == 1
+    mutations = [command for command in commands if command["cmd"] == "log_entry"]
+    assert len(mutations) == 2
+    assert {command["capability_token"] for command in mutations} == {"shared-token"}
+    assert len({command["request_id"] for command in mutations}) == 2
+
+
+async def test_phase_refuses_to_discover_or_mutate_without_stable_experiment_id() -> None:
+    handler = AsyncMock(return_value={"ok": True, "active_experiment": None})
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/phase cooldown"))
+
+    handler.assert_awaited_once_with({"cmd": "experiment_status"})
+    assert bot._mutation_envelope is None
+    assert "Подробности" in bot._send.await_args.args[1]
 
 
 # ===========================================================================
@@ -421,8 +596,7 @@ async def test_escalation_cancel_stops() -> None:
     # Task must be registered immediately after escalate()
     pending_key = "shift_missed_111"
     assert pending_key in svc._pending, (
-        f"Expected task key '{pending_key}' in _pending after escalate(), "
-        f"got keys: {list(svc._pending)}"
+        f"Expected task key '{pending_key}' in _pending after escalate(), got keys: {list(svc._pending)}"
     )
     task_ref = svc._pending[pending_key]
     assert not task_ref.done(), "Task should be waiting (not done) before cancel()"
@@ -432,8 +606,6 @@ async def test_escalation_cancel_stops() -> None:
     # cancel() awaits the task cancellation — task must be done and cancelled
     assert task_ref.cancelled(), "Task must be in cancelled state after cancel()"
     # Key must be removed from _pending
-    assert pending_key not in svc._pending, (
-        f"Key '{pending_key}' must be removed from _pending after cancel()"
-    )
+    assert pending_key not in svc._pending, f"Key '{pending_key}' must be removed from _pending after cancel()"
     # Belt-and-suspenders: send_message must not have been called
     notifier.send_message.assert_not_called()

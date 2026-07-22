@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -60,6 +62,17 @@ _PHASE_ALIASES: dict[str, str] = {
 # Legacy mutable list kept for any callers that import it. Prefer VALID_PHASES.
 _VALID_PHASES = sorted(VALID_PHASES)
 _COMMAND_FAILED_TEXT = "❌ Команда не выполнена. Подробности в логах."
+_MUTATION_PROTOCOL_MAJOR = 1
+_MUTATION_CAPABILITY = "cryodaq_mutation_v1"
+_MUTATION_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "accepted",
+        "server_protocol_major",
+        "required_capability",
+        "capability_token",
+    }
+)
 
 
 class _TelegramAuthError(Exception):
@@ -135,6 +148,8 @@ class TelegramCommandBot:
         self._poll_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[Reading] | None = None
         self._session: aiohttp.ClientSession | None = None
+        self._mutation_envelope: dict[str, Any] | None = None
+        self._mutation_discovery_task: asyncio.Task[dict[str, Any]] | None = None
 
     @property
     def _api(self) -> str:
@@ -175,6 +190,15 @@ class TelegramCommandBot:
                     pass
         self._collect_task = None
         self._poll_task = None
+        discovery_task = self._mutation_discovery_task
+        if discovery_task is not None and not discovery_task.done():
+            discovery_task.cancel()
+            try:
+                await discovery_task
+            except asyncio.CancelledError:
+                pass
+        self._mutation_discovery_task = None
+        self._mutation_envelope = None
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -351,9 +375,7 @@ class TelegramCommandBot:
             return
 
         if self._query_agent is None:
-            await self._send(
-                chat_id, "Я понимаю только команды с косой чертой. /help для списка."
-            )
+            await self._send(chat_id, "Я понимаю только команды с косой чертой. /help для списка.")
             return
 
         try:
@@ -471,6 +493,94 @@ class TelegramCommandBot:
     def _cmd_help(self) -> str:
         return _HELP_TEXT
 
+    async def _discover_mutation_envelope(self) -> dict[str, Any]:
+        if self._command_handler is None:
+            raise RuntimeError("command handler unavailable")
+        response = await self._command_handler({"cmd": "mutation_capabilities"})
+        if type(response) is not dict or response.get("ok") is not True:
+            raise RuntimeError("mutation capability discovery failed")
+        receipt = response.get("compatibility_receipt")
+        if type(receipt) is not dict or set(receipt) != _MUTATION_RECEIPT_KEYS:
+            raise RuntimeError("mutation capability receipt is malformed")
+        token = receipt.get("capability_token")
+        if (
+            receipt.get("schema") != "mutation_compatibility_v1"
+            or receipt.get("accepted") is not True
+            or type(receipt.get("server_protocol_major")) is not int
+            or receipt.get("server_protocol_major") != _MUTATION_PROTOCOL_MAJOR
+            or receipt.get("required_capability") != _MUTATION_CAPABILITY
+            or type(token) is not str
+            or not token
+            or len(token) > 256
+            or not token.isprintable()
+        ):
+            raise RuntimeError("mutation capability receipt is incompatible")
+        envelope = {
+            "protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "mutation_capability": _MUTATION_CAPABILITY,
+            "capability_token": token,
+        }
+        self._mutation_envelope = envelope
+        return envelope
+
+    def _mutation_discovery_done(self, task: asyncio.Task[dict[str, Any]]) -> None:
+        if self._mutation_discovery_task is task:
+            self._mutation_discovery_task = None
+        if task.cancelled():
+            return
+        # Retrieve any exception even if all shielded waiters were cancelled.
+        task.exception()
+
+    async def _get_mutation_envelope(self) -> dict[str, Any]:
+        if self._mutation_envelope is not None:
+            return dict(self._mutation_envelope)
+        task = self._mutation_discovery_task
+        if task is None:
+            task = asyncio.create_task(
+                self._discover_mutation_envelope(),
+                name="telegram_mutation_capability_discovery",
+            )
+            self._mutation_discovery_task = task
+            task.add_done_callback(self._mutation_discovery_done)
+        return dict(await asyncio.shield(task))
+
+    async def _dispatch_mutation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._command_handler is None:
+            return {
+                "ok": False,
+                "error_code": "mutation_capability_unavailable",
+            }
+        try:
+            envelope = await self._get_mutation_envelope()
+            result = await self._command_handler({**payload, **envelope})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Telegram mutation capability/dispatch failed: %s", exc, exc_info=True)
+            return {
+                "ok": False,
+                "error_code": "mutation_capability_unavailable",
+            }
+        if type(result) is not dict:
+            return {
+                "ok": False,
+                "error_code": "mutation_response_invalid",
+            }
+        if result.get("error_code") == "mutation_protocol_incompatible":
+            # Invalidate for the *next operator command*. Never replay this
+            # mutation: its outcome belongs to this one authoritative request.
+            self._mutation_envelope = None
+        return result
+
+    @staticmethod
+    def _operator_log_request_id(msg: dict[str, Any]) -> str:
+        chat_id = msg.get("chat", {}).get("id")
+        message_id = msg.get("message_id")
+        if type(chat_id) is int and type(message_id) is int:
+            identity = f"telegram:{chat_id}:{message_id}".encode()
+            return hashlib.sha256(identity).hexdigest()[:32]
+        return secrets.token_hex(16)
+
     async def _cmd_log(self, chat_id: int, text: str, msg: dict) -> None:
         if not text:
             await self._send(chat_id, "❌ Укажите текст: /log &lt;текст&gt;")
@@ -480,9 +590,11 @@ class TelegramCommandBot:
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
-        result = await self._command_handler(
+        result = await self._dispatch_mutation(
             {
                 "cmd": "log_entry",
+                "request_id": self._operator_log_request_id(msg),
+                "experiment_unbound": True,
                 "message": text,
                 "author": username,
                 "source": "telegram",
@@ -500,9 +612,7 @@ class TelegramCommandBot:
         normalized = phase.strip().lower()
         normalized = _PHASE_ALIASES.get(normalized, normalized)
         if normalized not in VALID_PHASES:
-            phases_ru = ", ".join(
-                phase_display_name(p) for p in sorted(VALID_PHASES)
-            )
+            phases_ru = ", ".join(phase_display_name(p) for p in sorted(VALID_PHASES))
             await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_ru}")
             return
         phase = normalized
@@ -511,9 +621,17 @@ class TelegramCommandBot:
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
-        result = await self._command_handler(
+        status = await self._command_handler({"cmd": "experiment_status"})
+        active = status.get("active_experiment") if type(status) is dict and status.get("ok") is True else None
+        experiment_id = active.get("experiment_id") if type(active) is dict else None
+        if type(experiment_id) is not str or not experiment_id:
+            logger.warning("Telegram /phase refused: no stable active experiment identity")
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
+            return
+        result = await self._dispatch_mutation(
             {
                 "cmd": "experiment_advance_phase",
+                "experiment_id": experiment_id,
                 "phase": phase,
                 "operator": username,
             }
@@ -561,6 +679,7 @@ class TelegramCommandBot:
         """Отправить PNG-изображение в указанный chat_id через sendPhoto."""
         try:
             import aiohttp  # noqa: PLC0415
+
             session = await self._get_session()
             form = aiohttp.FormData()
             form.add_field("chat_id", str(chat_id))
@@ -582,9 +701,7 @@ class TelegramCommandBot:
         """Resolve Telegram file_id к downloadable path via getFile API."""
         session = await self._get_session()
         try:
-            async with session.get(
-                f"{self._api}/getFile", params={"file_id": file_id}
-            ) as resp:
+            async with session.get(f"{self._api}/getFile", params={"file_id": file_id}) as resp:
                 if resp.status != 200:
                     logger.error("Telegram getFile %d", resp.status)
                     return None
@@ -626,14 +743,10 @@ class TelegramCommandBot:
         }
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/sendMessage", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/sendMessage", json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(
-                        "Telegram sendMessage (keyboard) %d: %s", resp.status, body[:200]
-                    )
+                    logger.error("Telegram sendMessage (keyboard) %d: %s", resp.status, body[:200])
                     return None
                 data = await resp.json()
                 return data.get("result", {}).get("message_id")
@@ -641,9 +754,7 @@ class TelegramCommandBot:
             logger.error("sendMessage keyboard error: %s", exc)
             return None
 
-    async def edit_message(
-        self, chat_id: int, message_id: int, text: str
-    ) -> None:
+    async def edit_message(self, chat_id: int, message_id: int, text: str) -> None:
         """Edit existing message text (used after inline keyboard tap)."""
         payload = {
             "chat_id": chat_id,
@@ -653,14 +764,10 @@ class TelegramCommandBot:
         }
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/editMessageText", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/editMessageText", json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(
-                        "Telegram editMessage %d: %s", resp.status, body[:200]
-                    )
+                    logger.error("Telegram editMessage %d: %s", resp.status, body[:200])
         except Exception as exc:
             logger.error("editMessage error: %s", exc)
 
@@ -671,9 +778,7 @@ class TelegramCommandBot:
             payload["text"] = text
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/answerCallbackQuery", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/answerCallbackQuery", json=payload) as resp:
                 if resp.status != 200:
                     logger.warning("Telegram answerCallback %d", resp.status)
         except Exception as exc:

@@ -13,7 +13,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar, _fault_beep_active
+from cryodaq.gui import theme
+from cryodaq.gui.shell.bottom_status_bar import (
+    BottomStatusBar,
+    _disk_space_color,
+    _fault_beep_active,
+)
 
 
 def _app() -> QApplication:
@@ -40,6 +45,20 @@ def test_none_is_not_active() -> None:
 def test_other_states_are_not_active() -> None:
     for state in ("safe_off", "ready", "run_permitted", "running", "manual_recovery"):
         assert _fault_beep_active(state) is False, state
+
+
+@pytest.mark.parametrize(
+    ("free_gb", "expected"),
+    [
+        (0.0, theme.STATUS_FAULT),
+        (9.99, theme.STATUS_FAULT),
+        (10.0, theme.STATUS_CAUTION),
+        (49.99, theme.STATUS_CAUTION),
+        (50.0, theme.TEXT_MUTED),
+    ],
+)
+def test_disk_space_thresholds_use_canonical_safety_rungs(free_gb: float, expected: str) -> None:
+    assert _disk_space_color(free_gb) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +111,23 @@ def test_non_fault_state_never_starts_the_timer() -> None:
     bar = _make_bar()
     bar.set_safety_state("running")
     assert not bar._fault_beep_timer.isActive()
+
+
+@pytest.mark.parametrize("state", ["run_permitted", "running"])
+def test_activity_state_uses_accent_without_claiming_healthy(state: str) -> None:
+    bar = _make_bar()
+    bar.set_safety_state(state)
+    style = bar._safety_label.styleSheet()
+    assert theme.ACCENT in style
+    assert theme.STATUS_OK not in style
+
+
+def test_ready_is_informational_not_healthy() -> None:
+    bar = _make_bar()
+    bar.set_safety_state("ready")
+    style = bar._safety_label.styleSheet()
+    assert theme.STATUS_INFO in style
+    assert theme.STATUS_OK not in style
 
 
 if __name__ == "__main__":

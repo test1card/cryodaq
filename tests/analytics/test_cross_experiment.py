@@ -92,9 +92,7 @@ def _write_metadata(path: Path, experiment_id: str, start: datetime, end: dateti
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _linear_cooldown(
-    duration_h: float, t_start: float, t_end: float, n: int = 400
-) -> tuple[np.ndarray, np.ndarray]:
+def _linear_cooldown(duration_h: float, t_start: float, t_end: float, n: int = 400) -> tuple[np.ndarray, np.ndarray]:
     t = np.linspace(0.0, duration_h, n)
     T = t_start + (t_end - t_start) * (t / duration_h)
     return t, T
@@ -198,6 +196,48 @@ def test_scan_archive_partial_summary_without_warm_channel(tmp_path: Path) -> No
     assert s.t_to_77K_h is not None
 
 
+def test_scan_archive_rejects_metadata_identity_mismatch(tmp_path: Path) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    exp_dir = _make_experiment(tmp_path, "exp-current", base)
+    metadata_path = exp_dir / "metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["experiment"]["experiment_id"] = "exp-stale"
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = scan_archive(tmp_path)
+
+    assert result.summaries == []
+    assert result.skipped == [("exp-current", "metadata experiment_id does not match archive directory")]
+
+
+def test_scan_archive_rejects_parquet_identity_mismatch(tmp_path: Path) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    exp_dir = _make_experiment(tmp_path, "exp-current", base)
+    t_cold, T_cold = _linear_cooldown(20.0, 300.0, 3.0)
+    _write_parquet(
+        exp_dir / "readings.parquet",
+        base,
+        {COLD: (t_cold, T_cold)},
+        "exp-stale",
+    )
+
+    result = scan_archive(tmp_path)
+
+    assert result.summaries == []
+    assert result.skipped == [("exp-current", "parquet unreadable or empty (pyarrow missing?)")]
+
+
+def test_scan_archive_rejects_invalid_analysis_windows(tmp_path: Path) -> None:
+    for argument, value in (
+        ("initial_window_h", 0.0),
+        ("steady_window_h", -1.0),
+        ("resample_bin_min", float("inf")),
+        ("max_cross_channel_skew_s", float("nan")),
+    ):
+        with pytest.raises(ValueError, match="positive and finite"):
+            scan_archive(tmp_path, **{argument: value})
+
+
 # ---------------------------------------------------------------------------
 # Per-experiment feature values
 # ---------------------------------------------------------------------------
@@ -207,9 +247,7 @@ def test_cooldown_fingerprint_crossing_times(tmp_path: Path) -> None:
     """Linear 300K -> 3K over 20h: crossing times are analytically known."""
     base = datetime(2026, 1, 1, tzinfo=UTC)
     duration_h = 20.0
-    _make_experiment(
-        tmp_path, "exp-linear", base, duration_h=duration_h, cold_start=300.0, cold_end=3.0
-    )
+    _make_experiment(tmp_path, "exp-linear", base, duration_h=duration_h, cold_start=300.0, cold_end=3.0)
 
     result = scan_archive(tmp_path)
     s = result.summaries[0]
@@ -236,9 +274,7 @@ def test_initial_cooldown_rate_matches_linear_slope(tmp_path: Path) -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     duration_h = 20.0
     cold_start, cold_end = 300.0, 3.0
-    _make_experiment(
-        tmp_path, "exp-rate", base, duration_h=duration_h, cold_start=cold_start, cold_end=cold_end
-    )
+    _make_experiment(tmp_path, "exp-rate", base, duration_h=duration_h, cold_start=cold_start, cold_end=cold_end)
 
     result = scan_archive(tmp_path, initial_window_h=1.5)
     s = result.summaries[0]
@@ -300,6 +336,40 @@ def test_steady_state_dT_between_stage_channels(tmp_path: Path) -> None:
     assert s.steady_state_t_cold_k == pytest.approx(3.0, abs=0.5)
     assert s.steady_state_t_warm_k == pytest.approx(90.0, abs=0.5)
     assert s.steady_state_dT_k == pytest.approx(87.0, abs=1.0)
+    assert s.steady_state_pair_count > 3
+    assert s.steady_state_max_skew_s == pytest.approx(0.0)
+
+
+def test_steady_state_dT_is_withheld_when_channels_exceed_skew_budget(tmp_path: Path) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    t_hours = np.linspace(0.0, 10.0, 300)
+    warm_times = t_hours + 10.0 / 3600.0
+    cold_values = np.full_like(t_hours, 3.0)
+    warm_values = np.full_like(warm_times, 90.0)
+    exp_dir = tmp_path / "experiments" / "exp-skew"
+    _write_metadata(
+        exp_dir / "metadata.json",
+        "exp-skew",
+        base,
+        base + timedelta(hours=11),
+        "COMPLETED",
+    )
+    _write_parquet(
+        exp_dir / "readings.parquet",
+        base,
+        {COLD: (t_hours, cold_values), WARM: (warm_times, warm_values)},
+        "exp-skew",
+    )
+
+    rejected = scan_archive(tmp_path, max_cross_channel_skew_s=5.0).summaries[0]
+    accepted = scan_archive(tmp_path, max_cross_channel_skew_s=15.0).summaries[0]
+
+    assert rejected.steady_state_dT_k is None
+    assert rejected.steady_state_pair_count == 0
+    assert rejected.steady_state_max_skew_s is None
+    assert accepted.steady_state_dT_k == pytest.approx(87.0)
+    assert accepted.steady_state_pair_count > 3
+    assert accepted.steady_state_max_skew_s == pytest.approx(10.0, abs=0.001)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +423,23 @@ def test_compute_trend_empty_metric_returns_no_points() -> None:
     assert trend.baseline_mean is None
 
 
+def test_compute_trend_ignores_nonfinite_evidence_and_rejects_invalid_controls() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    summaries = [
+        _summary("finite", base, -20.0),
+        _summary("nan", base + timedelta(days=30), float("nan")),
+        _summary("infinite", base + timedelta(days=60), float("inf")),
+    ]
+
+    trend = compute_trend(summaries, "initial_cooldown_rate_k_per_h", threshold=1.0)
+
+    assert [point.experiment_id for point in trend.points] == ["finite"]
+    with pytest.raises(ValueError, match="non-negative and finite"):
+        compute_trend(summaries, "initial_cooldown_rate_k_per_h", threshold=float("nan"))
+    with pytest.raises(ValueError, match="must be positive"):
+        compute_trend(summaries, "initial_cooldown_rate_k_per_h", threshold=1.0, baseline_n=0)
+
+
 # ---------------------------------------------------------------------------
 # Export / formatting
 # ---------------------------------------------------------------------------
@@ -398,8 +485,6 @@ def test_format_summary_table_lists_experiment_id() -> None:
 def test_format_trend_report_mentions_drift_verdict() -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     summaries = [_summary("e1", base, -20.0), _summary("e2", base + timedelta(days=60), -5.0)]
-    trend = compute_trend(
-        summaries, "initial_cooldown_rate_k_per_h", threshold=1.0, baseline_n=1, recent_n=1
-    )
+    trend = compute_trend(summaries, "initial_cooldown_rate_k_per_h", threshold=1.0, baseline_n=1, recent_n=1)
     report = format_trend_report(trend)
     assert "ДРЕЙФ" in report

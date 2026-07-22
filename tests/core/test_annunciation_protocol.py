@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,6 +11,18 @@ from cryodaq.core.alarm_v2 import AlarmEvent, AlarmStateManager
 from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
+from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+_MUTATION_TOKEN = "test-mutation-token-1"
+
+
+def _mutation(command: dict[str, object]) -> dict[str, object]:
+    return {
+        **command,
+        "protocol_major": 1,
+        "mutation_capability": "cryodaq_mutation_v1",
+        "capability_token": _MUTATION_TOKEN,
+    }
 
 
 def _event(name: str, *, at: float = 100.0) -> AlarmEvent:
@@ -17,18 +30,27 @@ def _event(name: str, *, at: float = 100.0) -> AlarmEvent:
 
 
 def _ann_ack(engine: str, activation: str) -> dict[str, str]:
-    return {
-        "cmd": "annunciation_ack",
-        "engine_instance_id": engine,
-        "activation_id": activation,
-        "operator": "operator",
-        "reason": "observed",
-    }
+    return _mutation(
+        {
+            "cmd": "annunciation_ack",
+            "engine_instance_id": engine,
+            "activation_id": activation,
+            "operator": "operator",
+            "reason": "observed",
+        }
+    )
 
 
-def _context(*, alarms: AlarmStateManager, safety: object, registry: AnnunciationRegistry) -> EngineCommandContext:
-    writer = MagicMock()
-    writer.append_operator_log = AsyncMock()
+def _context(
+    *,
+    alarms: AlarmStateManager,
+    safety: object,
+    registry: AnnunciationRegistry,
+    writer: object | None = None,
+) -> EngineCommandContext:
+    if writer is None:
+        writer = MagicMock()
+        writer.append_operator_log = AsyncMock()
     return EngineCommandContext(
         safety_manager=safety,
         event_logger=MagicMock(),
@@ -54,6 +76,7 @@ def _context(*, alarms: AlarmStateManager, safety: object, registry: Annunciatio
         multiline_burst_auto_stop_meta={},
         multiline_burst_auto_stop_tasks={},
         annunciation_registry=registry,
+        mutation_capability_token=_MUTATION_TOKEN,
     )
 
 
@@ -280,12 +303,85 @@ async def test_closed_command_shapes_reject_legacy_extra_and_missing_fields() ->
         "error": "invalid_annunciation_command",
     }
     assert await _handle_gui_command(
-        {"cmd": "annunciation_ack", "engine_instance_id": "engine-a"}, context=context
+        _mutation({"cmd": "annunciation_ack", "engine_instance_id": "engine-a"}),
+        context=context,
     ) == {"ok": False, "error": "invalid_annunciation_command"}
-    assert await _handle_gui_command({"cmd": "alarm_v2_ack", "alarm_name": "a"}, context=context) == {
+    assert await _handle_gui_command(_mutation({"cmd": "alarm_v2_ack", "alarm_name": "a"}), context=context) == {
         "ok": False,
         "error": "invalid_alarm_ack_command",
     }
+
+
+async def test_alarm_ack_owner_persists_exact_receipt_and_publishes_once(tmp_path: Path) -> None:
+    alarms = AlarmStateManager()
+    alarms.process("a", _event("a"), {})
+    safety = MagicMock()
+    safety.get_status.return_value = {"state": "safe_off", "fault_revision": 0}
+    registry = AnnunciationRegistry(engine_instance_id="engine-a")
+    writer = SQLiteWriter(tmp_path)
+    context = _context(alarms=alarms, safety=safety, registry=registry, writer=writer)
+    status = await _handle_gui_command({"cmd": "alarm_v2_status"}, context=context)
+    activation_id = status["active"]["a"]["activation_id"]
+    command = _mutation(
+        {
+            "cmd": "alarm_v2_ack",
+            "alarm_name": "a",
+            "engine_instance_id": "engine-a",
+            "activation_id": activation_id,
+            "operator": "operator",
+            "reason": "observed",
+            "request_id": "d" * 32,
+        }
+    )
+    first = await _handle_gui_command(command, context=context)
+    assert first["ok"] is True
+    assert first["event_emitted"] is True
+    assert context.broker.publish.await_count == 1
+    duplicate = await _handle_gui_command(command, context=context)
+    assert duplicate == first
+    assert context.broker.publish.await_count == 1
+    conflict = await _handle_gui_command({**command, "reason": "changed"}, context=context)
+    assert conflict["error_code"] == "idempotency_key_conflict"
+    await writer.stop()
+
+
+async def test_alarm_ack_retries_persisted_commit_after_publication_loss(tmp_path: Path) -> None:
+    alarms = AlarmStateManager()
+    alarms.process("a", _event("a"), {})
+    safety = MagicMock()
+    safety.get_status.return_value = {"state": "safe_off", "fault_revision": 0}
+    registry = AnnunciationRegistry(engine_instance_id="engine-a")
+    writer = SQLiteWriter(tmp_path)
+    context = _context(alarms=alarms, safety=safety, registry=registry, writer=writer)
+    status = await _handle_gui_command({"cmd": "alarm_v2_status"}, context=context)
+    activation_id = status["active"]["a"]["activation_id"]
+    command = _mutation(
+        {
+            "cmd": "alarm_v2_ack",
+            "alarm_name": "a",
+            "engine_instance_id": "engine-a",
+            "activation_id": activation_id,
+            "operator": "operator",
+            "reason": "observed",
+            "request_id": "c" * 32,
+        }
+    )
+    context.broker.publish.side_effect = [RuntimeError("publication lost"), None]
+    first = await _handle_gui_command(command, context=context)
+    assert first == {
+        "ok": False,
+        "error_code": "command_execution_failed",
+        "error": "command execution failed",
+        "delivery_state": "dispatched",
+        "commit_state": "unknown",
+        "retry_safe": False,
+    }
+    assert alarms.get_active()["a"].acknowledged is True
+    retry = await _handle_gui_command(command, context=context)
+    assert retry["ok"] is True
+    assert context.broker.publish.await_count == 2
+    assert alarms.get_active()["a"].acknowledged is True
+    await writer.stop()
 
 
 async def test_delayed_exact_alarm_command_cannot_ack_refired_alarm() -> None:
@@ -301,14 +397,17 @@ async def test_delayed_exact_alarm_command_cannot_ack_refired_alarm() -> None:
     alarms.process("a", None, {})
     alarms.process("a", _event("a", at=100.0), {})
     result = await _handle_gui_command(
-        {
-            "cmd": "alarm_v2_ack",
-            "alarm_name": "a",
-            "engine_instance_id": "engine-a",
-            "activation_id": old_id,
-            "operator": "operator",
-            "reason": "delayed",
-        },
+        _mutation(
+            {
+                "cmd": "alarm_v2_ack",
+                "alarm_name": "a",
+                "engine_instance_id": "engine-a",
+                "activation_id": old_id,
+                "operator": "operator",
+                "reason": "delayed",
+                "request_id": "a" * 32,
+            }
+        ),
         context=context,
     )
 

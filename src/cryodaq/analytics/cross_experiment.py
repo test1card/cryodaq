@@ -48,6 +48,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
@@ -103,6 +104,8 @@ class ExperimentSummary:
     steady_state_t_cold_k: float | None = None
     steady_state_t_warm_k: float | None = None
     steady_state_dT_k: float | None = None
+    steady_state_pair_count: int = 0
+    steady_state_max_skew_s: float | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -170,6 +173,7 @@ def scan_archive(
     initial_window_h: float = RATE_WINDOW_H,
     steady_window_h: float = 1.0,
     resample_bin_min: float = 5.0,
+    max_cross_channel_skew_s: float = 5.0,
 ) -> ScanResult:
     """Пройти ``<data_dir>/experiments/*/`` и извлечь сводку по каждому запуску.
 
@@ -190,6 +194,14 @@ def scan_archive(
     целевых каналов, попадают в ``skipped`` с причиной).
     """
     data_dir = Path(data_dir)
+    _require_positive_finite("initial_window_h", initial_window_h)
+    _require_positive_finite("steady_window_h", steady_window_h)
+    _require_positive_finite("resample_bin_min", resample_bin_min)
+    _require_positive_finite("max_cross_channel_skew_s", max_cross_channel_skew_s)
+    start = _normalize_bound(start)
+    end = _normalize_bound(end)
+    if start is not None and end is not None and end < start:
+        raise ValueError("end must not precede start")
     experiments_dir = data_dir / _EXPERIMENTS_SUBDIR
     summaries: list[ExperimentSummary] = []
     skipped: list[tuple[str, str]] = []
@@ -208,13 +220,24 @@ def scan_archive(
             continue
 
         experiment = payload.get("experiment", {}) or {}
+        metadata_experiment_id = str(experiment.get("experiment_id", ""))
+        if metadata_experiment_id != exp_id:
+            skipped.append((exp_id, "metadata experiment_id does not match archive directory"))
+            continue
         status = str(experiment.get("status", ""))
         if status == "RUNNING":
+            continue
+        if status not in {"COMPLETED", "ABORTED"}:
+            skipped.append((exp_id, f"unknown terminal status: {status or '<missing>'}"))
             continue
 
         start_time = _parse_iso(experiment.get("start_time"))
         if start_time is None:
             skipped.append((exp_id, "no start_time in metadata"))
+            continue
+        end_time = _parse_iso(experiment.get("end_time"))
+        if end_time is None or end_time < start_time:
+            skipped.append((exp_id, "invalid terminal end_time in metadata"))
             continue
         if start is not None and start_time < start:
             continue
@@ -226,9 +249,16 @@ def scan_archive(
             skipped.append((exp_id, "no readings.parquet"))
             continue
 
-        channels = read_experiment_parquet(parquet_path, channels=[cold_channel, warm_channel])
+        channels = read_experiment_parquet(
+            parquet_path,
+            channels=[cold_channel, warm_channel],
+            expected_experiment_id=exp_id,
+        )
         if not channels:
             skipped.append((exp_id, "parquet unreadable or empty (pyarrow missing?)"))
+            continue
+        if not _timestamps_within_experiment(channels, start_time, end_time):
+            skipped.append((exp_id, "parquet timestamps outside experiment bounds"))
             continue
 
         summary = _build_summary(
@@ -240,6 +270,7 @@ def scan_archive(
             initial_window_h=initial_window_h,
             steady_window_h=steady_window_h,
             resample_bin_min=resample_bin_min,
+            max_cross_channel_skew_s=max_cross_channel_skew_s,
         )
         summaries.append(summary)
 
@@ -251,11 +282,38 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
     try:
         dt = datetime.fromisoformat(str(value))
-    except ValueError:
+    except (TypeError, ValueError, OverflowError):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return dt
+    return dt.astimezone(UTC)
+
+
+def _normalize_bound(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _require_positive_finite(name: str, value: float) -> None:
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be positive and finite")
+
+
+def _timestamps_within_experiment(
+    channels: dict[str, list[tuple[float, float]]],
+    start_time: datetime,
+    end_time: datetime,
+) -> bool:
+    lower = start_time.timestamp()
+    upper = end_time.timestamp()
+    return all(
+        math.isfinite(float(timestamp)) and lower <= float(timestamp) <= upper
+        for rows in channels.values()
+        for timestamp, _value in rows
+    )
 
 
 # ============================================================================
@@ -273,6 +331,7 @@ def _build_summary(
     initial_window_h: float,
     steady_window_h: float,
     resample_bin_min: float,
+    max_cross_channel_skew_s: float,
 ) -> ExperimentSummary:
     cold = _to_hours_series(cold_rows)
     warm = _to_hours_series(warm_rows)
@@ -290,11 +349,7 @@ def _build_summary(
         summary.duration_h = float(t_cold[-1])
         summary.t_to_77K_h = _first_crossing_h(t_cold, T_cold, T_LN2_K)
         t_4k = _first_crossing_h(t_cold, T_cold, T_LHE_K)
-        if (
-            summary.t_to_77K_h is not None
-            and t_4k is not None
-            and t_4k >= summary.t_to_77K_h
-        ):
+        if summary.t_to_77K_h is not None and t_4k is not None and t_4k >= summary.t_to_77K_h:
             summary.t_77K_to_4K_h = t_4k - summary.t_to_77K_h
         summary.max_cooling_rate_cold_k_per_h = _max_abs_rate(t_cold, T_cold, resample_bin_min)
         summary.initial_cooldown_rate_k_per_h = _initial_rate(t_cold, T_cold, initial_window_h)
@@ -307,8 +362,16 @@ def _build_summary(
         summary.max_cooling_rate_warm_k_per_h = _max_abs_rate(t_warm, T_warm, resample_bin_min)
         summary.steady_state_t_warm_k = _tail_mean(t_warm, T_warm, steady_window_h)
 
-    if summary.steady_state_t_cold_k is not None and summary.steady_state_t_warm_k is not None:
-        summary.steady_state_dT_k = summary.steady_state_t_warm_k - summary.steady_state_t_cold_k
+    if cold is not None and warm is not None:
+        paired_dT, pair_count, max_skew = _paired_tail_delta(
+            cold_rows,
+            warm_rows,
+            window_h=steady_window_h,
+            max_skew_s=max_cross_channel_skew_s,
+        )
+        summary.steady_state_dT_k = paired_dT
+        summary.steady_state_pair_count = pair_count
+        summary.steady_state_max_skew_s = max_skew
 
     return summary
 
@@ -323,15 +386,65 @@ def _to_hours_series(
     """
     if not rows:
         return None
-    ordered = sorted(rows, key=lambda r: r[0])
+    ordered = _finite_last_writer_rows(rows)
     ts = np.array([r[0] for r in ordered], dtype=float)
     val = np.array([r[1] for r in ordered], dtype=float)
-    valid = ~np.isnan(val)
-    ts, val = ts[valid], val[valid]
     if len(ts) < 2:
         return None
     t_hours = (ts - ts[0]) / 3600.0
     return t_hours, val
+
+
+def _finite_last_writer_rows(rows: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    by_timestamp: dict[float, float] = {}
+    for raw_timestamp, raw_value in rows:
+        try:
+            timestamp = float(raw_timestamp)
+            value = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(timestamp) and math.isfinite(value):
+            by_timestamp[timestamp] = value
+    return sorted(by_timestamp.items())
+
+
+def _paired_tail_delta(
+    cold_rows: list[tuple[float, float]],
+    warm_rows: list[tuple[float, float]],
+    *,
+    window_h: float,
+    max_skew_s: float,
+) -> tuple[float | None, int, float | None]:
+    """Pair terminal samples one-to-one without hiding cross-channel skew."""
+
+    cold = _finite_last_writer_rows(cold_rows)
+    warm = _finite_last_writer_rows(warm_rows)
+    if not cold or not warm:
+        return None, 0, None
+    common_end = min(cold[-1][0], warm[-1][0])
+    common_start = max(cold[0][0], warm[0][0], common_end - window_h * 3600.0)
+    cold = [row for row in cold if common_start <= row[0] <= common_end]
+    warm = [row for row in warm if common_start <= row[0] <= common_end]
+    pairs: list[tuple[float, float, float]] = []
+    cold_index = warm_index = 0
+    while cold_index < len(cold) and warm_index < len(warm):
+        cold_ts, cold_value = cold[cold_index]
+        warm_ts, warm_value = warm[warm_index]
+        skew = warm_ts - cold_ts
+        if abs(skew) <= max_skew_s:
+            pairs.append((warm_value - cold_value, abs(skew), cold_ts))
+            cold_index += 1
+            warm_index += 1
+        elif skew < 0:
+            warm_index += 1
+        else:
+            cold_index += 1
+    if not pairs:
+        return None, 0, None
+    max_skew = max(pair[1] for pair in pairs)
+    if len(pairs) < 3:
+        return None, len(pairs), max_skew
+    return float(np.mean([pair[0] for pair in pairs])), len(pairs), max_skew
 
 
 def _first_crossing_h(t_hours: np.ndarray, T: np.ndarray, threshold: float) -> float | None:
@@ -414,11 +527,15 @@ def compute_trend(
     от первой точки), информационная величина в дополнение к baseline/recent
     сравнению.
     """
-    ordered = sorted(summaries, key=lambda s: s.start_time)
+    if not math.isfinite(threshold) or threshold < 0:
+        raise ValueError("threshold must be non-negative and finite")
+    if baseline_n < 1 or recent_n < 1:
+        raise ValueError("baseline_n and recent_n must be positive")
+    ordered = sorted(summaries, key=lambda s: _normalize_bound(s.start_time))
     points: list[TrendPoint] = []
     for s in ordered:
         value = getattr(s, metric, None)
-        if value is not None:
+        if value is not None and math.isfinite(float(value)):
             points.append(TrendPoint(s.experiment_id, s.start_time, float(value)))
 
     if not points:
@@ -441,9 +558,7 @@ def compute_trend(
     slope_per_month: float | None = None
     if len(points) >= 2:
         t0 = points[0].start_time
-        months = np.array(
-            [(p.start_time - t0).total_seconds() / (86400.0 * 30.44) for p in points]
-        )
+        months = np.array([(p.start_time - t0).total_seconds() / (86400.0 * 30.44) for p in points])
         vals = np.array([p.value for p in points])
         if float(months[-1]) > 0:
             slope_per_month = float(np.polyfit(months, vals, 1)[0])

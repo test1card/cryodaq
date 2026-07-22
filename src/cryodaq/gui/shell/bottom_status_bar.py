@@ -1,8 +1,8 @@
 """BottomStatusBar — passive technical readout (Phase UI-1 v2 Block A).
 
-Safety FSM state, engine uptime, disk space, data rate, connection,
-current time. All info already polled by MainWindow somewhere; this
-widget receives updates from MainWindowV2 via setters.
+The host supplies safety, data-rate, and recent-reading connection evidence.
+The widget manages launcher/UI uptime, data-directory free space, and local
+wall-clock presentation itself.
 """
 
 from __future__ import annotations
@@ -24,6 +24,15 @@ _HEIGHT_PX = theme.BOTTOM_BAR_HEIGHT  # DESIGN: invariant #1 — canonical 28px
 # asset pipeline in this codebase.
 _FAULT_LATCHED_STATE = "fault_latched"  # cryodaq.core.safety_manager.SafetyState.FAULT_LATCHED.value
 _FAULT_BEEP_INTERVAL_MS = 3000
+
+
+def _disk_space_color(free_gb: float) -> str:
+    """Return the canonical safety color for remaining data-disk space."""
+    if free_gb < 10:
+        return theme.STATUS_FAULT
+    if free_gb < 50:
+        return theme.STATUS_CAUTION
+    return theme.TEXT_MUTED
 
 
 def _fault_beep_active(state: str | None) -> bool:
@@ -88,9 +97,7 @@ class BottomStatusBar(QWidget):
         # launcher process uptime, not engine or experiment runtime.
         self._uptime_label = QLabel("Лаунчер 00:00:00")
         self._uptime_label.setStyleSheet(muted)
-        self._uptime_label.setToolTip(
-            "Время работы операторского интерфейса с момента запуска"
-        )
+        self._uptime_label.setToolTip("Время работы операторского интерфейса с момента запуска")
         layout.addWidget(self._uptime_label)
 
         layout.addWidget(_separator())
@@ -131,7 +138,8 @@ class BottomStatusBar(QWidget):
         if "fault" in s:
             color = theme.STATUS_FAULT
         elif "running" in s or "permitted" in s:
-            color = theme.STATUS_OK
+            # Activity/authorization is not evidence of healthy plant state.
+            color = theme.ACCENT
         elif "ready" in s:
             color = theme.STATUS_INFO
         else:
@@ -176,12 +184,7 @@ class BottomStatusBar(QWidget):
             data_dir = get_data_dir()
             data_dir.mkdir(parents=True, exist_ok=True)
             free_gb = shutil.disk_usage(str(data_dir)).free / (1024**3)
-            if free_gb < 10:
-                color = theme.STATUS_FAULT
-            elif free_gb < 50:
-                color = theme.STATUS_WARNING
-            else:
-                color = theme.TEXT_MUTED
+            color = _disk_space_color(free_gb)
             self._disk_label.setText(f"Диск {free_gb:.0f} ГБ")
             self._disk_label.setStyleSheet(f"color: {color};")
         except Exception:

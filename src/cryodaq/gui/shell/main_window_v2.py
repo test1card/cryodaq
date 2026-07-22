@@ -178,6 +178,7 @@ class MainWindowV2(QMainWindow):
         self._overview_panel = DashboardView(self._channel_mgr)
         self._overview_panel.setParent(self)
         self._overview_panel.set_read_only(self._replay_mode)
+        self._overview_panel.set_connected(False)
         self._operator_display = OperatorDisplay()
         self._alarm_panel = AlarmPanel()
         self._alarm_panel.set_read_only(self._replay_mode)
@@ -314,11 +315,11 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
-        if name in {"source", "experiment", "log"}:
+        if name in {"source", "experiment", "log", "multiline"}:
             widget.set_read_only(self._replay_mode)
         # II.6 post-review: replay cached connection + safety state into
         # the Keithley overlay on first construction. Without this the
-        # overlay stays in its default (disconnected, safety_ready=True)
+        # overlay stays in its fail-closed default (disconnected, safety_ready=False)
         # until the next _tick_status / safety_state event arrives.
         if name == "source":
             derived_connected = False
@@ -766,6 +767,7 @@ class MainWindowV2(QMainWindow):
         connected = silence < 3.0
         # Engine state derives from data flow — single source of truth
         self._top_bar.set_engine_state(connected)
+        self._overview_panel.set_connected(connected)
         if connected:
             elapsed = now - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0

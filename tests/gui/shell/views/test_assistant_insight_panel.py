@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.gui import theme
 from cryodaq.gui.shell.views.assistant_insight_panel import (
     _MAX_INSIGHTS,
     AssistantInsightPanel,
@@ -84,6 +85,7 @@ def test_push_insight_renders_one_card() -> None:
 
     # Assert rendered label texts — message and trigger chip visible in card.
     from PySide6.QtWidgets import QLabel
+
     labels = card.findChildren(QLabel)
     label_texts = [lb.text() for lb in labels]
     # The LLM message text must appear in one of the card's QLabels.
@@ -115,12 +117,23 @@ def test_push_insight_uses_provided_timestamp() -> None:
     ]
     assert len(cards) == 1
     from PySide6.QtWidgets import QLabel
+
     label_texts = [lb.text() for lb in cards[0].findChildren(QLabel)]
     expected_time = ts.astimezone().strftime("%H:%M:%S")
     assert any(expected_time in t for t in label_texts), (
         f"timestamp {expected_time!r} not found in card labels: {label_texts}"
     )
     panel.deleteLater()
+
+
+def test_alarm_and_shift_handover_use_caution_without_safety_green() -> None:
+    _app()
+    for event_type in ("alarm_fired", "shift_handover_request"):
+        chip = _TriggerChip(event_type)
+        style = chip.styleSheet()
+        assert theme.STATUS_CAUTION in style
+        assert theme.STATUS_OK not in style
+        chip.deleteLater()
 
 
 # ---------------------------------------------------------------------------
@@ -145,10 +158,9 @@ def test_panel_keeps_last_10_insights() -> None:
         for i in range(panel._cards_layout.count())
         if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
     ]
-    assert len(cards) == _MAX_INSIGHTS, (
-        f"expected {_MAX_INSIGHTS} rendered cards, got {len(cards)}"
-    )
+    assert len(cards) == _MAX_INSIGHTS, f"expected {_MAX_INSIGHTS} rendered cards, got {len(cards)}"
     from PySide6.QtWidgets import QLabel
+
     # Cards are laid out newest-first (same order as _entries).
     for idx, card in enumerate(cards):
         label_texts = [lb.text() for lb in card.findChildren(QLabel)]
@@ -177,6 +189,7 @@ def test_panel_layout_count_matches_entries() -> None:
 
     # Assert visible card texts match pushed messages (newest first).
     from PySide6.QtWidgets import QLabel
+
     for idx, card in enumerate(cards):
         label_texts = [lb.text() for lb in card.findChildren(QLabel)]
         expected_msg = f"Сообщение {4 - idx}"

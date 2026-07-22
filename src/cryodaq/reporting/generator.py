@@ -27,8 +27,49 @@ from cryodaq.reporting.sections import SECTION_REGISTRY
 # thread cannot be killed mid-call — eventually exhausting the thread pool.
 # On timeout the report degrades to docx-only, exactly like a missing soffice.
 _SOFFICE_TIMEOUT_S = 120
+# Preserve a bounded tail for DOCX hashing, manifest construction, durable
+# fsync, atomic generation promotion, and the final result write. Frozen
+# Windows builds can pay antivirus and filesystem latency at each boundary.
+_REPORT_COMMIT_TAIL_RESERVE_S = 8.0
+# POSIX tree termination can spend two seconds enumerating descendants, one
+# second settling TERM, and two more observing the direct process. Windows is
+# bounded below that value, so reserve the conservative cross-platform maximum.
+_SOFFICE_TERMINATION_RESERVE_S = 5.0
 
 logger = logging.getLogger(__name__)
+
+
+def _settle_soffice_process(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort bounded tree cleanup with a direct-leader fallback."""
+
+    tree_cleanup_failed = False
+    try:
+        terminate_descendant_tree(process.pid)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        tree_cleanup_failed = True
+        logger.error(
+            "ReportGenerator: cleanup of the soffice descendant tree failed; "
+            "falling back to direct leader termination: %s",
+            exc,
+        )
+    if tree_cleanup_failed:
+        try:
+            process.kill()
+        except OSError as exc:
+            logger.error("ReportGenerator: direct soffice termination failed: %s", exc)
+    try:
+        process.wait(timeout=2.0)
+        return
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error("ReportGenerator: soffice did not settle after cleanup: %s", exc)
+    try:
+        process.kill()
+    except OSError as exc:
+        logger.error("ReportGenerator: repeated direct soffice termination failed: %s", exc)
+    try:
+        process.wait(timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error("ReportGenerator: soffice leader could not be reaped within the cleanup bound: %s", exc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +127,8 @@ class ReportGenerator:
         if output_dir.is_symlink():
             raise ReportContractError("report output directory must not be a symlink")
         resolved_output = output_dir.resolve()
-        if (
-            resolved_output.parent != staging_root
-            or report_paths.experiment_root not in resolved_output.parents
-        ):
-            raise ReportContractError(
-                "report output must be one generation staging directory"
-            )
+        if resolved_output.parent != staging_root or report_paths.experiment_root not in resolved_output.parents:
+            raise ReportContractError("report output must be one generation staging directory")
         return self._generate_into(
             experiment_root,
             resolved_output,
@@ -149,9 +185,7 @@ class ReportGenerator:
             deadline_epoch=deadline_epoch,
         )
 
-        editable_document = self._build_document(
-            dataset, assets_dir, editable_sections, gemma_intro
-        )
+        editable_document = self._build_document(dataset, assets_dir, editable_sections, gemma_intro)
         editable_document.save(str(editable_docx_path))
 
         return ReportGenerationResult(
@@ -290,23 +324,17 @@ class ReportGenerator:
         from docx.oxml.ns import qn
 
         run = fp.add_run()
-        run._element.append(
-            run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"})
-        )
+        run._element.append(run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"}))
         run2 = fp.add_run()
         instr = run2._element.makeelement(qn("w:instrText"), {qn("xml:space"): "preserve"})
         instr.text = " PAGE "
         run2._element.append(instr)
         run3 = fp.add_run()
-        run3._element.append(
-            run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"})
-        )
+        run3._element.append(run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"}))
 
     def _resolve_raw_sections(self, metadata: dict) -> tuple[str, ...]:
         template = metadata.get("template", {})
-        configured = [
-            name for name in list(template.get("report_sections") or []) if name in SECTION_REGISTRY
-        ]
+        configured = [name for name in list(template.get("report_sections") or []) if name in SECTION_REGISTRY]
         ordered: list[str] = []
         for name in self._BASE_RAW_SECTIONS + tuple(configured):
             if name not in ordered:
@@ -340,8 +368,15 @@ class ReportGenerator:
         output_dir = source_docx_path.parent
         timeout_s = float(_SOFFICE_TIMEOUT_S)
         if deadline_epoch is not None:
-            # Reserve time for the editable document, hashing, promotion, and reply.
-            timeout_s = min(timeout_s, max(0.1, deadline_epoch - time.time() - 2.0))
+            remaining_s = deadline_epoch - time.time()
+            conversion_budget_s = remaining_s - _SOFFICE_TERMINATION_RESERVE_S - _REPORT_COMMIT_TAIL_RESERVE_S
+            if conversion_budget_s <= 0:
+                logger.warning(
+                    "ReportGenerator: PDF-конвертация пропущена — оставшееся "
+                    "время зарезервировано для надёжной публикации DOCX."
+                )
+                return None
+            timeout_s = min(timeout_s, conversion_budget_s)
         command = [
             soffice,
             "--headless",
@@ -368,11 +403,25 @@ class ReportGenerator:
                     stderr=subprocess.DEVNULL,
                     close_fds=True,
                 )
+                remaining_s = deadline_epoch - time.time()
+                timeout_s = min(
+                    float(_SOFFICE_TIMEOUT_S),
+                    remaining_s - _SOFFICE_TERMINATION_RESERVE_S - _REPORT_COMMIT_TAIL_RESERVE_S,
+                )
+                if timeout_s <= 0:
+                    # Process creation is synchronous and cannot be cancelled.
+                    # Once it returns, settle its tree even when startup latency
+                    # has already consumed the safe conversion budget.
+                    _settle_soffice_process(process)
+                    logger.warning(
+                        "ReportGenerator: PDF-конвертация пропущена — запуск процесса "
+                        "исчерпал безопасный бюджет конвертации."
+                    )
+                    return None
                 try:
                     process.wait(timeout=timeout_s)
                 except subprocess.TimeoutExpired:
-                    terminate_descendant_tree(process.pid)
-                    process.wait(timeout=2.0)
+                    _settle_soffice_process(process)
                     raise
         except subprocess.TimeoutExpired:
             logger.error(

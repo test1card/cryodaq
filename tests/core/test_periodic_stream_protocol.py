@@ -552,7 +552,10 @@ def test_command_decoder_rejects_duplicate_request_fields() -> None:
 
 def test_periodic_reply_encoder_is_compact_sorted_finite_and_exact_once() -> None:
     reply = encode_periodic_command_reply({"schema": PERIODIC_QUERY_SCHEMA, "ok": False, "error_code": "x"})
-    assert reply.wire == (b'{"error_code":"x","ok":false,"proto":1,"schema":"cryodaq.periodic.query/v1"}')
+    assert reply.wire == (
+        f'{{"error_code":"x","ok":false,"proto":{PROTOCOL_VERSION},'
+        '"schema":"cryodaq.periodic.query/v1"}'
+    ).encode()
     assert ZMQCommandServer()._encode_reply(reply) is reply.wire
     with pytest.raises(ValueError, match="Out of range float"):
         encode_periodic_command_reply({"ok": True, "value": float("nan")})

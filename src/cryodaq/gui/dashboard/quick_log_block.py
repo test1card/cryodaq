@@ -7,6 +7,7 @@ OperatorLogPanel overlay.
 
 from __future__ import annotations
 
+import html
 import logging
 from datetime import datetime
 
@@ -43,6 +44,11 @@ class QuickLogBlock(QWidget):
 
         self._entries: list[dict] = []
         self._entry_labels: list[QLabel] = []
+        self._mutation_enabled = False
+        self._authority_message = "Нет связи с Engine"
+        self._submission_state = "idle"
+        self._submission_detail = ""
+        self._read_stale_detail = ""
 
         self._build_ui()
         self._refresh_entries_display()
@@ -64,8 +70,7 @@ class QuickLogBlock(QWidget):
         self._input = QLineEdit()
         self._input.setObjectName("quickLogInput")
         self._input.setPlaceholderText(
-            "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c "
-            "\u0437\u0430\u043c\u0435\u0442\u043a\u0443\u2026"
+            "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0437\u0430\u043c\u0435\u0442\u043a\u0443\u2026"
         )  # Добавить заметку…
         # v0.55.2 ds-004: 24px = SPACE_5 — keep height on the scale.
         self._input.setFixedHeight(theme.SPACE_5)
@@ -83,8 +88,16 @@ class QuickLogBlock(QWidget):
         )
         composer.addWidget(self._input, stretch=1)
 
+        self._status_label = QLabel("")
+        self._status_label.setObjectName("quickLogStatus")
+        self._status_label.setVisible(False)
+        self._status_label.setTextFormat(Qt.TextFormat.PlainText)
+        composer.addWidget(self._status_label)
+
         self._send_btn = QPushButton("\u21b5")  # ↵
         self._send_btn.setObjectName("quickLogSendBtn")
+        self._send_btn.setAccessibleName("Записать заметку в журнал оператора")
+        self._send_btn.setToolTip("Записать заметку в журнал оператора")
         # v0.55.2 ds-005: square at 24px = SPACE_5; matches the input height.
         self._send_btn.setFixedSize(theme.SPACE_5, theme.SPACE_5)
         self._send_btn.clicked.connect(self._on_submit)
@@ -132,6 +145,7 @@ class QuickLogBlock(QWidget):
             f"border-top: 1px solid {theme.BORDER}; "
             f"}}"
         )
+        self._update_composer_state()
 
     # ------------------------------------------------------------------
     # Entry rendering
@@ -170,10 +184,11 @@ class QuickLogBlock(QWidget):
         except (ValueError, TypeError):
             ts_text = "--:--"
 
-        message_raw = entry.get("message", "")
+        message_raw = str(entry.get("message", "") or "")
         message = message_raw.splitlines()[0] if message_raw else ""
         if len(message) > 60:
             message = message[:57] + "\u2026"
+        rendered_message = html.escape(message)
 
         text = (
             f'<span style="color:{theme.MUTED_FOREGROUND}; '
@@ -183,13 +198,14 @@ class QuickLogBlock(QWidget):
             f'font-size:{theme.FONT_SIZE_XS}px;">\u00b7</span> '
             f'<span style="color:{theme.FOREGROUND}; '
             f"font-family:'{theme.FONT_BODY}'; "
-            f'font-size:{theme.FONT_SIZE_XS}px;">{message}</span>'
+            f'font-size:{theme.FONT_SIZE_XS}px;">{rendered_message}</span>'
         )
 
         lbl = QLabel()
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setText(text)
-        lbl.setToolTip(entry.get("message", ""))
+        lbl.setToolTip(html.escape(message_raw))
+        lbl.setAccessibleName(f"{ts_text}: {message}")
         return lbl
 
     # ------------------------------------------------------------------
@@ -197,11 +213,73 @@ class QuickLogBlock(QWidget):
     # ------------------------------------------------------------------
 
     def _on_submit(self) -> None:
+        if not self._mutation_enabled or self._submission_state not in {"idle", "error", "unknown"}:
+            return
         text = self._input.text().strip()
         if not text:
             return
-        self._input.clear()
+        self.set_submission_state("pending", "Запись отправлена; ожидается подтверждение журнала")
         self.entry_submitted.emit(text)
+
+    def set_mutation_enabled(self, enabled: bool, message: str = "") -> None:
+        self._mutation_enabled = bool(enabled)
+        self._authority_message = message.strip()
+        self._update_composer_state()
+
+    def set_submission_state(self, state: str, detail: str = "") -> None:
+        if state not in {"idle", "pending", "unknown", "error"}:
+            raise ValueError(f"unsupported quick-log submission state: {state}")
+        self._submission_state = state
+        self._submission_detail = detail.strip()
+        self._update_composer_state()
+
+    def set_read_stale(self, detail: str | None) -> None:
+        """Mark recent entries as retained, not current, without hiding them."""
+
+        self._read_stale_detail = "" if detail is None else detail.strip()
+        self._update_composer_state()
+
+    def confirm_submission(self, expected_message: str) -> None:
+        if self._input.text().strip() == expected_message.strip():
+            self._input.clear()
+        self.set_submission_state("idle")
+
+    def _update_composer_state(self) -> None:
+        editable = self._mutation_enabled and self._submission_state in {"idle", "error"}
+        retryable_unknown = self._mutation_enabled and self._submission_state == "unknown"
+        self._input.setEnabled(editable)
+        self._send_btn.setEnabled(editable or retryable_unknown)
+
+        if self._submission_state == "pending":
+            text, color = "СОХРАНЕНИЕ…", theme.STATUS_INFO
+            detail = self._submission_detail or text
+        elif self._submission_state == "unknown":
+            text, color = "ИСХОД НЕИЗВЕСТЕН", theme.STATUS_CAUTION
+            detail = self._submission_detail or text
+        elif self._submission_state == "error":
+            text, color = "НЕ СОХРАНЕНО", theme.STATUS_FAULT
+            detail = self._submission_detail or text
+        elif not self._mutation_enabled:
+            text, color = self._authority_message or "НЕДОСТУПНО", theme.MUTED_FOREGROUND
+            detail = self._authority_message or text
+        elif self._read_stale_detail:
+            text, color = "ЖУРНАЛ НЕ ОБНОВЛЁН", theme.STATUS_CAUTION
+            detail = self._read_stale_detail
+        else:
+            self._status_label.setVisible(False)
+            self._status_label.setText("")
+            self._status_label.setToolTip("")
+            return
+
+        self._status_label.setText(text)
+        self._status_label.setToolTip(detail)
+        self._status_label.setAccessibleName(text)
+        self._status_label.setAccessibleDescription(detail)
+        self._status_label.setStyleSheet(
+            f"color: {color}; font-family: '{theme.FONT_BODY}'; "
+            f"font-size: {theme.FONT_SIZE_XS}px; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        self._status_label.setVisible(True)
 
     # ------------------------------------------------------------------
     # Cleanup

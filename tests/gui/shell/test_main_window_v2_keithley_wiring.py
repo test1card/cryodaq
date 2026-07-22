@@ -176,8 +176,15 @@ def test_exact_internal_source_state_event_updates_real_panel():
     try:
         w._ensure_overlay("source")
         block = w._keithley_panel._smua_block
-        assert block._channel_state == "off"
+        assert block._channel_state == "unknown"
 
+        # A queued event cannot resurrect truth while the host is disconnected.
+        w._dispatch_reading(_source_state_reading("smua", "on"))
+        assert block._channel_state == "unknown"
+
+        # Once the host has a live link, the exact internal state channel is
+        # authoritative for this connection generation.
+        w._keithley_panel.set_connected(True)
         w._dispatch_reading(_source_state_reading("smua", "on"))
         assert block._channel_state == "on"
 
@@ -249,18 +256,18 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
     Patches ZmqCommandWorker at the panel-module level so the ZMQ socket is
     never opened and the spawned command dict is captured synchronously.
     """
-    from unittest.mock import MagicMock
-
     _app()
     w = MainWindowV2()
     try:
-        # Open overlay connected + safety ready so Start is enabled.
+        # Open overlay connected + safety ready, then provide an exact OFF
+        # observation. Connectivity alone must never enable energization.
         w._last_reading_time = time.monotonic()
         w._ensure_overlay("source")
         w._keithley_panel.set_connected(True)
         w._keithley_panel.set_safety_ready(True)
 
         block = w._keithley_panel._smua_block
+        block.apply_state("off")
         # Set known spin values.
         block._p_spin.setValue(0.050)
         block._v_spin.setValue(10.0)
@@ -268,10 +275,24 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
 
         captured_cmds: list[dict] = []
 
+        class _FakeSignal:
+            def __init__(self):
+                self._slot = None
+
+            def connect(self, slot):
+                self._slot = slot
+
+            def emit(self, result):
+                assert self._slot is not None
+                self._slot(result)
+
+        workers = []
+
         class _FakeWorker:
             def __init__(self, cmd: dict, parent=None):
                 captured_cmds.append(cmd)
-                self.finished = MagicMock()
+                self.finished = _FakeSignal()
+                workers.append(self)
 
             def start(self):
                 pass
@@ -283,7 +304,9 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
         # Click the REAL Start button (enabled by connected + safety-ready) so
         # the rendered clicked → _on_start_clicked → _dispatch_command wiring is
         # exercised end-to-end, not a private handler call.
-        assert block._start_btn.isEnabled(), "Start must be enabled when connected + safety-ready"
+        assert block._start_btn.isEnabled(), (
+            "Start requires connected + safety-ready + exact OFF observation"
+        )
         block._start_btn.click()
 
         assert len(captured_cmds) == 1, "exactly one command must be dispatched"
@@ -297,9 +320,9 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
         # Drive Stop on the SAME hosted panel (no second MainWindowV2 — keeps the
         # test's QThread churn at baseline). Put the channel in the running state
         # so Stop becomes enabled, click the real Stop button, assert keithley_stop.
+        workers[-1].finished.emit({"ok": True})
         captured_cmds.clear()
-        block._channel_state = "on"
-        block._update_control_enablement()
+        block.apply_state("on")
         assert block._stop_btn.isEnabled(), "Stop must be enabled when channel is running"
         block._stop_btn.click()
 

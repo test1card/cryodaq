@@ -345,3 +345,62 @@ def test_cached_values_reset_on_experiment_end(app):
     assert w._cached_eta_s is None
     assert w._stepper.isHidden()
     assert not w._create_btn.isHidden()
+
+
+def test_experiment_identity_change_resets_scoped_analytics_even_when_phase_is_same(app):
+    w = PhaseAwareWidget()
+    w.on_status_update(
+        {
+            "active_experiment": {"experiment_id": "exp-a"},
+            "current_phase": "cooldown",
+            "phase_started_at": 1000.0,
+        }
+    )
+    w._cached_eta_s = 3600.0
+    w._cached_r_thermal = 2.0
+
+    w.on_status_update(
+        {
+            "active_experiment": {"experiment_id": "exp-b"},
+            "current_phase": "cooldown",
+            "phase_started_at": 1000.0,
+        }
+    )
+
+    assert w.active_experiment_id == "exp-b"
+    assert w._cached_eta_s is None
+    assert w._cached_r_thermal is None
+
+
+def test_mutation_gate_blocks_direct_phase_handlers_without_hiding_truth(app):
+    w = PhaseAwareWidget()
+    w.on_status_update(
+        {
+            "active_experiment": {"experiment_id": "exp-read-only"},
+            "current_phase": "cooldown",
+            "phase_started_at": 1000.0,
+        }
+    )
+    received = []
+    w.phase_transition_requested.connect(received.append)
+
+    w.set_mutation_enabled(False)
+    w._on_back_clicked()
+    w._on_forward_clicked()
+    w._on_jump_selected(2)
+
+    assert received == []
+    assert not w._stepper.isHidden()
+    assert "ЗАХОЛАЖИВАНИЕ" in w._context_label.text()
+    assert not w._back_btn.isEnabled()
+    assert not w._forward_btn.isEnabled()
+    assert not w._jump_combo.isEnabled()
+
+
+def test_phase_operation_unknown_is_visible_and_accessible(app):
+    w = PhaseAwareWidget()
+    w.set_operation_state("unknown", "Команда не повторяется до сверки")
+
+    assert w._operation_label.text() == "ИСХОД НЕИЗВЕСТЕН"
+    assert "не повторяется" in w._operation_label.toolTip()
+    assert w._operation_label.accessibleName() == "ИСХОД НЕИЗВЕСТЕН"

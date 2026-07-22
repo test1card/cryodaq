@@ -339,7 +339,10 @@ def test_finalize_order_has_no_renderer_step(
     )
 
     assert finished.experiment_id == exp_id
-    assert events == ["metadata", "archive", "parquet", "clear"]
+    # Terminal truth and authority release are committed before best-effort
+    # derivative Parquet export. A slow or failed export must not leave the
+    # experiment looking RUNNING after its terminal metadata was published.
+    assert events == ["metadata", "archive", "clear", "parquet"]
 
 
 async def test_archive_normalizes_none_text_fields(manager: ExperimentManager) -> None:

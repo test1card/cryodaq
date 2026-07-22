@@ -21,6 +21,19 @@ from typing import Any
 from PySide6.QtCore import QThread, Signal
 
 from cryodaq.channels.descriptors import ChannelDescriptorV1
+from cryodaq.core.command_authority import (
+    ASSISTANT_READ_ACTIONS,
+    CLIENT_READ_ACTIONS,
+    ENGINE_MUTATION_CAPABILITY,
+    MUTATION_ENVELOPE_KEYS,
+    MUTATION_PROTOCOL_MAJOR,
+    MUTATION_RECEIPT_SCHEMA,
+    CommandClass,
+    classify_client_command,
+    is_assistant_namespaced,
+    requires_client_compatibility,
+    strip_mutation_envelope,
+)
 from cryodaq.core.descriptor_transport import (
     DescriptorQualifiedReading,
     qualify_reading_descriptor,
@@ -44,8 +57,21 @@ _CMD_REPLY_TIMEOUT_S = 65.0  # H7: outermost command tier — server 55s < REQ 6
 # cryodaq.core.zmq_bridge.PROTOCOL_VERSION. Used only to warn once if a
 # server ever reports a newer proto than this client knows — see
 # docs/protocol.md.
-CLIENT_PROTOCOL_VERSION = 1
+CLIENT_PROTOCOL_VERSION = 2
 _COUNTER_LOCK_TIMEOUT_S = 0.01
+_MUTATION_PROTOCOL_MAJOR = MUTATION_PROTOCOL_MAJOR
+_MUTATION_CAPABILITY = ENGINE_MUTATION_CAPABILITY
+_MUTATION_RECEIPT_SCHEMA = MUTATION_RECEIPT_SCHEMA
+_MUTATION_ENVELOPE_KEYS = MUTATION_ENVELOPE_KEYS
+
+# Exact observational inventory.  Anything absent is treated as a mutation;
+# an unnecessary compatibility envelope is safe, while accidentally granting
+# a new command read-only status could bypass the fail-closed client gate.
+_READ_ONLY_COMMANDS = CLIENT_READ_ACTIONS
+
+
+def _requires_mutation_envelope(action: object) -> bool:
+    return requires_client_compatibility(action)
 
 
 def _read_shared_counter(counter: Any, fallback: int) -> int:
@@ -170,6 +196,8 @@ class ZmqBridge:
         # Future-per-request command routing
         self._pending: dict[str, Future] = {}
         self._pending_lock = threading.Lock()
+        self._mutation_lock = threading.Lock()
+        self._mutation_receipt: dict[str, Any] | None = None
         self._reply_stop = threading.Event()
         self._reply_consumer: threading.Thread | None = None
         # Hardening 2026-04-21: restart counter for B1 diagnostic correlation
@@ -182,14 +210,34 @@ class ZmqBridge:
         # entirely in-process here (GUI process, not the subprocess), so a
         # plain instance counter is enough — no cross-process mp.Value needed.
         self._descriptor_malformed_count: int = 0
+        self._terminal_closed = False
+        self._terminal_queues_closed: set[str] = set()
+        self._terminal_queues_joined: set[str] = set()
 
     def start(self) -> None:
         """Start the ZMQ bridge subprocess."""
+        if self._terminal_closed:
+            raise RuntimeError("ZMQ bridge was terminally closed and cannot restart")
         if self._process is not None and self._process.is_alive():
             return
+        self._invalidate_mutation_compatibility()
         # Invalidate presentation freshness before any restart cleanup or
         # spawn operation that may raise.  Failure must remain unavailable.
         self._last_snapshot_time = 0.0
+        # Prove the previous reply consumer settled before replacing any
+        # queue/process identity. Dropping a live thread handle and later
+        # clearing this shared stop event would resurrect the old consumer
+        # alongside the new one, racing command replies between two owners.
+        reply_consumer = self._reply_consumer
+        if reply_consumer is not None:
+            if reply_consumer.is_alive():
+                self._reply_stop.set()
+                reply_consumer.join(timeout=1.0)
+            if reply_consumer.is_alive():
+                raise RuntimeError(
+                    "ZMQ bridge start refused: previous reply consumer remained alive after stop and join"
+                )
+            self._reply_consumer = None
         # A dead or partially started subprocess may still have feeder-
         # buffered cuts.  A fresh queue on every spawn attempt makes restart
         # invalidation atomic even when later cleanup or Process.start fails.
@@ -200,10 +248,6 @@ class ZmqBridge:
         with contextlib.suppress(Exception):
             old_snapshot_queue.close()
         self._snapshot_queue = mp.JoinableQueue(maxsize=2)
-        if self._reply_consumer is not None and self._reply_consumer.is_alive():
-            self._reply_stop.set()
-            self._reply_consumer.join(timeout=1.0)
-            self._reply_consumer = None
         self._shutdown_event.clear()
         # Drain stale queues
         _drain(self._data_queue)
@@ -435,7 +479,59 @@ class ZmqBridge:
         return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
     def send_command(self, cmd: dict) -> dict:
-        """Thread-safe command dispatch with Future-per-request correlation."""
+        """Dispatch one command after fail-closed mutation negotiation.
+
+        Discovery is single-flight across GUI worker threads.  A rotated token
+        invalidates the cache, but the rejected mutation is never replayed
+        automatically; the operator/client must explicitly submit it again.
+        """
+        if type(cmd) is not dict:
+            return {
+                "ok": False,
+                "error_code": "command_invalid",
+                "error": "GUI command must be a plain mapping",
+                "retry_safe": True,
+            }
+        action = cmd.get("cmd")
+        if type(action) is not str or not action:
+            return {
+                "ok": False,
+                "error_code": "command_invalid",
+                "error": "GUI command requires a non-empty string cmd",
+                "retry_safe": True,
+            }
+        command = strip_mutation_envelope(cmd)
+        if is_assistant_namespaced(action) and action not in ASSISTANT_READ_ACTIONS:
+            return {
+                "ok": False,
+                "error_code": "assistant_read_only",
+                "error": "Assistant accepts only the exact observational command allowlist",
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": False,
+            }
+        command_class = classify_client_command(action)
+        if command_class in {CommandClass.READ, CommandClass.SAFE_DIRECTION}:
+            return self._send_command_once(command)
+
+        receipt, failure = self._ensure_mutation_compatibility()
+        if failure is not None:
+            return failure
+        assert receipt is not None
+        command.update(
+            {
+                "protocol_major": receipt["server_protocol_major"],
+                "mutation_capability": receipt["required_capability"],
+                "capability_token": receipt["capability_token"],
+            }
+        )
+        result = self._send_command_once(command)
+        if result.get("error_code") == "mutation_protocol_incompatible":
+            self._invalidate_mutation_compatibility()
+        return result
+
+    def _send_command_once(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Thread-safe raw dispatch with Future-per-request correlation."""
         if not self.is_alive():
             return {"ok": False, "error": "ZMQ bridge subprocess not running"}
 
@@ -454,6 +550,53 @@ class ZmqBridge:
         finally:
             with self._pending_lock:
                 self._pending.pop(rid, None)
+
+    def _ensure_mutation_compatibility(
+        self,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        with self._mutation_lock:
+            if self._mutation_receipt is not None:
+                return dict(self._mutation_receipt), None
+            discovery = self._send_command_once({"cmd": "mutation_capabilities"})
+            receipt = discovery.get("compatibility_receipt") if isinstance(discovery, dict) else None
+            valid = (
+                discovery.get("ok") is True
+                and isinstance(receipt, dict)
+                and receipt.get("schema") == _MUTATION_RECEIPT_SCHEMA
+                and receipt.get("accepted") is True
+                and type(receipt.get("server_protocol_major")) is int
+                and receipt.get("server_protocol_major") == _MUTATION_PROTOCOL_MAJOR
+                and receipt.get("required_capability") == _MUTATION_CAPABILITY
+                and type(receipt.get("capability_token")) is str
+                and 16 <= len(receipt["capability_token"]) <= 512
+                and receipt["capability_token"].isprintable()
+            )
+            if not valid:
+                self._mutation_receipt = None
+                return None, {
+                    "ok": False,
+                    "error_code": "mutation_protocol_incompatible",
+                    "error": "GUI mutation compatibility discovery failed; command was not dispatched",
+                    "retry_safe": True,
+                    "compatibility_receipt": {
+                        "schema": _MUTATION_RECEIPT_SCHEMA,
+                        "accepted": False,
+                        "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
+                        "required_capability": _MUTATION_CAPABILITY,
+                    },
+                }
+            self._mutation_receipt = {
+                "schema": receipt["schema"],
+                "accepted": True,
+                "server_protocol_major": receipt["server_protocol_major"],
+                "required_capability": receipt["required_capability"],
+                "capability_token": receipt["capability_token"],
+            }
+            return dict(self._mutation_receipt), None
+
+    def _invalidate_mutation_compatibility(self) -> None:
+        with self._mutation_lock:
+            self._mutation_receipt = None
 
     def _check_proto(self, reply: dict[str, Any]) -> None:
         """Warn once if a server's ``proto`` is newer than this client knows.
@@ -502,7 +645,16 @@ class ZmqBridge:
                 logger.exception("ZMQ reply consumer: error processing reply")
 
     def shutdown(self) -> None:
-        """Signal subprocess to stop, cancel pending futures, wait for exit."""
+        """Settle the reply consumer and subprocess or raise with ownership intact."""
+        failures: list[str] = []
+        first_error: Exception | None = None
+
+        def record_failure(message: str, error: Exception | None = None) -> None:
+            nonlocal first_error
+            failures.append(message)
+            if first_error is None and error is not None:
+                first_error = error
+
         # Stop reply consumer thread
         self._reply_stop.set()
         with self._pending_lock:
@@ -510,27 +662,102 @@ class ZmqBridge:
                 if not future.done():
                     future.set_result({"ok": False, "error": "ZMQ bridge shutting down"})
             self._pending.clear()
-        if self._reply_consumer is not None and self._reply_consumer.is_alive():
-            self._reply_consumer.join(timeout=3.0)
+        reply_consumer = self._reply_consumer
+        if reply_consumer is not None:
+            try:
+                if reply_consumer.is_alive():
+                    reply_consumer.join(timeout=3.0)
+                if reply_consumer.is_alive():
+                    record_failure("reply consumer remained alive after join")
+            except Exception as exc:
+                record_failure("reply consumer settlement raised", exc)
 
         # Stop subprocess
-        self._shutdown_event.set()
-        if self._process is not None:
-            self._process.join(timeout=3)
-            if self._process.is_alive():
-                logger.warning("ZMQ bridge subprocess did not exit, killing")
-                self._process.kill()
-                self._process.join(timeout=2)
-            # Hardening 2026-04-21: log exit code for B1 diagnostic
-            exit_code = self._process.exitcode
+        process = self._process
+        try:
+            self._shutdown_event.set()
+        except Exception as exc:
+            record_failure("shutdown signal could not be set", exc)
+
+        if process is not None:
+            try:
+                if process.is_alive():
+                    process.join(timeout=3)
+                if process.is_alive():
+                    logger.warning("ZMQ bridge subprocess did not exit gracefully, terminating")
+                    process.terminate()
+                    process.join(timeout=2)
+                if process.is_alive():
+                    logger.warning("ZMQ bridge subprocess survived terminate, killing")
+                    process.kill()
+                    process.join(timeout=2)
+                if process.is_alive():
+                    record_failure("subprocess remained alive after kill and join")
+            except Exception as exc:
+                record_failure("subprocess settlement raised", exc)
+
+        # Snapshot truth is unavailable as soon as shutdown begins, including
+        # when settlement fails and ownership must be retained for a retry.
+        self._last_snapshot_time = 0.0
+        self._invalidate_mutation_compatibility()
+
+        if failures:
+            detail = "; ".join(failures)
+            error = RuntimeError(f"ZMQ bridge shutdown incomplete: {detail}")
+            if first_error is not None:
+                raise error from first_error
+            raise error
+
+        self._reply_consumer = None
+        if process is not None:
+            # Hardening 2026-04-21: log exit code for B1 diagnostic.  Clear the
+            # handle only after the final is_alive() proof above.
+            exit_code = process.exitcode
             if exit_code is not None:
                 logger.info("ZMQ bridge subprocess stopped (exitcode=%s)", exit_code)
             else:
-                logger.warning("ZMQ bridge subprocess stopped (exitcode=None after kill)")
+                logger.info("ZMQ bridge subprocess stopped (not alive, exitcode unavailable)")
             self._process = None
         else:
             logger.info("ZMQ bridge subprocess stopped")
-        self._last_snapshot_time = 0.0
+
+    def close(self) -> None:
+        """Terminally close parent-side IPC queues after a proven shutdown.
+
+        ``shutdown()`` intentionally remains restartable for watchdog recovery.
+        Launcher exit calls this terminal method only after the subprocess,
+        reply consumer, and command workers have settled.
+        """
+
+        if self._terminal_closed:
+            return
+        self.shutdown()
+        if self._process is not None or self._reply_consumer is not None:
+            raise RuntimeError("ZMQ bridge terminal close requires settled process and reply consumer")
+        with self._pending_lock:
+            if self._pending:
+                raise RuntimeError("ZMQ bridge terminal close requires no pending command futures")
+
+        queues = (
+            ("data", self._data_queue, False),
+            ("command", self._cmd_queue, False),
+            ("reply", self._reply_queue, False),
+            ("snapshot", self._snapshot_queue, True),
+        )
+        for name, ipc_queue, task_done in queues:
+            if name not in self._terminal_queues_closed:
+                _drain(ipc_queue, task_done=task_done)
+                ipc_queue.close()
+                self._terminal_queues_closed.add(name)
+            if name not in self._terminal_queues_joined:
+                feeder = getattr(ipc_queue, "_thread", None)
+                if isinstance(feeder, threading.Thread):
+                    feeder.join(timeout=2.0)
+                    if feeder.is_alive():
+                        raise RuntimeError(f"ZMQ bridge {name} queue feeder remained alive after bounded join")
+                ipc_queue.join_thread()
+                self._terminal_queues_joined.add(name)
+        self._terminal_closed = True
 
 
 def _drain(q: Any, *, task_done: bool = False) -> None:
@@ -540,7 +767,7 @@ def _drain(q: Any, *, task_done: bool = False) -> None:
             q.get_nowait()
             if task_done:
                 q.task_done()
-        except (queue.Empty, EOFError, OSError):
+        except (queue.Empty, EOFError, OSError, ValueError):
             break
 
 

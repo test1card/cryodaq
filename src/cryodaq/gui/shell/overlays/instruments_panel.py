@@ -190,6 +190,18 @@ def _fmt(value: float, decimals: int = 1) -> str:
     return f"{value:.{decimals}f}"
 
 
+def _channel_status_operator_text(status: object) -> str:
+    """Return bounded Russian copy without echoing backend enum values."""
+    if type(status) is not ChannelStatus:
+        return "неизвестный статус"
+    return {
+        ChannelStatus.OVERRANGE: "выше диапазона",
+        ChannelStatus.UNDERRANGE: "ниже диапазона",
+        ChannelStatus.SENSOR_ERROR: "ошибка датчика",
+        ChannelStatus.TIMEOUT: "тайм-аут",
+    }.get(status, "неизвестный статус")
+
+
 def _card_qss(object_name: str, border_color: str) -> str:
     return (
         f"#{object_name} {{"
@@ -330,7 +342,7 @@ class _InstrumentCard(QFrame):
             status_text = "Нет связи"
         elif self._last_status != ChannelStatus.OK:
             color = theme.STATUS_CAUTION
-            status_text = f"Предупреждение ({self._last_status.value})"
+            status_text = f"Внимание: {_channel_status_operator_text(self._last_status)}"
         else:
             color = theme.STATUS_OK
             status_text = "Норма"
@@ -476,7 +488,7 @@ class _SensorDiagSection(QFrame):
         if healthy:
             parts.append(f"{healthy} ОК")
         if warning:
-            parts.append(f"{warning} ПРЕД")
+            parts.append(f"{warning} ВНИМАНИЕ")
         if critical:
             parts.append(f"{critical} КРИТ")
         return " / ".join(parts)
@@ -554,7 +566,7 @@ class _SensorDiagSection(QFrame):
             self._chip_widgets.append(chip)
 
         _add(healthy, "INFO", "ОК")  # STATUS_INFO reused for OK summary
-        _add(warning, "WARNING", "ПРЕД")
+        _add(warning, "CAUTION", "ВНИМАНИЕ")
         _add(critical, "CRITICAL", "КРИТ")
 
     @property
