@@ -46,6 +46,7 @@ class OperatorSnapshotIngressOwner(QObject):
         self._next_health_poll = 0.0
         self._last_monotonic: float | None = None
         self._last_transport_age = 0.0
+        self._last_accepted_snapshot: OperatorSnapshot | None = None
         self._accepted_count = 0
         self._rejected_count = 0
         self._snapshot_queued.connect(
@@ -146,11 +147,18 @@ class OperatorSnapshotIngressOwner(QObject):
         if type(candidate) is not tuple or not candidate:
             self._reject_snapshot_batch()
             return
-        previous_revision = self._store.cut.revision if self._store.snapshot is not None else -1
+        previous = self._last_accepted_snapshot
+        previous_revision = previous.cut.revision if previous is not None else -1
         for item in candidate:
-            if type(item) is not OperatorSnapshot or item.cut.revision <= previous_revision:
+            if type(item) is not OperatorSnapshot or item.cut.revision < previous_revision:
                 self._reject_snapshot_batch()
                 return
+            if item.cut.revision == previous_revision:
+                if item != previous:
+                    self._reject_snapshot_batch()
+                    return
+                continue
+            previous = item
             previous_revision = item.cut.revision
         accepted = self._apply_snapshot(epoch, candidate[-1])
         if accepted and self._active and epoch == self._epoch:
@@ -163,14 +171,22 @@ class OperatorSnapshotIngressOwner(QObject):
         if type(candidate) is not OperatorSnapshot:
             self._reject_snapshot_batch()
             return False
-        if self._store.snapshot is not None and candidate.cut.revision <= self._store.cut.revision:
-            self._reject_snapshot_batch()
-            return False
+        if self._last_accepted_snapshot is not None:
+            previous_revision = self._last_accepted_snapshot.cut.revision
+            if candidate.cut.revision < previous_revision:
+                self._reject_snapshot_batch()
+                return False
+            if candidate.cut.revision == previous_revision:
+                if candidate == self._last_accepted_snapshot:
+                    return False
+                self._reject_snapshot_batch()
+                return False
         try:
             accepted = self._store.accept_snapshot(candidate)
         except Exception:
             self._reject_snapshot_batch()
             return False
+        self._last_accepted_snapshot = candidate
         self._accepted_count = min(_MAX_COUNTER, self._accepted_count + 1)
         self._last_transport_age = max(summary.transport_age_s for summary in accepted.summaries())
         return True

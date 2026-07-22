@@ -294,7 +294,7 @@ def test_stale_and_disconnected_health_are_snapshot_only_and_never_restart(qapp)
 def test_nonmonotonic_or_wrong_type_candidate_rejects_and_fails_closed(qapp) -> None:
     owner = OperatorSnapshotIngressOwner(_Bridge())
     owner.start()
-    owner._apply_snapshot(owner._epoch, _snapshot(2))
+    owner._apply_snapshot(owner._epoch, _snapshot(2, received_at=NOW + timedelta(seconds=99)))
 
     owner._apply_snapshot(owner._epoch, _snapshot(2))
     owner._apply_snapshot(owner._epoch, {"ready": True})
@@ -303,6 +303,37 @@ def test_nonmonotonic_or_wrong_type_candidate_rejects_and_fails_closed(qapp) -> 
     assert owner.rejected_count == 2
     assert owner.snapshot is not None
     assert owner.snapshot.cut.revision == 2
+    assert all("transport_disconnected" in summary.transport_reason_codes for summary in owner.snapshot.summaries())
+
+
+def test_identical_duplicate_revision_is_idempotent_without_authority_flap(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner.start()
+    original = _snapshot(2)
+    assert owner._apply_snapshot(owner._epoch, original) is True
+    epoch = owner._epoch
+    presented = owner.snapshot
+
+    assert owner._apply_snapshot(owner._epoch, _snapshot(2)) is False
+
+    assert owner._epoch == epoch
+    assert owner.accepted_count == 1
+    assert owner.rejected_count == 0
+    assert owner.snapshot is presented
+
+
+def test_same_revision_equivocation_rejects_and_fails_closed(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner.start()
+    assert owner._apply_snapshot(owner._epoch, _snapshot(2)) is True
+
+    conflicting = _snapshot(2, received_at=NOW + timedelta(seconds=99))
+    assert owner._apply_snapshot(owner._epoch, conflicting) is False
+
+    assert owner.accepted_count == 1
+    assert owner.rejected_count == 1
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.received_at != conflicting.cut.received_at
     assert all("transport_disconnected" in summary.transport_reason_codes for summary in owner.snapshot.summaries())
 
 
