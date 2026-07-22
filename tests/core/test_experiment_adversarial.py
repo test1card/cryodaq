@@ -99,6 +99,11 @@ def test_interrupted_finalize_replays_journal_to_one_terminal_truth(
 
     journal = tmp_path / "experiment_transition.json"
     assert journal.exists()
+    journal_payload = json.loads(journal.read_text(encoding="utf-8"))
+    assert journal_payload["schema_version"] == 2
+    assert journal_payload["manager_incarnation"] == journal_payload["predecessor"]["manager_incarnation"]
+    assert journal_payload["request_fingerprint"] == journal_payload["terminal_receipt"]["request_fingerprint"]
+    assert journal_payload["terminal_receipt"]["result_active_experiment_id"] is None
     recovered = _manager(tmp_path)
     assert recovered.active_experiment is None
     assert not journal.exists()
@@ -112,6 +117,306 @@ def test_interrupted_finalize_replays_journal_to_one_terminal_truth(
             "SELECT status FROM experiments WHERE experiment_id = ?", (active.experiment_id,)
         ).fetchone()
     assert status == ("COMPLETED",)
+
+
+def test_stale_journal_and_restart_replay_fail_durable_cas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    active = manager.create_experiment("campaign", "operator")
+    original_title = active.title
+
+    def fail_before_persistence(_info: object) -> None:
+        raise OSError("injected pre-persistence failure")
+
+    monkeypatch.setattr(manager, "_write_end", fail_before_persistence)
+    with pytest.raises(OSError, match="pre-persistence"):
+        manager.update_experiment(active.experiment_id, title="stale target")
+
+    journal = tmp_path / "experiment_transition.json"
+    assert journal.exists()
+    state_path = tmp_path / "experiment_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["revision"] += 1
+    state["last_transition_receipt"] = None
+    state["last_transition_receipt_fingerprint"] = None
+    state["state_fingerprint"] = manager._state_fingerprint(
+        revision=state["revision"],
+        app_mode=manager.app_mode,
+        active_experiment_id=active.experiment_id,
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before_journal = journal.read_bytes()
+    before_metadata = active.metadata_path.read_bytes()
+
+    monkeypatch.undo()
+    with pytest.raises(RuntimeError, match="predecessor is stale"):
+        _manager(tmp_path)
+
+    assert journal.read_bytes() == before_journal
+    assert active.metadata_path.read_bytes() == before_metadata
+    metadata = json.loads(before_metadata)
+    assert metadata["experiment"]["title"] == original_title
+    db_path = tmp_path / f"data_{active.start_time.date().isoformat()}.db"
+    with sqlite3.connect(str(db_path)) as conn:
+        persisted = conn.execute(
+            "SELECT title, status FROM experiments WHERE experiment_id = ?",
+            (active.experiment_id,),
+        ).fetchone()
+    assert persisted == (original_title, "RUNNING")
+
+
+def test_wrong_manager_incarnation_journal_cannot_mutate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    active = manager.create_experiment("campaign", "operator")
+
+    def fail_before_persistence(_info: object) -> None:
+        raise OSError("injected pre-persistence failure")
+
+    monkeypatch.setattr(manager, "_write_end", fail_before_persistence)
+    with pytest.raises(OSError, match="pre-persistence"):
+        manager.update_experiment(active.experiment_id, title="foreign target")
+
+    journal = tmp_path / "experiment_transition.json"
+    payload = json.loads(journal.read_text(encoding="utf-8"))
+    payload["manager_incarnation"] = "0" * 32
+    journal.write_text(json.dumps(payload), encoding="utf-8")
+    before_metadata = active.metadata_path.read_bytes()
+
+    monkeypatch.undo()
+    with pytest.raises(RuntimeError, match="different manager incarnation"):
+        _manager(tmp_path)
+
+    assert active.metadata_path.read_bytes() == before_metadata
+    assert journal.exists()
+
+
+def test_equivocal_journal_payload_is_rejected_before_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    active = manager.create_experiment("campaign", "operator")
+
+    def fail_before_persistence(_info: object) -> None:
+        raise OSError("injected pre-persistence failure")
+
+    monkeypatch.setattr(manager, "_write_end", fail_before_persistence)
+    with pytest.raises(OSError, match="pre-persistence"):
+        manager.update_experiment(active.experiment_id, title="original target")
+
+    journal = tmp_path / "experiment_transition.json"
+    payload = json.loads(journal.read_text(encoding="utf-8"))
+    payload["experiment"]["title"] = "equivocal target"
+    journal.write_text(json.dumps(payload), encoding="utf-8")
+    before_metadata = active.metadata_path.read_bytes()
+
+    monkeypatch.undo()
+    with pytest.raises(RuntimeError, match="fingerprint does not match"):
+        _manager(tmp_path)
+
+    assert active.metadata_path.read_bytes() == before_metadata
+    assert journal.exists()
+
+
+def test_legacy_journal_is_preserved_and_rejected_without_replay(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    active = manager.create_experiment("campaign", "operator")
+    journal = tmp_path / "experiment_transition.json"
+    legacy = {
+        "schema_version": 1,
+        "operation": "update",
+        "experiment": {**active.to_payload(), "title": "legacy target"},
+    }
+    journal.write_text(json.dumps(legacy), encoding="utf-8")
+    before_metadata = active.metadata_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="unsupported schema"):
+        _manager(tmp_path)
+
+    assert active.metadata_path.read_bytes() == before_metadata
+    assert json.loads(journal.read_text(encoding="utf-8")) == legacy
+
+
+def test_restart_accepts_only_exact_durable_terminal_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager(tmp_path)
+    active = manager.create_experiment("campaign", "operator")
+    journal = tmp_path / "experiment_transition.json"
+    original_unlink = Path.unlink
+
+    def fail_journal_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == journal:
+            raise OSError("injected post-receipt crash")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_journal_unlink)
+    with pytest.raises(OSError, match="post-receipt"):
+        manager.update_experiment(active.experiment_id, title="committed title")
+
+    state_before = json.loads((tmp_path / "experiment_state.json").read_text(encoding="utf-8"))
+    receipt = state_before["last_transition_receipt"]
+    assert receipt["result_revision"] == state_before["revision"]
+    assert receipt["result_state_fingerprint"] == state_before["state_fingerprint"]
+    assert journal.exists()
+
+    monkeypatch.undo()
+    recovered = _manager(tmp_path)
+
+    assert recovered.active_experiment is not None
+    assert recovered.active_experiment.title == "committed title"
+    assert not journal.exists()
+    state_after = json.loads((tmp_path / "experiment_state.json").read_text(encoding="utf-8"))
+    assert state_after["revision"] == state_before["revision"]
+    assert state_after["last_transition_receipt"] == receipt
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.__setitem__("unexpected_authority", "ignored-before-fix"),
+        lambda payload: payload.pop("last_transition_receipt_fingerprint"),
+    ],
+    ids=["unknown-field", "missing-field"],
+)
+def test_v2_state_envelope_ambiguity_fails_closed_without_modification(
+    tmp_path: Path,
+    mutation: object,
+) -> None:
+    manager = _manager(tmp_path)
+    active = manager.create_experiment("campaign", "operator")
+    state_path = tmp_path / "experiment_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    mutation(state)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before_state = state_path.read_bytes()
+    before_metadata = active.metadata_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="envelope is ambiguous"):
+        _manager(tmp_path)
+
+    assert state_path.read_bytes() == before_state
+    assert active.metadata_path.read_bytes() == before_metadata
+    assert not (tmp_path / "experiment_transition.json").exists()
+
+
+def test_terminal_receipt_digest_corruption_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path)
+    active = manager.create_experiment("campaign", "operator")
+    state_path = tmp_path / "experiment_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["last_transition_receipt_fingerprint"] = "0" * 64
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before_state = state_path.read_bytes()
+    before_metadata = active.metadata_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="terminal receipt fingerprint"):
+        _manager(tmp_path)
+
+    assert state_path.read_bytes() == before_state
+    assert active.metadata_path.read_bytes() == before_metadata
+
+
+def test_exact_legacy_state_migrates_once_to_v2(tmp_path: Path) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    state_path = tmp_path / "experiment_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "app_mode": "experiment",
+                "active_experiment_id": None,
+                "updated_at": "2026-07-23T12:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = ExperimentManager(tmp_path, instruments)
+
+    migrated = json.loads(state_path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == 2
+    assert migrated["revision"] == 0
+    assert migrated["last_transition_receipt"] is None
+    assert migrated["last_transition_receipt_fingerprint"] is None
+    assert manager.active_experiment is None
+
+
+def test_legacy_state_with_pending_journal_is_not_migrated_or_replayed(
+    tmp_path: Path,
+) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    state_path = tmp_path / "experiment_state.json"
+    journal_path = tmp_path / "experiment_transition.json"
+    legacy_state = {
+        "schema_version": 1,
+        "app_mode": "experiment",
+        "active_experiment_id": None,
+        "updated_at": "2026-07-23T12:00:00+00:00",
+    }
+    legacy_journal = {
+        "schema_version": 1,
+        "operation": "create",
+        "experiment": {"experiment_id": "untrusted"},
+    }
+    state_path.write_text(json.dumps(legacy_state), encoding="utf-8")
+    journal_path.write_text(json.dumps(legacy_journal), encoding="utf-8")
+    before_state = state_path.read_bytes()
+    before_journal = journal_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="unsupported schema"):
+        ExperimentManager(tmp_path, instruments)
+
+    assert state_path.read_bytes() == before_state
+    assert journal_path.read_bytes() == before_journal
+    assert not (tmp_path / "experiments").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("revision", 12, "envelope is ambiguous"),
+        ("last_transition_receipt", {}, "envelope is ambiguous"),
+        ("updated_at", "not-a-time", "update timestamp is invalid"),
+    ],
+)
+def test_injected_legacy_state_is_not_blessed_into_v2(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    instruments = tmp_path / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    state_path = tmp_path / "experiment_state.json"
+    legacy = {
+        "schema_version": 1,
+        "app_mode": "experiment",
+        "active_experiment_id": None,
+        "updated_at": "2026-07-23T12:00:00+00:00",
+    }
+    legacy[field] = value
+    state_path.write_text(json.dumps(legacy), encoding="utf-8")
+    before_state = state_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match=message):
+        ExperimentManager(tmp_path, instruments)
+
+    assert state_path.read_bytes() == before_state
+    assert not (tmp_path / "experiment_transition.json").exists()
+    assert not (tmp_path / "experiments").exists()
 
 
 def test_finalize_rejects_end_before_start_without_partial_transition(tmp_path: Path) -> None:

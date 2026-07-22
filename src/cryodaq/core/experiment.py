@@ -69,11 +69,36 @@ ON experiments(status) WHERE status = 'RUNNING';
 _LIFECYCLE_LOCKS_GUARD = threading.Lock()
 _LIFECYCLE_LOCKS: dict[str, threading.RLock] = {}
 
+_TRANSITION_SCHEMA_VERSION = 2
+_STATE_SCHEMA_VERSION = 2
+_HEX_ID_LENGTH = 32
+_SHA256_LENGTH = 64
+_UNSET = object()
+
 
 def _lifecycle_lock_for(data_dir: Path) -> threading.RLock:
     key = os.path.normcase(str(data_dir.resolve()))
     with _LIFECYCLE_LOCKS_GUARD:
         return _LIFECYCLE_LOCKS.setdefault(key, threading.RLock())
+
+
+def _canonical_digest(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_lower_hex(value: Any, length: int) -> bool:
+    return (
+        type(value) is str
+        and len(value) == length
+        and value == value.lower()
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def _serialized_lifecycle(method):
@@ -426,8 +451,12 @@ class ExperimentManager:
         self._operator_snapshot = OperatorExperimentSnapshot(0, None, None, None)
         self._mutation_lock = threading.RLock()
         self._durable_mutation_id: str | None = None
+        self._manager_incarnation = uuid.uuid4().hex
+        self._state_revision = 0
+        self._last_transition_receipt: dict[str, Any] | None = None
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
         with self._lifecycle_lock:
+            self._load_state_authority()
             self._recover_transition()
             self._load_state()
         if self._active is not None:
@@ -1271,7 +1300,13 @@ class ExperimentManager:
             raise ValueError("app_mode is required.")
         return AppMode(value)
 
-    def _set_active(self, info: ExperimentInfo) -> None:
+    def _set_active(
+        self,
+        info: ExperimentInfo,
+        *,
+        state_revision: int | None = None,
+        transition_receipt: dict[str, Any] | None | object = _UNSET,
+    ) -> None:
         with self._mutation_lock:
             if self._active is None or self._active.experiment_id != info.experiment_id:
                 self._operator_phase = None
@@ -1281,20 +1316,31 @@ class ExperimentManager:
                 active_experiment_id=info.experiment_id,
             )
             try:
-                self._write_state()
+                self._write_state(
+                    revision=state_revision,
+                    transition_receipt=transition_receipt,
+                )
             finally:
                 # _write_state already follows the manager's in-memory commit.
                 # If durability fails, preserve the exception while ensuring
                 # the observational cut cannot publish the previous state.
                 self._refresh_operator_snapshot()
 
-    def _clear_active(self) -> None:
+    def _clear_active(
+        self,
+        *,
+        state_revision: int | None = None,
+        transition_receipt: dict[str, Any] | None | object = _UNSET,
+    ) -> None:
         with self._mutation_lock:
             self._active = None
             self._operator_phase = None
             self._state = ExperimentState(app_mode=self._state.app_mode, active_experiment_id=None)
             try:
-                self._write_state()
+                self._write_state(
+                    revision=state_revision,
+                    transition_receipt=transition_receipt,
+                )
             finally:
                 self._refresh_operator_snapshot()
 
@@ -1317,17 +1363,198 @@ class ExperimentManager:
             *candidate,
         )
 
-    def _load_state(self) -> None:
-        active_experiment_id: str | None = None
-        app_mode = AppMode.EXPERIMENT
-        if self._state_path.exists():
-            try:
-                payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-                app_mode = self._normalize_app_mode(payload.get("app_mode", AppMode.EXPERIMENT.value))
-                active_experiment_id = _clean_text(payload.get("active_experiment_id")) or None
-            except Exception as exc:
-                logger.warning("Failed to load experiment state %s: %s", self._state_path, exc)
+    def _state_fingerprint(
+        self,
+        *,
+        revision: int,
+        app_mode: AppMode,
+        active_experiment_id: str | None,
+    ) -> str:
+        return _canonical_digest(
+            {
+                "schema_version": _STATE_SCHEMA_VERSION,
+                "manager_incarnation": self._manager_incarnation,
+                "revision": revision,
+                "app_mode": app_mode.value,
+                "active_experiment_id": active_experiment_id,
+            }
+        )
+
+    def _state_cut(self) -> dict[str, Any]:
+        receipt_fingerprint = (
+            _canonical_digest(self._last_transition_receipt) if self._last_transition_receipt is not None else None
+        )
+        return {
+            "manager_incarnation": self._manager_incarnation,
+            "revision": self._state_revision,
+            "app_mode": self._state.app_mode.value,
+            "active_experiment_id": self._state.active_experiment_id,
+            "state_fingerprint": self._state_fingerprint(
+                revision=self._state_revision,
+                app_mode=self._state.app_mode,
+                active_experiment_id=self._state.active_experiment_id,
+            ),
+            "last_receipt_fingerprint": receipt_fingerprint,
+        }
+
+    def _load_state_authority(self) -> None:
+        if not self._state_path.exists():
+            if self._transition_path.exists():
+                try:
+                    json.loads(self._transition_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    raise RuntimeError("Experiment transition journal is unreadable.") from exc
+                raise RuntimeError("Experiment transition has no durable predecessor state authority.")
+            self._state = ExperimentState(app_mode=AppMode.EXPERIMENT, active_experiment_id=None)
+            self._state_revision = 0
+            self._last_transition_receipt = None
+            self._write_state(revision=0, transition_receipt=None)
+            return
+
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError("Experiment state authority is unreadable.") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Experiment state authority is invalid.")
+
+        schema_version = payload.get("schema_version")
+        if type(schema_version) is not int or schema_version not in {
+            1,
+            _STATE_SCHEMA_VERSION,
+        }:
+            raise RuntimeError("Experiment state authority has an unsupported schema.")
+        legacy_keys = {
+            "schema_version",
+            "app_mode",
+            "active_experiment_id",
+            "updated_at",
+        }
+        v2_keys = {
+            "schema_version",
+            "app_mode",
+            "active_experiment_id",
+            "revision",
+            "state_fingerprint",
+            "last_transition_receipt",
+            "last_transition_receipt_fingerprint",
+            "manager_incarnation",
+            "updated_at",
+        }
+        expected_keys = legacy_keys if schema_version == 1 else v2_keys
+        if set(payload) != expected_keys:
+            raise RuntimeError("Experiment state authority envelope is ambiguous.")
+        if type(payload.get("app_mode")) is not str:
+            raise RuntimeError("Experiment state application mode is invalid.")
+        app_mode = self._normalize_app_mode(payload["app_mode"])
+        active_experiment_id = payload.get("active_experiment_id")
+        if active_experiment_id is not None and (type(active_experiment_id) is not str or not active_experiment_id):
+            raise RuntimeError("Experiment state active identity is invalid.")
+        updated_at = payload.get("updated_at")
+        if type(updated_at) is not str:
+            raise RuntimeError("Experiment state update timestamp is invalid.")
+        try:
+            parsed_updated_at = _parse_time(updated_at)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Experiment state update timestamp is invalid.") from exc
+        if parsed_updated_at is None:
+            raise RuntimeError("Experiment state update timestamp is invalid.")
+
+        revision = 0 if schema_version == 1 else payload.get("revision")
+        if type(revision) is not int or revision < 0:
+            raise RuntimeError("Experiment state revision is invalid.")
+        receipt = None if schema_version == 1 else payload.get("last_transition_receipt")
+        if receipt is not None and not isinstance(receipt, dict):
+            raise RuntimeError("Experiment state terminal receipt is invalid.")
+        receipt_fingerprint = None if schema_version == 1 else payload.get("last_transition_receipt_fingerprint")
+        if schema_version == _STATE_SCHEMA_VERSION:
+            manager_incarnation = payload.get("manager_incarnation")
+            if not _is_lower_hex(manager_incarnation, _HEX_ID_LENGTH):
+                raise RuntimeError("Experiment manager incarnation is invalid.")
+            self._manager_incarnation = manager_incarnation
+            expected_fingerprint = self._state_fingerprint(
+                revision=revision,
+                app_mode=app_mode,
+                active_experiment_id=active_experiment_id,
+            )
+            if (
+                not _is_lower_hex(payload.get("state_fingerprint"), _SHA256_LENGTH)
+                or payload.get("state_fingerprint") != expected_fingerprint
+            ):
+                raise RuntimeError("Experiment state fingerprint is invalid.")
+            expected_receipt_fingerprint = _canonical_digest(receipt) if receipt is not None else None
+            if receipt_fingerprint != expected_receipt_fingerprint or (
+                receipt_fingerprint is not None and not _is_lower_hex(receipt_fingerprint, _SHA256_LENGTH)
+            ):
+                raise RuntimeError("Experiment state terminal receipt fingerprint is invalid.")
+            if receipt is not None:
+                receipt_keys = {
+                    "schema",
+                    "manager_incarnation",
+                    "request_id",
+                    "request_fingerprint",
+                    "operation",
+                    "experiment_id",
+                    "experiment_fingerprint",
+                    "predecessor_revision",
+                    "predecessor_state_fingerprint",
+                    "result_revision",
+                    "result_active_experiment_id",
+                    "result_state_fingerprint",
+                }
+                if (
+                    set(receipt) != receipt_keys
+                    or receipt.get("schema") != "experiment_transition_receipt_v2"
+                    or receipt.get("manager_incarnation") != self._manager_incarnation
+                    or not _is_lower_hex(receipt.get("request_id"), _HEX_ID_LENGTH)
+                    or not _is_lower_hex(
+                        receipt.get("request_fingerprint"),
+                        _SHA256_LENGTH,
+                    )
+                    or not _is_lower_hex(
+                        receipt.get("experiment_fingerprint"),
+                        _SHA256_LENGTH,
+                    )
+                    or not _is_lower_hex(
+                        receipt.get("predecessor_state_fingerprint"),
+                        _SHA256_LENGTH,
+                    )
+                    or receipt.get("operation") not in {"create", "update", "finalize"}
+                    or type(receipt.get("experiment_id")) is not str
+                    or not receipt.get("experiment_id")
+                    or type(receipt.get("predecessor_revision")) is not int
+                    or receipt.get("predecessor_revision") < 0
+                    or receipt.get("result_revision") != receipt.get("predecessor_revision") + 1
+                    or receipt.get("result_revision") != revision
+                    or receipt.get("result_active_experiment_id") != active_experiment_id
+                    or receipt.get("result_state_fingerprint") != expected_fingerprint
+                    or (
+                        receipt.get("operation") == "finalize"
+                        and receipt.get("result_active_experiment_id") is not None
+                    )
+                    or (
+                        receipt.get("operation") in {"create", "update"}
+                        and receipt.get("result_active_experiment_id") != receipt.get("experiment_id")
+                    )
+                ):
+                    raise RuntimeError("Experiment state terminal receipt is invalid.")
+        elif self._transition_path.exists():
+            # A legacy journal cannot be upgraded safely because it has no
+            # predecessor cut. Preserve both files for operator recovery.
+            self._state = ExperimentState(app_mode=app_mode, active_experiment_id=active_experiment_id)
+            self._state_revision = revision
+            self._last_transition_receipt = receipt
+            return
+
         self._state = ExperimentState(app_mode=app_mode, active_experiment_id=active_experiment_id)
+        self._state_revision = revision
+        self._last_transition_receipt = dict(receipt) if receipt is not None else None
+        if schema_version == 1:
+            self._write_state(revision=revision, transition_receipt=receipt)
+
+    def _load_state(self) -> None:
+        self._load_state_authority()
+        active_experiment_id = self._state.active_experiment_id
         if active_experiment_id:
             active = self._read_experiment_from_metadata(active_experiment_id)
             if active is not None and active.status is ExperimentStatus.RUNNING:
@@ -1335,16 +1562,40 @@ class ExperimentManager:
             else:
                 self._clear_active()
 
-    def _write_state(self) -> None:
+    def _write_state(
+        self,
+        *,
+        revision: int | None = None,
+        transition_receipt: dict[str, Any] | None | object = _UNSET,
+    ) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        next_revision = self._state_revision + 1 if revision is None else revision
+        if type(next_revision) is not int or next_revision < 0:
+            raise RuntimeError("Experiment state revision is invalid.")
+        next_receipt = None if transition_receipt is _UNSET else transition_receipt
+        if next_receipt is not None and not isinstance(next_receipt, dict):
+            raise RuntimeError("Experiment state terminal receipt is invalid.")
         payload = {
-            "schema_version": 1,
+            "schema_version": _STATE_SCHEMA_VERSION,
             **self._state.to_payload(),
+            "revision": next_revision,
+            "state_fingerprint": self._state_fingerprint(
+                revision=next_revision,
+                app_mode=self._state.app_mode,
+                active_experiment_id=self._state.active_experiment_id,
+            ),
+            "last_transition_receipt": next_receipt,
+            "last_transition_receipt_fingerprint": (
+                _canonical_digest(next_receipt) if next_receipt is not None else None
+            ),
+            "manager_incarnation": self._manager_incarnation,
             "updated_at": datetime.now(UTC).isoformat(),
         }
         from cryodaq.core.atomic_write import atomic_write_text
 
         atomic_write_text(self._state_path, json.dumps(payload, ensure_ascii=False, indent=2))
+        self._state_revision = next_revision
+        self._last_transition_receipt = dict(next_receipt) if isinstance(next_receipt, dict) else None
 
     def _commit_transition(
         self,
@@ -1356,14 +1607,20 @@ class ExperimentManager:
         result_tables: list[dict[str, Any]] | None = None,
         summary_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Durably journal and apply one idempotent lifecycle transition."""
+        """Durably journal and apply one identity-bound CAS transition."""
 
         if self._transition_path.exists():
             self._recover_transition()
+        self._load_state_authority()
+        predecessor = self._state_cut()
+        request_id = uuid.uuid4().hex
         payload: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": _TRANSITION_SCHEMA_VERSION,
+            "manager_incarnation": self._manager_incarnation,
+            "request_id": request_id,
             "operation": operation,
             "experiment": info.to_payload(),
+            "predecessor": predecessor,
         }
         if run_records is not None:
             payload["run_records"] = [
@@ -1375,6 +1632,31 @@ class ExperimentManager:
             payload["result_tables"] = [dict(item) for item in result_tables]
         if summary_metadata is not None:
             payload["summary_metadata"] = dict(summary_metadata)
+        request_material = dict(payload)
+        request_fingerprint = _canonical_digest(request_material)
+        payload["request_fingerprint"] = request_fingerprint
+
+        result_active_id = None if operation == "finalize" else info.experiment_id
+        result_revision = predecessor["revision"] + 1
+        result_state_fingerprint = self._state_fingerprint(
+            revision=result_revision,
+            app_mode=AppMode(predecessor["app_mode"]),
+            active_experiment_id=result_active_id,
+        )
+        payload["terminal_receipt"] = {
+            "schema": "experiment_transition_receipt_v2",
+            "manager_incarnation": self._manager_incarnation,
+            "request_id": request_id,
+            "request_fingerprint": request_fingerprint,
+            "operation": operation,
+            "experiment_id": info.experiment_id,
+            "experiment_fingerprint": _canonical_digest(info.to_payload()),
+            "predecessor_revision": predecessor["revision"],
+            "predecessor_state_fingerprint": predecessor["state_fingerprint"],
+            "result_revision": result_revision,
+            "result_active_experiment_id": result_active_id,
+            "result_state_fingerprint": result_state_fingerprint,
+        }
 
         from cryodaq.core.atomic_write import atomic_write_text
 
@@ -1396,10 +1678,136 @@ class ExperimentManager:
             payload = json.loads(self._transition_path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise RuntimeError("Experiment transition journal is unreadable.") from exc
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        if not isinstance(payload, dict) or payload.get("schema_version") != _TRANSITION_SCHEMA_VERSION:
             raise RuntimeError("Experiment transition journal has an unsupported schema.")
+        self._load_state_authority()
         self._apply_transition(payload)
         self._transition_path.unlink(missing_ok=False)
+        self._load_state()
+
+    def _validate_transition_authority(
+        self,
+        payload: dict[str, Any],
+        info: ExperimentInfo,
+    ) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        optional_keys = {
+            "run_records",
+            "artifact_index",
+            "result_tables",
+            "summary_metadata",
+        }
+        required_keys = {
+            "schema_version",
+            "manager_incarnation",
+            "request_id",
+            "request_fingerprint",
+            "operation",
+            "experiment",
+            "predecessor",
+            "terminal_receipt",
+        }
+        if set(payload) - required_keys - optional_keys or not required_keys.issubset(payload):
+            raise RuntimeError("Experiment transition envelope is ambiguous.")
+        manager_incarnation = payload.get("manager_incarnation")
+        request_id = payload.get("request_id")
+        request_fingerprint = payload.get("request_fingerprint")
+        if not _is_lower_hex(manager_incarnation, _HEX_ID_LENGTH):
+            raise RuntimeError("Experiment transition manager incarnation is invalid.")
+        if manager_incarnation != self._manager_incarnation:
+            raise RuntimeError("Experiment transition belongs to a different manager incarnation.")
+        if not _is_lower_hex(request_id, _HEX_ID_LENGTH):
+            raise RuntimeError("Experiment transition request identity is invalid.")
+        if not _is_lower_hex(request_fingerprint, _SHA256_LENGTH):
+            raise RuntimeError("Experiment transition request fingerprint is invalid.")
+        request_material = {
+            key: value for key, value in payload.items() if key not in {"request_fingerprint", "terminal_receipt"}
+        }
+        if _canonical_digest(request_material) != request_fingerprint:
+            raise RuntimeError("Experiment transition request fingerprint does not match its payload.")
+
+        predecessor = payload.get("predecessor")
+        if not isinstance(predecessor, dict) or set(predecessor) != {
+            "manager_incarnation",
+            "revision",
+            "app_mode",
+            "active_experiment_id",
+            "state_fingerprint",
+            "last_receipt_fingerprint",
+        }:
+            raise RuntimeError("Experiment transition predecessor authority is invalid.")
+        if predecessor.get("manager_incarnation") != manager_incarnation:
+            raise RuntimeError("Experiment transition predecessor incarnation is inconsistent.")
+        revision = predecessor.get("revision")
+        if type(revision) is not int or revision < 0:
+            raise RuntimeError("Experiment transition predecessor revision is invalid.")
+        try:
+            predecessor_mode = AppMode(predecessor.get("app_mode"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Experiment transition predecessor mode is invalid.") from exc
+        predecessor_active_id = predecessor.get("active_experiment_id")
+        if predecessor_active_id is not None and (type(predecessor_active_id) is not str or not predecessor_active_id):
+            raise RuntimeError("Experiment transition predecessor identity is invalid.")
+        expected_predecessor_fingerprint = self._state_fingerprint(
+            revision=revision,
+            app_mode=predecessor_mode,
+            active_experiment_id=predecessor_active_id,
+        )
+        if predecessor.get("state_fingerprint") != expected_predecessor_fingerprint:
+            raise RuntimeError("Experiment transition predecessor fingerprint is invalid.")
+        operation = payload["operation"]
+        if predecessor_mode is not AppMode.EXPERIMENT:
+            raise RuntimeError("Experiment transition predecessor mode is not authoritative.")
+        if operation == "create":
+            if predecessor_active_id is not None:
+                raise RuntimeError("Create transition predecessor already has an active experiment.")
+        elif predecessor_active_id != info.experiment_id:
+            raise RuntimeError("Experiment transition predecessor identity does not match its target.")
+        last_receipt_fingerprint = predecessor.get("last_receipt_fingerprint")
+        if last_receipt_fingerprint is not None and not _is_lower_hex(
+            last_receipt_fingerprint,
+            _SHA256_LENGTH,
+        ):
+            raise RuntimeError("Experiment transition predecessor receipt is invalid.")
+
+        result_active_id = None if operation == "finalize" else info.experiment_id
+        result_revision = revision + 1
+        result_state_fingerprint = self._state_fingerprint(
+            revision=result_revision,
+            app_mode=predecessor_mode,
+            active_experiment_id=result_active_id,
+        )
+        expected_receipt = {
+            "schema": "experiment_transition_receipt_v2",
+            "manager_incarnation": manager_incarnation,
+            "request_id": request_id,
+            "request_fingerprint": request_fingerprint,
+            "operation": operation,
+            "experiment_id": info.experiment_id,
+            "experiment_fingerprint": _canonical_digest(info.to_payload()),
+            "predecessor_revision": revision,
+            "predecessor_state_fingerprint": expected_predecessor_fingerprint,
+            "result_revision": result_revision,
+            "result_active_experiment_id": result_active_id,
+            "result_state_fingerprint": result_state_fingerprint,
+        }
+        receipt = payload.get("terminal_receipt")
+        if receipt != expected_receipt:
+            raise RuntimeError("Experiment transition terminal receipt is invalid.")
+
+        current = self._state_cut()
+        if current == predecessor:
+            return predecessor, expected_receipt, False
+        exact_result = (
+            current["manager_incarnation"] == manager_incarnation
+            and current["revision"] == result_revision
+            and current["app_mode"] == predecessor_mode.value
+            and current["active_experiment_id"] == result_active_id
+            and current["state_fingerprint"] == result_state_fingerprint
+            and self._last_transition_receipt == expected_receipt
+        )
+        if exact_result:
+            return predecessor, expected_receipt, True
+        raise RuntimeError("Experiment transition predecessor is stale or its durable receipt is equivocal.")
 
     def _apply_transition(self, payload: dict[str, Any]) -> None:
         operation = payload.get("operation")
@@ -1409,6 +1817,14 @@ class ExperimentManager:
         if not isinstance(raw_info, dict):
             raise RuntimeError("Experiment transition has no exact experiment payload.")
         info = self._experiment_info_from_payload(raw_info)
+        predecessor, terminal_receipt, already_committed = self._validate_transition_authority(payload, info)
+        if already_committed:
+            return
+        if operation in {"create", "update"}:
+            if info.status is not ExperimentStatus.RUNNING or info.end_time is not None:
+                raise RuntimeError("Active transition must carry exact RUNNING state.")
+        elif info.status is ExperimentStatus.RUNNING or info.end_time is None:
+            raise RuntimeError("Finalize transition must carry exact terminal state.")
 
         raw_records = payload.get("run_records")
         run_records = None
@@ -1434,8 +1850,6 @@ class ExperimentManager:
             raise RuntimeError("Experiment transition summary_metadata is invalid.")
 
         if operation == "create":
-            if info.status is not ExperimentStatus.RUNNING or info.end_time is not None:
-                raise RuntimeError("Create transition must carry exact RUNNING state.")
             self._write_start(info)
         else:
             self._write_end(info)
@@ -1447,13 +1861,16 @@ class ExperimentManager:
             summary_metadata=dict(raw_summary) if raw_summary is not None else None,
         )
         if operation in {"create", "update"}:
-            if info.status is not ExperimentStatus.RUNNING or info.end_time is not None:
-                raise RuntimeError("Active transition must carry exact RUNNING state.")
-            self._set_active(info)
+            self._set_active(
+                info,
+                state_revision=predecessor["revision"] + 1,
+                transition_receipt=terminal_receipt,
+            )
         else:
-            if info.status is ExperimentStatus.RUNNING or info.end_time is None:
-                raise RuntimeError("Finalize transition must carry exact terminal state.")
-            self._clear_active()
+            self._clear_active(
+                state_revision=predecessor["revision"] + 1,
+                transition_receipt=terminal_receipt,
+            )
 
     def _experiment_info_from_payload(self, experiment: dict[str, Any]) -> ExperimentInfo:
         experiment_id = _clean_text(experiment.get("experiment_id"))
