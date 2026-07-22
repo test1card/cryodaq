@@ -1,7 +1,9 @@
 import ast
 import json
-from dataclasses import replace
+import re
+from dataclasses import MISSING, fields, replace
 from datetime import UTC, datetime, timedelta
+from inspect import Parameter, signature
 from pathlib import Path
 
 import pytest
@@ -177,6 +179,25 @@ def test_received_at_documents_producer_order_not_gui_transport_receipt() -> Non
     assert "backend coherent-cut generation/receipt-order" in documentation
     assert "not the GUI transport receipt time" in documentation
     assert MAX_LIVE_SOURCES_PER_SESSION == 8
+
+
+def test_lifecycle_fields_have_no_constructor_defaults() -> None:
+    lifecycle_parameter = signature(ReadinessSummary).parameters["lifecycle"]
+    lifecycle_field = next(field for field in fields(ReadinessSummary) if field.name == "lifecycle")
+
+    assert lifecycle_parameter.default is Parameter.empty
+    assert lifecycle_field.default is MISSING
+    assert lifecycle_field.default_factory is MISSING
+
+
+def test_codec_version_text_matches_wire_schema() -> None:
+    schema_version = protocol._SCHEMA_VERSION
+    source = Path(protocol.__file__).read_text(encoding="utf-8")
+    stated_versions = {int(value) for value in re.findall(r"\b[vV](\d+)\b", source)}
+
+    assert f"strict v{schema_version} codec" in (protocol.__doc__ or "")
+    assert stated_versions == {schema_version}
+    assert json.loads(dump_operator_snapshot(_snapshot()))["version"] == schema_version
 
 
 def test_neutral_protocol_import_architecture_has_no_gui_or_qt_dependency() -> None:

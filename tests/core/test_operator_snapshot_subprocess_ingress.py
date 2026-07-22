@@ -44,6 +44,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -74,7 +75,7 @@ def _snapshot(
     )
     return OperatorSnapshot(
         cut,
-        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, ()),
+        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, (), SafetyLifecycle.UNKNOWN),
         PlantHealthSummary(cut, status, ()),
         InfrastructureNodeHealth(cut, status, ()),
         AttentionQueue(cut, status, ()),

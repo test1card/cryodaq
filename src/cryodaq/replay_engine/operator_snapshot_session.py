@@ -35,6 +35,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -271,6 +272,7 @@ def _build_replay_snapshot(
             status("replay_readiness_unavailable", "Replay cannot authorize readiness"),
             ReadinessTruth.UNKNOWN,
             (),
+            SafetyLifecycle.UNKNOWN,
         ),
         PlantHealthSummary(
             cut,

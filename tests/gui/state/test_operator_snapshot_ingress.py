@@ -66,6 +66,7 @@ def _snapshot(
             status,
             ReadinessTruth.UNKNOWN,
             (),
+            SafetyLifecycle.UNKNOWN,
         ),
         PlantHealthSummary(cut, status, ()),
         InfrastructureNodeHealth(cut, status, ()),

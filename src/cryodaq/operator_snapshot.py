@@ -1,7 +1,7 @@
 """Backend-owned immutable F36 operator snapshot protocol.
 
 This neutral module deliberately contains no GUI objects, transport calls, or
-commands. Engine/replay producers and GUI consumers share its strict v1 codec.
+commands. Engine/replay producers and GUI consumers share its strict v2 codec.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class AvailabilityTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
-# V1 resource budgets. Collection limits derive from the public fleet target of
+# V2 resource budgets. Collection limits derive from the public fleet target of
 # 100 devices / 2,000 channels. The 8 MiB wire cap is frozen with measured
 # worst-case headroom in tests; evidence is rejected, never silently truncated.
 MAX_FLEET_DEVICES = 100
@@ -105,7 +105,7 @@ STATE_PRECEDENCE = MappingProxyType(
 
 
 class OperatorSnapshotProtocolError(ValueError):
-    """Closed receiver-boundary failure for invalid or excessive v1 data."""
+    """Closed receiver-boundary failure for invalid or excessive v2 data."""
 
 
 __all__ = [
@@ -609,7 +609,7 @@ class ReadinessSummary(_OperatorSummary):
 
     readiness: ReadinessTruth
     blockers: tuple[ReadinessBlocker, ...]
-    lifecycle: SafetyLifecycle = SafetyLifecycle.UNKNOWN
+    lifecycle: SafetyLifecycle
 
     def __post_init__(self) -> None:
         super(ReadinessSummary, self).__post_init__()
@@ -942,7 +942,7 @@ _SCHEMA_VERSION = 2
 
 
 def encode_operator_snapshot(snapshot: OperatorSnapshot) -> dict[str, Any]:
-    """Return the strict v1 JSON-compatible envelope for ``snapshot``."""
+    """Return the strict v2 JSON-compatible envelope for ``snapshot``."""
 
     if not isinstance(snapshot, OperatorSnapshot):
         raise TypeError("snapshot must be an OperatorSnapshot")
@@ -966,7 +966,7 @@ def dump_operator_snapshot(snapshot: OperatorSnapshot) -> str:
 
 
 def load_operator_snapshot(payload: str) -> OperatorSnapshot:
-    """Parse and validate one strict v1 JSON envelope."""
+    """Parse and validate one strict v2 JSON envelope."""
 
     if not isinstance(payload, str):
         raise TypeError("payload must be a string")
@@ -1356,7 +1356,7 @@ def _datetime(value: Any, path: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"{path} must be an ISO-8601 timestamp") from exc
     if _format_datetime(parsed) != raw:
-        raise ValueError(f"{path} is not the canonical v1 UTC timestamp")
+        raise ValueError(f"{path} is not the canonical v2 UTC timestamp")
     return parsed
 
 
