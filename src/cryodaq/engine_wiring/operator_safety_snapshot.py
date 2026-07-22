@@ -24,7 +24,6 @@ from __future__ import annotations
 import math
 import unicodedata
 from dataclasses import dataclass
-from enum import StrEnum
 
 from cryodaq.operator_snapshot import (
     MAX_CHANNELS,
@@ -34,19 +33,8 @@ from cryodaq.operator_snapshot import (
     MAX_TEXT_UTF8_BYTES,
     OperatorPresentationState,
     ReadinessTruth,
+    SafetyLifecycle,
 )
-
-
-class SafetyLifecycle(StrEnum):
-    """Neutral observation of the safety owner's current lifecycle state."""
-
-    SAFE_OFF = "safe_off"
-    READY = "ready"
-    RUN_PERMITTED = "run_permitted"
-    RUNNING = "running"
-    FAULT_LATCHED = "fault_latched"
-    MANUAL_RECOVERY = "manual_recovery"
-    UNKNOWN = "unknown"
 
 
 def _bounded_text(value: object, *, field: str, limit: int) -> str:

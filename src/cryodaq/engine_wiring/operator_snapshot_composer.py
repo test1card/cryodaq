@@ -276,6 +276,8 @@ class OperatorSnapshotComposer:
             allocation.received_at,
             self._source,
             SnapshotMode.LIVE,
+            receipts.experiment.experiment_id or "no-active-experiment",
+            self._source,
         )
         source_age = (cut.received_at - cut.observed_at).total_seconds()
 
@@ -296,6 +298,7 @@ class OperatorSnapshotComposer:
             _status(readiness_state, source_age, readiness_reasons, "Backend readiness authority"),
             receipts.safety.readiness,
             blockers,
+            receipts.safety.lifecycle,
         )
 
         plant_items = tuple(

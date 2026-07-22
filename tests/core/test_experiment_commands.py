@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,12 +12,22 @@ import yaml
 
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.core.operator_log import OperatorLogCommitResult
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
+from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 from cryodaq.engine import (
     EngineCommandContext,
     _drain_experiment_command_tasks,
     _handle_gui_command,
     _is_mutating_command,
     _run_experiment_command,
+    _run_keithley_command,
+    _run_operator_log_command,
 )
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -781,13 +792,13 @@ async def test_emergency_off_bypasses_compatibility_and_strips_forged_envelope(
     assert calls == ["smua", "smub"]
 
 
-async def test_emergency_off_omitted_channel_dispatches_once_to_legacy_smua(
+async def test_emergency_off_omitted_channel_dispatches_once_to_global_scope(
     manager: ExperimentManager,
 ) -> None:
-    calls: list[str] = []
+    calls: list[str | None] = []
 
     class Safety:
-        async def emergency_off(self, *, channel: str) -> dict[str, object]:
+        async def emergency_off(self, *, channel: str | None) -> dict[str, object]:
             calls.append(channel)
             return {"ok": True, "channel": channel}
 
@@ -796,8 +807,8 @@ async def test_emergency_off_omitted_channel_dispatches_once_to_legacy_smua(
 
     reply = await _handle_gui_command({"cmd": "keithley_emergency_off"}, context=context)
 
-    assert reply == {"ok": True, "channel": "smua"}
-    assert calls == ["smua"]
+    assert reply == {"ok": True, "channel": None}
+    assert calls == [None]
 
 
 @pytest.mark.parametrize(
@@ -1266,3 +1277,291 @@ async def test_operator_log_command_uses_durable_writer_identity(tmp_path: Path,
     assert replay == first
     assert conflict["error_code"] == "idempotency_key_conflict"
     assert [row.message for row in rows] == ["one durable note"]
+
+
+async def test_async_quick_log_cas_blocks_replacement_during_durable_await(
+    manager: ExperimentManager,
+) -> None:
+    experiment_id = manager.start_experiment("CAS run", "operator")
+    durable_entered = asyncio.Event()
+    release_durable = asyncio.Event()
+
+    class BlockingWriter:
+        async def append_operator_log(self, **kwargs):
+            assert kwargs["experiment_id"] == experiment_id
+            durable_entered.set()
+            await release_durable.wait()
+            return SimpleNamespace(
+                to_payload=lambda: {"experiment_id": experiment_id},
+            )
+
+    owner = asyncio.create_task(
+        _run_operator_log_command(
+            "log_entry",
+            {"message": "bound to A", "experiment_id": experiment_id},
+            BlockingWriter(),
+            manager,
+        )
+    )
+    await asyncio.wait_for(durable_entered.wait(), 1.0)
+
+    try:
+        with pytest.raises(RuntimeError, match="mutation.*progress|durable.*mutation"):
+            manager.finalize_experiment(experiment_id)
+        assert manager.active_experiment_id == experiment_id
+    finally:
+        release_durable.set()
+        await asyncio.gather(owner, return_exceptions=True)
+
+    assert owner.result()["entry"]["experiment_id"] == experiment_id
+
+
+async def test_cancelled_quick_log_retains_cas_until_executor_settlement(
+    manager: ExperimentManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_id = manager.start_experiment("Cancelled CAS run", "operator")
+    writer = SQLiteWriter(tmp_path / "writer")
+    await writer.start_immediate()
+    durable_entered = threading.Event()
+    release_durable = threading.Event()
+
+    def blocked_write(**kwargs):
+        assert kwargs["experiment_id"] == experiment_id
+        durable_entered.set()
+        assert release_durable.wait(2.0)
+        return SimpleNamespace(to_payload=lambda: {"experiment_id": experiment_id})
+
+    monkeypatch.setattr(writer, "_write_operator_log_entry", blocked_write)
+    owner = asyncio.create_task(
+        _run_operator_log_command(
+            "log_entry",
+            {"message": "cancelled but admitted", "experiment_id": experiment_id},
+            writer,
+            manager,
+        )
+    )
+    assert await asyncio.to_thread(durable_entered.wait, 1.0)
+    owner.cancel()
+    await asyncio.sleep(0)
+    assert not owner.done()
+    with pytest.raises(RuntimeError, match="mutation.*progress|durable.*mutation"):
+        manager.finalize_experiment(experiment_id)
+
+    release_durable.set()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    assert manager.active_experiment_id == experiment_id
+    await writer.stop()
+
+
+async def test_omitted_emergency_off_channel_is_verified_global_scope() -> None:
+    class Transport:
+        def __init__(self) -> None:
+            self.readbacks = {"smua": "0", "smub": "0"}
+            self.writes: list[str] = []
+            self.queries: list[str] = []
+
+        async def write(self, command: str) -> None:
+            self.writes.append(command)
+
+        async def query(self, command: str, timeout_ms: int | None = None) -> str:
+            del timeout_ms
+            channel = "smua" if "smua.source.output" in command else "smub"
+            self.queries.append(channel)
+            nonce = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|", command)
+            assert nonce is not None
+            return f"CRYODAQ_OFF_V1|{nonce.group(1)}|{self.readbacks[channel]}"
+
+        def reset_evidence(self) -> None:
+            self.writes.clear()
+            self.queries.clear()
+
+    async def reviewed_owner() -> tuple[SafetyManager, Keithley2604B, Transport]:
+        transport = Transport()
+        driver = Keithley2604B("k", "USB::FAKE", mock=False)
+        driver._transport = transport
+        driver._connected = True
+        assert await driver.emergency_off() is True
+        binding = _issue_registry_runtime_binding(
+            driver=driver,
+            timing=AcquisitionTiming(1.0, 1.0, 1.0),
+            registry_provenance="test:global-emergency-off",
+            trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        )
+        manager = SafetyManager(
+            SafetyBroker(),
+            keithley_driver=driver,
+            reviewed_source_runtime_binding=binding,
+            mock=False,
+        )
+        await manager.start()
+        generation = await manager.begin_reviewed_source_connect(driver, binding, "test setup")
+        assert await manager.complete_reviewed_source_connect(driver, binding, generation, "test setup") is True
+        transport.reset_evidence()
+        return manager, driver, transport
+
+    manager = failing_manager = None
+    failing_transport = None
+    try:
+        manager, driver, transport = await reviewed_owner()
+        result = await _run_keithley_command(
+            "keithley_emergency_off",
+            {"cmd": "keithley_emergency_off"},
+            manager,
+        )
+        assert result["ok"] is True
+        assert result["channels"] == ["smua", "smub"]
+        assert transport.writes == [
+            "smua.source.levelv = 0",
+            "smua.source.output = smua.OUTPUT_OFF",
+            "smub.source.levelv = 0",
+            "smub.source.output = smub.OUTPUT_OFF",
+        ]
+        assert transport.queries == ["smua", "smub"]
+        assert driver._output_off_verified == {"smua": True, "smub": True}
+        assert manager.snapshot_operator_safety().verified_off is True
+
+        failing_manager, failing_driver, failing_transport = await reviewed_owner()
+        failing_transport.readbacks["smub"] = "1"
+        failed = await _run_keithley_command(
+            "keithley_emergency_off",
+            {"cmd": "keithley_emergency_off"},
+            failing_manager,
+        )
+        assert failed["ok"] is False
+        assert failed["channels"] == ["smua", "smub"]
+        assert failing_transport.queries[:2] == ["smua", "smub"]
+        assert {command.split(".", 1)[0] for command in failing_transport.writes} == {"smua", "smub"}
+        assert failing_driver._output_off_verified["smub"] is False
+        assert failing_manager.state is SafetyState.FAULT_LATCHED
+        assert failing_manager.snapshot_operator_safety().verified_off is False
+    finally:
+        if manager is not None:
+            await manager.stop()
+        if failing_manager is not None:
+            assert failing_transport is not None
+            failing_transport.readbacks["smub"] = "0"
+            await failing_manager.stop()
+
+
+def test_delayed_a_commands_cannot_mutate_b(
+    manager: ExperimentManager,
+) -> None:
+    experiment_a = manager.start_experiment("Experiment A", "operator")
+    manager.finalize_experiment(experiment_a)
+    experiment_b = manager.start_experiment("Experiment B", "operator")
+    phase_before = manager.get_current_phase()
+    metadata_b = manager._metadata_path(experiment_b)
+    before = metadata_b.read_bytes()
+
+    with pytest.raises((ValueError, RuntimeError), match="identity mismatch|does not match"):
+        _run_experiment_command(
+            "experiment_update",
+            {
+                "experiment_id": experiment_a,
+                "notes": "late update for A",
+            },
+            manager,
+        )
+    phase_result = _run_experiment_command(
+        "experiment_advance_phase",
+        {
+            "phase": "cooldown",
+            "operator": "late operator",
+            "experiment_id": experiment_a,
+        },
+        manager,
+    )
+    assert phase_result["ok"] is False
+    assert phase_result["error_code"] == "stale_experiment_command"
+    assert phase_result["experiment_id"] == experiment_a
+
+    assert manager.active_experiment_id == experiment_b
+    assert manager.active_experiment is not None
+    assert manager.active_experiment.notes != "late update for A"
+    assert manager.get_current_phase() == phase_before
+    assert metadata_b.read_bytes() == before
+
+
+async def test_delayed_quick_log_cannot_attach_to_replacement_experiment(
+    manager: ExperimentManager,
+) -> None:
+    experiment_a = manager.start_experiment("Experiment A", "operator")
+    manager.finalize_experiment(experiment_a)
+    experiment_b = manager.start_experiment("Experiment B", "operator")
+    metadata_b = manager._metadata_path(experiment_b)
+    before = metadata_b.read_bytes()
+
+    class RejectUnexpectedWriter:
+        async def append_operator_log(self, **_kwargs):
+            raise AssertionError("stale quick-log command reached durable writer")
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        await _run_operator_log_command(
+            "log_entry",
+            {
+                "message": "late log for A",
+                "experiment_id": experiment_a,
+            },
+            RejectUnexpectedWriter(),
+            manager,
+        )
+
+    assert manager.active_experiment_id == experiment_b
+    assert metadata_b.read_bytes() == before
+
+
+def test_lifecycle_admission_is_atomic_with_durable_mutation_reservation(
+    manager: ExperimentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_id = manager.start_experiment("Atomic admission", "operator")
+    admitted = threading.Event()
+    release = threading.Event()
+    finalized = threading.Event()
+    reserved = threading.Event()
+    failures: list[BaseException] = []
+    original_assert = manager._assert_mutation_available
+
+    def block_after_admission() -> None:
+        original_assert()
+        if threading.current_thread().name == "lifecycle-owner" and not admitted.is_set():
+            admitted.set()
+            assert release.wait(2.0)
+
+    monkeypatch.setattr(manager, "_assert_mutation_available", block_after_admission)
+
+    def finalize() -> None:
+        try:
+            manager.finalize_experiment(experiment_id)
+            finalized.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    def reserve() -> None:
+        try:
+            with manager.experiment_cas(experiment_id):
+                reserved.set()
+        except BaseException as exc:
+            failures.append(exc)
+
+    lifecycle = threading.Thread(target=finalize, name="lifecycle-owner")
+    durable = threading.Thread(target=reserve, name="durable-owner")
+    lifecycle.start()
+    assert admitted.wait(1.0)
+    durable.start()
+    assert not reserved.wait(0.1), "durable mutation entered during lifecycle admission"
+    release.set()
+    lifecycle.join(1.0)
+    durable.join(1.0)
+
+    assert not lifecycle.is_alive()
+    assert not durable.is_alive()
+    assert finalized.is_set()
+    assert not reserved.is_set()
+    assert manager.active_experiment_id is None
+    assert len(failures) == 1
+    assert isinstance(failures[0], RuntimeError)
+    assert "identity mismatch" in str(failures[0]).lower()

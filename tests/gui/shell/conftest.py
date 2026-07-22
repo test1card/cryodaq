@@ -16,13 +16,56 @@ already-running QThreads to finish.
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import QObject, Signal
+
+import cryodaq.gui.zmq_client as _zmq_client
+
+_REAL_ZMQ_COMMAND_WORKER = _zmq_client.ZmqCommandWorker
+
+
+class _SyncCommandWorkerStub(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, cmd: dict, parent=None) -> None:  # noqa: ANN001
+        super().__init__(parent)
+        self._cmd = cmd
+
+    def start(self) -> None:
+        return None
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return False
+
+    def isFinished(self) -> bool:  # noqa: N802
+        return True
+
+    def requestInterruption(self) -> None:  # noqa: N802
+        return None
+
+    def wait(self, _msecs: int = 0) -> bool:
+        return True
+
+    def quit(self) -> None:
+        return None
+
+
+@pytest.fixture
+def real_zmq_worker(monkeypatch):
+    """Opt a test into the real QThread worker for settlement coverage."""
+
+    monkeypatch.setattr(_zmq_client, "ZmqCommandWorker", _REAL_ZMQ_COMMAND_WORKER)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_shell_test(monkeypatch):
     import cryodaq.gui.zmq_client as zc
 
-    monkeypatch.setattr(zc, "send_command", lambda _cmd: {"ok": False, "stub": True})
+    monkeypatch.setattr(
+        zc,
+        "send_command",
+        lambda _cmd, *, cancellation_requested=None: {"ok": False, "stub": True},
+    )
+    monkeypatch.setattr(zc, "ZmqCommandWorker", _SyncCommandWorkerStub)
     yield
     from PySide6.QtCore import QThread, QTimer
     from PySide6.QtWidgets import QApplication
@@ -53,6 +96,9 @@ def _isolate_shell_test(monkeypatch):
 
     # Process pending deleteLater calls and any immediate finished
     # signals from no-op worker stubs.
+    import gc
+
+    gc.collect()
     for _ in range(5):
         app.processEvents()
 

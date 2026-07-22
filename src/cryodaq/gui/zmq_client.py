@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -72,6 +73,18 @@ _READ_ONLY_COMMANDS = CLIENT_READ_ACTIONS
 
 def _requires_mutation_envelope(action: object) -> bool:
     return requires_client_compatibility(action)
+
+
+_MAX_UNRESOLVED_COMMANDS = 1024
+
+
+@dataclass(frozen=True, slots=True)
+class LateCommandResult:
+    """Typed, generation-bound result retained after owner cancellation."""
+
+    request_id: str
+    generation: int
+    reply: dict[str, Any]
 
 
 def _read_shared_counter(counter: Any, fallback: int) -> int:
@@ -195,6 +208,9 @@ class ZmqBridge:
         self._last_cmd_timeout: float = 0.0
         # Future-per-request command routing
         self._pending: dict[str, Future] = {}
+        self._outcome_unknown: dict[str, Future] = {}
+        self._request_generation: dict[str, int] = {}
+        self._late_results: dict[str, LateCommandResult] = {}
         self._pending_lock = threading.Lock()
         self._mutation_lock = threading.Lock()
         self._mutation_receipt: dict[str, Any] | None = None
@@ -213,6 +229,11 @@ class ZmqBridge:
         self._terminal_closed = False
         self._terminal_queues_closed: set[str] = set()
         self._terminal_queues_joined: set[str] = set()
+        # A bridge restart is a new presentation authority.  The subprocess
+        # wire data cannot choose this value: it is attached only after a
+        # Reading has crossed into this GUI-side bridge instance.
+        self._bridge_instance_id: str | None = uuid.uuid4().hex
+        self._generation = 0
 
     def start(self) -> None:
         """Start the ZMQ bridge subprocess."""
@@ -221,38 +242,85 @@ class ZmqBridge:
         if self._process is not None and self._process.is_alive():
             return
         self._invalidate_mutation_compatibility()
-        # Invalidate presentation freshness before any restart cleanup or
-        # spawn operation that may raise.  Failure must remain unavailable.
+        # Revoke the retired presentation authority before any join, drain,
+        # close, allocation, or spawn operation that can fail.  A failed
+        # restart must never leave the previous snapshot looking fresh.
         self._last_snapshot_time = 0.0
-        # Prove the previous reply consumer settled before replacing any
-        # queue/process identity. Dropping a live thread handle and later
-        # clearing this shared stop event would resurrect the old consumer
-        # alongside the new one, racing command replies between two owners.
-        reply_consumer = self._reply_consumer
-        if reply_consumer is not None:
-            if reply_consumer.is_alive():
-                self._reply_stop.set()
-                reply_consumer.join(timeout=1.0)
-            if reply_consumer.is_alive():
-                raise RuntimeError(
-                    "ZMQ bridge start refused: previous reply consumer remained alive after stop and join"
-                )
-            self._reply_consumer = None
-        # A dead or partially started subprocess may still have feeder-
-        # buffered cuts.  A fresh queue on every spawn attempt makes restart
-        # invalidation atomic even when later cleanup or Process.start fails.
+        self._bridge_instance_id = None
+        # Snapshot cuts are presentation-only and have no command outcome to
+        # reconcile.  Quarantine them before fallible consumer/process cleanup
+        # so even a failed restart cannot revive the retired generation.
         old_snapshot_queue = self._snapshot_queue
         _drain(old_snapshot_queue, task_done=True)
+        # A reply consumer owns the old reply queue.  It must settle before
+        # any queue is drained, closed, or replaced; otherwise a late reply
+        # can be consumed by the replacement generation.
+        old_consumer = self._reply_consumer
+        if old_consumer is not None:
+            self._reply_stop.set()
+            if old_consumer.is_alive():
+                old_consumer.join(timeout=1.0)
+            if old_consumer.is_alive():
+                raise RuntimeError(
+                    "previous reply consumer remained alive after stop and join; "
+                    "reply consumer did not settle; restart refused"
+                )
+            self._reply_consumer = None
+        # A dead child can still own multiprocessing feeder resources.  Join
+        # it before retiring any queue so no producer can race the final drain.
+        old_process = self._process
+        if old_process is not None and hasattr(old_process, "join"):
+            old_process.join(timeout=1.0)
+            if old_process.is_alive():
+                raise RuntimeError("ZMQ subprocess did not settle before restart")
+        # Only now may queue ownership be replaced.  If either owner failed to
+        # settle, the drained snapshot queue stays attached for a safe retry.
         with contextlib.suppress(Exception):
             old_snapshot_queue.cancel_join_thread()
         with contextlib.suppress(Exception):
             old_snapshot_queue.close()
         self._snapshot_queue = mp.JoinableQueue(maxsize=2)
+        self._bridge_instance_id = uuid.uuid4().hex
+        self._generation += 1
+        with self._pending_lock:
+            for rid, future in tuple(self._pending.items()):
+                if not future.done():
+                    future.set_result(
+                        {
+                            "ok": False,
+                            "error": "bridge generation replaced; outcome unknown",
+                            "request_id": rid,
+                            "generation": self._request_generation.get(rid, self._generation - 1),
+                            "dispatched": True,
+                            "outcome_unknown": True,
+                        }
+                    )
+                self._outcome_unknown[rid] = future
+            self._pending.clear()
+            # Outcome-unknown owners remain addressable until explicit
+            # reconciliation; generation replacement must not erase them.
+        # Every child generation owns fresh IPC queues.  Old-child messages
+        # remain attached to the retired queue object and cannot be relabelled
+        # with this GUI incarnation after a restart.
+        for name, factory in (
+            ("_data_queue", lambda: mp.Queue(maxsize=10_000)),
+            ("_cmd_queue", lambda: mp.Queue(maxsize=1_000)),
+            ("_reply_queue", lambda: mp.Queue(maxsize=1_000)),
+        ):
+            old_queue = getattr(self, name)
+            if name == "_reply_queue":
+                # This is the single final routed drain.  It runs only after
+                # the retired consumer, child, and feeders have settled.
+                with self._pending_lock:
+                    self._drain_replies_locked(old_queue)
+            else:
+                _drain(old_queue)
+            with contextlib.suppress(Exception):
+                old_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                old_queue.close()
+            setattr(self, name, factory())
         self._shutdown_event.clear()
-        # Drain stale queues
-        _drain(self._data_queue)
-        _drain(self._cmd_queue)
-        _drain(self._reply_queue)
         self._process = mp.Process(
             target=zmq_bridge_main,
             args=(
@@ -319,7 +387,7 @@ class ZmqBridge:
                     logger.warning("ZMQ bridge: %s", d.get("message", ""))
                     continue
                 self._last_reading_time = time.monotonic()
-                readings.append(_reading_from_dict(d))
+                readings.append(self._with_bridge_incarnation(_reading_from_dict(d)))
             except (queue.Empty, EOFError):
                 break
             except Exception as exc:
@@ -360,7 +428,7 @@ class ZmqBridge:
                     logger.warning("ZMQ bridge: %s", d.get("message", ""))
                     continue
                 self._last_reading_time = time.monotonic()
-                reading = _reading_from_dict(d)
+                reading = self._with_bridge_incarnation(_reading_from_dict(d))
                 envelope_payload = d.get("descriptor_envelope")
                 qualified = qualify_reading_descriptor(
                     reading,
@@ -382,6 +450,27 @@ class ZmqBridge:
     def descriptor_malformed_count(self) -> int:
         """Count of readings whose descriptor envelope failed to decode/verify."""
         return self._descriptor_malformed_count
+
+    @property
+    def bridge_instance_id(self) -> str | None:
+        """Exact GUI-side bridge incarnation, or ``None`` after shutdown."""
+        return self._bridge_instance_id
+
+    def _with_bridge_incarnation(self, reading: Reading) -> Reading:
+        bridge_instance_id = self._bridge_instance_id
+        if bridge_instance_id is None:
+            raise RuntimeError("received Reading before bridge incarnation was established")
+        metadata = {**reading.metadata, "bridge_instance_id": bridge_instance_id}
+        return Reading(
+            timestamp=reading.timestamp,
+            instrument_id=reading.instrument_id,
+            channel=reading.channel,
+            value=reading.value,
+            unit=reading.unit,
+            status=reading.status,
+            raw=reading.raw,
+            metadata=metadata,
+        )
 
     def heartbeat_stale(self, *, timeout_s: float = 30.0) -> bool:
         """Return True if the bridge heartbeat is older than ``timeout_s``."""
@@ -478,13 +567,24 @@ class ZmqBridge:
         pid = self._process.pid
         return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
-    def send_command(self, cmd: dict) -> dict:
+    def send_command(
+        self,
+        cmd: dict,
+        *,
+        cancellation_requested: threading.Event | None = None,
+    ) -> dict:
         """Dispatch one command after fail-closed mutation negotiation.
 
         Discovery is single-flight across GUI worker threads.  A rotated token
         invalidates the cache, but the rejected mutation is never replayed
         automatically; the operator/client must explicitly submit it again.
         """
+        if cancellation_requested is not None and cancellation_requested.is_set():
+            return {
+                "ok": False,
+                "dispatched": False,
+                "error": "ZMQ command cancelled before dispatch",
+            }
         if type(cmd) is not dict:
             return {
                 "ok": False,
@@ -501,7 +601,9 @@ class ZmqBridge:
                 "retry_safe": True,
             }
         command = strip_mutation_envelope(cmd)
-        if is_assistant_namespaced(action) and action not in ASSISTANT_READ_ACTIONS:
+        if action in {"rag.rebuild_index", "rag.rebuild_status"} or (
+            is_assistant_namespaced(action) and action not in ASSISTANT_READ_ACTIONS
+        ):
             return {
                 "ok": False,
                 "error_code": "assistant_read_only",
@@ -512,9 +614,9 @@ class ZmqBridge:
             }
         command_class = classify_client_command(action)
         if command_class in {CommandClass.READ, CommandClass.SAFE_DIRECTION}:
-            return self._send_command_once(command)
+            return self._send_command_once(command, cancellation_requested=cancellation_requested)
 
-        receipt, failure = self._ensure_mutation_compatibility()
+        receipt, failure = self._ensure_mutation_compatibility(cancellation_requested=cancellation_requested)
         if failure is not None:
             return failure
         assert receipt is not None
@@ -525,39 +627,122 @@ class ZmqBridge:
                 "capability_token": receipt["capability_token"],
             }
         )
-        result = self._send_command_once(command)
+        result = self._send_command_once(command, cancellation_requested=cancellation_requested)
         if result.get("error_code") == "mutation_protocol_incompatible":
             self._invalidate_mutation_compatibility()
         return result
 
-    def _send_command_once(self, cmd: dict[str, Any]) -> dict[str, Any]:
+    def _send_command_once(
+        self,
+        cmd: dict[str, Any],
+        *,
+        cancellation_requested: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """Thread-safe raw dispatch with Future-per-request correlation."""
+        if cancellation_requested is not None and cancellation_requested.is_set():
+            return {
+                "ok": False,
+                "dispatched": False,
+                "error": "ZMQ command cancelled before dispatch",
+            }
         if not self.is_alive():
             return {"ok": False, "error": "ZMQ bridge subprocess not running"}
 
-        rid = uuid.uuid4().hex[:8]
-        cmd = {**cmd, "_rid": rid}
         future: Future = Future()
+        rid: str | None = None
 
         with self._pending_lock:
+            if len(self._outcome_unknown) >= _MAX_UNRESOLVED_COMMANDS:
+                return {
+                    "ok": False,
+                    "error": "ZMQ unresolved command capacity exhausted",
+                }
+            rid = uuid.uuid4().hex
+            while rid in self._pending or rid in self._outcome_unknown or rid in self._late_results:
+                rid = uuid.uuid4().hex
             self._pending[rid] = future
+            self._request_generation[rid] = self._generation
+            generation = self._generation
+        cmd = {**cmd, "_rid": rid, "_bridge_generation": generation}
 
+        enqueued = False
         try:
+            if cancellation_requested is not None and cancellation_requested.is_set():
+                with self._pending_lock:
+                    self._pending.pop(rid, None)
+                    self._request_generation.pop(rid, None)
+                return {
+                    "ok": False,
+                    "dispatched": False,
+                    "error": "ZMQ command cancelled before dispatch",
+                }
             self._cmd_queue.put(cmd, timeout=2.0)
-            return future.result(timeout=_CMD_REPLY_TIMEOUT_S)
+            enqueued = True
+            deadline = time.monotonic() + _CMD_REPLY_TIMEOUT_S
+            while True:
+                if cancellation_requested is not None and cancellation_requested.is_set():
+                    direct_result: dict[str, Any] | None = None
+                    with self._pending_lock:
+                        if self._pending.get(rid) is future:
+                            self._pending.pop(rid, None)
+                            self._outcome_unknown[rid] = future
+                        elif future.done():
+                            direct_result = future.result()
+                    if direct_result is not None:
+                        return direct_result
+                    return {
+                        "ok": False,
+                        "error": "ZMQ command outcome unknown after cancellation",
+                        "request_id": rid,
+                        "generation": generation,
+                        "dispatched": True,
+                        "outcome_unknown": True,
+                    }
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    direct_result = None
+                    with self._pending_lock:
+                        if self._pending.get(rid) is future:
+                            self._pending.pop(rid, None)
+                            self._outcome_unknown[rid] = future
+                        elif future.done():
+                            direct_result = future.result()
+                    if direct_result is not None:
+                        return direct_result
+                    return {
+                        "ok": False,
+                        "error": "ZMQ command outcome unknown after timeout",
+                        "request_id": rid,
+                        "generation": generation,
+                        "dispatched": True,
+                        "outcome_unknown": True,
+                    }
+                try:
+                    return future.result(timeout=min(0.05, remaining))
+                except TimeoutError:
+                    continue
         except Exception as exc:
             return {"ok": False, "error": f"Engine не отвечает ({type(exc).__name__}: {exc})"}
         finally:
-            with self._pending_lock:
-                self._pending.pop(rid, None)
+            if not enqueued and rid is not None:
+                with self._pending_lock:
+                    self._pending.pop(rid, None)
+                    self._request_generation.pop(rid, None)
 
     def _ensure_mutation_compatibility(
         self,
+        *,
+        cancellation_requested: threading.Event | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         with self._mutation_lock:
             if self._mutation_receipt is not None:
                 return dict(self._mutation_receipt), None
-            discovery = self._send_command_once({"cmd": "mutation_capabilities"})
+            discovery = self._send_command_once(
+                {"cmd": "mutation_capabilities"},
+                cancellation_requested=cancellation_requested,
+            )
+            if cancellation_requested is not None and cancellation_requested.is_set():
+                return None, discovery
             receipt = discovery.get("compatibility_receipt") if isinstance(discovery, dict) else None
             valid = (
                 discovery.get("ok") is True
@@ -633,12 +818,9 @@ class ZmqBridge:
                     logger.warning("ZMQ reply consumer: non-dict reply: %r", type(reply))
                     continue
                 self._check_proto(reply)
-                rid = reply.pop("_rid", None)
-                if rid:
-                    with self._pending_lock:
-                        future = self._pending.get(rid)
-                    if future and not future.done():
-                        future.set_result(reply)
+                rid = reply.get("_rid")
+                with self._pending_lock:
+                    if self._route_reply_locked(reply):
                         continue
                 logger.debug("Unmatched ZMQ reply (rid=%s)", rid)
             except Exception:
@@ -656,11 +838,23 @@ class ZmqBridge:
                 first_error = error
 
         # Stop reply consumer thread
+        self._last_snapshot_time = 0.0
+        self._bridge_instance_id = None
         self._reply_stop.set()
         with self._pending_lock:
-            for rid, future in self._pending.items():
+            for rid, future in tuple(self._pending.items()):
                 if not future.done():
-                    future.set_result({"ok": False, "error": "ZMQ bridge shutting down"})
+                    future.set_result(
+                        {
+                            "ok": False,
+                            "error": "ZMQ bridge shutting down; outcome unknown",
+                            "request_id": rid,
+                            "generation": self._request_generation.get(rid, self._generation),
+                            "dispatched": True,
+                            "outcome_unknown": True,
+                        }
+                    )
+                self._outcome_unknown[rid] = future
             self._pending.clear()
         reply_consumer = self._reply_consumer
         if reply_consumer is not None:
@@ -668,9 +862,14 @@ class ZmqBridge:
                 if reply_consumer.is_alive():
                     reply_consumer.join(timeout=3.0)
                 if reply_consumer.is_alive():
-                    record_failure("reply consumer remained alive after join")
+                    record_failure("reply consumer remained alive after join and did not settle")
             except Exception as exc:
                 record_failure("reply consumer settlement raised", exc)
+
+        if not failures:
+            self._reply_consumer = None
+            with self._pending_lock:
+                self._drain_replies_locked(self._reply_queue)
 
         # Stop subprocess
         process = self._process
@@ -681,8 +880,10 @@ class ZmqBridge:
 
         if process is not None:
             try:
-                if process.is_alive():
-                    process.join(timeout=3)
+                # Join once even if is_alive() has already flipped false: a
+                # terminal child/feeder may publish its final correlated reply
+                # while process resources settle.
+                process.join(timeout=3)
                 if process.is_alive():
                     logger.warning("ZMQ bridge subprocess did not exit gracefully, terminating")
                     process.terminate()
@@ -717,6 +918,11 @@ class ZmqBridge:
                 logger.info("ZMQ bridge subprocess stopped (exitcode=%s)", exit_code)
             else:
                 logger.info("ZMQ bridge subprocess stopped (not alive, exitcode unavailable)")
+            # The child can emit its terminal command reply while join/kill is
+            # settling.  The retired queue remains owned until this final
+            # locked drain, so outcome-unknown requests stay reconcilable.
+            with self._pending_lock:
+                self._drain_replies_locked(self._reply_queue)
             self._process = None
         else:
             logger.info("ZMQ bridge subprocess stopped")
@@ -759,6 +965,52 @@ class ZmqBridge:
                 self._terminal_queues_joined.add(name)
         self._terminal_closed = True
 
+    def reconcile_late_result(self, request_id: str, *, generation: int | None = None) -> LateCommandResult | None:
+        """Consume one exact late result after the mutation owner reconciles it."""
+        with self._pending_lock:
+            result = self._late_results.get(request_id)
+            if result is None or (generation is not None and result.generation != generation):
+                return None
+            self._late_results.pop(request_id, None)
+            self._outcome_unknown.pop(request_id, None)
+            self._request_generation.pop(request_id, None)
+            return result
+
+    def _route_reply_locked(self, reply: object) -> bool:
+        """Route one reply; caller must hold ``_pending_lock``."""
+        if not isinstance(reply, dict):
+            return False
+        rid = reply.get("_rid")
+        if not isinstance(rid, str) or not rid:
+            return False
+        pending_owner = self._pending.pop(rid, None)
+        unknown_owner = self._outcome_unknown.get(rid)
+        generation = self._request_generation.get(rid, self._generation)
+        clean_reply = {key: value for key, value in reply.items() if key != "_rid"}
+        if unknown_owner is not None:
+            if rid in self._late_results:
+                logger.warning("Ignoring duplicate late ZMQ reply for request %s", rid)
+                return True
+            self._late_results[rid] = LateCommandResult(rid, generation, clean_reply)
+            if not unknown_owner.done():
+                unknown_owner.set_result(clean_reply)
+            return True
+        if pending_owner is None:
+            return False
+        self._request_generation.pop(rid, None)
+        if not pending_owner.done():
+            pending_owner.set_result(clean_reply)
+        return True
+
+    def _drain_replies_locked(self, reply_queue: Any) -> None:
+        """Route all currently queued replies before retiring ``reply_queue``."""
+        while True:
+            try:
+                reply = reply_queue.get_nowait()
+            except (queue.Empty, EOFError, OSError):
+                return
+            self._route_reply_locked(reply)
+
 
 def _drain(q: Any, *, task_done: bool = False) -> None:
     """Drain a multiprocessing Queue, ignoring errors."""
@@ -793,7 +1045,11 @@ def _on_qt_main_thread() -> bool:
         return False
 
 
-def send_command(cmd: dict) -> dict:
+def send_command(
+    cmd: dict,
+    *,
+    cancellation_requested: threading.Event | None = None,
+) -> dict:
     """Send a command via the global bridge. BLOCKING — may take up to ~65 s
     (the outer REQ reply timeout).
 
@@ -809,7 +1065,7 @@ def send_command(cmd: dict) -> dict:
         )
     if _bridge is None:
         return {"ok": False, "error": "ZMQ bridge not initialized"}
-    return _bridge.send_command(cmd)
+    return _bridge.send_command(cmd, cancellation_requested=cancellation_requested)
 
 
 def shutdown() -> None:
@@ -826,7 +1082,14 @@ class ZmqCommandWorker(QThread):
     def __init__(self, cmd: dict, parent=None) -> None:
         super().__init__(parent)
         self._cmd = cmd
+        self._cancellation_requested = threading.Event()
+
+    def requestInterruption(self) -> None:
+        """Make an in-flight command wait observe controlled teardown."""
+        self._cancellation_requested.set()
+        super().requestInterruption()
 
     def run(self) -> None:
-        result = send_command(self._cmd)
-        self.finished.emit(result)
+        result = send_command(self._cmd, cancellation_requested=self._cancellation_requested)
+        if not self.isInterruptionRequested():
+            self.finished.emit(result)

@@ -316,19 +316,19 @@ async def test_cmd_log_writes_entry() -> None:
 
     handler = AsyncMock(side_effect=dispatch)
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/log Всё штатно"))
+    await bot._handle_message(_tg_msg("/log exp-1 Всё штатно"))
     assert handler.await_count == 2
     cmd = handler.await_args_list[1].args[0]
     assert cmd["cmd"] == "log_entry"
     assert "Всё штатно" in cmd["message"]
     assert cmd["author"] == "testuser"
-    assert cmd["experiment_unbound"] is True
+    assert cmd["experiment_id"] == "exp-1"
     assert len(cmd["request_id"]) == 32
     assert set(cmd["request_id"]) <= set("0123456789abcdef")
     assert set(cmd) == {
         "cmd",
         "request_id",
-        "experiment_unbound",
+        "experiment_id",
         "message",
         "author",
         "source",
@@ -356,7 +356,7 @@ async def test_query_agent_missing_reply_has_no_english_terms() -> None:
 async def test_unavailable_command_handler_reply_has_no_english_terms() -> None:
     bot = _make_bot(command_handler=None)
 
-    await bot._handle_message(_tg_msg("/log запись"))
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "command_handler" not in text
@@ -367,7 +367,7 @@ async def test_command_handler_failure_does_not_expose_raw_english_error() -> No
     handler = AsyncMock(return_value={"ok": False, "error": "backend failure"})
     bot = _make_bot(command_handler=handler)
 
-    await bot._handle_message(_tg_msg("/log запись"))
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "backend failure" not in text
@@ -378,7 +378,7 @@ async def test_cmd_log_empty_text_returns_error() -> None:
     bot = _make_bot()
     await bot._handle_message(_tg_msg("/log"))
     bot._send.assert_called_once()
-    assert "❌" in bot._send.call_args[0][1]
+    assert "experiment_id" in bot._send.call_args[0][1]
 
 
 async def test_cmd_phase_advances() -> None:
@@ -397,7 +397,7 @@ async def test_cmd_phase_advances() -> None:
 
     handler = AsyncMock(side_effect=dispatch)
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/phase cooling"))
+    await bot._handle_message(_tg_msg("/phase cooling exp-current"))
     assert handler.await_count == 3
     cmd = handler.await_args_list[2].args[0]
     assert cmd["cmd"] == "experiment_advance_phase"
@@ -406,6 +406,7 @@ async def test_cmd_phase_advances() -> None:
     assert cmd["protocol_major"] == 1
     assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
     assert cmd["capability_token"] == "token-1"
+    assert cmd["expected_experiment_id"] == "exp-current"
     assert "✅" in bot._send.call_args[0][1]
 
 
@@ -450,7 +451,7 @@ async def test_mutation_discovery_refuses_missing_or_malformed_receipts(
     handler = AsyncMock(return_value=discovery_response)
     bot = _make_bot(command_handler=handler)
 
-    await bot._handle_message(_tg_msg("/log запись"))
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
 
     handler.assert_awaited_once_with({"cmd": "mutation_capabilities"})
     assert bot._mutation_envelope is None
@@ -475,7 +476,7 @@ async def test_rotated_token_is_invalidated_without_automatic_mutation_replay() 
 
     bot = _make_bot(command_handler=dispatch)
 
-    await bot._handle_message(_tg_msg("/log first", message_id=91))
+    await bot._handle_message(_tg_msg("/log exp-1 first", message_id=91))
 
     assert len(commands) == 2
     assert [command["cmd"] for command in commands] == [
@@ -484,7 +485,7 @@ async def test_rotated_token_is_invalidated_without_automatic_mutation_replay() 
     ]
     assert bot._mutation_envelope is None
 
-    await bot._handle_message(_tg_msg("/log second", message_id=92))
+    await bot._handle_message(_tg_msg("/log exp-1 second", message_id=92))
 
     assert [command["cmd"] for command in commands] == [
         "mutation_capabilities",
@@ -510,8 +511,8 @@ async def test_concurrent_mutations_share_one_capability_discovery() -> None:
         return {"ok": True}
 
     bot = _make_bot(command_handler=dispatch)
-    first = asyncio.create_task(bot._handle_message(_tg_msg("/log first", message_id=101)))
-    second = asyncio.create_task(bot._handle_message(_tg_msg("/log second", message_id=102)))
+    first = asyncio.create_task(bot._handle_message(_tg_msg("/log exp-1 first", message_id=101)))
+    second = asyncio.create_task(bot._handle_message(_tg_msg("/log exp-2 second", message_id=102)))
     await asyncio.wait_for(discovery_entered.wait(), timeout=1)
     assert [command["cmd"] for command in commands] == ["mutation_capabilities"]
     release_discovery.set()
@@ -528,14 +529,41 @@ async def test_phase_refuses_to_discover_or_mutate_without_stable_experiment_id(
     handler = AsyncMock(return_value={"ok": True, "active_experiment": None})
     bot = _make_bot(command_handler=handler)
 
-    await bot._handle_message(_tg_msg("/phase cooldown"))
+    await bot._handle_message(_tg_msg("/phase cooldown exp-claimed"))
 
     handler.assert_awaited_once_with({"cmd": "experiment_status"})
     assert bot._mutation_envelope is None
     assert "Подробности" in bot._send.await_args.args[1]
 
 
+async def test_invalid_phase_with_exact_identity_never_dispatches() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/phase definitely-not-a-phase exp-A"))
+
+    handler.assert_not_awaited()
+    bot._send.assert_awaited_once()
+    assert "\u274c" in bot._send.await_args.args[1]
+
+
+async def test_cmd_phase_without_identity_is_rejected() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/phase cooling"))
+    handler.assert_not_called()
+    assert "experiment_id" in bot._send.call_args[0][1]
+
+
 # ===========================================================================
+async def test_cmd_log_without_identity_is_rejected() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/log запись"))
+    handler.assert_not_called()
+    assert "experiment_id" in bot._send.call_args[0][1]
+
+
 # EscalationService tests
 # ===========================================================================
 

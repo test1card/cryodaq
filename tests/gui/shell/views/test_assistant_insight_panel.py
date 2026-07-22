@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLabel
 
 from cryodaq.gui import theme
 from cryodaq.gui.shell.views.assistant_insight_panel import (
@@ -134,6 +135,40 @@ def test_alarm_and_shift_handover_use_caution_without_safety_green() -> None:
         assert theme.STATUS_CAUTION in style
         assert theme.STATUS_OK not in style
         chip.deleteLater()
+
+
+def test_untrusted_assistant_text_is_plain_text() -> None:
+    _app()
+    hostile_body = "<b>alarm</b> &lt;tag&gt; \u202eRTL\u0001"
+    hostile_brand = "<img src=x> &amp; brand \u202dNAME\u0002"
+    hostile_emoji = "<i>bot</i>"
+    panel = AssistantInsightPanel(
+        brand_name=hostile_brand,
+        brand_emoji=hostile_emoji,
+    )
+    panel.push_insight(hostile_body, "<script>untrusted-trigger</script>")
+
+    card = next(
+        panel._cards_layout.itemAt(i).widget()
+        for i in range(panel._cards_layout.count())
+        if isinstance(panel._cards_layout.itemAt(i).widget(), _InsightCard)
+    )
+    labels = card.findChildren(QLabel)
+    body = next(label for label in labels if label.text() == hostile_body)
+    trigger = next(label for label in labels if isinstance(label, _TriggerChip))
+    panel_labels = panel.findChildren(QLabel)
+    title = next(label for label in panel_labels if hostile_brand in label.text() and hostile_emoji in label.text())
+
+    assert body.textFormat() == Qt.TextFormat.PlainText
+    assert body.text() == hostile_body
+    assert trigger.textFormat() == Qt.TextFormat.PlainText
+    assert trigger.text() == "\u0421\u041e\u0411\u042b\u0422\u0418\u0415"
+    assert title.textFormat() == Qt.TextFormat.PlainText
+    assert hostile_brand in title.text()
+    assert hostile_emoji in title.text()
+    assert panel._placeholder.textFormat() == Qt.TextFormat.PlainText
+    assert hostile_brand in panel._placeholder.text()
+    panel.deleteLater()
 
 
 # ---------------------------------------------------------------------------

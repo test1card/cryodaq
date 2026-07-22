@@ -40,6 +40,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -91,7 +92,7 @@ def _snapshot(
     integrity_storage:
         Availability truth for the data-integrity section.
     """
-    cut = SnapshotCut(1, _OBS, _OBS + timedelta(seconds=1), "engine-v1", SnapshotMode.LIVE)
+    cut = SnapshotCut(1, _OBS, _OBS + timedelta(seconds=1), "engine-v1", SnapshotMode.LIVE, "exp-1", "engine-v1")
     ok = _status()
     manifest = SupportBundleManifest(
         "bundle-1",
@@ -121,7 +122,13 @@ def _snapshot(
 
     return OperatorSnapshot(
         cut,
-        ReadinessSummary(cut, ok, ReadinessTruth.READY, ()),
+        ReadinessSummary(
+            cut,
+            ok,
+            ReadinessTruth.READY,
+            (),
+            lifecycle=SafetyLifecycle.READY,
+        ),
         PlantHealthSummary(cut, health_status, health_items),
         InfrastructureNodeHealth(
             cut,

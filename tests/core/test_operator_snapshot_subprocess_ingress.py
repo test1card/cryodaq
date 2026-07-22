@@ -64,7 +64,7 @@ def _snapshot(
     received_at: datetime | None = None,
 ) -> OperatorSnapshot:
     received = NOW + timedelta(seconds=revision) if received_at is None else received_at
-    cut = SnapshotCut(revision, NOW, received, SOURCE, SnapshotMode.LIVE)
+    cut = SnapshotCut(revision, NOW, received, SOURCE, SnapshotMode.LIVE, "experiment-1", SOURCE)
     status = SummaryStatus(
         OperatorPresentationState.CAUTION,
         float(revision),
@@ -548,7 +548,7 @@ def test_spawn_failure_invalidates_snapshot_age_and_queued_cut_before_attempt(mo
     assert bridge._last_reading_time == 222.0
 
 
-def test_restart_cleanup_failure_cannot_resurrect_old_snapshot_queue(monkeypatch) -> None:
+def test_restart_cleanup_failure_keeps_drained_old_queue_and_refuses_new_generation(monkeypatch) -> None:
     class BrokenReplyThread:
         def is_alive(self) -> bool:
             return True
@@ -557,17 +557,29 @@ def test_restart_cleanup_failure_cannot_resurrect_old_snapshot_queue(monkeypatch
             raise RuntimeError("reply cleanup failed")
 
     bridge = ZmqBridge()
-    old_queue = bridge._snapshot_queue
-    old_queue.put(_snapshot(4), timeout=1)
+    old_queue = queue.Queue(maxsize=2)
+    bridge._snapshot_queue = old_queue
+    old_queue.put_nowait(_snapshot(4))
     bridge._last_snapshot_time = time.monotonic()
     broken = BrokenReplyThread()
     bridge._reply_consumer = broken
+    monkeypatch.setattr(
+        "cryodaq.gui.zmq_client.mp.JoinableQueue",
+        lambda *args, **kwargs: pytest.fail("cleanup failure must not allocate a replacement snapshot queue"),
+    )
 
     with pytest.raises(RuntimeError, match="reply cleanup failed"):
         bridge.start()
 
     assert bridge._snapshot_queue is old_queue
+    assert old_queue.empty()
+    assert old_queue.unfinished_tasks == 0
+    assert bridge.poll_operator_snapshots() == []
     assert bridge._reply_consumer is broken
+    assert bridge._reply_stop.is_set()
+    assert bridge._bridge_instance_id is None
+    assert bridge._generation == 0
+    assert bridge.restart_count() == 0
     assert bridge._last_snapshot_time == 0.0
     assert bridge.snapshot_flow_age_s() is None
 

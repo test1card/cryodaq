@@ -19,7 +19,6 @@ exercises the startup gate that consumes the same proven logic.
 
 from __future__ import annotations
 
-import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -172,29 +171,27 @@ def test_real_v3_patterns_validate_cleanly_before_legacy_union() -> None:
     )
 
 
-def test_actual_runtime_union_reports_all_dead_legacy_throttle_patterns() -> None:
-    """The validator checks the same legacy-plus-v3 union as AdaptiveThrottle."""
-    with pytest.raises(SafetyPatternLivenessError) as exc_info:
-        validate_safety_pattern_liveness(
-            descriptor_catalog=_real_catalog(),
-            interlocks_config_path=_INTERLOCKS_PATH,
-            safety_manager=_real_safety_manager(),
-            adaptive_throttle_patterns=_real_merged_patterns(),
-        )
+def test_actual_runtime_union_resolves_canonical_patterns_to_raw_throttle_plane() -> None:
+    """The runtime union is live only after descriptor-authority resolution."""
+    resolved = validate_safety_pattern_liveness(
+        descriptor_catalog=_real_catalog(),
+        interlocks_config_path=_INTERLOCKS_PATH,
+        safety_manager=_real_safety_manager(),
+        adaptive_throttle_patterns=_real_merged_patterns(),
+    )
 
-    message = str(exc_info.value)
-    assert "Т[1-8]$" in message
-    assert "Т(9|10|11|12)$" in message
-    assert "Т12$" in message
-    assert "AdaptiveThrottle protected patterns" in message
+    assert "Т[1-8]$" not in resolved
+    assert "Т(9|10|11|12)$" not in resolved
+    assert "Т12$" not in resolved
+    assert "^Т1\\ Криостат\\ верх$" in resolved
+    assert "^Т12\\ Теплообменник\\ 2$" in resolved
 
 
-async def test_run_engine_uses_local_replacement_logs_liveness_and_continues(
+async def test_run_engine_uses_local_replacement_and_fails_closed_on_dead_pattern(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Production wiring selects local authority, passes the union, and warns."""
+    """Production wiring validates the selected authority before persistence."""
     legacy = ["legacy-only$"]
     v3 = {"v3-only"}
     observed = _install_engine_startup_harness(
@@ -209,9 +206,7 @@ async def test_run_engine_uses_local_replacement_logs_liveness_and_continues(
         raise SafetyPatternLivenessError("synthetic local dead pattern")
 
     monkeypatch.setattr(engine, "validate_safety_pattern_liveness", _dead_validator)
-    caplog.set_level(logging.CRITICAL, logger="cryodaq.engine")
-
-    with pytest.raises(_StopAtWriter):
+    with pytest.raises(SafetyPatternLivenessError, match="synthetic local dead pattern"):
         await engine._run_engine(mock=True)
 
     kwargs = observed["validator_kwargs"]
@@ -219,10 +214,7 @@ async def test_run_engine_uses_local_replacement_logs_liveness_and_continues(
     assert set(selected_catalog._bindings) == {("probe", "local emitted")}
     assert ("base", "base emitted") not in selected_catalog._bindings
     assert set(kwargs["adaptive_throttle_patterns"]) == {"legacy-only$", "v3-only"}
-    assert observed["writer_called"] is True
-    assert observed["writer_catalog"] is selected_catalog
-    assert "TEMPORARY LAB BUILD" in caplog.text
-    assert "synthetic local dead pattern" in caplog.text
+    assert observed["writer_called"] is False
 
 
 async def test_run_engine_does_not_catch_unrelated_validator_exception(
@@ -278,15 +270,15 @@ def test_dead_interlock_pattern_raises_canonical(tmp_path) -> None:
     assert "interlocks.yaml" in message
 
 
-def test_dead_safety_critical_pattern_raises_raw() -> None:
-    """A dead raw safety.yaml critical_channels pattern makes validation raise.
+def test_dead_safety_critical_pattern_raises_from_canonical_authority() -> None:
+    """A dead canonical safety.yaml critical pattern makes validation raise.
 
     Loads the real safety config, then appends a critical_channels pattern that
     matches NO raw emitted label. The validator must raise and name the dead
     pattern, its plane, and the safety.yaml source.
     """
     sm = _real_safety_manager()
-    sm._config.critical_channels.append(re.compile("__DEAD_SAFETY_CRITICAL__"))
+    sm._canonical_critical_patterns.append(re.compile("__DEAD_SAFETY_CRITICAL__"))
     with pytest.raises(SafetyPatternLivenessError) as exc_info:
         validate_safety_pattern_liveness(
             descriptor_catalog=_real_catalog(),
@@ -296,12 +288,12 @@ def test_dead_safety_critical_pattern_raises_raw() -> None:
         )
     message = str(exc_info.value)
     assert "__DEAD_SAFETY_CRITICAL__" in message
-    assert "raw" in message
+    assert "canonical" in message
     assert "critical_channels" in message
 
 
-def test_dead_adaptive_throttle_pattern_raises_raw_substring() -> None:
-    """A dead protected ref on the throttle's raw substring plane raises.
+def test_dead_adaptive_throttle_pattern_raises_before_raw_resolution() -> None:
+    """A dead protected ref on the canonical resolution plane raises.
 
     The disk-bypass channel alone would be skipped, so add a second dead ref
     that matches NO raw emitted label. The validator must raise and name the
@@ -317,7 +309,7 @@ def test_dead_adaptive_throttle_pattern_raises_raw_substring() -> None:
         )
     message = str(exc_info.value)
     assert "__DEAD_ALARM_REF__" in message
-    assert "substring" in message
+    assert "canonical AdaptiveThrottle expression" in message
     assert "AdaptiveThrottle protected patterns" in message
     # The disk channel must NOT be listed as dead even when another ref is.
     assert _DISK_CHANNEL not in message

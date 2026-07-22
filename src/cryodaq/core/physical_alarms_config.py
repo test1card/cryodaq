@@ -16,6 +16,11 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+class PhysicalAlarmsConfigError(RuntimeError):
+    """Production physical-alarm configuration is absent or unsafe to use."""
+
+
 # ---------------------------------------------------------------------------
 # Hard-coded defaults (all tunables)
 # ---------------------------------------------------------------------------
@@ -279,6 +284,98 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
         vacuum_cfg["escalate_to_safety"] = True
 
     return cooldown_cfg, vacuum_cfg
+
+
+def load_production_physical_alarms_config(
+    path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
+    """Parse one complete physical-alarm document for an engine startup.
+
+    This intentionally does *not* use the legacy fallback loader above.  A
+    missing, unreadable, duplicate-key, aliased, malformed, non-finite, or
+    incomplete production document is a startup error rather than an invented
+    configuration.  Offline/replay callers that explicitly need historical
+    defaults must use ``load_physical_alarms_config`` instead.
+    """
+
+    class _UniqueSafeLoader(yaml.SafeLoader):
+        pass
+
+    def _mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False):
+        mapping: dict[object, object] = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise PhysicalAlarmsConfigError(f"duplicate configuration key {key!r}")
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    _UniqueSafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PhysicalAlarmsConfigError(f"cannot read physical alarms configuration: {exc}") from exc
+    try:
+        composed = yaml.compose(text, Loader=_UniqueSafeLoader)
+        seen_nodes: set[int] = set()
+
+        def _reject_aliases(node: yaml.Node | None) -> None:
+            if node is None:
+                return
+            identity = id(node)
+            if identity in seen_nodes:
+                raise PhysicalAlarmsConfigError("YAML aliases are not permitted in production configuration")
+            seen_nodes.add(identity)
+            if isinstance(node, yaml.MappingNode):
+                for key_node, value_node in node.value:
+                    _reject_aliases(key_node)
+                    _reject_aliases(value_node)
+            elif isinstance(node, yaml.SequenceNode):
+                for item in node.value:
+                    _reject_aliases(item)
+
+        _reject_aliases(composed)
+        raw = yaml.load(text, Loader=_UniqueSafeLoader)
+    except (yaml.YAMLError, PhysicalAlarmsConfigError) as exc:
+        raise PhysicalAlarmsConfigError(f"invalid physical alarms configuration: {exc}") from exc
+    if not isinstance(raw, dict) or set(raw) != {"cooldown", "vacuum", "landmarks"}:
+        raise PhysicalAlarmsConfigError("physical alarms document must contain exactly cooldown, vacuum, landmarks")
+    if not isinstance(raw["cooldown"], dict) or set(raw["cooldown"]) != set(_COOLDOWN_DEFAULTS):
+        raise PhysicalAlarmsConfigError("cooldown section is incomplete or contains unknown fields")
+    if not isinstance(raw["vacuum"], dict) or set(raw["vacuum"]) != set(_VACUUM_DEFAULTS):
+        raise PhysicalAlarmsConfigError("vacuum section is incomplete or contains unknown fields")
+    try:
+        cooldown = _validate_cooldown_config(raw["cooldown"])
+        vacuum = _validate_complete_vacuum_config(raw["vacuum"])
+    except ValueError as exc:
+        raise PhysicalAlarmsConfigError(str(exc)) from exc
+    landmarks_raw = raw["landmarks"]
+    if not isinstance(landmarks_raw, dict) or set(landmarks_raw) != {"Т11", "Т12"}:
+        raise PhysicalAlarmsConfigError("landmarks must contain exactly canonical Т11 and Т12")
+    landmarks = load_channel_landmarks_from_document(raw)
+    if set(landmarks) != {"Т11", "Т12"} or any(not entry["aliases"] for entry in landmarks.values()):
+        raise PhysicalAlarmsConfigError("landmarks must have non-empty canonical alias lists")
+    return cooldown, vacuum, landmarks
+
+
+def load_channel_landmarks_from_document(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate landmarks from an already parsed physical-alarm document."""
+    landmarks_raw = raw.get("landmarks")
+    if not isinstance(landmarks_raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for channel_id, entry in landmarks_raw.items():
+        if not isinstance(channel_id, str) or not isinstance(entry, dict):
+            return {}
+        aliases = entry.get("aliases")
+        if not isinstance(aliases, list) or not all(isinstance(alias, str) and alias.strip() for alias in aliases):
+            return {}
+        out[channel_id] = {
+            "role": str(entry.get("role", "")),
+            "physical": str(entry.get("physical", "")),
+            "aliases": [alias.strip().lower() for alias in aliases],
+        }
+    return out
 
 
 def load_channel_landmarks(path: Path) -> dict[str, dict[str, Any]]:

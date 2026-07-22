@@ -108,7 +108,9 @@ def test_panel_constructs_with_categories(app: QApplication) -> None:
 
 def test_clicking_category_switches_to_rag_page(app: QApplication) -> None:
     """MED: drive real itemClicked signal path; spy exact rag.search command."""
-    from cryodaq.gui.zmq_client import ZmqCommandWorker
+    from cryodaq.gui.shell.overlays import knowledge_base_panel
+
+    ZmqCommandWorker = knowledge_base_panel.ZmqCommandWorker
 
     panel = KnowledgeBasePanel(categories=_custom_categories())
     dispatched: list[dict] = []
@@ -121,12 +123,13 @@ def test_clicking_category_switches_to_rag_page(app: QApplication) -> None:
         # Prevent actual ZMQ connection; stub start/finished.
         original_init(self_w, cmd, **kwargs)
 
-    with patch.object(ZmqCommandWorker, "__init__", _fake_init):
-        with patch.object(ZmqCommandWorker, "start", lambda self_w: None):
-            # Click first item via the real list itemClicked signal.
-            item = panel._list.item(0)
-            panel._list.setCurrentItem(item)
-            panel._list.itemClicked.emit(item)
+    with patch.object(knowledge_base_panel, "ZmqCommandWorker", ZmqCommandWorker):
+        with patch.object(ZmqCommandWorker, "__init__", _fake_init):
+            with patch.object(ZmqCommandWorker, "start", lambda self_w: None):
+                # Click first item via the real list itemClicked signal.
+                item = panel._list.item(0)
+                panel._list.setCurrentItem(item)
+                panel._list.itemClicked.emit(item)
 
     assert panel._stack.currentIndex() == _PAGE_RAG
     # Loading state visible.
@@ -222,31 +225,23 @@ def test_panel_exposes_only_read_only_actions_and_offline_guidance(
     from PySide6.QtGui import QAction
     from PySide6.QtWidgets import QAbstractButton, QLabel
 
-    from cryodaq.gui.zmq_client import ZmqCommandWorker
-
     panel = KnowledgeBasePanel(categories=_custom_categories())
-    dispatched: list[dict] = []
-    original_init = ZmqCommandWorker.__init__
+    with patch("cryodaq.gui.shell.overlays.knowledge_base_panel.ZmqCommandWorker") as worker_type:
+        for index in range(panel._list.count()):
+            item = panel._list.item(index)
+            if item.flags() & Qt.ItemFlag.ItemIsSelectable:
+                panel._list.setCurrentItem(item)
+                panel._on_item_clicked(item)
+        for button in panel.findChildren(QAbstractButton):
+            if button.isEnabled():
+                button.click()
+        for action in panel.findChildren(QAction):
+            if action.isEnabled():
+                action.trigger()
+        for timer in panel.findChildren(QTimer):
+            timer.timeout.emit()
 
-    def _capture(self_w, cmd, **kwargs):
-        dispatched.append(dict(cmd))
-        original_init(self_w, cmd, **kwargs)
-
-    with patch.object(ZmqCommandWorker, "__init__", _capture):
-        with patch.object(ZmqCommandWorker, "start", lambda _worker: None):
-            for index in range(panel._list.count()):
-                item = panel._list.item(index)
-                if item.flags() & Qt.ItemFlag.ItemIsSelectable:
-                    panel._list.setCurrentItem(item)
-                    panel._list.itemClicked.emit(item)
-            for button in panel.findChildren(QAbstractButton):
-                if button.isEnabled():
-                    button.click()
-            for action in panel.findChildren(QAction):
-                if action.isEnabled():
-                    action.trigger()
-            for timer in panel.findChildren(QTimer):
-                timer.timeout.emit()
+    dispatched = [call.kwargs["cmd"] for call in worker_type.call_args_list]
 
     assert any(command["cmd"] == "rag.search" for command in dispatched)
     assert {command["cmd"] for command in dispatched} <= {"rag.search", "assistant.query"}

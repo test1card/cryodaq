@@ -29,6 +29,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -52,9 +53,10 @@ def _snapshot(
     mode: SnapshotMode = SnapshotMode.LIVE,
     observed_at: datetime = NOW,
     received_at: datetime | None = None,
+    producer_id: str | None = None,
 ) -> OperatorSnapshot:
     received = NOW + timedelta(seconds=revision) if received_at is None else received_at
-    cut = SnapshotCut(revision, observed_at, received, source, mode)
+    cut = SnapshotCut(revision, observed_at, received, source, mode, "experiment-1", producer_id or source)
     state = OperatorPresentationState.STALE if mode is SnapshotMode.REPLAY else OperatorPresentationState.CAUTION
     status = SummaryStatus(state, 0.0, 0.0, (), "Backend authority")
     return OperatorSnapshot(
@@ -185,6 +187,8 @@ def test_new_cut_and_stale_transport_emit_once_as_one_atomic_presentation(qapp) 
     assert emitted[0].cut.revision == 1
     assert all(summary.transport_age_s >= 6 for summary in emitted[0].summaries())
     assert all(summary.transport_reason_codes == ("snapshot_stale",) for summary in emitted[0].summaries())
+    assert emitted[0].readiness.readiness is ReadinessTruth.UNKNOWN
+    assert emitted[0].readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
 
 def test_two_queued_cuts_coalesce_to_one_newest_qualified_revision(qapp) -> None:
@@ -204,6 +208,23 @@ def test_two_queued_cuts_coalesce_to_one_newest_qualified_revision(qapp) -> None
     assert owner.snapshot == emitted[0]
 
 
+def test_invalid_member_quarantines_the_entire_drained_batch_before_replacement(qapp) -> None:
+    bridge = _Bridge()
+    bridge.age = 0.2
+    owner = OperatorSnapshotIngressOwner(bridge)
+    owner.start()
+    owner._apply_snapshot(owner._epoch, _snapshot(1))
+    bridge.snapshots = [_snapshot(2), {"not": "a snapshot"}]
+
+    owner.pump()
+    _events_until(lambda: owner.rejected_count == 1)
+
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.revision == 1
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+    assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("transport_disconnected",)}
+
+
 def test_wrong_thread_direct_mutation_rejected_but_signal_delivery_is_queued(qapp) -> None:
     owner = OperatorSnapshotIngressOwner(_Bridge())
     owner.start()
@@ -214,7 +235,7 @@ def test_wrong_thread_direct_mutation_rejected_but_signal_delivery_is_queued(qap
             owner._apply_snapshot(owner._epoch, _snapshot(1))
         except BaseException as exc:
             errors.append(exc)
-        owner._snapshot_queued.emit(owner._epoch, _snapshot(1))
+        owner._snapshot_queued.emit(owner._epoch, (_snapshot(1),))
 
     thread = threading.Thread(target=worker)
     thread.start()
@@ -236,7 +257,7 @@ def test_restart_invalidation_discards_queued_old_epoch_and_degrades_current_cut
     owner._apply_snapshot(owner._epoch, _snapshot(1))
     owner._apply_transport(owner._epoch)
     old_epoch = owner._epoch
-    owner._snapshot_queued.emit(old_epoch, _snapshot(2))
+    owner._snapshot_queued.emit(old_epoch, (_snapshot(2),))
     bridge.snapshots = [_snapshot(3)]
 
     owner.invalidate_transport()
@@ -259,11 +280,15 @@ def test_stale_and_disconnected_health_are_snapshot_only_and_never_restart(qapp)
     assert owner.snapshot is not None
     assert {summary.state for summary in owner.snapshot.summaries()} == {OperatorPresentationState.CAUTION}
     assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("snapshot_stale",)}
+    assert owner.snapshot.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
     bridge.alive = False
     owner._apply_transport(owner._epoch)
     assert owner.snapshot is not None
     assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("transport_disconnected",)}
+    assert owner.snapshot.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
 
 def test_nonmonotonic_or_wrong_type_candidate_rejects_and_fails_closed(qapp) -> None:
@@ -291,7 +316,12 @@ def test_source_and_mode_transitions_preserve_store_protocol_authority(qapp) -> 
         mode=SnapshotMode.REPLAY,
         observed_at=NOW - timedelta(days=1),
     )
-    live_b = _snapshot(3, source="live/b", observed_at=NOW + timedelta(seconds=1))
+    live_b = _snapshot(
+        3,
+        source="live/b",
+        observed_at=NOW + timedelta(seconds=1),
+        producer_id="live/a",
+    )
 
     for snapshot in (live_a, replay, live_b):
         owner._apply_snapshot(owner._epoch, snapshot)
@@ -306,10 +336,24 @@ def test_source_and_mode_transitions_preserve_store_protocol_authority(qapp) -> 
         source="live/b",
         observed_at=NOW,
         received_at=NOW + timedelta(seconds=5),
+        producer_id="live/a",
     )
     owner._apply_snapshot(owner._epoch, regressed_live_b)
     assert owner.rejected_count == 1
     assert owner.snapshot.cut.revision == 3
+
+
+def test_foreign_live_producer_is_quarantined_without_replacing_current_truth(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner.start()
+    owner._apply_snapshot(owner._epoch, _snapshot(1, producer_id="engine-a"))
+    owner._apply_snapshot(owner._epoch, _snapshot(2, producer_id="engine-b"))
+
+    assert owner.rejected_count == 1
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.revision == 1
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+    assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("transport_disconnected",)}
 
 
 def test_stop_cancels_queued_epoch_drains_bridge_and_leaves_store_disconnected(qapp) -> None:
@@ -317,7 +361,7 @@ def test_stop_cancels_queued_epoch_drains_bridge_and_leaves_store_disconnected(q
     owner = OperatorSnapshotIngressOwner(bridge)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
-    owner._snapshot_queued.emit(owner._epoch, _snapshot(2))
+    owner._snapshot_queued.emit(owner._epoch, (_snapshot(2),))
     bridge.snapshots = [_snapshot(3)]
 
     owner.stop()

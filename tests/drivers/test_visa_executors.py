@@ -225,10 +225,10 @@ async def test_usbtmc_close_releases_partial_manager_ownership():
 
 
 @pytest.mark.asyncio
-async def test_usbtmc_close_failure_is_contained_but_blocks_reopen(caplog):
+async def test_usbtmc_close_failure_raises_typed_terminal_receipt_and_blocks_reopen(caplog):
     import logging
 
-    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+    from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
     manager_closed = False
 
@@ -245,11 +245,13 @@ async def test_usbtmc_close_failure_is_contained_but_blocks_reopen(caplog):
     transport._resource = _Resource()
     transport._rm = _Manager()
 
-    with caplog.at_level(logging.CRITICAL):
+    with caplog.at_level(logging.CRITICAL), pytest.raises(USBTMCIncompleteCloseError, match="remains owned"):
         await transport.close()
 
     assert manager_closed is True
     assert transport._close_incomplete is True
+    assert transport._resource is not None
+    assert transport._rm is not None
     assert "resource close failed" in caplog.text
     with pytest.raises(RuntimeError, match="terminal"):
         await transport.open("USB0::REOPEN::INSTR")
@@ -297,6 +299,8 @@ async def test_usbtmc_cancelled_open_settles_and_closes_late_handles(monkeypatch
             manager_closed.set()
 
     transport = USBTMCTransport(mock=False)
+    transport._mark_query_desynchronized()
+    transport._quarantine_clean_close = True
 
     def _late_open(_resource_str: str):
         started.set()
@@ -319,6 +323,17 @@ async def test_usbtmc_cancelled_open_settles_and_closes_late_handles(monkeypatch
     assert transport._resource is None
     assert transport._rm is None
     assert transport._executor is None
+    assert transport._query_desynchronized is True
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.query("ordinary-query")
+
+    def _recovered_open(_resource_str: str):
+        return _Manager(), _Resource()
+
+    monkeypatch.setattr(transport, "_blocking_open", _recovered_open)
+    await transport.open("USB0::RECOVERED::INSTR")
+    assert transport._query_desynchronized is False
+    await transport.close()
 
 
 @pytest.mark.asyncio
@@ -520,7 +535,7 @@ async def test_usbtmc_wedged_cancelled_open_returns_bounded_and_reaps_late_handl
 async def test_usbtmc_cancelled_timed_out_close_is_terminal() -> None:
     import asyncio
 
-    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+    from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
     close_started = threading.Event()
     close_release = threading.Event()
@@ -543,7 +558,7 @@ async def test_usbtmc_cancelled_timed_out_close_is_terminal() -> None:
 
     task.cancel()
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(USBTMCIncompleteCloseError, match="terminally quarantined"):
         await asyncio.wait_for(task, timeout=2.0)
 
     assert transport._close_incomplete is True
@@ -747,6 +762,55 @@ async def test_gpib_close_returns_even_if_executor_worker_is_blocked():
 
 
 @pytest.mark.asyncio
+async def test_gpib_double_open_and_incomplete_close_keep_retained_owner() -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
+
+    release = threading.Event()
+
+    class _Resource:
+        def close(self) -> None:
+            assert release.wait(3.0)
+
+    transport = GPIBTransport(mock=False)
+    transport._resource_str = "GPIB0::12::INSTR"
+    transport._resource = _Resource()
+    transport._session_open = True
+
+    with pytest.raises(RuntimeError, match="previous GPIB executor generation"):
+        await transport.open("GPIB0::12::INSTR")
+    close_task = asyncio.create_task(transport.close())
+    await asyncio.sleep(0)
+    with pytest.raises(GPIBIncompleteCloseError):
+        await close_task
+    with pytest.raises(RuntimeError, match="previous GPIB executor generation"):
+        await transport.open("GPIB0::12::INSTR")
+    release.set()
+    assert await asyncio.to_thread(transport._close_done.wait, 2.0)
+    await transport.close()
+    assert transport._resource is None
+
+
+@pytest.mark.asyncio
+async def test_gpib_close_error_is_typed_and_remains_quarantined() -> None:
+    from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
+
+    class _Resource:
+        def close(self) -> None:
+            raise OSError("close failed")
+
+    transport = GPIBTransport(mock=False)
+    transport._resource = _Resource()
+    transport._session_open = True
+    with pytest.raises(GPIBIncompleteCloseError, match="handle remains quarantined"):
+        await transport.close()
+    with pytest.raises(GPIBIncompleteCloseError, match="handle remains quarantined"):
+        await transport.close()
+    assert transport._resource is not None
+
+
+@pytest.mark.asyncio
 async def test_usbtmc_close_returns_even_if_executor_worker_is_blocked():
     from cryodaq.drivers.transport.usbtmc import USBTMCTransport
 
@@ -782,6 +846,144 @@ async def test_usbtmc_close_returns_even_if_executor_worker_is_blocked():
     assert elapsed < 2.5, f"USBTMC close blocked too long ({elapsed:.2f}s)"
 
 
+@pytest.mark.asyncio
+async def test_usbtmc_close_does_not_wait_for_saturated_default_executor() -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    loop = asyncio.get_running_loop()
+    previous_default = getattr(loop, "_default_executor", None)
+    saturated = ThreadPoolExecutor(max_workers=1)
+    blocker_started = threading.Event()
+    blocker_release = threading.Event()
+
+    def _block_default_executor() -> None:
+        blocker_started.set()
+        blocker_release.wait(3.0)
+
+    saturated.submit(_block_default_executor)
+    assert blocker_started.wait(1.0)
+    loop.set_default_executor(saturated)
+
+    class _Handle:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _Handle()
+    transport._rm = _Handle()
+    close_task = asyncio.create_task(transport.close())
+    try:
+        done, _pending = await asyncio.wait({close_task}, timeout=0.4)
+        assert close_task in done, "USBTMC close queued behind the saturated default executor"
+        await close_task
+    finally:
+        blocker_release.set()
+        if not close_task.done():
+            await close_task
+        saturated.shutdown(wait=True)
+        loop._default_executor = previous_default
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_cancelled_open_cleanup_does_not_wait_for_saturated_default_executor(
+    monkeypatch,
+) -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    loop = asyncio.get_running_loop()
+    previous_default = getattr(loop, "_default_executor", None)
+    saturated = ThreadPoolExecutor(max_workers=1)
+    blocker_started = threading.Event()
+    blocker_release = threading.Event()
+    open_started = threading.Event()
+    open_release = threading.Event()
+
+    def _block_default_executor() -> None:
+        blocker_started.set()
+        blocker_release.wait(3.0)
+
+    saturated.submit(_block_default_executor)
+    assert blocker_started.wait(1.0)
+    loop.set_default_executor(saturated)
+
+    class _Handle:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+
+    def _late_open(_resource_str: str):
+        open_started.set()
+        assert open_release.wait(2.0)
+        return _Handle(), _Handle()
+
+    monkeypatch.setattr(transport, "_blocking_open", _late_open)
+    open_task = asyncio.create_task(transport.open("USB0::LATE-CLEANUP::INSTR"))
+    try:
+        for _ in range(100):
+            if open_started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert open_started.is_set()
+        open_task.cancel()
+        open_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(open_task), timeout=0.4)
+    finally:
+        open_release.set()
+        blocker_release.set()
+        if not open_task.done():
+            open_task.cancel()
+        try:
+            await open_task
+        except asyncio.CancelledError:
+            pass
+        saturated.shutdown(wait=True)
+        loop._default_executor = previous_default
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_completed_late_open_callback_hands_cleanup_off_event_loop() -> None:
+    import asyncio
+    from concurrent.futures import Future
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    close_started = threading.Event()
+    close_release = threading.Event()
+
+    class _Resource:
+        def close(self) -> None:
+            close_started.set()
+            assert close_release.wait(2.0)
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    completed: Future[tuple[object, object]] = Future()
+    completed.set_result((_Manager(), _Resource()))
+    transport._open_future = completed
+
+    try:
+        transport._start_late_open_reaper(completed)
+        await asyncio.sleep(0)
+        assert close_started.wait(0.2)
+    finally:
+        close_release.set()
+
+    for _ in range(100):
+        if transport._open_future is None:
+            break
+        await asyncio.sleep(0.01)
+    assert transport._open_future is None
+
+
 def test_usbtmc_bounded_close_propagates_process_control_exception() -> None:
     from cryodaq.drivers.transport.usbtmc import _run_with_timeout
 
@@ -796,7 +998,7 @@ def test_usbtmc_bounded_close_propagates_process_control_exception() -> None:
 
 
 @pytest.mark.asyncio
-async def test_usbtmc_late_failed_query_is_quarantined_but_off_write_remains_available() -> None:
+async def test_usbtmc_queued_quarantine_rechecks_all_waiters_before_resource_access() -> None:
     import asyncio
 
     from cryodaq.drivers.transport.usbtmc import USBTMCTransport
@@ -805,18 +1007,31 @@ async def test_usbtmc_late_failed_query_is_quarantined_but_off_write_remains_ava
     release = threading.Event()
     query_calls: list[str] = []
     writes: list[str] = []
+    raw_writes: list[bytes] = []
+    member_accesses: list[str] = []
 
     class _Resource:
         timeout = 0
 
+        def __getattribute__(self, name: str):
+            if name in {"query", "write", "write_raw"}:
+                member_accesses.append(name)
+            return object.__getattribute__(self, name)
+
         def query(self, command: str) -> str:
             query_calls.append(command)
-            started.set()
-            assert release.wait(3.0)
-            raise OSError("late USBTMC query failure")
+            if command == "failing-query":
+                started.set()
+                assert release.wait(3.0)
+                raise OSError("late USBTMC query failure")
+            nonce = command.split("|")[1]
+            return f"CRYODAQ_OFF_V1|{nonce}|0"
 
         def write(self, command: str) -> None:
             writes.append(command)
+
+        def write_raw(self, data: bytes) -> None:
+            raw_writes.append(data)
 
         def close(self) -> None:
             return None
@@ -828,22 +1043,35 @@ async def test_usbtmc_late_failed_query_is_quarantined_but_off_write_remains_ava
     transport = USBTMCTransport(mock=False)
     transport._resource = _Resource()
     transport._rm = _Manager()
-    task = asyncio.create_task(transport.query("print(smua.source.output)"))
+    failing = asyncio.create_task(transport.query("failing-query"))
     assert await asyncio.to_thread(started.wait, 1.0)
 
-    task.cancel()
+    ordinary = asyncio.create_task(transport.write("smua.source.levelv = 1"))
+    raw = asyncio.create_task(transport.write_raw(b"smua.source.output = smua.OUTPUT_OFF"))
+    ordinary_query = asyncio.create_task(transport.query("queued-ordinary-query"))
+    off = asyncio.create_task(transport.write("smua.source.output = smua.OUTPUT_OFF"))
+    nonce = "a" * 32
+    challenge_command = f'print(string.format("CRYODAQ_OFF_V1|{nonce}|%g", smua.source.output))'
+    challenge = asyncio.create_task(transport.query(challenge_command))
+    await asyncio.sleep(0)
+
     release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    with pytest.raises(OSError, match="late USBTMC query failure"):
+        await failing
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await ordinary
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await raw
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await ordinary_query
+    await off
+    assert await challenge == f"CRYODAQ_OFF_V1|{nonce}|0"
 
     assert transport._query_desynchronized is True
-    with pytest.raises(RuntimeError, match="terminally desynchronized"):
-        await transport.query("print(smub.source.output)")
-    assert query_calls == ["print(smua.source.output)"]
-
-    off_command = "smua.source.output = smua.OUTPUT_OFF"
-    await transport.write(off_command)
-    assert writes == [off_command]
+    assert query_calls == ["failing-query", challenge_command]
+    assert writes == ["smua.source.output = smua.OUTPUT_OFF"]
+    assert raw_writes == []
+    assert member_accesses == ["query", "write", "query"]
     await transport.close()
 
 
@@ -893,7 +1121,7 @@ async def test_usbtmc_cancelled_successful_query_does_not_poison_next_query() ->
 
 
 @pytest.mark.asyncio
-async def test_usbtmc_query_quarantine_survives_close_and_open(monkeypatch) -> None:
+async def test_usbtmc_query_quarantine_clears_only_after_clean_close_and_successful_open(monkeypatch) -> None:
     from cryodaq.drivers.transport.usbtmc import USBTMCTransport
 
     class _FailedResource:
@@ -918,7 +1146,7 @@ async def test_usbtmc_query_quarantine_survives_close_and_open(monkeypatch) -> N
 
         def query(self, _command: str) -> str:
             self.query_calls += 1
-            return "must-not-be-used"
+            return "recovered"
 
         def write(self, command: str) -> None:
             self.writes.append(command)
@@ -942,11 +1170,721 @@ async def test_usbtmc_query_quarantine_survives_close_and_open(monkeypatch) -> N
     monkeypatch.setattr(transport, "_settle_open", _reopen)
     await transport.open("USB0::REOPENED::INSTR")
 
-    with pytest.raises(RuntimeError, match="terminally desynchronized"):
-        await transport.query("second")
-    assert reopened.query_calls == 0
-    await transport.write("smub.source.output = smub.OUTPUT_OFF")
-    assert reopened.writes == ["smub.source.output = smub.OUTPUT_OFF"]
+    assert transport._query_desynchronized is False
+    assert await transport.query("second") == "recovered"
+    assert reopened.query_calls == 1
+    await transport.write("ordinary-write")
+    assert reopened.writes == ["ordinary-write"]
+    await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_quarantine_allows_only_exact_off_traffic_and_fresh_challenges() -> None:
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    query_calls: list[str] = []
+    writes: list[str] = []
+    raw_writes: list[bytes] = []
+
+    class _Resource:
+        timeout = 0
+
+        def query(self, command: str) -> str:
+            query_calls.append(command)
+            nonce = command.split("|")[1]
+            if nonce == "d" * 32:
+                raise OSError("fresh challenge failed after transmission")
+            return f"CRYODAQ_OFF_V1|{nonce}|0"
+
+        def write(self, command: str) -> None:
+            writes.append(command)
+
+        def write_raw(self, data: bytes) -> None:
+            raw_writes.append(data)
+
+        def close(self) -> None:
+            return None
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _Resource()
+    transport._rm = _Manager()
+    stale_nonce = "a" * 32
+    stale_challenge = f'print(string.format("CRYODAQ_OFF_V1|{stale_nonce}|%g", smua.source.output))'
+    assert await transport.query(stale_challenge) == f"CRYODAQ_OFF_V1|{stale_nonce}|0"
+    transport._mark_query_desynchronized()
+
+    allowed = [
+        "smua.source.levelv = 0",
+        "smub.source.levelv = 0",
+        "smua.source.output = smua.OUTPUT_OFF",
+        "smub.source.output = smub.OUTPUT_OFF",
+    ]
+    for command in allowed:
+        await transport.write(command)
+
+    rejected_writes = [
+        " smua.source.levelv = 0",
+        "smua.source.levelv = 0 ",
+        "smua.source.levelv=0",
+        "smua.source.levelv = 0.0",
+        "smua.source.levelv = +0",
+        "smua.source.levelv = 0 -- OFF",
+        "smua.source.levelv = 0;smua.source.output = smua.OUTPUT_OFF",
+        "prefix smua.source.output = smua.OUTPUT_OFF",
+        "smua.source.output = smua.OUTPUT_OFF suffix",
+        "SMUA.source.output = SMUA.OUTPUT_OFF",
+        "smua.source.output = smub.OUTPUT_OFF",
+    ]
+    for command in rejected_writes:
+        with pytest.raises(RuntimeError, match="quarantined"):
+            await transport.write(command)
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.write_raw(b"smua.source.output = smua.OUTPUT_OFF")
+
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.query(stale_challenge)
+    fresh_nonce = "b" * 32
+    fresh_challenge = f'print(string.format("CRYODAQ_OFF_V1|{fresh_nonce}|%g", smub.source.output))'
+    assert await transport.query(fresh_challenge) == f"CRYODAQ_OFF_V1|{fresh_nonce}|0"
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.query(fresh_challenge)
+    failed_nonce = "d" * 32
+    failed_challenge = f'print(string.format("CRYODAQ_OFF_V1|{failed_nonce}|%g", smua.source.output))'
+    with pytest.raises(OSError, match="failed after transmission"):
+        await transport.query(failed_challenge)
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.query(failed_challenge)
+
+    rejected_queries = [
+        "print(smua.source.output)",
+        f" {fresh_challenge}",
+        f"{fresh_challenge} ",
+        f"{fresh_challenge};print(errorqueue.count)",
+        f"{fresh_challenge} -- verify",
+        f'print(string.format("CRYODAQ_OFF_V1|{"c" * 31}|%g", smua.source.output))',
+        f'print(string.format("CRYODAQ_OFF_V1|{"C" * 32}|%g", smua.source.output))',
+        f'print(string.format("CRYODAQ_OFF_V1|{"c" * 32}|%g", smuc.source.output))',
+    ]
+    for command in rejected_queries:
+        with pytest.raises(RuntimeError, match="quarantined"):
+            await transport.query(command)
+
+    assert writes == allowed
+    assert raw_writes == []
+    assert query_calls == [stale_challenge, fresh_challenge, failed_challenge]
+    await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_quarantine_rejects_string_subclasses_before_resource_access() -> None:
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    accesses: list[str] = []
+    allowed_write = "smua.source.output = smua.OUTPUT_OFF"
+    nonce = "e" * 32
+    allowed_query = f'print(string.format("CRYODAQ_OFF_V1|{nonce}|%g", smua.source.output))'
+
+    class _SpoofedWrite(str):
+        def __hash__(self) -> int:
+            return hash(allowed_write)
+
+        def __eq__(self, other: object) -> bool:
+            return other == allowed_write
+
+    class _SpoofedQuery(str):
+        def encode(self, *_args, **_kwargs) -> bytes:
+            return b"smua.source.output = smua.OUTPUT_ON"
+
+    class _Resource:
+        def __getattribute__(self, name: str):
+            if name in {"query", "write", "write_raw"}:
+                accesses.append(name)
+            return object.__getattribute__(self, name)
+
+        def query(self, _command: str) -> str:
+            return "must-not-run"
+
+        def write(self, _command: str) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _Resource()
+    transport._rm = _Manager()
+    transport._mark_query_desynchronized()
+
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.write(_SpoofedWrite("smua.source.output = smua.OUTPUT_ON"))
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.query(_SpoofedQuery(allowed_query))
+    assert accesses == []
+    await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_failed_cancelled_and_handleless_open_cannot_clear_quarantine(monkeypatch) -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    class _FailedResource:
+        timeout = 0
+
+        def query(self, _command: str) -> str:
+            raise OSError("query framing lost")
+
+        def close(self) -> None:
+            return None
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _FailedResource()
+    transport._rm = _Manager()
+    with pytest.raises(OSError, match="framing lost"):
+        await transport.query("poison")
+    await transport.close()
+    assert transport._quarantine_clean_close is True
+
+    async def _failed_open(_resource_str: str) -> None:
+        raise OSError("open failed")
+
+    monkeypatch.setattr(transport, "_settle_open", _failed_open)
+    with pytest.raises(OSError, match="open failed"):
+        await transport.open("USB0::FAILED::INSTR")
+    assert transport._query_desynchronized is True
+
+    async def _cancelled_open(_resource_str: str) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(transport, "_settle_open", _cancelled_open)
+    with pytest.raises(asyncio.CancelledError):
+        await transport.open("USB0::CANCELLED::INSTR")
+    assert transport._query_desynchronized is True
+
+    async def _handleless_open(_resource_str: str) -> None:
+        return None
+
+    monkeypatch.setattr(transport, "_settle_open", _handleless_open)
+    with pytest.raises(RuntimeError, match="without resource handles"):
+        await transport.open("USB0::HANDLELESS::INSTR")
+    assert transport._query_desynchronized is True
+
+    for missing in ("resource", "manager"):
+        partial = USBTMCTransport(mock=False)
+        partial._mark_query_desynchronized()
+        partial._quarantine_clean_close = True
+
+        async def _partial_open(_resource_str: str, *, missing=missing) -> None:
+            partial._resource = None if missing == "resource" else _FailedResource()
+            partial._rm = None if missing == "manager" else _Manager()
+
+        monkeypatch.setattr(partial, "_settle_open", _partial_open)
+        with pytest.raises(RuntimeError, match="without resource handles"):
+            await partial.open(f"USB0::MISSING-{missing.upper()}::INSTR")
+        assert partial._query_desynchronized is True
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_incomplete_or_noop_close_cannot_enable_quarantine_recovery() -> None:
+    from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
+
+    class _Resource:
+        timeout = 0
+
+        def query(self, _command: str) -> str:
+            raise OSError("query failed")
+
+        def close(self) -> None:
+            raise OSError("close failed")
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _Resource()
+    transport._rm = _Manager()
+    with pytest.raises(OSError, match="query failed"):
+        await transport.query("poison")
+    with pytest.raises(USBTMCIncompleteCloseError, match="retained VISA handle"):
+        await transport.close()
+    assert transport._quarantine_clean_close is False
+    assert transport._close_incomplete is True
+    with pytest.raises(RuntimeError, match="terminal"):
+        await transport.open("USB0::UNSAFE::INSTR")
+
+    noop = USBTMCTransport(mock=False)
+    noop._mark_query_desynchronized()
+    await noop.close()
+    assert noop._quarantine_clean_close is False
+    with pytest.raises(RuntimeError, match="completed clean close"):
+        await noop.open("USB0::UNSAFE-NOOP::INSTR")
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_cancelled_close_after_success_is_not_terminal() -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    close_started = threading.Event()
+    close_release = threading.Event()
+
+    class _Resource:
+        timeout = 0
+
+        def query(self, _command: str) -> str:
+            raise OSError("query failed")
+
+        def close(self) -> None:
+            close_started.set()
+            assert close_release.wait(3.0)
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _Resource()
+    transport._rm = _Manager()
+    with pytest.raises(OSError, match="query failed"):
+        await transport.query("poison")
+
+    close_task = asyncio.create_task(transport.close())
+    assert await asyncio.to_thread(close_started.wait, 1.0)
+    close_task.cancel()
+    close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+    assert transport._resource is None
+    assert transport._rm is None
+    assert transport._close_incomplete is False
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_cancelled_close_retains_owner_until_settlement() -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    close_started = threading.Event()
+    close_release = threading.Event()
+    resource_closed = threading.Event()
+    manager_closed = threading.Event()
+
+    class _Resource:
+        def close(self) -> None:
+            close_started.set()
+            assert close_release.wait(3.0)
+            resource_closed.set()
+
+    class _Manager:
+        def close(self) -> None:
+            manager_closed.set()
+
+    resource = _Resource()
+    manager = _Manager()
+    transport = USBTMCTransport(mock=False)
+    transport._resource = resource
+    transport._rm = manager
+
+    close_task = asyncio.create_task(transport.close())
+    try:
+        assert await asyncio.to_thread(close_started.wait, 1.0)
+        assert close_task.cancel()
+        assert close_task.cancelling() == 1
+        await asyncio.sleep(0)
+
+        assert close_task.done() is False
+        assert transport._resource is resource
+        assert transport._rm is manager
+        assert resource_closed.is_set() is False
+        assert manager_closed.is_set() is False
+
+        close_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+        assert resource_closed.is_set()
+        assert manager_closed.is_set()
+    finally:
+        close_release.set()
+        if not close_task.done():
+            await asyncio.gather(close_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_usbtmc_cancelled_close_commits_success_before_propagating_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    close_started = threading.Event()
+    close_release = threading.Event()
+    calls: list[tuple[str, object]] = []
+
+    class _Resource:
+        def close(self) -> None:
+            close_started.set()
+            assert close_release.wait(3.0)
+            calls.append(("resource", self))
+
+    class _Manager:
+        def close(self) -> None:
+            calls.append(("manager", self))
+
+    resource = _Resource()
+    manager = _Manager()
+    transport = USBTMCTransport(mock=False)
+    transport._resource = resource
+    transport._rm = manager
+    replacement_resource = object()
+    replacement_manager = object()
+
+    close_task = asyncio.create_task(transport.close())
+    try:
+        assert await asyncio.to_thread(close_started.wait, 1.0)
+        assert close_task.cancel()
+        assert close_task.cancelling() == 1
+        close_release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+        assert calls == [("resource", resource), ("manager", manager)]
+        assert transport._resource is None
+        assert transport._rm is None
+        assert transport._close_incomplete is False
+
+        opened: list[str] = []
+
+        def _fresh_blocking_open(resource_str: str) -> tuple[object, object]:
+            opened.append(resource_str)
+            return replacement_manager, replacement_resource
+
+        monkeypatch.setattr(transport, "_blocking_open", _fresh_blocking_open)
+        await transport.open("USB0::FRESH-GENERATION::INSTR")
+        assert opened == ["USB0::FRESH-GENERATION::INSTR"]
+        assert transport._resource is replacement_resource
+        assert transport._rm is replacement_manager
+    finally:
+        close_release.set()
+        if not close_task.done():
+            await asyncio.gather(close_task, return_exceptions=True)
+        if transport._resource is replacement_resource:
+            transport._resource = None
+            transport._rm = None
+            transport._shutdown_executor()
+
+
+@pytest.mark.asyncio
+async def test_gpib_double_open_and_incomplete_close_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    import cryodaq.drivers.transport.gpib as gpib_module
+    from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
+
+    close_entered = threading.Event()
+    release_close = threading.Event()
+    exact_handle = object()
+    close_calls: list[object] = []
+
+    class Resource:
+        def close(self) -> None:
+            close_entered.set()
+            assert release_close.wait(3.0)
+            close_calls.append(exact_handle)
+
+    resource = Resource()
+    transport = GPIBTransport(mock=False)
+    transport._resource = resource
+    transport._resource_str = "GPIB0::12::INSTR"
+    transport._session_open = True
+    initial_generation = transport._open_generation
+    monkeypatch.setattr(gpib_module, "_CLOSE_TIMEOUT_S", 0.01)
+
+    close_task: asyncio.Task | None = None
+    try:
+        with pytest.raises(RuntimeError, match="generation has not settled"):
+            await transport.open("GPIB0::13::INSTR")
+        assert transport._open_generation == initial_generation
+
+        close_task = asyncio.create_task(transport.close())
+        assert await asyncio.to_thread(close_entered.wait, 1.0)
+        with pytest.raises(GPIBIncompleteCloseError, match="did not settle"):
+            await close_task
+        assert transport._resource is resource
+        assert transport._terminal_unsettled is True
+        with pytest.raises(RuntimeError, match="generation has not settled"):
+            await transport.open("GPIB0::13::INSTR")
+
+        release_close.set()
+        assert transport._close_done is not None
+        assert await asyncio.to_thread(transport._close_done.wait, 2.0)
+        await transport.close()
+        assert close_calls == [exact_handle]
+        assert transport._resource is None
+        assert transport._terminal_unsettled is False
+    finally:
+        release_close.set()
+        if close_task is not None:
+            await asyncio.gather(close_task, return_exceptions=True)
+        if transport._executor is not None:
+            transport._executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.asyncio
+async def test_gpib_clean_new_generation_recovers_from_desynchronization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.drivers.transport.gpib as gpib_module
+    from cryodaq.drivers.transport.gpib import GPIBTransport
+
+    events: list[tuple[str, object]] = []
+
+    class Resource:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def __init__(self, name: str, *, fail_query: bool) -> None:
+            self.name = name
+            self.fail_query = fail_query
+
+        def clear(self) -> None:
+            events.append(("sdc", self))
+
+        def set_visa_attribute(self, _attr, _value) -> None:
+            pass
+
+        def write(self, command: str) -> None:
+            events.append((command, self))
+
+        def read(self) -> str:
+            if self.fail_query:
+                raise OSError("GPIB response provenance lost")
+            return "fresh-response"
+
+        def close(self) -> None:
+            events.append(("close", self))
+
+    class Interface:
+        def send_ifc(self) -> None:
+            events.append(("ifc", self))
+
+        def close(self) -> None:
+            events.append(("close", self))
+
+    failed = Resource("failed", fail_query=True)
+    fresh = Resource("fresh", fail_query=False)
+    interface = Interface()
+    normal_resources = iter((failed, fresh))
+
+    class ResourceManager:
+        def open_resource(self, resource_str: str):
+            if resource_str.endswith("::INTFC"):
+                return interface
+            resource = next(normal_resources)
+            events.append(("open", resource))
+            return resource
+
+    manager = ResourceManager()
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {"GPIB0": manager}, raising=False)
+    monkeypatch.setattr(gpib_module, "_WRITE_READ_DELAY_S", 0.0)
+    transport = GPIBTransport(mock=False)
+    try:
+        await transport.open("GPIB0::12::INSTR")
+        with pytest.raises(OSError, match="provenance lost"):
+            await transport.query("KRDG?")
+        assert transport._query_desynchronized is True
+        await transport.close()
+        assert ("close", failed) in events
+
+        await transport.open("GPIB0::12::INSTR")
+        assert transport._resource is fresh
+        assert transport._query_desynchronized is True
+        assert await transport.recover() is True
+        assert transport._query_desynchronized is False
+        assert await transport.query("KRDG?") == "fresh-response"
+        assert ("sdc", fresh) in events
+        assert ("ifc", interface) in events
+    finally:
+        if transport._resource is not None:
+            await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_gpib_successful_recovery_clears_query_quarantine_only_after_both_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.gpib import GPIBTransport
+
+    transport = GPIBTransport(mock=False)
+    transport._resource = object()
+    transport._session_open = True
+    transport._query_desynchronized = True
+    generation = transport._open_generation
+    clear_entered = asyncio.Event()
+    release_clear = asyncio.Event()
+    ifc_entered = asyncio.Event()
+    release_ifc = asyncio.Event()
+
+    async def clear_bus() -> bool:
+        clear_entered.set()
+        await release_clear.wait()
+        return True
+
+    async def send_ifc() -> bool:
+        ifc_entered.set()
+        await release_ifc.wait()
+        return True
+
+    monkeypatch.setattr(transport, "clear_bus", clear_bus)
+    monkeypatch.setattr(transport, "send_ifc", send_ifc)
+    recovery = asyncio.create_task(transport.recover())
+    try:
+        await asyncio.wait_for(clear_entered.wait(), 1.0)
+        assert transport._query_desynchronized is True
+        assert transport._open_generation == generation
+        release_clear.set()
+        await asyncio.wait_for(ifc_entered.wait(), 1.0)
+        assert transport._query_desynchronized is True
+        assert transport._open_generation == generation
+        release_ifc.set()
+        assert await recovery is True
+        assert transport._query_desynchronized is False
+        assert transport._open_generation == generation + 1
+
+        transport._query_desynchronized = True
+
+        async def fail_ifc() -> bool:
+            return False
+
+        monkeypatch.setattr(transport, "send_ifc", fail_ifc)
+        assert await transport.recover() is False
+        assert transport._query_desynchronized is True
+    finally:
+        release_clear.set()
+        release_ifc.set()
+        await asyncio.gather(recovery, return_exceptions=True)
+        transport._resource = None
+        transport._session_open = False
+
+
+@pytest.mark.asyncio
+async def test_gpib_terminal_close_intent_survives_cancelled_operation_settlement_and_closes_exact_handle() -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
+
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    closes: list[object] = []
+
+    class Resource:
+        def write(self, _command: str) -> None:
+            write_entered.set()
+            assert release_write.wait(3.0)
+
+        def close(self) -> None:
+            closes.append(self)
+
+    exact_handle = Resource()
+    transport = GPIBTransport(mock=False)
+    transport._resource = exact_handle
+    transport._resource_str = "GPIB0::12::INSTR"
+    transport._session_open = True
+    operation = asyncio.create_task(transport.write("OUTPUT 0"))
+    try:
+        assert await asyncio.to_thread(write_entered.wait, 1.0)
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+        with pytest.raises(GPIBIncompleteCloseError, match="still running|incomplete"):
+            await transport.close()
+        assert transport._resource is exact_handle
+        assert transport._terminal_unsettled is True
+
+        release_write.set()
+        assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+        assert closes == [exact_handle]
+        assert transport._resource is None
+        assert transport._session_open is False
+        assert transport._terminal_unsettled is False
+    finally:
+        release_write.set()
+        await asyncio.gather(operation, return_exceptions=True)
+        if transport._executor is not None:
+            transport._executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["query", "write", "write_raw"])
+async def test_usbtmc_cancelled_failed_executor_io_quarantines(operation: str) -> None:
+    import asyncio
+
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Resource:
+        timeout = 0
+
+        def _fail(self) -> None:
+            started.set()
+            assert release.wait(3.0)
+            raise OSError("cancelled worker failed")
+
+        def query(self, _command: str) -> str:
+            self._fail()
+            raise AssertionError("unreachable")
+
+        def write(self, _command: str) -> None:
+            self._fail()
+
+        def write_raw(self, _data: bytes) -> None:
+            self._fail()
+
+        def close(self) -> None:
+            return None
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _Resource()
+    transport._rm = _Manager()
+    call = {
+        "query": lambda: transport.query("failing-query"),
+        "write": lambda: transport.write("ordinary-write"),
+        "write_raw": lambda: transport.write_raw(b"ordinary-raw"),
+    }[operation]
+    task = asyncio.create_task(call())
+    assert await asyncio.to_thread(started.wait, 1.0)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert transport._query_desynchronized is True
     await transport.close()
 
 
@@ -982,12 +1920,17 @@ async def test_usbtmc_mock_queries_require_exact_allowlisted_commands() -> None:
         f'print(string.format("CRYODAQ_OFF_V1|{nonce}|%g", smua.source.output))extra',
     ]
     for command in unsupported:
+        transport = USBTMCTransport(mock=True)
         with pytest.raises(ValueError, match="unsupported USBTMC mock query"):
             await transport.query(command)
+        assert transport._query_desynchronized is True
+        with pytest.raises(RuntimeError, match="quarantined"):
+            await transport.query("*IDN?")
+        await transport.write("smua.source.output = smua.OUTPUT_OFF")
 
 
 @pytest.mark.asyncio
-async def test_gpib_late_failed_query_is_quarantined_but_recovery_remains_available(
+async def test_gpib_late_failed_query_is_quarantined_until_fresh_recovery(
     monkeypatch,
 ) -> None:
     import asyncio
@@ -1033,25 +1976,40 @@ async def test_gpib_late_failed_query_is_quarantined_but_recovery_remains_availa
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+    assert transport._open_settled.wait(5.0)
     assert transport._query_desynchronized is True
 
     writes_before_refusal = list(resource.writes)
-    with pytest.raises(RuntimeError, match="terminally desynchronized"):
+    with pytest.raises(RuntimeError, match="quarantined"):
         await transport.query("KRDG? 1")
     assert resource.writes == writes_before_refusal
 
     off_command = "OUTPUT 0"
-    await transport.write(off_command)
-    assert resource.writes[-1] == off_command
-    assert await transport.clear_bus() is True
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.write(off_command)
+    assert resource.writes == writes_before_refusal
+    # Cancellation settles and closes the retained handle; recovery cannot
+    # operate on a retired generation.  A fresh validated open is required.
+    assert await transport.clear_bus() is False
+
+    reopened = _Resource()
+
+    def _reopen(generation, _resource_str, _bus_prefix, _timeout_ms) -> None:
+        with transport._state_lock:
+            if generation == transport._open_generation:
+                transport._resource = reopened
+                transport._session_open = True
+        transport._settle_executor_operation()
+
+    monkeypatch.setattr(transport, "_blocking_connect", _reopen)
+    await transport.open("GPIB0::12::INSTR")
     monkeypatch.setattr(transport, "_blocking_ifc", lambda: True)
-    assert await transport.send_ifc() is True
+    assert await transport.recover() is True
     await transport.close()
 
 
 @pytest.mark.asyncio
-async def test_gpib_cancelled_successful_query_does_not_poison_next_query() -> None:
+async def test_gpib_cancelled_successful_query_closes_retained_handle() -> None:
     import asyncio
 
     from cryodaq.drivers.transport.gpib import GPIBTransport
@@ -1089,11 +2047,12 @@ async def test_gpib_cancelled_successful_query_does_not_poison_next_query() -> N
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+    assert transport._open_settled.wait(5.0)
 
     assert transport._query_desynchronized is False
-    assert await transport.query("second") == "next-response"
-    await transport.close()
+    assert transport._resource is None
+    with pytest.raises(RuntimeError, match="not connected"):
+        await transport.query("second")
 
 
 @pytest.mark.asyncio
@@ -1140,16 +2099,19 @@ async def test_gpib_cancelled_queued_query_keeps_settlement_owner() -> None:
 
     task.cancel()
     await asyncio.sleep(0)
-    assert task.done() is False
+    # Cancellation returns immediately; the retained executor owner settles
+    # the queued VISA call before the next generation is admitted.
+    assert task.done() is True
     blocker_release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert transport._open_settled.is_set() is True
+    assert transport._open_settled.wait(5.0)
     assert transport._query_desynchronized is False
     assert calls == [("write", "queued"), ("read", None)]
-    assert await transport.query("next") == "settled-response"
-    await transport.close()
+    assert transport._resource is None
+    with pytest.raises(RuntimeError, match="not connected"):
+        await transport.query("next")
 
 
 @pytest.mark.asyncio
@@ -1221,9 +2183,10 @@ async def test_gpib_query_quarantine_survives_close_and_open(monkeypatch) -> Non
     monkeypatch.setattr(transport, "_blocking_connect", _reopen)
     await transport.open("GPIB0::12::INSTR")
 
-    with pytest.raises(RuntimeError, match="terminally desynchronized"):
+    with pytest.raises(RuntimeError, match="quarantined"):
         await transport.query("KRDG? 1")
     assert reopened.writes == []
-    await transport.write("OUTPUT 0")
-    assert reopened.writes == ["OUTPUT 0"]
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await transport.write("OUTPUT 0")
+    assert reopened.writes == []
     await transport.close()

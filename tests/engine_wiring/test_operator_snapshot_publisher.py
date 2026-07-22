@@ -47,7 +47,7 @@ def _snapshot(
     received_at: datetime | None = None,
 ) -> OperatorSnapshot:
     received = NOW + timedelta(seconds=revision) if received_at is None else received_at
-    cut = SnapshotCut(revision, NOW, received, source, SnapshotMode.LIVE)
+    cut = SnapshotCut(revision, NOW, received, source, SnapshotMode.LIVE, "experiment-1", source)
     status = SummaryStatus(
         OperatorPresentationState.CAUTION,
         float(revision),

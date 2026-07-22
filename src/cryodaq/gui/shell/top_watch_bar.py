@@ -9,6 +9,7 @@ docs/PHASE_UI1_V2_WIREFRAME.md section 3 — calibrate on lab PC later.
 
 from __future__ import annotations
 
+import html
 import logging
 import math
 import time
@@ -16,13 +17,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
-from cryodaq.gui.shell.alarm_sound import plan_from_response
 from cryodaq.gui.utils.plural import ru_plural
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,6 @@ _STALE_TIMEOUT_S = 30.0  # [calibrate] seconds with no reading → "ожидаю
 _PRESENTATION_INTERVAL_MS = 500  # DESIGN: RULE-DATA-002 — at most 2 Hz
 _FUTURE_SOURCE_TOLERANCE_S = 1.0
 _PRESSURE_VITAL = "pressure"
-
 _STATUS_EVIDENCE_RANK = {
     ChannelStatus.OK: 0,
     ChannelStatus.TIMEOUT: 1,
@@ -164,18 +163,6 @@ class _PendingVitalCut:
             self.clock_skew_evidence = reading
 
 
-# A3b: CRITICAL alarms beep three times, spaced so the operator hears three
-# distinct beeps rather than one stutter — same QApplication.beep() bell the
-# launcher uses for engine-down (no sound-asset pipeline in this codebase).
-_CRITICAL_BEEP_GAP_MS = 150
-
-
-def _beep_critical() -> None:
-    QApplication.beep()
-    QTimer.singleShot(_CRITICAL_BEEP_GAP_MS, QApplication.beep)
-    QTimer.singleShot(2 * _CRITICAL_BEEP_GAP_MS, QApplication.beep)
-
-
 def _format_pressure(p: float) -> str:
     """Format pressure as compact scientific notation (X.Xe±Y).
 
@@ -273,24 +260,16 @@ class TopWatchBar(QWidget):
         self._fast_timer.timeout.connect(self._poll_fast)
         self._fast_timer.start()
 
+        # Kept solely as a stopped test-isolation handle for legacy shell
+        # fixtures.  It has no callback, no poll command, and no sound role;
+        # audible annunciation belongs only to AnnunciationController.
+        self._slow_timer = QTimer(self)
+
         # 1 Hz channel summary refresh (cheap, just re-renders cache)
         self._channel_refresh_timer = QTimer(self)
         self._channel_refresh_timer.setInterval(1000)
         self._channel_refresh_timer.timeout.connect(self._refresh_channels)
         self._channel_refresh_timer.start()
-
-        # Alarm sound polling remains independent from the authoritative
-        # alarm snapshot/count owned by AlarmPanel.
-        self._slow_timer = QTimer(self)
-        self._slow_timer.setInterval(2000)
-        self._slow_timer.start()
-
-        # A3b: same 2s cadence carries the recent_alarms sound poll — one
-        # more slot on the existing timer, no new QTimer needed.
-        self._slow_timer.timeout.connect(self._poll_recent_alarms)
-        self._alarm_sound_last_seq = 0
-        self._alarm_sound_have_baseline = False
-        self._alarm_sound_worker = None
 
         # B.4: one bounded presentation/stale tick for persistent vitals.
         # Ingestion remains full-rate; only human-readable repaint is capped.
@@ -514,8 +493,14 @@ class TopWatchBar(QWidget):
 
     @classmethod
     def _provenance_text(cls, reading: Reading) -> str:
-        instrument = str(reading.instrument_id).strip() or "не указан"
-        channel = str(reading.channel).strip() or "не указан"
+        def plain(value: object) -> str:
+            text = str(value).strip() or "не указан"
+            # Qt tooltips auto-detect rich text.  Escape markup and replace
+            # controls so an untrusted Reading identity stays literal text.
+            return html.escape("".join(char if ord(char) >= 32 else "�" for char in text))
+
+        instrument = plain(reading.instrument_id)
+        channel = plain(reading.channel)
         return f"прибор: {instrument}; канал: {channel}; время: {cls._source_time_text(reading)}"
 
     def _render_vital(self, key: str, cut: _PendingVitalCut | None = None) -> None:
@@ -827,30 +812,6 @@ class TopWatchBar(QWidget):
         self._channel_label.setText(text)
         self._channel_label.setToolTip(", ".join(tooltip_parts))
         self._channel_label.setStyleSheet(f"color: {color};")
-
-    def _poll_recent_alarms(self) -> None:
-        """Poll recent_alarms for A3b sound. Skips if previous still in flight."""
-        if self._alarm_sound_worker is not None and not self._alarm_sound_worker.isFinished():
-            return
-        from cryodaq.gui.zmq_client import ZmqCommandWorker
-
-        self._alarm_sound_worker = ZmqCommandWorker(
-            {"cmd": "recent_alarms", "since_seq": self._alarm_sound_last_seq}, parent=self
-        )
-        self._alarm_sound_worker.finished.connect(self._on_recent_alarms_result)
-        self._alarm_sound_worker.start()
-
-    def _on_recent_alarms_result(self, result: dict) -> None:
-        if not result.get("ok"):
-            return
-        plan = plan_from_response(result, self._alarm_sound_last_seq, have_baseline=self._alarm_sound_have_baseline)
-        self._alarm_sound_have_baseline = True
-        self._alarm_sound_last_seq = plan.next_seq
-        for level in plan.new_levels:
-            if level == "CRITICAL":
-                _beep_critical()
-            else:
-                QApplication.beep()
 
     # ------------------------------------------------------------------
     # External setters (for direct injection from MainWindowV2 dispatchers)

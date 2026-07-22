@@ -344,11 +344,23 @@ class TelegramCommandBot:
         elif command in ("/help", "/start"):
             await self._send(chat_id, _HELP_TEXT)
         elif command == "/log":
-            log_text = text[len("/log") :].strip()
-            await self._cmd_log(chat_id, log_text, msg)
+            log_args = text[len("/log") :].strip().split(maxsplit=1)
+            if len(log_args) != 2:
+                await self._send(
+                    chat_id,
+                    "вќЊ РЈРєР°Р¶РёС‚Рµ experiment_id Рё С‚РµРєСЃС‚: /log <experiment_id> <text>",
+                )
+                return
+            await self._cmd_log(chat_id, log_args[1], log_args[0], msg)
         elif command == "/phase":
-            phase_arg = text[len("/phase") :].strip()
-            await self._cmd_phase(chat_id, phase_arg, msg)
+            phase_args = text[len("/phase") :].strip().split()
+            if len(phase_args) != 2:
+                await self._send(
+                    chat_id,
+                    "❌ Укажите фазу и точный experiment_id: /phase <фаза> <experiment_id>",
+                )
+                return
+            await self._cmd_phase(chat_id, phase_args[0], phase_args[1], msg)
         elif command == "/ask":
             query_text = text[len("/ask") :].strip()
             if not query_text:
@@ -581,7 +593,7 @@ class TelegramCommandBot:
             return hashlib.sha256(identity).hexdigest()[:32]
         return secrets.token_hex(16)
 
-    async def _cmd_log(self, chat_id: int, text: str, msg: dict) -> None:
+    async def _cmd_log(self, chat_id: int, text: str, experiment_id: str, msg: dict) -> None:
         if not text:
             await self._send(chat_id, "❌ Укажите текст: /log &lt;текст&gt;")
             return
@@ -594,10 +606,10 @@ class TelegramCommandBot:
             {
                 "cmd": "log_entry",
                 "request_id": self._operator_log_request_id(msg),
-                "experiment_unbound": True,
                 "message": text,
                 "author": username,
                 "source": "telegram",
+                "experiment_id": experiment_id,
             }
         )
         if result.get("ok"):
@@ -606,7 +618,7 @@ class TelegramCommandBot:
             logger.warning("Telegram /log failed: %s", result.get("error"))
             await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
-    async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
+    async def _cmd_phase(self, chat_id: int, phase: str, expected_experiment_id: str, msg: dict) -> None:
         # Phase 2c I.2: accept legacy aliases (cooling/warming) and
         # canonicalise to ExperimentPhase enum values.
         normalized = phase.strip().lower()
@@ -634,6 +646,7 @@ class TelegramCommandBot:
                 "experiment_id": experiment_id,
                 "phase": phase,
                 "operator": username,
+                "expected_experiment_id": expected_experiment_id,
             }
         )
         if result.get("ok"):

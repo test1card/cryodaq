@@ -40,6 +40,7 @@ cooldown:
   watchdog_margin_K: 1.0             # Т12 threshold = base_temp_K + this (default 6.0 K)
   watchdog_sustained_s: 300          # seconds Т12 must stay above threshold before firing
   watchdog_level: WARNING
+  cold_start_skip_margin_K: 5.0
 
   # Channels (must match channels.yaml short IDs).
   # Hardware mapping verified by architect at lab 2026-05-03 (C6 resolved):

@@ -32,7 +32,9 @@ class _FakeKeithleyTransport:
             assert match is not None
             return f"CRYODAQ_OFF_V1|{match.group(1)}|0\n"
         if "source.output" in c:
-            return "0"  # inactive channels report OFF
+            match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|", cmd)
+            assert match is not None
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|0"  # inactive channels report OFF
         if "measure.iv()" in c:
             return self._iv
         if "source.compliance" in c:

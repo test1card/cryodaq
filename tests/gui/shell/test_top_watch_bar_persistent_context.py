@@ -75,6 +75,21 @@ def _make_reading(
     )
 
 
+def test_provenance_identity_is_escaped_as_literal_tooltip_text() -> None:
+    reading = Reading(
+        channel="<b>channel</b>\x01",
+        value=1.0,
+        unit="K",
+        timestamp=datetime.now(UTC),
+        status=ChannelStatus.OK,
+        instrument_id="<img src=x onerror=bad>",
+    )
+
+    detail = TopWatchBar._provenance_text(reading)
+    assert "&lt;img src=x onerror=bad&gt;" in detail
+    assert "&lt;b&gt;channel&lt;/b&gt;�" in detail
+
+
 def test_constructs_with_channel_mgr(app, mock_channel_mgr):
     bar = TopWatchBar(mock_channel_mgr)
     _stop_timers(bar)

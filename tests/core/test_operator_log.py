@@ -80,6 +80,7 @@ async def test_log_entry_command_uses_active_experiment(
             "author": "petrov",
             "source": "gui",
             "tags": ["pressure"],
+            "experiment_id": exp_id,
         },
         writer,
         experiment_manager,
@@ -97,9 +98,7 @@ async def test_log_entry_command_uses_active_experiment(
     assert reading.metadata["experiment_id"] == exp_id
 
 
-async def test_log_get_filters_by_time_range(
-    tmp_path: Path, experiment_manager: ExperimentManager
-) -> None:
+async def test_log_get_filters_by_time_range(tmp_path: Path, experiment_manager: ExperimentManager) -> None:
     writer = SQLiteWriter(tmp_path)
     start_ts = datetime(2026, 3, 16, 8, 0, tzinfo=UTC)
     middle_ts = start_ts + timedelta(hours=1)

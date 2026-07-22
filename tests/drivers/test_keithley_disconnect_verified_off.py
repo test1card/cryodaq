@@ -139,8 +139,9 @@ async def test_transport_failure_cannot_stamp_off_proof(failure: str) -> None:
     driver._channels["smua"].active = True
 
     exact_off = await driver.emergency_off()
-    assert exact_off is (failure == "write")
-    assert driver._channels["smua"].active is (failure == "read")
+    assert exact_off is False
+    assert driver._channels["smua"].active is True
+    assert driver._output_off_verified["smua"] is False
     driver._connected = False
     assert await driver.emergency_off() is False
 

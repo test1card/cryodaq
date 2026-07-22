@@ -18,14 +18,30 @@ _MOCK_IDN = "Keithley Instruments Inc., Model 2604B, MOCK00001, 3.0.0"
 _MOCK_IV_RESPONSE = "0.01\t5.0"
 _CLOSE_TIMEOUT_S = 1.0
 _OPEN_CANCEL_SETTLE_TIMEOUT_S = 1.0
-_MOCK_OFF_CHALLENGE_RE = re.compile(
+_OFF_CHALLENGE_RE = re.compile(
     r'^print\(string\.format\("CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", '
     r"(smua|smub)\.source\.output\)\)$"
+)
+_QUARANTINE_OFF_WRITES = frozenset(
+    {
+        "smua.source.levelv = 0",
+        "smub.source.levelv = 0",
+        "smua.source.output = smua.OUTPUT_OFF",
+        "smub.source.output = smub.OUTPUT_OFF",
+    }
 )
 _MOCK_PRINTBUFFER_RE = re.compile(
     r"printbuffer\((\d+), (\d+), (smua|smub)\.nvbuffer1\.timestamps, "
     r"\3\.nvbuffer1\.sourcevalues, \3\.nvbuffer1\)"
 )
+
+
+class USBTMCIncompleteCloseError(RuntimeError):
+    """A VISA handle remains owned by an unsettled close operation.
+
+    A normal return from :meth:`USBTMCTransport.close` is therefore a terminal
+    settlement receipt, not merely evidence that a wrapper was invoked.
+    """
 
 
 def _run_with_timeout(fn, *, timeout_s: float, label: str) -> bool:
@@ -84,10 +100,14 @@ class USBTMCTransport:
         # the exact future owned until its late handles have been closed.
         self._open_future: ConcurrentFuture[tuple[Any, Any]] | None = None
         self._close_incomplete = False
+        self._close_cancellation: asyncio.CancelledError | None = None
         # A failed query may leave an unread or partial response in the VISA
         # session. Once that happens no later response can be attributed to
-        # its command with confidence. This latch is deliberately one-way.
+        # its command with confidence. Recovery requires a clean close and a
+        # genuinely successful new open.
         self._query_desynchronized = False
+        self._quarantine_clean_close = False
+        self._off_challenge_nonces: set[str] = set()
         # Внутренний счётчик для mock: имитация буфера измерений
         self._mock_buf_index: int = 0
 
@@ -106,6 +126,76 @@ class USBTMCTransport:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 
+    def _mark_query_desynchronized(self) -> None:
+        self._query_desynchronized = True
+        self._quarantine_clean_close = False
+
+    def _authorize_write_locked(self, cmd: str) -> None:
+        if self._query_desynchronized and (type(cmd) is not str or cmd not in _QUARANTINE_OFF_WRITES):
+            raise RuntimeError("USBTMC session is quarantined after query desynchronization")
+
+    def _authorize_query_locked(self, cmd: str) -> None:
+        if self._query_desynchronized and type(cmd) is not str:
+            raise RuntimeError("USBTMC session is quarantined after query desynchronization")
+        challenge = _OFF_CHALLENGE_RE.fullmatch(cmd)
+        if not self._query_desynchronized:
+            if challenge is not None:
+                self._off_challenge_nonces.add(challenge.group(1))
+            return
+        if challenge is None or challenge.group(1) in self._off_challenge_nonces:
+            raise RuntimeError("USBTMC session is quarantined after query desynchronization")
+        self._off_challenge_nonces.add(challenge.group(1))
+
+    async def _settle_owned_handle_close(
+        self,
+        resource: Any,
+        manager: Any,
+        *,
+        caller_cancelled: asyncio.CancelledError | None = None,
+    ) -> tuple[bool, asyncio.CancelledError | None]:
+        """Start bounded cleanup immediately, independent of shared executors."""
+
+        loop = asyncio.get_running_loop()
+        completion: asyncio.Future[tuple[bool, BaseException | None]] = loop.create_future()
+
+        def _publish(result: bool, error: BaseException | None) -> None:
+            if not completion.done():
+                completion.set_result((result, error))
+
+        def _worker() -> None:
+            try:
+                result = _run_with_timeout(
+                    lambda: self._blocking_close_handles(resource, manager),
+                    timeout_s=_CLOSE_TIMEOUT_S,
+                    label=self._resource_str or "usbtmc",
+                )
+                outcome = (result, None)
+            except BaseException as exc:
+                outcome = (False, exc)
+            try:
+                loop.call_soon_threadsafe(_publish, *outcome)
+            except RuntimeError:
+                log.critical("USBTMC: event loop closed before owned handle cleanup settled")
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"usbtmc-owned-close-{self._resource_str or 'usbtmc'}",
+        ).start()
+
+        while not completion.done():
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError as exc:
+                caller_cancelled = caller_cancelled or exc
+
+        closed, error = completion.result()
+        if error is not None:
+            if caller_cancelled is not None:
+                raise caller_cancelled from error
+            raise error
+        return closed, caller_cancelled
+
     async def _cleanup_open_handles(
         self,
         resource: Any,
@@ -115,37 +205,36 @@ class USBTMCTransport:
     ) -> None:
         """Own completed late handles through bounded close, then re-cancel."""
 
-        repeated_cancel: asyncio.CancelledError | None = None
         try:
-            cleanup_task = asyncio.create_task(
-                asyncio.to_thread(
-                    _run_with_timeout,
-                    lambda: self._blocking_close_handles(resource, manager),
-                    timeout_s=_CLOSE_TIMEOUT_S,
-                    label=self._resource_str or "usbtmc",
-                )
+            closed, repeated_cancel = await self._settle_owned_handle_close(
+                resource,
+                manager,
+                caller_cancelled=caller_cancelled,
             )
-            while not cleanup_task.done():
-                try:
-                    await asyncio.shield(cleanup_task)
-                except asyncio.CancelledError as exc:
-                    repeated_cancel = repeated_cancel or exc
-                except BaseException:
-                    break
-            try:
-                if not cleanup_task.result():
-                    self._close_incomplete = True
-                    log.critical(
-                        "USBTMC: cancelled-open handle close exceeded %.1fs; "
-                        "the owned close thread remains responsible for the handles",
-                        _CLOSE_TIMEOUT_S,
-                    )
-            except BaseException as exc:
+            if not closed:
                 self._close_incomplete = True
-                log.critical("USBTMC: cancelled-open cleanup failed: %s", exc)
+                log.critical(
+                    "USBTMC: cancelled-open handle close exceeded %.1fs; "
+                    "the owned close thread remains responsible for the handles",
+                    _CLOSE_TIMEOUT_S,
+                )
+        except BaseException as exc:
+            self._close_incomplete = True
+            log.critical("USBTMC: cancelled-open cleanup failed: %s", exc.__cause__ or exc)
+            raise
         finally:
             self._shutdown_executor()
         raise repeated_cancel or caller_cancelled
+
+    def _start_late_open_reaper(self, future: ConcurrentFuture[tuple[Any, Any]]) -> None:
+        """Hand a completed-or-pending late open to a non-event-loop reaper."""
+
+        threading.Thread(
+            target=self._close_late_open_result,
+            args=(future,),
+            daemon=True,
+            name=f"usbtmc-late-open-reaper-{self._resource_str or 'usbtmc'}",
+        ).start()
 
     def _close_late_open_result(self, future: ConcurrentFuture[tuple[Any, Any]]) -> None:
         """Own and close handles returned after a cancelled, timed-out open."""
@@ -155,11 +244,15 @@ class USBTMCTransport:
         except BaseException as exc:
             log.warning("USBTMC: cancelled VISA open eventually failed: %s", exc)
         else:
-            closed = _run_with_timeout(
-                lambda: self._blocking_close_handles(resource, manager),
-                timeout_s=_CLOSE_TIMEOUT_S,
-                label=self._resource_str or "usbtmc-late-open",
-            )
+            try:
+                closed = _run_with_timeout(
+                    lambda: self._blocking_close_handles(resource, manager),
+                    timeout_s=_CLOSE_TIMEOUT_S,
+                    label=self._resource_str or "usbtmc-late-open",
+                )
+            except BaseException as exc:
+                closed = False
+                log.critical("USBTMC: late-open handle cleanup failed: %s", exc)
             if not closed:
                 self._close_incomplete = True
                 log.critical(
@@ -194,10 +287,10 @@ class USBTMCTransport:
                     "owned late-handle reaper remains active and reconnect is blocked",
                     _OPEN_CANCEL_SETTLE_TIMEOUT_S,
                 )
-                open_future.add_done_callback(self._close_late_open_result)
+                open_future.add_done_callback(self._start_late_open_reaper)
                 raise caller_cancelled
             except asyncio.CancelledError:
-                open_future.add_done_callback(self._close_late_open_result)
+                open_future.add_done_callback(self._start_late_open_reaper)
                 raise caller_cancelled
             except BaseException:
                 self._open_future = None
@@ -224,7 +317,12 @@ class USBTMCTransport:
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         cancelling_at_start = task.cancelling() if task is not None else 0
-        operation = loop.run_in_executor(self._get_executor(), fn, *args)
+        try:
+            operation = loop.run_in_executor(self._get_executor(), fn, *args)
+        except BaseException:
+            if quarantine_query_failure:
+                self._mark_query_desynchronized()
+            raise
         caller_cancelled: asyncio.CancelledError | None = None
         while not operation.done():
             try:
@@ -237,10 +335,15 @@ class USBTMCTransport:
         try:
             result = operation.result()
         except BaseException as operation_error:
-            if quarantine_query_failure:
-                self._query_desynchronized = True
+            cancel_failed = caller_cancelled is not None or (
+                task is not None and task.cancelling() > cancelling_at_start
+            )
+            if quarantine_query_failure or cancel_failed:
+                self._mark_query_desynchronized()
             if caller_cancelled is not None:
                 raise caller_cancelled from operation_error
+            if cancel_failed:
+                raise asyncio.CancelledError() from operation_error
             raise
         if caller_cancelled is None and task is not None and task.cancelling() > cancelling_at_start:
             caller_cancelled = asyncio.CancelledError()
@@ -253,39 +356,23 @@ class USBTMCTransport:
 
         task = asyncio.current_task()
         cancelling_at_start = task.cancelling() if task is not None else 0
-        close_task = asyncio.create_task(
-            asyncio.to_thread(
-                _run_with_timeout,
-                lambda: self._blocking_close_handles(resource, manager),
-                timeout_s=_CLOSE_TIMEOUT_S,
-                label=self._resource_str or "usbtmc",
-            )
-        )
-        caller_cancelled: asyncio.CancelledError | None = None
-        while not close_task.done():
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError as exc:
-                caller_cancelled = caller_cancelled or exc
-            except BaseException:
-                # The result block below is the single containment point that
-                # marks the transport terminal and preserves cancellation.
-                break
         try:
-            closed = close_task.result()
+            closed, caller_cancelled = await self._settle_owned_handle_close(resource, manager)
         except BaseException as close_error:
             self._close_incomplete = True
-            log.critical("USBTMC: owned handle-close task failed: %s", close_error)
-            if caller_cancelled is not None:
-                raise caller_cancelled from close_error
+            log.critical("USBTMC: owned handle-close task failed: %s", close_error.__cause__ or close_error)
             raise
         if not closed:
             self._close_incomplete = True
             log.critical("USBTMC: handle close timed out; this transport is terminal and cannot reopen")
+        elif self._query_desynchronized:
+            self._quarantine_clean_close = True
         if caller_cancelled is None and task is not None and task.cancelling() > cancelling_at_start:
             caller_cancelled = asyncio.CancelledError()
-        if caller_cancelled is not None:
-            raise caller_cancelled
+        # Re-propagate cancellation only after ``close`` commits the settled
+        # handle state; raising here would falsely quarantine a successful
+        # close.
+        self._close_cancellation = caller_cancelled
         return closed
 
     # ------------------------------------------------------------------
@@ -302,10 +389,12 @@ class USBTMCTransport:
             ``"USB0::0x05E6::0x2604::SERIALNUM::INSTR"``.
         """
         async with self._lock:
-            if not self.mock and (self._resource is not None or self._rm is not None):
-                raise RuntimeError("USBTMC resource is already open; close it before reopening")
             if self._close_incomplete:
                 raise RuntimeError("USBTMC transport is terminal after an incomplete close")
+            if not self.mock and (self._resource is not None or self._rm is not None):
+                raise RuntimeError("USBTMC resource is already open; close it before reopening")
+            if self._query_desynchronized and not self._quarantine_clean_close:
+                raise RuntimeError("USBTMC quarantined session requires a completed clean close before reopening")
             self._resource_str = resource_str
 
             if self.mock:
@@ -314,6 +403,10 @@ class USBTMCTransport:
 
             try:
                 await self._settle_open(resource_str)
+                if self._resource is None or self._rm is None:
+                    raise RuntimeError("USBTMC VISA open completed without resource handles")
+                self._query_desynchronized = False
+                self._quarantine_clean_close = False
                 log.info("USBTMC: ресурс %s успешно открыт", resource_str)
             except Exception as exc:
                 log.error("USBTMC: ошибка открытия ресурса %s — %s", resource_str, exc)
@@ -326,6 +419,11 @@ class USBTMCTransport:
                 log.info("USBTMC [mock]: имитация закрытия ресурса %s", self._resource_str)
                 return
 
+            if self._close_incomplete:
+                raise USBTMCIncompleteCloseError(
+                    "USBTMC retained VISA close has not settled; reconnect and replacement are blocked"
+                )
+
             if self._resource is None and self._rm is None:
                 if self._open_future is None:
                     self._shutdown_executor()
@@ -333,23 +431,30 @@ class USBTMCTransport:
 
             resource = self._resource
             manager = self._rm
-            self._resource = None
-            self._rm = None
+            self._close_cancellation = None
             try:
                 closed = await self._settle_handle_close(resource, manager)
-                if closed:
-                    log.info("USBTMC: ресурс %s закрыт", self._resource_str)
-            except Exception as exc:
+            except BaseException as exc:
                 self._close_incomplete = True
-                log.critical(
-                    "USBTMC: ошибка при закрытии ресурса %s — %s",
-                    self._resource_str,
-                    exc,
-                )
-            finally:
-                # Shut down the dedicated executor so threads do not
-                # accumulate across reconnects.
                 self._shutdown_executor()
+                log.critical("USBTMC: close of resource %s failed: %s", self._resource_str, exc)
+                raise USBTMCIncompleteCloseError("USBTMC close failed before the retained VISA handle settled") from exc
+            if not closed:
+                self._close_incomplete = True
+                self._shutdown_executor()
+                raise USBTMCIncompleteCloseError(
+                    "USBTMC close timed out while the retained VISA handle remains owned by a worker; "
+                    "terminally quarantined until settlement"
+                )
+
+            self._resource = None
+            self._rm = None
+            self._shutdown_executor()
+            caller_cancelled = self._close_cancellation
+            self._close_cancellation = None
+            if caller_cancelled is not None:
+                raise caller_cancelled
+            log.info("USBTMC: ресурс %s закрыт", self._resource_str)
 
     async def write(self, cmd: str) -> None:
         """Отправить TSP-команду прибору без ожидания ответа.
@@ -360,11 +465,11 @@ class USBTMCTransport:
             TSP-команда на языке Lua, например
             ``"smua.source.output = smua.OUTPUT_OFF"``.
         """
-        if self.mock:
-            log.debug("USBTMC [mock] write: %s", cmd)
-            return
-
         async with self._lock:
+            self._authorize_write_locked(cmd)
+            if self.mock:
+                log.debug("USBTMC [mock] write: %s", cmd)
+                return
             try:
                 await self._settle_executor_call(self._resource.write, cmd)
                 log.debug("USBTMC write → %s: %s", self._resource_str, cmd)
@@ -385,14 +490,15 @@ class USBTMCTransport:
         data:
             Байтовая последовательность для передачи в прибор.
         """
-        if self.mock:
-            log.debug(
-                "USBTMC [mock] write_raw: %d байт",
-                len(data),
-            )
-            return
-
         async with self._lock:
+            if self._query_desynchronized:
+                raise RuntimeError("USBTMC session is quarantined after query desynchronization")
+            if self.mock:
+                log.debug(
+                    "USBTMC [mock] write_raw: %d байт",
+                    len(data),
+                )
+                return
             try:
                 await self._settle_executor_call(self._resource.write_raw, data)
                 log.debug(
@@ -424,15 +530,17 @@ class USBTMCTransport:
         str
             Ответ прибора без завершающих пробелов и символов новой строки.
         """
-        if self.mock:
-            response = self._mock_response(cmd)
-            log.debug("USBTMC [mock] query '%s' → '%s'", cmd, response)
-            return response
-
         async with self._lock:
+            self._authorize_query_locked(cmd)
+            if self.mock:
+                try:
+                    response = self._mock_response(cmd)
+                except BaseException:
+                    self._mark_query_desynchronized()
+                    raise
+                log.debug("USBTMC [mock] query '%s' → '%s'", cmd, response)
+                return response
             try:
-                if self._query_desynchronized:
-                    raise RuntimeError("USBTMC query channel is terminally desynchronized")
                 response: str = await self._settle_executor_call(
                     self._blocking_query,
                     cmd,
@@ -516,7 +624,7 @@ class USBTMCTransport:
             "print(cryodaq_wdog_tripped)",
         }:
             return "0"
-        challenge = _MOCK_OFF_CHALLENGE_RE.fullmatch(cmd)
+        challenge = _OFF_CHALLENGE_RE.fullmatch(cmd)
         if challenge is not None:
             return f"CRYODAQ_OFF_V1|{challenge.group(1)}|0"
         if _MOCK_PRINTBUFFER_RE.fullmatch(cmd) is not None:

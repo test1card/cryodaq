@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QFrame, QScrollArea
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.dashboard.dashboard_view import _PRESENTATION_INTERVAL_MS
+from cryodaq.operator_snapshot import ReadinessTruth, SafetyLifecycle
 
 
 class _DeferredSignal:
@@ -68,10 +69,17 @@ def _scope_result(entries: list[dict], *, log_scope: str = "all") -> dict:
     }
 
 
-def _settle_connection(view: DashboardView) -> None:
+def _settle_connection(view: DashboardView, *, experiment_id: str) -> None:
     view.set_connected(True)
     assert len(_DeferredWorker.instances) == 1
     _DeferredWorker.instances.pop(0).finish(_scope_result([]))
+    view.set_authority_receipt(
+        experiment_id=experiment_id,
+        producer_id="engine-test",
+        revision=1,
+        lifecycle=SafetyLifecycle.READY,
+        readiness=ReadinessTruth.READY,
+    )
 
 
 def _commit_result(context: dict, *, entry_id: int = 1) -> dict:
@@ -88,7 +96,7 @@ def _commit_result(context: dict, *, entry_id: int = 1) -> dict:
             "schema": "operator_log_commit_v1",
             "request_id": context["request_id"],
             "entry_id": entry_id,
-            "experiment_id": None,
+            "experiment_id": context["experiment_id"],
             "committed": True,
         },
     }
@@ -108,6 +116,8 @@ def _phase_commit_result(context: dict) -> dict:
             "committed": True,
         },
     }
+
+
 @pytest.fixture(scope="module")
 def app():
     qapp = QApplication.instance() or QApplication([])
@@ -119,6 +129,27 @@ def test_dashboard_view_constructs(app):
     mgr = ChannelManager()
     view = DashboardView(mgr)
     assert view is not None
+
+
+def test_dashboard_connection_contract_disables_mutations_until_live_and_after_loss(app):
+    view = DashboardView(ChannelManager())
+
+    assert not view._connected
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
+
+    view.set_connected(True)
+    view.set_authority_receipt(
+        experiment_id=None,
+        producer_id="engine-test",
+        revision=1,
+    )
+    assert view._phase_widget._create_btn.isEnabled()
+    assert view._quick_log._send_btn.isEnabled()
+
+    view.set_connected(False)
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
 
 
 def test_dashboard_presentation_tick_is_bounded_to_two_hz(app):
@@ -298,6 +329,12 @@ def test_dashboard_live_config_signals_still_persist(app, monkeypatch):
     saved: list[bool] = []
     monkeypatch.setattr(mgr, "save", lambda: saved.append(True))
     view = DashboardView(mgr)
+    view.set_connected(True)
+    view.set_authority_receipt(
+        experiment_id=None,
+        producer_id="engine-test",
+        revision=1,
+    )
 
     view._sensor_grid.rename_requested.emit("Т1", "Новое")
     view._sensor_grid.hide_requested.emit("Т1")
@@ -306,6 +343,24 @@ def test_dashboard_live_config_signals_still_persist(app, monkeypatch):
     assert mgr.get_name("Т1") == "Новое"
     assert mgr.is_visible("Т1") is False
     assert saved == [True, True]
+
+
+def test_dashboard_connected_without_authority_cannot_hide_or_save(app, monkeypatch):
+    """Transport connectivity alone cannot authorize persisted configuration changes."""
+    mgr = ChannelManager()
+    mgr._channels = {"T1": {"name": "Original", "visible": True}}
+    saved: list[bool] = []
+    monkeypatch.setattr(mgr, "save", lambda: saved.append(True))
+    view = DashboardView(mgr)
+    view.set_connected(True)
+
+    view._sensor_grid.hide_requested.emit("T1")
+    app.processEvents()
+
+    assert view._connected is True
+    assert view._authority_valid is False
+    assert mgr.is_visible("T1") is True
+    assert saved == []
 
 
 def test_dashboard_quick_log_is_fail_closed_while_disconnected(app, monkeypatch):
@@ -325,7 +380,7 @@ def test_dashboard_quick_log_is_fail_closed_while_disconnected(app, monkeypatch)
 def test_dashboard_quick_log_requires_exact_commit_receipt(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-log")
     assert view._quick_log is not None
     view._quick_log._input.setText("Проверить persistence-first")
 
@@ -337,8 +392,8 @@ def test_dashboard_quick_log_requires_exact_commit_receipt(app, monkeypatch):
     assert context is not None
     assert worker.payload == context["payload"]
     assert worker.payload["cmd"] == "log_entry"
-    assert worker.payload["experiment_unbound"] is True
-    assert "experiment_id" not in worker.payload
+    assert worker.payload["experiment_id"] == "exp-log"
+    assert "experiment_unbound" not in worker.payload
     assert len(worker.payload["request_id"]) == 32
     assert view._quick_log._input.text() == "Проверить persistence-first"
 
@@ -357,7 +412,7 @@ def test_dashboard_quick_log_requires_exact_commit_receipt(app, monkeypatch):
 def test_dashboard_quick_log_unknown_retries_identical_payload(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-log")
     assert view._quick_log is not None
     view._quick_log._input.setText("Не дублировать при таймауте")
     view._quick_log._on_submit()
@@ -382,7 +437,7 @@ def test_dashboard_quick_log_unknown_retries_identical_payload(app, monkeypatch)
 def test_dashboard_quick_log_forged_receipt_keeps_draft_unknown(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-log")
     assert view._quick_log is not None
     view._quick_log._input.setText("Не доверять чужому receipt")
     view._quick_log._on_submit()
@@ -402,7 +457,7 @@ def test_dashboard_quick_log_forged_receipt_keeps_draft_unknown(app, monkeypatch
 def test_dashboard_quick_log_accepts_exact_late_receipt_after_disconnect(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-log")
     assert view._quick_log is not None
     view._quick_log._input.setText("Поздний точный receipt")
     view._quick_log._on_submit()
@@ -424,6 +479,13 @@ def test_dashboard_quick_log_poll_requires_exact_global_scope_and_retains_last_g
     view.set_connected(True)
     first = _DeferredWorker.instances.pop(0)
     first.finish(_scope_result([{"id": 50, "timestamp": "2026-07-19T08:00:00+00:00", "message": "Последнее"}]))
+    view.set_authority_receipt(
+        experiment_id="exp-log",
+        producer_id="engine-test",
+        revision=1,
+        lifecycle=SafetyLifecycle.READY,
+        readiness=ReadinessTruth.READY,
+    )
     assert view._quick_log is not None
     assert "Последнее" in view._quick_log._entry_labels[0].text()
 
@@ -443,7 +505,7 @@ def test_dashboard_quick_log_poll_requires_exact_global_scope_and_retains_last_g
 def test_dashboard_quick_log_poll_is_single_flight_and_coalesced(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-log")
 
     view._poll_log_entries()
     first = _DeferredWorker.instances[0]
@@ -463,7 +525,7 @@ def test_dashboard_quick_log_poll_is_single_flight_and_coalesced(app, monkeypatc
 def test_dashboard_phase_command_requires_exact_experiment_and_reconciles(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-exact")
     view.on_experiment_status(
         {
             "active_experiment": {"experiment_id": "exp-exact", "name": "E"},
@@ -483,6 +545,7 @@ def test_dashboard_phase_command_requires_exact_experiment_and_reconciles(app, m
         "experiment_id": "exp-exact",
         "phase": "cooldown",
         "operator": "",
+        "expected_experiment_id": "exp-exact",
     }
     mutation.finish(_phase_commit_result(context))
 
@@ -506,7 +569,7 @@ def test_dashboard_phase_command_requires_exact_experiment_and_reconciles(app, m
 def test_dashboard_phase_command_without_exact_id_never_constructs_worker(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-authorized")
     view.on_experiment_status(
         {
             "active_experiment": {"name": "Legacy-shaped status"},
@@ -524,7 +587,7 @@ def test_dashboard_phase_command_without_exact_id_never_constructs_worker(app, m
 def test_dashboard_phase_timeout_never_replays_mutation_and_uses_ordered_read(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-timeout")
     view.on_experiment_status(
         {
             "active_experiment": {"experiment_id": "exp-timeout"},
@@ -557,7 +620,7 @@ def test_dashboard_phase_timeout_never_replays_mutation_and_uses_ordered_read(ap
 def test_dashboard_ignores_phase_reply_after_experiment_context_changes(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
-    _settle_connection(view)
+    _settle_connection(view, experiment_id="exp-old")
     view.on_experiment_status(
         {
             "active_experiment": {"experiment_id": "exp-old"},

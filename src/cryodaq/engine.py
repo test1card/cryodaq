@@ -78,16 +78,12 @@ from cryodaq.core.operator_log import (
 )
 from cryodaq.core.path_jail import resolve_within
 from cryodaq.core.physical_alarms_config import (
-    load_channel_landmarks,
-    load_physical_alarms_config,
+    load_production_physical_alarms_config,
 )
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
-from cryodaq.core.safety_pattern_liveness import (
-    SafetyPatternLivenessError,
-    validate_safety_pattern_liveness,
-)
+from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.core.scheduler import (
     InstrumentConfig,
     ReviewedSourceSettlementIncomplete,
@@ -230,6 +226,10 @@ async def _run_keithley_command(
         return await safety_manager.request_stop(channel=smu_channel)
 
     if action == "keithley_emergency_off":
+        # Preserve omitted channel as the literal global scope.  Normalizing
+        # None would silently turn a global OFF request into smua-only.
+        if channel is None:
+            return await safety_manager.emergency_off(channel=None)
         smu_channel = normalize_smu_channel(channel)
         return await safety_manager.emergency_off(channel=smu_channel)
 
@@ -324,17 +324,35 @@ async def _run_operator_log_command(
             raise ValueError("Operator log message must not be empty.")
 
         experiment_id = cmd.get("experiment_id")
-        if experiment_id is None and cmd.get("current_experiment", True):
-            experiment_id = experiment_manager.active_experiment_id
-
-        entry = await writer.append_operator_log(
-            message=message,
-            author=str(cmd.get("author", "")).strip(),
-            source=str(cmd.get("source", "")).strip() or "command",
-            experiment_id=str(experiment_id) if experiment_id is not None else None,
-            tags=cmd.get("tags"),
-            timestamp=_parse_log_time(cmd.get("timestamp")),
-        )
+        if type(experiment_id) is not str or not experiment_id.strip():
+            raise ValueError("experiment_id is required for operator log mutations.")
+        with experiment_manager.experiment_cas(experiment_id):
+            experiment_manager.assert_experiment_cas(experiment_id)
+            write_owner = asyncio.create_task(
+                writer.append_operator_log(
+                    message=message,
+                    author=str(cmd.get("author", "")).strip(),
+                    source=str(cmd.get("source", "")).strip() or "command",
+                    experiment_id=experiment_id,
+                    tags=cmd.get("tags"),
+                    timestamp=_parse_log_time(cmd.get("timestamp")),
+                ),
+                name="operator_log_durable_write",
+            )
+            caller_cancelled: asyncio.CancelledError | None = None
+            while not write_owner.done():
+                try:
+                    await asyncio.shield(write_owner)
+                except asyncio.CancelledError as exc:
+                    caller_cancelled = caller_cancelled or exc
+            try:
+                entry = write_owner.result()
+            except BaseException as operation_error:
+                if caller_cancelled is not None:
+                    raise caller_cancelled from operation_error
+                raise
+            if caller_cancelled is not None:
+                raise caller_cancelled
         await _publish_operator_log_entry(broker, entry)
         return {"ok": True, "entry": entry.to_payload()}
 
@@ -3467,8 +3485,12 @@ async def _handle_gui_command(
                     asyncio.shield(status_task),
                     timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
                 )
-            except TimeoutError as exc:
-                raise TimeoutError(f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)") from exc
+            except TimeoutError:
+                return {
+                    "ok": False,
+                    "error_code": "experiment_status_timeout",
+                    "error": f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)",
+                }
         if action in _EXPERIMENT_READ_ACTIONS:
             if not context.experiment_commands_accepting:
                 return {
@@ -3812,32 +3834,20 @@ async def _run_engine(*, mock: bool = False) -> None:
         len(v3_patterns),
         len(merged_patterns),
     )
+    # F-1 startup diagnostic: resolve every canonical protected expression to
+    # one exact raw emitted label before AdaptiveThrottle is constructed.  A
+    # missing, ambiguous, or colliding binding is a startup configuration
+    # error; do not boot with an optimistic/raw-substring fallback.
+    merged_patterns = validate_safety_pattern_liveness(
+        descriptor_catalog=live_descriptor_catalog,
+        interlocks_config_path=interlocks_cfg,
+        safety_manager=safety_manager,
+        adaptive_throttle_patterns=merged_patterns,
+    )
     adaptive_throttle = AdaptiveThrottle(
         housekeeping_raw.get("adaptive_throttle", {}),
         protected_patterns=merged_patterns,
     )
-
-    # F-1 startup diagnostic: a dead CRITICAL/safety pattern silently disarms
-    # its runtime consumer. Validate the exact protected-pattern union supplied
-    # to AdaptiveThrottle against the SELECTED descriptor manifest, before any
-    # broker subscriber, writer, scheduler, or acquisition exists. TEMPORARY
-    # no-brick policy for the lab build: catch only this diagnostic exception,
-    # log it at CRITICAL, and continue until the exact lab-local manifest has
-    # been validated and recorded. Then remove this catch to enable the
-    # exception's intended fail-closed exit-2 behavior.
-    try:
-        validate_safety_pattern_liveness(
-            descriptor_catalog=live_descriptor_catalog,
-            interlocks_config_path=interlocks_cfg,
-            safety_manager=safety_manager,
-            adaptive_throttle_patterns=merged_patterns,
-        )
-    except SafetyPatternLivenessError as exc:
-        logger.critical(
-            "TEMPORARY LAB BUILD: startup safety-pattern liveness failed; "
-            "continuing boot until the selected lab manifest is validated:\n%s",
-            exc,
-        )
 
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR, channel_catalog=live_descriptor_catalog)
@@ -4024,23 +4034,18 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # --- Physical alarms (F-X v3): CooldownAlarm + VacuumGuard ---
     _phys_alarms_yaml = _CONFIG_DIR / "physical_alarms.yaml"
-    _cooldown_cfg, _vacuum_cfg = load_physical_alarms_config(_phys_alarms_yaml)
+    _cooldown_cfg, _vacuum_cfg, _landmarks = load_production_physical_alarms_config(_phys_alarms_yaml)
 
     # F-ChannelLandmarks: install hardware-pinned landmark map (Т11/Т12 with
     # operator-phrasing aliases) on the shared ChannelManager. The query
     # agent's IntentClassifier reads it via channel_manager.get_landmarks()
     # to resolve phrases like "азотная плита" to the correct channel even
     # when an experiment-level alias has drifted onto another channel.
-    try:
-        _landmarks = load_channel_landmarks(_phys_alarms_yaml)
-        get_channel_manager().set_landmarks(_landmarks)
-        if _landmarks:
-            logger.info(
-                "ChannelLandmarks: загружены для каналов %s",
-                ", ".join(sorted(_landmarks)),
-            )
-    except Exception as exc:
-        logger.warning("ChannelLandmarks: ошибка загрузки — %s", exc, exc_info=True)
+    get_channel_manager().set_landmarks(_landmarks)
+    logger.info(
+        "ChannelLandmarks: загружены для каналов %s",
+        ", ".join(sorted(_landmarks)),
+    )
 
     # Resolve model path relative to project root (not process cwd)
     _model_path_str = _cooldown_cfg.get("predictor_model_path", "model/predictor_model.json")

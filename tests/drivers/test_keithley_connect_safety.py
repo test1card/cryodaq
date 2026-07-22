@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
+from cryodaq.drivers.instruments.keithley_2604b import (
+    Keithley2604B,
+    TransportTeardownIncompleteError,
+)
+from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError
 
 _CANONICAL_IDN = "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
 _OFF_NONCE_RE = re.compile(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g")
@@ -217,8 +221,8 @@ async def test_emergency_off_returns_true_in_mock_mode():
 
 
 @pytest.mark.asyncio
-async def test_emergency_off_accepts_exact_readback_when_output_off_write_raises():
-    """A fresh current-nonce OFF readback is authoritative despite write status."""
+async def test_emergency_off_fails_closed_when_output_off_write_raises():
+    """An ambiguous OFF write cannot report verified-OFF success."""
     k = _make_keithley(mock=False)
     transport = MagicMock()
 
@@ -231,7 +235,86 @@ async def test_emergency_off_accepts_exact_readback_when_output_off_write_raises
     k._transport = transport
     k._connected = True
 
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is False
+
+
+@pytest.mark.asyncio
+async def test_emergency_off_single_channel_uses_exact_quarantine_recovery_traffic(monkeypatch):
+    from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+    writes: list[str] = []
+    queries: list[str] = []
+    nonce = "d" * 32
+
+    class _Resource:
+        timeout = 0
+
+        def query(self, command: str) -> str:
+            queries.append(command)
+            if command == "poison-query":
+                raise OSError("USBTMC response framing lost")
+            assert command == f'print(string.format("CRYODAQ_OFF_V1|{nonce}|%g", smua.source.output))'
+            return f"CRYODAQ_OFF_V1|{nonce}|0\n"
+
+        def write(self, command: str) -> None:
+            writes.append(command)
+
+        def close(self) -> None:
+            return None
+
+    class _Manager:
+        def close(self) -> None:
+            return None
+
+    transport = USBTMCTransport(mock=False)
+    transport._resource = _Resource()
+    transport._rm = _Manager()
+    with pytest.raises(OSError, match="framing lost"):
+        await transport.query("poison-query")
+
+    k = _make_keithley(mock=False)
+    k._transport = transport
+    k._connected = True
+    monkeypatch.setattr("cryodaq.drivers.instruments.keithley_2604b.secrets.token_hex", lambda _size: nonce)
+
+    assert await k.emergency_off("smua") is True
+    assert writes == [
+        "smua.source.levelv = 0",
+        "smua.source.output = smua.OUTPUT_OFF",
+    ]
+    assert queries == [
+        "poison-query",
+        f'print(string.format("CRYODAQ_OFF_V1|{nonce}|%g", smua.source.output))',
+    ]
+    await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_transport_close_blocks_keithley_disconnect_and_reconnect() -> None:
+    k = _make_keithley(mock=False)
+    transport = MagicMock()
+    transport.close = AsyncMock(side_effect=USBTMCIncompleteCloseError("retained handle is unsettled"))
+    transport.open = AsyncMock()
+    k._transport = transport
+    k._connected = True
+    k._output_off_verified = {"smua": True, "smub": True}
+    k._output_off_verified_generation = {
+        "smua": k._connection_generation,
+        "smub": k._connection_generation,
+    }
+    k._output_off_verified_epoch = {
+        "smua": k._source_command_epoch["smua"],
+        "smub": k._source_command_epoch["smub"],
+    }
+
+    with pytest.raises(TransportTeardownIncompleteError, match="teardown is incomplete"):
+        await k.disconnect()
+
+    assert k.connected is True
+    assert k._teardown_incomplete is True
+    with pytest.raises(TransportTeardownIncompleteError, match="reconnect refused"):
+        await k.connect()
+    transport.open.assert_not_awaited()
 
 
 @pytest.mark.asyncio

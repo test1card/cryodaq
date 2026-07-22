@@ -18,7 +18,7 @@ from typing import Any
 
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
-from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,10 @@ class OutputStateUnverifiedError(RuntimeError):
     (SafetyManager) must fail CLOSED and latch a fault rather than report a
     clean SAFE_OFF.
     """
+
+
+class TransportTeardownIncompleteError(RuntimeError):
+    """The source transport has not produced a terminal close settlement."""
 
 
 # Minimum measurable current for resistance calculation (avoid division by noise).
@@ -320,6 +324,7 @@ class Keithley2604B(InstrumentDriver):
         # Connection-scoped evidence: only OFF readback collected in the
         # current connection generation may authorize transport teardown.
         self._connection_generation = 0
+        self._teardown_incomplete = False
         self._connect_in_progress = False
         self._disconnect_in_progress = False
         self._source_command_epoch: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
@@ -343,6 +348,10 @@ class Keithley2604B(InstrumentDriver):
         }
 
     async def connect(self) -> None:
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(
+                f"{self.name}: reconnect refused while the previous VISA close remains unsettled"
+            )
         if self._connected or self._connect_in_progress or self._disconnect_in_progress:
             raise RuntimeError(f"{self.name}: connect already active")
         if any(self._source_start_token.values()) or any(self._source_off_depth.values()):
@@ -432,6 +441,8 @@ class Keithley2604B(InstrumentDriver):
             try:
                 close_task.result()
             except BaseException as exc:
+                if isinstance(exc, USBTMCIncompleteCloseError):
+                    self._teardown_incomplete = True
                 log.critical("%s: failed-connect transport cleanup failed: %s", self.name, exc)
         finally:
             self._connected = False
@@ -440,6 +451,8 @@ class Keithley2604B(InstrumentDriver):
             self._revoke_off_evidence()
 
     async def disconnect(self) -> None:
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(f"{self.name}: previous transport close remains unsettled")
         if self._connect_in_progress or self._disconnect_in_progress:
             raise RuntimeError(f"{self.name}: lifecycle transition blocks disconnect")
         self._disconnect_in_progress = True
@@ -484,6 +497,7 @@ class Keithley2604B(InstrumentDriver):
                 terminal_error = terminal_error or exc
 
             close_task = asyncio.create_task(self._transport.close())
+            close_settled = False
             while not close_task.done():
                 try:
                     await asyncio.shield(close_task)
@@ -493,20 +507,29 @@ class Keithley2604B(InstrumentDriver):
                     break
             try:
                 close_task.result()
+                close_settled = True
             except asyncio.CancelledError as exc:
                 pending_cancel = pending_cancel or exc
             except BaseException as exc:
                 terminal_error = terminal_error or exc
             finally:
-                self._connected = False
-                self._instrument_id = ""
-                self._wdog_armed = False
-                self._wdog_autonomous = False
-                self._revoke_off_evidence()
+                if close_settled:
+                    self._connected = False
+                    self._instrument_id = ""
+                    self._wdog_armed = False
+                    self._wdog_autonomous = False
+                    self._revoke_off_evidence()
+                else:
+                    self._teardown_incomplete = True
+                    self._unsafe_output_state = True
 
             if pending_cancel is not None:
                 raise pending_cancel
             if terminal_error is not None:
+                if isinstance(terminal_error, USBTMCIncompleteCloseError):
+                    raise TransportTeardownIncompleteError(
+                        f"{self.name}: VISA teardown is incomplete; reconnect remains blocked"
+                    ) from terminal_error
                 raise terminal_error
         finally:
             self._disconnect_in_progress = False
@@ -795,6 +818,7 @@ class Keithley2604B(InstrumentDriver):
             return all_confirmed
 
         deferred_error: BaseException | None = None
+        command_failed = {smu_channel: False for smu_channel in channels}
         for smu_channel in channels:
             for command in (
                 f"{smu_channel}.source.levelv = 0",
@@ -803,6 +827,7 @@ class Keithley2604B(InstrumentDriver):
                 try:
                     await self._transport.write(command)
                 except Exception as exc:
+                    command_failed[smu_channel] = True
                     log.critical(
                         "%s: SAFETY: %s command failed on %s (%s): %s",
                         self.name,
@@ -812,6 +837,7 @@ class Keithley2604B(InstrumentDriver):
                         exc,
                     )
                 except BaseException as exc:
+                    command_failed[smu_channel] = True
                     deferred_error = deferred_error or exc
                     log.critical(
                         "%s: SAFETY: %s command interrupted on %s (%s): %s",
@@ -845,7 +871,7 @@ class Keithley2604B(InstrumentDriver):
                     exc,
                 )
                 readback_confirmed = False
-            if readback_confirmed:
+            if readback_confirmed and not command_failed[smu_channel]:
                 committed = self._mark_channel_off_verified(
                     smu_channel,
                     generation=generation,

@@ -26,6 +26,7 @@ from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 from cryodaq.gui.dashboard.quick_log_block import QuickLogBlock
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
 from cryodaq.gui.state.descriptor_store import IdentityStatus
+from cryodaq.operator_snapshot import OperatorSnapshot, ReadinessTruth, SafetyLifecycle, SnapshotMode
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,9 @@ class DashboardView(QScrollArea):
         self._phase_worker = None
         self._phase_context: dict[str, Any] | None = None
         self._phase_reconcile_worker = None
+        self._authority_valid = False
+        self._authority_experiment_id: str | None = None
+        self._authority_revision: int | None = None
         self._log_submit_worker = None
         self._log_submit_context: dict[str, Any] | None = None
         self._log_unresolved_context: dict[str, Any] | None = None
@@ -253,6 +257,10 @@ class DashboardView(QScrollArea):
             return
         self._connected = connected
         self._connection_generation += 1
+        if not connected:
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._authority_revision = None
         if not connected and self._log_submit_context is not None:
             self._log_unresolved_context = self._log_submit_context
             if self._quick_log is not None:
@@ -278,7 +286,7 @@ class DashboardView(QScrollArea):
             self._start_phase_reconciliation()
 
     def _update_mutation_authority(self) -> None:
-        mutable = self._connected and not self._read_only
+        mutable = self._connected and not self._read_only and self._authority_valid
         if self._phase_widget is not None:
             phase_mutable = (
                 mutable
@@ -288,10 +296,69 @@ class DashboardView(QScrollArea):
             )
             self._phase_widget.set_mutation_enabled(phase_mutable)
         if self._quick_log is not None:
-            reason = "Только чтение" if self._read_only else "Нет связи с Engine"
+            if self._read_only:
+                reason = "Только чтение"
+            elif not self._connected:
+                reason = "Нет связи с Engine"
+            else:
+                reason = "Нет текущего подтверждённого разрешения на изменение"
             self._quick_log.set_mutation_enabled(mutable, reason)
+
+    def set_operator_snapshot(self, snapshot: object) -> None:
+        """Derive mutation authority only from a current live coherent cut."""
+        valid = (
+            type(snapshot) is OperatorSnapshot
+            and snapshot.cut.mode is SnapshotMode.LIVE
+            and snapshot.readiness.readiness is ReadinessTruth.READY
+            and snapshot.readiness.lifecycle is SafetyLifecycle.READY
+            and not snapshot.readiness.transport_reason_codes
+        )
+        if not valid:
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._authority_revision = None
+        elif self._authority_revision is None or snapshot.cut.revision > self._authority_revision:
+            self._authority_valid = True
+            self._authority_experiment_id = snapshot.cut.experiment_id
+            self._authority_revision = snapshot.cut.revision
+        self._update_mutation_authority()
+
+    def set_authority_receipt(
+        self,
+        *,
+        experiment_id: str | None,
+        producer_id: str,
+        revision: int,
+        lifecycle: SafetyLifecycle = SafetyLifecycle.READY,
+        readiness: ReadinessTruth = ReadinessTruth.READY,
+    ) -> None:
+        """Accept an explicit test/integration authority receipt, never cadence."""
+        valid = (
+            type(producer_id) is str
+            and bool(producer_id)
+            and (experiment_id is None or (type(experiment_id) is str and bool(experiment_id)))
+            and type(revision) is int
+            and revision >= 0
+            and lifecycle is SafetyLifecycle.READY
+            and readiness is ReadinessTruth.READY
+        )
+        if not valid:
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._authority_revision = None
+        elif self._authority_revision is None or revision > self._authority_revision:
+            self._authority_valid = True
+            self._authority_experiment_id = experiment_id
+            self._authority_revision = revision
+        self._update_mutation_authority()
+
+    def _apply_mutation_availability(self) -> None:
+        """Compatibility name for callers that refresh the mutation gate."""
+        self._update_mutation_authority()
+
+        enabled = self._connected and not self._read_only and self._authority_valid
         if self._sensor_grid is not None:
-            self._sensor_grid.set_read_only(self._read_only)
+            self._sensor_grid.set_read_only(not enabled)
 
     # ------------------------------------------------------------------
     # Sensor grid signal handlers
@@ -299,14 +366,14 @@ class DashboardView(QScrollArea):
 
     def _on_rename_requested(self, channel_id: str, new_name: str) -> None:
         """Operator renamed a channel via inline rename or context menu."""
-        if self._read_only:
+        if self._read_only or not self._connected or not self._authority_valid:
             return
         self._channel_mgr.set_name(channel_id, new_name)
         self._channel_mgr.save()
 
     def _on_hide_requested(self, channel_id: str) -> None:
         """Operator wants to hide a channel from the dashboard."""
-        if self._read_only:
+        if self._read_only or not self._connected or not self._authority_valid:
             return
         self._channel_mgr.set_visible(channel_id, False)
         self._channel_mgr.save()
@@ -328,6 +395,7 @@ class DashboardView(QScrollArea):
         if (
             self._read_only
             or not self._connected
+            or not self._authority_valid
             or self._phase_worker is not None
             or self._phase_reconcile_worker is not None
             or self._phase_context is not None
@@ -335,7 +403,7 @@ class DashboardView(QScrollArea):
         ):
             return
         experiment_id = self._phase_widget.active_experiment_id
-        if type(experiment_id) is not str or not experiment_id:
+        if type(experiment_id) is not str or not experiment_id or experiment_id != self._authority_experiment_id:
             self._phase_widget.set_operation_state(
                 "error",
                 "Нет точного идентификатора активного эксперимента; команда не отправлена",
@@ -359,6 +427,7 @@ class DashboardView(QScrollArea):
                 "experiment_id": experiment_id,
                 "phase": phase,
                 "operator": "",
+                "expected_experiment_id": experiment_id,
             },
             parent=self,
         )
@@ -553,7 +622,15 @@ class DashboardView(QScrollArea):
     def _on_log_entry_submitted(self, message: str) -> None:
         """Persist a quick note with an exact, safely retryable receipt."""
         message = message.strip()
-        if self._read_only or not self._connected or not message:
+        experiment_id = self._authority_experiment_id
+        if (
+            self._read_only
+            or not self._connected
+            or not self._authority_valid
+            or type(experiment_id) is not str
+            or not experiment_id
+            or not message
+        ):
             return
         if self._log_submit_worker is not None:
             return
@@ -577,19 +654,25 @@ class DashboardView(QScrollArea):
             "author": "",
             "source": "dashboard",
             "tags": [],
-            "experiment_unbound": True,
+            "experiment_id": experiment_id,
         }
         self._start_log_submit(
             {
                 "payload": payload,
                 "request_id": request_id,
-                "experiment_id": None,
+                "experiment_id": experiment_id,
                 "message": message,
             }
         )
 
     def _start_log_submit(self, context: dict[str, Any]) -> None:
-        if self._read_only or not self._connected or self._log_submit_worker is not None:
+        if (
+            self._read_only
+            or not self._connected
+            or not self._authority_valid
+            or context.get("experiment_id") != self._authority_experiment_id
+            or self._log_submit_worker is not None
+        ):
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 

@@ -39,6 +39,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -58,7 +59,7 @@ def _status(state: OperatorPresentationState = OperatorPresentationState.OK) -> 
 
 def _snapshot(*, mode: SnapshotMode = SnapshotMode.LIVE) -> OperatorSnapshot:
     observed = datetime(2026, 7, 11, 1, 2, 3, 456789, tzinfo=UTC)
-    cut = SnapshotCut(42, observed, observed + timedelta(seconds=1), "engine-v1", mode)
+    cut = SnapshotCut(42, observed, observed + timedelta(seconds=1), "engine-v1", mode, "exp-1", "engine-v1")
     ok = _status()
     stale = _status(OperatorPresentationState.STALE)
     summary_status = stale if mode is SnapshotMode.REPLAY else ok
@@ -74,6 +75,7 @@ def _snapshot(*, mode: SnapshotMode = SnapshotMode.LIVE) -> OperatorSnapshot:
             summary_status,
             ReadinessTruth.UNKNOWN if mode is SnapshotMode.REPLAY else ReadinessTruth.READY,
             (),
+            SafetyLifecycle.UNKNOWN if mode is SnapshotMode.REPLAY else SafetyLifecycle.READY,
         ),
         PlantHealthSummary(cut, summary_status, (PlantHealthItem("plant", "Установка", summary_status.state, ()),)),
         InfrastructureNodeHealth(
@@ -128,6 +130,7 @@ def _transport_degraded_envelope(reason: str = "transport_disconnected") -> dict
         snapshot[key]["status"]["transport_age_s"] = 8.0
         snapshot[key]["status"]["transport_reason_codes"] = [reason]
     snapshot["readiness"]["readiness"] = "unknown"
+    snapshot["readiness"]["lifecycle"] = "unknown"
     snapshot["experiment"]["recording"] = "unknown"
     snapshot["experiment"]["recording_session_id"] = None
     snapshot["data_integrity"]["storage"] = "unknown"
@@ -147,6 +150,7 @@ def test_replay_cut_is_observation_only_and_cannot_claim_live_summary_authority(
 
     assert replay.authority_boundary == "observation_only"
     assert replay.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert replay.readiness.lifecycle is SafetyLifecycle.UNKNOWN
     assert replay.experiment.recording is RecordingTruth.REPLAY_ONLY
     assert replay.data_integrity.storage is AvailabilityTruth.UNKNOWN
     assert replay.support_bundle.availability is AvailabilityTruth.UNKNOWN
@@ -162,6 +166,7 @@ def test_replay_cut_is_observation_only_and_cannot_claim_live_summary_authority(
         replay.readiness,
         readiness=ReadinessTruth.BLOCKED,
         blockers=(historical_blocker,),
+        lifecycle=SafetyLifecycle.FAULT_LATCHED,
     )
     with pytest.raises(ValueError, match="replay readiness must remain UNKNOWN"):
         OperatorSnapshot(replay.cut, blocked, *replay.summaries()[1:])
@@ -213,11 +218,21 @@ def test_false_green_and_aggregate_contradictions_are_unrepresentable() -> None:
     warning = ReadinessBlocker("vacuum", OperatorPresentationState.WARNING, "Вакуум", "Проверка")
 
     with pytest.raises(ValueError, match="BLOCKED requires"):
-        replace(snapshot.readiness, readiness=ReadinessTruth.BLOCKED, blockers=())
+        replace(
+            snapshot.readiness,
+            readiness=ReadinessTruth.BLOCKED,
+            blockers=(),
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
+        )
     with pytest.raises(ValueError, match="most severe blocker"):
-        replace(snapshot.readiness, readiness=ReadinessTruth.BLOCKED, blockers=(warning,))
+        replace(
+            snapshot.readiness,
+            readiness=ReadinessTruth.BLOCKED,
+            blockers=(warning,),
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
+        )
     with pytest.raises(ValueError, match="UNKNOWN readiness"):
-        replace(snapshot.readiness, readiness=ReadinessTruth.UNKNOWN)
+        replace(snapshot.readiness, readiness=ReadinessTruth.UNKNOWN, lifecycle=SafetyLifecycle.UNKNOWN)
     with pytest.raises(ValueError, match="most severe item"):
         replace(
             snapshot.attention,
@@ -287,6 +302,7 @@ def test_unknown_readiness_cannot_hide_urgent_blocker(
             status=replace(snapshot.readiness.status, state=OperatorPresentationState.STALE),
             readiness=ReadinessTruth.UNKNOWN,
             blockers=(blocker,),
+            lifecycle=SafetyLifecycle.UNKNOWN,
         )
 
     accepted = replace(
@@ -294,6 +310,7 @@ def test_unknown_readiness_cannot_hide_urgent_blocker(
         status=replace(snapshot.readiness.status, state=blocker_state),
         readiness=ReadinessTruth.UNKNOWN,
         blockers=(blocker,),
+        lifecycle=SafetyLifecycle.UNKNOWN,
     )
     assert accepted.state is blocker_state
 
@@ -584,13 +601,57 @@ def test_codec_rejects_noncanonical_utc_spellings(alternate: str) -> None:
 
 def test_loader_rejects_duplicate_keys_at_outer_and_nested_depth() -> None:
     wire = dump_operator_snapshot(_snapshot())
-    outer = wire.replace('"version":1', '"version":2,"version":1', 1)
+    outer = wire.replace('"version":2', '"version":3,"version":2', 1)
     nested = wire.replace('"revision":42', '"revision":41,"revision":42', 1)
 
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):
         load_operator_snapshot(outer)
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):
         load_operator_snapshot(nested)
+
+
+def test_live_readiness_lifecycle_is_exact_and_transport_loss_erases_lifecycle_authority() -> None:
+    snapshot = _snapshot()
+    assert snapshot.readiness.lifecycle is SafetyLifecycle.READY
+
+    envelope = _transport_degraded_envelope()
+    degraded = decode_operator_snapshot(envelope)
+    assert degraded.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert degraded.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+
+    with pytest.raises(ValueError, match="READY readiness requires READY safety lifecycle"):
+        replace(snapshot.readiness, lifecycle=SafetyLifecycle.FAULT_LATCHED)
+
+    with pytest.raises(TypeError, match="exact SafetyLifecycle"):
+        replace(snapshot.readiness, lifecycle="ready")  # type: ignore[arg-type]
+
+    malformed = encode_operator_snapshot(snapshot)
+    malformed["snapshot"]["readiness"]["lifecycle"] = "operator_guess"
+    with pytest.raises(ValueError, match="snapshot.readiness.lifecycle"):
+        decode_operator_snapshot(malformed)
+
+
+def test_v2_snapshot_identity_is_mandatory_and_bound_to_the_coherent_experiment() -> None:
+    snapshot = _snapshot()
+    envelope = encode_operator_snapshot(snapshot)
+
+    missing_producer = json.loads(json.dumps(envelope))
+    del missing_producer["snapshot"]["cut"]["producer_id"]
+    with pytest.raises(ValueError, match="snapshot.cut"):
+        decode_operator_snapshot(missing_producer)
+
+    mismatched = json.loads(json.dumps(envelope))
+    mismatched["snapshot"]["cut"]["experiment_id"] = "other-experiment"
+    for summary in mismatched["snapshot"].values():
+        if isinstance(summary, dict) and "cut" in summary:
+            summary["cut"]["experiment_id"] = "other-experiment"
+    with pytest.raises(ValueError, match="experiment identity"):
+        decode_operator_snapshot(mismatched)
+
+    v1 = json.loads(json.dumps(envelope))
+    v1["version"] = 1
+    with pytest.raises(ValueError, match="version is unsupported"):
+        decode_operator_snapshot(v1)
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
@@ -640,7 +701,13 @@ def test_utf8_string_reason_and_integer_caps_at_exact_boundaries() -> None:
     )
     assert len(status.operator_text.encode()) == MAX_TEXT_UTF8_BYTES
     assert SnapshotCut(
-        MAX_NONNEGATIVE_INT, datetime.now(UTC), datetime.now(UTC), "i" * MAX_ID_UTF8_BYTES, SnapshotMode.LIVE
+        MAX_NONNEGATIVE_INT,
+        datetime.now(UTC),
+        datetime.now(UTC),
+        "i" * MAX_ID_UTF8_BYTES,
+        SnapshotMode.LIVE,
+        "exp-7",
+        "engine-v1",
     )
     assert SupportBundleEntry("p" * MAX_PATH_UTF8_BYTES, MAX_NONNEGATIVE_INT, "a" * 64)
 
@@ -655,11 +722,27 @@ def test_utf8_string_reason_and_integer_caps_at_exact_boundaries() -> None:
     with pytest.raises(ValueError, match="UTF-8 bytes"):
         replace(status, reason_codes=("r" * (MAX_REASON_UTF8_BYTES + 1),))
     with pytest.raises(ValueError, match="UTF-8 bytes"):
-        SnapshotCut(1, datetime.now(UTC), datetime.now(UTC), "i" * (MAX_ID_UTF8_BYTES + 1), SnapshotMode.LIVE)
+        SnapshotCut(
+            1,
+            datetime.now(UTC),
+            datetime.now(UTC),
+            "i" * (MAX_ID_UTF8_BYTES + 1),
+            SnapshotMode.LIVE,
+            "exp-7",
+            "engine-v1",
+        )
     with pytest.raises(ValueError, match="UTF-8 bytes"):
         SupportBundleEntry("p" * (MAX_PATH_UTF8_BYTES + 1), 1, "a" * 64)
     with pytest.raises(ValueError, match=r"\[0"):
-        SnapshotCut(MAX_NONNEGATIVE_INT + 1, datetime.now(UTC), datetime.now(UTC), "id", SnapshotMode.LIVE)
+        SnapshotCut(
+            MAX_NONNEGATIVE_INT + 1,
+            datetime.now(UTC),
+            datetime.now(UTC),
+            "id",
+            SnapshotMode.LIVE,
+            "exp-7",
+            "engine-v1",
+        )
 
 
 def test_collection_caps_accept_exact_boundary_and_reject_one_over() -> None:
@@ -811,6 +894,7 @@ def test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap() -> None:
             status=max_status,
             readiness=ReadinessTruth.BLOCKED,
             blockers=blockers,
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
         ),
         plant_health=replace(snapshot.plant_health, status=max_status, subsystems=plant),
         infrastructure=replace(snapshot.infrastructure, status=max_status, nodes=nodes),

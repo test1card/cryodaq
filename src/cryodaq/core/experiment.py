@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum, StrEnum
@@ -389,6 +391,20 @@ def _report_error_display(error_code: Any, error_text: Any) -> str:
     return f"Previous report attempt failed ({code or 'report_failed'})."[:512]
 
 
+def _serialized_lifecycle_mutation(method: Any) -> Any:
+    """Hold lifecycle recovery and mutation admission through side effects."""
+
+    @functools.wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._lifecycle_lock:
+            self._recover_transition()
+            with self._mutation_lock:
+                self._assert_mutation_available()
+                return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class ExperimentManager:
     def __init__(
         self,
@@ -408,6 +424,8 @@ class ExperimentManager:
         self._state = ExperimentState(app_mode=AppMode.EXPERIMENT)
         self._operator_phase: str | None = None
         self._operator_snapshot = OperatorExperimentSnapshot(0, None, None, None)
+        self._mutation_lock = threading.RLock()
+        self._durable_mutation_id: str | None = None
         self._templates_cache: dict[str, ExperimentTemplate] | None = None
         with self._lifecycle_lock:
             self._recover_transition()
@@ -440,6 +458,45 @@ class ExperimentManager:
         """
 
         return self._operator_snapshot
+
+    @contextmanager
+    def experiment_cas(self, expected_experiment_id: str) -> Iterator[str]:
+        """Reserve an experiment identity across an asynchronous durable mutation.
+
+        The reservation is deliberately not held as a native thread lock while
+        the caller awaits its writer.  Other lifecycle callers can therefore
+        keep the event loop live, but they observe the reservation and fail
+        closed.  The owner must call :meth:`assert_experiment_cas` immediately
+        before its durable write; exit revalidates the identity once more.
+        """
+        if type(expected_experiment_id) is not str or not expected_experiment_id:
+            raise RuntimeError("Experiment identity is required.")
+        with self._mutation_lock:
+            if self._active is None or self._active.experiment_id != expected_experiment_id:
+                raise RuntimeError("Experiment identity mismatch.")
+            if self._durable_mutation_id is not None:
+                raise RuntimeError("A durable experiment mutation is already in progress.")
+            self._durable_mutation_id = expected_experiment_id
+        try:
+            yield expected_experiment_id
+            self.assert_experiment_cas(expected_experiment_id)
+        finally:
+            with self._mutation_lock:
+                if self._durable_mutation_id == expected_experiment_id:
+                    self._durable_mutation_id = None
+
+    def assert_experiment_cas(self, expected_experiment_id: str) -> None:
+        """Revalidate the reserved identity immediately before durable I/O."""
+        with self._mutation_lock:
+            if self._durable_mutation_id != expected_experiment_id:
+                raise RuntimeError("Experiment mutation reservation is not owned by this caller.")
+            if self._active is None or self._active.experiment_id != expected_experiment_id:
+                raise RuntimeError("Experiment identity changed during mutation.")
+
+    def _assert_mutation_available(self) -> None:
+        with self._mutation_lock:
+            if self._durable_mutation_id is not None:
+                raise RuntimeError("A durable experiment mutation is in progress.")
 
     def get_templates(self) -> list[ExperimentTemplate]:
         if self._templates_cache is None:
@@ -483,7 +540,7 @@ class ExperimentManager:
     def get_app_mode(self) -> AppMode:
         return self.app_mode
 
-    @_serialized_lifecycle
+    @_serialized_lifecycle_mutation
     def set_app_mode(self, mode: AppMode | str) -> AppMode:
         next_mode = self._normalize_app_mode(mode)
         if next_mode is AppMode.DEBUG and self._active is not None:
@@ -718,7 +775,7 @@ class ExperimentManager:
                 return entry
         return None
 
-    @_serialized_lifecycle
+    @_serialized_lifecycle_mutation
     def attach_run_record(
         self,
         *,
@@ -803,7 +860,7 @@ class ExperimentManager:
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
 
-    @_serialized_lifecycle
+    @_serialized_lifecycle_mutation
     def create_experiment(
         self,
         name: str,
@@ -819,6 +876,7 @@ class ExperimentManager:
         start_time: datetime | str | None = None,
         report_enabled: bool | None = None,
     ) -> ExperimentInfo:
+        self._assert_mutation_available()
         self._require_experiment_mode()
         if self._active is not None:
             raise RuntimeError(
@@ -897,7 +955,7 @@ class ExperimentManager:
     def get_active_experiment(self) -> ExperimentInfo | None:
         return self._active
 
-    @_serialized_lifecycle
+    @_serialized_lifecycle_mutation
     def attach_composition_photo(
         self,
         experiment_id: str,
@@ -994,7 +1052,7 @@ class ExperimentManager:
         payload["artifact_index"] = artifact_index
         atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    @_serialized_lifecycle
+    @_serialized_lifecycle_mutation
     def update_experiment(
         self,
         experiment_id: str | None = None,
@@ -1005,6 +1063,7 @@ class ExperimentManager:
         description: str | None = None,
         custom_fields: dict[str, Any] | None = None,
     ) -> ExperimentInfo:
+        self._assert_mutation_available()
         self._require_experiment_mode()
         active = self._require_active(experiment_id)
         updated = ExperimentInfo(
@@ -1034,7 +1093,7 @@ class ExperimentManager:
         self._commit_transition("update", updated)
         return updated
 
-    @_serialized_lifecycle
+    @_serialized_lifecycle_mutation
     def finalize_experiment(
         self,
         experiment_id: str | None = None,
@@ -1047,6 +1106,7 @@ class ExperimentManager:
         custom_fields: dict[str, Any] | None = None,
         end_time: datetime | str | None = None,
     ) -> ExperimentInfo:
+        self._assert_mutation_available()
         self._require_experiment_mode()
         active = self._require_active(experiment_id)
 
@@ -1212,29 +1272,31 @@ class ExperimentManager:
         return AppMode(value)
 
     def _set_active(self, info: ExperimentInfo) -> None:
-        if self._active is None or self._active.experiment_id != info.experiment_id:
-            self._operator_phase = None
-        self._active = info
-        self._state = ExperimentState(
-            app_mode=self._state.app_mode,
-            active_experiment_id=info.experiment_id,
-        )
-        try:
-            self._write_state()
-        finally:
-            # _write_state already follows the manager's in-memory commit.
-            # If durability fails, preserve the exception while ensuring the
-            # observational cut cannot publish the previous lifecycle state.
-            self._refresh_operator_snapshot()
+        with self._mutation_lock:
+            if self._active is None or self._active.experiment_id != info.experiment_id:
+                self._operator_phase = None
+            self._active = info
+            self._state = ExperimentState(
+                app_mode=self._state.app_mode,
+                active_experiment_id=info.experiment_id,
+            )
+            try:
+                self._write_state()
+            finally:
+                # _write_state already follows the manager's in-memory commit.
+                # If durability fails, preserve the exception while ensuring
+                # the observational cut cannot publish the previous state.
+                self._refresh_operator_snapshot()
 
     def _clear_active(self) -> None:
-        self._active = None
-        self._operator_phase = None
-        self._state = ExperimentState(app_mode=self._state.app_mode, active_experiment_id=None)
-        try:
-            self._write_state()
-        finally:
-            self._refresh_operator_snapshot()
+        with self._mutation_lock:
+            self._active = None
+            self._operator_phase = None
+            self._state = ExperimentState(app_mode=self._state.app_mode, active_experiment_id=None)
+            try:
+                self._write_state()
+            finally:
+                self._refresh_operator_snapshot()
 
     def _refresh_operator_snapshot(self, *, force: bool = False) -> None:
         previous = self._operator_snapshot
@@ -1734,7 +1796,7 @@ class ExperimentManager:
             )
         return expected_experiment_id
 
-    @_serialized_lifecycle
+    @_serialized_lifecycle_mutation
     def advance_phase(
         self,
         phase: str,
@@ -1755,9 +1817,23 @@ class ExperimentManager:
             raise RuntimeError("No active experiment.")
         if self._active.experiment_id != expected_experiment_id:
             raise ExperimentIdentityMismatchError(
-                "Active experiment does not match expected_experiment_id; "
+                "Experiment identity mismatch: active experiment does not match expected_experiment_id; "
                 "the phase command is stale and was not applied."
             )
+        with self.experiment_cas(expected_experiment_id):
+            return self._advance_phase_locked(phase, operator, expected_experiment_id)
+
+    def _advance_phase_locked(
+        self,
+        phase: str,
+        operator: str = "",
+        expected_experiment_id: str = "",
+    ) -> dict[str, Any]:
+        """Transition phase only for the exact currently-authoritative experiment."""
+        if self._active is None:
+            raise RuntimeError("No active experiment.")
+        if type(expected_experiment_id) is not str or expected_experiment_id != self._active.experiment_id:
+            raise ExperimentIdentityMismatchError("Experiment identity mismatch.")
         # Validate phase name
         try:
             ExperimentPhase(phase)

@@ -103,9 +103,11 @@ class OperatorSnapshotIngressOwner(QObject):
             self._failure_queued.emit(epoch)
             return
         if snapshots:
-            # The subprocess queue is latest-state, not an audit log.  Only
-            # the newest complete cut is qualified and presented.
-            self._snapshot_queued.emit(epoch, snapshots[-1])
+            # A latest-state queue is not an audit log, but every drained
+            # element still belongs to one generation-bound batch.  Validate
+            # the whole immutable batch before its newest cut may replace the
+            # current authority.
+            self._snapshot_queued.emit(epoch, tuple(snapshots))
             self._next_health_poll = now + _HEALTH_POLL_INTERVAL_S
         elif now >= self._next_health_poll:
             self._transport_queued.emit(epoch)
@@ -141,7 +143,16 @@ class OperatorSnapshotIngressOwner(QObject):
     @Slot(int, object)
     def _apply_snapshot_batch(self, epoch: int, candidate: object) -> None:
         """Accept and freshness-qualify one cut before emitting it once."""
-        accepted = self._apply_snapshot(epoch, candidate)
+        if type(candidate) is not tuple or not candidate:
+            self._reject_snapshot_batch()
+            return
+        previous_revision = self._store.cut.revision if self._store.snapshot is not None else -1
+        for item in candidate:
+            if type(item) is not OperatorSnapshot or item.cut.revision <= previous_revision:
+                self._reject_snapshot_batch()
+                return
+            previous_revision = item.cut.revision
+        accepted = self._apply_snapshot(epoch, candidate[-1])
         if accepted and self._active and epoch == self._epoch:
             self._apply_transport(epoch)
 

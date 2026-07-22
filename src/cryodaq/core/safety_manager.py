@@ -20,7 +20,7 @@ import yaml
 
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.smu_channel import SmuChannel, normalize_smu_channel
+from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import (
     DriverRuntimeBinding,
@@ -324,6 +324,11 @@ class SafetyManager:
                 scheduler_drain_timeout_s=float(raw.get("scheduler_drain_timeout_s", 5.0)),
             )
             self._keithley_patterns = [re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])]
+            # Liveness validation resolves these canonical patterns against
+            # the selected descriptor authority.  A config reload must start
+            # from the newly loaded canonical source rather than retaining a
+            # previous raw-label resolution.
+            self._canonical_critical_patterns = list(patterns)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise SafetyConfigError(
                 f"safety.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}"
@@ -2477,9 +2482,10 @@ class SafetyManager:
     def _resolve_channels(self, channel: str | None) -> set[SmuChannel]:
         if channel is not None:
             return {normalize_smu_channel(channel)}
-        if self._active_sources:
-            return set(self._active_sources)
-        return {normalize_smu_channel(None)}
+        # Omitted channel is an explicit global emergency-OFF scope.  It must
+        # never collapse to the currently active subset or normalize to smua;
+        # both physical outputs require independent OFF verification.
+        return set(SMU_CHANNELS)
 
     def _check_preconditions(self) -> tuple[bool, str]:
         now = time.monotonic()

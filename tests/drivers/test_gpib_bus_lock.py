@@ -22,7 +22,7 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
-from cryodaq.drivers.transport.gpib import GPIBTransport
+from cryodaq.drivers.transport.gpib import GPIBIncompleteCloseError, GPIBTransport
 
 
 async def test_gpib_open_stores_resource_str():
@@ -327,6 +327,254 @@ async def test_cancelled_partial_connect_closes_late_resource_and_executor(monke
     assert not driver.connected
 
 
+async def test_cancelled_connect_late_success_closes_exact_handle_automatically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_entered = threading.Event()
+    release_clear = threading.Event()
+    closed: list[object] = []
+    opened: list[tuple[str, object]] = []
+
+    class Handle:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def clear(self) -> None:
+            clear_entered.set()
+            assert release_clear.wait(2.0)
+
+        def set_visa_attribute(self, _attr, _value) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.append(self)
+
+    exact_handle = Handle()
+
+    class ResourceManager:
+        def open_resource(self, resource: str) -> Handle:
+            opened.append((resource, exact_handle))
+            return exact_handle
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pyvisa",
+        types.SimpleNamespace(ResourceManager=ResourceManager),
+    )
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
+    transport = GPIBTransport(mock=False)
+
+    owner = asyncio.create_task(
+        transport.open("GPIB0::12::INSTR", timeout_ms=100),
+    )
+    assert await asyncio.to_thread(clear_entered.wait, 1.0)
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    with pytest.raises(RuntimeError, match="generation has not settled"):
+        await transport.open("GPIB0::13::INSTR", timeout_ms=100)
+
+    release_clear.set()
+    assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+    assert closed == [exact_handle]
+    assert opened == [("GPIB0::12::INSTR", exact_handle)]
+    assert transport._resource is None
+    assert transport._executor is None
+
+
+async def test_cancelled_connect_late_failure_retains_quarantined_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_entered = threading.Event()
+    release_clear = threading.Event()
+    exact_close_attempts: list[object] = []
+
+    class Handle:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def clear(self) -> None:
+            clear_entered.set()
+            assert release_clear.wait(2.0)
+            raise OSError("late connect failed")
+
+        def set_visa_attribute(self, _attr, _value) -> None:
+            pass
+
+        def close(self) -> None:
+            exact_close_attempts.append(self)
+            raise OSError("exact late handle did not close")
+
+    exact_handle = Handle()
+
+    class ResourceManager:
+        def open_resource(self, _resource: str) -> Handle:
+            return exact_handle
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pyvisa",
+        types.SimpleNamespace(ResourceManager=ResourceManager),
+    )
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
+    transport = GPIBTransport(mock=False)
+    owner = asyncio.create_task(transport.open("GPIB0::12::INSTR"))
+    try:
+        assert await asyncio.to_thread(clear_entered.wait, 1.0)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        release_clear.set()
+        assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+
+        assert exact_close_attempts == [exact_handle]
+        assert transport._resource is exact_handle
+        assert transport._terminal_unsettled is True
+        assert isinstance(transport._close_error, OSError)
+        with pytest.raises(RuntimeError, match="generation has not settled"):
+            await transport.open("GPIB0::13::INSTR")
+        with pytest.raises(GPIBIncompleteCloseError, match="quarantined"):
+            await transport.close()
+    finally:
+        release_clear.set()
+        await asyncio.gather(owner, return_exceptions=True)
+        if transport._executor is not None:
+            transport._executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def test_close_during_cancelled_connect_joins_same_terminal_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_entered = threading.Event()
+    release_clear = threading.Event()
+    closed: list[object] = []
+
+    class Handle:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def clear(self) -> None:
+            clear_entered.set()
+            assert release_clear.wait(2.0)
+
+        def set_visa_attribute(self, _attr, _value) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.append(self)
+
+    exact_handle = Handle()
+
+    class ResourceManager:
+        def open_resource(self, _resource: str) -> Handle:
+            return exact_handle
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pyvisa",
+        types.SimpleNamespace(ResourceManager=ResourceManager),
+    )
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
+    transport = GPIBTransport(mock=False)
+    owner = asyncio.create_task(transport.open("GPIB0::12::INSTR"))
+    close_owner: asyncio.Task | None = None
+    try:
+        assert await asyncio.to_thread(clear_entered.wait, 1.0)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        close_owner = asyncio.create_task(transport.close())
+        await asyncio.sleep(0)
+        assert not close_owner.done()
+
+        release_clear.set()
+        await asyncio.wait_for(close_owner, 2.0)
+        assert closed == [exact_handle]
+        assert transport._resource is None
+        assert transport._terminal_unsettled is False
+        assert transport._open_settled.is_set()
+    finally:
+        release_clear.set()
+        await asyncio.gather(owner, return_exceptions=True)
+        if close_owner is not None:
+            await asyncio.gather(close_owner, return_exceptions=True)
+        if transport._executor is not None:
+            transport._executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def test_reopen_blocked_until_cancelled_connect_terminal_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_clear_entered = threading.Event()
+    release_first_clear = threading.Event()
+    opened: list[object] = []
+    closed: list[object] = []
+
+    class Handle:
+        write_termination = ""
+        read_termination = ""
+        timeout = 0
+
+        def __init__(self, *, blocks: bool) -> None:
+            self.blocks = blocks
+
+        def clear(self) -> None:
+            if self.blocks:
+                first_clear_entered.set()
+                assert release_first_clear.wait(2.0)
+
+        def set_visa_attribute(self, _attr, _value) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.append(self)
+
+    first_handle = Handle(blocks=True)
+    second_handle = Handle(blocks=False)
+
+    class ResourceManager:
+        def open_resource(self, _resource: str) -> Handle:
+            handle = first_handle if not opened else second_handle
+            opened.append(handle)
+            return handle
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pyvisa",
+        types.SimpleNamespace(ResourceManager=ResourceManager),
+    )
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", {}, raising=False)
+    transport = GPIBTransport(mock=False)
+    owner = asyncio.create_task(transport.open("GPIB0::12::INSTR"))
+    try:
+        assert await asyncio.to_thread(first_clear_entered.wait, 1.0)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        with pytest.raises(RuntimeError, match="generation has not settled"):
+            await transport.open("GPIB0::13::INSTR")
+        assert opened == [first_handle]
+
+        release_first_clear.set()
+        assert await asyncio.to_thread(transport._open_settled.wait, 2.0)
+        assert closed == [first_handle]
+        await transport.open("GPIB0::13::INSTR")
+        assert opened == [first_handle, second_handle]
+        assert transport._resource is second_handle
+        assert transport._session_open is True
+    finally:
+        release_first_clear.set()
+        await asyncio.gather(owner, return_exceptions=True)
+        if transport._resource is second_handle:
+            await transport.close()
+        if transport._executor is not None:
+            transport._executor.shutdown(wait=False, cancel_futures=True)
+
+
 async def test_cancelled_blocking_idn_rejects_overlap_until_executor_settles(monkeypatch) -> None:
     read_started = threading.Event()
     release_read = threading.Event()
@@ -367,15 +615,14 @@ async def test_cancelled_blocking_idn_rejects_overlap_until_executor_settles(mon
     task = asyncio.create_task(driver.connect())
     assert await asyncio.to_thread(read_started.wait, 1.0)
     task.cancel()
-    await asyncio.sleep(0)
-    assert task.done() is False
+    with pytest.raises(asyncio.CancelledError):
+        await task
     with pytest.raises(RuntimeError, match="executor generation has not settled"):
         await driver.connect()
     assert resources_opened == 1
     assert driver._transport._executor is not None
     release_read.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    assert await asyncio.to_thread(driver._transport._open_settled.wait, 2.0)
     assert await asyncio.to_thread(closed.wait, 1.0)
     await driver.disconnect()
     assert driver._transport._executor is None

@@ -28,6 +28,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -83,6 +84,8 @@ def _snapshot(
         received_at=observed_at + timedelta(seconds=1),
         source="engine/operator-snapshot-v1",
         mode=mode,
+        experiment_id="exp-7",
+        producer_id="engine/operator-snapshot-v1",
     )
     effective_state = (
         OperatorPresentationState.STALE
@@ -136,27 +139,34 @@ def _snapshot(
         if current
         else AvailabilityTruth.UNKNOWN
     )
+    readiness = (
+        ReadinessTruth.UNKNOWN
+        if mode is SnapshotMode.REPLAY
+        else ReadinessTruth.BLOCKED
+        if urgent
+        else (
+            ReadinessTruth.UNKNOWN
+            if effective_state
+            in {
+                OperatorPresentationState.STALE,
+                OperatorPresentationState.DISCONNECTED,
+            }
+            else ReadinessTruth.READY
+        )
+    )
+    lifecycle = {
+        ReadinessTruth.READY: SafetyLifecycle.READY,
+        ReadinessTruth.BLOCKED: SafetyLifecycle.FAULT_LATCHED,
+        ReadinessTruth.UNKNOWN: SafetyLifecycle.UNKNOWN,
+    }[readiness]
     return OperatorSnapshot(
         cut=cut,
         readiness=ReadinessSummary(
             cut,
             status,
-            (
-                ReadinessTruth.UNKNOWN
-                if mode is SnapshotMode.REPLAY
-                else ReadinessTruth.BLOCKED
-                if urgent
-                else (
-                    ReadinessTruth.UNKNOWN
-                    if effective_state
-                    in {
-                        OperatorPresentationState.STALE,
-                        OperatorPresentationState.DISCONNECTED,
-                    }
-                    else ReadinessTruth.READY
-                )
-            ),
+            readiness,
             () if blocker is None else (blocker,),
+            lifecycle,
         ),
         plant_health=PlantHealthSummary(
             cut,
@@ -278,12 +288,20 @@ def test_snapshot_rejects_mixed_revision_or_provenance_cut() -> None:
         received_at=snapshot.cut.received_at,
         source=snapshot.cut.source,
         mode=SnapshotMode.LIVE,
+        experiment_id=snapshot.cut.experiment_id,
+        producer_id=snapshot.cut.producer_id,
     )
 
     with pytest.raises(ValueError, match="same snapshot cut"):
         OperatorSnapshot(
             cut=snapshot.cut,
-            readiness=ReadinessSummary(other_cut, snapshot.readiness.status, ReadinessTruth.READY, ()),
+            readiness=ReadinessSummary(
+                other_cut,
+                snapshot.readiness.status,
+                ReadinessTruth.READY,
+                (),
+                SafetyLifecycle.READY,
+            ),
             plant_health=snapshot.plant_health,
             infrastructure=snapshot.infrastructure,
             attention=snapshot.attention,
@@ -297,9 +315,17 @@ def test_snapshot_rejects_mixed_revision_or_provenance_cut() -> None:
 def test_live_future_source_timestamp_fails_closed_but_historical_replay_is_valid() -> None:
     receipt = datetime(2026, 7, 11, 1, 2, tzinfo=UTC)
     with pytest.raises(ValueError, match="live observed_at"):
-        SnapshotCut(1, receipt + timedelta(seconds=1), receipt, "engine", SnapshotMode.LIVE)
+        SnapshotCut(1, receipt + timedelta(seconds=1), receipt, "engine", SnapshotMode.LIVE, "exp-7", "engine")
 
-    replay = SnapshotCut(1, datetime(2001, 1, 1, tzinfo=UTC), receipt, "archive", SnapshotMode.REPLAY)
+    replay = SnapshotCut(
+        1,
+        datetime(2001, 1, 1, tzinfo=UTC),
+        receipt,
+        "archive",
+        SnapshotMode.REPLAY,
+        "exp-7",
+        "archive",
+    )
     assert replay.observed_at.year == 2001
 
 
@@ -307,6 +333,10 @@ def test_disconnected_transport_is_idempotent_and_does_not_change_cut() -> None:
     snapshot = _snapshot(state=OperatorPresentationState.OK)
     first = apply_transport_freshness(snapshot, connected=False, transport_age_s=8, stale_after_s=5)
     second = apply_transport_freshness(first, connected=False, transport_age_s=8, stale_after_s=5)
+
+    assert first.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert first.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+    assert second.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
     assert first.cut == snapshot.cut
     assert second == first
@@ -408,6 +438,7 @@ def test_transport_degrades_nested_blockers_and_attention_with_explicit_cue(
             status=nested_status,
             readiness=ReadinessTruth.BLOCKED,
             blockers=(blocker,),
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
         ),
         attention=replace(snapshot.attention, status=nested_status, items=(attention,)),
     )
@@ -1241,7 +1272,7 @@ def test_codec_live_and_replay_round_trip_is_strict_and_json_compatible() -> Non
     [
         lambda value: value.update(extra=True),
         lambda value: value.update(version=True),
-        lambda value: value.update(version=2),
+        lambda value: value.update(version=1),
         lambda value: value["snapshot"]["cut"].update(extra="x"),
         lambda value: value["snapshot"]["cut"].update(mode="future"),
         lambda value: value["snapshot"]["cut"].update(revision=True),

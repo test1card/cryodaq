@@ -307,7 +307,6 @@ def test_contract_has_no_mutation_or_control_capability_and_narrow_imports() -> 
         "annotations",
         "dataclass",
         "math",
-        "StrEnum",
         "unicodedata",
         "MAX_CHANNELS",
         "MAX_ID_UTF8_BYTES",
