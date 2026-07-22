@@ -93,6 +93,47 @@ def test_closeevent_stops_status_timer() -> None:
         _stop_timers(w)
 
 
+def test_analytics_safety_reading_never_enables_mutation_authority() -> None:
+    """READY-looking telemetry is display evidence, never command authority."""
+    _app()
+    bridge = ZmqBridge()
+    assert bridge.bridge_instance_id is not None
+    window = MainWindowV2(bridge=bridge)
+    try:
+        window._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-a"}}
+        window._ensure_overlay("source")
+        assert window._keithley_panel is not None
+
+        # Establish a genuinely connected presentation so disabled controls
+        # cannot be explained by an unrelated no-connection condition.
+        window._last_reading_time = time.monotonic()
+        window._tick_status()
+        assert window._keithley_panel._connected is True
+
+        window._dispatch_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="safety_manager",
+                channel="analytics/safety_state",
+                value=0.0,
+                unit="",
+                metadata={
+                    "state": "ready",
+                    "reason": "",
+                    "bridge_instance_id": bridge.bridge_instance_id,
+                    "experiment_id": "exp-a",
+                },
+            )
+        )
+
+        assert window._keithley_panel._connected is True
+        assert window._keithley_panel._safety_ready is False
+        assert window._keithley_panel._smua_block._start_btn.isEnabled() is False
+        assert window._keithley_panel._start_both_btn.isEnabled() is False
+    finally:
+        _stop_timers(window)
+
+
 def test_disk_reading_is_presented_only_when_backend_metadata_is_exact() -> None:
     _app()
     bridge = ZmqBridge()

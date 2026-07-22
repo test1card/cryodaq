@@ -697,40 +697,38 @@ class MainWindowV2(QMainWindow):
             if state_name not in _SAFETY_READY_STATES:
                 self._invalidate_safety_authority("Нарушен порядок состояния Safety")
             return
+        reason = metadata.get("reason", "") or ""
         if self._typed_safety_authority_seen:
-            # The POD cut is coherent, freshness-qualified, experiment-bound,
-            # and producer-bound. Legacy analytics telemetry is display-only
-            # and cannot overwrite or resurrect that authority.
+            # READY-looking analytics cannot overwrite the coherent typed cut.
+            # A negative observation is allowed to revoke it, and remains
+            # visible until a newer typed cut supplies recovery authority.
+            if state_name not in _SAFETY_READY_STATES:
+                self._last_safety_state = state_name
+                self._last_safety_reason = str(reason) if reason else ""
+                self._last_safety_observed_at = observed_at
+                self._bottom_bar.set_safety_state(self._last_safety_state)
+                self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
             return
 
-        reason = metadata.get("reason", "") or ""
         self._last_safety_state = state_name
         self._last_safety_reason = str(reason) if reason else ""
         self._last_safety_observed_at = observed_at
         self._bottom_bar.set_safety_state(self._last_safety_state)
 
-        bridge_instance_id = self._current_bridge_instance_id()
-        current_experiment_id = self._active_experiment_id()
-        authority_current = (
-            reading.instrument_id == "safety_manager"
-            and bridge_instance_id is not None
-            and metadata.get("bridge_instance_id") == bridge_instance_id
-        )
-        if authority_current:
-            self._accepted_safety_bridge_instance_id = bridge_instance_id
-            self._accepted_safety_experiment_id = current_experiment_id
+        # Analytics is presentation telemetry, not command authority. It may
+        # revoke a previously accepted typed cut, but even a fresh, matching
+        # READY-looking packet cannot create bindings or restore mutation
+        # readiness. Recovery requires a newer coherent OperatorSnapshot.
+        if state_name not in _SAFETY_READY_STATES:
+            self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
         else:
-            # Invalid telemetry may be useful historical display evidence, but
-            # it must also destroy any prior enabling replay binding.
             self._accepted_safety_bridge_instance_id = None
             self._accepted_safety_experiment_id = None
-        ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
-        ready = ready and authority_current
-        if self._keithley_panel is not None:
-            self._keithley_panel.set_safety_ready(
-                ready,
-                reason_text if not ready else "",
-            )
+            if self._keithley_panel is not None:
+                self._keithley_panel.set_safety_ready(
+                    False,
+                    "No authoritative Safety state",
+                )
 
     def _current_keithley_safety_gate(self) -> tuple[bool, str]:
         bridge_instance_id = self._current_bridge_instance_id()
@@ -742,20 +740,11 @@ class MainWindowV2(QMainWindow):
                 or self._accepted_safety_experiment_id == self._active_experiment_id()
             )
         )
-        if self._typed_safety_authority_seen:
-            if self._typed_safety_ready and binding_current:
-                return True, ""
-            return False, self._last_safety_reason or "Нет текущего состояния Safety"
-        if self._last_safety_state is None:
-            return False, "Нет авторитетного состояния Safety"
-        observed_at = self._last_safety_observed_at
-        source_current = observed_at is not None and observed_at >= datetime.now(UTC) - timedelta(
-            seconds=_SAFETY_MAX_SOURCE_AGE_S
-        )
-        ready, reason = _map_safety_state(self._last_safety_state, self._last_safety_reason)
-        if ready and binding_current and source_current:
+        if self._typed_safety_authority_seen and self._typed_safety_ready and binding_current:
             return True, ""
-        return False, reason if not ready else "Нет текущего состояния Safety"
+        if self._typed_safety_authority_seen:
+            return False, self._last_safety_reason or "Нет текущего состояния Safety"
+        return False, self._last_safety_reason or "Нет авторитетного состояния Safety"
 
     def _invalidate_safety_authority(self, reason: str, *, disconnected: bool = False) -> None:
         self._accepted_safety_bridge_instance_id = None
