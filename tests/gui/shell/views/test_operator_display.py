@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 from cryodaq.gui import theme
 from cryodaq.gui.shell.operator_components import NavigationIntent
 from cryodaq.gui.shell.views.operator_display import TOP_ATTENTION_LIMIT, OperatorDisplay
+from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.operator_snapshot import (
     AttentionItem,
     AttentionQueue,
@@ -827,6 +828,86 @@ def test_wrong_type_and_equal_revision_different_truth_reject(qapp):
     before = _display_state(display)
     with pytest.raises(ValueError, match="different"):
         display.render(_snapshot("alarm", revision=10))
+    assert _display_state(display) == before
+
+
+def test_same_revision_transport_degradation_renders_every_card_atomically(qapp):
+    store = OperatorSnapshotStore()
+    fresh = store.accept_snapshot(_snapshot("normal", revision=10))
+    display = OperatorDisplay()
+    display.render(fresh)
+
+    stale = store.observe_transport(connected=True, transport_age_s=5, stale_after_s=5)
+    display.render(stale)
+    assert display.snapshot == stale
+    assert {section.card._summary.cut for section in display._sections.values()} == {stale.cut}
+    assert {section.card.revision for section in display._sections.values()} == {10}
+    assert {section.card._summary.state for section in display._sections.values()} == {OperatorPresentationState.STALE}
+
+    disconnected = store.observe_transport(connected=False, transport_age_s=6, stale_after_s=5)
+    display.render(disconnected)
+    assert display.snapshot == disconnected
+    assert {section.card._summary.cut for section in display._sections.values()} == {disconnected.cut}
+    assert {section.card.revision for section in display._sections.values()} == {10}
+    assert {section.card._summary.state for section in display._sections.values()} == {
+        OperatorPresentationState.DISCONNECTED
+    }
+
+
+def test_same_revision_transport_recovery_cannot_restore_invalidated_authority(qapp):
+    store = OperatorSnapshotStore()
+    store.accept_snapshot(_snapshot("normal", revision=10))
+    disconnected = store.observe_transport(connected=False, transport_age_s=5, stale_after_s=5)
+    display = OperatorDisplay()
+    display.render(disconnected)
+
+    recovered = store.observe_transport(connected=True, transport_age_s=6, stale_after_s=10)
+    display.render(recovered)
+
+    assert display.snapshot == recovered
+    assert recovered.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert recovered.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+    assert recovered.experiment.recording is RecordingTruth.UNKNOWN
+    assert recovered.data_integrity.storage is AvailabilityTruth.UNKNOWN
+    assert recovered.support_bundle.availability is AvailabilityTruth.UNKNOWN
+    assert {section.card._summary.state for section in display._sections.values()} == {OperatorPresentationState.STALE}
+
+
+def test_same_revision_younger_transport_age_rejects_without_partial_render(qapp):
+    store = OperatorSnapshotStore()
+    store.accept_snapshot(_snapshot("normal", revision=10))
+    older = store.observe_transport(connected=True, transport_age_s=5, stale_after_s=5)
+    younger_store = OperatorSnapshotStore()
+    younger_store.accept_snapshot(_snapshot("normal", revision=10))
+    younger = younger_store.observe_transport(connected=True, transport_age_s=4, stale_after_s=4)
+    display = OperatorDisplay()
+    display.render(older)
+    before = _display_state(display)
+
+    with pytest.raises(ValueError, match="different"):
+        display.render(younger)
+
+    assert _display_state(display) == before
+
+
+def test_same_revision_fresh_copy_cannot_restore_invalidated_authority(qapp):
+    raw = _snapshot("normal", revision=10)
+    store = OperatorSnapshotStore()
+    store.accept_snapshot(raw)
+    disconnected = store.observe_transport(connected=False, transport_age_s=5, stale_after_s=5)
+    restored = OperatorSnapshot(
+        raw.cut,
+        *(replace(summary, status=replace(summary.status, transport_age_s=6)) for summary in raw.summaries()),
+    )
+    display = OperatorDisplay()
+    display.render(disconnected)
+    before = _display_state(display)
+
+    with pytest.raises(ValueError, match="different"):
+        display.render(restored)
+
+    assert restored.readiness.readiness is ReadinessTruth.READY
+    assert restored.readiness.lifecycle is SafetyLifecycle.READY
     assert _display_state(display) == before
 
 

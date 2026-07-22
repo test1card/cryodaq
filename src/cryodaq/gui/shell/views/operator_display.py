@@ -8,7 +8,7 @@ intent only.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal
@@ -132,7 +132,38 @@ class _ComposedSnapshotCard(SnapshotCardShell):
 
     def _plan_owned(self, summary, owner: object):  # noqa: ANN001, ANN202
         self.__require_display_owner(owner)
+        if self._revision == summary.revision and self._summary != summary:
+            return self._plan_same_revision_owned(summary)
         return SnapshotCardShell._plan_render(self, summary)
+
+    def _plan_same_revision_owned(self, summary):  # noqa: ANN001, ANN202
+        """Let the root-authorized transport transition reach owned children."""
+
+        card_revision = self._revision
+        footer_revision = self.footer._revision
+        content = self._content
+        content_revision = None if content is None else content._revision
+        assert card_revision is not None
+        assert footer_revision is not None
+        if content is not None:
+            assert content_revision is not None
+        self._revision = card_revision - 1
+        self.footer._revision = footer_revision - 1
+        if content is not None:
+            content._revision = content_revision - 1
+        try:
+            plan = SnapshotCardShell._plan_render(self, summary)
+        finally:
+            self._revision = card_revision
+            self.footer._revision = footer_revision
+            if content is not None:
+                content._revision = content_revision
+        return replace(
+            plan,
+            expected_revision=card_revision,
+            footer=replace(plan.footer, expected_revision=footer_revision),
+            body=(None if plan.body is None else replace(plan.body, expected_revision=content_revision)),
+        )
 
     def _can_commit_owned(self, plan, owner: object) -> None:  # noqa: ANN001
         self.__require_display_owner(owner)
@@ -343,7 +374,8 @@ class OperatorDisplay(QScrollArea):
             if cut.revision < current.cut.revision:
                 raise ValueError("cannot render an older operator snapshot revision")
             if cut.revision == current.cut.revision and snapshot != current:
-                raise ValueError("one revision cannot render different operator-display truth")
+                if not _is_same_cut_transport_transition(current, snapshot):
+                    raise ValueError("one revision cannot render different operator-display truth")
 
         (
             readiness,
@@ -569,6 +601,137 @@ class OperatorDisplay(QScrollArea):
                 for name, section in self._sections.items()
             ),
         )
+
+
+_TRANSPORT_MUTATED_FIELDS = frozenset(
+    {
+        "availability",
+        "lifecycle",
+        "manifest",
+        "readiness",
+        "recording",
+        "recording_session_id",
+        "state",
+        "storage",
+        "transport_age_s",
+        "transport_reason_codes",
+    }
+)
+
+
+def _is_same_cut_transport_transition(current: OperatorSnapshot, candidate: OperatorSnapshot) -> bool:
+    """Accept only conservative store presentation evolution for one cut."""
+
+    if candidate.cut != current.cut:
+        return False
+    current_summaries = current.summaries()
+    candidate_summaries = candidate.summaries()
+    if candidate_summaries[0].transport_age_s < current_summaries[0].transport_age_s:
+        return False
+    if _backend_evidence(current) != _backend_evidence(candidate):
+        return False
+
+    current_condition = current_summaries[0].transport_reason_codes
+    candidate_condition = candidate_summaries[0].transport_reason_codes
+    if any(
+        not _is_transport_state_transition(before, after, current_condition, candidate_condition)
+        for before, after in zip(
+            _presentation_states(current),
+            _presentation_states(candidate),
+            strict=True,
+        )
+    ):
+        return False
+    return _authority_does_not_recover(current, candidate, candidate_condition)
+
+
+def _backend_evidence(value: object) -> object:
+    """Project backend evidence while excluding store-owned overlay fields."""
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return tuple(
+            (field.name, _backend_evidence(getattr(value, field.name)))
+            for field in fields(value)
+            if field.name not in _TRANSPORT_MUTATED_FIELDS
+        )
+    if isinstance(value, tuple):
+        return tuple(_backend_evidence(item) for item in value)
+    return value
+
+
+def _presentation_states(snapshot: OperatorSnapshot) -> tuple[OperatorPresentationState, ...]:
+    return (
+        *(summary.state for summary in snapshot.summaries()),
+        *(item.state for item in snapshot.readiness.blockers),
+        *(item.state for item in snapshot.plant_health.subsystems),
+        *(item.state for item in snapshot.infrastructure.nodes),
+        *(item.state for item in snapshot.attention.items),
+    )
+
+
+def _is_transport_state_transition(
+    current: OperatorPresentationState,
+    candidate: OperatorPresentationState,
+    current_condition: tuple[str, ...],
+    candidate_condition: tuple[str, ...],
+) -> bool:
+    if STATE_PRECEDENCE[current] >= STATE_PRECEDENCE[OperatorPresentationState.CAUTION]:
+        return candidate is current
+    if current is OperatorPresentationState.OK:
+        expected = {
+            (): OperatorPresentationState.OK,
+            ("snapshot_stale",): OperatorPresentationState.STALE,
+            ("transport_disconnected",): OperatorPresentationState.DISCONNECTED,
+        }[candidate_condition]
+        return candidate is expected
+    if current is OperatorPresentationState.STALE:
+        expected = (
+            OperatorPresentationState.DISCONNECTED
+            if candidate_condition == ("transport_disconnected",)
+            else OperatorPresentationState.STALE
+        )
+        return candidate is expected
+    if current is OperatorPresentationState.DISCONNECTED:
+        if candidate_condition == ("transport_disconnected",):
+            return candidate is OperatorPresentationState.DISCONNECTED
+        if current_condition != ("transport_disconnected",):
+            return candidate is OperatorPresentationState.DISCONNECTED
+        return candidate in {
+            OperatorPresentationState.STALE,
+            OperatorPresentationState.DISCONNECTED,
+        }
+    return False
+
+
+def _authority_does_not_recover(
+    current: OperatorSnapshot,
+    candidate: OperatorSnapshot,
+    candidate_condition: tuple[str, ...],
+) -> bool:
+    if not candidate_condition:
+        return (
+            current.readiness.readiness is candidate.readiness.readiness
+            and current.readiness.lifecycle is candidate.readiness.lifecycle
+            and current.experiment.recording is candidate.experiment.recording
+            and current.experiment.recording_session_id == candidate.experiment.recording_session_id
+            and current.data_integrity.storage is candidate.data_integrity.storage
+            and current.support_bundle.availability is candidate.support_bundle.availability
+            and current.support_bundle.manifest == candidate.support_bundle.manifest
+        )
+    return (
+        candidate.readiness.readiness is ReadinessTruth.UNKNOWN
+        and candidate.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+        and candidate.data_integrity.storage is AvailabilityTruth.UNKNOWN
+        and candidate.support_bundle.availability is AvailabilityTruth.UNKNOWN
+        and candidate.support_bundle.manifest is None
+        and (
+            candidate.cut.mode is SnapshotMode.REPLAY
+            or (
+                candidate.experiment.recording is RecordingTruth.UNKNOWN
+                and candidate.experiment.recording_session_id is None
+            )
+        )
+    )
 
 
 def _project_attention(queue: AttentionQueue) -> AttentionQueue:
