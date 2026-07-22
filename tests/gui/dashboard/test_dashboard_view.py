@@ -143,11 +143,69 @@ def test_dashboard_connection_contract_disables_mutations_until_live_and_after_l
         experiment_id=None,
         producer_id="engine-test",
         revision=1,
+        lifecycle=SafetyLifecycle.READY,
+        readiness=ReadinessTruth.READY,
     )
     assert view._phase_widget._create_btn.isEnabled()
     assert view._quick_log._send_btn.isEnabled()
 
     view.set_connected(False)
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
+
+
+@pytest.mark.parametrize("omitted", ["lifecycle", "readiness"])
+def test_dashboard_authority_receipt_never_defaults_omitted_truth_to_ready(app, omitted):
+    view = DashboardView(ChannelManager())
+    view.set_connected(True)
+    receipt = {
+        "experiment_id": None,
+        "producer_id": "engine-test",
+        "revision": 1,
+        "lifecycle": SafetyLifecycle.READY,
+        "readiness": ReadinessTruth.READY,
+    }
+    receipt.pop(omitted)
+
+    with pytest.raises(TypeError):
+        view.set_authority_receipt(**receipt)
+
+    assert view._authority_valid is False
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "readiness"),
+    [
+        (SafetyLifecycle.UNKNOWN, ReadinessTruth.READY),
+        (SafetyLifecycle.READY, ReadinessTruth.UNKNOWN),
+        (SafetyLifecycle.UNKNOWN, ReadinessTruth.UNKNOWN),
+    ],
+)
+def test_dashboard_authority_receipt_unknown_truth_revokes_mutation(app, lifecycle, readiness):
+    view = DashboardView(ChannelManager())
+    view.set_connected(True)
+    view.set_authority_receipt(
+        experiment_id=None,
+        producer_id="engine-test",
+        revision=1,
+        lifecycle=SafetyLifecycle.READY,
+        readiness=ReadinessTruth.READY,
+    )
+    assert view._authority_valid is True
+
+    view.set_authority_receipt(
+        experiment_id=None,
+        producer_id="engine-test",
+        revision=2,
+        lifecycle=lifecycle,
+        readiness=readiness,
+    )
+
+    assert view._authority_valid is False
+    assert view._authority_experiment_id is None
+    assert view._authority_revision is None
     assert not view._phase_widget._create_btn.isEnabled()
     assert not view._quick_log._send_btn.isEnabled()
 
@@ -334,6 +392,8 @@ def test_dashboard_live_config_signals_still_persist(app, monkeypatch):
         experiment_id=None,
         producer_id="engine-test",
         revision=1,
+        lifecycle=SafetyLifecycle.READY,
+        readiness=ReadinessTruth.READY,
     )
 
     view._sensor_grid.rename_requested.emit("Т1", "Новое")

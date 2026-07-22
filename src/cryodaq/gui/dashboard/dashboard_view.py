@@ -329,8 +329,8 @@ class DashboardView(QScrollArea):
         experiment_id: str | None,
         producer_id: str,
         revision: int,
-        lifecycle: SafetyLifecycle = SafetyLifecycle.READY,
-        readiness: ReadinessTruth = ReadinessTruth.READY,
+        lifecycle: SafetyLifecycle,
+        readiness: ReadinessTruth,
     ) -> None:
         """Accept an explicit test/integration authority receipt, never cadence."""
         valid = (
