@@ -340,6 +340,133 @@ def _active(state: PeriodicStateDocument) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _same_periodic_active(
+    expected: Mapping[str, object],
+    observed: dict[str, Any] | None,
+    *,
+    expected_status: PeriodicStatus,
+) -> bool:
+    return bool(
+        observed is not None
+        and observed["slot_id"] == expected["slot_id"]
+        and observed["owner_token"] == expected["owner_token"]
+        and observed["generation_id"] == expected["generation_id"]
+        and observed["status"] == expected_status.value
+    )
+
+
+def _persist_delivery_result(
+    data_dir: Path,
+    active: Mapping[str, object],
+    result: PeriodicDeliveryResult,
+    *,
+    expected_delivery_kind: str,
+    backoff_base_s: float,
+    backoff_cap_s: float,
+    now: float,
+) -> None:
+    current = load_periodic_state(data_dir)
+    current_active = _active(current)
+    if not _same_periodic_active(active, current_active, expected_status=PeriodicStatus.DELIVERING):
+        raise PeriodicContractError("delivery state changed before result persistence")
+    timestamp = max(float(now), float(current.payload["updated_at"]))
+    if result.outcome is PeriodicDeliveryOutcome.ACCEPTED:
+        if result.receipt is None or result.receipt.kind != expected_delivery_kind:
+            candidate = mark_delivery_unknown(
+                current,
+                code="delivery_receipt_kind_mismatch",
+                text="accepted delivery receipt kind does not match destination authority",
+                slot_id=str(active["slot_id"]),
+                owner_token=str(active["owner_token"]),
+                now=timestamp,
+            )
+        else:
+            candidate = mark_succeeded(
+                current,
+                receipt=result.receipt,
+                slot_id=str(active["slot_id"]),
+                owner_token=str(active["owner_token"]),
+                now=timestamp,
+            )
+    elif result.outcome is PeriodicDeliveryOutcome.UNKNOWN:
+        candidate = mark_delivery_unknown(
+            current,
+            code=result.error_code or "delivery_internal_unknown",
+            text=result.error_text or "delivery outcome is unknown",
+            slot_id=str(active["slot_id"]),
+            owner_token=str(active["owner_token"]),
+            now=timestamp,
+        )
+    else:
+        retryable = result.retryable
+        certainty = "rejected" if result.outcome is PeriodicDeliveryOutcome.REJECTED else "not_sent"
+        count = int(active["delivery_attempt_count"])
+        if retryable and count < int(active["max_delivery_attempts"]):
+            delay = (
+                result.retry_after_s
+                if result.retry_after_s is not None
+                else retry_delay(backoff_base_s, backoff_cap_s, count)
+            )
+            candidate = mark_retryable_failure(
+                current,
+                phase="delivery",
+                certainty=certainty,
+                code=result.error_code or "telegram_connect_failed",
+                text=result.error_text or "Telegram delivery failed",
+                not_before=timestamp + delay,
+                slot_id=str(active["slot_id"]),
+                owner_token=str(active["owner_token"]),
+                now=timestamp,
+            )
+        else:
+            candidate = mark_terminal_failure(
+                current,
+                phase="delivery",
+                certainty=certainty,
+                code=result.error_code or "telegram_permanent_rejection",
+                text=result.error_text or "Telegram delivery failed",
+                slot_id=str(active["slot_id"]),
+                owner_token=str(active["owner_token"]),
+                now=timestamp,
+            )
+    write_periodic_state(
+        data_dir,
+        candidate,
+        expected_slot_id=str(active["slot_id"]),
+        expected_owner_token=str(active["owner_token"]),
+        expected_status=PeriodicStatus.DELIVERING,
+    )
+
+
+def _persist_delivery_unknown(
+    data_dir: Path,
+    active: Mapping[str, object],
+    *,
+    code: str,
+    text: str,
+    now: float,
+) -> None:
+    current = load_periodic_state(data_dir)
+    current_active = _active(current)
+    if not _same_periodic_active(active, current_active, expected_status=PeriodicStatus.DELIVERING):
+        return
+    candidate = mark_delivery_unknown(
+        current,
+        code=code,
+        text=text,
+        slot_id=str(active["slot_id"]),
+        owner_token=str(active["owner_token"]),
+        now=max(float(now), float(current.payload["updated_at"])),
+    )
+    write_periodic_state(
+        data_dir,
+        candidate,
+        expected_slot_id=str(active["slot_id"]),
+        expected_owner_token=str(active["owner_token"]),
+        expected_status=PeriodicStatus.DELIVERING,
+    )
+
+
 class PeriodicPngCoordinator:
     """One leader's pure-DI projection, render, and delivery state machine."""
 
@@ -790,6 +917,20 @@ class PeriodicPngCoordinator:
                 status = "degraded_projection"
                 code = "periodic_projection_incomplete"
                 text = "periodic projection evidence is incomplete"
+        active = state.payload["active"]
+        delivery_capacity_full = len(state.payload["unresolved_delivery"]) >= MAX_UNRESOLVED_DELIVERIES
+        delivery_ready = isinstance(active, dict) and (
+            active.get("status") == PeriodicStatus.READY.value
+            or (
+                active.get("status") == PeriodicStatus.FAILED.value
+                and active.get("failure_phase") == "delivery"
+                and active.get("retryable") is True
+            )
+        )
+        if status in {"ready", "degraded_projection", "degraded_tls"} and delivery_capacity_full and delivery_ready:
+            status = "paused_unknown_capacity"
+            code = "delivery_paused_unknown_capacity"
+            text = "delivery paused because unresolved evidence capacity is full"
         existing_health = state.payload["health"]
         if status in {
             "ready",
@@ -1379,92 +1520,28 @@ class PeriodicPngCoordinator:
             return
         assert self._delivery_settlement_lock is not None
         async with self._delivery_settlement_lock:
-            current = await self._load_state()
-            current_active = _active(current)
-            if not self._same_active(active, current_active, expected_status=PeriodicStatus.DELIVERING):
-                raise PeriodicContractError("delivery state changed before result persistence")
-            now = self._logical_now(current)
-            if result.outcome is PeriodicDeliveryOutcome.ACCEPTED:
-                if result.receipt is None or result.receipt.kind != self._expected_delivery_kind:
-                    candidate = mark_delivery_unknown(
-                        current,
-                        code="delivery_receipt_kind_mismatch",
-                        text="accepted delivery receipt kind does not match destination authority",
-                        slot_id=active["slot_id"],
-                        owner_token=active["owner_token"],
-                        now=now,
-                    )
-                else:
-                    candidate = mark_succeeded(
-                        current,
-                        receipt=result.receipt,
-                        slot_id=active["slot_id"],
-                        owner_token=active["owner_token"],
-                        now=now,
-                    )
-            elif result.outcome is PeriodicDeliveryOutcome.UNKNOWN:
-                candidate = mark_delivery_unknown(
-                    current,
-                    code=result.error_code or "delivery_internal_unknown",
-                    text=result.error_text or "delivery outcome is unknown",
-                    slot_id=active["slot_id"],
-                    owner_token=active["owner_token"],
-                    now=now,
-                )
-            else:
-                retryable = result.retryable
-                certainty = "rejected" if result.outcome is PeriodicDeliveryOutcome.REJECTED else "not_sent"
-                count = int(active["delivery_attempt_count"])
-                if retryable and count < int(active["max_delivery_attempts"]):
-                    delay = (
-                        result.retry_after_s
-                        if result.retry_after_s is not None
-                        else retry_delay(
-                            self._config.backoff_base_s,
-                            self._config.backoff_cap_s,
-                            count,
-                        )
-                    )
-                    candidate = mark_retryable_failure(
-                        current,
-                        phase="delivery",
-                        certainty=certainty,
-                        code=result.error_code or "telegram_connect_failed",
-                        text=result.error_text or "Telegram delivery failed",
-                        not_before=now + delay,
-                        slot_id=active["slot_id"],
-                        owner_token=active["owner_token"],
-                        now=now,
-                    )
-                else:
-                    candidate = mark_terminal_failure(
-                        current,
-                        phase="delivery",
-                        certainty=certainty,
-                        code=result.error_code or "telegram_permanent_rejection",
-                        text=result.error_text or "Telegram delivery failed",
-                        slot_id=active["slot_id"],
-                        owner_token=active["owner_token"],
-                        now=now,
-                    )
-            await self._persist(current, candidate)
+            await self._run_blocking(
+                _persist_delivery_result,
+                self._data_dir,
+                active,
+                result,
+                expected_delivery_kind=self._expected_delivery_kind,
+                backoff_base_s=self._config.backoff_base_s,
+                backoff_cap_s=self._config.backoff_cap_s,
+                now=self._clock.wall_time(),
+            )
 
     async def _persist_unknown(self, active: dict[str, Any], code: str, text: str) -> None:
         assert self._delivery_settlement_lock is not None
         async with self._delivery_settlement_lock:
-            current = await self._load_state()
-            current_active = _active(current)
-            if not self._same_active(active, current_active, expected_status=PeriodicStatus.DELIVERING):
-                return
-            candidate = mark_delivery_unknown(
-                current,
+            await self._run_blocking(
+                _persist_delivery_unknown,
+                self._data_dir,
+                active,
                 code=code,
                 text=text,
-                slot_id=active["slot_id"],
-                owner_token=active["owner_token"],
-                now=self._logical_now(current),
+                now=self._clock.wall_time(),
             )
-            await self._persist(current, candidate)
 
     async def _await_shielded(
         self,

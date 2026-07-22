@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -41,9 +41,7 @@ def test_resolve_rag_config_path_explicit_missing_returns_none(tmp_path: Path) -
     assert "does-not-exist" in label
 
 
-def test_resolve_rag_config_path_falls_back_to_yaml_example(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_rag_config_path_falls_back_to_yaml_example(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When no live config exists, rag.yaml.example is the last-resort
     default — verifies the v0.55.14 fix for SCOPE 2 finding 2.5."""
     monkeypatch.setattr(cli, "get_config_dir", lambda: tmp_path)
@@ -58,9 +56,7 @@ def test_resolve_rag_config_path_falls_back_to_yaml_example(
     assert "defaults" in label.lower()
 
 
-def test_resolve_rag_config_path_prefers_local_over_yaml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_rag_config_path_prefers_local_over_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "get_config_dir", lambda: tmp_path)
     (tmp_path / "rag.local.yaml").write_text("rag: {a: 1}", encoding="utf-8")
     (tmp_path / "rag.yaml").write_text("rag: {b: 2}", encoding="utf-8")
@@ -71,9 +67,7 @@ def test_resolve_rag_config_path_prefers_local_over_yaml(
     assert path.name == "rag.local.yaml"
 
 
-def test_resolve_rag_config_path_prefers_yaml_over_example(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_rag_config_path_prefers_yaml_over_example(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "get_config_dir", lambda: tmp_path)
     (tmp_path / "rag.yaml").write_text("rag: {}", encoding="utf-8")
     (tmp_path / "rag.yaml.example").write_text("rag: {}", encoding="utf-8")
@@ -83,9 +77,7 @@ def test_resolve_rag_config_path_prefers_yaml_over_example(
     assert path.name == "rag.yaml"
 
 
-def test_resolve_rag_config_path_no_files_returns_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_rag_config_path_no_files_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "get_config_dir", lambda: tmp_path)
     path, label = cli._resolve_rag_config_path(None)
     assert path is None
@@ -110,12 +102,8 @@ def test_load_rag_config_handles_missing_path(tmp_path: Path) -> None:
 def test_ollama_error_classes_imported_at_module_load() -> None:
     """The CLI module must import the Ollama error classes so the
     try/except blocks in index_main / search_main can catch them."""
-    assert OllamaModelMissingError in cli.__dict__.values() or hasattr(
-        cli, "OllamaModelMissingError"
-    )
-    assert OllamaUnavailableError in cli.__dict__.values() or hasattr(
-        cli, "OllamaUnavailableError"
-    )
+    assert OllamaModelMissingError in cli.__dict__.values() or hasattr(cli, "OllamaModelMissingError")
+    assert OllamaUnavailableError in cli.__dict__.values() or hasattr(cli, "OllamaUnavailableError")
 
 
 _INDEX_MAIN_FRIENDLY: dict[type, list[str]] = {
@@ -131,6 +119,37 @@ _INDEX_MAIN_FRIENDLY: dict[type, list[str]] = {
         "hint:",
     ],
 }
+
+
+def test_index_main_is_the_explicit_offline_rebuild_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    config = tmp_path / "rag.yaml"
+    db_path = tmp_path / "offline-index"
+    config.write_text(f"rag:\n  db_path: '{db_path}'\n", encoding="utf-8")
+    embeddings = MagicMock(close=AsyncMock())
+    build_index = AsyncMock(return_value={"chunks": 1, "indexed": 1})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cryodaq-rag-index", "--config", str(config), "--no-sqlite"],
+    )
+    monkeypatch.setattr(cli, "get_data_dir", lambda: data_dir)
+    monkeypatch.setattr(cli, "get_project_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_make_embeddings", lambda _config: embeddings)
+    monkeypatch.setattr(cli, "build_index", build_index)
+
+    cli.index_main()
+
+    build_index.assert_awaited_once()
+    invocation = build_index.await_args.kwargs
+    assert invocation["db_path"] == db_path
+    assert invocation["experiments_dir"] == data_dir / "experiments"
+    assert invocation["sqlite_path"] is None
+    assert invocation["embeddings_client"] is embeddings
+    embeddings.close.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -163,15 +182,11 @@ def test_index_main_ollama_errors_exit_with_friendly_message(
     with pytest.raises(SystemExit) as exc_info:
         cli.index_main()
 
-    assert exc_info.value.code == expected_exit, (
-        f"expected exit {expected_exit}, got {exc_info.value.code}"
-    )
+    assert exc_info.value.code == expected_exit, f"expected exit {expected_exit}, got {exc_info.value.code}"
     captured = capsys.readouterr()
     expected_substrings = _INDEX_MAIN_FRIENDLY[error_cls]
     for substr in expected_substrings:
-        assert substr in captured.err, (
-            f"expected {substr!r} in stderr for {error_cls.__name__}; got: {captured.err!r}"
-        )
+        assert substr in captured.err, f"expected {substr!r} in stderr for {error_cls.__name__}; got: {captured.err!r}"
     assert "Traceback (most recent call last)" not in captured.err, (
         f"bare traceback must not appear in stderr; got: {captured.err!r}"
     )
@@ -211,9 +226,7 @@ def test_search_main_ollama_errors_exit_with_friendly_message(
     cfg = tmp_path / "rag.yaml"
     cfg.write_text("rag: {}", encoding="utf-8")
 
-    monkeypatch.setattr(
-        sys, "argv", ["cryodaq-rag-search", "--config", str(cfg), "test query"]
-    )
+    monkeypatch.setattr(sys, "argv", ["cryodaq-rag-search", "--config", str(cfg), "test query"])
     monkeypatch.setattr(
         cli,
         "RagSearcher",
@@ -223,15 +236,11 @@ def test_search_main_ollama_errors_exit_with_friendly_message(
     with pytest.raises(SystemExit) as exc_info:
         cli.search_main()
 
-    assert exc_info.value.code == expected_exit, (
-        f"expected exit {expected_exit}, got {exc_info.value.code}"
-    )
+    assert exc_info.value.code == expected_exit, f"expected exit {expected_exit}, got {exc_info.value.code}"
     captured = capsys.readouterr()
     expected_substrings = _SEARCH_MAIN_FRIENDLY[error_cls]
     for substr in expected_substrings:
-        assert substr in captured.err, (
-            f"expected {substr!r} in stderr for {error_cls.__name__}; got: {captured.err!r}"
-        )
+        assert substr in captured.err, f"expected {substr!r} in stderr for {error_cls.__name__}; got: {captured.err!r}"
     assert "Traceback (most recent call last)" not in captured.err, (
         f"bare traceback must not appear in stderr; got: {captured.err!r}"
     )

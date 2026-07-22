@@ -51,6 +51,7 @@ ENGINE_QUERY_ACTIONS = frozenset(
         "experiment_status",
         "get_sensor_diagnostics",
         "get_vacuum_trend",
+        "log_get",
         "readings_history",
     }
 )

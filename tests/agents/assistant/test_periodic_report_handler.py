@@ -43,7 +43,7 @@ def _make_config(**overrides) -> AssistantConfig:
         output_telegram=True,
         output_operator_log=True,
         output_gui_insight=False,
-        audit_enabled=False,
+        audit_enabled=True,
         periodic_report_enabled=True,
         periodic_report_min_events=1,
         periodic_report_skip_if_idle=True,
@@ -68,7 +68,6 @@ def _make_agent(
     config: AssistantConfig | None = None,
     ollama=None,
     telegram=None,
-    event_logger=None,
     context: PeriodicReportContext | None = None,
     tmp_path: Path,
 ) -> tuple[AssistantLiveAgent, EventBus]:
@@ -86,18 +85,13 @@ def _make_agent(
     if context is not None:
         ctx_builder.build_periodic_report_context = AsyncMock(return_value=context)
 
-    audit = AuditLogger(tmp_path / "audit", enabled=False)
+    audit = AuditLogger(tmp_path / "audit", enabled=True)
 
     if telegram is None:
         telegram = AsyncMock()
         telegram._send_to_all = AsyncMock()
-    if event_logger is None:
-        event_logger = AsyncMock()
-        event_logger.log_event = AsyncMock()
-
     router = OutputRouter(
         telegram_bot=telegram,
-        event_logger=event_logger,
         event_bus=bus,
     )
 
@@ -220,14 +214,10 @@ async def test_periodic_report_handler_handles_empty_response(tmp_path: Path) ->
     ctx = _make_mock_context(total_event_count=2)
     ollama = AsyncMock()
     ollama.generate = AsyncMock(
-        return_value=GenerationResult(
-            text="", tokens_in=10, tokens_out=0, latency_s=1.0, model="gemma4:e2b"
-        )
+        return_value=GenerationResult(text="", tokens_in=10, tokens_out=0, latency_s=1.0, model="gemma4:e2b")
     )
     ollama.close = AsyncMock()
-    agent, bus = _make_agent(
-        ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path
-    )
+    agent, bus = _make_agent(ollama=ollama, telegram=telegram, context=ctx, tmp_path=tmp_path)
     await agent.start()
 
     await bus.publish(_periodic_event())
@@ -263,7 +253,6 @@ async def test_periodic_report_disabled_does_not_handle(tmp_path: Path) -> None:
 def test_periodic_report_prefix_includes_suffix() -> None:
     router = OutputRouter(
         telegram_bot=None,
-        event_logger=MagicMock(),
         event_bus=MagicMock(),
         brand_name="Гемма",
         brand_emoji="🤖",

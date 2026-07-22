@@ -17,6 +17,8 @@ from cryodaq.agents.assistant.query.schemas import (
     QueryAdapters,
     VacuumETA,
 )
+from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant_main import _handle_assistant_query_command
 
 # ---------------------------------------------------------------------------
 # Test fixtures / helpers
@@ -326,8 +328,50 @@ async def test_query_agent_audit_log_per_query() -> None:
     assert kwargs["trigger_event"]["type"] == "live_query"
     assert kwargs["trigger_event"]["chat_id"] == 42
     assert kwargs["trigger_event"]["category"] == "composite_status"
-    assert "telegram" in kwargs["outputs_dispatched"]
+    assert kwargs["output_intent"] == ["telegram"]
+    assert kwargs["outputs_dispatched"] == []
     assert kwargs["errors"] == []
+
+
+async def test_query_audit_failure_prevents_chart_and_response_egress(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    audit = AuditLogger(tmp_path / "audit")
+    monkeypatch.setattr(
+        "cryodaq.agents.assistant.shared.audit._write_audit_record",
+        lambda *_args: (_ for _ in ()).throw(OSError("fsync failed")),
+    )
+    chart = MagicMock()
+    ollama = MagicMock()
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("composite_status")),
+            _make_gen_result("UNAUDITED MODEL RESPONSE"),
+        ]
+    )
+    agent = AssistantQueryAgent(
+        ollama_client=ollama,
+        audit_logger=audit,
+        config=_make_config(),
+        adapters=_make_adapters(),
+        chart_dispatcher=chart,
+    )
+
+    try:
+        reply = await _handle_assistant_query_command(
+            agent,
+            {"query": "status?", "chat_id": 42},
+        )
+    finally:
+        await audit.close()
+
+    assert reply.get("ok") is False
+    assert reply.get("error_code") == "audit_unavailable"
+    assert reply.get("delivery_state") == "not_dispatched"
+    assert "response" not in reply
+    assert "UNAUDITED MODEL RESPONSE" not in repr(reply)
+    chart.dispatch.assert_not_called()
 
 
 async def test_query_agent_audit_log_records_errors() -> None:

@@ -8,9 +8,12 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from cryodaq.agents.assistant.shared.report_intro import (
     IntroConfig,
     _build_context,
+    _call_ollama_sync,
     _format_channel_stats,
     _format_phases,
     generate_report_intro,
@@ -60,10 +63,8 @@ def _make_dataset(
 ) -> _FakeDataset:
     if phases is None:
         phases = [
-            {"phase": "PREP", "started_at": "2026-05-01T10:00:00+00:00",
-             "ended_at": "2026-05-01T10:15:00+00:00"},
-            {"phase": "COOL", "started_at": "2026-05-01T10:15:00+00:00",
-             "ended_at": "2026-05-01T12:00:00+00:00"},
+            {"phase": "PREP", "started_at": "2026-05-01T10:00:00+00:00", "ended_at": "2026-05-01T10:15:00+00:00"},
+            {"phase": "COOL", "started_at": "2026-05-01T10:15:00+00:00", "ended_at": "2026-05-01T12:00:00+00:00"},
         ]
     return _FakeDataset(
         metadata={
@@ -78,12 +79,14 @@ def _make_dataset(
                 "phases": phases,
             }
         },
-        readings=readings or [
+        readings=readings
+        or [
             _FakeReading("T1", 4.2, "K"),
             _FakeReading("T1", 4.5, "K"),
             _FakeReading("T2", 4.3, "K"),
         ],
-        operator_log=operator_log or [
+        operator_log=operator_log
+        or [
             _FakeLogRecord("Начало охлаждения. Все параметры в норме."),
             _FakeLogRecord("Целевая температура достигнута."),
         ],
@@ -112,10 +115,8 @@ def test_build_context_includes_duration() -> None:
 def test_format_phases_lists_all_phases() -> None:
     exp = {
         "phases": [
-            {"phase": "PREP", "started_at": "2026-05-01T10:00:00+00:00",
-             "ended_at": "2026-05-01T10:15:00+00:00"},
-            {"phase": "COOL", "started_at": "2026-05-01T10:15:00+00:00",
-             "ended_at": "2026-05-01T12:00:00+00:00"},
+            {"phase": "PREP", "started_at": "2026-05-01T10:00:00+00:00", "ended_at": "2026-05-01T10:15:00+00:00"},
+            {"phase": "COOL", "started_at": "2026-05-01T10:15:00+00:00", "ended_at": "2026-05-01T12:00:00+00:00"},
         ]
     }
     result = _format_phases(exp)
@@ -134,9 +135,9 @@ def test_format_channel_stats_computes_min_max_mean() -> None:
     dataset = _make_dataset(readings=readings)
     result = _format_channel_stats(dataset)
     assert "T1" in result
-    assert "мин 4 K" in result      # min — format: {val:.4g}{unit_str}
-    assert "макс 10 K" in result    # max — distinct from mean
-    assert "ср 6.333 K" in result   # mean = 19/3, :.4g → "6.333"
+    assert "мин 4 K" in result  # min — format: {val:.4g}{unit_str}
+    assert "макс 10 K" in result  # max — distinct from mean
+    assert "ср 6.333 K" in result  # mean = 19/3, :.4g → "6.333"
 
 
 def test_generate_report_intro_disabled_returns_none() -> None:
@@ -199,6 +200,69 @@ def test_generate_report_intro_empty_ollama_response_returns_none() -> None:
         result = generate_report_intro(dataset, config)
 
     assert result is None
+
+
+def test_report_intro_rejects_redirects_and_nonliteral_loopback(
+    monkeypatch,
+) -> None:
+    import urllib.error
+    import urllib.request
+
+    opened: list[urllib.request.Request] = []
+
+    class _NoRedirectOpener:
+        def open(self, request, timeout):
+            del timeout
+            opened.append(request)
+            raise urllib.error.HTTPError(
+                request.full_url,
+                302,
+                "redirect rejected",
+                {"Location": "https://example.invalid/escape"},
+                None,
+            )
+
+    def build_opener(*handlers):
+        redirect_handlers = [handler for handler in handlers if isinstance(handler, urllib.request.HTTPRedirectHandler)]
+        assert redirect_handlers
+        assert (
+            redirect_handlers[0].redirect_request(
+                urllib.request.Request("http://127.0.0.1:11434/api/generate"),
+                None,
+                302,
+                "Found",
+                {"Location": "https://example.invalid/escape"},
+                "http://127.0.0.1:11434/api/generate",
+            )
+            is None
+        )
+        return _NoRedirectOpener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default urlopen follows redirects"),
+        ),
+    )
+
+    with pytest.raises(urllib.error.HTTPError, match="302"):
+        _call_ollama_sync(
+            "prompt",
+            "system",
+            IntroConfig(enabled=True, base_url="http://127.0.0.1:11434"),
+        )
+    assert len(opened) == 1
+
+    opened.clear()
+    with pytest.raises(ValueError, match="literal"):
+        _call_ollama_sync(
+            "prompt",
+            "system",
+            IntroConfig(enabled=True, base_url="http://localhost:11434"),
+        )
+    assert opened == []
 
 
 def test_operator_notes_excludes_gemma_tagged_entries() -> None:

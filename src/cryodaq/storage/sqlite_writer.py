@@ -12,19 +12,28 @@ import json
 import logging
 import math
 import os
+import stat
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError, ThreadPoolExecutor
+from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
 from cryodaq.channels.descriptors import ChannelCatalog
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
-from cryodaq.core.operator_log import OperatorLogEntry, normalize_operator_log_tags
+from cryodaq.core.operator_log import (
+    OperatorLogCommitResult,
+    OperatorLogEntry,
+    OperatorLogIdempotencyConflictError,
+    OperatorLogIdempotencyUnavailableError,
+    normalize_operator_log_tags,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import (
     SQLITE_BACKPORT_SAFE,
@@ -93,7 +102,9 @@ CREATE TABLE IF NOT EXISTS operator_log (
     author        TEXT    NOT NULL DEFAULT '',
     source        TEXT    NOT NULL DEFAULT '',
     message       TEXT    NOT NULL,
-    tags          TEXT    NOT NULL DEFAULT '[]'
+    tags          TEXT    NOT NULL DEFAULT '[]',
+    request_id    TEXT,
+    request_fingerprint TEXT
 );
 """
 
@@ -104,6 +115,57 @@ CREATE INDEX IF NOT EXISTS idx_operator_log_ts ON operator_log (timestamp);
 INDEX_OPERATOR_LOG_EXPERIMENT = """
 CREATE INDEX IF NOT EXISTS idx_operator_log_experiment ON operator_log (experiment_id, timestamp);
 """
+
+INDEX_OPERATOR_LOG_REQUEST_ID = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_log_request_id
+ON operator_log (request_id) WHERE request_id IS NOT NULL;
+"""
+
+SCHEMA_ALARM_ACK_OUTBOX = """
+CREATE TABLE IF NOT EXISTS alarm_ack_outbox (
+    request_id TEXT PRIMARY KEY,
+    request_fingerprint TEXT NOT NULL,
+    alarm_name TEXT NOT NULL,
+    activation_id TEXT NOT NULL,
+    operator_name TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('intent', 'committed', 'published')),
+    event_json TEXT,
+    receipt_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+"""
+SCHEMA_OPERATOR_LOG_PUBLICATION_OUTBOX = """
+CREATE TABLE IF NOT EXISTS operator_log_publication_outbox (
+    request_id TEXT PRIMARY KEY,
+    request_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('intent', 'published')),
+    event_json TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+"""
+
+_OPERATOR_LOG_LEGACY_COLUMNS = (
+    (0, "id", "INTEGER", 0, None, 1),
+    (1, "timestamp", "REAL", 1, None, 0),
+    (2, "experiment_id", "TEXT", 0, None, 0),
+    (3, "author", "TEXT", 1, "''", 0),
+    (4, "source", "TEXT", 1, "''", 0),
+    (5, "message", "TEXT", 1, None, 0),
+    (6, "tags", "TEXT", 1, "'[]'", 0),
+)
+_OPERATOR_LOG_CURRENT_COLUMNS = (
+    *_OPERATOR_LOG_LEGACY_COLUMNS,
+    (7, "request_id", "TEXT", 0, None, 0),
+    (8, "request_fingerprint", "TEXT", 0, None, 0),
+)
+_OPERATOR_LOG_REGISTRY_DEADLINE_S = 10.0
+_OPERATOR_LOG_MAX_DIRECTORY_ENTRIES = 100_000
+_OPERATOR_LOG_MAX_HOT_DATABASES = 10_000
+_OPERATOR_LOG_MAX_KEYED_ROWS = 10_000
 
 
 def _parse_timestamp(raw) -> datetime:
@@ -267,12 +329,64 @@ class CommittedBatchReceipt:
         return False
 
 
+class CommittedBatchSettlement:
+    """Operation-scoped owner for a descriptor commit and its terminal receipt."""
+
+    __slots__ = ("_owner",)
+
+    def __init__(self) -> None:
+        self._owner: asyncio.Task[CommittedBatchReceipt | None] | None = None
+
+    def bind(self, owner: asyncio.Task[CommittedBatchReceipt | None]) -> None:
+        if self._owner is not None:
+            raise RuntimeError("commit settlement ticket is already bound")
+        self._owner = owner
+
+    async def wait(self) -> CommittedBatchReceipt | None:
+        owner = self._owner
+        if owner is None:
+            raise RuntimeError("commit settlement ticket is not bound")
+        return await asyncio.shield(owner)
+
+
 @dataclass(frozen=True, slots=True)
 class _CommitReceiptIntegrity:
     entries: tuple[CommittedReadingReceipt, ...]
     entry_values: tuple[tuple[str, str, int, bytes, DescriptorBoundReading], ...]
     commit_revision: int
     token: object
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedOperatorLogRequest:
+    """Persistence-private registry row; never serialized to operator clients."""
+
+    storage_day: date
+    entry: OperatorLogEntry
+    request_id: str
+    request_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class AlarmAckOutboxRecord:
+    request_id: str
+    request_fingerprint: str
+    alarm_name: str
+    activation_id: str
+    operator_name: str
+    reason: str
+    state: str
+    event: dict[str, Any] | None
+    receipt: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorLogPublicationOutboxRecord:
+    request_id: str
+    request_fingerprint: str
+    state: str
+    event: dict[str, Any]
+    receipt: dict[str, Any]
 
 
 class SQLiteWriter:
@@ -306,6 +420,16 @@ class SQLiteWriter:
         self._total_written: int = 0
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_write")
         self._read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sqlite_read")
+        # Every executor operation is owned independently of its caller. A REP
+        # timeout/cancellation may abandon only the waiter; these retained owners
+        # remain authoritative until the worker and its side effects settle.
+        self._owned_write_tasks: set[asyncio.Task[Any]] = set()
+        self._owned_read_tasks: set[asyncio.Task[Any]] = set()
+        self._pending_callback_futures: set[ConcurrentFuture[Any]] = set()
+        self._pending_write_futures: set[asyncio.Future[Any]] = set()
+        self._pending_read_futures: set[asyncio.Future[Any]] = set()
+        self._stopping = False
+        self._stop_owner: asyncio.Task[None] | None = None
         # Periodic explicit WAL checkpoint counter (DEEP_AUDIT_CC.md D.1).
         self._checkpoint_counter = 0
         # Optional F35 descriptor authority.  A plain ChannelCatalog retains
@@ -319,6 +443,18 @@ class SQLiteWriter:
         self._commit_owner_key = object()
         self._commit_revision = 0
         self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
+        # Durable operator-log idempotency is a retained-data property, not an
+        # in-memory receipt cache. Startup explicitly builds this bounded
+        # registry before keyed writes are enabled. Slice B extends the same
+        # builder with indexed cold-v2 rows; normal appends never rescan cold
+        # storage.
+        self._operator_log_idempotency_registry: dict[str, _PersistedOperatorLogRequest] | None = None
+        # Each abandoned commit has one explicit operation-scoped ticket. The
+        # bound is checked before admission; no receipt can be evicted to make
+        # room for a later operation.
+        self._commit_settlement_capacity = 1024
+        self._retained_commit_settlements: set[CommittedBatchSettlement] = set()
+        self._settled_commit_receipts: list[CommittedBatchReceipt] = []
 
         # Disk-full graceful degradation (Phase 2a H.1).
         # When the writer thread detects disk-full from sqlite3.OperationalError,
@@ -343,8 +479,387 @@ class SQLiteWriter:
 
         _check_sqlite_version()
 
+    def _control_db_path(self) -> Path:
+        return self._data_dir / "control.db"
+
+    def _open_control_db(self) -> sqlite3.Connection:
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self._control_db_path()), timeout=10, check_same_thread=False)
+        try:
+            mode = conn.execute("PRAGMA journal_mode=WAL;").fetchone()
+            if (mode[0] if mode else "").lower() != "wal":
+                raise RuntimeError("alarm ACK outbox requires SQLite WAL")
+            conn.execute("PRAGMA synchronous=FULL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.execute(SCHEMA_ALARM_ACK_OUTBOX)
+            conn.execute(SCHEMA_OPERATOR_LOG_PUBLICATION_OUTBOX)
+            conn.commit()
+            return conn
+        except Exception:
+            conn.close()
+            raise
+
+    @staticmethod
+    def _alarm_ack_record(row: tuple[object, ...]) -> AlarmAckOutboxRecord:
+        event = None if row[7] is None else json.loads(str(row[7]))
+        receipt = None if row[8] is None else json.loads(str(row[8]))
+        return AlarmAckOutboxRecord(
+            request_id=str(row[0]),
+            request_fingerprint=str(row[1]),
+            alarm_name=str(row[2]),
+            activation_id=str(row[3]),
+            operator_name=str(row[4]),
+            reason=str(row[5]),
+            state=str(row[6]),
+            event=event,
+            receipt=receipt,
+        )
+
+    def _prepare_alarm_ack_outbox_sync(
+        self,
+        request_id: str,
+        request_fingerprint: str,
+        alarm_name: str,
+        activation_id: str,
+        operator_name: str,
+        reason: str,
+    ) -> AlarmAckOutboxRecord:
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        values = (request_id, request_fingerprint, alarm_name, activation_id, operator_name, reason)
+        conn = self._open_control_db()
+        try:
+            now = time.time()
+            conn.execute(
+                "INSERT OR IGNORE INTO alarm_ack_outbox "
+                "(request_id, request_fingerprint, alarm_name, activation_id, operator_name, "
+                "reason, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'intent', ?, ?)",
+                (*values, now, now),
+            )
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, alarm_name, activation_id, "
+                "operator_name, reason, state, event_json, receipt_json "
+                "FROM alarm_ack_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("alarm ACK outbox intent disappeared")
+            record = self._alarm_ack_record(row)
+            if record.request_fingerprint != request_fingerprint:
+                raise OperatorLogIdempotencyConflictError("alarm ACK request_id was reused with different content")
+            conn.commit()
+            return record
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _operator_log_publication_record(row: tuple[object, ...]) -> OperatorLogPublicationOutboxRecord:
+        return OperatorLogPublicationOutboxRecord(
+            request_id=str(row[0]),
+            request_fingerprint=str(row[1]),
+            state=str(row[2]),
+            event=dict(json.loads(str(row[3]))),
+            receipt=dict(json.loads(str(row[4]))),
+        )
+
+    def _prepare_operator_log_publication_outbox_sync(
+        self,
+        request_id: str,
+        request_fingerprint: str,
+        event: dict[str, Any],
+        receipt: dict[str, Any],
+    ) -> OperatorLogPublicationOutboxRecord:
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        event_json = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        receipt_json = json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        conn = self._open_control_db()
+        try:
+            now = time.time()
+            conn.execute(
+                "INSERT OR IGNORE INTO operator_log_publication_outbox "
+                "(request_id, request_fingerprint, state, event_json, receipt_json, created_at, updated_at) "
+                "VALUES (?, ?, 'intent', ?, ?, ?, ?)",
+                (request_id, request_fingerprint, event_json, receipt_json, now, now),
+            )
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, state, event_json, receipt_json "
+                "FROM operator_log_publication_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("operator-log publication intent disappeared")
+            current = self._operator_log_publication_record(row)
+            if current.request_fingerprint != request_fingerprint:
+                raise OperatorLogIdempotencyConflictError(
+                    "operator-log publication request_id was reused with different content"
+                )
+            if current.event != event or current.receipt != receipt:
+                raise RuntimeError("operator-log publication payload changed")
+            conn.commit()
+            return current
+        finally:
+            conn.close()
+
+    async def prepare_operator_log_publication_outbox(
+        self,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+        event: dict[str, Any],
+        receipt: dict[str, Any],
+    ) -> OperatorLogPublicationOutboxRecord:
+        owner = self._owned_executor_task(
+            self._executor,
+            self._prepare_operator_log_publication_outbox_sync,
+            request_id,
+            request_fingerprint,
+            event,
+            receipt,
+            read=False,
+            name="sqlite_operator_log_publication_prepare",
+        )
+        return await asyncio.shield(owner)
+
+    def _publish_operator_log_publication_outbox_sync(
+        self, request_id: str, request_fingerprint: str
+    ) -> OperatorLogPublicationOutboxRecord:
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        conn = self._open_control_db()
+        try:
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, state, event_json, receipt_json "
+                "FROM operator_log_publication_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("operator-log publication intent is missing")
+            current = self._operator_log_publication_record(row)
+            if current.request_fingerprint != request_fingerprint:
+                raise OperatorLogIdempotencyConflictError(
+                    "operator-log publication request_id was reused with different content"
+                )
+            if current.state == "published":
+                return current
+            conn.execute(
+                "UPDATE operator_log_publication_outbox SET state = 'published', updated_at = ? "
+                "WHERE request_id = ? AND request_fingerprint = ?",
+                (time.time(), request_id, request_fingerprint),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, state, event_json, receipt_json "
+                "FROM operator_log_publication_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("operator-log publication receipt disappeared")
+            return self._operator_log_publication_record(row)
+        finally:
+            conn.close()
+
+    async def publish_operator_log_publication_outbox(
+        self, *, request_id: str, request_fingerprint: str
+    ) -> OperatorLogPublicationOutboxRecord:
+        owner = self._owned_executor_task(
+            self._executor,
+            self._publish_operator_log_publication_outbox_sync,
+            request_id,
+            request_fingerprint,
+            read=False,
+            name="sqlite_operator_log_publication_publish",
+        )
+        return await asyncio.shield(owner)
+
+    async def prepare_alarm_ack_outbox(
+        self,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+        alarm_name: str,
+        activation_id: str,
+        operator_name: str,
+        reason: str,
+    ) -> AlarmAckOutboxRecord:
+        owner = self._owned_executor_task(
+            self._executor,
+            self._prepare_alarm_ack_outbox_sync,
+            request_id,
+            request_fingerprint,
+            alarm_name,
+            activation_id,
+            operator_name,
+            reason,
+            read=False,
+            name="sqlite_alarm_ack_outbox_prepare",
+        )
+        return await asyncio.shield(owner)
+
+    def _commit_alarm_ack_outbox_sync(
+        self,
+        request_id: str,
+        request_fingerprint: str,
+        event: dict[str, Any],
+        receipt: dict[str, Any],
+    ) -> AlarmAckOutboxRecord:
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        event_json = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        receipt_json = json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        conn = self._open_control_db()
+        try:
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, alarm_name, activation_id, "
+                "operator_name, reason, state, event_json, receipt_json "
+                "FROM alarm_ack_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("alarm ACK outbox intent is missing")
+            current = self._alarm_ack_record(row)
+            if current.request_fingerprint != request_fingerprint:
+                raise OperatorLogIdempotencyConflictError("alarm ACK request_id was reused with different content")
+            if current.state == "published":
+                return current
+            if current.state == "committed":
+                if current.event != event or current.receipt != receipt:
+                    raise RuntimeError("alarm ACK outbox committed payload changed")
+                return current
+            now = time.time()
+            conn.execute(
+                "UPDATE alarm_ack_outbox SET state = 'committed', event_json = ?, receipt_json = ?, updated_at = ? "
+                "WHERE request_id = ? AND request_fingerprint = ? AND state = 'intent'",
+                (event_json, receipt_json, now, request_id, request_fingerprint),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, alarm_name, activation_id, "
+                "operator_name, reason, state, event_json, receipt_json "
+                "FROM alarm_ack_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("alarm ACK outbox commit disappeared")
+            return self._alarm_ack_record(row)
+        finally:
+            conn.close()
+
+    async def commit_alarm_ack_outbox(
+        self,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+        event: dict[str, Any],
+        receipt: dict[str, Any],
+    ) -> AlarmAckOutboxRecord:
+        owner = self._owned_executor_task(
+            self._executor,
+            self._commit_alarm_ack_outbox_sync,
+            request_id,
+            request_fingerprint,
+            event,
+            receipt,
+            read=False,
+            name="sqlite_alarm_ack_outbox_commit",
+        )
+        return await asyncio.shield(owner)
+
+    def _publish_alarm_ack_outbox_sync(self, request_id: str, request_fingerprint: str) -> AlarmAckOutboxRecord:
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        conn = self._open_control_db()
+        try:
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, alarm_name, activation_id, "
+                "operator_name, reason, state, event_json, receipt_json "
+                "FROM alarm_ack_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("alarm ACK outbox receipt is missing")
+            current = self._alarm_ack_record(row)
+            if current.request_fingerprint != request_fingerprint:
+                raise OperatorLogIdempotencyConflictError("alarm ACK request_id was reused with different content")
+            if current.state == "intent":
+                raise RuntimeError("alarm ACK event cannot publish before state commit")
+            if current.state == "published":
+                return current
+            conn.execute(
+                "UPDATE alarm_ack_outbox SET state = 'published', updated_at = ? "
+                "WHERE request_id = ? AND request_fingerprint = ?",
+                (time.time(), request_id, request_fingerprint),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT request_id, request_fingerprint, alarm_name, activation_id, "
+                "operator_name, reason, state, event_json, receipt_json "
+                "FROM alarm_ack_outbox WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("alarm ACK outbox publication disappeared")
+            return self._alarm_ack_record(row)
+        finally:
+            conn.close()
+
+    async def publish_alarm_ack_outbox(self, *, request_id: str, request_fingerprint: str) -> AlarmAckOutboxRecord:
+        owner = self._owned_executor_task(
+            self._executor,
+            self._publish_alarm_ack_outbox_sync,
+            request_id,
+            request_fingerprint,
+            read=False,
+            name="sqlite_alarm_ack_outbox_publish",
+        )
+        return await asyncio.shield(owner)
+
     def _db_path(self, day: date) -> Path:
         return self._data_dir / f"data_{day.isoformat()}.db"
+
+    @staticmethod
+    def _operator_log_columns(conn: sqlite3.Connection) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            (int(row[0]), str(row[1]), str(row[2]).upper(), int(row[3]), row[4], int(row[5]))
+            for row in conn.execute("PRAGMA main.table_info(operator_log)")
+        )
+
+    @staticmethod
+    def _normalized_schema_sql(value: object) -> str:
+        if type(value) is not str:
+            return ""
+        return " ".join(value.strip().rstrip(";").split()).casefold()
+
+    @classmethod
+    def _verify_operator_log_storage(cls, conn: sqlite3.Connection) -> None:
+        if cls._operator_log_columns(conn) != _OPERATOR_LOG_CURRENT_COLUMNS:
+            raise RuntimeError("operator_log schema is not the exact current schema")
+        index_rows = conn.execute("PRAGMA main.index_list(operator_log)").fetchall()
+        matching = [row for row in index_rows if row[1] == "idx_operator_log_request_id"]
+        if len(matching) != 1 or int(matching[0][2]) != 1 or int(matching[0][4]) != 1:
+            raise RuntimeError("operator_log request-id index is missing or not unique/partial")
+        index_info = conn.execute("PRAGMA main.index_info(idx_operator_log_request_id)").fetchall()
+        if [(int(row[0]), int(row[1]), row[2]) for row in index_info] != [(0, 7, "request_id")]:
+            raise RuntimeError("operator_log request-id index targets unexpected columns")
+        stored = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_operator_log_request_id'"
+        ).fetchone()
+        actual_sql = cls._normalized_schema_sql(None if stored is None else stored[0])
+        expected_sql = cls._normalized_schema_sql(INDEX_OPERATOR_LOG_REQUEST_ID)
+        expected_without_guard = expected_sql.replace(" if not exists", "")
+        if actual_sql not in {expected_sql, expected_without_guard}:
+            raise RuntimeError("operator_log request-id index predicate is not exact")
+
+    @classmethod
+    def _ensure_operator_log_storage_in_transaction(cls, conn: sqlite3.Connection) -> None:
+        columns = cls._operator_log_columns(conn)
+        if not columns:
+            conn.execute(SCHEMA_OPERATOR_LOG)
+        elif columns == _OPERATOR_LOG_LEGACY_COLUMNS:
+            conn.execute("ALTER TABLE operator_log ADD COLUMN request_id TEXT")
+            conn.execute("ALTER TABLE operator_log ADD COLUMN request_fingerprint TEXT")
+        elif columns != _OPERATOR_LOG_CURRENT_COLUMNS:
+            raise RuntimeError("operator_log schema migration refused an unknown or partial schema")
+        conn.execute(INDEX_OPERATOR_LOG_TS)
+        conn.execute(INDEX_OPERATOR_LOG_EXPERIMENT)
+        conn.execute(INDEX_OPERATOR_LOG_REQUEST_ID)
+        cls._verify_operator_log_storage(conn)
 
     # ------------------------------------------------------------------
     # Disk-full graceful degradation (Phase 2a H.1)
@@ -389,6 +904,135 @@ class SQLiteWriter:
         """
         self._persistence_failure_callback = callback
 
+    def _remember_owned_task(self, task: asyncio.Task[Any], collection: set[asyncio.Task[Any]]) -> asyncio.Task[Any]:
+        collection.add(task)
+        task.add_done_callback(collection.discard)
+        return task
+
+    async def _run_owned_executor(
+        self,
+        executor: ThreadPoolExecutor,
+        function: Callable[..., Any],
+        *args: Any,
+        pending: set[asyncio.Future[Any]],
+    ) -> Any:
+        if self._stopping:
+            raise RuntimeError("SQLiteWriter is stopping; new persistence work is rejected")
+        loop = asyncio.get_running_loop()
+        operation = loop.run_in_executor(executor, function, *args)
+        pending.add(operation)
+        operation.add_done_callback(pending.discard)
+        caller_cancelled: asyncio.CancelledError | None = None
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError as exc:
+                caller_cancelled = caller_cancelled or exc
+            except BaseException:
+                break
+        try:
+            result = operation.result()
+        except BaseException as operation_error:
+            if caller_cancelled is not None:
+                raise caller_cancelled from operation_error
+            raise
+        if caller_cancelled is not None:
+            raise caller_cancelled
+        return result
+
+    async def _commit_owner(self, readings: list[Reading]) -> CommittedBatchReceipt | None:
+        bound = await self._run_owned_executor(
+            self._executor,
+            self._write_live_batch,
+            readings,
+            pending=self._pending_write_futures,
+        )
+        if bound is None:
+            return None
+        return self._issue_committed_batch(bound)
+
+    def begin_committed(self, readings: list[Reading]) -> CommittedBatchSettlement:
+        """Admit one commit only when its settlement proof has capacity."""
+        if self._live_channel_catalog is None:
+            raise RuntimeError("write_committed() requires a live descriptor catalog owner")
+        if self._stopping:
+            raise RuntimeError("SQLiteWriter is stopping; new persistence work is rejected")
+        if len(self._retained_commit_settlements) >= self._commit_settlement_capacity:
+            raise RuntimeError("commit settlement capacity exhausted; admission refused")
+        settlement = CommittedBatchSettlement()
+        owner = self._remember_owned_task(
+            asyncio.create_task(self._commit_owner(readings), name="sqlite_write_committed"),
+            self._owned_write_tasks,
+        )
+        settlement.bind(owner)
+        self._retained_commit_settlements.add(settlement)
+        return settlement
+
+    async def settle_committed(self, settlement: CommittedBatchSettlement) -> CommittedBatchReceipt | None:
+        """Settle and release exactly the admitted operation named by settlement."""
+        if settlement not in self._retained_commit_settlements:
+            raise RuntimeError("unknown or already settled commit ticket")
+        try:
+            return await settlement.wait()
+        finally:
+            self._retained_commit_settlements.discard(settlement)
+
+    def release_committed(self, settlement: CommittedBatchSettlement) -> None:
+        """Release a normally completed operation-scoped ticket."""
+        if settlement not in self._retained_commit_settlements:
+            raise RuntimeError("unknown or already released commit ticket")
+        self._retained_commit_settlements.remove(settlement)
+
+    def take_retained_commit_receipts(self) -> tuple[CommittedBatchReceipt, ...]:
+        """Compatibility snapshot of terminal receipts; never drains proof."""
+        return tuple(self._settled_commit_receipts)
+
+    def _owned_executor_task(
+        self,
+        executor: ThreadPoolExecutor,
+        function: Callable[..., Any],
+        *args: Any,
+        read: bool,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        collection = self._owned_read_tasks if read else self._owned_write_tasks
+        pending = self._pending_read_futures if read else self._pending_write_futures
+        task = asyncio.create_task(
+            self._run_owned_executor(executor, function, *args, pending=pending),
+            name=name,
+        )
+        return self._remember_owned_task(task, collection)
+
+    async def _settle_owned_tasks(self, collection: set[asyncio.Task[Any]]) -> None:
+        while True:
+            pending = tuple(task for task in collection if not task.done())
+            if not pending:
+                return
+            drain = asyncio.gather(*pending, return_exceptions=True)
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                continue
+
+    async def _settle_callback_futures(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            pending = tuple(future for future in self._pending_callback_futures if not future.done())
+            if not pending:
+                return
+            drain = asyncio.gather(
+                *(asyncio.wrap_future(future, loop=loop) for future in pending),
+                return_exceptions=True,
+            )
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                continue
+
+    @staticmethod
+    def _forget_callback_future(future: ConcurrentFuture[Any], owner: SQLiteWriter) -> None:
+        owner._pending_callback_futures.discard(future)
+
     def _signal_persistence_failure(self, reason: str) -> None:
         """Schedule persistence-failure callback on the engine event loop.
 
@@ -404,6 +1048,8 @@ class SQLiteWriter:
                 self._persistence_failure_callback(reason),
                 self._loop,
             )
+            self._pending_callback_futures.add(future)
+            future.add_done_callback(partial(self._forget_callback_future, owner=self))
         except Exception as exc:
             logger.error("Failed to schedule persistence_failure callback: %s", exc)
             return
@@ -477,15 +1123,19 @@ class SQLiteWriter:
         conn.execute("PRAGMA cache_size=-16384;")  # 16 MB cache
         conn.execute("PRAGMA temp_store=MEMORY;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute(SCHEMA_READINGS)
-        conn.execute(SCHEMA_SOURCE_DATA)
-        conn.execute(SCHEMA_OPERATOR_LOG)
-        conn.execute(INDEX_READINGS_TS)
-        conn.execute(INDEX_SOURCE_DATA_TS)
-        conn.execute(INDEX_CHANNEL_TS)
-        conn.execute(INDEX_OPERATOR_LOG_TS)
-        conn.execute(INDEX_OPERATOR_LOG_EXPERIMENT)
-        conn.commit()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(SCHEMA_READINGS)
+            conn.execute(SCHEMA_SOURCE_DATA)
+            conn.execute(INDEX_READINGS_TS)
+            conn.execute(INDEX_SOURCE_DATA_TS)
+            conn.execute(INDEX_CHANNEL_TS)
+            self._ensure_operator_log_storage_in_transaction(conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
         try:
             initialize_descriptor_storage(conn)
         except Exception:
@@ -926,22 +1576,37 @@ class SQLiteWriter:
         source: str,
         message: str,
         tags: tuple[str, ...],
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> OperatorLogEntry:
+        if (request_id is None) != (request_fingerprint is None):
+            raise ValueError("operator-log private request fields must be supplied together")
+        if request_id is not None:
+            self._validate_operator_log_request(request_id, request_fingerprint)
         day = timestamp.date()
         conn = self._ensure_connection(day)
-        cursor = conn.execute(
-            "INSERT INTO operator_log (timestamp, experiment_id, author, source, message, tags) "
-            "VALUES (?, ?, ?, ?, ?, ?);",
-            (
-                timestamp.timestamp(),
-                experiment_id,
-                author,
-                source,
-                message,
-                json.dumps(list(tags), ensure_ascii=False),
-            ),
-        )
-        conn.commit()
+        if request_id is not None:
+            self._verify_operator_log_storage(conn)
+        try:
+            cursor = conn.execute(
+                "INSERT INTO operator_log "
+                "(timestamp, experiment_id, author, source, message, tags, request_id, request_fingerprint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                (
+                    timestamp.timestamp(),
+                    experiment_id,
+                    author,
+                    source,
+                    message,
+                    json.dumps(list(tags), ensure_ascii=False),
+                    request_id,
+                    request_fingerprint,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         return OperatorLogEntry(
             id=int(cursor.lastrowid),
             timestamp=timestamp,
@@ -951,6 +1616,407 @@ class SQLiteWriter:
             message=message,
             tags=tags,
         )
+
+    @staticmethod
+    def _validate_operator_log_request(request_id: object, request_fingerprint: object) -> None:
+        if (
+            type(request_id) is not str
+            or len(request_id) != 32
+            or any(char not in "0123456789abcdef" for char in request_id)
+        ):
+            raise ValueError("request_id must be exactly 32 lowercase hexadecimal characters")
+        if (
+            type(request_fingerprint) is not str
+            or len(request_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in request_fingerprint)
+        ):
+            raise ValueError("request_fingerprint must be a lowercase SHA-256 hexadecimal digest")
+
+    @staticmethod
+    def _operator_log_path_identity(path: Path) -> tuple[int, int, int, int]:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("operator-log source is not a regular file")
+        if getattr(info, "st_nlink", 1) != 1:
+            raise OSError("operator-log source has multiple links")
+        return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_nlink)
+
+    def _bounded_operator_log_hot_paths(self, deadline_monotonic: float) -> tuple[tuple[date, Path], ...]:
+        if not self._data_dir.exists():
+            return ()
+        paths: list[tuple[date, Path]] = []
+        visited = 0
+        try:
+            with os.scandir(self._data_dir) as entries:
+                for item in entries:
+                    visited += 1
+                    if visited > _OPERATOR_LOG_MAX_DIRECTORY_ENTRIES:
+                        raise OperatorLogIdempotencyUnavailableError(
+                            "operator-log hot directory exceeds the bounded entry cap"
+                        )
+                    if time.monotonic() >= deadline_monotonic:
+                        raise OperatorLogIdempotencyUnavailableError("operator-log hot registry deadline expired")
+                    name = item.name
+                    if len(name) != 18 or not name.startswith("data_") or not name.endswith(".db"):
+                        continue
+                    try:
+                        day = date.fromisoformat(name[5:15])
+                    except ValueError:
+                        continue
+                    if name != f"data_{day.isoformat()}.db":
+                        continue
+                    path = Path(item.path)
+                    self._operator_log_path_identity(path)
+                    paths.append((day, path))
+                    if len(paths) > _OPERATOR_LOG_MAX_HOT_DATABASES:
+                        raise OperatorLogIdempotencyUnavailableError(
+                            "operator-log hot database count exceeds the bounded cap"
+                        )
+        except OperatorLogIdempotencyUnavailableError:
+            raise
+        except Exception as exc:
+            raise OperatorLogIdempotencyUnavailableError("operator-log hot registry enumeration failed") from exc
+        return tuple(sorted(paths, key=lambda item: item[0]))
+
+    def _read_hot_operator_log_registry(
+        self,
+        deadline_monotonic: float,
+    ) -> dict[str, _PersistedOperatorLogRequest]:
+        registry: dict[str, _PersistedOperatorLogRequest] = {}
+        for storage_day, path in self._bounded_operator_log_hot_paths(deadline_monotonic):
+            identity = self._operator_log_path_identity(path)
+            uri = f"file:{quote(str(path), safe='/')}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=0.25, isolation_level=None)
+            expired = [False]
+            try:
+                if not hasattr(conn, "setlimit") or not hasattr(sqlite3, "SQLITE_LIMIT_LENGTH"):
+                    raise RuntimeError("SQLite allocation limits unavailable")
+                conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1_048_576)
+                conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 65_536)
+
+                def interrupt_on_deadline() -> int:
+                    if time.monotonic() >= deadline_monotonic:
+                        expired[0] = True
+                        return 1
+                    return 0
+
+                conn.set_progress_handler(interrupt_on_deadline, 2_000)
+                conn.execute("PRAGMA query_only=ON").close()
+                conn.execute("PRAGMA busy_timeout=250").close()
+                columns = self._operator_log_columns(conn)
+                if not columns:
+                    continue
+                if columns == _OPERATOR_LOG_LEGACY_COLUMNS:
+                    continue
+                self._verify_operator_log_storage(conn)
+                cursor = conn.execute(
+                    "SELECT id, timestamp, experiment_id, author, source, message, tags, "
+                    "request_id, request_fingerprint FROM operator_log "
+                    "INDEXED BY idx_operator_log_request_id WHERE request_id IS NOT NULL "
+                    "ORDER BY request_id LIMIT ?",
+                    (_OPERATOR_LOG_MAX_KEYED_ROWS + 1,),
+                )
+                try:
+                    rows = cursor.fetchall()
+                finally:
+                    cursor.close()
+                if len(rows) > _OPERATOR_LOG_MAX_KEYED_ROWS:
+                    raise RuntimeError("operator-log keyed row count exceeds the bounded cap")
+                for row in rows:
+                    (
+                        row_id,
+                        raw_timestamp,
+                        experiment_id,
+                        author,
+                        source,
+                        message,
+                        raw_tags,
+                        request_id,
+                        fingerprint,
+                    ) = row
+                    self._validate_operator_log_request(request_id, fingerprint)
+                    if type(row_id) is not int or row_id <= 0:
+                        raise ValueError("operator-log row id is invalid")
+                    if experiment_id is not None and type(experiment_id) is not str:
+                        raise ValueError("operator-log experiment id is invalid")
+                    if any(type(value) is not str for value in (author, source, message, raw_tags)):
+                        raise ValueError("operator-log text field is invalid")
+                    decoded_tags = json.loads(raw_tags)
+                    if type(decoded_tags) is not list or any(type(value) is not str for value in decoded_tags):
+                        raise ValueError("operator-log tags are invalid")
+                    entry = OperatorLogEntry(
+                        id=row_id,
+                        timestamp=_parse_timestamp(raw_timestamp),
+                        experiment_id=experiment_id,
+                        author=author,
+                        source=source,
+                        message=message,
+                        tags=tuple(decoded_tags),
+                    )
+                    if request_id in registry:
+                        raise RuntimeError("operator-log request id is ambiguous across retained hot databases")
+                    registry[request_id] = _PersistedOperatorLogRequest(
+                        storage_day=storage_day,
+                        entry=entry,
+                        request_id=request_id,
+                        request_fingerprint=fingerprint,
+                    )
+                    if len(registry) > _OPERATOR_LOG_MAX_KEYED_ROWS:
+                        raise RuntimeError("operator-log keyed row count exceeds the bounded cap")
+            except Exception as exc:
+                reason = (
+                    "operator-log hot registry deadline expired"
+                    if expired[0]
+                    else "operator-log hot registry is invalid"
+                )
+                raise OperatorLogIdempotencyUnavailableError(reason) from exc
+            finally:
+                conn.close()
+            if self._operator_log_path_identity(path) != identity:
+                raise OperatorLogIdempotencyUnavailableError("operator-log hot source identity changed")
+        self._read_cold_operator_log_registry(deadline_monotonic, registry)
+        if time.monotonic() >= deadline_monotonic:
+            raise OperatorLogIdempotencyUnavailableError("operator-log hot registry deadline expired")
+        return registry
+
+    def _read_cold_operator_log_registry(
+        self,
+        deadline_monotonic: float,
+        registry: dict[str, _PersistedOperatorLogRequest],
+    ) -> None:
+        """Load keyed identity only from verified, contained cold-v2 sidecars."""
+        index_path = self._data_dir / "archive" / "index.json"
+        if not index_path.is_file():
+            return
+        try:
+            archive_root = index_path.parent.resolve(strict=True)
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            entries = index.get("files", [])
+            if type(entries) is not list or len(entries) > _OPERATOR_LOG_MAX_HOT_DATABASES:
+                raise ValueError("cold operator-log index is invalid or unbounded")
+            import pyarrow.parquet as pq  # noqa: PLC0415
+        except ImportError as exc:
+            raise OperatorLogIdempotencyUnavailableError("cold operator-log identity requires pyarrow") from exc
+        except Exception as exc:
+            raise OperatorLogIdempotencyUnavailableError("cold operator-log index is invalid") from exc
+
+        for indexed in entries:
+            if time.monotonic() >= deadline_monotonic:
+                raise OperatorLogIdempotencyUnavailableError("operator-log cold registry deadline expired")
+            if indexed.get("operator_log_schema") != "operator_log_v2":
+                continue
+            relative = indexed.get("operator_log_path")
+            if type(relative) is not str or not relative:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log path is invalid")
+            path = (archive_root / relative).resolve(strict=True)
+            try:
+                path.relative_to(archive_root)
+            except ValueError as exc:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log path escapes archive root") from exc
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or getattr(info, "st_nlink", 1) != 1
+                or getattr(info, "st_file_attributes", 0) & 0x400
+            ):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log sidecar is not stable")
+            if indexed.get("operator_log_size_bytes") != info.st_size:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log size proof mismatch")
+            if self._md5_hex(path) != indexed.get("operator_log_checksum_md5"):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log checksum proof mismatch")
+            table = pq.read_table(
+                str(path),
+                columns=[
+                    "timestamp",
+                    "experiment_id",
+                    "author",
+                    "source",
+                    "message",
+                    "tags",
+                    "request_id",
+                    "request_fingerprint",
+                    "row_id",
+                ],
+            )
+            if table.num_rows > _OPERATOR_LOG_MAX_KEYED_ROWS:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log keyed row count exceeds cap")
+            for row in table.to_pylist():
+                request_id = row["request_id"]
+                fingerprint = row["request_fingerprint"]
+                self._validate_operator_log_request(request_id, fingerprint)
+                row_id = row["row_id"]
+                if type(row_id) is not int or row_id <= 0:
+                    raise ValueError("cold operator-log row id is invalid")
+                tags = json.loads(str(row["tags"]))
+                if type(tags) is not list or any(type(value) is not str for value in tags):
+                    raise ValueError("cold operator-log tags are invalid")
+                values = (row["author"], row["source"], row["message"])
+                if any(type(value) is not str for value in values):
+                    raise ValueError("cold operator-log text field is invalid")
+                original_name = indexed.get("original_name")
+                if (
+                    type(original_name) is not str
+                    or len(original_name) != 18
+                    or not original_name.startswith("data_")
+                    or not original_name.endswith(".db")
+                ):
+                    raise ValueError("cold operator-log source day is invalid")
+                storage_day = date.fromisoformat(original_name[5:15])
+                entry = OperatorLogEntry(
+                    id=row_id,
+                    timestamp=_parse_timestamp(row["timestamp"]),
+                    experiment_id=row["experiment_id"],
+                    author=row["author"],
+                    source=row["source"],
+                    message=row["message"],
+                    tags=tuple(tags),
+                )
+                if request_id in registry:
+                    raise OperatorLogIdempotencyUnavailableError(
+                        "operator-log request id is ambiguous across retained storage"
+                    )
+                registry[request_id] = _PersistedOperatorLogRequest(
+                    storage_day=storage_day,
+                    entry=entry,
+                    request_id=request_id,
+                    request_fingerprint=fingerprint,
+                )
+                if len(registry) > _OPERATOR_LOG_MAX_KEYED_ROWS:
+                    raise OperatorLogIdempotencyUnavailableError("operator-log keyed row count exceeds the bounded cap")
+
+    def _initialize_operator_log_idempotency_sync(self, deadline_monotonic: float) -> None:
+        try:
+            registry = self._read_hot_operator_log_registry(deadline_monotonic)
+        except Exception:
+            self._operator_log_idempotency_registry = None
+            raise
+        self._operator_log_idempotency_registry = registry
+
+    async def initialize_operator_log_idempotency(self) -> None:
+        """Build the bounded retained-data registry before accepting keyed writes."""
+
+        deadline = time.monotonic() + _OPERATOR_LOG_REGISTRY_DEADLINE_S
+        owner = self._owned_executor_task(
+            self._executor,
+            self._initialize_operator_log_idempotency_sync,
+            deadline,
+            read=False,
+            name="sqlite_operator_log_registry_init",
+        )
+        await asyncio.shield(owner)
+
+    def _resolve_operator_log_request_sync(
+        self,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> OperatorLogCommitResult | None:
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        registry = self._operator_log_idempotency_registry
+        if registry is None:
+            raise OperatorLogIdempotencyUnavailableError("operator-log deduplication registry is not initialized")
+        persisted = registry.get(request_id)
+        if persisted is None:
+            return None
+        if persisted.request_fingerprint != request_fingerprint:
+            raise OperatorLogIdempotencyConflictError("request_id was already committed with different content")
+        return OperatorLogCommitResult(entry=persisted.entry, replayed=True)
+
+    async def find_operator_log_request(
+        self,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> OperatorLogCommitResult | None:
+        """Resolve one key from the proven registry without touching disk."""
+
+        owner = self._owned_executor_task(
+            self._executor,
+            self._resolve_operator_log_request_sync,
+            request_id,
+            request_fingerprint,
+            read=False,
+            name="sqlite_operator_log_lookup",
+        )
+        return await asyncio.shield(owner)
+
+    def _append_operator_log_idempotent_sync(
+        self,
+        *,
+        message: str,
+        author: str,
+        source: str,
+        experiment_id: str | None,
+        tags: tuple[str, ...],
+        request_id: str,
+        request_fingerprint: str,
+    ) -> OperatorLogCommitResult:
+        resolved = self._resolve_operator_log_request_sync(request_id, request_fingerprint)
+        if resolved is not None:
+            return resolved
+        entry_time = datetime.now(UTC)
+        try:
+            entry = self._write_operator_log_entry(
+                timestamp=entry_time,
+                experiment_id=experiment_id,
+                author=author,
+                source=source,
+                message=message,
+                tags=tags,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+        except sqlite3.IntegrityError as exc:
+            # A collision not represented in the proven registry means its
+            # authority changed underneath us. Do not guess whether it is a
+            # replay; disable keyed writes until a fresh bounded rebuild.
+            self._operator_log_idempotency_registry = None
+            raise OperatorLogIdempotencyUnavailableError("operator-log request registry changed during append") from exc
+        registry = self._operator_log_idempotency_registry
+        if registry is None:
+            raise OperatorLogIdempotencyUnavailableError("operator-log request registry became unavailable")
+        registry[request_id] = _PersistedOperatorLogRequest(
+            storage_day=entry_time.date(),
+            entry=entry,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        return OperatorLogCommitResult(entry=entry, replayed=False)
+
+    async def append_operator_log_idempotent(
+        self,
+        *,
+        message: str,
+        request_id: str,
+        request_fingerprint: str,
+        author: str = "",
+        source: str = "command",
+        experiment_id: str | None = None,
+        tags: list[str] | tuple[str, ...] | str | None = None,
+    ) -> OperatorLogCommitResult:
+        """Append once using server-owned time, or return the original row."""
+
+        text = message.strip()
+        if not text:
+            raise ValueError("Operator log message must not be empty.")
+        self._validate_operator_log_request(request_id, request_fingerprint)
+        normalized_tags = normalize_operator_log_tags(tags)
+        task = partial(
+            self._append_operator_log_idempotent_sync,
+            message=text,
+            author=author.strip(),
+            source=source.strip() or "command",
+            experiment_id=experiment_id,
+            tags=normalized_tags,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        owner = self._owned_executor_task(
+            self._executor,
+            task,
+            read=False,
+            name="sqlite_operator_log_idempotent_append",
+        )
+        return await asyncio.shield(owner)
 
     def _operator_log_db_paths(
         self,
@@ -1084,7 +2150,6 @@ class SQLiteWriter:
 
     async def _consume_loop(self, queue: asyncio.Queue[Reading]) -> None:
         """Основной цикл: собирает батч из очереди, пишет в БД."""
-        loop = asyncio.get_running_loop()
         executor = self._executor
         while self._running:
             batch: list[Reading] = []
@@ -1100,7 +2165,12 @@ class SQLiteWriter:
                     break
             if batch:
                 try:
-                    await loop.run_in_executor(executor, self._write_batch, batch)
+                    await self._run_owned_executor(
+                        executor,
+                        self._write_batch,
+                        batch,
+                        pending=self._pending_write_futures,
+                    )
                 except Exception:
                     logger.exception("Ошибка записи батча (%d записей)", len(batch))
 
@@ -1123,9 +2193,15 @@ class SQLiteWriter:
                 "descriptor-authoritative writer requires write_committed(); "
                 "the legacy bool API cannot carry persistence authority"
             )
-        loop = asyncio.get_running_loop()
+        owner = self._owned_executor_task(
+            self._executor,
+            self._write_batch,
+            readings,
+            read=False,
+            name="sqlite_write_immediate",
+        )
         try:
-            return await loop.run_in_executor(self._executor, self._write_batch, readings)
+            return await asyncio.shield(owner)
         except Exception:
             logger.critical(
                 "CRITICAL: Ошибка write_immediate (%d записей) — данные НЕ персистированы",
@@ -1147,20 +2223,24 @@ class SQLiteWriter:
 
         if self._live_channel_catalog is None:
             raise RuntimeError("write_committed() requires a live descriptor catalog owner")
-        loop = asyncio.get_running_loop()
+        settlement = self.begin_committed(readings)
         try:
-            bound = await loop.run_in_executor(self._executor, self._write_live_batch, readings)
+            bound = await settlement.wait()
         except asyncio.CancelledError:
+            # The owner continues through the transaction and post-commit
+            # receipt boundary; cancellation never creates a late write after
+            # a caller or shutdown waiter has been told it is settled.
             raise
         except Exception:
+            self._retained_commit_settlements.discard(settlement)
             logger.critical(
                 "CRITICAL: descriptor-authoritative commit failed (%d readings) — no receipt issued",
                 len(readings),
             )
             raise
-        if bound is None:
-            return None
-        return self._issue_committed_batch(bound)
+        assert isinstance(bound, CommittedBatchReceipt) or bound is None
+        self._retained_commit_settlements.discard(settlement)
+        return bound
 
     async def append_operator_log(
         self,
@@ -1178,7 +2258,6 @@ class SQLiteWriter:
 
         normalized_tags = normalize_operator_log_tags(tags)
         entry_time = timestamp or datetime.now(UTC)
-        loop = asyncio.get_running_loop()
         task = partial(
             self._write_operator_log_entry,
             timestamp=entry_time,
@@ -1188,7 +2267,13 @@ class SQLiteWriter:
             message=text,
             tags=normalized_tags,
         )
-        return await loop.run_in_executor(self._executor, task)
+        owner = self._owned_executor_task(
+            self._executor,
+            task,
+            read=False,
+            name="sqlite_append_operator_log",
+        )
+        return await asyncio.shield(owner)
 
     async def get_operator_log(
         self,
@@ -1198,7 +2283,6 @@ class SQLiteWriter:
         end_time: datetime | None = None,
         limit: int = 100,
     ) -> list[OperatorLogEntry]:
-        loop = asyncio.get_running_loop()
         task = partial(
             self._read_operator_log,
             experiment_id=experiment_id,
@@ -1211,7 +2295,13 @@ class SQLiteWriter:
         # this call for every `log_get` command (~0.1 Hz from the dashboard),
         # and was previously serialised against scheduler.write_immediate()
         # on the single-worker write executor.
-        return await loop.run_in_executor(self._read_executor, task)
+        owner = self._owned_executor_task(
+            self._read_executor,
+            task,
+            read=True,
+            name="sqlite_operator_log_read",
+        )
+        return await asyncio.shield(owner)
 
     async def start_immediate(self) -> None:
         """Инициализировать writer без очереди (persistence-first режим).
@@ -1235,8 +2325,8 @@ class SQLiteWriter:
         self._task = asyncio.create_task(self._consume_loop(queue), name="sqlite_writer")
         logger.info("SQLiteWriter запущен (flush=%.1fs, batch=%d)", self._flush_interval_s, self._batch_size)
 
-    async def stop(self) -> None:
-        """Остановить цикл, дождаться завершения, закрыть БД."""
+    async def _stop_impl(self) -> None:
+        """Settle every retained owner before closing SQLite or executors."""
         self._running = False
         if self._task:
             self._task.cancel()
@@ -1245,12 +2335,20 @@ class SQLiteWriter:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        # Shutdown executor FIRST — waits for any in-flight write_batch to finish.
-        # Then close connection — no race with executor thread.
-        # shutdown(wait=True) blocks until the in-flight sqlite op returns; run it
-        # off the event loop via asyncio.to_thread so a busy write doesn't freeze
-        # the engine loop during shutdown. All callers await stop() (or drive it
-        # via run_until_complete), so a running loop is always present here.
+        # Caller cancellation never detaches a write, read, or callback owner.
+        # A stopped receipt is impossible until all retained work is terminal.
+        for settlement in tuple(self._retained_commit_settlements):
+            try:
+                receipt = await settlement.wait()
+                if receipt is not None:
+                    self._settled_commit_receipts.append(receipt)
+            except BaseException:
+                logger.exception("retained SQLite commit settlement failed during stop")
+            finally:
+                self._retained_commit_settlements.discard(settlement)
+        await self._settle_owned_tasks(self._owned_write_tasks)
+        await self._settle_owned_tasks(self._owned_read_tasks)
+        await self._settle_callback_futures()
         if self._executor is not None:
             await asyncio.to_thread(self._executor.shutdown, wait=True)
         if self._read_executor is not None:
@@ -1260,7 +2358,28 @@ class SQLiteWriter:
             self._conn = None
             self._descriptor_catalog_installed = False
             self._descriptor_connection_guard = None
-        logger.info("SQLiteWriter остановлен (записано: %d)", self._total_written)
+        logger.info("SQLiteWriter stopped (written: %d)", self._total_written)
+
+    async def stop(self) -> None:
+        """Retain one shutdown owner and never report stopped early."""
+        if self._stop_owner is None:
+            self._stopping = True
+            self._stop_owner = asyncio.create_task(self._stop_impl(), name="sqlite_writer_stop")
+        owner = self._stop_owner
+        caller_cancelled: asyncio.CancelledError | None = None
+        while not owner.done():
+            try:
+                await asyncio.shield(owner)
+            except asyncio.CancelledError as exc:
+                caller_cancelled = caller_cancelled or exc
+        try:
+            owner.result()
+        except BaseException as error:
+            if caller_cancelled is not None:
+                raise caller_cancelled from error
+            raise
+        if caller_cancelled is not None:
+            raise caller_cancelled
 
     # ------------------------------------------------------------------
     # Readings history query (for GUI reconnect / full-range view)
@@ -1602,7 +2721,6 @@ class SQLiteWriter:
         limit_per_channel: int = 3600,
     ) -> dict[str, list[tuple[float, float]]]:
         """Async wrapper for _read_readings_history."""
-        loop = asyncio.get_running_loop()
         task = partial(
             self._read_readings_history,
             channels=channels,
@@ -1610,7 +2728,13 @@ class SQLiteWriter:
             to_ts=to_ts,
             limit_per_channel=limit_per_channel,
         )
-        return await loop.run_in_executor(self._read_executor, task)
+        owner = self._owned_executor_task(
+            self._read_executor,
+            task,
+            read=True,
+            name="sqlite_readings_history",
+        )
+        return await asyncio.shield(owner)
 
     @property
     def stats(self) -> dict[str, Any]:

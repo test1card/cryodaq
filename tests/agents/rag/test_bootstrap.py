@@ -1,218 +1,123 @@
-"""F-KnowledgeBaseExpansion (v0.55.7.1) — engine RAG bootstrap tests.
-
-PHASE 6: ``_bootstrap_rag_index_if_empty`` is fire-and-forget.
-- Skips when index already populated.
-- Builds when probe returns empty / fails.
-- Failures are logged, never propagated (engine ready signal must
-  not block on bootstrap).
-"""
+"""Live assistant RAG capability boundary."""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cryodaq.agents.assistant_main import _bootstrap_rag_index_if_empty
-from cryodaq.agents.rag.indexer import _EMBEDDING_DIM
-from tests.agents.rag.loaders.conftest import write_pdf
-
-
-class _MockEmbeddings:
-    """Deterministic 1024d vector."""
-
-    def __init__(self) -> None:
-        self.dim = _EMBEDDING_DIM
-        self.calls: list[str] = []
-
-    async def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        seed = (hash(text) % 100) / 100.0
-        return [seed] * self.dim
-
-
-def _seed_minimal_corpus(root: Path) -> Path:
-    """One markdown procedure under data/knowledge/procedures/."""
-    knowledge = root / "knowledge"
-    procedures = knowledge / "procedures"
-    procedures.mkdir(parents=True)
-    (procedures / "p.md").write_text("# Test procedure\nbody", encoding="utf-8")
-    return knowledge
-
-
-def _seed_pdf_corpus(root: Path) -> Path:
-    knowledge = root / "knowledge"
-    pdf_dir = knowledge / "equipment_manuals"
-    pdf_dir.mkdir(parents=True)
-    write_pdf(pdf_dir / "manual.pdf", ["Sample manual content"])
-    return knowledge
-
-
-# ---------------------------------------------------------------------------
-# Bootstrap behaviour
-# ---------------------------------------------------------------------------
+import cryodaq.agents.assistant_main as assistant_main
+from cryodaq.agents.assistant.live.agent import AssistantConfig
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_runs_when_index_empty(tmp_path: Path) -> None:
-    """Empty db_path → build_index runs and produces chunks."""
-    knowledge = _seed_minimal_corpus(tmp_path)
-    db_path = tmp_path / "rag_db"
-    embeddings = _MockEmbeddings()
-
-    await _bootstrap_rag_index_if_empty(
-        db_path=db_path,
-        embeddings_client=embeddings,
-        knowledge_dir=knowledge,
-        experiments_dir=tmp_path / "experiments",
-        sqlite_path=None,
-        repo_root=tmp_path,
-    )
-
-    # build_index ran → at least the procedure chunk got embedded.
-    assert any("Test procedure" in c for c in embeddings.calls), (
-        "Embeddings client should have been called for procedure chunk"
-    )
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_skips_when_index_populated(tmp_path: Path) -> None:
-    """Probe returns ≥1 hit → bootstrap exits early without indexing."""
-    knowledge = _seed_minimal_corpus(tmp_path)
-    db_path = tmp_path / "rag_db"
-    embeddings = _MockEmbeddings()
-
-    # Patch RagSearcher.search to return a fake hit на the probe.
-    from cryodaq.agents.rag import searcher as searcher_mod
-
-    class _PopulatedSearcher:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def search(self, *args, **kwargs):
-            return [object()]  # truthy single result
-
-    with patch.object(searcher_mod, "RagSearcher", _PopulatedSearcher):
-        await _bootstrap_rag_index_if_empty(
-            db_path=db_path,
-            embeddings_client=embeddings,
-            knowledge_dir=knowledge,
-            experiments_dir=tmp_path / "experiments",
-            sqlite_path=None,
-            repo_root=tmp_path,
-        )
-
-    # build_index NOT invoked → embeddings client untouched.
-    assert embeddings.calls == [], (
-        "Bootstrap must skip when index already populated"
-    )
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_failure_does_not_propagate(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+async def test_live_runtime_has_no_rag_rebuild_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """build_index raising must NOT crash the engine startup.
+    captured: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {}
 
-    Engine fires this as asyncio.create_task; if it raised, asyncio
-    would log the unhandled exception but the engine ready signal would
-    still go through (the task is detached). The test asserts the
-    helper itself swallows the exception so the failure is contained
-    к a single ERROR log line.
-    """
-    knowledge = _seed_minimal_corpus(tmp_path)
-    db_path = tmp_path / "rag_db"
+    class _StartStop:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.start = AsyncMock()
+            self.stop = AsyncMock()
 
-    class _BoomEmbeddings:
-        async def embed(self, text: str) -> list[float]:
-            raise RuntimeError("ollama unreachable")
+    class _CommandServer(_StartStop):
+        def __init__(self, *, handler, **_kwargs) -> None:
+            super().__init__()
+            captured["handler"] = handler
 
-    with caplog.at_level("ERROR"):
-        await _bootstrap_rag_index_if_empty(
-            db_path=db_path,
-            embeddings_client=_BoomEmbeddings(),
-            knowledge_dir=knowledge,
-            experiments_dir=tmp_path / "experiments",
-            sqlite_path=None,
-            repo_root=tmp_path,
-        )
+    config = AssistantConfig(
+        enabled=True,
+        ollama_base_url="http://127.0.0.1:11434",
+        query_enabled=False,
+        periodic_report_enabled=False,
+    )
+    monkeypatch.setattr(
+        assistant_main.AssistantConfig,
+        "from_yaml_path",
+        classmethod(lambda _cls, _path: config),
+    )
+    assert (assistant_main._CONFIG_DIR / "agent.yaml").exists()
 
-    assert any(
-        "RAG bootstrap failed" in r.message for r in caplog.records
-    ), "Bootstrap must log ERROR on failure but not raise"
+    engine_client = MagicMock()
+    ollama = MagicMock(close=AsyncMock())
+    telegram = MagicMock(close=AsyncMock())
+    state = _StartStop()
+    state.active_experiment_id = None
+    state.get_summary = MagicMock(return_value=None)
+    live = _StartStop()
+    output_router = MagicMock(close=AsyncMock())
+    audit_logger = MagicMock(close=AsyncMock())
+    build_index = AsyncMock(return_value={"indexed": 1})
 
+    monkeypatch.setattr(
+        assistant_main,
+        "EngineQueryClient",
+        lambda *_args, **_kwargs: engine_client,
+    )
+    monkeypatch.setattr(
+        assistant_main,
+        "OllamaClient",
+        lambda *_args, **_kwargs: ollama,
+    )
+    monkeypatch.setattr(
+        assistant_main,
+        "EngineContextReader",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+    monkeypatch.setattr(
+        assistant_main,
+        "ContextBuilder",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+    monkeypatch.setattr(
+        assistant_main,
+        "AuditLogger",
+        lambda *_args, **_kwargs: audit_logger,
+    )
+    monkeypatch.setattr(
+        assistant_main,
+        "OutputRouter",
+        lambda **_kwargs: output_router,
+    )
+    monkeypatch.setattr(
+        assistant_main,
+        "AssistantLiveAgent",
+        lambda **_kwargs: live,
+    )
+    monkeypatch.setattr(
+        assistant_main,
+        "_RemoteEngineStateCache",
+        lambda *_args, **_kwargs: state,
+    )
+    monkeypatch.setattr(assistant_main, "_load_telegram_sender", lambda: telegram)
+    monkeypatch.setattr(assistant_main, "_resolve_rag_config", lambda: None)
+    monkeypatch.setattr(assistant_main, "ZMQEventSubscriber", _StartStop)
+    monkeypatch.setattr(assistant_main, "ZMQCommandServer", _CommandServer)
+    monkeypatch.setattr("cryodaq.agents.rag.indexer.build_index", build_index)
 
-@pytest.mark.asyncio
-async def test_bootstrap_handles_pdf_corpus(tmp_path: Path) -> None:
-    """End-to-end: PDF dropped under equipment_manuals/ gets indexed."""
-    knowledge = _seed_pdf_corpus(tmp_path)
-    db_path = tmp_path / "rag_db"
-    embeddings = _MockEmbeddings()
+    async def _parked_tick(*_args, **_kwargs) -> None:
+        await asyncio.Event().wait()
 
-    await _bootstrap_rag_index_if_empty(
-        db_path=db_path,
-        embeddings_client=embeddings,
-        knowledge_dir=knowledge,
-        experiments_dir=tmp_path / "experiments",
-        sqlite_path=None,
-        repo_root=tmp_path,
+    monkeypatch.setattr(assistant_main, "_periodic_report_tick", _parked_tick)
+    shutdown = asyncio.Event()
+    shutdown.set()
+    await assistant_main._run_llm_runtime(
+        engine_cmd_addr="tcp://127.0.0.1:1",
+        engine_pub_addr="tcp://127.0.0.1:2",
+        assistant_cmd_addr="tcp://127.0.0.1:3",
+        shutdown_event=shutdown,
     )
 
-    assert any("Sample manual content" in c for c in embeddings.calls)
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_idempotent_after_population(tmp_path: Path) -> None:
-    """Running bootstrap twice — second call must observe non-empty index."""
-    knowledge = _seed_minimal_corpus(tmp_path)
-    db_path = tmp_path / "rag_db"
-    embeddings1 = _MockEmbeddings()
-
-    # First call populates index.
-    await _bootstrap_rag_index_if_empty(
-        db_path=db_path,
-        embeddings_client=embeddings1,
-        knowledge_dir=knowledge,
-        experiments_dir=tmp_path / "experiments",
-        sqlite_path=None,
-        repo_root=tmp_path,
-    )
-    first_call_count = len(embeddings1.calls)
-    assert first_call_count > 0
-
-    # Second call detects populated index → skips.
-    embeddings2 = _MockEmbeddings()
-    await _bootstrap_rag_index_if_empty(
-        db_path=db_path,
-        embeddings_client=embeddings2,
-        knowledge_dir=knowledge,
-        experiments_dir=tmp_path / "experiments",
-        sqlite_path=None,
-        repo_root=tmp_path,
-    )
-    # Probe call only — no rebuild.
-    assert len(embeddings2.calls) <= 1, (
-        f"Second bootstrap must skip indexing, got {len(embeddings2.calls)} embed calls"
-    )
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_with_no_corpus_at_all(tmp_path: Path) -> None:
-    """Bootstrap on a clean checkout с no corpus must not crash —
-    build_index returns zero stats and the engine continues."""
-    knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()  # empty
-    db_path = tmp_path / "rag_db"
-    embeddings = _MockEmbeddings()
-
-    await _bootstrap_rag_index_if_empty(
-        db_path=db_path,
-        embeddings_client=embeddings,
-        knowledge_dir=knowledge,
-        experiments_dir=tmp_path / "experiments",
-        sqlite_path=None,
-        repo_root=tmp_path,
-    )
-    # Zero embed calls — build_index sees empty corpus and returns early.
-    assert embeddings.calls == []
+    handler = captured["handler"]
+    forbidden_target = tmp_path / "live-index-must-not-exist"
+    for action in ("rag.rebuild_index", "rag.rebuild_status"):
+        reply = await handler({"cmd": action, "target": str(forbidden_target)})
+        assert reply == {"ok": False, "error": f"unknown command: {action}"}
+    build_index.assert_not_awaited()
+    assert not forbidden_target.exists()

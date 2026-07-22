@@ -9,6 +9,8 @@ pyarrow is OPTIONAL — functions degrade gracefully if not installed.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -72,11 +74,15 @@ def export_experiment_readings_to_parquet(
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = pq.ParquetWriter(
-        str(output_path),
-        schema,
-        compression="snappy",
+    descriptor, raw_temp = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
     )
+    os.close(descriptor)
+    temp_path = Path(raw_temp)
+    writer = None
+    published = False
 
     total_rows = 0
     skipped_days: list[str] = []
@@ -95,6 +101,11 @@ def export_experiment_readings_to_parquet(
     last_day = end_time.date()
 
     try:
+        writer = pq.ParquetWriter(
+            str(temp_path),
+            schema,
+            compression="snappy",
+        )
         while current_day <= last_day:
             day_str = current_day.isoformat()
             db_path = sqlite_root / f"data_{day_str}.db"
@@ -125,7 +136,7 @@ def export_experiment_readings_to_parquet(
                 cursor = conn.execute(
                     "SELECT timestamp, instrument_id, channel, value, unit, status "
                     "FROM readings WHERE timestamp >= ? AND timestamp <= ? "
-                    "ORDER BY timestamp",
+                    "ORDER BY timestamp, rowid",
                     (start_epoch, end_epoch),
                 )
 
@@ -174,8 +185,25 @@ def export_experiment_readings_to_parquet(
                 conn.close()
 
             current_day += timedelta(days=1)
-    finally:
         writer.close()
+        writer = None
+        metadata = pq.read_metadata(str(temp_path))
+        if metadata.num_rows != total_rows:
+            raise RuntimeError(f"Parquet export row count mismatch: expected {total_rows}, got {metadata.num_rows}")
+        if metadata.schema.to_arrow_schema() != schema:
+            raise RuntimeError("Parquet export schema mismatch after close.")
+        with temp_path.open("r+b") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temp_path, output_path)
+        published = True
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                logger.exception("Failed to close incomplete Parquet export %s", temp_path.name)
+        if not published:
+            temp_path.unlink(missing_ok=True)
 
     duration = time.monotonic() - t0
     file_size = output_path.stat().st_size if output_path.exists() else 0
@@ -254,6 +282,8 @@ def _write_cold_day(
 def read_experiment_parquet(
     parquet_path: Path,
     channels: list[str] | None = None,
+    *,
+    expected_experiment_id: str | None = None,
 ) -> dict[str, list[tuple[float, float]]]:
     """Read experiment data from Parquet. Returns {channel: [(unix_ts, value), ...]}.
 
@@ -277,11 +307,21 @@ def read_experiment_parquet(
         ch_array = table.column("channel").to_pylist()
         val_array = table.column("value").to_pylist()
         status_array = table.column("status").to_pylist()
+        if expected_experiment_id is not None:
+            experiment_ids = table.column("experiment_id").to_pylist()
+            if any(value != expected_experiment_id for value in experiment_ids):
+                logger.error(
+                    "Rejecting Parquet with mixed or stale experiment identity: %s",
+                    parquet_path,
+                )
+                return {}
 
         channel_set = set(channels) if channels else None
         result: dict[str, list[tuple[float, float]]] = {}
         for i in range(table.num_rows):
             ch = ch_array[i]
+            if not isinstance(ch, str) or not ch:
+                continue
             if channel_set is not None and ch not in channel_set:
                 continue
             epoch = float(ts_us[i].as_py()) / 1_000_000.0

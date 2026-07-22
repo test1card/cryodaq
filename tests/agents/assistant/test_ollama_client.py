@@ -11,6 +11,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaClient,
     OllamaModelMissingError,
     OllamaUnavailableError,
+    validate_loopback_origin,
 )
 
 # ---------------------------------------------------------------------------
@@ -21,6 +22,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
 def _mock_response(data: dict) -> MagicMock:
     """Build a mock aiohttp async context manager returning data."""
     resp = AsyncMock()
+    resp.status = 200
     resp.json = AsyncMock(return_value=data)
     cm = AsyncMock()
     cm.__aenter__ = AsyncMock(return_value=resp)
@@ -56,9 +58,7 @@ def _success_data(
 
 
 def test_generation_result_fields() -> None:
-    r = GenerationResult(
-        text="response", tokens_in=10, tokens_out=5, latency_s=1.2, model="gemma3:e4b"
-    )
+    r = GenerationResult(text="response", tokens_in=10, tokens_out=5, latency_s=1.2, model="gemma3:e4b")
     assert r.text == "response"
     assert r.tokens_in == 10
     assert r.tokens_out == 5
@@ -161,9 +161,7 @@ async def test_generate_raises_unavailable_on_connector_error() -> None:
     client = OllamaClient()
     mock_session = AsyncMock()
     mock_session.closed = False
-    mock_session.post = MagicMock(
-        side_effect=aiohttp.ClientError("connection refused")
-    )
+    mock_session.post = MagicMock(side_effect=aiohttp.ClientError("connection refused"))
     client._session = mock_session
 
     with pytest.raises(OllamaUnavailableError):
@@ -281,9 +279,7 @@ async def test_smoke_real_ollama() -> None:
         )
         assert not result.truncated, f"Timed out. model={model}"
         assert result.tokens_out > 0, f"No tokens generated. model={model}"
-        assert result.text.strip() == "PASS", (
-            f"Expected exactly 'PASS', got {result.text!r}. model={model}"
-        )
+        assert result.text.strip() == "PASS", f"Expected exactly 'PASS', got {result.text!r}. model={model}"
     finally:
         await client.close()
 
@@ -320,3 +316,38 @@ async def test_embed_returns_vector_on_success() -> None:
     result = await client.embed("hello")
 
     assert result == [0.1, 0.2, 0.3]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://127.0.0.1:11434",
+        "http://192.0.2.1:11434",
+        "http://user:password@127.0.0.1:11434",
+        "http://127.0.0.1:11434/api",
+        "http://127.0.0.1:11434?redirect=remote",
+        "ftp://127.0.0.1:11434",
+    ],
+)
+def test_loopback_origin_rejects_remote_or_ambiguous_urls(base_url: str) -> None:
+    with pytest.raises(ValueError, match="loopback|origin|userinfo"):
+        validate_loopback_origin(base_url)
+
+
+def test_loopback_origin_rejects_nonliteral_loopback() -> None:
+    with pytest.raises(ValueError, match="literal"):
+        validate_loopback_origin("http://localhost:11434")
+    assert validate_loopback_origin("http://[::1]:11434") == "http://[::1]:11434"
+
+
+def test_redirect_and_nonliteral_loopback_are_rejected_before_egress() -> None:
+    import asyncio
+
+    response = _mock_response({})
+    response.__aenter__.return_value.status = 302
+    client = OllamaClient(base_url="http://127.0.0.1:11434")
+    client._session = _mock_session(response)
+
+    with pytest.raises(OllamaUnavailableError, match="redirect"):
+        asyncio.run(client.generate("prompt"))
+    assert client._session.post.call_args.kwargs["allow_redirects"] is False

@@ -15,6 +15,7 @@ from cryodaq.channels.descriptors import (
     ChannelSafetyClass,
 )
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
+from cryodaq.core.operator_log import OperatorLogIdempotencyConflictError
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
@@ -295,6 +296,92 @@ async def test_swallowed_persistence_failure_returns_no_receipt(
     await writer.stop()
 
 
+async def test_operator_log_publication_outbox_survives_restart(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "e" * 32
+    fingerprint = "f" * 64
+    event = {"schema": "operator_log_commit_v1", "entry": {"id": 7, "message": "stable"}}
+    receipt = {"request_id": request_id, "committed": True}
+    prepared = await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    assert prepared.state == "intent"
+    published = await writer.publish_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    assert published.state == "published"
+    await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    replay = await restarted.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    assert replay.state == "published"
+    assert replay.event == event
+    with pytest.raises(OperatorLogIdempotencyConflictError):
+        await restarted.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint="0" * 64,
+            event=event,
+            receipt=receipt,
+        )
+    await restarted.stop()
+
+
+async def test_alarm_ack_outbox_survives_restart_and_rejects_request_reuse(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    fingerprint = "b" * 64
+    prepared = await writer.prepare_alarm_ack_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        alarm_name="alarm",
+        activation_id="activation-1",
+        operator_name="operator",
+        reason="observed",
+    )
+    assert prepared.state == "intent"
+    committed = await writer.commit_alarm_ack_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event={"alarm_name": "alarm", "activation_id": "activation-1"},
+        receipt={"ok": True, "event_emitted": True},
+    )
+    assert committed.state == "committed"
+    published = await writer.publish_alarm_ack_outbox(request_id=request_id, request_fingerprint=fingerprint)
+    assert published.state == "published"
+    await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    replay = await restarted.prepare_alarm_ack_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        alarm_name="alarm",
+        activation_id="activation-1",
+        operator_name="operator",
+        reason="observed",
+    )
+    assert replay.state == "published"
+    assert replay.receipt == {"event_emitted": True, "ok": True}
+    with pytest.raises(OperatorLogIdempotencyConflictError):
+        await restarted.prepare_alarm_ack_outbox(
+            request_id=request_id,
+            request_fingerprint="c" * 64,
+            alarm_name="alarm",
+            activation_id="activation-1",
+            operator_name="operator",
+            reason="different",
+        )
+    await restarted.stop()
+
+
 @pytest.mark.parametrize("_repeat", range(25))
 async def test_cancellation_ambiguity_never_issues_receipt(
     tmp_path: Path,
@@ -317,10 +404,72 @@ async def test_cancellation_ambiguity_never_issues_receipt(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert any(not owner.done() for owner in writer._owned_write_tasks)
+    stop_task = asyncio.create_task(writer.stop())
+    await asyncio.sleep(0)
+    assert not stop_task.done()
     release.set()
-    await writer.stop()
+    await stop_task
 
-    assert len(writer._issued_commits) == 0
+    retained = writer.take_retained_commit_receipts()
+    assert len(retained) == 1
+    assert writer.owns_commit(retained[0])
+    assert len(writer._owned_write_tasks) == 0
+    assert len(writer._pending_write_futures) == 0
+
+
+async def test_cancelled_read_waiter_remains_owned_until_stop_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    entered = Event()
+    release = Event()
+    original = writer._read_operator_log
+
+    def blocked(**kwargs: object):
+        entered.set()
+        assert release.wait(5)
+        return original(**kwargs)
+
+    monkeypatch.setattr(writer, "_read_operator_log", blocked)
+    task = asyncio.create_task(writer.get_operator_log())
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert any(not owner.done() for owner in writer._owned_read_tasks)
+    stop_task = asyncio.create_task(writer.stop())
+    await asyncio.sleep(0)
+    assert not stop_task.done()
+    release.set()
+    await stop_task
+    assert not writer._owned_read_tasks
+    assert not writer._pending_read_futures
+
+
+async def test_persistence_failure_callback_is_owned_until_writer_stop(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def callback(_reason: str) -> None:
+        entered.set()
+        await release.wait()
+
+    writer.set_event_loop(asyncio.get_running_loop())
+    writer.set_persistence_failure_callback(callback)
+    await asyncio.to_thread(writer._signal_persistence_failure, "disk full: test")
+    await entered.wait()
+    assert writer._pending_callback_futures
+    stop_task = asyncio.create_task(writer.stop())
+    await asyncio.sleep(0)
+    assert not stop_task.done()
+    release.set()
+    await stop_task
+    assert not writer._pending_callback_futures
 
 
 @pytest.mark.parametrize("_repeat", range(25))

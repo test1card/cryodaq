@@ -96,6 +96,12 @@ class AssistantQueryAgent:
         self._chart_dispatcher = chart_dispatcher
         self._rate_buckets: dict[int | str, collections.deque[float]] = {}
         self._next_rate_sweep_at = 0.0
+        self._closed = False
+        self._last_audit_error = False
+
+    @property
+    def last_audit_error(self) -> bool:
+        return self._last_audit_error
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,12 +120,20 @@ class AssistantQueryAgent:
             logger.warning("AssistantQueryAgent: unexpected error for %r", query[:80], exc_info=True)
             return _FALLBACK
 
+    async def close(self) -> None:
+        """Drain chart work before the query owner is considered stopped."""
+        self._closed = True
+        if self._chart_dispatcher is not None:
+            await self._chart_dispatcher.close()
+
     async def _handle_query_inner(
         self,
         query: str,
         *,
         chat_id: int | str | None = None,
     ) -> str:
+        if self._closed:
+            return _FALLBACK
         if chat_id is not None and not self._check_rate(chat_id):
             logger.info("AssistantQueryAgent: rate-limited chat_id=%s", chat_id)
             return "Слишком много запросов. Подожди немного."
@@ -159,8 +173,6 @@ class AssistantQueryAgent:
                 errors.append("format_llm_truncated_or_empty")
             else:
                 response = result.text.strip()
-                if self._chart_dispatcher is not None and chat_id is not None:
-                    self._chart_dispatcher.dispatch(intent.category, data, chat_id)
         except Exception as exc:
             logger.warning("AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc)
             errors.append(f"unexpected: {exc}")
@@ -169,6 +181,7 @@ class AssistantQueryAgent:
         cat_str = intent.category.value if intent is not None else "error"
 
         try:
+            self._last_audit_error = False
             await self._audit.log(
                 audit_id=audit_id,
                 trigger_event={
@@ -188,11 +201,17 @@ class AssistantQueryAgent:
                     "out": result.tokens_out if result is not None else 0,
                 },
                 latency_s=latency_s,
-                outputs_dispatched=["telegram"] if chat_id is not None else [],
+                output_intent=["telegram"] if chat_id is not None else [],
+                outputs_dispatched=[],
                 errors=errors,
             )
         except Exception:
+            self._last_audit_error = True
             logger.warning("AssistantQueryAgent: audit log failed", exc_info=True)
+            return response
+
+        if self._chart_dispatcher is not None and chat_id is not None:
+            self._chart_dispatcher.dispatch(intent.category if intent is not None else None, data, chat_id)
 
         return response
 

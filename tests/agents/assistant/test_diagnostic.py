@@ -71,7 +71,7 @@ def _make_config(**overrides) -> AssistantConfig:
         output_telegram=True,
         output_operator_log=True,
         output_gui_insight=False,
-        audit_enabled=False,
+        audit_enabled=True,
         slice_b_suggestion=True,
     )
     for k, v in overrides.items():
@@ -81,12 +81,12 @@ def _make_config(**overrides) -> AssistantConfig:
 
 def _two_call_ollama(summary_text: str, diag_text: str) -> MagicMock:
     """Ollama mock that returns summary on 1st call, diagnostic on 2nd."""
-    responses = iter([
-        GenerationResult(text=summary_text, tokens_in=80, tokens_out=30,
-                         latency_s=2.0, model="gemma4:e4b"),
-        GenerationResult(text=diag_text, tokens_in=120, tokens_out=40,
-                         latency_s=2.5, model="gemma4:e4b"),
-    ])
+    responses = iter(
+        [
+            GenerationResult(text=summary_text, tokens_in=80, tokens_out=30, latency_s=2.0, model="gemma4:e4b"),
+            GenerationResult(text=diag_text, tokens_in=120, tokens_out=40, latency_s=2.5, model="gemma4:e4b"),
+        ]
+    )
     ollama = AsyncMock()
     ollama.generate = AsyncMock(side_effect=lambda *a, **kw: next(responses))
     ollama.close = AsyncMock()
@@ -106,7 +106,6 @@ def _make_agent(
     config: AssistantConfig | None = None,
     ollama=None,
     telegram=None,
-    event_logger=None,
     reader=None,
     tmp_path: Path,
 ) -> tuple[AssistantLiveAgent, EventBus]:
@@ -119,18 +118,13 @@ def _make_agent(
         reader.read_readings_history = AsyncMock(return_value={})
 
     ctx = ContextBuilder(reader, em)
-    audit = AuditLogger(tmp_path / "audit", enabled=False)
+    audit = AuditLogger(tmp_path / "audit", enabled=True)
 
     if telegram is None:
         telegram = AsyncMock()
         telegram._send_to_all = AsyncMock()
-    if event_logger is None:
-        event_logger = AsyncMock()
-        event_logger.log_event = AsyncMock()
-
     router = OutputRouter(
         telegram_bot=telegram,
-        event_logger=event_logger,
         event_bus=bus,
     )
     agent = AssistantLiveAgent(
@@ -160,9 +154,7 @@ async def test_diagnostic_suggestion_runs_after_alarm_summary(tmp_path: Path) ->
 
     await bus.publish(_alarm_event())
     # Wait for handler tasks to drain instead of sleeping a fixed duration.
-    await asyncio.wait_for(
-        _drain_handler_tasks(agent), timeout=5.0
-    )
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
 
     assert ollama.generate.await_count == 2
     calls = ollama.generate.call_args_list

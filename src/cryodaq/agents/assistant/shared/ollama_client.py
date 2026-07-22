@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -18,6 +20,37 @@ _GENERATE_PATH = "/api/generate"
 # models. /api/embed introduced in Ollama 0.1.36 (2024) is the modern
 # endpoint, accepts batched input, returns embeddings as nested list.
 _EMBEDDINGS_PATH = "/api/embed"
+
+
+def validate_loopback_origin(base_url: str) -> str:
+    """Return a normalized local HTTP origin or reject it before I/O."""
+
+    if type(base_url) is not str or not base_url.strip():
+        raise ValueError("Ollama base URL must be a non-empty loopback HTTP origin")
+    candidate = base_url.strip()
+    if any(char in candidate for char in "\r\n"):
+        raise ValueError("Ollama base URL must not contain control characters")
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Ollama base URL is malformed") from exc
+    if parsed.scheme.casefold() != "http" or hostname is None:
+        raise ValueError("Ollama base URL must use http on a loopback host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Ollama base URL must not contain userinfo")
+    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError("Ollama base URL must be an origin without path or query")
+    host = hostname.casefold()
+    try:
+        if not ipaddress.ip_address(host).is_loopback:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError("Ollama base URL must target a literal loopback host") from exc
+    rendered_host = f"[{host}]" if ":" in host else host
+    suffix = "" if port is None else f":{port}"
+    return f"http://{rendered_host}{suffix}"
 
 
 class OllamaUnavailableError(Exception):
@@ -52,12 +85,12 @@ class OllamaClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:11434",
+        base_url: str = "http://127.0.0.1:11434",
         default_model: str = "gemma4:e4b",
         *,
         timeout_s: float = 30.0,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        self._base_url = validate_loopback_origin(base_url)
         self._default_model = default_model
         self._timeout_s = timeout_s
         self._session: aiohttp.ClientSession | None = None
@@ -113,7 +146,9 @@ class OllamaClient:
 
         try:
             async with asyncio.timeout(self._timeout_s):
-                async with session.post(url, json=payload) as resp:
+                async with session.post(url, json=payload, allow_redirects=False) as resp:
+                    if 300 <= resp.status < 400:
+                        raise OllamaUnavailableError("Ollama refused an HTTP redirect")
                     data: dict[str, Any] = await resp.json(content_type=None)
         except TimeoutError:
             latency_s = time.monotonic() - t0
@@ -131,9 +166,7 @@ class OllamaClient:
                 truncated=True,
             )
         except aiohttp.ClientConnectorError as exc:
-            raise OllamaUnavailableError(
-                f"Cannot connect to Ollama at {self._base_url}: {exc}"
-            ) from exc
+            raise OllamaUnavailableError(f"Cannot connect to Ollama at {self._base_url}: {exc}") from exc
         except aiohttp.ClientError as exc:
             raise OllamaUnavailableError(f"Ollama HTTP error: {exc}") from exc
 
@@ -175,7 +208,9 @@ class OllamaClient:
         t0 = time.monotonic()
         try:
             async with asyncio.timeout(self._timeout_s):
-                async with session.post(url, json=payload) as resp:
+                async with session.post(url, json=payload, allow_redirects=False) as resp:
+                    if 300 <= resp.status < 400:
+                        raise OllamaUnavailableError("Ollama refused an HTTP redirect")
                     if resp.status == 404:
                         raise OllamaModelMissingError(model)
                     data: dict[str, Any] = await resp.json(content_type=None)
@@ -189,9 +224,7 @@ class OllamaClient:
             )
             return []
         except aiohttp.ClientConnectorError as exc:
-            raise OllamaUnavailableError(
-                f"Cannot connect to Ollama at {self._base_url}: {exc}"
-            ) from exc
+            raise OllamaUnavailableError(f"Cannot connect to Ollama at {self._base_url}: {exc}") from exc
         except aiohttp.ClientError as exc:
             raise OllamaUnavailableError(f"Ollama HTTP error: {exc}") from exc
 

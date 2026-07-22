@@ -22,8 +22,7 @@ the GUI already uses:
   ``alarm_v2_history``).
 - HOSTS its OWN REP socket (``tcp://127.0.0.1:5557``, loopback-only,
   same trust model as the engine's :5556 — see ``core/zmq_bridge.py``
-  module docstring) serving ``assistant.query`` / ``rag.search`` /
-  ``rag.rebuild_index`` / ``rag.rebuild_status``.
+  module docstring) serving ``assistant.query`` and read-only ``rag.search``.
 
 Read-only by construction: this process never sends a write/control
 command to the engine — only the query actions above, and it never
@@ -63,25 +62,23 @@ from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
 from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.schemas import QueryAdapters
 from cryodaq.agents.assistant.shared.audit import AuditLogger
+from cryodaq.agents.assistant.shared.context_reader import EngineContextReader, _validate_context_receipt
 from cryodaq.agents.assistant.shared.engine_client import (
     DEFAULT_ENGINE_CMD_ADDR,
     EngineQueryClient,
 )
-from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
+from cryodaq.agents.assistant.shared.ollama_client import OllamaClient, validate_loopback_origin
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.event_bus import EngineEvent, EventBus
-from cryodaq.core.event_logger import EventLogger
 from cryodaq.core.zmq_bridge import (
     DEFAULT_PUB_ADDR,
     ZMQCommandServer,
     ZMQEventSubscriber,
 )
-from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
-from cryodaq.storage.sqlite_writer import SQLiteWriter
+from cryodaq.paths import get_config_dir, get_data_dir
 
 logger = logging.getLogger("cryodaq.assistant")
 
-_PROJECT_ROOT = get_project_root()
 _CONFIG_DIR = get_config_dir()
 _DATA_DIR = get_data_dir()
 
@@ -120,7 +117,9 @@ class _RemoteEngineStateCache:
         self._client = client
         self._poll_interval_s = poll_interval_s
         self._experiment_status: dict[str, Any] = {}
+        self._experiment_receipt: dict[str, Any] | None = None
         self._sensor_diagnostics: dict[str, Any] | None = None
+        self._sensor_receipt: dict[str, Any] | None = None
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -137,30 +136,110 @@ class _RemoteEngineStateCache:
         while True:
             try:
                 exp_reply = await self._client.call({"cmd": "experiment_status"})
-                if exp_reply.get("ok"):
-                    self._experiment_status = exp_reply
+                active = (exp_reply.get("active_experiment") or {}).get("experiment_id")
+                experiment_receipt_valid = False
+                if exp_reply.get("ok") and isinstance(active, str) and active:
+                    try:
+                        _validate_context_receipt(
+                            exp_reply.get("scope_receipt"),
+                            expected_scope="experiment_status",
+                            expected_experiment_id=active,
+                            query_start=None,
+                            query_end=None,
+                        )
+                    except Exception:
+                        self._experiment_status = {}
+                        self._experiment_receipt = None
+                        self._sensor_diagnostics = None
+                        self._sensor_receipt = None
+                    else:
+                        experiment_receipt_valid = True
+                        self._experiment_status = exp_reply
+                        self._experiment_receipt = exp_reply.get("scope_receipt")
+                else:
+                    self._experiment_status = {}
+                    self._experiment_receipt = None
+                    self._sensor_diagnostics = None
+                    self._sensor_receipt = None
                 diag_reply = await self._client.call({"cmd": "get_sensor_diagnostics"})
-                if diag_reply.get("ok"):
+                if experiment_receipt_valid and diag_reply.get("ok") and isinstance(active, str) and active:
+                    _validate_context_receipt(
+                        diag_reply.get("scope_receipt"),
+                        expected_scope="sensor_diagnostics",
+                        expected_experiment_id=active,
+                        query_start=None,
+                        query_end=None,
+                    )
                     self._sensor_diagnostics = diag_reply.get("summary")
+                    self._sensor_receipt = diag_reply.get("scope_receipt")
+                else:
+                    self._sensor_diagnostics = None
+                    self._sensor_receipt = None
             except Exception:
+                self._experiment_status = {}
+                self._experiment_receipt = None
+                self._sensor_diagnostics = None
+                self._sensor_receipt = None
                 logger.debug("assistant state cache poll failed", exc_info=True)
             await asyncio.sleep(self._poll_interval_s)
+
+    def _invalidate(self) -> None:
+        self._experiment_status = {}
+        self._experiment_receipt = None
+        self._sensor_diagnostics = None
+        self._sensor_receipt = None
+
+    def _experiment_is_current(self) -> bool:
+        active = self._experiment_status.get("active_experiment") or {}
+        experiment_id = active.get("experiment_id")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            self._invalidate()
+            return False
+        try:
+            _validate_context_receipt(
+                self._experiment_receipt,
+                expected_scope="experiment_status",
+                expected_experiment_id=experiment_id,
+                query_start=None,
+                query_end=None,
+            )
+        except Exception:
+            self._invalidate()
+            return False
+        return True
 
     # --- ExperimentManager-shaped duck type (sync, per module docstring) ---
     @property
     def active_experiment_id(self) -> str | None:
+        if not self._experiment_is_current():
+            return None
         active = self._experiment_status.get("active_experiment")
         return active.get("experiment_id") if active else None
 
     def get_current_phase(self) -> str | None:
+        if not self._experiment_is_current():
+            return None
         return self._experiment_status.get("current_phase")
 
     def get_phase_history(self) -> list[dict]:
+        if not self._experiment_is_current():
+            return []
         return self._experiment_status.get("phases", [])
 
     # --- sensor_diag_provider callable (sync, zero-arg) ---
     def get_summary(self) -> Any | None:
-        if self._sensor_diagnostics is None:
+        if self._sensor_diagnostics is None or not self._experiment_is_current():
+            return None
+        try:
+            _validate_context_receipt(
+                self._sensor_receipt,
+                expected_scope="sensor_diagnostics",
+                expected_experiment_id=self._experiment_status["active_experiment"]["experiment_id"],
+                query_start=None,
+                query_end=None,
+            )
+        except Exception:
+            self._invalidate()
             return None
         return types.SimpleNamespace(**self._sensor_diagnostics)
 
@@ -203,20 +282,24 @@ class TelegramSender:
             self._session = aiohttp.ClientSession(connector=connector)
         return self._session
 
-    async def _send(self, chat_id: int, text: str) -> None:
+    async def _send(self, chat_id: int, text: str) -> str:
         session = await self._get_session()
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         try:
-            async with session.post(f"{self._api}/sendMessage", json=payload) as resp:
+            async with session.post(f"{self._api}/sendMessage", json=payload, allow_redirects=False) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error("Telegram sendMessage %d: %s", resp.status, body[:200])
+                    return "failed" if not 300 <= resp.status < 400 else "outcome_unknown"
+                return "delivered"
         except Exception as exc:
             logger.error("Ошибка отправки Telegram: %s", exc)
+            return "outcome_unknown"
 
-    async def _send_to_all(self, text: str) -> None:
-        for chat_id in self._allowed_ids:
-            await self._send(chat_id, text)
+    async def _send_to_all(self, text: str) -> dict[int, str]:
+        if not self._allowed_ids:
+            return {}
+        return {chat_id: await self._send(chat_id, text) for chat_id in self._allowed_ids}
 
     async def send_photo(self, chat_id: int | str, photo: bytes, caption: str = "") -> None:
         import aiohttp  # noqa: PLC0415
@@ -228,7 +311,7 @@ class TelegramSender:
             form.add_field("photo", photo, filename="chart.png", content_type="image/png")
             if caption:
                 form.add_field("caption", caption)
-            async with session.post(f"{self._api}/sendPhoto", data=form) as resp:
+            async with session.post(f"{self._api}/sendPhoto", data=form, allow_redirects=False) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error("Telegram sendPhoto %d: %s", resp.status, body[:200])
@@ -268,157 +351,6 @@ def _load_telegram_sender() -> TelegramSender | None:
         return None
 
 
-# ---------------------------------------------------------------------------
-# RAG index + rebuild-state-machine (moved unchanged from engine.py)
-# ---------------------------------------------------------------------------
-
-_rag_rebuild_state: dict[str, Any] = {
-    "state": "idle",
-    "started_at": None,
-    "finished_at": None,
-    "chunks_indexed": 0,
-    "error": None,
-}
-_rag_rebuild_task: asyncio.Task[None] | None = None
-
-
-def _rag_rebuild_status_snapshot() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "state": _rag_rebuild_state["state"],
-        "started_at": _rag_rebuild_state["started_at"],
-        "finished_at": _rag_rebuild_state["finished_at"],
-        "chunks_indexed": _rag_rebuild_state["chunks_indexed"],
-        "error": _rag_rebuild_state["error"],
-    }
-
-
-async def _run_rag_rebuild(
-    *,
-    db_path: Path,
-    embeddings_client: Any,
-    knowledge_dir: Path,
-    experiments_dir: Path,
-    sqlite_path: Path | None,
-    repo_root: Path,
-) -> None:
-    try:
-        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
-
-        stats = await build_index(
-            experiments_dir=experiments_dir,
-            vault_dir=None,
-            sqlite_path=sqlite_path,
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            pdf_dir=knowledge_dir / "equipment_manuals",
-            procedures_dir=knowledge_dir / "procedures",
-            reference_root=repo_root,
-        )
-        _rag_rebuild_state.update(
-            {
-                "state": "complete",
-                "finished_at": time.time(),
-                "chunks_indexed": int(stats.get("indexed", 0)),
-                "error": None,
-            }
-        )
-        logger.info("RAG manual rebuild complete: %d chunks indexed в %s", stats.get("indexed", 0), db_path)
-    except Exception as exc:  # noqa: BLE001
-        _rag_rebuild_state.update({"state": "failed", "finished_at": time.time(), "error": str(exc)})
-        logger.error("RAG manual rebuild failed: %s", exc, exc_info=True)
-
-
-async def _handle_rag_rebuild_command(
-    action: str,
-    cmd: dict[str, Any],
-    *,
-    db_path: Path | None,
-    embeddings_client: Any | None,
-    knowledge_dir: Path | None,
-    experiments_dir: Path | None,
-    sqlite_path: Path | None,
-    repo_root: Path | None,
-) -> dict[str, Any]:
-    global _rag_rebuild_task
-
-    if action == "rag.rebuild_status":
-        return _rag_rebuild_status_snapshot()
-    if action != "rag.rebuild_index":
-        return {"ok": False, "error": f"unknown rebuild action: {action}"}
-    if _rag_rebuild_state["state"] == "running":
-        return {"ok": False, "error": "Rebuild уже идёт — дождитесь завершения."}
-    if (
-        embeddings_client is None
-        or db_path is None
-        or knowledge_dir is None
-        or experiments_dir is None
-        or repo_root is None
-    ):
-        return {"ok": False, "error": "RAG не сконфигурирован (config/rag.yaml отсутствует?)."}
-
-    _rag_rebuild_state.update(
-        {
-            "state": "running",
-            "started_at": time.time(),
-            "finished_at": None,
-            "chunks_indexed": 0,
-            "error": None,
-        }
-    )
-    _rag_rebuild_task = asyncio.create_task(
-        _run_rag_rebuild(
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            knowledge_dir=knowledge_dir,
-            experiments_dir=experiments_dir,
-            sqlite_path=sqlite_path,
-            repo_root=repo_root,
-        ),
-        name="rag_manual_rebuild",
-    )
-    return {"ok": True, "state": "running", "started_at": _rag_rebuild_state["started_at"]}
-
-
-async def _bootstrap_rag_index_if_empty(
-    *,
-    db_path: Path,
-    embeddings_client: Any,
-    knowledge_dir: Path,
-    experiments_dir: Path,
-    sqlite_path: Path | None,
-    repo_root: Path,
-) -> None:
-    try:
-        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
-
-        searcher = RagSearcher(db_path=db_path, embeddings_client=embeddings_client)
-        sample = await searcher.search("test", top_k=1)
-        if sample:
-            logger.info("RAG index already populated (%d sample), skipping bootstrap", len(sample))
-            return
-    except Exception as exc:  # noqa: BLE001
-        logger.info("RAG index probe failed, proceeding with bootstrap: %s", exc)
-
-    logger.info("RAG bootstrap starting from bundled sources в %s", knowledge_dir)
-    try:
-        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
-
-        stats = await build_index(
-            experiments_dir=experiments_dir,
-            vault_dir=None,
-            sqlite_path=sqlite_path,
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            pdf_dir=knowledge_dir / "equipment_manuals",
-            procedures_dir=knowledge_dir / "procedures",
-            reference_root=repo_root,
-        )
-        logger.info("RAG bootstrap complete: %d chunks indexed в %s", stats.get("indexed", 0), db_path)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("RAG bootstrap failed: %s", exc, exc_info=True)
-
-
 def _resolve_rag_config() -> dict[str, Any] | None:
     """Resolve rag.local.yaml → rag.yaml → rag.yaml.example, same priority
     order engine.py used to apply."""
@@ -433,7 +365,7 @@ def _resolve_rag_config() -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# assistant.query / rag.* command dispatch (this process's own REP)
+# assistant.query / rag.search command dispatch (this process's own REP)
 # ---------------------------------------------------------------------------
 
 
@@ -454,6 +386,14 @@ async def _handle_assistant_query_command(
         }
     try:
         response = await asyncio.wait_for(query_agent.handle_query(query, chat_id=chat_id), timeout=timeout_s)
+        if getattr(query_agent, "last_audit_error", False) is True:
+            return {
+                "ok": False,
+                "error_code": "audit_unavailable",
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": False,
+            }
         return {"ok": True, "response": response}
     except TimeoutError:
         return {
@@ -563,6 +503,7 @@ async def _run_llm_runtime(
         logger.info("cryodaq-assistant: config/agent.yaml не найден — нечего запускать, выхожу")
         return
     config = AssistantConfig.from_yaml_path(agent_cfg_path)
+    config.ollama_base_url = validate_loopback_origin(config.ollama_base_url)
     if not config.enabled:
         logger.info("cryodaq-assistant: agent.enabled=false — нечего запускать, выхожу")
         return
@@ -591,8 +532,7 @@ async def _run_llm_runtime(
     )
     telegram_sender: Any | None = None
     try:
-        # This reader is used read-only against the engine-owned WAL database.
-        reader = SQLiteWriter(_DATA_DIR)
+        reader = EngineContextReader(engine_client)
         context_builder = ContextBuilder(reader, state_cache, sensor_diag_provider=state_cache.get_summary)
         audit_logger = AuditLogger(
             _DATA_DIR / "agents" / "assistant" / "audit",
@@ -600,10 +540,8 @@ async def _run_llm_runtime(
             retention_days=config.audit_retention_days,
         )
         telegram_sender = _load_telegram_sender()
-        event_logger = EventLogger(reader, state_cache, event_bus=event_bus)
         output_router = OutputRouter(
             telegram_bot=telegram_sender,
-            event_logger=event_logger,
             event_bus=event_bus,
             brand_name=config.brand_name,
             brand_emoji=config.brand_emoji,
@@ -626,11 +564,7 @@ async def _run_llm_runtime(
 
     # --- RAG searcher ---
     rag_searcher: Any = None
-    rag_rebuild_db_path: Path | None = None
-    rag_rebuild_embeddings: Any | None = None
-    rag_rebuild_knowledge_dir: Path | None = None
     rag_emb_client: Any | None = None
-    rag_bootstrap_args: dict[str, Any] | None = None
     try:
         rag_cfg = _resolve_rag_config()
     except Exception:
@@ -651,25 +585,12 @@ async def _run_llm_runtime(
             rag_table = str(rag_cfg.get("table_name", "cryodaq_corpus"))
             rag_emb_url = str(rag_cfg.get("ollama_base_url", "http://localhost:11434"))
             rag_emb_model = str(rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
-            rag_knowledge_dir = Path(  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
-                str(rag_cfg.get("knowledge_dir", _DATA_DIR / "knowledge"))
-            ).expanduser()
-            rag_db_path.mkdir(parents=True, exist_ok=True)
+            if not await asyncio.to_thread(rag_db_path.is_dir):
+                raise FileNotFoundError(f"offline RAG index is absent at {rag_db_path}; run cryodaq-rag-index")
             rag_emb = EmbeddingsClient(base_url=rag_emb_url, model=rag_emb_model)
             rag_emb_client = rag_emb
             rag_searcher = RagSearcher(db_path=rag_db_path, embeddings_client=rag_emb, table_name=rag_table)
-            rag_rebuild_db_path = rag_db_path
-            rag_rebuild_embeddings = rag_emb
-            rag_rebuild_knowledge_dir = rag_knowledge_dir
             logger.info("RAG searcher: инициализирован (config=%s, db=%s)", rag_cfg["_source"], rag_db_path)
-            rag_bootstrap_args = {
-                "db_path": rag_db_path,
-                "embeddings_client": rag_emb,
-                "knowledge_dir": rag_knowledge_dir,
-                "experiments_dir": _DATA_DIR / "experiments",
-                "sqlite_path": None,
-                "repo_root": _PROJECT_ROOT,
-            }
         except Exception as exc:
             logger.warning("RAG searcher: ошибка инициализации — %s", exc)
             rag_searcher = None
@@ -742,17 +663,6 @@ async def _run_llm_runtime(
                 return await _handle_assistant_query_command(query_agent, cmd)
             if action == "rag.search":
                 return await _handle_rag_search_command(rag_searcher, cmd)
-            if action in ("rag.rebuild_index", "rag.rebuild_status"):
-                return await _handle_rag_rebuild_command(
-                    action,
-                    cmd,
-                    db_path=rag_rebuild_db_path,
-                    embeddings_client=rag_rebuild_embeddings,
-                    knowledge_dir=rag_rebuild_knowledge_dir,
-                    experiments_dir=_DATA_DIR / "experiments",
-                    sqlite_path=None,
-                    repo_root=_PROJECT_ROOT,
-                )
             return {"ok": False, "error": f"unknown command: {action}"}
         except Exception as exc:
             logger.error("Ошибка выполнения команды ассистента '%s': %s", action, exc)
@@ -779,11 +689,8 @@ async def _run_llm_runtime(
     state_started = False
     event_started = False
     command_started = False
-    live_started = False
-    reader_started = False
     broker_started = False
     periodic_task: asyncio.Task[None] | None = None
-    rag_bootstrap_task: asyncio.Task[None] | None = None
 
     async def _cleanup(label: str, operation) -> None:
         try:
@@ -792,8 +699,6 @@ async def _run_llm_runtime(
             logger.exception("Optional assistant cleanup failed: %s", label)
 
     try:
-        reader_started = True
-        await reader.start_immediate()
         if broker_snapshot is not None:
             broker_started = True
             await broker_snapshot.start()
@@ -803,13 +708,7 @@ async def _run_llm_runtime(
         await event_sub.start()
         command_started = True
         await cmd_server.start()
-        live_started = True
         await live_agent.start()
-        if rag_bootstrap_args is not None:
-            rag_bootstrap_task = asyncio.create_task(
-                _bootstrap_rag_index_if_empty(**rag_bootstrap_args),
-                name="rag_bootstrap",
-            )
 
         periodic_task = asyncio.create_task(
             _periodic_report_tick(config, event_bus, state_cache),
@@ -823,12 +722,11 @@ async def _run_llm_runtime(
             periodic_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await periodic_task
-        if rag_bootstrap_task is not None:
-            rag_bootstrap_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await rag_bootstrap_task
-        if live_started:
-            await _cleanup("live agent", live_agent.stop)
+        if query_agent is not None:
+            await _cleanup("query agent", query_agent.close)
+        await _cleanup("live agent", live_agent.stop)
+        await _cleanup("output router", output_router.close)
+        await _cleanup("audit logger", audit_logger.close)
         if command_started:
             await _cleanup("command server", cmd_server.stop)
         if event_started:
@@ -837,8 +735,6 @@ async def _run_llm_runtime(
             await _cleanup("state cache", state_cache.stop)
         if broker_started and broker_snapshot is not None:
             await _cleanup("broker snapshot", broker_snapshot.stop)
-        if reader_started:
-            await _cleanup("SQLite reader", reader.stop)
         await _cleanup("Ollama client", ollama.close)
         if rag_emb_client is not None:
             await _cleanup("RAG embeddings client", rag_emb_client.close)

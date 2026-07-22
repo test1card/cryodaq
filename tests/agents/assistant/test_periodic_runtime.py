@@ -19,6 +19,7 @@ from cryodaq.agents.assistant.periodic_runtime import (
     PeriodicLiveDiscontinuity,
     SequencedPeriodicLiveSources,
 )
+from cryodaq.agents.assistant_main import _RemoteEngineStateCache
 from cryodaq.core.zmq_bridge import (
     DEFAULT_TOPIC,
     EVENTS_TOPIC,
@@ -889,7 +890,11 @@ async def test_query_uses_fresh_req_and_parses_closed_responses() -> None:
     "body",
     [
         b'{"ok":true,"ok":true}',
-        b'{"ok":true,"proto":1,"schema":"cryodaq.periodic.query/v1","state_revision":true,"state_token":"x","active":{}}',
+        (
+            f'{{"ok":true,"proto":{PROTOCOL_VERSION},'
+            '"schema":"cryodaq.periodic.query/v1","state_revision":true,'
+            '"state_token":"x","active":{}}}'
+        ).encode(),
         b'{"ok":true,"proto":1e999,"schema":"cryodaq.periodic.query/v1","state_revision":1,"state_token":"x","active":{}}',
     ],
 )
@@ -914,3 +919,162 @@ async def test_query_rejects_duplicate_boolean_integer_and_nonfinite(body: bytes
         await query.close()
         server.close(linger=0)
         context.term()
+
+
+async def test_engine_disconnect_invalidates_cached_context() -> None:
+    first_cycle_done = asyncio.Event()
+    allow_disconnect = asyncio.Event()
+    disconnect_cycle_done = asyncio.Event()
+    now = datetime.now(UTC).isoformat()
+
+    def receipt(scope: str) -> dict[str, object]:
+        return {
+            "schema": "assistant_context_receipt_v1",
+            "log_scope": scope,
+            "experiment_id": "exp-1",
+            "engine_incarnation": "engine-1",
+            "experiment_incarnation": "experiment-1",
+            "revision": 7,
+            "order": 11,
+            "query_start": None,
+            "query_end": None,
+            "received_at": now,
+            "freshness_s": 30.0,
+        }
+
+    class Client:
+        calls = 0
+
+        async def call(self, command: dict[str, object]) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                assert command == {"cmd": "experiment_status"}
+                return {
+                    "ok": True,
+                    "active_experiment": {"experiment_id": "exp-1"},
+                    "current_phase": "COOLDOWN",
+                    "phases": [],
+                    "scope_receipt": receipt("experiment_status"),
+                }
+            if self.calls == 2:
+                assert command == {"cmd": "get_sensor_diagnostics"}
+                first_cycle_done.set()
+                return {
+                    "ok": True,
+                    "summary": {"status": "ok"},
+                    "scope_receipt": receipt("sensor_diagnostics"),
+                }
+            await allow_disconnect.wait()
+            if self.calls == 3:
+                return {"ok": False, "error": "engine disconnected"}
+            disconnect_cycle_done.set()
+            return {"ok": False, "error": "engine disconnected"}
+
+    cache = _RemoteEngineStateCache(Client(), poll_interval_s=0.0)
+    await cache.start()
+    try:
+        await asyncio.wait_for(first_cycle_done.wait(), 1.0)
+        await asyncio.sleep(0)
+        assert cache.active_experiment_id == "exp-1"
+        assert cache.get_current_phase() == "COOLDOWN"
+        assert cache.get_summary() is not None
+
+        allow_disconnect.set()
+        await asyncio.wait_for(disconnect_cycle_done.wait(), 1.0)
+        await asyncio.sleep(0)
+
+        assert cache.active_experiment_id is None
+        assert cache.get_current_phase() is None
+        assert cache.get_phase_history() == []
+        assert cache.get_summary() is None
+    finally:
+        await cache.stop()
+
+
+async def test_live_runtime_consumes_context_receipt_and_expires_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.agents import assistant_main
+    from cryodaq.agents.assistant.shared import context_reader
+
+    published = asyncio.Event()
+    park = asyncio.Event()
+    received_at = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+
+    class _ClockDateTime:
+        current = received_at
+
+        @classmethod
+        def fromisoformat(cls, value: str) -> datetime:
+            return datetime.fromisoformat(value)
+
+        @classmethod
+        def now(cls, tz=None) -> datetime:
+            del tz
+            return cls.current
+
+        @classmethod
+        def fromtimestamp(cls, value: float, tz=None) -> datetime:
+            return datetime.fromtimestamp(value, tz=tz)
+
+    monkeypatch.setattr(context_reader, "datetime", _ClockDateTime)
+    monkeypatch.setattr(assistant_main, "datetime", _ClockDateTime)
+
+    def fresh_receipt(scope: str) -> dict[str, object]:
+        return {
+            "schema": "assistant_context_receipt_v1",
+            "log_scope": scope,
+            "experiment_id": "exp-fresh",
+            "engine_incarnation": "engine-current",
+            "experiment_incarnation": "experiment-current",
+            "revision": 3,
+            "order": 5,
+            "query_start": None,
+            "query_end": None,
+            "received_at": received_at.isoformat(),
+            "freshness_s": 5.0,
+        }
+
+    class Client:
+        calls = 0
+
+        async def call(self, command: dict[str, object]) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                assert command == {"cmd": "experiment_status"}
+                return {
+                    "ok": True,
+                    "active_experiment": {"experiment_id": "exp-fresh"},
+                    "current_phase": "COOLDOWN",
+                    "phases": [{"phase": "COOLDOWN"}],
+                    "scope_receipt": fresh_receipt("experiment_status"),
+                }
+            if self.calls == 2:
+                assert command == {"cmd": "get_sensor_diagnostics"}
+                return {
+                    "ok": True,
+                    "summary": {"status": "ok"},
+                    "scope_receipt": fresh_receipt("sensor_diagnostics"),
+                }
+            published.set()
+            await park.wait()
+            raise AssertionError("parked client unexpectedly resumed")
+
+    cache = _RemoteEngineStateCache(Client(), poll_interval_s=0.0)
+    await cache.start()
+    try:
+        await asyncio.wait_for(published.wait(), 1.0)
+        assert cache.active_experiment_id == "exp-fresh"
+        assert cache.get_current_phase() == "COOLDOWN"
+        assert cache.get_phase_history() == [{"phase": "COOLDOWN"}]
+        summary = cache.get_summary()
+        assert summary is not None
+        assert summary.status == "ok"
+
+        _ClockDateTime.current = datetime(2026, 7, 22, 12, 0, 6, tzinfo=UTC)
+        assert cache.active_experiment_id is None
+        assert cache.get_current_phase() is None
+        assert cache.get_phase_history() == []
+        assert cache.get_summary() is None
+    finally:
+        await cache.stop()

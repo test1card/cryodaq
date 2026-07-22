@@ -1320,10 +1320,30 @@ class Scheduler:
         if self._sqlite_writer is not None and combined:
             try:
                 if getattr(self._sqlite_writer, "descriptor_authoritative", False) is True:
+                    settlement = None
                     try:
-                        receipt = await self._sqlite_writer.write_committed(combined)
+                        begin = getattr(self._sqlite_writer, "begin_committed", None)
+                        if callable(begin):
+                            settlement = begin(combined)
+                            receipt = await settlement.wait()
+                            release = getattr(self._sqlite_writer, "release_committed", None)
+                            if callable(release):
+                                release(settlement)
+                        else:
+                            receipt = await self._sqlite_writer.write_committed(combined)
                     except asyncio.CancelledError:
-                        self._observe_persistence_ambiguity()
+                        settle = getattr(self._sqlite_writer, "settle_committed", None)
+                        if settlement is not None and callable(settle):
+                            try:
+                                receipt = await settle(settlement)
+                                if receipt is not None:
+                                    self._observe_persistence_commit(receipt)
+                                else:
+                                    self._observe_persistence_ambiguity()
+                            except BaseException:
+                                self._observe_persistence_ambiguity()
+                        else:
+                            self._observe_persistence_ambiguity()
                         raise
                     except Exception:
                         self._observe_persistence_ambiguity()

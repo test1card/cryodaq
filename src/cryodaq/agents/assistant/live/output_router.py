@@ -8,13 +8,13 @@ distinguish AI-generated content from human input.
 from __future__ import annotations
 
 import enum
+import html
 import logging
 import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from cryodaq.core.event_bus import EngineEvent, EventBus
-    from cryodaq.core.event_logger import EventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -48,15 +48,16 @@ def _markdown_to_html_for_telegram(text: str) -> str:
     Bullet ``*`` markers ("* item", "  * item") are intentionally untouched
     because the italic regex requires word characters between the markers.
     """
+    text = html.escape(text, quote=False)
     text = _MD_BOLD_RE.sub(r"<b>\1</b>", text)
     text = _MD_ITALIC_RE.sub(r"<i>\1</i>", text)
     text = _MD_INLINE_CODE_RE.sub(r"<code>\1</code>", text)
     text = _MD_HEADERS_RE.sub("", text)
     return text
 
+
 class OutputTarget(enum.Enum):
     TELEGRAM = "telegram"
-    OPERATOR_LOG = "operator_log"
     GUI_INSIGHT = "gui_insight"
 
 
@@ -67,18 +68,16 @@ class OutputRouter:
         self,
         *,
         telegram_bot: Any | None,
-        event_logger: EventLogger,
         event_bus: EventBus,
         brand_name: str = "Гемма",
         brand_emoji: str = "🤖",
     ) -> None:
         self._telegram = telegram_bot
-        self._event_logger = event_logger
         self._event_bus = event_bus
         self._brand_base = f"{brand_emoji} {brand_name}"
         self._prefix = f"{self._brand_base}:"
 
-    async def dispatch(
+    async def dispatch_detailed(
         self,
         trigger_event: EngineEvent,
         llm_output: str,
@@ -86,19 +85,17 @@ class OutputRouter:
         targets: list[OutputTarget],
         audit_id: str,
         prefix_suffix: str = "",
-    ) -> list[str]:
+    ) -> dict[str, Any]:
         """Send llm_output to all configured targets.
 
         prefix_suffix: optional text inserted before the colon, e.g. "(отчёт за час)".
-        Returns list of successfully dispatched target names.
+        Returns one explicit settlement state per requested target.
         """
-        dispatched: list[str] = []
+        outcomes: dict[str, str] = {}
         if prefix_suffix:
             prefix = f"{self._brand_base} {prefix_suffix}:"
         else:
             prefix = self._prefix
-        prefixed = f"{prefix} {llm_output}"
-
         for target in targets:
             try:
                 if target == OutputTarget.TELEGRAM:
@@ -106,21 +103,21 @@ class OutputRouter:
                         # F-BotPolish: convert Markdown→HTML only for the
                         # Telegram target. The prefix is plain ASCII and
                         # already HTML-safe, so we only normalize the body.
-                        telegram_text = (
-                            f"{prefix} {_markdown_to_html_for_telegram(llm_output)}"
-                        )
-                        await self._telegram._send_to_all(telegram_text)
-                        dispatched.append("telegram")
+                        telegram_text = f"{prefix} {_markdown_to_html_for_telegram(llm_output)}"
+                        sent = await self._telegram._send_to_all(telegram_text)
+                        if isinstance(sent, dict):
+                            states = tuple(sent.values())
+                            if len(sent) == 1:
+                                outcomes["telegram"] = next(iter(states), "failed")
+                            else:
+                                outcomes["telegram"] = {str(chat_id): str(state) for chat_id, state in sent.items()}
+                        elif sent is True:
+                            outcomes["telegram"] = "delivered"
+                        else:
+                            outcomes["telegram"] = "failed"
                     else:
                         logger.debug("OutputRouter: Telegram bot not configured, skipping")
-
-                elif target == OutputTarget.OPERATOR_LOG:
-                    await self._event_logger.log_event(
-                        "assistant",
-                        prefixed,
-                        extra_tags=["ai", audit_id],
-                    )
-                    dispatched.append("operator_log")
+                        outcomes["telegram"] = "not_configured"
 
                 elif target == OutputTarget.GUI_INSIGHT:
                     from datetime import UTC, datetime
@@ -139,9 +136,10 @@ class OutputRouter:
                             experiment_id=trigger_event.experiment_id,
                         )
                     )
-                    dispatched.append("gui_insight")
+                    outcomes["gui_insight"] = "delivered"
 
             except Exception:
+                outcomes[target.value] = "outcome_unknown"
                 logger.warning(
                     "OutputRouter: failed to dispatch to %s (audit_id=%s)",
                     target.value,
@@ -149,4 +147,39 @@ class OutputRouter:
                     exc_info=True,
                 )
 
-        return dispatched
+        return outcomes
+
+    async def dispatch(
+        self,
+        trigger_event: EngineEvent,
+        llm_output: str,
+        *,
+        targets: list[OutputTarget],
+        audit_id: str,
+        prefix_suffix: str = "",
+    ) -> list[str]:
+        """Compatibility wrapper returning only targets proven delivered."""
+        outcomes = await self.dispatch_detailed(
+            trigger_event,
+            llm_output,
+            targets=targets,
+            audit_id=audit_id,
+            prefix_suffix=prefix_suffix,
+        )
+        delivered: list[str] = []
+        for target, state in outcomes.items():
+            if state == "delivered":
+                delivered.append(target)
+            elif (
+                isinstance(state, dict)
+                and state
+                and all(recipient_state == "delivered" for recipient_state in state.values())
+            ):
+                delivered.append(target)
+        return delivered
+
+    async def close(self) -> None:
+        """Settle and close the owned Telegram transport, if configured."""
+        close = getattr(self._telegram, "close", None)
+        if callable(close):
+            await close()
