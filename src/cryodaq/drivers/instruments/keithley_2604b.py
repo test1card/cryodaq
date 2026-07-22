@@ -68,9 +68,7 @@ _IV_FIELDS = (
     ("power", "W"),
 )
 
-_OUTPUT_STATE_NUMBER_RE = re.compile(
-    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z"
-)
+_OUTPUT_STATE_NUMBER_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 _OUTPUT_STATE_MAX_CHARS = 64
 
 # TSP software late-pet watchdog, gated on _wdog_enabled (default False).
@@ -129,16 +127,13 @@ def _parse_wdog_latch(raw: str) -> bool:
 def _validate_wdog_timeout_s(value: object) -> float:
     """Return a finite late-pet timeout within the supported safety range."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(
-            "watchdog_timeout_s must be a real number, not a boolean or string"
-        )
+        raise ValueError("watchdog_timeout_s must be a real number, not a boolean or string")
     timeout_s = float(value)
     if not math.isfinite(timeout_s):
         raise ValueError("watchdog_timeout_s must be finite")
     if not (_WDOG_TIMEOUT_MIN_S <= timeout_s <= _WDOG_TIMEOUT_MAX_S):
         raise ValueError(
-            "watchdog_timeout_s must be between "
-            f"{_WDOG_TIMEOUT_MIN_S:g} and {_WDOG_TIMEOUT_MAX_S:g} seconds"
+            f"watchdog_timeout_s must be between {_WDOG_TIMEOUT_MIN_S:g} and {_WDOG_TIMEOUT_MAX_S:g} seconds"
         )
     return timeout_s
 
@@ -226,9 +221,7 @@ class Keithley2604B(InstrumentDriver):
         if watchdog_mode is not None:
             self._wdog_mode = WatchdogMode(watchdog_mode)
         elif watchdog_enabled is not None:
-            self._wdog_mode = (
-                WatchdogMode.BEST_EFFORT if watchdog_enabled else WatchdogMode.OFF
-            )
+            self._wdog_mode = WatchdogMode.BEST_EFFORT if watchdog_enabled else WatchdogMode.OFF
         else:
             self._wdog_mode = WatchdogMode.OFF
         self._wdog_enabled = self._wdog_mode is not WatchdogMode.OFF
@@ -336,8 +329,7 @@ class Keithley2604B(InstrumentDriver):
                         )
                     else:
                         log.info(
-                            "%s: SAFETY: forced outputs off on connect "
-                            "(crash-recovery guard, readback-verified)",
+                            "%s: SAFETY: forced outputs off on connect (crash-recovery guard, readback-verified)",
                             self.name,
                         )
             _validate_keithley_serial(serial)
@@ -376,9 +368,7 @@ class Keithley2604B(InstrumentDriver):
 
     async def disconnect(self) -> None:
         if self._teardown_incomplete:
-            raise TransportTeardownIncompleteError(
-                f"{self.name}: previous transport close remains unsettled"
-            )
+            raise TransportTeardownIncompleteError(f"{self.name}: previous transport close remains unsettled")
         if not self._connected:
             return
         off_confirmed = all(self._output_off_verified.values())
@@ -392,8 +382,7 @@ class Keithley2604B(InstrumentDriver):
         if off_confirmed is not True:
             self._unsafe_output_state = True
             raise OutputStateUnverifiedError(
-                f"{self.name}: disconnect refused without a "
-                "readback-verified OFF for both outputs"
+                f"{self.name}: disconnect refused without a readback-verified OFF for both outputs"
             )
 
         # Only terminal OFF proof authorizes teardown.  Once authorized,
@@ -447,20 +436,14 @@ class Keithley2604B(InstrumentDriver):
                 if not runtime.active:
                     # Check output state — source may be OFF or left ON from
                     # a previous session.  measure.iv() errors when output is OFF.
-                    output_raw = await self._transport.query(
-                        f"print({smu_channel}.source.output)", timeout_ms=3000
-                    )
+                    output_raw = await self._transport.query(f"print({smu_channel}.source.output)", timeout_ms=3000)
                     try:
                         output_on = float(output_raw.strip()) > 0.5
                     except ValueError:
                         output_on = False
 
                     if not output_on:
-                        readings.extend(
-                            self._build_channel_readings(
-                                smu_channel, 0.0, 0.0, resistance_override=0.0
-                            )
-                        )
+                        readings.extend(self._build_channel_readings(smu_channel, 0.0, 0.0, resistance_override=0.0))
                         continue
 
                     # Output is ON but not managed by us — read for monitoring.
@@ -502,9 +485,7 @@ class Keithley2604B(InstrumentDriver):
                             current_v = self._last_v[smu_channel]
                             delta_v = target_v - current_v
                             if abs(delta_v) > MAX_DELTA_V_PER_STEP:
-                                delta_v = (
-                                    MAX_DELTA_V_PER_STEP if delta_v > 0 else -MAX_DELTA_V_PER_STEP
-                                )
+                                delta_v = MAX_DELTA_V_PER_STEP if delta_v > 0 else -MAX_DELTA_V_PER_STEP
                                 target_v = current_v + delta_v
                                 log.debug(
                                     "Slew rate limited: delta=%.3f V, target=%.3f V",
@@ -515,11 +496,7 @@ class Keithley2604B(InstrumentDriver):
                             await self._transport.write(f"{smu_channel}.source.levelv = {target_v}")
                             self._last_v[smu_channel] = target_v
 
-                readings.extend(
-                    self._build_channel_readings(
-                        smu_channel, voltage, current, extra_meta=extra_meta
-                    )
-                )
+                readings.extend(self._build_channel_readings(smu_channel, voltage, current, extra_meta=extra_meta))
             except OSError as exc:
                 # Transport-level error (USB disconnect, pipe broken) —
                 # mark disconnected so scheduler triggers reconnect.
@@ -543,11 +520,7 @@ class Keithley2604B(InstrumentDriver):
 
         if not self._connected:
             raise RuntimeError(f"{self.name}: instrument not connected")
-        if not (
-            math.isfinite(p_target)
-            and math.isfinite(v_compliance)
-            and math.isfinite(i_compliance)
-        ):
+        if not (math.isfinite(p_target) and math.isfinite(v_compliance) and math.isfinite(i_compliance)):
             # Non-finite would be formatted straight into the SCPI level/limit
             # writes below (and nan defeats the <= 0 guard). Reject at the
             # hardware boundary regardless of caller.
@@ -574,9 +547,7 @@ class Keithley2604B(InstrumentDriver):
         await self._transport.write(f"{smu_channel}.reset()")
         await self._transport.write(f"{smu_channel}.source.func = {smu_channel}.OUTPUT_DCVOLTS")
         await self._transport.write(f"{smu_channel}.source.autorangev = {smu_channel}.AUTORANGE_ON")
-        await self._transport.write(
-            f"{smu_channel}.measure.autorangei = {smu_channel}.AUTORANGE_ON"
-        )
+        await self._transport.write(f"{smu_channel}.measure.autorangei = {smu_channel}.AUTORANGE_ON")
         await self._transport.write(f"{smu_channel}.source.limitv = {v_compliance}")
         await self._transport.write(f"{smu_channel}.source.limiti = {i_compliance}")
         await self._transport.write(f"{smu_channel}.source.levelv = 0")
@@ -658,9 +629,7 @@ class Keithley2604B(InstrumentDriver):
             write_succeeded = True
             try:
                 await self._transport.write(f"{smu_channel}.source.levelv = 0")
-                await self._transport.write(
-                    f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF"
-                )
+                await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF")
             except Exception as exc:
                 log.critical("%s: emergency_off failed on %s: %s", self.name, smu_channel, exc)
                 write_succeeded = False
@@ -862,12 +831,8 @@ class Keithley2604B(InstrumentDriver):
             self._wdog_autonomous = False
             autonomous_read_ok = False
             try:
-                autonomous_raw = await self._transport.query(
-                    "print(cryodaq_wdog_autonomous)"
-                )
-                self._wdog_autonomous = _parse_wdog_flag(
-                    autonomous_raw, field="cryodaq_wdog_autonomous"
-                )
+                autonomous_raw = await self._transport.query("print(cryodaq_wdog_autonomous)")
+                self._wdog_autonomous = _parse_wdog_flag(autonomous_raw, field="cryodaq_wdog_autonomous")
                 autonomous_read_ok = True
             except Exception as autonomous_exc:
                 if self._wdog_mode is WatchdogMode.REQUIRED:
@@ -917,8 +882,7 @@ class Keithley2604B(InstrumentDriver):
                 )
             self._wdog_armed = True
             log.info(
-                "%s: TSP software late-pet watchdog active "
-                "(timeout=%.1fs, fw v%d, autonomous=%s)",
+                "%s: TSP software late-pet watchdog active (timeout=%.1fs, fw v%d, autonomous=%s)",
                 self.name,
                 self._wdog_timeout_s,
                 _WDOG_SCRIPT_VERSION,
@@ -947,8 +911,7 @@ class Keithley2604B(InstrumentDriver):
                     )
             if self._wdog_mode is WatchdogMode.REQUIRED:
                 log.critical(
-                    "%s: TSP watchdog arm FAILED and mode=required — refusing to "
-                    "connect (fail-closed): %s",
+                    "%s: TSP watchdog arm FAILED and mode=required — refusing to connect (fail-closed): %s",
                     self.name,
                     exc,
                 )
@@ -989,11 +952,7 @@ class Keithley2604B(InstrumentDriver):
         the latch and reactivates only the non-autonomous late-pet checker.
         Any ambiguity keeps recovery fault-latched and attempts a disarm.
         """
-        if (
-            not self._wdog_enabled
-            or self.mock
-            or not self._connected
-        ):
+        if not self._wdog_enabled or self.mock or not self._connected:
             return True
         if not self._wdog_armed and not self._wdog_trip_pending:
             return True
@@ -1002,9 +961,7 @@ class Keithley2604B(InstrumentDriver):
         fresh_instrument = raw.strip().lower() == "nil"
         if fresh_instrument:
             if not self._wdog_trip_pending:
-                raise ValueError(
-                    "watchdog latch disappeared without host-side pending evidence"
-                )
+                raise ValueError("watchdog latch disappeared without host-side pending evidence")
             tripped = False
         else:
             tripped = _parse_wdog_flag(raw, field="cryodaq_wdog_tripped")
@@ -1016,8 +973,7 @@ class Keithley2604B(InstrumentDriver):
 
         if not await self.emergency_off():
             log.critical(
-                "%s: refusing watchdog trip acknowledgment because both-output "
-                "OFF could not be readback-verified",
+                "%s: refusing watchdog trip acknowledgment because both-output OFF could not be readback-verified",
                 self.name,
             )
             return False
@@ -1037,13 +993,9 @@ class Keithley2604B(InstrumentDriver):
             ack_issued = True
             version: float | None = None
             if not force_upload:
-                version_raw = await self._transport.query(
-                    "print(CRYODAQ_WDOG_VERSION)"
-                )
+                version_raw = await self._transport.query("print(CRYODAQ_WDOG_VERSION)")
                 if version_raw.strip().lower() != "nil":
-                    version = _parse_wdog_number(
-                        version_raw, field="CRYODAQ_WDOG_VERSION"
-                    )
+                    version = _parse_wdog_number(version_raw, field="CRYODAQ_WDOG_VERSION")
             if version == float(_WDOG_SCRIPT_VERSION):
                 await self._transport.write("cryodaq_wdog_acknowledge()")
             else:
@@ -1051,37 +1003,22 @@ class Keithley2604B(InstrumentDriver):
                 # left by an older script, but only after verified OFF above.
                 # Upgrade and reactivate v3 in this same visible recovery path.
                 await self._transport.write(_load_wdog_script())
-                uploaded_raw = await self._transport.query(
-                    "print(CRYODAQ_WDOG_VERSION)"
-                )
-                uploaded = _parse_wdog_number(
-                    uploaded_raw, field="CRYODAQ_WDOG_VERSION"
-                )
+                uploaded_raw = await self._transport.query("print(CRYODAQ_WDOG_VERSION)")
+                uploaded = _parse_wdog_number(uploaded_raw, field="CRYODAQ_WDOG_VERSION")
                 if uploaded != float(_WDOG_SCRIPT_VERSION):
                     raise _WatchdogArmError(
-                        "watchdog acknowledgment upgrade version mismatch: "
-                        f"{uploaded_raw.strip()!r}"
+                        f"watchdog acknowledgment upgrade version mismatch: {uploaded_raw.strip()!r}"
                     )
-                autonomous_raw = await self._transport.query(
-                    "print(cryodaq_wdog_autonomous)"
-                )
-                autonomous = _parse_wdog_flag(
-                    autonomous_raw, field="cryodaq_wdog_autonomous"
-                )
+                autonomous_raw = await self._transport.query("print(cryodaq_wdog_autonomous)")
+                autonomous = _parse_wdog_flag(autonomous_raw, field="cryodaq_wdog_autonomous")
                 if autonomous:
-                    raise _WatchdogArmError(
-                        "v3 acknowledgment upgrade unexpectedly reported autonomous=1"
-                    )
-                await self._transport.write(
-                    f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}"
-                )
+                    raise _WatchdogArmError("v3 acknowledgment upgrade unexpectedly reported autonomous=1")
+                await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
                 await self._transport.write("cryodaq_wdog_run()")
             active_raw = await self._transport.query("print(cryodaq_wdog_active)")
             tripped_raw = await self._transport.query("print(cryodaq_wdog_tripped)")
             active = _parse_wdog_flag(active_raw, field="cryodaq_wdog_active")
-            still_tripped = _parse_wdog_flag(
-                tripped_raw, field="cryodaq_wdog_tripped"
-            )
+            still_tripped = _parse_wdog_flag(tripped_raw, field="cryodaq_wdog_tripped")
             if not active or still_tripped:
                 raise _WatchdogArmError(
                     "TSP watchdog acknowledgment readback bad: "
@@ -1094,8 +1031,7 @@ class Keithley2604B(InstrumentDriver):
                     await self._transport.write("cryodaq_wdog_disarm()")
                 except Exception as disarm_exc:
                     log.critical(
-                        "%s: watchdog acknowledgment failed and disarm also "
-                        "failed; TSP state UNKNOWN: %s",
+                        "%s: watchdog acknowledgment failed and disarm also failed; TSP state UNKNOWN: %s",
                         self.name,
                         disarm_exc,
                     )
@@ -1157,26 +1093,18 @@ class Keithley2604B(InstrumentDriver):
             return False
         token = response[len(prefix) :].strip()
         try:
-            if (
-                not token
-                or len(token) > _OUTPUT_STATE_MAX_CHARS
-                or _OUTPUT_STATE_NUMBER_RE.fullmatch(token) is None
-            ):
+            if not token or len(token) > _OUTPUT_STATE_MAX_CHARS or _OUTPUT_STATE_NUMBER_RE.fullmatch(token) is None:
                 raise InvalidOperation
             value = Decimal(token)
         except InvalidOperation:
-            log.critical(
-                "%s: %s unexpected output response: %r", self.name, smu_channel, token
-            )
+            log.critical("%s: %s unexpected output response: %r", self.name, smu_channel, token)
             return False
         # Keithley output is an enum.  Accept only a finite numeric literal
         # whose exact Decimal value is zero.  +0 and -0 are equivalent OFF
         # encodings; NaN/Inf, negative/fractional values and trailing junk are
         # all unverified, never coerced to OFF.
         if not value.is_finite() or not value.is_zero():
-            log.critical(
-                "%s: %s still reports output=%s", self.name, smu_channel, token
-            )
+            log.critical("%s: %s still reports output=%s", self.name, smu_channel, token)
             return False
         return True
 
@@ -1228,9 +1156,7 @@ class Keithley2604B(InstrumentDriver):
                 value=resistance,
                 unit="Ohm",
                 instrument_id=self.name,
-                status=ChannelStatus.OK
-                if math.isfinite(resistance)
-                else ChannelStatus.SENSOR_ERROR,
+                status=ChannelStatus.OK if math.isfinite(resistance) else ChannelStatus.SENSOR_ERROR,
                 raw=resistance if math.isfinite(resistance) else None,
                 metadata=metadata,
             ),
@@ -1301,11 +1227,7 @@ class Keithley2604B(InstrumentDriver):
         results: list[dict[str, float]] = []
         resistance = self._mock_r_of_t()
         runtime = self._channels["smua"]
-        voltage = (
-            math.sqrt(runtime.p_target * resistance)
-            if runtime.active and runtime.p_target > 0.0
-            else 0.0
-        )
+        voltage = math.sqrt(runtime.p_target * resistance) if runtime.active and runtime.p_target > 0.0 else 0.0
         current = voltage / resistance if resistance > 0.0 else 0.0
         for idx in range(count):
             results.append(
