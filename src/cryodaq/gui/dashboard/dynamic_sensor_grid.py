@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QSize, Signal
 from PySide6.QtWidgets import QGridLayout, QLabel, QVBoxLayout, QWidget
@@ -32,6 +32,26 @@ _STATUS_EVIDENCE_RANK = {
     ChannelStatus.OVERRANGE: 3,
     ChannelStatus.SENSOR_ERROR: 3,
 }
+
+
+def _status_evidence_rank(status: object) -> int:
+    if not isinstance(status, ChannelStatus):
+        return _STATUS_EVIDENCE_RANK[ChannelStatus.SENSOR_ERROR]
+    return _STATUS_EVIDENCE_RANK[status]
+
+
+def _fail_closed_sample(sample: _QualifiedReading) -> _QualifiedReading:
+    reading, identity_status = sample
+    if isinstance(reading.status, ChannelStatus):
+        return sample
+    return (
+        replace(
+            reading,
+            value=float("nan"),
+            status=ChannelStatus.SENSOR_ERROR,
+        ),
+        identity_status,
+    )
 
 
 def _finite_value(sample: _QualifiedReading) -> float | None:
@@ -61,7 +81,7 @@ class _PendingCellCut:
             self.minimum = sample
         if value is not None and (maximum is None or value > maximum):
             self.maximum = sample
-        if _STATUS_EVIDENCE_RANK[sample[0].status] > _STATUS_EVIDENCE_RANK[self.status_evidence[0].status]:
+        if _status_evidence_rank(sample[0].status) > _status_evidence_rank(self.status_evidence[0].status):
             self.status_evidence = sample
 
 
@@ -237,7 +257,7 @@ class DynamicSensorGrid(QWidget):
         """Cache only the latest presentation cut for the next <=2 Hz tick."""
         short_id = reading.channel.split(" ")[0]
         if short_id in self._cells:
-            sample = (reading, identity_status)
+            sample = _fail_closed_sample((reading, identity_status))
             pending = self._pending_readings.get(short_id)
             if pending is None:
                 self._pending_readings[short_id] = _PendingCellCut(

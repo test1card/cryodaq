@@ -444,6 +444,36 @@ def test_10000_updates_keep_one_constant_size_cut(app, mock_channel_mgr):
     )
 
 
+def test_malformed_status_fails_closed_without_suppressing_peer_vitals(app, mock_channel_mgr):
+    bar = TopWatchBar(mock_channel_mgr)
+    _stop_timers(bar)
+    base = datetime.now(UTC) - timedelta(seconds=5)
+
+    bar.on_reading(_make_reading("\u042212 ref", 4.20, timestamp=base))
+    bar._flush_persistent_context()
+    malformed = Reading(
+        channel="\u042212 ref",
+        value=4.25,
+        unit="K",
+        timestamp=base + timedelta(seconds=1),
+        status="ok",  # type: ignore[arg-type] -- hostile decoded input
+        instrument_id="hostile",
+    )
+
+    bar.on_reading(malformed)
+    bar.on_reading(_make_reading("\u042211 ref", 76.5, timestamp=base + timedelta(seconds=2)))
+    bar._flush_persistent_context()
+
+    assert bar._ctx_second_stage_value.text().startswith("4.20 K")
+    assert "\u041d\u0415\u0422 \u0414\u0410\u041d\u041d\u042b\u0425" in bar._ctx_second_stage_value.text()
+    assert theme.STATUS_FAULT in bar._ctx_second_stage_value.styleSheet()
+    assert (
+        "\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u0441\u0442\u0430\u0442\u0443\u0441"
+        in bar._ctx_second_stage_value.accessibleDescription()
+    )
+    assert bar._ctx_n2_plate_value.text().startswith("76.50 K")
+
+
 # --- _format_pressure helper (Batch A) ---
 
 

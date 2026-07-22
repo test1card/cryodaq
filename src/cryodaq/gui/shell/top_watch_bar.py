@@ -47,6 +47,26 @@ _STATUS_LABELS_RU = {
 }
 
 
+_UNKNOWN_STATUS_LABEL_RU = "неизвестный статус"
+
+
+def _presentation_status(status: object) -> ChannelStatus:
+    """Project malformed transport status to the pessimistic UI state."""
+    if isinstance(status, ChannelStatus):
+        return status
+    return ChannelStatus.SENSOR_ERROR
+
+
+def _status_evidence_rank(status: object) -> int:
+    return _STATUS_EVIDENCE_RANK[_presentation_status(status)]
+
+
+def _status_label_ru(status: object) -> str:
+    if isinstance(status, ChannelStatus):
+        return _STATUS_LABELS_RU[status]
+    return _UNKNOWN_STATUS_LABEL_RU
+
+
 def _invalid_value_reason(key: str, reading: Reading) -> str | None:
     """Return a Russian reason when an OK-status vital is physically unusable."""
     if reading.status is not ChannelStatus.OK:
@@ -140,8 +160,8 @@ class _PendingVitalCut:
             if maximum is None or value > maximum:
                 self.maximum = reading
 
-        incoming_rank = _STATUS_EVIDENCE_RANK[reading.status]
-        current_rank = _STATUS_EVIDENCE_RANK[self.status_evidence.status]
+        incoming_rank = _status_evidence_rank(reading.status)
+        current_rank = _status_evidence_rank(self.status_evidence.status)
         if incoming_rank > current_rank or (
             incoming_rank == current_rank and reading.timestamp >= self.status_evidence.timestamp
         ):
@@ -569,7 +589,7 @@ class TopWatchBar(QWidget):
             details.append("Текущих данных нет.")
         else:
             details.append(f"Последний принятый источник: {self._provenance_text(source)}.")
-            details.append(f"Статус источника: {_STATUS_LABELS_RU[source.status]}.")
+            details.append(f"Статус источника: {_status_label_ru(source.status)}.")
             invalid_reason = _invalid_value_reason(key, source)
             if invalid_reason is not None:
                 details.append(f"Причина непригодности: {invalid_reason}.")
@@ -594,7 +614,7 @@ class TopWatchBar(QWidget):
                     )
                 )
             interval_parts.append(
-                f"худший статус: {_STATUS_LABELS_RU[evidence.status_evidence.status]}; "
+                f"худший статус: {_status_label_ru(evidence.status_evidence.status)}; "
                 f"время статуса: {self._source_time_text(evidence.status_evidence)}"
             )
             if evidence.invalid_value_evidence is not None:
@@ -670,7 +690,10 @@ class TopWatchBar(QWidget):
             # stale after _STALE_TIMEOUT_S and the counter freezes at
             # "0/16 \u043d\u043e\u0440\u043c\u0430".
             short_id = ch.split(" ", 1)[0]
-            self._channel_last_seen[short_id] = (time.monotonic(), reading.status)
+            self._channel_last_seen[short_id] = (
+                time.monotonic(),
+                _presentation_status(reading.status),
+            )
             if short_id in (SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
                 vital_key = short_id
         elif ch.endswith("/pressure"):

@@ -158,6 +158,53 @@ def test_coalesced_cut_uses_source_timestamp_for_staleness(app, mock_channel_mgr
     assert cell._status_hint_widget.text() == "\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e"
 
 
+def test_malformed_status_fails_closed_without_suppressing_valid_peer(app, mock_channel_mgr, buffer_store):
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.gui import theme
+
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    now = datetime.now(UTC)
+    valid_same_channel = Reading(
+        channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+        value=77.3,
+        unit="K",
+        timestamp=now,
+        status=ChannelStatus.OK,
+        instrument_id="lakeshore_218s",
+    )
+    malformed = Reading(
+        channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+        value=77.4,
+        unit="K",
+        timestamp=now + timedelta(milliseconds=1),
+        status="ok",  # type: ignore[arg-type] -- hostile decoded input
+        instrument_id="hostile",
+    )
+    valid_peer = Reading(
+        channel="\u04222 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u043d\u0438\u0437",
+        value=55.3,
+        unit="K",
+        timestamp=now + timedelta(milliseconds=2),
+        status=ChannelStatus.OK,
+        instrument_id="lakeshore_218s",
+    )
+
+    grid.dispatch_reading(valid_same_channel, IdentityStatus.AUTHORITATIVE)
+    grid.dispatch_reading(malformed, IdentityStatus.AUTHORITATIVE)
+    grid.dispatch_reading(valid_peer, IdentityStatus.AUTHORITATIVE)
+    grid.refresh()
+
+    malformed_cell = grid._cells["\u04221"]
+    assert malformed_cell._value_widget.text() == "\u2014"
+    assert (
+        malformed_cell._status_hint_widget.text()
+        == "\u041e\u0448\u0438\u0431\u043a\u0430 \u0434\u0430\u0442\u0447\u0438\u043a\u0430"
+    )
+    assert theme.STATUS_FAULT in malformed_cell.styleSheet()
+    assert "55.30" in grid._cells["\u04222"]._value_widget.text()
+    assert grid._cells["\u04222"]._status_hint_widget.text() == "\u041d\u043e\u0440\u043c\u0430"
+
+
 def test_grid_read_only_survives_cell_rebuild(app, mock_channel_mgr, buffer_store):
     grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
     grid.set_read_only(True)
