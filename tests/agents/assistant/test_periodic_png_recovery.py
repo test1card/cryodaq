@@ -1012,11 +1012,15 @@ async def test_blocked_sender_heartbeats_at_30_and_60_with_one_call(
             previous = current
             assert telegram.calls == 1
         telegram.release.set()
-        for _ in range(100):
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while True:
             payload = (await _load_stable(tmp_path)).payload
             if payload["last_terminal"] is not None:
                 break
-            await asyncio.sleep(0.001)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise AssertionError("blocked sender did not reach a terminal state before the deadline")
+            await asyncio.sleep(min(0.01, remaining))
         assert payload["last_terminal"]["status"] == "SUCCEEDED"
         assert telegram.calls == 1
     finally:
