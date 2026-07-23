@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools.check_python_compile import compile_python_tree
+
 _PYTEST = (
     sys.executable,
     "-B",
@@ -116,6 +118,12 @@ def _suite_commands(suite: str, *, root: Path, basetemp: Path | None) -> tuple[t
 
 
 def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
+    try:
+        manifest = compile_python_tree(root)
+    except (OSError, UnicodeError, SyntaxError, ValueError) as exc:
+        print(f"candidate-suite={suite} compile-failure={exc}", file=sys.stderr, flush=True)
+        return 1
+    print(f"candidate-suite={suite} compiled-sources={len(manifest)}", flush=True)
     commands = _suite_commands(suite, root=root, basetemp=basetemp)
     failures: list[tuple[int, int]] = []
     for index, command in enumerate(commands, start=1):

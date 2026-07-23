@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tools.check_python_compile import compile_python_tree
 from tools.ci_candidate_runner import suite_for_node
 from tools.governance_contract import GovernanceContractError, validate_registry
 
@@ -242,3 +243,8 @@ def test_pytest_raises_requires_a_specific_exception_contract() -> None:
             relative = path.relative_to(ROOT).as_posix()
             offenders.append(f"{relative}:{node.lineno}:{node.args[0].id}")
     assert offenders == [], f"pytest.raises must name the expected failure contract: {offenders}"
+
+
+def test_all_repository_python_sources_compile_before_pytest_evidence() -> None:
+    manifest = compile_python_tree(ROOT)
+    assert manifest

@@ -87,6 +87,7 @@ jobs:
           git diff --quiet
           git diff --cached --quiet
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          python -B -m tools.check_python_compile --root .
           python -m pytest \
             -p no:cacheprovider \
             --basetemp "${RUNNER_TEMP:?}/cryodaq-active-remaining-pytest" \

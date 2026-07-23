@@ -103,6 +103,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: isolated_python_dash_i_ignored_parent_pycache_environment_and_mutated_sealed_candidate_after_green_tests_2026_07_23_pending_immutable_capture
     green_evidence: pending
+  - id: PYTHON-COMPILE-BEFORE-PYTEST-FALSE-GREEN-003
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/governance/test_agent_preventions.py::test_all_repository_python_sources_compile_before_pytest_evidence
+    ci_partition: remaining
+    red_evidence: launcher_patch_inserted_test_code_at_repeated_local_anchor_causing_indentation_and_name_errors_before_py_compile_exposed_it_2026_07_23_pending_immutable_capture
+    green_evidence: pending
   - id: ZMQ-QUARANTINE-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -952,6 +960,8 @@ records:
       - node: tests/governance/test_agent_preventions.py::test_test_assertions_cannot_be_swallowed_by_broad_exception_handlers
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_pytest_raises_requires_a_specific_exception_contract
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_all_repository_python_sources_compile_before_pytest_evidence
         ci_partition: remaining
     red_evidence: multiple_reviewer_reproductions_contradict_green_counts_pending_artifact_binding
     green_evidence: pending

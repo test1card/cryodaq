@@ -205,6 +205,7 @@ def test_gui_candidate_runner_executes_every_subcommand_and_aggregates_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
     observed: list[tuple[str, ...]] = []
     returncodes = iter((7, 0, 9))
 
@@ -223,6 +224,31 @@ def test_gui_candidate_runner_executes_every_subcommand_and_aggregates_failures(
     assert len(observed) == 3
     assert all("no:cacheprovider" in command for command in observed)
     assert all("--basetemp" in command for command in observed)
+
+
+def test_candidate_runner_rejects_invalid_python_before_pytest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "invalid.py").write_text("def broken(:\n", encoding="utf-8")
+    observed: list[tuple[str, ...]] = []
+
+    def fake_run(command, **kwargs):
+        observed.append(tuple(command))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(ci_candidate_runner.subprocess, "run", fake_run)
+
+    result = ci_candidate_runner.run_suite(
+        "remaining",
+        root=candidate,
+        basetemp=tmp_path / "candidate-runner-state",
+    )
+
+    assert result == 1
+    assert observed == []
 
 
 def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(tmp_path: Path) -> None:
@@ -245,6 +271,9 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert "${GITHUB_SHA:?}" in active["run"]
     assert "git rev-parse HEAD" in active["run"]
     assert active["run"].count("git status --porcelain=v1 --untracked-files=all") == 2
+    compile_offset = active["run"].index("python -B -m tools.check_python_compile --root .")
+    pytest_offset = active["run"].index("python -m pytest")
+    assert compile_offset < pytest_offset
     for selection in (
         *ci_candidate_runner.ACTIVE_CHECKOUT_REMAINING_FILES,
         *ci_candidate_runner.ACTIVE_CHECKOUT_REMAINING_NODES,
