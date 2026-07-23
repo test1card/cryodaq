@@ -320,6 +320,9 @@ def execute_exported_candidate(
     environment["CRYODAQ_CANDIDATE_COMMIT"] = manifest.commit
     environment["CRYODAQ_CANDIDATE_TREE"] = manifest.tree
     environment["CRYODAQ_CANDIDATE_MANIFEST_SHA256"] = manifest.sha256
+    runtime_root = state_root / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    environment["CRYODAQ_STATE_ROOT"] = str(runtime_root)
     try:
         completed = subprocess.run(
             list(command),

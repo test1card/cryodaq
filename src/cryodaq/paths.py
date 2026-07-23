@@ -1,11 +1,15 @@
 """Runtime path resolution for CryoDAQ.
 
-Handles three modes:
+Handles three installation modes and one independent writable-state override:
 
 1. Explicit override via ``CRYODAQ_ROOT`` env var (highest priority).
 2. PyInstaller frozen bundle (``sys.frozen``) — paths resolve next to the
    exe, NOT inside the ``_MEIPASS`` temp dir (which is wiped on exit).
 3. Editable install / dev mode — paths relative to the repo root.
+
+``CRYODAQ_STATE_ROOT`` may independently relocate writable ``data/`` and
+``logs/`` state without changing the read-only configuration and TSP roots.
+This keeps sealed/exported application trees immutable during verification.
 
 See: https://pyinstaller.org/en/latest/runtime-information.html
 """
@@ -50,16 +54,30 @@ def get_config_dir() -> Path:
     return get_project_root() / "config"
 
 
+def get_state_root() -> Path:
+    """Return the root that owns writable runtime state.
+
+    ``CRYODAQ_STATE_ROOT`` is deliberately separate from ``CRYODAQ_ROOT``:
+    callers can keep configuration bound to one immutable application tree
+    while placing mutable data and logs on a dedicated volume.
+    """
+
+    env_root = os.environ.get("CRYODAQ_STATE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    return get_project_root()
+
+
 def get_data_dir() -> Path:
     """Data dir — SQLite DBs, experiment artifacts, lock files. Writable."""
-    d = get_project_root() / "data"
+    d = get_state_root() / "data"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def get_logs_dir() -> Path:
     """Logs dir — rotating log files. Writable."""
-    d = get_project_root() / "logs"
+    d = get_state_root() / "logs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

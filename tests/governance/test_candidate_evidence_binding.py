@@ -162,6 +162,7 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
         "    assert os.environ['PYTHONUTF8'] == '1'\n"
         "    assert os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] == '1'\n"
         "    assert not Path(os.environ['CRYODAQ_CANDIDATE_PYTEST_BASETEMP']).is_relative_to(Path.cwd())\n"
+        "    assert not Path(os.environ['CRYODAQ_STATE_ROOT']).is_relative_to(Path.cwd())\n"
         "    assert not Path(os.environ['XDG_CACHE_HOME']).is_relative_to(Path.cwd())\n",
     )
     commit = _commit(candidate_repo, "environment guard")
@@ -186,8 +187,11 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
 
     assert receipt.returncode == 0, receipt.stdout + receipt.stderr
     pycache_root = tmp_path / ".export-sanitized-execution-state" / "pycache"
+    runtime_root = tmp_path / ".export-sanitized-execution-state" / "runtime"
     assert pycache_root.is_dir()
+    assert runtime_root.is_dir()
     assert not pycache_root.is_relative_to(receipt.export_root)
+    assert not runtime_root.is_relative_to(receipt.export_root)
     assert not any(path.suffix == ".pyc" for path in receipt.export_root.rglob("*"))
 
 

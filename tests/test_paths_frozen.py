@@ -62,9 +62,7 @@ def test_frozen_tsp_dir_is_inside_meipass(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "executable", str(fake_exe), raising=False)
 
     tsp = paths.get_tsp_dir()
-    assert str(tsp).startswith(str(meipass)), (
-        f"TSP dir should be inside _MEIPASS (read-only bundle), got {tsp}"
-    )
+    assert str(tsp).startswith(str(meipass)), f"TSP dir should be inside _MEIPASS (read-only bundle), got {tsp}"
 
 
 def test_cryodaq_root_overrides_frozen(tmp_path, monkeypatch):
@@ -82,6 +80,7 @@ def test_cryodaq_root_overrides_frozen(tmp_path, monkeypatch):
 
 
 def test_get_data_dir_creates_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("CRYODAQ_STATE_ROOT", raising=False)
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
     d = paths.get_data_dir()
     assert d.exists() and d.is_dir()
@@ -89,7 +88,23 @@ def test_get_data_dir_creates_directory(tmp_path, monkeypatch):
 
 
 def test_get_logs_dir_creates_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("CRYODAQ_STATE_ROOT", raising=False)
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
     d = paths.get_logs_dir()
     assert d.exists() and d.is_dir()
     assert d == (tmp_path / "logs").resolve()
+
+
+def test_state_root_relocates_only_writable_data_and_logs(tmp_path, monkeypatch):
+    application_root = tmp_path / "application"
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("CRYODAQ_ROOT", str(application_root))
+    monkeypatch.setenv("CRYODAQ_STATE_ROOT", str(state_root))
+
+    assert paths.get_project_root() == application_root.resolve()
+    assert paths.get_config_dir() == application_root.resolve() / "config"
+    assert paths.get_tsp_dir() == application_root.resolve() / "tsp"
+    assert paths.get_data_dir() == state_root.resolve() / "data"
+    assert paths.get_logs_dir() == state_root.resolve() / "logs"
+    assert not (application_root / "data").exists()
+    assert not (application_root / "logs").exists()
