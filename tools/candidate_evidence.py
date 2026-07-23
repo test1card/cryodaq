@@ -292,8 +292,9 @@ def execute_exported_candidate(
     state_root.mkdir(parents=True, exist_ok=True)
     pytest_base = state_root / "pytest"
     cache_root = state_root / "cache"
+    pycache_root = state_root / "pycache"
     temp_root = state_root / "tmp"
-    for path in (pytest_base, cache_root, temp_root):
+    for path in (pytest_base, cache_root, pycache_root, temp_root):
         path.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ)
     for key in tuple(environment):
@@ -303,6 +304,7 @@ def execute_exported_candidate(
     environment["PYTHONPATH"] = str(export_root / "src")
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONPYCACHEPREFIX"] = str(pycache_root)
     environment["PYTHONUTF8"] = "1"
     environment["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
     environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"

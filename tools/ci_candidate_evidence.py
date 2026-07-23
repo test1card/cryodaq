@@ -229,7 +229,7 @@ def _github_environment() -> dict[str, str]:
 def _run(args: argparse.Namespace) -> int:
     repo = args.repository.resolve(strict=True)
     github = _github_environment()
-    command = (sys.executable, "-m", "tools.ci_candidate_runner", "--suite", args.suite)
+    command = (sys.executable, "-B", "-m", "tools.ci_candidate_runner", "--suite", args.suite)
     receipt = execute_exported_candidate(
         repo,
         args.revision,

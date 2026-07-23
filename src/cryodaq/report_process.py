@@ -66,8 +66,11 @@ _PERIODIC_ENV_ALLOWLIST = frozenset(
         "LD_LIBRARY_PATH",
         "LOCALAPPDATA",
         "PATH",
-        "PYTHONHOME",
         "PYTHONPATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONNOUSERSITE",
+        "PYTHONPYCACHEPREFIX",
+        "PYTHONUTF8",
         "SYSTEMROOT",
         "TEMP",
         "TMP",
@@ -234,9 +237,7 @@ def write_periodic_input_file(
 ) -> Path:
     """Validate, bound, and durably publish one immutable child input."""
 
-    raw, validated = serialize_periodic_input(
-        payload, expected_max_input_bytes=expected_max_input_bytes
-    )
+    raw, validated = serialize_periodic_input(payload, expected_max_input_bytes=expected_max_input_bytes)
     root = periodic_root(Path(data_dir), create=True)
     periodic = _ensure_protocol_subdirectory(root, "periodic")
     inputs = _ensure_protocol_subdirectory(periodic, "inputs")
@@ -356,9 +357,7 @@ def read_result_file(path: Path) -> dict[str, Any]:
 def read_periodic_result_file(path: Path, *, require_success: bool) -> dict[str, Any]:
     """Read one closed periodic success/failure JSON through a bounded fd."""
 
-    result, _fence = _read_periodic_result_file_fenced(
-        Path(path), require_success=require_success
-    )
+    result, _fence = _read_periodic_result_file_fenced(Path(path), require_success=require_success)
     return result
 
 
@@ -377,9 +376,7 @@ def read_periodic_artifact_bytes(data_dir: Path, artifact: PeriodicArtifact) -> 
     try:
         periodic_generation_dir(Path(data_dir), generation)
     except (PeriodicContractError, PeriodicIOError, OSError) as exc:
-        raise ReportProcessError(
-            "invalid_periodic_generation", "periodic artifact hierarchy is unsafe"
-        ) from exc
+        raise ReportProcessError("invalid_periodic_generation", "periodic artifact hierarchy is unsafe") from exc
     try:
         raw = _read_periodic_artifact_fenced(Path(data_dir), generation, artifact.size)
     except ReportProcessError:
@@ -388,56 +385,31 @@ def read_periodic_artifact_bytes(data_dir: Path, artifact: PeriodicArtifact) -> 
         raise _periodic_artifact_io_error() from None
     width, height = _validate_png(raw)
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    if (
-        len(raw) != artifact.size
-        or digest != artifact.sha256
-        or width != artifact.width
-        or height != artifact.height
-    ):
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic PNG does not match durable evidence"
-        )
+    if len(raw) != artifact.size or digest != artifact.sha256 or width != artifact.width or height != artifact.height:
+        raise ReportProcessError("invalid_periodic_artifact", "periodic PNG does not match durable evidence")
     return raw
 
 
 def _periodic_artifact_io_error() -> ReportProcessError:
-    return ReportProcessError(
-        "invalid_periodic_artifact", "periodic PNG could not be read safely"
-    )
+    return ReportProcessError("invalid_periodic_artifact", "periodic PNG could not be read safely")
 
 
 def _validate_periodic_artifact_descriptor(artifact: PeriodicArtifact) -> str:
     if type(artifact) is not PeriodicArtifact:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact descriptor is invalid"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact descriptor is invalid")
     if type(artifact.path) is not str:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact path is invalid"
-        )
-    match = re.fullmatch(
-        r"periodic/generations/([0-9a-f]{32})/periodic[.]png", artifact.path
-    )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact path is invalid")
+    match = re.fullmatch(r"periodic/generations/([0-9a-f]{32})/periodic[.]png", artifact.path)
     if match is None:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact path is not authoritative"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact path is not authoritative")
     try:
         generation = validate_generation_token(match.group(1))
     except PeriodicInputError as exc:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact generation is invalid"
-        ) from exc
-    if type(artifact.sha256) is not str or re.fullmatch(
-        r"sha256:[0-9a-f]{64}", artifact.sha256
-    ) is None:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact hash is invalid"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact generation is invalid") from exc
+    if type(artifact.sha256) is not str or re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.sha256) is None:
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact hash is invalid")
     if type(artifact.size) is not int or not 1 <= artifact.size <= MAX_PNG_BYTES:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact size is invalid"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact size is invalid")
     if (
         type(artifact.width) is not int
         or type(artifact.height) is not int
@@ -445,39 +417,24 @@ def _validate_periodic_artifact_descriptor(artifact: PeriodicArtifact) -> str:
         or not 100 <= artifact.height <= 10_000
         or artifact.width + artifact.height > 10_000
         or artifact.width * artifact.height > 50_000_000
-        or max(artifact.width, artifact.height)
-        > 20 * min(artifact.width, artifact.height)
+        or max(artifact.width, artifact.height) > 20 * min(artifact.width, artifact.height)
     ):
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact dimensions are invalid"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact dimensions are invalid")
     if type(artifact.mime) is not str or artifact.mime != "image/png":
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic artifact MIME type is invalid"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic artifact MIME type is invalid")
     return generation
 
 
-def _read_periodic_artifact_fenced(
-    data_dir: Path, generation: str, expected_size: int
-) -> bytes:
+def _read_periodic_artifact_fenced(data_dir: Path, generation: str, expected_size: int) -> bytes:
     if os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd:
         return _read_periodic_artifact_dirfd(data_dir, generation, expected_size)
     return _read_periodic_artifact_path_fallback(data_dir, generation, expected_size)
 
 
-def _read_periodic_artifact_dirfd(
-    data_dir: Path, generation: str, expected_size: int
-) -> bytes:
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+def _read_periodic_artifact_dirfd(data_dir: Path, generation: str, expected_size: int) -> bytes:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    directories: list[
-        tuple[int, _DirectoryFence, int | None, str | None, Path]
-    ] = []
+    directories: list[tuple[int, _DirectoryFence, int | None, str | None, Path]] = []
     file_fd: int | None = None
     try:
         root_fd: int | None = None
@@ -494,15 +451,11 @@ def _read_periodic_artifact_dirfd(
             if root_fd is not None:
                 os.close(root_fd)
                 raise _periodic_artifact_io_error() from None
-            raise ReportProcessError(
-                "invalid_periodic_generation", "periodic data directory is unavailable"
-            ) from None
+            raise ReportProcessError("invalid_periodic_generation", "periodic data directory is unavailable") from None
         assert root_fd is not None
         if _directory_fence(before_root) != _directory_fence(opened_root):
             os.close(root_fd)
-            raise ReportProcessError(
-                "invalid_periodic_generation", "periodic data directory changed while opening"
-            )
+            raise ReportProcessError("invalid_periodic_generation", "periodic data directory changed while opening")
         directories.append((root_fd, _directory_fence(opened_root), None, None, data_dir))
 
         parent_fd = root_fd
@@ -533,20 +486,14 @@ def _read_periodic_artifact_dirfd(
                     "invalid_periodic_generation",
                     "periodic artifact directory changed while opening",
                 )
-            directories.append(
-                (child_fd, _directory_fence(opened), parent_fd, name, current)
-            )
+            directories.append((child_fd, _directory_fence(opened), parent_fd, name, current))
             parent_fd = child_fd
 
         try:
-            before_file = os.stat(
-                "periodic.png", dir_fd=parent_fd, follow_symlinks=False
-            )
+            before_file = os.stat("periodic.png", dir_fd=parent_fd, follow_symlinks=False)
             _require_regular_single_link(before_file, "periodic PNG")
             if before_file.st_size != expected_size or before_file.st_size > MAX_PNG_BYTES:
-                raise ReportProcessError(
-                    "invalid_periodic_artifact", "periodic PNG size does not match evidence"
-                )
+                raise ReportProcessError("invalid_periodic_artifact", "periodic PNG size does not match evidence")
             file_fd = os.open("periodic.png", file_flags, dir_fd=parent_fd)
             opened_file = os.fstat(file_fd)
         except ReportProcessError:
@@ -554,29 +501,20 @@ def _read_periodic_artifact_dirfd(
         except OSError:
             raise _periodic_artifact_io_error() from None
         if _file_fence(before_file) != _file_fence(opened_file):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG changed while opening"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG changed while opening")
         raw = _read_open_fd_bounded(file_fd, MAX_PNG_BYTES)
         finished_file = os.fstat(file_fd)
         try:
-            after_file = os.stat(
-                "periodic.png", dir_fd=parent_fd, follow_symlinks=False
-            )
+            after_file = os.stat("periodic.png", dir_fd=parent_fd, follow_symlinks=False)
         except OSError:
             raise _periodic_artifact_io_error() from None
-        if (
-            _file_fence(opened_file) != _file_fence(finished_file)
-            or _file_fence(after_file) != _file_fence(finished_file)
+        if _file_fence(opened_file) != _file_fence(finished_file) or _file_fence(after_file) != _file_fence(
+            finished_file
         ):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG changed while reading"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG changed while reading")
         _verify_open_directory_chain(directories)
         if len(raw) != expected_size:
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG size does not match evidence"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG size does not match evidence")
         return raw
     finally:
         pending_error = sys.exception()
@@ -595,9 +533,7 @@ def _read_periodic_artifact_dirfd(
             raise _periodic_artifact_io_error() from None
 
 
-def _read_periodic_artifact_path_fallback(
-    data_dir: Path, generation: str, expected_size: int
-) -> bytes:
+def _read_periodic_artifact_path_fallback(data_dir: Path, generation: str, expected_size: int) -> bytes:
     final = periodic_generation_dir(data_dir, generation)
     directories = [
         data_dir,
@@ -622,14 +558,8 @@ def _read_periodic_artifact_path_fallback(
             current = path.lstat()
         except OSError:
             raise _periodic_artifact_io_error() from None
-        if (
-            stat.S_ISLNK(current.st_mode)
-            or not stat.S_ISDIR(current.st_mode)
-            or _directory_fence(current) != expected
-        ):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic artifact directory changed"
-            )
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode) or _directory_fence(current) != expected:
+            raise ReportProcessError("invalid_periodic_artifact", "periodic artifact directory changed")
     return raw
 
 
@@ -639,9 +569,7 @@ def _read_periodic_artifact_path_file(path: Path, expected_size: int) -> bytes:
         before = path.lstat()
         _require_regular_single_link(before, "periodic PNG")
         if before.st_size != expected_size or before.st_size > MAX_PNG_BYTES:
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG size does not match evidence"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG size does not match evidence")
         fd = os.open(
             path,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
@@ -649,23 +577,14 @@ def _read_periodic_artifact_path_file(path: Path, expected_size: int) -> bytes:
         opened = os.fstat(fd)
         _require_regular_single_link(opened, "periodic PNG")
         if _file_fence(before) != _file_fence(opened):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG changed while opening"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG changed while opening")
         raw = _read_open_fd_bounded(fd, MAX_PNG_BYTES)
         finished = os.fstat(fd)
         after = path.lstat()
-        if (
-            _file_fence(opened) != _file_fence(finished)
-            or _file_fence(after) != _file_fence(finished)
-        ):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG changed while reading"
-            )
+        if _file_fence(opened) != _file_fence(finished) or _file_fence(after) != _file_fence(finished):
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG changed while reading")
         if len(raw) != expected_size:
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG size does not match evidence"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG size does not match evidence")
         return raw
     except ReportProcessError:
         raise
@@ -698,22 +617,16 @@ def _read_open_fd_bounded(fd: int, maximum: int) -> bytes:
 
 def _require_real_directory(info: os.stat_result, label: str) -> None:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise ReportProcessError(
-            "invalid_periodic_generation", f"{label} must be a real directory"
-        )
+        raise ReportProcessError("invalid_periodic_generation", f"{label} must be a real directory")
 
 
 def _require_regular_single_link(info: os.stat_result, label: str) -> None:
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", f"{label} must be a regular single-link file"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", f"{label} must be a regular single-link file")
 
 
 def _verify_open_directory_chain(
-    directories: Sequence[
-        tuple[int, _DirectoryFence, int | None, str | None, Path]
-    ],
+    directories: Sequence[tuple[int, _DirectoryFence, int | None, str | None, Path]],
 ) -> None:
     for descriptor, expected, parent_fd, name, path in directories:
         try:
@@ -721,9 +634,7 @@ def _verify_open_directory_chain(
         except OSError:
             raise _periodic_artifact_io_error() from None
         if stat.S_ISLNK(current_fd.st_mode) or not stat.S_ISDIR(current_fd.st_mode):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic artifact directory changed"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic artifact directory changed")
         if parent_fd is None:
             try:
                 current_path = path.lstat()
@@ -732,30 +643,17 @@ def _verify_open_directory_chain(
         else:
             assert name is not None
             try:
-                current_path = os.stat(
-                    name, dir_fd=parent_fd, follow_symlinks=False
-                )
+                current_path = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             except OSError:
                 raise _periodic_artifact_io_error() from None
         if stat.S_ISLNK(current_path.st_mode) or not stat.S_ISDIR(current_path.st_mode):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic artifact directory changed"
-            )
-        if (
-            _directory_fence(current_fd) != expected
-            or _directory_fence(current_path) != expected
-        ):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic artifact directory changed"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic artifact directory changed")
+        if _directory_fence(current_fd) != expected or _directory_fence(current_path) != expected:
+            raise ReportProcessError("invalid_periodic_artifact", "periodic artifact directory changed")
 
 
-def _read_periodic_result_file_fenced(
-    path: Path, *, require_success: bool
-) -> tuple[dict[str, Any], _FileFence]:
-    raw, fence = _read_regular_bounded_fenced(
-        Path(path), MAX_RESULT_BYTES, "periodic result"
-    )
+def _read_periodic_result_file_fenced(path: Path, *, require_success: bool) -> tuple[dict[str, Any], _FileFence]:
+    raw, fence = _read_regular_bounded_fenced(Path(path), MAX_RESULT_BYTES, "periodic result")
     try:
         payload = json.loads(
             raw.decode("utf-8", errors="strict"),
@@ -792,14 +690,8 @@ def recover_periodic_generation(
         ) from exc
     _require_exact_generation_entries(final)
     result_path = final / "result.json"
-    result, result_fence = _read_periodic_result_file_fenced(
-        result_path, require_success=True
-    )
-    if (
-        result["generation_id"] != generation
-        or result["slot_id"] != expected_slot_id
-        or result["owner_token"] != owner
-    ):
+    result, result_fence = _read_periodic_result_file_fenced(result_path, require_success=True)
+    if result["generation_id"] != generation or result["slot_id"] != expected_slot_id or result["owner_token"] != owner:
         raise ReportProcessError("periodic_fence_mismatch", "periodic result fence does not match")
     _require_rendering_state_fence(
         Path(data_dir),
@@ -810,9 +702,7 @@ def recover_periodic_generation(
     )
     artifact = result["artifact"]
     png = final / "periodic.png"
-    raw_png, png_fence = _read_regular_bounded_fenced(
-        png, MAX_PNG_BYTES, "periodic PNG"
-    )
+    raw_png, png_fence = _read_regular_bounded_fenced(png, MAX_PNG_BYTES, "periodic PNG")
     width, height = _validate_png(raw_png)
     digest = "sha256:" + hashlib.sha256(raw_png).hexdigest()
     if (
@@ -883,9 +773,7 @@ def _read_regular_bounded(path: Path, maximum: int, label: str) -> bytes:
     return raw
 
 
-def _read_regular_bounded_fenced(
-    path: Path, maximum: int, label: str
-) -> tuple[bytes, _FileFence]:
+def _read_regular_bounded_fenced(path: Path, maximum: int, label: str) -> tuple[bytes, _FileFence]:
     try:
         before = path.lstat()
     except OSError as exc:
@@ -966,31 +854,23 @@ def _require_exact_generation_entries(final: Path) -> None:
     except ReportProcessError:
         raise
     except OSError as exc:
-        raise ReportProcessError(
-            "invalid_periodic_generation", "periodic generation cannot be scanned"
-        ) from exc
+        raise ReportProcessError("invalid_periodic_generation", "periodic generation cannot be scanned") from exc
     if entries != {"periodic.png", "result.json"}:
-        raise ReportProcessError(
-            "invalid_periodic_generation", "periodic generation contents are invalid"
-        )
+        raise ReportProcessError("invalid_periodic_generation", "periodic generation contents are invalid")
 
 
 def _verify_path_fence(path: Path, expected: _FileFence, label: str) -> None:
     try:
         current = path.lstat()
     except OSError as exc:
-        raise ReportProcessError(
-            "invalid_periodic_generation", f"{label} changed before authorization"
-        ) from exc
+        raise ReportProcessError("invalid_periodic_generation", f"{label} changed before authorization") from exc
     if (
         stat.S_ISLNK(current.st_mode)
         or not stat.S_ISREG(current.st_mode)
         or current.st_nlink != 1
         or _file_fence(current) != expected
     ):
-        raise ReportProcessError(
-            "invalid_periodic_generation", f"{label} changed before authorization"
-        )
+        raise ReportProcessError("invalid_periodic_generation", f"{label} changed before authorization")
 
 
 def _verify_generation_end_fence(
@@ -1009,14 +889,8 @@ def _verify_generation_end_fence(
         raise ReportProcessError(
             "invalid_periodic_generation", "periodic generation changed before authorization"
         ) from exc
-    if (
-        stat.S_ISLNK(current.st_mode)
-        or not stat.S_ISDIR(current.st_mode)
-        or _file_fence(current) != final_fence
-    ):
-        raise ReportProcessError(
-            "invalid_periodic_generation", "periodic generation changed before authorization"
-        )
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode) or _file_fence(current) != final_fence:
+        raise ReportProcessError("invalid_periodic_generation", "periodic generation changed before authorization")
 
 
 def _validate_png(raw: bytes) -> tuple[int, int]:
@@ -1029,66 +903,40 @@ def _validate_png(raw: bytes) -> tuple[int, int]:
     saw_iend = False
     while offset < len(raw):
         if len(raw) - offset < 12:
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG contains a truncated chunk"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG contains a truncated chunk")
         length = struct.unpack(">I", raw[offset : offset + 4])[0]
         chunk_type = raw[offset + 4 : offset + 8]
         chunk_end = offset + 12 + length
-        if chunk_end > len(raw) or not all(
-            (65 <= value <= 90) or (97 <= value <= 122) for value in chunk_type
-        ):
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG chunk is invalid"
-            )
+        if chunk_end > len(raw) or not all((65 <= value <= 90) or (97 <= value <= 122) for value in chunk_type):
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG chunk is invalid")
         payload_end = offset + 8 + length
-        expected_crc = struct.unpack(">I", raw[payload_end : chunk_end])[0]
+        expected_crc = struct.unpack(">I", raw[payload_end:chunk_end])[0]
         if zlib.crc32(raw[offset + 4 : payload_end]) & 0xFFFFFFFF != expected_crc:
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG chunk CRC is invalid"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG chunk CRC is invalid")
         if offset == 8:
             if chunk_type != b"IHDR" or length != 13:
-                raise ReportProcessError(
-                    "invalid_periodic_artifact", "periodic PNG IHDR is invalid"
-                )
+                raise ReportProcessError("invalid_periodic_artifact", "periodic PNG IHDR is invalid")
             width, height = struct.unpack(">II", raw[offset + 8 : offset + 16])
         elif chunk_type == b"IHDR":
-            raise ReportProcessError(
-                "invalid_periodic_artifact", "periodic PNG contains duplicate IHDR"
-            )
+            raise ReportProcessError("invalid_periodic_artifact", "periodic PNG contains duplicate IHDR")
         if chunk_type == b"IDAT":
             saw_idat = True
         if chunk_type == b"IEND":
             if length != 0 or chunk_end != len(raw):
-                raise ReportProcessError(
-                    "invalid_periodic_artifact", "periodic PNG IEND is invalid"
-                )
+                raise ReportProcessError("invalid_periodic_artifact", "periodic PNG IEND is invalid")
             saw_iend = True
         offset = chunk_end
     if width is None or height is None or not saw_idat or not saw_iend:
-        raise ReportProcessError(
-            "invalid_periodic_artifact", "periodic PNG chunk structure is incomplete"
-        )
+        raise ReportProcessError("invalid_periodic_artifact", "periodic PNG chunk structure is incomplete")
     if not (100 <= width <= 10_000 and 100 <= height <= 10_000):
         raise ReportProcessError("invalid_periodic_artifact", "periodic PNG dimensions are invalid")
-    if (
-        width + height > 10_000
-        or width * height > 50_000_000
-        or max(width, height) > 20 * min(width, height)
-    ):
+    if width + height > 10_000 or width * height > 50_000_000 or max(width, height) > 20 * min(width, height):
         raise ReportProcessError("invalid_periodic_artifact", "periodic PNG dimensions are excessive")
     return width, height
 
 
 def _write_exclusive_fsynced(path: Path, raw: bytes) -> None:
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_BINARY", 0)
-    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     fd = os.open(path, flags, 0o600)
     try:
         with os.fdopen(fd, "wb", closefd=False) as stream:
@@ -1406,12 +1254,7 @@ class ReportProcessRunner:
                 # A damaged or unreadable manifest has no recovery authority.
                 # Preserve the child's ordinary result/exit failure below.
                 pass
-            if (
-                return_code != 0
-                and not force
-                and manifest is not None
-                and manifest["generation_id"] == generation_id
-            ):
+            if return_code != 0 and not force and manifest is not None and manifest["generation_id"] == generation_id:
                 recovered_committed_manifest = True
                 report = manifest["report"]
                 payload = {
@@ -1570,9 +1413,7 @@ class ReportProcessRunner:
         if process_error is not None and not os.path.lexists(side):
             raise process_error
         if os.path.lexists(side):
-            payload, side_fence = _read_periodic_result_file_fenced(
-                side, require_success=False
-            )
+            payload, side_fence = _read_periodic_result_file_fenced(side, require_success=False)
             if (
                 payload["generation_id"] != generation
                 or payload["owner_token"] != owner
@@ -1591,9 +1432,7 @@ class ReportProcessRunner:
             _fsync_dir(side.parent)
             raise ReportProcessError(payload["error_code"], payload["error_text"])
         if return_code == 0:
-            raise ReportProcessError(
-                "periodic_protocol_failure", "periodic child exited without an immutable final"
-            )
+            raise ReportProcessError("periodic_protocol_failure", "periodic child exited without an immutable final")
         raise ReportProcessError(
             f"exit_{return_code if return_code is not None else 'unknown'}",
             "periodic child failed without structured evidence",

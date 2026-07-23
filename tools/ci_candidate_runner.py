@@ -10,6 +10,7 @@ from pathlib import Path
 
 _PYTEST = (
     sys.executable,
+    "-B",
     "-m",
     "pytest",
     "-p",

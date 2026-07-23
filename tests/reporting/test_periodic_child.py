@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import cryodaq.report_process as report_process
 from cryodaq.notifications._secrets import SecretStr
 from cryodaq.periodic_config import PeriodicPngConfig
 from cryodaq.periodic_state import (
@@ -134,9 +135,7 @@ def _install_rendering_state(data_dir: Path) -> str:
         now=7_201.0,
     )
     write_periodic_state(data_dir, pending)
-    rendering = mark_rendering(
-        pending, slot_id=slot.slot_id, owner_token=OWNER, now=7_202.0
-    )
+    rendering = mark_rendering(pending, slot_id=slot.slot_id, owner_token=OWNER, now=7_202.0)
     write_periodic_state(
         data_dir,
         rendering,
@@ -202,9 +201,7 @@ def test_argv_cap_is_independent_input_authority() -> None:
         ("--max-input-bytes", "65536"),
     ],
 )
-def test_periodic_duplicate_authority_argv_is_rejected(
-    tmp_path: Path, option: str, duplicate: str
-) -> None:
+def test_periodic_duplicate_authority_argv_is_rejected(tmp_path: Path, option: str, duplicate: str) -> None:
     import cryodaq.reporting.__main__ as child
 
     argv = [
@@ -276,9 +273,7 @@ def test_input_relational_contract() -> None:
     duplicate["readings"].append(copy.deepcopy(duplicate["readings"][-1]))
     attacks.append(duplicate)
     multi = copy.deepcopy(payload)
-    multi["readings"].insert(
-        0, {"ts": 7_000.0, "iid": "other", "ch": "Т1", "v": 5.0, "u": "K", "st": "ok"}
-    )
+    multi["readings"].insert(0, {"ts": 7_000.0, "iid": "other", "ch": "Т1", "v": 5.0, "u": "K", "st": "ok"})
     attacks.append(multi)
     evidence = copy.deepcopy(payload)
     evidence["render"]["source_errors"] = ["/private/secret"]
@@ -351,9 +346,7 @@ def test_alarm_level_hostile_types_are_closed_protocol_errors(hostile_level: obj
         ("alarms", "not-a-list"),
     ],
 )
-def test_closed_input_parser_hostile_top_level_types_raise_only_protocol_error(
-    field: str, hostile: object
-) -> None:
+def test_closed_input_parser_hostile_top_level_types_raise_only_protocol_error(field: str, hostile: object) -> None:
     payload = _payload()
     payload[field] = hostile
     with pytest.raises(PeriodicInputError):
@@ -375,9 +368,7 @@ def test_closed_input_parser_hostile_top_level_types_raise_only_protocol_error(
         ("error_text", {}),
     ],
 )
-def test_closed_result_parser_hostile_types_raise_only_protocol_error(
-    field: str, hostile: object
-) -> None:
+def test_closed_result_parser_hostile_types_raise_only_protocol_error(field: str, hostile: object) -> None:
     payload = {
         "schema": 1,
         "ok": False,
@@ -432,19 +423,20 @@ def test_periodic_real_subprocess_promotes_and_recovers(tmp_path: Path) -> None:
     assert result.caption.startswith("<b>CryoDAQ")
     final = periodic_generation_dir(tmp_path, GENERATION)
     assert {item.name for item in final.iterdir()} == {"periodic.png", "result.json"}
-    assert runner.recover_periodic(
-        GENERATION,
-        expected_slot_id=slot_id,
-        expected_owner_token=OWNER,
-    ) == result
+    assert (
+        runner.recover_periodic(
+            GENERATION,
+            expected_slot_id=slot_id,
+            expected_owner_token=OWNER,
+        )
+        == result
+    )
 
 
 def test_recovery_rejects_owner_slot_and_status_mismatch(tmp_path: Path) -> None:
     slot_id = _install_rendering_state(tmp_path)
     write_periodic_input_file(tmp_path, _payload(), expected_max_input_bytes=65_536)
-    command = build_periodic_report_command(
-        GENERATION, deadline_epoch=time.time() + 20, max_input_bytes=65_536
-    )
+    command = build_periodic_report_command(GENERATION, deadline_epoch=time.time() + 20, max_input_bytes=65_536)
     env = os.environ.copy()
     env["CRYODAQ_REPORT_DATA_DIR"] = str(tmp_path)
     assert subprocess.run(command, env=env, check=False).returncode == 0
@@ -457,14 +449,10 @@ def test_recovery_rejects_owner_slot_and_status_mismatch(tmp_path: Path) -> None
         )
 
 
-def test_success_recovery_is_idempotent_and_never_rerenders(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_success_recovery_is_idempotent_and_never_rerenders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     slot_id = _install_rendering_state(tmp_path)
     write_periodic_input_file(tmp_path, _payload(), expected_max_input_bytes=65_536)
-    command = build_periodic_report_command(
-        GENERATION, deadline_epoch=time.time() + 20, max_input_bytes=65_536
-    )
+    command = build_periodic_report_command(GENERATION, deadline_epoch=time.time() + 20, max_input_bytes=65_536)
     env = os.environ.copy()
     env["CRYODAQ_REPORT_DATA_DIR"] = str(tmp_path)
     assert subprocess.run(command, env=env, check=False).returncode == 0
@@ -482,9 +470,7 @@ def test_success_recovery_is_idempotent_and_never_rerenders(
         expected_owner_token=OWNER,
         max_input_bytes=65_536,
     )
-    second = runner.recover_periodic(
-        GENERATION, expected_slot_id=slot_id, expected_owner_token=OWNER
-    )
+    second = runner.recover_periodic(GENERATION, expected_slot_id=slot_id, expected_owner_token=OWNER)
     assert first == second
     assert {item.name: (item.stat().st_ino, item.read_bytes()) for item in final.iterdir()} == before
 
@@ -526,9 +512,7 @@ def test_final_recovery_rejects_late_tree_and_entry_mutation(
             original = png.read_bytes()
             png.write_bytes(original)
 
-    monkeypatch.setattr(
-        process_module, "_require_rendering_state_fence", mutate_at_last_fence
-    )
+    monkeypatch.setattr(process_module, "_require_rendering_state_fence", mutate_at_last_fence)
     with pytest.raises(ReportProcessError, match="changed|extra"):
         process_module.recover_periodic_generation(
             tmp_path,
@@ -538,9 +522,7 @@ def test_final_recovery_rejects_late_tree_and_entry_mutation(
         )
 
 
-def test_final_recovery_requires_generations_parent_fsync(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_final_recovery_requires_generations_parent_fsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.report_process as process_module
 
     slot_id = _install_rendering_state(tmp_path)
@@ -557,9 +539,7 @@ def test_final_recovery_requires_generations_parent_fsync(
         raise OSError("injected generations fsync failure")
 
     monkeypatch.setattr(process_module, "_fsync_dir", fail_fsync)
-    with pytest.raises(
-        ReportProcessError, match="periodic_durability_failure"
-    ) as failure:
+    with pytest.raises(ReportProcessError, match="periodic_durability_failure") as failure:
         process_module.recover_periodic_generation(
             tmp_path,
             GENERATION,
@@ -569,9 +549,7 @@ def test_final_recovery_requires_generations_parent_fsync(
     assert "injected" not in failure.value.error_text
 
 
-def test_post_rename_parent_fsync_fault_is_recovered_by_parent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_post_rename_parent_fsync_fault_is_recovered_by_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.reporting.__main__ as child
 
     slot_id = _install_rendering_state(tmp_path)
@@ -579,9 +557,7 @@ def test_post_rename_parent_fsync_fault_is_recovered_by_parent(
     real_fsync = child._fsync_dir
 
     def fail_after_rename(path: Path) -> None:
-        if path.name == "generations" and periodic_generation_dir(
-            tmp_path, GENERATION
-        ).exists():
+        if path.name == "generations" and periodic_generation_dir(tmp_path, GENERATION).exists():
             raise OSError("injected post-rename parent fsync failure")
         real_fsync(path)
 
@@ -606,30 +582,29 @@ def test_post_rename_parent_fsync_fault_is_recovered_by_parent(
 def test_invalid_periodic_preflight_imports_no_heavy_or_privileged_modules() -> None:
     script = (
         "import sys; import cryodaq.reporting.__main__ as m; "
-        "rc=m.main(['periodic','--generation-id="
-        + GENERATION
-        + "','--deadline-epoch=0','--max-input-bytes=65536']); "
+        "rc=m.main(['periodic','--generation-id=" + GENERATION + "','--deadline-epoch=0','--max-input-bytes=65536']); "
         "print(rc); print('|'.join(sorted(x for x in sys.modules if "
         "x.startswith(('matplotlib','numpy','aiohttp','cryodaq.engine',"
         "'cryodaq.storage','cryodaq.agents')))))"
     )
     env = os.environ.copy()
     env["CRYODAQ_REPORT_DATA_DIR"] = os.getcwd()
-    completed = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=True
-    )
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, check=True)
     assert completed.stdout.splitlines()[-1] == ""
 
 
-def test_child_surface_contains_no_destination_or_secret(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_child_surface_contains_no_destination_or_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     slot_id = _install_rendering_state(tmp_path)
     runner = ReportProcessRunner(tmp_path, timeout_s=2.0)
     captured: dict[str, object] = {}
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-token-sentinel")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100-secret-chat")
     monkeypatch.setenv("CRYODAQ_OPERATOR", "operator-sentinel")
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "untrusted-python-home"))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "external-pycache"))
+    monkeypatch.setenv("PYTHONUTF8", "1")
 
     def inspect_child(command: object, *, env: object) -> int:
         captured["command"] = command
@@ -649,7 +624,39 @@ def test_child_surface_contains_no_destination_or_secret(
     assert "secret-token-sentinel" not in surface
     assert "secret-chat" not in surface
     assert "operator-sentinel" not in surface
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert child_env["PYTHONNOUSERSITE"] == "1"
+    assert child_env["PYTHONPYCACHEPREFIX"] == str(tmp_path / "external-pycache")
+    assert child_env["PYTHONUTF8"] == "1"
+    assert "PYTHONHOME" not in child_env
     assert "TELEGRAM" not in surface
+
+
+def test_periodic_child_environment_preserves_only_safe_interpreter_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "untrusted-home"))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "candidate" / "src"))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "candidate-state" / "pycache"))
+    monkeypatch.setenv("PYTHONUTF8", "1")
+    monkeypatch.setenv("CRYODAQ_TEST_SECRET", "must-not-cross-boundary")
+
+    env = report_process._periodic_child_environment(tmp_path / "report-state")
+
+    assert env["PYTHONPATH"] == str(tmp_path / "candidate" / "src")
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert env["PYTHONPYCACHEPREFIX"] == str(tmp_path / "candidate-state" / "pycache")
+    assert env["PYTHONUTF8"] == "1"
+    assert env["CRYODAQ_REPORT_DATA_DIR"] == str(tmp_path / "report-state")
+    assert "PYTHONHOME" not in env
+    assert "CRYODAQ_TEST_SECRET" not in env
+    assert "must-not-cross-boundary" not in repr(env)
 
 
 def test_input_path_rejects_symlink_and_hardlink(tmp_path: Path) -> None:
@@ -682,9 +689,7 @@ def test_input_path_rejects_symlink_and_hardlink(tmp_path: Path) -> None:
 def test_protocol_directory_creation_is_owner_only_and_rejects_links(tmp_path: Path) -> None:
     from cryodaq.report_process import periodic_failure_result_path
 
-    input_path = write_periodic_input_file(
-        tmp_path / "safe", _payload(), expected_max_input_bytes=65_536
-    )
+    input_path = write_periodic_input_file(tmp_path / "safe", _payload(), expected_max_input_bytes=65_536)
     if os.name == "posix":
         assert input_path.parent.stat().st_mode & 0o077 == 0
         assert input_path.parent.parent.stat().st_mode & 0o077 == 0
@@ -788,9 +793,7 @@ def test_failure_side_channel_requires_exact_current_config_fence(
         )
 
 
-def test_failure_side_same_inode_late_mutation_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failure_side_same_inode_late_mutation_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.report_process as process_module
 
     slot_id = _install_rendering_state(tmp_path)
@@ -826,9 +829,7 @@ def test_failure_side_same_inode_late_mutation_is_rejected(
         real_fence(*args, **kwargs)
 
     monkeypatch.setattr(runner, "_run_process", failed_child)
-    monkeypatch.setattr(
-        process_module, "_require_rendering_state_fence", mutate_after_read
-    )
+    monkeypatch.setattr(process_module, "_require_rendering_state_fence", mutate_after_read)
     with pytest.raises(ReportProcessError, match="changed"):
         runner.generate_periodic(
             GENERATION,
@@ -842,18 +843,12 @@ def test_failure_side_channel_is_suppressed_after_state_fence_loss(tmp_path: Pat
     import cryodaq.reporting.__main__ as child
 
     _install_rendering_state(tmp_path)
-    _raw, snapshot = serialize_periodic_input(
-        _payload(), expected_max_input_bytes=65_536
-    )
+    _raw, snapshot = serialize_periodic_input(_payload(), expected_max_input_bytes=65_536)
     (tmp_path / "reporting" / "periodic_state.json").unlink()
 
-    child._write_periodic_side_failure(
-        tmp_path, snapshot, code="render_failed", text="periodic renderer failed"
-    )
+    child._write_periodic_side_failure(tmp_path, snapshot, code="render_failed", text="periodic renderer failed")
 
-    assert not (
-        tmp_path / "reporting" / "periodic" / "results" / f"{GENERATION}.json"
-    ).exists()
+    assert not (tmp_path / "reporting" / "periodic" / "results" / f"{GENERATION}.json").exists()
 
 
 def test_failure_side_result_is_atomically_published_by_replace(
@@ -862,9 +857,7 @@ def test_failure_side_result_is_atomically_published_by_replace(
     import cryodaq.reporting.__main__ as child
 
     _install_rendering_state(tmp_path)
-    _raw, snapshot = serialize_periodic_input(
-        _payload(), expected_max_input_bytes=65_536
-    )
+    _raw, snapshot = serialize_periodic_input(_payload(), expected_max_input_bytes=65_536)
     real_replace = child.os.replace
     observed: dict[str, object] = {}
 
@@ -873,15 +866,11 @@ def test_failure_side_result_is_atomically_published_by_replace(
         observed["temporary"] = source.read_bytes()
         observed["mode"] = source.stat().st_mode & 0o777
         if os.path.lexists(destination):
-            observed["old_code"] = read_periodic_result_file(
-                destination, require_success=False
-            )["error_code"]
+            observed["old_code"] = read_periodic_result_file(destination, require_success=False)["error_code"]
         real_replace(source, destination)
 
     monkeypatch.setattr(child.os, "replace", inspect_replace)
-    child._write_periodic_side_failure(
-        tmp_path, snapshot, code="render_failed", text="periodic renderer failed"
-    )
+    child._write_periodic_side_failure(tmp_path, snapshot, code="render_failed", text="periodic renderer failed")
     side = tmp_path / "reporting" / "periodic" / "results" / f"{GENERATION}.json"
     first = side.read_bytes()
     assert observed["final_absent"] is True
@@ -891,39 +880,29 @@ def test_failure_side_result_is_atomically_published_by_replace(
     assert read_periodic_result_file(side, require_success=False)["ok"] is False
     assert not side.with_name(f".{side.name}.tmp").exists()
 
-    child._write_periodic_side_failure(
-        tmp_path, snapshot, code="deadline", text="periodic render deadline expired"
-    )
+    child._write_periodic_side_failure(tmp_path, snapshot, code="deadline", text="periodic render deadline expired")
     assert side.read_bytes() != first
     assert observed["old_code"] == "render_failed"
     assert read_periodic_result_file(side, require_success=False)["error_code"] == "deadline"
 
 
-def test_failure_side_atomic_publish_fault_cleans_temporary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failure_side_atomic_publish_fault_cleans_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.reporting.__main__ as child
 
     _install_rendering_state(tmp_path)
-    _raw, snapshot = serialize_periodic_input(
-        _payload(), expected_max_input_bytes=65_536
-    )
+    _raw, snapshot = serialize_periodic_input(_payload(), expected_max_input_bytes=65_536)
     monkeypatch.setattr(
         child.os,
         "replace",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected replace")),
     )
-    child._write_periodic_side_failure(
-        tmp_path, snapshot, code="render_failed", text="periodic renderer failed"
-    )
+    child._write_periodic_side_failure(tmp_path, snapshot, code="render_failed", text="periodic renderer failed")
     side = tmp_path / "reporting" / "periodic" / "results" / f"{GENERATION}.json"
     assert not side.exists()
     assert not side.with_name(f".{side.name}.tmp").exists()
 
 
-def test_partial_png_crash_has_no_success_and_retry_recovers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_partial_png_crash_has_no_success_and_retry_recovers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.reporting.__main__ as child
     import cryodaq.reporting.periodic_renderer as renderer
 
@@ -953,16 +932,12 @@ def test_partial_png_crash_has_no_success_and_retry_recovers(
     assert recovered.artifact.path.endswith("/periodic.png")
 
 
-def test_input_same_inode_late_mutation_blocks_promotion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_input_same_inode_late_mutation_blocks_promotion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.reporting.__main__ as child
     import cryodaq.reporting.periodic_renderer as renderer
 
     _install_rendering_state(tmp_path)
-    input_path = write_periodic_input_file(
-        tmp_path, _payload(), expected_max_input_bytes=65_536
-    )
+    input_path = write_periodic_input_file(tmp_path, _payload(), expected_max_input_bytes=65_536)
     real_render = renderer.render_periodic_png
 
     def mutate_then_render(*args: object, **kwargs: object) -> object:

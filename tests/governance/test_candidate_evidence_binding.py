@@ -157,6 +157,8 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
         "    assert 'PYTEST_PLUGINS' not in os.environ\n"
         "    assert 'PYTHONHOME' not in os.environ\n"
         "    assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'\n"
+        "    assert os.environ['PYTHONNOUSERSITE'] == '1'\n"
+        "    assert not Path(os.environ['PYTHONPYCACHEPREFIX']).is_relative_to(Path.cwd())\n"
         "    assert os.environ['PYTHONUTF8'] == '1'\n"
         "    assert os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] == '1'\n"
         "    assert not Path(os.environ['CRYODAQ_CANDIDATE_PYTEST_BASETEMP']).is_relative_to(Path.cwd())\n"
@@ -183,6 +185,41 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
     )
 
     assert receipt.returncode == 0, receipt.stdout + receipt.stderr
+    pycache_root = tmp_path / ".export-sanitized-execution-state" / "pycache"
+    assert pycache_root.is_dir()
+    assert not pycache_root.is_relative_to(receipt.export_root)
+    assert not any(path.suffix == ".pyc" for path in receipt.export_root.rglob("*"))
+
+
+def test_export_execution_redirects_nested_python_cache_outside_candidate(
+    candidate_repo: Path,
+    tmp_path: Path,
+) -> None:
+    _write(candidate_repo / "src" / "pkg" / "nested.py", "VALUE = 42\n")
+    commit = _commit(candidate_repo, "nested interpreter cache guard")
+    script = (
+        "import os, subprocess, sys; "
+        "env={key: value for key, value in os.environ.items() "
+        "if key in {'PATH','PYTHONPATH','PYTHONNOUSERSITE',"
+        "'PYTHONPYCACHEPREFIX','PYTHONUTF8','SYSTEMROOT','WINDIR'}}; "
+        "assert 'PYTHONDONTWRITEBYTECODE' not in env; "
+        "raise SystemExit(subprocess.run([sys.executable,'-c','import pkg.nested'],env=env).returncode)"
+    )
+    receipt = execute_exported_candidate(
+        candidate_repo,
+        commit,
+        command=[sys.executable, "-c", script],
+        destination=tmp_path / "export-nested-cache",
+    )
+
+    assert receipt.returncode == 0, receipt.stdout + receipt.stderr
+    assert not any(path.suffix == ".pyc" for path in receipt.export_root.rglob("*"))
+    pycache_root = tmp_path / ".export-nested-cache-execution-state" / "pycache"
+    assert pycache_root.is_dir()
+    assert not pycache_root.is_relative_to(receipt.export_root)
+    external_bytecode = tuple(pycache_root.rglob("*.pyc"))
+    assert any(path.name.startswith("nested.") for path in external_bytecode)
+    assert all(not path.is_relative_to(receipt.export_root) for path in external_bytecode)
 
 
 def test_export_execution_rejects_committed_path_mutation(candidate_repo: Path, tmp_path: Path) -> None:
@@ -210,6 +247,18 @@ def test_export_execution_rejects_unexpected_file_creation(candidate_repo: Path,
                 "from pathlib import Path; Path('unexpected.txt').write_text('not candidate', encoding='utf-8')",
             ],
             destination=tmp_path / "export-extra",
+        )
+
+    with pytest.raises(CandidateEvidenceError, match="unexpected"):
+        execute_exported_candidate(
+            candidate_repo,
+            "HEAD",
+            command=[
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('unexpected.pyc').write_bytes(b'not candidate')",
+            ],
+            destination=tmp_path / "export-extra-pyc",
         )
 
 
