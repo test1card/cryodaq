@@ -15,11 +15,11 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from cryodaq.core.broker import DataBroker
-from cryodaq.drivers.base import InstrumentDriver
+from cryodaq.drivers.base import InstrumentDriver, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     BusRecoveryLevel,
@@ -1355,6 +1355,18 @@ class Scheduler:
                     if len(entries) != len(combined):
                         self._observe_persistence_ambiguity()
                         raise RuntimeError("commit receipt cardinality disagrees with persisted batch")
+                    for admitted, entry in zip(combined, entries, strict=True):
+                        committed = entry.reading
+                        if (
+                            type(committed) is not Reading
+                            or replace(
+                                committed,
+                                channel=admitted.channel,
+                            )
+                            != admitted
+                        ):
+                            self._observe_persistence_ambiguity()
+                            raise RuntimeError("commit receipt payload disagrees with the admitted batch")
                     committed_publish_readings = [entry.reading for entry in entries[: len(persisted_readings)]]
                     descriptor_envelopes = [entry.descriptor_envelope for entry in entries[: len(persisted_readings)]]
                     persisted = True

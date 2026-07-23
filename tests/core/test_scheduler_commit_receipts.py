@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -44,8 +45,11 @@ async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading(
     queue = await broker.subscribe("observer")
     # F35 D4.3: only an opted-in subscriber sees the paired descriptor envelope.
     envelope_queue = await broker.subscribe("zmq_publisher", wants_descriptor_envelope=True)
-    original = _reading(1.0, metadata={"origin": "driver"})
-    committed = _reading(2.0, metadata={"origin": "commit"})
+    original = replace(
+        _reading(1.0, metadata={"origin": "driver"}),
+        channel="emitted-probe-label",
+    )
+    committed = _reading(1.0, metadata={"origin": "driver"})
     receipt = object()
 
     class _Writer:
@@ -77,16 +81,18 @@ async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading(
     delivered = queue.get_nowait()
     assert writer.written == [original]
     assert observed == [receipt]
-    assert delivered.value == 2.0
-    assert delivered.raw == 102.0
+    assert delivered.channel == "probe.1"
+    assert delivered.value == 1.0
+    assert delivered.raw == 101.0
     assert delivered.metadata == {
-        "origin": "commit",
+        "origin": "driver",
         PERSISTENCE_AUTHORITATIVE_METADATA_KEY: True,
     }
 
     paired = envelope_queue.get_nowait()
     assert type(paired) is PublishedReading
-    assert paired.reading.value == 2.0
+    assert paired.reading.channel == "probe.1"
+    assert paired.reading.value == 1.0
     assert paired.descriptor_envelope == b'{"channel_id":"probe.1"}'
 
 
@@ -162,7 +168,7 @@ async def test_observation_failure_does_not_suppress_proven_commit_publication()
 
         def entries_from_commit(self, candidate: object) -> list[_Entry]:
             assert candidate is receipt
-            return [_Entry(_reading(2.0))]
+            return [_Entry(_reading(1.0))]
 
     ambiguous: list[bool] = []
 
@@ -179,6 +185,6 @@ async def test_observation_failure_does_not_suppress_proven_commit_publication()
 
     await scheduler._process_readings(state, [_reading(1.0)])
 
-    assert queue.get_nowait().value == 2.0
+    assert queue.get_nowait().value == 1.0
     assert ambiguous == [True]
     assert state.total_errors == 0
