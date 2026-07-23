@@ -439,7 +439,7 @@ assert not any(name.startswith(forbidden) for name in sys.modules), sorted(
 print('PURE_IMPORT_OK')
 """
     completed = subprocess.run(
-        [sys.executable, "-I", "-c", code],
+        [sys.executable, "-B", "-I", "-c", code],
         check=False,
         capture_output=True,
         text=True,

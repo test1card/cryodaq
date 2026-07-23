@@ -478,7 +478,7 @@ forbidden = [
 print(json.dumps(forbidden))
 """
     completed = __import__("subprocess").run(
-        [sys.executable, "-I", "-c", code],
+        [sys.executable, "-B", "-I", "-c", code],
         cwd=project_root,
         capture_output=True,
         text=True,

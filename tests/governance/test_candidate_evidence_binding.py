@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import subprocess
@@ -16,6 +17,8 @@ from tools.candidate_evidence import (
     validate_materializable_paths,
 )
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 def _run(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -31,6 +34,26 @@ def _run(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8", newline="\n")
+
+
+def test_isolated_python_test_subprocesses_disable_bytecode() -> None:
+    """Keep isolated Python children from writing into sealed candidates.
+
+    Isolated mode deliberately ignores the ambient no-bytecode and pycache
+    environment. Every literal test subprocess that requests -I must
+    therefore also request -B itself.
+    """
+
+    offenders: list[str] = []
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.List, ast.Tuple)):
+                continue
+            arguments = [item.value for item in node.elts if isinstance(item, ast.Constant) and type(item.value) is str]
+            if "-I" in arguments and "-B" not in arguments:
+                offenders.append(f"{path.relative_to(ROOT).as_posix()}:{node.lineno}")
+    assert offenders == [], f"isolated Python test subprocesses may write candidate bytecode: {offenders}"
 
 
 def _commit(repo: Path, message: str) -> str:
