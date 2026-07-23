@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -345,7 +349,7 @@ async def test_alarm_ack_owner_persists_exact_receipt_and_publishes_once(tmp_pat
     await writer.stop()
 
 
-async def test_alarm_ack_retries_persisted_commit_after_publication_loss(tmp_path: Path) -> None:
+async def test_ack_publish_failure_retry_emits_one_durable_event(tmp_path: Path) -> None:
     alarms = AlarmStateManager()
     alarms.process("a", _event("a"), {})
     safety = MagicMock()
@@ -377,10 +381,72 @@ async def test_alarm_ack_retries_persisted_commit_after_publication_loss(tmp_pat
         "retry_safe": False,
     }
     assert alarms.get_active()["a"].acknowledged is True
+    acknowledged_at = alarms.get_active()["a"].acknowledged_at
+    assert type(acknowledged_at) is float
+    assert math.isfinite(acknowledged_at) and acknowledged_at > 0.0
+
+    def durable_row() -> tuple[str, str, str, str, str]:
+        control = sqlite3.connect(tmp_path / "control.db")
+        try:
+            rows = control.execute(
+                "SELECT request_id, request_fingerprint, state, event_json, receipt_json FROM alarm_ack_outbox"
+            ).fetchall()
+        finally:
+            control.close()
+        assert len(rows) == 1
+        return rows[0]
+
+    committed_row = durable_row()
+    assert committed_row[0] == command["request_id"]
+    fingerprint_payload = {
+        key: value
+        for key, value in command.items()
+        if key not in {"request_id", "protocol_major", "mutation_capability", "capability_token"}
+    }
+    expected_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert committed_row[1] == expected_fingerprint
+    assert committed_row[2] == "committed"
+    committed_event = json.loads(committed_row[3])
+    committed_receipt = json.loads(committed_row[4])
+    assert committed_event == {
+        "acknowledged_at": acknowledged_at,
+        "activation_id": activation_id,
+        "alarm_id": "a",
+        "engine_instance_id": "engine-a",
+        "operator": "operator",
+        "reason": "observed",
+    }
+    assert committed_receipt["committed"] is True
+    first_published = context.broker.publish.await_args_list[0].args[0]
+    assert first_published.instrument_id == "alarm_v2"
+    assert first_published.channel == "alarm_v2/acknowledged"
+    assert first_published.value == acknowledged_at
+    assert first_published.unit == ""
+    assert first_published.metadata == committed_event
+
     retry = await _handle_gui_command(command, context=context)
     assert retry["ok"] is True
     assert context.broker.publish.await_count == 2
     assert alarms.get_active()["a"].acknowledged is True
+    published_row = durable_row()
+    assert published_row[:2] == committed_row[:2]
+    assert published_row[2] == "published"
+    assert published_row[3:] == committed_row[3:]
+    assert json.loads(published_row[4]) == retry
+    second_published = context.broker.publish.await_args_list[1].args[0]
+    assert second_published.instrument_id == first_published.instrument_id
+    assert second_published.channel == first_published.channel
+    assert second_published.value == first_published.value
+    assert second_published.unit == first_published.unit
+    assert second_published.metadata == committed_event
     await writer.stop()
 
 
