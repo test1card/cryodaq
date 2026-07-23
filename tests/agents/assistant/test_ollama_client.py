@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
+from cryodaq.agents.assistant.live.agent import AssistantConfig
 from cryodaq.agents.assistant.shared.ollama_client import (
     GenerationResult,
     OllamaClient,
@@ -13,6 +17,7 @@ from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaUnavailableError,
     validate_loopback_origin,
 )
+from cryodaq.agents.rag.embeddings import EmbeddingsClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -266,7 +271,7 @@ async def test_smoke_real_ollama() -> None:
         pytest.skip("No known model available in ollama list")
 
     client = OllamaClient(
-        base_url="http://localhost:11434",
+        base_url="http://127.0.0.1:11434",
         default_model=model,
         timeout_s=120.0,
     )
@@ -338,6 +343,21 @@ def test_loopback_origin_rejects_nonliteral_loopback() -> None:
     with pytest.raises(ValueError, match="literal"):
         validate_loopback_origin("http://localhost:11434")
     assert validate_loopback_origin("http://[::1]:11434") == "http://[::1]:11434"
+
+
+def test_shipped_ollama_defaults_are_literal_loopback() -> None:
+    root = Path(__file__).resolve().parents[3]
+    agent_config = yaml.safe_load((root / "config/agent.yaml").read_text(encoding="utf-8"))
+    rag_config = yaml.safe_load((root / "config/rag.yaml.example").read_text(encoding="utf-8"))
+    defaults = (
+        AssistantConfig().ollama_base_url,
+        inspect.signature(EmbeddingsClient).parameters["base_url"].default,
+        agent_config["agent"]["ollama"]["base_url"],
+        rag_config["rag"]["ollama_base_url"],
+    )
+
+    assert defaults == ("http://127.0.0.1:11434",) * len(defaults)
+    assert all(validate_loopback_origin(value) == value for value in defaults)
 
 
 def test_redirect_and_nonliteral_loopback_are_rejected_before_egress() -> None:

@@ -135,7 +135,7 @@ def test_config_from_dict() -> None:
     raw = {
         "enabled": True,
         "ollama": {
-            "base_url": "http://localhost:11434",
+            "base_url": "http://127.0.0.1:11434",
             "default_model": "gemma4:e4b",
             "timeout_s": 30,
         },

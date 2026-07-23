@@ -66,7 +66,7 @@ def _make_embeddings(rag_cfg: dict) -> EmbeddingsClient:
     # multilingual leaderboard. Previous default (multilingual-e5-small)
     # deprecated due к Ollama 0.23+ incompatibility for community uploads.
     return EmbeddingsClient(
-        base_url=rag_cfg.get("ollama_base_url", "http://localhost:11434"),
+        base_url=rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"),
         model=rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"),
     )
 
@@ -123,9 +123,7 @@ def index_main() -> None:
     # v0.55.7.1 — knowledge corpus paths. The defaults match the
     # PHASE 1 folder layout; rag.yaml's `knowledge_dir` overrides root,
     # subdir names follow the convention ${knowledge_dir}/{equipment_manuals,procedures}.
-    knowledge_dir = Path(
-        rag_cfg.get("knowledge_dir", get_data_dir() / "knowledge")
-    ).expanduser()
+    knowledge_dir = Path(rag_cfg.get("knowledge_dir", get_data_dir() / "knowledge")).expanduser()
     pdf_dir = knowledge_dir / "equipment_manuals"
     procedures_dir = knowledge_dir / "procedures"
     reference_root = get_project_root()
@@ -173,7 +171,7 @@ def index_main() -> None:
         print(
             f"\nerror: cannot reach Ollama: {exc}\n"
             f"  hint: verify ollama_base_url in {cfg_source} "
-            f"({rag_cfg.get('ollama_base_url', 'http://localhost:11434')})",
+            f"({rag_cfg.get('ollama_base_url', 'http://127.0.0.1:11434')})",
             file=sys.stderr,
         )
         sys.exit(4)
@@ -229,8 +227,7 @@ def search_main() -> None:
         sys.exit(3)
     except OllamaUnavailableError as exc:
         print(
-            f"\nerror: cannot reach Ollama: {exc}\n"
-            f"  hint: verify ollama_base_url in {cfg_source}",
+            f"\nerror: cannot reach Ollama: {exc}\n  hint: verify ollama_base_url in {cfg_source}",
             file=sys.stderr,
         )
         sys.exit(4)

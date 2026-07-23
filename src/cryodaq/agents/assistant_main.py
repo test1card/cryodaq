@@ -583,7 +583,7 @@ async def _run_llm_runtime(
                 str(rag_cfg.get("db_path", "data/rag_index"))
             ).expanduser()
             rag_table = str(rag_cfg.get("table_name", "cryodaq_corpus"))
-            rag_emb_url = str(rag_cfg.get("ollama_base_url", "http://localhost:11434"))
+            rag_emb_url = str(rag_cfg.get("ollama_base_url", "http://127.0.0.1:11434"))
             rag_emb_model = str(rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
             if not await asyncio.to_thread(rag_db_path.is_dir):
                 raise FileNotFoundError(f"offline RAG index is absent at {rag_db_path}; run cryodaq-rag-index")

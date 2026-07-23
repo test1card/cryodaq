@@ -53,7 +53,7 @@ _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 @dataclass
 class AssistantConfig:
     enabled: bool = True
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     default_model: str = "gemma4:e4b"
     timeout_s: float = 60.0
     temperature: float = 0.3

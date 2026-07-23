@@ -19,7 +19,7 @@ class EmbeddingsClient:
     def __init__(
         self,
         *,
-        base_url: str = "http://localhost:11434",
+        base_url: str = "http://127.0.0.1:11434",
         model: str = "qwen3-embedding:0.6b",
         timeout_s: float = 30.0,
     ) -> None:
