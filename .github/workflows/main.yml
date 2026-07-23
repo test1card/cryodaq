@@ -208,7 +208,7 @@ jobs:
             --output "${RUNNER_TEMP:?}/cryodaq-candidate-attestation/artifact-attestation.json" \
             --artifact-name "${CANDIDATE_ARTIFACT:?}" \
             --artifact-id "${{ steps.candidate-upload.outputs.artifact-id }}" \
-            --artifact-digest "${{ steps.candidate-upload.outputs.artifact-digest }}"
+            --artifact-digest "sha256:${{ steps.candidate-upload.outputs.artifact-digest }}"
 
       - name: Upload exact candidate artifact attestation
         id: candidate-attestation-upload

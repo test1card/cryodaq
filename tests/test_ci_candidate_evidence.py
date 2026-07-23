@@ -235,6 +235,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     candidate = indexed["candidate"]
     upload = indexed["candidate-upload"]
     attestation_upload = indexed["candidate-attestation-upload"]
+    attest = next(step for step in steps if step.get("name") == "Attest uploaded candidate artifact")
     enforce = next(
         step for step in steps if step.get("name") == "Enforce exact candidate execution and evidence publication"
     )
@@ -256,6 +257,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     upload_pin = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     assert upload["uses"] == upload_pin
     assert attestation_upload["uses"] == upload_pin
+    assert '--artifact-digest "sha256:${{ steps.candidate-upload.outputs.artifact-digest }}"' in attest["run"]
     assert "always()" in enforce["if"]
     for dependency in (
         "steps.active-remaining.outcome",
