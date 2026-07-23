@@ -95,6 +95,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: dirty_primary_passed_while_exported_8ff15811_failed_collection_and_exported_c16cabc_imported_uncommitted_context_reader_and_failed_three_collection_modules_2026_07_22_pending_immutable_capture
     green_evidence: pending
+  - id: CANDIDATE-BYTECODE-FALSE-GREEN-002
+    status: open
+    scope: repository
+    runtime_prevention_id: REVIEW-EXACT-TREE-001
+    guard: tests/governance/test_candidate_evidence_binding.py::test_isolated_python_test_subprocesses_disable_bytecode
+    ci_partition: remaining
+    red_evidence: isolated_python_dash_i_ignored_parent_pycache_environment_and_mutated_sealed_candidate_after_green_tests_2026_07_23_pending_immutable_capture
+    green_evidence: pending
   - id: ZMQ-QUARANTINE-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -914,6 +922,8 @@ records:
       - node: tests/governance/test_candidate_evidence_binding.py::test_candidate_tests_execute_exported_committed_tree
         ci_partition: remaining
       - node: tests/governance/test_candidate_evidence_binding.py::test_manifest_rejects_dirty_or_missing_product_dependencies
+        ci_partition: remaining
+      - node: tests/governance/test_candidate_evidence_binding.py::test_isolated_python_test_subprocesses_disable_bytecode
         ci_partition: remaining
     red_evidence: exact_tree_8ff15811_failed_while_dirty_tree_passed_then_exact_tree_c16cabc_omitted_required_context_reader_and_failed_three_assistant_collection_modules_2026_07_22_pending_artifact_binding
     green_evidence: pending
