@@ -849,6 +849,7 @@ def test_phase_command_carries_exact_active_experiment_id(app, monkeypatch):
         {
             "cmd": "experiment_advance_phase",
             "experiment_id": "exp-a",
+            "expected_experiment_id": "exp-a",
             "phase": "vacuum",
         }
     ]
