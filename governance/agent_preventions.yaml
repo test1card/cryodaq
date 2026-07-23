@@ -671,6 +671,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: test_zmq_safety_except_exception_swallowed_assertion_json_and_unsafe_success_reply_2026_07_22_pending_immutable_capture
     green_evidence: pending
+  - id: PYTEST-BROAD-RAISES-FALSE-GREEN-002
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/governance/test_agent_preventions.py::test_pytest_raises_requires_a_specific_exception_contract
+    ci_partition: remaining
+    red_evidence: keithley_watchdog_test_missing_fake_transport_passed_only_on_unavailable_pyvisa_backend_2026_07_23_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: GOVERNANCE-PREVENTION-MAP-001
@@ -932,6 +940,8 @@ records:
       - node: tests/governance/test_agent_preventions.py::test_false_green_pairs_have_unique_ids_runtime_links_and_exact_default_ci_guards
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_test_assertions_cannot_be_swallowed_by_broad_exception_handlers
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_pytest_raises_requires_a_specific_exception_contract
         ci_partition: remaining
     red_evidence: multiple_reviewer_reproductions_contradict_green_counts_pending_artifact_binding
     green_evidence: pending

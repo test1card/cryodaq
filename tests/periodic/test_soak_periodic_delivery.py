@@ -20,6 +20,7 @@ from cryodaq.agents.assistant.periodic_delivery import (
 )
 from cryodaq.agents.assistant.soak_periodic_delivery import (
     SoakPeriodicDeliverySession,
+    SoakPeriodicProtocolError,
     build_ack,
     decode_frame_body,
 )
@@ -27,6 +28,7 @@ from scripts.soak_mock_stack_runner import (
     _ArtifactReceiptSink,
     _AssistantProcessObservation,
     _ProcessIdentity,
+    _RunnerFoundationError,
 )
 
 _POSIX_ARTIFACT_CAPABILITY = pytest.mark.skipif(os.name != "posix", reason="artifact delivery capability is POSIX-only")
@@ -138,9 +140,9 @@ def test_decoder_rejects_truncation_and_one_byte_oversize() -> None:
     body = framed[4:]
     assert size == len(body)
     assert build_ack(decode_frame_body(body))
-    with pytest.raises(Exception):
+    with pytest.raises(SoakPeriodicProtocolError):
         decode_frame_body(body[:-1])
-    with pytest.raises(Exception):
+    with pytest.raises(SoakPeriodicProtocolError):
         decode_frame_body(b"x" * (frame_body_limit() + 1))
 
 
@@ -163,7 +165,7 @@ def test_runner_rejects_wrong_pid_without_file_or_ack(tmp_path: Path) -> None:
         )
     )
     sink = _ArtifactReceiptSink(runner, nonce="d" * 64, evidence_dir=tmp_path)
-    with pytest.raises(Exception, match="identity/generation/sequence"):
+    with pytest.raises(_RunnerFoundationError, match="identity/generation/sequence"):
         sink.accept_one(**_accept(999, photo))
     assert not glob.glob(str(tmp_path / "periodic-*.png"))
     assert client.recv(1) == b""
@@ -192,7 +194,7 @@ def test_runner_rejects_duplicate_generation_sequence_after_one_ack(tmp_path: Pa
     ack_size = struct.unpack("!I", client.recv(4))[0]
     assert len(client.recv(ack_size)) == ack_size
     client.sendall(frame)
-    with pytest.raises(Exception, match="identity/generation/sequence"):
+    with pytest.raises(_RunnerFoundationError, match="identity/generation/sequence"):
         sink.accept_one(**_accept(123, photo))
     assert len(glob.glob(str(tmp_path / "periodic-*.png"))) == 1
     client.close()
@@ -219,7 +221,7 @@ def test_runner_rejects_wrong_expected_authority(tmp_path: Path) -> None:
     sink = _ArtifactReceiptSink(runner, nonce="d" * 64, evidence_dir=tmp_path)
     expected = _accept(123, photo)
     expected["expected_owner_token"] = "f" * 32
-    with pytest.raises(Exception, match="identity/generation/sequence"):
+    with pytest.raises(_RunnerFoundationError, match="identity/generation/sequence"):
         sink.accept_one(**expected)
     assert not glob.glob(str(tmp_path / "periodic-*.png"))
     client.close()
@@ -246,7 +248,7 @@ def test_runner_rejects_first_generation_jump(tmp_path: Path) -> None:
     sink = _ArtifactReceiptSink(runner, nonce="d" * 64, evidence_dir=tmp_path)
     expected = _accept(123, photo)
     expected["expected_assistant_generation"] = 999
-    with pytest.raises(Exception, match="identity/generation/sequence"):
+    with pytest.raises(_RunnerFoundationError, match="identity/generation/sequence"):
         sink.accept_one(**expected)
     assert not glob.glob(str(tmp_path / "periodic-*.png"))
     client.close()
@@ -286,7 +288,7 @@ def test_runner_rejects_generation_jump_after_accepted_generation(tmp_path: Path
     client.sendall(jumped)
     expected = _accept(999, photo)
     expected["expected_assistant_generation"] = 999
-    with pytest.raises(Exception, match="identity/generation/sequence"):
+    with pytest.raises(_RunnerFoundationError, match="identity/generation/sequence"):
         sink.accept_one(**expected)
     assert len(glob.glob(str(tmp_path / "periodic-*.png"))) == 1
     client.close()
@@ -318,7 +320,7 @@ def test_runner_rejects_unsafe_or_corrupt_existing_ledger(tmp_path: Path, ledger
         )
     )
     sink = _ArtifactReceiptSink(runner, nonce="d" * 64, evidence_dir=tmp_path)
-    with pytest.raises(Exception, match="ledger"):
+    with pytest.raises(_RunnerFoundationError, match="ledger"):
         sink.accept_one(**_accept(123, photo))
     assert client.recv(1) == b""
     client.close()
@@ -335,7 +337,7 @@ def test_runner_zero_byte_stall_is_bounded(
     client, runner = socket.socketpair()
     monkeypatch.setattr(runner_module, "_ARTIFACT_IO_TIMEOUT_S", 0.02)
     sink = _ArtifactReceiptSink(runner, nonce="d" * 64, evidence_dir=tmp_path)
-    with pytest.raises(Exception, match="deadline"):
+    with pytest.raises(_RunnerFoundationError, match="deadline"):
         sink.accept_one(**_accept(123, _png()))
     assert client.recv(1) == b""
     client.close()
@@ -373,7 +375,7 @@ def test_runner_ack_backpressure_is_bounded_after_durable_acceptance(
     )
     monkeypatch.setattr(runner_module, "_ARTIFACT_IO_TIMEOUT_S", 0.02)
     sink = _ArtifactReceiptSink(runner, nonce="d" * 64, evidence_dir=tmp_path)
-    with pytest.raises(Exception, match="ACK deadline"):
+    with pytest.raises(_RunnerFoundationError, match="ACK deadline"):
         sink.accept_one(**_accept(123, photo))
     assert len(glob.glob(str(tmp_path / "periodic-g1-s1-*.png"))) == 1
     assert os.path.isfile(tmp_path / "periodic-receipts.jsonl")
@@ -400,7 +402,7 @@ def test_evidence_directory_replacement_between_lstat_and_open_is_rejected(
 
     client, runner = socket.socketpair()
     monkeypatch.setattr(os, "open", swap_then_open)
-    with pytest.raises(Exception, match="identity changed"):
+    with pytest.raises(_RunnerFoundationError, match="identity changed"):
         _ArtifactReceiptSink(runner, nonce="d" * 64, evidence_dir=tmp_path)
     client.close()
     runner.close()

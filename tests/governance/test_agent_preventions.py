@@ -221,3 +221,24 @@ def test_test_assertions_cannot_be_swallowed_by_broad_exception_handlers() -> No
                     relative = path.relative_to(ROOT).as_posix()
                     offenders.append(f"{relative}:{node.lineno}:{sorted(forbidden)!r}")
     assert offenders == [], f"test assertions can be swallowed by broad handlers: {offenders}"
+
+
+def test_pytest_raises_requires_a_specific_exception_contract() -> None:
+    offenders: list[str] = []
+    for path in sorted((ROOT / "tests").rglob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or not isinstance(node.func.value, ast.Name)
+                or node.func.value.id != "pytest"
+                or node.func.attr != "raises"
+                or not node.args
+                or not isinstance(node.args[0], ast.Name)
+                or node.args[0].id not in {"Exception", "BaseException"}
+            ):
+                continue
+            relative = path.relative_to(ROOT).as_posix()
+            offenders.append(f"{relative}:{node.lineno}:{node.args[0].id}")
+    assert offenders == [], f"pytest.raises must name the expected failure contract: {offenders}"

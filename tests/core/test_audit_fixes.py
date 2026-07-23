@@ -289,9 +289,7 @@ async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
 
     from cryodaq.storage.sentinel import SENTINEL, decode
 
-    assert rows[0][1] == SENTINEL, (
-        f"Persisted value must be the sentinel, got {rows[0][1]}"
-    )
+    assert rows[0][1] == SENTINEL, f"Persisted value must be the sentinel, got {rows[0][1]}"
     assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
@@ -330,9 +328,7 @@ async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
 
     from cryodaq.storage.sentinel import SENTINEL, decode
 
-    assert rows[0][1] == SENTINEL, (
-        f"Persisted value must be the sentinel, got {rows[0][1]}"
-    )
+    assert rows[0][1] == SENTINEL, f"Persisted value must be the sentinel, got {rows[0][1]}"
     assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
@@ -365,13 +361,13 @@ def test_gpib_resource_closed_on_clear_failure() -> None:
     transport._bus_prefix = "GPIB0"
 
     mock_res = MagicMock()
-    mock_res.clear.side_effect = Exception("IFC not supported")
+    mock_res.clear.side_effect = RuntimeError("IFC not supported")
 
     mock_rm = MagicMock()
     mock_rm.open_resource.return_value = mock_res
 
     with patch.object(GPIBTransport, "_get_rm", return_value=mock_rm):
-        with pytest.raises(Exception, match="IFC not supported"):
+        with pytest.raises(RuntimeError, match="IFC not supported"):
             transport._blocking_connect()
 
     # Resource must have been closed despite clear() failure

@@ -971,7 +971,7 @@ def test_failclosed_no_control_remediation_surface() -> None:
 
     assert dataclasses.is_dataclass(capture)
     # Frozen dataclasses raise FrozenInstanceError on attribute assignment.
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         capture.bundle_id = "tampered"  # type: ignore[misc]
 
     # No methods named after control or remediation verbs.

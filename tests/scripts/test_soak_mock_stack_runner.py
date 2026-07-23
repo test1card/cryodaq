@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 from contextlib import contextmanager, nullcontext
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -1062,7 +1063,7 @@ def test_pid_reuse_recheck_is_terminal_and_cannot_complete_cleanup() -> None:
 def test_nonce_provenance_is_immutable_validated_and_non_authoritative() -> None:
     provenance = runner._RunProvenance("a" * 32, "sha256:" + "b" * 64, "darwin")
     assert provenance.run_id == "a" * 32
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         provenance.run_id = "c" * 32  # type: ignore[misc]
     assert not hasattr(runner, "_RunnerAuthority")
     assert not hasattr(runner, "Evidence")
