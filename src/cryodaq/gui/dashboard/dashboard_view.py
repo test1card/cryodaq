@@ -26,7 +26,13 @@ from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 from cryodaq.gui.dashboard.quick_log_block import QuickLogBlock
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
 from cryodaq.gui.state.descriptor_store import IdentityStatus
-from cryodaq.operator_snapshot import OperatorSnapshot, ReadinessTruth, SafetyLifecycle, SnapshotMode
+from cryodaq.operator_snapshot import (
+    OperatorPresentationState,
+    OperatorSnapshot,
+    ReadinessTruth,
+    SafetyLifecycle,
+    SnapshotMode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +101,9 @@ class DashboardView(QScrollArea):
         self._phase_reconcile_worker = None
         self._authority_valid = False
         self._authority_experiment_id: str | None = None
+        self._authority_producer_id: str | None = None
         self._authority_revision: int | None = None
+        self._authority_snapshot: OperatorSnapshot | None = None
         self._log_submit_worker = None
         self._log_submit_context: dict[str, Any] | None = None
         self._log_unresolved_context: dict[str, Any] | None = None
@@ -260,7 +268,9 @@ class DashboardView(QScrollArea):
         if not connected:
             self._authority_valid = False
             self._authority_experiment_id = None
+            self._authority_producer_id = None
             self._authority_revision = None
+            self._authority_snapshot = None
         if not connected and self._log_submit_context is not None:
             self._log_unresolved_context = self._log_submit_context
             if self._quick_log is not None:
@@ -303,62 +313,57 @@ class DashboardView(QScrollArea):
             else:
                 reason = "Нет текущего подтверждённого разрешения на изменение"
             self._quick_log.set_mutation_enabled(mutable, reason)
+        if self._sensor_grid is not None:
+            self._sensor_grid.set_read_only(not mutable)
 
     def set_operator_snapshot(self, snapshot: object) -> None:
         """Derive mutation authority only from a current live coherent cut."""
+        if type(snapshot) is not OperatorSnapshot:
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._update_mutation_authority()
+            return
+
+        cut = snapshot.cut
+        if self._authority_producer_id is None:
+            self._authority_producer_id = cut.producer_id
+        elif cut.producer_id != self._authority_producer_id:
+            # A producer/incarnation replacement is a transport-generation
+            # boundary. It must be accompanied by disconnect/reconnect; a
+            # READY-looking packet alone cannot seize mutation authority.
+            self._authority_valid = False
+            self._authority_experiment_id = None
+            self._update_mutation_authority()
+            return
+
+        previous_revision = self._authority_revision
         valid = (
-            type(snapshot) is OperatorSnapshot
-            and snapshot.cut.mode is SnapshotMode.LIVE
+            cut.mode is SnapshotMode.LIVE
             and snapshot.readiness.readiness is ReadinessTruth.READY
             and snapshot.readiness.lifecycle is SafetyLifecycle.READY
+            and snapshot.readiness.status.state is OperatorPresentationState.OK
             and not snapshot.readiness.transport_reason_codes
         )
-        if not valid:
-            self._authority_valid = False
-            self._authority_experiment_id = None
-            self._authority_revision = None
-        elif self._authority_revision is None or snapshot.cut.revision > self._authority_revision:
-            self._authority_valid = True
-            self._authority_experiment_id = snapshot.cut.experiment_id
-            self._authority_revision = snapshot.cut.revision
-        self._update_mutation_authority()
+        if previous_revision is not None:
+            if cut.revision < previous_revision:
+                self._authority_valid = False
+                self._authority_experiment_id = None
+                self._update_mutation_authority()
+                return
+            if cut.revision == previous_revision:
+                exact_duplicate = snapshot == self._authority_snapshot
+                if not exact_duplicate or not self._authority_valid or not valid:
+                    self._authority_valid = False
+                    self._authority_experiment_id = None
+                self._authority_snapshot = snapshot
+                self._update_mutation_authority()
+                return
 
-    def set_authority_receipt(
-        self,
-        *,
-        experiment_id: str | None,
-        producer_id: str,
-        revision: int,
-        lifecycle: SafetyLifecycle,
-        readiness: ReadinessTruth,
-    ) -> None:
-        """Accept an explicit test/integration authority receipt, never cadence."""
-        valid = (
-            type(producer_id) is str
-            and bool(producer_id)
-            and (experiment_id is None or (type(experiment_id) is str and bool(experiment_id)))
-            and type(revision) is int
-            and revision >= 0
-            and lifecycle is SafetyLifecycle.READY
-            and readiness is ReadinessTruth.READY
-        )
-        if not valid:
-            self._authority_valid = False
-            self._authority_experiment_id = None
-            self._authority_revision = None
-        elif self._authority_revision is None or revision > self._authority_revision:
-            self._authority_valid = True
-            self._authority_experiment_id = experiment_id
-            self._authority_revision = revision
+        self._authority_revision = cut.revision
+        self._authority_snapshot = snapshot
+        self._authority_valid = valid
+        self._authority_experiment_id = snapshot.experiment.experiment_id if valid else None
         self._update_mutation_authority()
-
-    def _apply_mutation_availability(self) -> None:
-        """Compatibility name for callers that refresh the mutation gate."""
-        self._update_mutation_authority()
-
-        enabled = self._connected and not self._read_only and self._authority_valid
-        if self._sensor_grid is not None:
-            self._sensor_grid.set_read_only(not enabled)
 
     # ------------------------------------------------------------------
     # Sensor grid signal handlers
@@ -627,8 +632,7 @@ class DashboardView(QScrollArea):
             self._read_only
             or not self._connected
             or not self._authority_valid
-            or type(experiment_id) is not str
-            or not experiment_id
+            or (experiment_id is not None and (type(experiment_id) is not str or not experiment_id))
             or not message
         ):
             return
@@ -656,6 +660,8 @@ class DashboardView(QScrollArea):
             "tags": [],
             "experiment_id": experiment_id,
         }
+        if experiment_id is None:
+            payload["experiment_unbound"] = True
         self._start_log_submit(
             {
                 "payload": payload,

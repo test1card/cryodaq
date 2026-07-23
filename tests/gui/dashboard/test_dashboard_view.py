@@ -6,16 +6,39 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFrame, QScrollArea
 
 from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.dashboard.dashboard_view import _PRESENTATION_INTERVAL_MS
-from cryodaq.operator_snapshot import ReadinessTruth, SafetyLifecycle
+from cryodaq.operator_snapshot import (
+    AttentionQueue,
+    AvailabilityTruth,
+    CooldownHistorySummary,
+    DataIntegritySummary,
+    ExperimentOperatingState,
+    InfrastructureNode,
+    InfrastructureNodeHealth,
+    OperatorPresentationState,
+    OperatorSnapshot,
+    PlantHealthItem,
+    PlantHealthSummary,
+    ReadinessSummary,
+    ReadinessTruth,
+    RecordingTruth,
+    SafetyLifecycle,
+    SnapshotCut,
+    SnapshotMode,
+    SummaryStatus,
+    SupportBundleEntry,
+    SupportBundleManifest,
+    SupportBundleSummary,
+)
 
 
 class _DeferredSignal:
@@ -73,12 +96,64 @@ def _settle_connection(view: DashboardView, *, experiment_id: str) -> None:
     view.set_connected(True)
     assert len(_DeferredWorker.instances) == 1
     _DeferredWorker.instances.pop(0).finish(_scope_result([]))
-    view.set_authority_receipt(
-        experiment_id=experiment_id,
-        producer_id="engine-test",
-        revision=1,
-        lifecycle=SafetyLifecycle.READY,
-        readiness=ReadinessTruth.READY,
+    view.set_operator_snapshot(_operator_snapshot(experiment_id=experiment_id))
+
+
+def _operator_snapshot(
+    *,
+    experiment_id: str = "no-active-experiment",
+    revision: int = 1,
+    producer_id: str = "engine-test",
+    lifecycle: SafetyLifecycle = SafetyLifecycle.READY,
+    readiness: ReadinessTruth = ReadinessTruth.READY,
+    mode: SnapshotMode = SnapshotMode.LIVE,
+) -> OperatorSnapshot:
+    observed = datetime.now(UTC)
+    cut = SnapshotCut(revision, observed, observed, producer_id, mode, experiment_id, producer_id)
+    presentation = (
+        OperatorPresentationState.OK
+        if mode is SnapshotMode.LIVE and readiness is ReadinessTruth.READY and lifecycle is SafetyLifecycle.READY
+        else OperatorPresentationState.CAUTION
+    )
+    status = SummaryStatus(presentation, 0.0, 0.0, ("authoritative",), "confirmed")
+    manifest = (
+        SupportBundleManifest(
+            "bundle-1",
+            cut.received_at,
+            (SupportBundleEntry("status/status.json", 1, "a" * 64),),
+        )
+        if mode is SnapshotMode.LIVE
+        else None
+    )
+    availability = AvailabilityTruth.AVAILABLE if mode is SnapshotMode.LIVE else AvailabilityTruth.UNKNOWN
+    recording = RecordingTruth.NOT_RECORDING if mode is SnapshotMode.LIVE else RecordingTruth.REPLAY_ONLY
+    active_experiment = None if experiment_id == "no-active-experiment" else experiment_id
+    return OperatorSnapshot(
+        cut,
+        ReadinessSummary(cut, status, readiness, (), lifecycle),
+        PlantHealthSummary(
+            cut,
+            status,
+            (PlantHealthItem("plant", "Plant", presentation, ()),),
+        ),
+        InfrastructureNodeHealth(
+            cut,
+            status,
+            (InfrastructureNode("engine", "Engine", presentation, ()),),
+        ),
+        AttentionQueue(cut, status, ()),
+        ExperimentOperatingState(
+            cut,
+            status,
+            active_experiment,
+            "Experiment" if active_experiment else None,
+            "cooldown" if active_experiment else None,
+            recording,
+            None,
+        ),
+        DataIntegritySummary(cut, status, revision, revision, 0, 0, availability),
+        CooldownHistorySummary(cut, status, (), None, ()),
+        SupportBundleSummary(cut, status, availability, manifest),
     )
 
 
@@ -137,72 +212,141 @@ def test_dashboard_connection_contract_disables_mutations_until_live_and_after_l
     assert not view._connected
     assert not view._phase_widget._create_btn.isEnabled()
     assert not view._quick_log._send_btn.isEnabled()
+    assert view._sensor_grid._read_only is True
 
     view.set_connected(True)
-    view.set_authority_receipt(
-        experiment_id=None,
-        producer_id="engine-test",
-        revision=1,
-        lifecycle=SafetyLifecycle.READY,
-        readiness=ReadinessTruth.READY,
-    )
+    assert view._sensor_grid._read_only is True
+    view.set_operator_snapshot(_operator_snapshot())
     assert view._phase_widget._create_btn.isEnabled()
     assert view._quick_log._send_btn.isEnabled()
+    assert view._sensor_grid._read_only is False
 
     view.set_connected(False)
     assert not view._phase_widget._create_btn.isEnabled()
     assert not view._quick_log._send_btn.isEnabled()
+    assert view._sensor_grid._read_only is True
 
 
-@pytest.mark.parametrize("omitted", ["lifecycle", "readiness"])
-def test_dashboard_authority_receipt_never_defaults_omitted_truth_to_ready(app, omitted):
+def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
     view = DashboardView(ChannelManager())
     view.set_connected(True)
-    receipt = {
-        "experiment_id": None,
-        "producer_id": "engine-test",
-        "revision": 1,
-        "lifecycle": SafetyLifecycle.READY,
-        "readiness": ReadinessTruth.READY,
-    }
-    receipt.pop(omitted)
+    view.set_operator_snapshot(
+        {
+            "experiment_id": "exp-1",
+            "producer_id": "engine-test",
+            "revision": 1,
+            "readiness": ReadinessTruth.READY,
+        }
+    )
+    assert view._authority_valid is False
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
+    assert view._sensor_grid._read_only is True
 
-    with pytest.raises(TypeError):
-        view.set_authority_receipt(**receipt)
+    ready = _operator_snapshot(experiment_id="exp-1", revision=1)
+    view.set_operator_snapshot(ready)
+    assert view._authority_valid is True
+    assert view._authority_experiment_id == "exp-1"
+    assert view._authority_producer_id == "engine-test"
+    assert view._sensor_grid._read_only is False
+    view.set_operator_snapshot(ready)
+    assert view._authority_valid is True
 
+    # A different coherent snapshot at the same revision is equivocation, even
+    # when both snapshots claim READY.
+    view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=1))
+    assert view._authority_valid is False
+    assert view._sensor_grid._read_only is True
+
+    # An equivocal equal-revision delivery revokes the previously optimistic
+    # cut, and the original READY object cannot replay that authority.
+    view.set_operator_snapshot(
+        _operator_snapshot(
+            experiment_id="exp-1",
+            revision=1,
+            lifecycle=SafetyLifecycle.UNKNOWN,
+            readiness=ReadinessTruth.UNKNOWN,
+        )
+    )
+    view.set_operator_snapshot(ready)
+    assert view._authority_valid is False
+    assert view._authority_revision == 1
+
+    view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=2))
+    assert view._authority_valid is True
+    assert view._sensor_grid._read_only is False
+
+    view.set_operator_snapshot(
+        _operator_snapshot(
+            experiment_id="exp-1",
+            revision=3,
+            lifecycle=SafetyLifecycle.UNKNOWN,
+            readiness=ReadinessTruth.UNKNOWN,
+        )
+    )
+    assert view._authority_valid is False
+    assert view._authority_revision == 3
+    assert view._authority_producer_id == "engine-test"
+    assert view._sensor_grid._read_only is True
+
+    # An older READY cut and a READY-looking producer replacement cannot
+    # restore authority after revocation. A real reconnect is required for a
+    # producer/incarnation replacement.
+    view.set_operator_snapshot(ready)
+    view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=4, producer_id="engine-other"))
     assert view._authority_valid is False
     assert not view._phase_widget._create_btn.isEnabled()
     assert not view._quick_log._send_btn.isEnabled()
 
+    view.set_connected(False)
+    assert view._authority_producer_id is None
+    assert view._authority_revision is None
+    assert view._sensor_grid._read_only is True
 
-@pytest.mark.parametrize(
-    ("lifecycle", "readiness"),
-    [
-        (SafetyLifecycle.UNKNOWN, ReadinessTruth.READY),
-        (SafetyLifecycle.READY, ReadinessTruth.UNKNOWN),
-        (SafetyLifecycle.UNKNOWN, ReadinessTruth.UNKNOWN),
-    ],
-)
-def test_dashboard_authority_receipt_unknown_truth_revokes_mutation(app, lifecycle, readiness):
+
+def test_dashboard_replay_cut_advances_highwater_and_cannot_restore_live_authority(app):
     view = DashboardView(ChannelManager())
     view.set_connected(True)
-    view.set_authority_receipt(
-        experiment_id=None,
-        producer_id="engine-test",
-        revision=1,
-        lifecycle=SafetyLifecycle.READY,
-        readiness=ReadinessTruth.READY,
-    )
+    view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=42))
     assert view._authority_valid is True
 
-    view.set_authority_receipt(
-        experiment_id=None,
-        producer_id="engine-test",
-        revision=2,
-        lifecycle=lifecycle,
-        readiness=readiness,
+    view.set_operator_snapshot(
+        _operator_snapshot(
+            experiment_id="exp-1",
+            revision=50,
+            lifecycle=SafetyLifecycle.UNKNOWN,
+            readiness=ReadinessTruth.UNKNOWN,
+            mode=SnapshotMode.REPLAY,
+        )
     )
+    assert view._authority_valid is False
+    assert view._authority_revision == 50
 
+    view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=43))
+    assert view._authority_valid is False
+    assert view._authority_revision == 50
+
+
+def test_telemetry_does_not_enable_mutations(app):
+    view = DashboardView(ChannelManager())
+    view.set_connected(True)
+    view.on_reading(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="safety_manager",
+            channel="analytics/safety_state",
+            value=0.0,
+            unit="",
+            metadata={
+                "state": "ready",
+                "lifecycle": "ready",
+                "readiness": "ready",
+                "experiment_id": "exp-telemetry",
+                "producer_id": "engine-telemetry",
+                "revision": 999,
+            },
+        )
+    )
     assert view._authority_valid is False
     assert view._authority_experiment_id is None
     assert view._authority_revision is None
@@ -388,13 +532,7 @@ def test_dashboard_live_config_signals_still_persist(app, monkeypatch):
     monkeypatch.setattr(mgr, "save", lambda: saved.append(True))
     view = DashboardView(mgr)
     view.set_connected(True)
-    view.set_authority_receipt(
-        experiment_id=None,
-        producer_id="engine-test",
-        revision=1,
-        lifecycle=SafetyLifecycle.READY,
-        readiness=ReadinessTruth.READY,
-    )
+    view.set_operator_snapshot(_operator_snapshot())
 
     view._sensor_grid.rename_requested.emit("Т1", "Новое")
     view._sensor_grid.hide_requested.emit("Т1")
@@ -539,13 +677,7 @@ def test_dashboard_quick_log_poll_requires_exact_global_scope_and_retains_last_g
     view.set_connected(True)
     first = _DeferredWorker.instances.pop(0)
     first.finish(_scope_result([{"id": 50, "timestamp": "2026-07-19T08:00:00+00:00", "message": "Последнее"}]))
-    view.set_authority_receipt(
-        experiment_id="exp-log",
-        producer_id="engine-test",
-        revision=1,
-        lifecycle=SafetyLifecycle.READY,
-        readiness=ReadinessTruth.READY,
-    )
+    view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-log"))
     assert view._quick_log is not None
     assert "Последнее" in view._quick_log._entry_labels[0].text()
 
@@ -560,6 +692,24 @@ def test_dashboard_quick_log_poll_requires_exact_global_scope_and_retains_last_g
     assert "Последнее" in view._quick_log._entry_labels[0].text()
     assert "Чужое" not in view._quick_log._entry_labels[0].text()
     assert view._quick_log._status_label.text() == "ЖУРНАЛ НЕ ОБНОВЛЁН"
+
+
+def test_dashboard_no_active_experiment_submits_explicit_unbound_log(app, monkeypatch):
+    _install_deferred_worker(monkeypatch)
+    view = DashboardView(ChannelManager())
+    view.set_connected(True)
+    _DeferredWorker.instances.pop(0).finish(_scope_result([]))
+    view.set_operator_snapshot(_operator_snapshot())
+
+    assert view._authority_experiment_id is None
+    assert view._quick_log is not None
+    view._quick_log._input.setText("Глобальная запись")
+    view._quick_log._on_submit()
+
+    worker = _DeferredWorker.instances.pop(0)
+    assert worker.payload["experiment_id"] is None
+    assert worker.payload["experiment_unbound"] is True
+    assert worker.started is True
 
 
 def test_dashboard_quick_log_poll_is_single_flight_and_coalesced(app, monkeypatch):
