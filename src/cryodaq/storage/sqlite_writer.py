@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -20,7 +21,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
@@ -41,6 +42,10 @@ from cryodaq.storage._sqlite import (
     sqlite3,
     sqlite_version_info,
 )
+from cryodaq.storage._windows_secure_read import (
+    SecureRelativeReadError,
+    read_secure_relative_bytes,
+)
 from cryodaq.storage.channel_descriptors import (
     DescriptorBoundReading,
     LiveChannelDescriptorCatalog,
@@ -55,6 +60,164 @@ from cryodaq.storage.sentinel import decode, encode, is_sentinel
 logger = logging.getLogger(__name__)
 
 _MAX_COMMIT_REVISION = 2**63 - 1
+
+
+def _operator_log_monotonic() -> float:
+    return time.monotonic()
+
+
+def _operator_log_read_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        getattr(info, "st_nlink", 1),
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _operator_log_regular_identity(path: Path) -> tuple[int, int, int, int, int, int, int]:
+    info = path.lstat()
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or getattr(info, "st_nlink", 1) != 1
+        or bool(getattr(info, "st_file_attributes", 0) & reparse_flag)
+    ):
+        raise OSError("operator-log authority is not a single-link regular file")
+    return _operator_log_read_identity(info)
+
+
+def _canonical_operator_log_relative(relative: str) -> str:
+    if type(relative) is not str or not relative or "\\" in relative or "\x00" in relative:
+        raise OSError("operator-log authority path is invalid")
+    pure = PurePosixPath(relative)
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+        raise OSError("operator-log authority path is invalid")
+    if len(pure.parts[0]) >= 2 and pure.parts[0][1] == ":":
+        raise OSError("operator-log authority path is invalid")
+    canonical = pure.as_posix()
+    if relative != canonical:
+        raise OSError("operator-log authority path is not canonical")
+    return canonical
+
+
+def _operator_log_relative_parts(relative: str) -> tuple[str, ...]:
+    return PurePosixPath(_canonical_operator_log_relative(relative)).parts
+
+
+def _read_posix_operator_log_bytes(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    max_bytes: int,
+    deadline_monotonic: float,
+) -> bytes:
+    directory_fd: int | None = None
+    file_fd: int | None = None
+    try:
+        if not hasattr(os, "O_DIRECTORY") or os.open not in os.supports_dir_fd:
+            raise OSError("secure relative reads are unavailable")
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+        file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+            file_flags |= os.O_NOFOLLOW
+        root_parts = root.parts
+        if len(root_parts) < 2:
+            raise OSError("operator-log authority root is invalid")
+        directory_fd = os.open(root_parts[0], directory_flags)
+        for component in (*root_parts[1:], *parts[:-1]):
+            if _operator_log_monotonic() >= deadline_monotonic:
+                raise TimeoutError("operator-log secure read deadline expired")
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        before = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            raise OSError("operator-log authority is not a bounded single-link regular file")
+        file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+        opened = os.fstat(file_fd)
+        if _operator_log_read_identity(opened) != _operator_log_read_identity(before):
+            raise OSError("operator-log authority changed before reading")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            if _operator_log_monotonic() >= deadline_monotonic:
+                raise TimeoutError("operator-log secure read deadline expired")
+            chunk = os.read(file_fd, min(remaining, 65_536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        finished = os.fstat(file_fd)
+        if (
+            len(raw) > max_bytes
+            or len(raw) != opened.st_size
+            or _operator_log_read_identity(finished) != _operator_log_read_identity(opened)
+        ):
+            raise OSError("operator-log authority changed while reading or exceeded its bound")
+        return raw
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _read_secure_operator_log_bytes(
+    root: Path,
+    relative: str,
+    *,
+    max_bytes: int,
+    deadline_monotonic: float,
+) -> bytes:
+    parts = _operator_log_relative_parts(relative)
+    absolute_root = Path(os.path.abspath(os.fspath(root)))
+    selected = absolute_root.joinpath(*parts)
+    before = _operator_log_regular_identity(selected)
+    if before[4] <= 0 or before[4] > max_bytes:
+        raise OSError("operator-log authority exceeds its byte bound")
+    if _operator_log_monotonic() >= deadline_monotonic:
+        raise TimeoutError("operator-log secure read deadline expired")
+    if os.name == "nt":
+        try:
+            raw = read_secure_relative_bytes(absolute_root, PurePosixPath(*parts), max_bytes=max_bytes)
+        except SecureRelativeReadError as exc:
+            raise OSError("operator-log authority cannot be read safely") from exc
+    else:
+        raw = _read_posix_operator_log_bytes(
+            absolute_root,
+            parts,
+            max_bytes=max_bytes,
+            deadline_monotonic=deadline_monotonic,
+        )
+    if _operator_log_monotonic() >= deadline_monotonic:
+        raise TimeoutError("operator-log secure read deadline expired")
+    after = _operator_log_regular_identity(selected)
+    if after != before or len(raw) != before[4]:
+        raise OSError("operator-log authority path identity changed")
+    return raw
+
+
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    decoded: dict[str, object] = {}
+    for key, value in pairs:
+        if key in decoded:
+            raise ValueError(f"duplicate JSON key: {key}")
+        decoded[key] = value
+    return decoded
+
 
 SCHEMA_READINGS = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -166,6 +329,14 @@ _OPERATOR_LOG_REGISTRY_DEADLINE_S = 10.0
 _OPERATOR_LOG_MAX_DIRECTORY_ENTRIES = 100_000
 _OPERATOR_LOG_MAX_HOT_DATABASES = 10_000
 _OPERATOR_LOG_MAX_KEYED_ROWS = 10_000
+_OPERATOR_LOG_INDEX_MAX_BYTES = 8 * 1024 * 1024
+_OPERATOR_LOG_SIDECAR_MAX_BYTES = 32 * 1024 * 1024
+_OPERATOR_LOG_MAX_DECODED_BYTES = 32 * 1024 * 1024
+_OPERATOR_LOG_MAX_TEXT_FIELD_BYTES = 1024 * 1024
+_OPERATOR_LOG_MAX_IDENTITY_FIELD_BYTES = 4096
+_OPERATOR_LOG_PARQUET_THRIFT_STRING_MAX_BYTES = 1024 * 1024
+_OPERATOR_LOG_MAX_ROW_GROUPS = 1024
+_OPERATOR_LOG_BATCH_ROWS = 256
 
 
 def _parse_timestamp(raw) -> datetime:
@@ -1654,7 +1825,7 @@ class SQLiteWriter:
                         raise OperatorLogIdempotencyUnavailableError(
                             "operator-log hot directory exceeds the bounded entry cap"
                         )
-                    if time.monotonic() >= deadline_monotonic:
+                    if _operator_log_monotonic() >= deadline_monotonic:
                         raise OperatorLogIdempotencyUnavailableError("operator-log hot registry deadline expired")
                     name = item.name
                     if len(name) != 18 or not name.startswith("data_") or not name.endswith(".db"):
@@ -1695,7 +1866,7 @@ class SQLiteWriter:
                 conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 65_536)
 
                 def interrupt_on_deadline() -> int:
-                    if time.monotonic() >= deadline_monotonic:
+                    if _operator_log_monotonic() >= deadline_monotonic:
                         expired[0] = True
                         return 1
                     return 0
@@ -1775,7 +1946,7 @@ class SQLiteWriter:
             if self._operator_log_path_identity(path) != identity:
                 raise OperatorLogIdempotencyUnavailableError("operator-log hot source identity changed")
         self._read_cold_operator_log_registry(deadline_monotonic, registry)
-        if time.monotonic() >= deadline_monotonic:
+        if _operator_log_monotonic() >= deadline_monotonic:
             raise OperatorLogIdempotencyUnavailableError("operator-log hot registry deadline expired")
         return registry
 
@@ -1785,117 +1956,335 @@ class SQLiteWriter:
         registry: dict[str, _PersistedOperatorLogRequest],
     ) -> None:
         """Load keyed identity only from verified, contained cold-v2 sidecars."""
-        index_path = self._data_dir / "archive" / "index.json"
-        if not index_path.is_file():
+        archive_root = self._data_dir / "archive"
+        try:
+            index_bytes = _read_secure_operator_log_bytes(
+                self._data_dir,
+                "archive/index.json",
+                max_bytes=_OPERATOR_LOG_INDEX_MAX_BYTES,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except FileNotFoundError:
             return
         try:
-            archive_root = index_path.parent.resolve(strict=True)
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-            entries = index.get("files", [])
+            index = json.loads(
+                index_bytes.decode("utf-8", errors="strict"),
+                object_pairs_hook=_reject_duplicate_json_pairs,
+            )
+            if type(index) is not dict:
+                raise ValueError("cold operator-log index root is invalid")
+            if "files" not in index:
+                raise ValueError("cold operator-log index files authority is missing")
+            entries = index["files"]
             if type(entries) is not list or len(entries) > _OPERATOR_LOG_MAX_HOT_DATABASES:
                 raise ValueError("cold operator-log index is invalid or unbounded")
+            import pyarrow as pa  # noqa: PLC0415
             import pyarrow.parquet as pq  # noqa: PLC0415
         except ImportError as exc:
             raise OperatorLogIdempotencyUnavailableError("cold operator-log identity requires pyarrow") from exc
         except Exception as exc:
             raise OperatorLogIdempotencyUnavailableError("cold operator-log index is invalid") from exc
 
+        canonical_authorities: list[tuple[str, str] | None] = []
+        preflight_paths: set[str] = set()
+        preflight_proofs: set[tuple[str, int, str, int, str]] = set()
         for indexed in entries:
-            if time.monotonic() >= deadline_monotonic:
-                raise OperatorLogIdempotencyUnavailableError("operator-log cold registry deadline expired")
-            if indexed.get("operator_log_schema") != "operator_log_v2":
-                continue
-            relative = indexed.get("operator_log_path")
-            if type(relative) is not str or not relative:
-                raise OperatorLogIdempotencyUnavailableError("cold operator-log path is invalid")
-            path = (archive_root / relative).resolve(strict=True)
-            try:
-                path.relative_to(archive_root)
-            except ValueError as exc:
-                raise OperatorLogIdempotencyUnavailableError("cold operator-log path escapes archive root") from exc
-            info = path.lstat()
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or getattr(info, "st_nlink", 1) != 1
-                or getattr(info, "st_file_attributes", 0) & 0x400
-            ):
-                raise OperatorLogIdempotencyUnavailableError("cold operator-log sidecar is not stable")
-            if indexed.get("operator_log_size_bytes") != info.st_size:
-                raise OperatorLogIdempotencyUnavailableError("cold operator-log size proof mismatch")
-            if self._md5_hex(path) != indexed.get("operator_log_checksum_md5"):
-                raise OperatorLogIdempotencyUnavailableError("cold operator-log checksum proof mismatch")
-            table = pq.read_table(
-                str(path),
-                columns=[
-                    "timestamp",
-                    "experiment_id",
-                    "author",
-                    "source",
-                    "message",
-                    "tags",
-                    "request_id",
-                    "request_fingerprint",
-                    "row_id",
-                ],
+            if type(indexed) is not dict:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log index entry is invalid")
+            operator_field_names = (
+                "operator_log_path",
+                "operator_log_rows",
+                "operator_log_checksum_md5",
+                "operator_log_size_bytes",
+                "operator_log_schema",
             )
-            if table.num_rows > _OPERATOR_LOG_MAX_KEYED_ROWS:
-                raise OperatorLogIdempotencyUnavailableError("cold operator-log keyed row count exceeds cap")
-            for row in table.to_pylist():
-                request_id = row["request_id"]
-                fingerprint = row["request_fingerprint"]
-                self._validate_operator_log_request(request_id, fingerprint)
-                row_id = row["row_id"]
-                if type(row_id) is not int or row_id <= 0:
-                    raise ValueError("cold operator-log row id is invalid")
-                tags = json.loads(str(row["tags"]))
-                if type(tags) is not list or any(type(value) is not str for value in tags):
-                    raise ValueError("cold operator-log tags are invalid")
-                values = (row["author"], row["source"], row["message"])
-                if any(type(value) is not str for value in values):
-                    raise ValueError("cold operator-log text field is invalid")
-                original_name = indexed.get("original_name")
-                if (
-                    type(original_name) is not str
-                    or len(original_name) != 18
-                    or not original_name.startswith("data_")
-                    or not original_name.endswith(".db")
-                ):
-                    raise ValueError("cold operator-log source day is invalid")
-                storage_day = date.fromisoformat(original_name[5:15])
-                entry = OperatorLogEntry(
-                    id=row_id,
-                    timestamp=_parse_timestamp(row["timestamp"]),
-                    experiment_id=row["experiment_id"],
-                    author=row["author"],
-                    source=row["source"],
-                    message=row["message"],
-                    tags=tuple(tags),
+            operator_field_presence = tuple(name in indexed for name in operator_field_names)
+            if not any(operator_field_presence):
+                canonical_authorities.append(None)
+                continue
+            if not all(operator_field_presence):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log proof is incomplete")
+            relative, expected_rows, expected_checksum, expected_size, schema_version = (
+                indexed[name] for name in operator_field_names
+            )
+            if any(
+                value is None for value in (relative, expected_rows, expected_checksum, expected_size, schema_version)
+            ):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log proof contains null authority")
+            if schema_version not in {"operator_log_v1", "operator_log_v2"}:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log schema tag is unknown")
+            archive_relative = indexed.get("archive_path")
+            try:
+                canonical_relative = _canonical_operator_log_relative(relative)
+                canonical_archive_relative = _canonical_operator_log_relative(archive_relative)
+            except OSError as exc:
+                raise OperatorLogIdempotencyUnavailableError(
+                    "cold operator-log path authority is invalid or non-canonical"
+                ) from exc
+            expected_relative = (
+                canonical_archive_relative.removesuffix(".parquet") + ".operator_log.parquet"
+                if canonical_archive_relative.endswith(".parquet")
+                else None
+            )
+            if canonical_relative != expected_relative:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log path proof mismatch")
+            if type(expected_size) is not int or not 0 < expected_size <= _OPERATOR_LOG_SIDECAR_MAX_BYTES:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log size proof mismatch")
+            if (
+                type(expected_checksum) is not str
+                or len(expected_checksum) != 32
+                or any(char not in "0123456789abcdef" for char in expected_checksum)
+            ):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log checksum proof mismatch")
+            if type(expected_rows) is not int or not 0 < expected_rows <= _OPERATOR_LOG_MAX_KEYED_ROWS:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log row-count proof is invalid")
+            proof = (
+                canonical_relative,
+                expected_rows,
+                expected_checksum,
+                expected_size,
+                schema_version,
+            )
+            if proof in preflight_proofs:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log proof is duplicated")
+            if canonical_relative in preflight_paths:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log path authority is ambiguous")
+            preflight_proofs.add(proof)
+            preflight_paths.add(canonical_relative)
+            canonical_authorities.append((canonical_relative, canonical_archive_relative))
+
+        seen_operator_paths: set[str] = set()
+        seen_operator_proofs: set[tuple[str, int, str, int, str]] = set()
+        for entry_index, indexed in enumerate(entries):
+            if _operator_log_monotonic() >= deadline_monotonic:
+                raise OperatorLogIdempotencyUnavailableError("operator-log cold registry deadline expired")
+            if type(indexed) is not dict:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log index entry is invalid")
+            operator_field_names = (
+                "operator_log_path",
+                "operator_log_rows",
+                "operator_log_checksum_md5",
+                "operator_log_size_bytes",
+                "operator_log_schema",
+            )
+            operator_field_presence = tuple(name in indexed for name in operator_field_names)
+            if not any(operator_field_presence):
+                continue
+            if not all(operator_field_presence):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log proof is incomplete")
+            operator_fields = tuple(indexed[name] for name in operator_field_names)
+            if any(value is None for value in operator_fields):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log proof contains null authority")
+            relative, expected_rows, expected_checksum, expected_size, schema_version = operator_fields
+            if schema_version not in {"operator_log_v1", "operator_log_v2"}:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log schema tag is unknown")
+            canonical_authority = canonical_authorities[entry_index]
+            if canonical_authority is None:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log path authority is unavailable")
+            relative, archive_relative = canonical_authority
+            expected_relative = (
+                archive_relative.removesuffix(".parquet") + ".operator_log.parquet"
+                if archive_relative.endswith(".parquet")
+                else None
+            )
+            if relative != expected_relative:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log path proof mismatch")
+            if type(expected_size) is not int or not 0 < expected_size <= _OPERATOR_LOG_SIDECAR_MAX_BYTES:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log size proof mismatch")
+            if (
+                type(expected_checksum) is not str
+                or len(expected_checksum) != 32
+                or any(char not in "0123456789abcdef" for char in expected_checksum)
+            ):
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log checksum proof mismatch")
+            if type(expected_rows) is not int or not 0 < expected_rows <= _OPERATOR_LOG_MAX_KEYED_ROWS:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log row-count proof is invalid")
+            proof = (relative, expected_rows, expected_checksum, expected_size, schema_version)
+            if proof in seen_operator_proofs:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log proof is duplicated")
+            if relative in seen_operator_paths:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log path authority is ambiguous")
+            seen_operator_proofs.add(proof)
+            seen_operator_paths.add(relative)
+            raw_sidecar = _read_secure_operator_log_bytes(
+                archive_root,
+                relative,
+                max_bytes=_OPERATOR_LOG_SIDECAR_MAX_BYTES,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if _operator_log_monotonic() >= deadline_monotonic:
+                raise OperatorLogIdempotencyUnavailableError("operator-log cold registry deadline expired after read")
+            if len(raw_sidecar) != expected_size:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log size proof mismatch")
+            if hashlib.md5(raw_sidecar, usedforsecurity=False).hexdigest() != expected_checksum:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log checksum proof mismatch")
+            public_schema = pa.schema(
+                [
+                    ("timestamp", pa.float64()),
+                    ("experiment_id", pa.string()),
+                    ("author", pa.string()),
+                    ("source", pa.string()),
+                    ("message", pa.string()),
+                    ("tags", pa.string()),
+                ]
+            )
+            expected_schema = (
+                pa.schema(
+                    [
+                        *public_schema,
+                        ("request_id", pa.string()),
+                        ("request_fingerprint", pa.string()),
+                        ("row_id", pa.int64()),
+                    ]
                 )
-                if request_id in registry:
-                    raise OperatorLogIdempotencyUnavailableError(
-                        "operator-log request id is ambiguous across retained storage"
+                if schema_version == "operator_log_v2"
+                else public_schema
+            )
+            parquet = pq.ParquetFile(
+                pa.BufferReader(raw_sidecar),
+                pre_buffer=False,
+                thrift_string_size_limit=_OPERATOR_LOG_PARQUET_THRIFT_STRING_MAX_BYTES,
+                thrift_container_size_limit=_OPERATOR_LOG_MAX_KEYED_ROWS * len(expected_schema),
+            )
+            if parquet.schema_arrow != expected_schema:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log exact schema mismatch")
+            metadata = parquet.metadata
+            if metadata.num_rows != expected_rows:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log row-count proof mismatch")
+            if metadata.num_row_groups < 1 or metadata.num_row_groups > _OPERATOR_LOG_MAX_ROW_GROUPS:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log row-group count exceeds cap")
+            total_uncompressed = 0
+            total_compressed = 0
+            for group_index in range(metadata.num_row_groups):
+                if _operator_log_monotonic() >= deadline_monotonic:
+                    raise OperatorLogIdempotencyUnavailableError("operator-log cold registry deadline expired")
+                group = metadata.row_group(group_index)
+                total_uncompressed += group.total_byte_size
+                total_compressed += sum(
+                    group.column(column_index).total_compressed_size for column_index in range(group.num_columns)
+                )
+                if total_uncompressed > _OPERATOR_LOG_MAX_DECODED_BYTES or total_compressed > len(raw_sidecar):
+                    raise OperatorLogIdempotencyUnavailableError("cold operator-log decoded size exceeds cap")
+            original_name = indexed.get("original_name")
+            if (
+                type(original_name) is not str
+                or len(original_name) != 18
+                or not original_name.startswith("data_")
+                or not original_name.endswith(".db")
+            ):
+                raise ValueError("cold operator-log source day is invalid")
+            storage_day = date.fromisoformat(original_name[5:15])
+            if original_name != f"data_{storage_day.isoformat()}.db":
+                raise ValueError("cold operator-log source day is invalid")
+
+            decoded_rows = 0
+            decoded_arrow_bytes = 0
+            decoded_content_bytes = 0
+            row_ids: set[int] = set()
+            for batch in parquet.iter_batches(batch_size=_OPERATOR_LOG_BATCH_ROWS, use_threads=False):
+                if _operator_log_monotonic() >= deadline_monotonic:
+                    raise OperatorLogIdempotencyUnavailableError("operator-log cold registry deadline expired")
+                if batch.schema != expected_schema:
+                    raise OperatorLogIdempotencyUnavailableError("cold operator-log reopen schema mismatch")
+                decoded_rows += batch.num_rows
+                decoded_arrow_bytes += batch.nbytes
+                if decoded_rows > expected_rows or decoded_arrow_bytes > _OPERATOR_LOG_MAX_DECODED_BYTES:
+                    raise OperatorLogIdempotencyUnavailableError("cold operator-log decoded size exceeds cap")
+                for row in batch.to_pylist():
+                    raw_timestamp = row["timestamp"]
+                    if type(raw_timestamp) is not float or not math.isfinite(raw_timestamp):
+                        raise ValueError("cold operator-log timestamp is invalid")
+                    timestamp = datetime.fromtimestamp(raw_timestamp, tz=UTC)
+                    experiment_id = row["experiment_id"]
+                    if experiment_id is not None and type(experiment_id) is not str:
+                        raise ValueError("cold operator-log experiment id is invalid")
+                    author = row["author"]
+                    source = row["source"]
+                    message = row["message"]
+                    raw_tags = row["tags"]
+                    if any(type(value) is not str for value in (author, source, message, raw_tags)):
+                        raise ValueError("cold operator-log text field is invalid")
+                    field_values = (
+                        ("experiment_id", experiment_id, _OPERATOR_LOG_MAX_IDENTITY_FIELD_BYTES),
+                        ("author", author, _OPERATOR_LOG_MAX_IDENTITY_FIELD_BYTES),
+                        ("source", source, _OPERATOR_LOG_MAX_IDENTITY_FIELD_BYTES),
+                        ("message", message, _OPERATOR_LOG_MAX_TEXT_FIELD_BYTES),
+                        ("tags", raw_tags, _OPERATOR_LOG_MAX_TEXT_FIELD_BYTES),
                     )
-                registry[request_id] = _PersistedOperatorLogRequest(
-                    storage_day=storage_day,
-                    entry=entry,
-                    request_id=request_id,
-                    request_fingerprint=fingerprint,
-                )
-                if len(registry) > _OPERATOR_LOG_MAX_KEYED_ROWS:
-                    raise OperatorLogIdempotencyUnavailableError("operator-log keyed row count exceeds the bounded cap")
+                    for field_name, value, maximum in field_values:
+                        if value is None:
+                            continue
+                        field_bytes = len(value.encode("utf-8"))
+                        if field_bytes > maximum:
+                            raise OperatorLogIdempotencyUnavailableError(
+                                f"cold operator-log {field_name} field exceeds cap"
+                            )
+                        decoded_content_bytes += field_bytes
+                    tags = json.loads(raw_tags, object_pairs_hook=_reject_duplicate_json_pairs)
+                    if type(tags) is not list or any(type(value) is not str for value in tags):
+                        raise ValueError("cold operator-log tags are invalid")
+                    decoded_content_bytes += sum(len(value.encode("utf-8")) for value in tags)
+                    if decoded_content_bytes > _OPERATOR_LOG_MAX_DECODED_BYTES:
+                        raise OperatorLogIdempotencyUnavailableError("cold operator-log decoded content exceeds cap")
+                    if schema_version == "operator_log_v1":
+                        continue
+                    row_id = row["row_id"]
+                    if type(row_id) is not int or row_id <= 0 or row_id in row_ids:
+                        raise ValueError("cold operator-log row id is invalid or ambiguous")
+                    row_ids.add(row_id)
+                    request_id = row["request_id"]
+                    fingerprint = row["request_fingerprint"]
+                    if request_id is None and fingerprint is None:
+                        continue
+                    if (request_id is None) != (fingerprint is None):
+                        raise OperatorLogIdempotencyUnavailableError(
+                            "cold operator-log identity is only partially populated"
+                        )
+                    self._validate_operator_log_request(request_id, fingerprint)
+                    decoded_content_bytes += len(request_id) + len(fingerprint)
+                    if decoded_content_bytes > _OPERATOR_LOG_MAX_DECODED_BYTES:
+                        raise OperatorLogIdempotencyUnavailableError("cold operator-log decoded content exceeds cap")
+                    entry = OperatorLogEntry(
+                        id=row_id,
+                        timestamp=timestamp,
+                        experiment_id=experiment_id,
+                        author=author,
+                        source=source,
+                        message=message,
+                        tags=tuple(tags),
+                    )
+                    if request_id in registry:
+                        raise OperatorLogIdempotencyUnavailableError(
+                            "operator-log request id is ambiguous across retained storage"
+                        )
+                    registry[request_id] = _PersistedOperatorLogRequest(
+                        storage_day=storage_day,
+                        entry=entry,
+                        request_id=request_id,
+                        request_fingerprint=fingerprint,
+                    )
+                    if len(registry) > _OPERATOR_LOG_MAX_KEYED_ROWS:
+                        raise OperatorLogIdempotencyUnavailableError(
+                            "operator-log keyed row count exceeds the bounded cap"
+                        )
+            if decoded_rows != expected_rows:
+                raise OperatorLogIdempotencyUnavailableError("cold operator-log row-count proof mismatch")
 
     def _initialize_operator_log_idempotency_sync(self, deadline_monotonic: float) -> None:
         try:
             registry = self._read_hot_operator_log_registry(deadline_monotonic)
-        except Exception:
+        except OperatorLogIdempotencyUnavailableError:
             self._operator_log_idempotency_registry = None
             raise
+        except Exception as exc:
+            self._operator_log_idempotency_registry = None
+            raise OperatorLogIdempotencyUnavailableError("operator-log retained registry is invalid") from exc
         self._operator_log_idempotency_registry = registry
 
     async def initialize_operator_log_idempotency(self) -> None:
         """Build the bounded retained-data registry before accepting keyed writes."""
 
-        deadline = time.monotonic() + _OPERATOR_LOG_REGISTRY_DEADLINE_S
+        deadline = _operator_log_monotonic() + _OPERATOR_LOG_REGISTRY_DEADLINE_S
         owner = self._owned_executor_task(
             self._executor,
             self._initialize_operator_log_idempotency_sync,
@@ -1953,6 +2342,11 @@ class SQLiteWriter:
         resolved = self._resolve_operator_log_request_sync(request_id, request_fingerprint)
         if resolved is not None:
             return resolved
+        registry = self._operator_log_idempotency_registry
+        if registry is None:
+            raise OperatorLogIdempotencyUnavailableError("operator-log request registry became unavailable")
+        if len(registry) >= _OPERATOR_LOG_MAX_KEYED_ROWS:
+            raise OperatorLogIdempotencyUnavailableError("operator-log keyed registry capacity is exhausted")
         entry_time = datetime.now(UTC)
         try:
             entry = self._write_operator_log_entry(
