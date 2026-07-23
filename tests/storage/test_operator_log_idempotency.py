@@ -426,7 +426,7 @@ async def _assert_cold_registry_unavailable(
     await writer.stop()
 
 
-async def test_clean_mixed_cold_v2_replays_keyed_row_and_ignores_null_identity(tmp_path: Path) -> None:
+async def test_rotation_restart_returns_original_request_receipt(tmp_path: Path) -> None:
     request_id = "5" * 32
     fingerprint = "f" * 64
     _index_path, _hot_path, _evidence = await _rotate_mixed_operator_log_v2(
