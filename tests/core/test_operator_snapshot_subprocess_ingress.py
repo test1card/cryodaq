@@ -519,6 +519,61 @@ def test_bridge_restart_replaces_snapshot_queue_and_invalidates_old_cut(monkeypa
     assert bridge.snapshot_flow_age_s() is None
 
 
+def test_old_child_data_cannot_inherit_new_incarnation(monkeypatch) -> None:
+    class FakeProcess:
+        pid = 123
+
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
+    monkeypatch.setattr("cryodaq.gui.zmq_client.mp.Process", FakeProcess)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.threading.Thread", FakeThread)
+    monkeypatch.setattr("cryodaq.gui.zmq_client.mp.JoinableQueue", lambda *args, **kwargs: queue.Queue(maxsize=2))
+    bridge = ZmqBridge()
+    bridge.start()
+    retired_queue = bridge._snapshot_queue
+    retired_incarnation = bridge.bridge_instance_id
+    assert retired_incarnation is not None
+
+    bridge._process._alive = False
+    bridge.start()
+    replacement_queue = bridge._snapshot_queue
+    replacement_incarnation = bridge.bridge_instance_id
+
+    assert replacement_queue is not retired_queue
+    assert replacement_incarnation is not None
+    assert replacement_incarnation != retired_incarnation
+    retired_queue.put_nowait(_snapshot(99))
+    assert bridge.poll_operator_snapshots() == []
+    assert retired_queue.get_nowait().cut.revision == 99
+    retired_queue.task_done()
+
+    replacement_queue.put_nowait(_snapshot(1))
+    assert [snapshot.cut.revision for snapshot in bridge.poll_operator_snapshots()] == [1]
+
+
 def test_spawn_failure_invalidates_snapshot_age_and_queued_cut_before_attempt(monkeypatch) -> None:
     class FailingProcess:
         def __init__(self, *args, **kwargs) -> None:

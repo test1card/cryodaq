@@ -776,6 +776,34 @@ def test_same_cut_raw_cannot_reset_authority_after_disconnect() -> None:
     assert {summary.state for summary in store.summaries()} == {OperatorPresentationState.DISCONNECTED}
 
 
+def test_explicit_generation_replacement_rejects_old_producer() -> None:
+    original = _snapshot()
+    store = OperatorSnapshotStore()
+    store.accept_snapshot(original)
+    store.observe_transport(connected=False, transport_age_s=8, stale_after_s=5)
+    store.begin_live_producer_replacement()
+
+    replacement = _recut(
+        original,
+        revision=1,
+        observed_at=original.cut.observed_at + timedelta(seconds=1),
+        received_at=original.cut.received_at + timedelta(seconds=1),
+        source="engine/restarted",
+        producer_id="engine/operator-snapshot-v2",
+    )
+    assert store.accept_snapshot(replacement) == replacement
+
+    retired_late = _recut(
+        original,
+        revision=43,
+        observed_at=original.cut.observed_at + timedelta(seconds=2),
+        received_at=original.cut.received_at + timedelta(seconds=2),
+    )
+    with pytest.raises(ValueError, match="producer incarnation changed"):
+        store.accept_snapshot(retired_late)
+    assert store.snapshot == replacement
+
+
 def test_equal_cut_identical_raw_is_idempotent_only_before_invalidation() -> None:
     raw = _snapshot()
     decoded = load_operator_snapshot(dump_operator_snapshot(raw))

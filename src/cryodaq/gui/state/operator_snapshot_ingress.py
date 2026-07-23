@@ -115,7 +115,7 @@ class OperatorSnapshotIngressOwner(QObject):
             self._next_health_poll = now + _HEALTH_POLL_INTERVAL_S
 
     def invalidate_transport(self) -> None:
-        """Invalidate old queued work before an externally decided bridge restart."""
+        """Invalidate queued transport work without retiring the engine producer."""
         self._require_owner_thread()
         if not self._active:
             return
@@ -127,6 +127,16 @@ class OperatorSnapshotIngressOwner(QObject):
         finally:
             self._degrade_current(connected=False)
         self._next_health_poll = 0.0
+
+    def invalidate_producer(self) -> None:
+        """Retire backend authority only for a known engine incarnation turnover."""
+
+        self._require_owner_thread()
+        if not self._active:
+            return
+        self.invalidate_transport()
+        self._store.begin_live_producer_replacement()
+        self._last_accepted_snapshot = None
 
     def stop(self) -> None:
         """Settle queued work, drain IPC, and leave current truth disconnected."""
@@ -144,13 +154,23 @@ class OperatorSnapshotIngressOwner(QObject):
     @Slot(int, object)
     def _apply_snapshot_batch(self, epoch: int, candidate: object) -> None:
         """Accept and freshness-qualify one cut before emitting it once."""
+        self._require_owner_thread()
+        if not self._active or epoch != self._epoch:
+            return
         if type(candidate) is not tuple or not candidate:
             self._reject_snapshot_batch()
             return
         previous = self._last_accepted_snapshot
         previous_revision = previous.cut.revision if previous is not None else -1
+        batch_identity: tuple[str, str, object] | None = None
         for item in candidate:
             if type(item) is not OperatorSnapshot or item.cut.revision < previous_revision:
+                self._reject_snapshot_batch()
+                return
+            identity = (item.cut.producer_id, item.cut.experiment_id, item.cut.mode)
+            if batch_identity is None:
+                batch_identity = identity
+            elif identity != batch_identity:
                 self._reject_snapshot_batch()
                 return
             if item.cut.revision == previous_revision:

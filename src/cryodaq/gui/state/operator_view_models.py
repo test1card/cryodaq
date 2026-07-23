@@ -51,7 +51,9 @@ class OperatorSnapshotStore:
         "_invalidated",
         "_live_observed_high_water",
         "_live_producer_id",
+        "_live_producer_replacement_pending",
         "_raw",
+        "_retired_live_producer_ids",
         "_stale_after_s",
         "_transport_age_s",
     )
@@ -65,6 +67,8 @@ class OperatorSnapshotStore:
         self._invalidated = False
         self._live_observed_high_water: dict[str, datetime] = {}
         self._live_producer_id: str | None = None
+        self._live_producer_replacement_pending = False
+        self._retired_live_producer_ids: set[str] = set()
 
     def __copy__(self) -> OperatorSnapshotStore:
         raise TypeError("OperatorSnapshotStore is a single-owner GUI session")
@@ -104,8 +108,11 @@ class OperatorSnapshotStore:
             raise TypeError("snapshot must be an OperatorSnapshot")
         if any(summary.transport_reason_codes for summary in snapshot.summaries()):
             raise ValueError("transport-overlaid snapshot cannot be accepted as raw authority")
+        replacement = snapshot.cut.mode is SnapshotMode.LIVE and self._live_producer_replacement_pending
+        if replacement and snapshot.cut.producer_id in self._retired_live_producer_ids:
+            raise ValueError("retired live producer cannot become the replacement generation")
         current = self._raw
-        if current is not None:
+        if current is not None and not replacement:
             if snapshot.cut == current.cut:
                 if self._invalidated:
                     raise ValueError("same-cut raw snapshot cannot reset invalidated authority")
@@ -117,7 +124,11 @@ class OperatorSnapshotStore:
             if snapshot.cut.received_at < current.cut.received_at:
                 raise ValueError("backend snapshot received_at cannot move backwards")
         if snapshot.cut.mode is SnapshotMode.LIVE:
-            if self._live_producer_id is None:
+            if replacement:
+                self._live_producer_id = snapshot.cut.producer_id
+                self._live_observed_high_water.clear()
+                self._live_producer_replacement_pending = False
+            elif self._live_producer_id is None:
                 self._live_producer_id = snapshot.cut.producer_id
             elif snapshot.cut.producer_id != self._live_producer_id:
                 raise ValueError("live snapshot producer incarnation changed without explicit replacement")
@@ -135,6 +146,23 @@ class OperatorSnapshotStore:
         self._stale_after_s = None
         self._invalidated = False
         return snapshot
+
+    def begin_live_producer_replacement(self) -> None:
+        """Authorize one new producer only after the current cut is disconnected."""
+
+        current_producer = self._live_producer_id
+        if self._raw is not None and self._raw.cut.mode is SnapshotMode.LIVE and self._connected is not False:
+            raise RuntimeError("live producer replacement requires disconnected transport evidence")
+        if current_producer is not None:
+            if (
+                current_producer not in self._retired_live_producer_ids
+                and len(self._retired_live_producer_ids) >= MAX_LIVE_SOURCES_PER_SESSION
+            ):
+                raise RuntimeError("retired live producer bound is exhausted; start a new GUI session")
+            self._retired_live_producer_ids.add(current_producer)
+        self._live_producer_id = None
+        self._live_observed_high_water.clear()
+        self._live_producer_replacement_pending = True
 
     def observe_transport(
         self,

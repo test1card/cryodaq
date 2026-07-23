@@ -54,9 +54,10 @@ def _snapshot(
     observed_at: datetime = NOW,
     received_at: datetime | None = None,
     producer_id: str | None = None,
+    experiment_id: str = "experiment-1",
 ) -> OperatorSnapshot:
     received = NOW + timedelta(seconds=revision) if received_at is None else received_at
-    cut = SnapshotCut(revision, observed_at, received, source, mode, "experiment-1", producer_id or source)
+    cut = SnapshotCut(revision, observed_at, received, source, mode, experiment_id, producer_id or source)
     state = OperatorPresentationState.STALE if mode is SnapshotMode.REPLAY else OperatorPresentationState.CAUTION
     status = SummaryStatus(state, 0.0, 0.0, (), "Backend authority")
     return OperatorSnapshot(
@@ -74,7 +75,7 @@ def _snapshot(
         ExperimentOperatingState(
             cut,
             status,
-            "experiment-1",
+            experiment_id,
             "Cooldown",
             "cooldown",
             RecordingTruth.REPLAY_ONLY if mode is SnapshotMode.REPLAY else RecordingTruth.UNKNOWN,
@@ -226,6 +227,27 @@ def test_invalid_member_quarantines_the_entire_drained_batch_before_replacement(
     assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("transport_disconnected",)}
 
 
+def test_mixed_identity_batch_is_quarantined_atomically(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner.start()
+    owner._apply_snapshot(owner._epoch, _snapshot(1, producer_id="engine-a"))
+
+    owner._apply_snapshot_batch(
+        owner._epoch,
+        (
+            _snapshot(2, producer_id="engine-b"),
+            _snapshot(3, producer_id="engine-a"),
+        ),
+    )
+
+    assert owner.accepted_count == 1
+    assert owner.rejected_count == 1
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.revision == 1
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+    assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("transport_disconnected",)}
+
+
 def test_wrong_thread_direct_mutation_rejected_but_signal_delivery_is_queued(qapp) -> None:
     owner = OperatorSnapshotIngressOwner(_Bridge())
     owner.start()
@@ -268,6 +290,46 @@ def test_restart_invalidation_discards_queued_old_epoch_and_degrades_current_cut
     assert owner.snapshot is not None
     assert owner.snapshot.cut.revision == 1
     assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("transport_disconnected",)}
+
+    owner._apply_snapshot(owner._epoch, _snapshot(2))
+    assert owner.accepted_count == 2
+    assert owner.rejected_count == 0
+    assert owner.snapshot.cut.revision == 2
+
+
+def test_bridge_only_restart_still_rejects_foreign_engine_producer(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner.start()
+    owner._apply_snapshot(owner._epoch, _snapshot(1, producer_id="engine-a"))
+
+    owner.invalidate_transport()
+    owner._apply_snapshot(owner._epoch, _snapshot(2, producer_id="engine-b"))
+
+    assert owner.accepted_count == 1
+    assert owner.rejected_count == 1
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.producer_id == "engine-a"
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+
+
+def test_explicit_engine_replacement_accepts_new_and_never_resurrects_retired_producer(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner.start()
+    owner._apply_snapshot(owner._epoch, _snapshot(7, producer_id="engine-a"))
+
+    owner.invalidate_producer()
+    owner._apply_snapshot(owner._epoch, _snapshot(1, producer_id="engine-b"))
+    assert owner.accepted_count == 2
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.producer_id == "engine-b"
+
+    owner.invalidate_producer()
+    owner._apply_snapshot(owner._epoch, _snapshot(99, producer_id="engine-a"))
+
+    assert owner.accepted_count == 2
+    assert owner.rejected_count == 1
+    assert owner.snapshot.cut.producer_id == "engine-b"
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
 
 def test_stale_and_disconnected_health_are_snapshot_only_and_never_restart(qapp) -> None:
@@ -405,6 +467,32 @@ def test_stop_cancels_queued_epoch_drains_bridge_and_leaves_store_disconnected(q
     assert owner.snapshot is not None
     assert owner.snapshot.cut.revision == 1
     assert all("transport_disconnected" in summary.transport_reason_codes for summary in owner.snapshot.summaries())
+
+
+def test_malformed_old_epoch_after_stop_has_zero_side_effects(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner.start()
+    owner._apply_snapshot(owner._epoch, _snapshot(1))
+    old_epoch = owner._epoch
+    owner.stop()
+    before = (
+        owner._epoch,
+        owner.active,
+        owner.accepted_count,
+        owner.rejected_count,
+        owner.snapshot,
+    )
+
+    owner._apply_snapshot_batch(old_epoch, ({"optimistic": "ready"},))
+    owner._apply_failure(old_epoch)
+
+    assert (
+        owner._epoch,
+        owner.active,
+        owner.accepted_count,
+        owner.rejected_count,
+        owner.snapshot,
+    ) == before
 
 
 def test_stop_failure_keeps_owner_active_and_epoch_current(qapp, monkeypatch) -> None:
