@@ -467,7 +467,7 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
-    guard: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_retains_owner_until_settlement
+    guard: tests/drivers/test_usbtmc_process_protocol.py::test_terminate_and_kill_failure_retains_exact_owner
     ci_partition: remaining
     red_evidence: cooperative_close_tests_missed_cancelled_live_handle_pending_immutable_capture
     green_evidence: pending
@@ -675,7 +675,7 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
-    guard: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_commits_success_before_propagating_cancellation
+    guard: tests/drivers/test_usbtmc_process_protocol.py::test_later_close_reconciles_same_owner_without_second_physical_close
     ci_partition: remaining
     red_evidence: exact_cli_97cff82c_test_blessed_terminal_incomplete_state_after_the_owned_handle_close_had_successfully_settled_2026_07_22_pending_immutable_capture
     green_evidence: pending
@@ -1387,9 +1387,9 @@ records:
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
-      - node: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_retains_owner_until_settlement
+      - node: tests/drivers/test_usbtmc_process_protocol.py::test_terminate_and_kill_failure_retains_exact_owner
         ci_partition: remaining
-      - node: tests/drivers/test_visa_executors.py::test_usbtmc_cancelled_close_commits_success_before_propagating_cancellation
+      - node: tests/drivers/test_usbtmc_process_protocol.py::test_later_close_reconciles_same_owner_without_second_physical_close
         ci_partition: remaining
     red_evidence: usbtmc_cancelled_close_lost_owner_pending_artifact_binding
     green_evidence: pending

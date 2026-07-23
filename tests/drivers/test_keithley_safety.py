@@ -25,16 +25,22 @@ class _FakeKeithleyTransport:
         self._iv = f"{current}\t{voltage}"
         self.writes: list[str] = []
 
+    async def open(self, resource: str) -> None:
+        del resource
+
+    async def close(self) -> None:
+        return None
+
     async def query(self, cmd: str, timeout_ms: int | None = None) -> str:
         c = cmd.lower()
+        if cmd == "*IDN?":
+            return "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
         if "cryodaq_off_v1" in c:
             match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", cmd)
             assert match is not None
             return f"CRYODAQ_OFF_V1|{match.group(1)}|0\n"
         if "source.output" in c:
-            match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|", cmd)
-            assert match is not None
-            return f"CRYODAQ_OFF_V1|{match.group(1)}|0"  # inactive channels report OFF
+            return "0"  # inactive channels report OFF
         if "measure.iv()" in c:
             return self._iv
         if "source.compliance" in c:
@@ -43,6 +49,19 @@ class _FakeKeithleyTransport:
 
     async def write(self, cmd: str) -> None:
         self.writes.append(cmd)
+
+
+async def _connected_physical_driver(
+    *,
+    current: float = 1e-3,
+    voltage: float = 10.0,
+) -> tuple[Keithley2604B, _FakeKeithleyTransport]:
+    driver = Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
+    fake = _FakeKeithleyTransport(current=current, voltage=voltage)
+    driver._transport = fake
+    await driver.connect()
+    fake.writes.clear()
+    return driver, fake
 
 
 # ---------------------------------------------------------------------------
@@ -55,12 +74,9 @@ async def test_slew_rate_normal_regulation() -> None:
     step stays within MAX_DELTA_V_PER_STEP. The mock path bypasses the limiter,
     so this drives a fake TSP transport with a stable R whose target sits above
     one step's reach, and asserts each consecutive step delta is clamped."""
-    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
     # current=1 mA, voltage=10 V → R=10 kΩ → target wants ~v_comp(40 V); from
     # _last_v=0 the driver must ramp toward it 0.5 V at a time.
-    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
-    driver._transport = fake
-    driver._connected = True
+    driver, fake = await _connected_physical_driver()
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
     driver._channels["smua"].v_comp = 40.0
@@ -86,12 +102,9 @@ async def test_slew_rate_limits_large_v_step() -> None:
     slew limiter). A 10 kΩ measured resistance at P=0.5 W wants ~40 V, but from
     _last_v=0 the commanded step must be clamped to MAX_DELTA_V_PER_STEP, so the
     driver writes levelv = 0.5, not the full target."""
-    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
     # current=1 mA, voltage=10 V → R=10 kΩ → target ~sqrt(0.5*10000)=70.7 V,
     # clamped to v_comp(40), then slew-clamped to 0.5 V from _last_v=0.
-    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
-    driver._transport = fake
-    driver._connected = True
+    driver, fake = await _connected_physical_driver()
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
     driver._channels["smua"].v_comp = 40.0
@@ -121,10 +134,7 @@ async def test_last_v_resets_on_stop() -> None:
     nonzero value before the call — in mock mode _last_v never gets above
     0.0 (mock read_channels doesn't update it), making 'resets to zero'
     indistinguishable from 'was already zero'."""
-    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
-    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
-    driver._transport = fake
-    driver._connected = True
+    driver, fake = await _connected_physical_driver()
     # Seed smua with a nonzero level so the reset is observable.
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
@@ -141,10 +151,7 @@ async def test_last_v_resets_on_emergency_off_single() -> None:
     state intact. Driven through the non-mock path so smub's preserved _last_v
     is observable (the mock path never seeds it, making 'preserved' and 'reset'
     indistinguishable)."""
-    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
-    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
-    driver._transport = fake
-    driver._connected = True
+    driver, fake = await _connected_physical_driver()
     # Seed both channels as live with distinct nonzero levels.
     for ch, level in (("smua", 12.0), ("smub", 7.0)):
         driver._channels[ch].active = True
@@ -169,10 +176,7 @@ async def test_last_v_resets_on_emergency_off_all() -> None:
     Driven through the non-mock path so both channels are seeded to
     distinct nonzero levels — in mock mode _last_v stays 0.0 throughout,
     making 'zeroed by emergency_off' indistinguishable from 'never set'."""
-    driver = Keithley2604B("k2604", "USB0::FAKE", mock=False)
-    fake = _FakeKeithleyTransport(current=1e-3, voltage=10.0)
-    driver._transport = fake
-    driver._connected = True
+    driver, fake = await _connected_physical_driver()
     # Seed both channels with distinct nonzero levels.
     for ch, level in (("smua", 9.0), ("smub", 4.5)):
         driver._channels[ch].active = True

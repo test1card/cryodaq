@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
+from cryodaq.drivers.instruments.keithley_2604b import (
+    Keithley2604B,
+    OutputStateUnverifiedError,
+)
 
 
 class _RecordingTransport:
@@ -130,7 +133,7 @@ def test_lua_v3_documents_integer_second_strict_boundary() -> None:
 def _driver(*, enabled: bool, mock: bool = False, timeout_s: float = 5.0):
     return Keithley2604B(
         "k2604",
-        "USB0::FAKE",
+        "USB0::0x05E6::0x2604::04089762::INSTR",
         mock=mock,
         watchdog_enabled=enabled,
         watchdog_timeout_s=timeout_s,
@@ -403,20 +406,23 @@ async def test_power_cycle_nil_after_host_pending_allows_explicit_v3_reactivatio
 # ---------------------------------------------------------------------------
 
 
-async def test_upload_failure_is_non_fatal(caplog) -> None:
+async def test_upload_transport_failure_aborts_connect(caplog) -> None:
     drv = _driver(enabled=True)
     t = _RecordingTransport(fail_on="function cryodaq_wdog_pet")
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()  # must NOT raise
+        with pytest.raises(RuntimeError, match="transport authority"):
+            await drv.connect()
 
-    assert drv._connected is True
+    assert drv._connected is False
     assert drv._wdog_armed is False
+    assert t._opened is False
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
     # A failed arm must not leave a running/timeout write behind.
     assert "cryodaq_wdog_run()" not in t.writes
     # A poll after a failed arm must not pet a non-existent watchdog.
-    await drv.read_channels()
+    with pytest.raises(RuntimeError, match="not connected"):
+        await drv.read_channels()
     assert "cryodaq_wdog_pet()" not in t.writes
 
 
@@ -442,7 +448,7 @@ async def test_mock_mode_zero_wdog_writes() -> None:
 
 async def test_flag_off_default_is_byte_identical() -> None:
     # Default construction (no watchdog kwargs) must behave as flag OFF.
-    drv = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    drv = Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     assert drv._wdog_enabled is False
     off = _RecordingTransport()
     drv._transport = off
@@ -464,7 +470,7 @@ async def test_off_and_default_command_streams_byte_identical(monkeypatch) -> No
         lambda _size: "a" * 32,
     )
     d_off = _mode_driver("off")
-    d_default = Keithley2604B("k2604", "USB0::FAKE", mock=False)
+    d_default = Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     t_off = _RecordingTransport()
     t_default = _RecordingTransport()
     d_off._transport = t_off
@@ -558,12 +564,12 @@ def test_default_timeout_is_five_seconds() -> None:
 )
 def test_watchdog_timeout_rejects_invalid_or_unsafe_values(value) -> None:
     with pytest.raises(ValueError, match="watchdog_timeout_s"):
-        Keithley2604B("k2604", "USB0::FAKE", watchdog_timeout_s=value)
+        Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", watchdog_timeout_s=value)
 
 
 @pytest.mark.parametrize("value", [1, 1.0, 5, 300, 300.0])
 def test_watchdog_timeout_accepts_finite_supported_range(value) -> None:
-    drv = Keithley2604B("k2604", "USB0::FAKE", watchdog_timeout_s=value)
+    drv = Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", watchdog_timeout_s=value)
     assert drv._wdog_timeout_s == pytest.approx(float(value))
 
 
@@ -583,7 +589,7 @@ def _load_keithley_driver(tmp_path, enabled_literal: str):
         "instruments:\n"
         "  - type: keithley_2604b\n"
         "    name: k2604\n"
-        "    resource: USB0::FAKE\n",
+        "    resource: USB0::0x05E6::0x2604::04089762::INSTR\n",
         encoding="utf-8",
     )
     return _load_drivers(cfg, mock=True).instrument_configs[0].driver
@@ -614,7 +620,7 @@ def _mode_driver(mode: str, *, mock: bool = False, timeout_s: float = 5.0):
 
     return Keithley2604B(
         "k2604",
-        "USB0::FAKE",
+        "USB0::0x05E6::0x2604::04089762::INSTR",
         mock=mock,
         watchdog_mode=mode,
         watchdog_timeout_s=timeout_s,
@@ -650,7 +656,203 @@ async def test_mode_best_effort_happy_arms() -> None:
     assert "cryodaq_wdog_run()" in t.writes
 
 
-async def test_mode_best_effort_arm_fail_is_non_fatal(caplog) -> None:
+async def test_pending_watchdog_trip_blocks_direct_source_start() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    t.wdog_tripped_raw = "1"
+    drv._transport = t
+
+    await drv.connect()
+
+    assert drv.connected is True
+    assert drv.watchdog_trip_pending is True
+    t.writes.clear()
+    with pytest.raises(OutputStateUnverifiedError, match="pending watchdog trip"):
+        await drv.start_source("smua", 0.5, 40.0, 1.0)
+    assert not any("OUTPUT_ON" in command for command in t.writes)
+    assert not any("smua.reset()" in command for command in t.writes)
+    await drv.disconnect()
+
+
+async def test_watchdog_trip_during_source_config_supersedes_output_on() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+
+    reset_started = asyncio.Event()
+    release_reset = asyncio.Event()
+    original_write = t.write
+
+    async def _block_first_config_write(command: str) -> None:
+        if command == "smua.reset()":
+            reset_started.set()
+            await release_reset.wait()
+        await original_write(command)
+
+    t.write = _block_first_config_write  # type: ignore[method-assign]
+    start_task = asyncio.create_task(drv.start_source("smua", 0.5, 40.0, 1.0))
+    await reset_started.wait()
+
+    t.wdog_tripped_raw = "1"
+    trip_task = asyncio.create_task(drv.wdog_tripped())
+    await asyncio.sleep(0)
+    release_reset.set()
+
+    assert await trip_task is True
+    with pytest.raises(RuntimeError, match="superseded"):
+        await start_task
+    assert drv.watchdog_trip_pending is True
+    assert not any("OUTPUT_ON" in command for command in t.writes)
+    assert any("OUTPUT_OFF" in command for command in t.writes)
+    assert drv._channels["smua"].active is False
+    assert drv._has_current_off_proof("smua") is True
+    await drv.disconnect()
+
+
+async def test_watchdog_trip_after_last_config_still_blocks_output_on() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+
+    last_config_started = asyncio.Event()
+    release_last_config = asyncio.Event()
+    original_write = t.write
+
+    async def _block_last_config_write(command: str) -> None:
+        if command == "smua.source.levelv = 0":
+            last_config_started.set()
+            await release_last_config.wait()
+        await original_write(command)
+
+    t.write = _block_last_config_write  # type: ignore[method-assign]
+    start_task = asyncio.create_task(drv.start_source("smua", 0.5, 40.0, 1.0))
+    await last_config_started.wait()
+
+    t.wdog_tripped_raw = "1"
+    trip_task = asyncio.create_task(drv.wdog_tripped())
+    await asyncio.sleep(0)
+    release_last_config.set()
+
+    assert await trip_task is True
+    with pytest.raises(RuntimeError, match="superseded"):
+        await start_task
+    assert drv.watchdog_trip_pending is True
+    assert not any("OUTPUT_ON" in command for command in t.writes)
+    assert any("OUTPUT_OFF" in command for command in t.writes)
+    assert drv._channels["smua"].active is False
+    assert drv._has_current_off_proof("smua") is True
+    await drv.disconnect()
+
+
+async def test_watchdog_trip_queued_before_regulation_write_blocks_level_update() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    await drv.start_source("smua", 0.5, 40.0, 1.0)
+
+    compliance_started = asyncio.Event()
+    release_compliance = asyncio.Event()
+    original_query = t.query
+
+    async def _block_compliance(command: str, timeout_ms: int | None = None) -> str:
+        if "smua.measure.iv()" in command:
+            return "0.01\t1.0"
+        if "smua.source.compliance" in command:
+            compliance_started.set()
+            await release_compliance.wait()
+            return "false"
+        return await original_query(command, timeout_ms)
+
+    t.query = _block_compliance  # type: ignore[method-assign]
+    t.writes.clear()
+    read_task = asyncio.create_task(drv.read_channels())
+    await compliance_started.wait()
+
+    t.wdog_tripped_raw = "1"
+    trip_task = asyncio.create_task(drv.wdog_tripped())
+    await asyncio.sleep(0)
+    release_compliance.set()
+
+    assert await trip_task is True
+    await read_task
+    assert drv.watchdog_trip_pending is True
+    assert not any("source.levelv" in command for command in t.writes)
+    assert drv._last_v["smua"] == 0.0
+
+    assert await drv.emergency_off() is True
+    assert drv._channels["smua"].active is False
+    assert drv._has_current_off_proof("smua") is True
+    await drv.disconnect()
+
+
+async def test_watchdog_trip_queued_before_limit_write_blocks_config_and_state_update() -> None:
+    drv = _mode_driver("best_effort")
+    t = _RecordingTransport()
+    drv._transport = t
+    await drv.connect()
+    await drv.start_source("smua", 0.5, 40.0, 1.0)
+    original_limit = drv._channels["smua"].v_comp
+
+    hold_entered = asyncio.Event()
+    release_hold = asyncio.Event()
+    original_query = t.query
+
+    async def _hold_ordinary_lock(command: str, timeout_ms: int | None = None) -> str:
+        if command == "hold-limit-queue":
+            hold_entered.set()
+            await release_hold.wait()
+            return "0"
+        return await original_query(command, timeout_ms)
+
+    t.query = _hold_ordinary_lock  # type: ignore[method-assign]
+    t.writes.clear()
+    hold = asyncio.create_task(drv._operational_query("hold-limit-queue"))
+    await hold_entered.wait()
+
+    trip_queued = asyncio.Event()
+    original_operational_query = drv._operational_query
+
+    async def _observe_trip_queue(command: str, *, timeout_ms: int | None = None) -> str:
+        if command == "print(cryodaq_wdog_tripped)":
+            trip_queued.set()
+        return await original_operational_query(command, timeout_ms=timeout_ms)
+
+    drv._operational_query = _observe_trip_queue  # type: ignore[method-assign]
+    t.wdog_tripped_raw = "1"
+    trip_task = asyncio.create_task(drv.wdog_tripped())
+    await trip_queued.wait()
+
+    limit_queued = asyncio.Event()
+    original_operational_write = drv._operational_write
+
+    async def _observe_limit_queue(command: str, *, authority_check=None) -> None:
+        if command == "smua.source.limitv = 20.0":
+            limit_queued.set()
+        await original_operational_write(command, authority_check=authority_check)
+
+    drv._operational_write = _observe_limit_queue  # type: ignore[method-assign]
+    update_task = asyncio.create_task(drv.update_source_limit("smua", v_comp=20.0))
+    await limit_queued.wait()
+    assert update_task.done() is False
+    release_hold.set()
+
+    assert await trip_task is True
+    with pytest.raises(RuntimeError, match="regulation was superseded"):
+        await update_task
+    await hold
+    assert drv.watchdog_trip_pending is True
+    assert not any(command == "smua.source.limitv = 20.0" for command in t.writes)
+    assert drv._channels["smua"].v_comp == original_limit
+
+    assert await drv.emergency_off() is True
+    assert drv._channels["smua"].active is False
+    await drv.disconnect()
+
+
+async def test_mode_best_effort_transport_write_failure_aborts_connect(caplog) -> None:
     drv = _mode_driver("best_effort")
     # NOTE: fail_on is a substring match against every write, and the
     # uploaded Lua script itself defines "function cryodaq_wdog_run()" — a
@@ -669,9 +871,11 @@ async def test_mode_best_effort_arm_fail_is_non_fatal(caplog) -> None:
     t.write = _write_fail_run_only  # type: ignore[assignment]
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()  # must NOT raise (fail-OPEN on watchdog layer)
-    assert drv._connected is True
+        with pytest.raises(RuntimeError, match="transport authority"):
+            await drv.connect()
+    assert drv._connected is False
     assert drv._wdog_armed is False
+    assert t._opened is False
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
     # R2 (Phase A recheck, MEDIUM): the run write itself raising is ambiguous
     # (the instrument may have accepted the command before the write failed)
@@ -685,7 +889,7 @@ async def test_mode_required_arm_fail_raises_and_closes(caplog) -> None:
     drv = _mode_driver("required")
     t = _RecordingTransport(fail_on="function cryodaq_wdog_pet")  # upload write fails
     drv._transport = t
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         await drv.connect()
     assert drv._connected is False
     assert drv._wdog_armed is False
@@ -710,7 +914,7 @@ async def test_mode_required_run_fail_raises() -> None:
 
     t.write = _write_fail_run_only  # type: ignore[assignment]
     drv._transport = t
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         await drv.connect()
     assert drv._connected is False
     # R2 (Phase A recheck, MEDIUM): required mode still fails closed, but the
@@ -757,7 +961,7 @@ async def test_latch_read_transport_fail_required_raises_and_closes(caplog) -> N
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_tripped")
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             await drv.connect()
     assert drv._connected is False
     assert drv._wdog_armed is False
@@ -767,27 +971,24 @@ async def test_latch_read_transport_fail_required_raises_and_closes(caplog) -> N
     assert "cryodaq_wdog_run()" not in t.writes
 
 
-async def test_latch_read_transport_fail_best_effort_degrades(caplog) -> None:
-    """HIGH: a TRANSPORT failure on the latch read in best_effort logs CRITICAL
-    (latch state unknown, watchdog NOT armed to avoid erasing it), leaves
-    _wdog_armed False, uploads NOTHING, and connect still succeeds host-only."""
+async def test_latch_read_transport_fail_best_effort_aborts_connect(caplog) -> None:
+    """Best-effort never waives transport/session authority."""
     drv = _mode_driver("best_effort")
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_tripped")
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()  # must NOT raise
-    assert drv._connected is True
+        with pytest.raises(RuntimeError, match="transport authority"):
+            await drv.connect()
+    assert drv._connected is False
     assert drv._wdog_armed is False
+    assert t._opened is False
     # No arming happened — latch preserved for the next connect.
     assert not any("function cryodaq_wdog_pet" in w for w in t.writes)
     assert "cryodaq_wdog_run()" not in t.writes
     crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
     assert crits
     msg = " ".join(r.getMessage() for r in crits).lower()
-    assert "unknown" in msg
-    # A poll after must not pet a watchdog that was never armed.
-    await drv.read_channels()
-    assert "cryodaq_wdog_pet()" not in t.writes
+    assert "authority" in msg
 
 
 @pytest.mark.parametrize("sentinel", ["nil", " nil \r\n"])
@@ -816,7 +1017,7 @@ async def test_latch_malformed_preserves_evidence_without_upload(raw, mode, capl
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
         if mode == "required":
-            with pytest.raises(Exception):
+            with pytest.raises(RuntimeError):
                 await drv.connect()
         else:
             await drv.connect()
@@ -831,7 +1032,7 @@ async def test_mode_required_refuses_non_autonomous_v3(caplog) -> None:
     t = _RecordingTransport()  # v3 reports cryodaq_wdog_autonomous=0
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             await drv.connect()
     assert drv._connected is False
     assert drv._wdog_armed is False
@@ -847,7 +1048,7 @@ async def test_required_accepts_only_literal_numeric_one(raw) -> None:
     t = _RecordingTransport()
     t.wdog_autonomous_raw = raw
     drv._transport = t
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         await drv.connect()
     assert drv._wdog_autonomous is False
     assert "cryodaq_wdog_run()" not in t.writes
@@ -870,17 +1071,18 @@ async def test_best_effort_non_autonomous_warning_is_bounded(caplog) -> None:
     assert drv._wdog_autonomous is False
 
 
-async def test_best_effort_autonomous_readback_failure_still_runs_late_pet(caplog) -> None:
+async def test_best_effort_autonomous_transport_failure_aborts_connect(caplog) -> None:
     drv = _mode_driver("best_effort")
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_autonomous")
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()
-    assert drv._connected is True
-    assert drv._wdog_armed is True
+        with pytest.raises(RuntimeError, match="transport authority"):
+            await drv.connect()
+    assert drv._connected is False
+    assert drv._wdog_armed is False
     assert drv._wdog_autonomous is False
-    assert "cryodaq_wdog_run()" in t.writes
-    assert "zero full-host-death coverage" in " ".join(r.getMessage() for r in caplog.records).lower()
+    assert "cryodaq_wdog_run()" not in t.writes
+    assert t._opened is False
 
 
 @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "2", "-1", "0.5", "true", ""])
@@ -901,7 +1103,7 @@ async def test_best_effort_invalid_autonomous_flag_is_rejected_but_late_pet_runs
 def test_alias_enabled_true_maps_to_best_effort() -> None:
     from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B, WatchdogMode
 
-    drv = Keithley2604B("k2604", "USB0::FAKE", watchdog_enabled=True)
+    drv = Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", watchdog_enabled=True)
     assert drv._wdog_mode is WatchdogMode.BEST_EFFORT
     assert drv._wdog_enabled is True
 
@@ -909,7 +1111,7 @@ def test_alias_enabled_true_maps_to_best_effort() -> None:
 def test_alias_enabled_false_maps_to_off() -> None:
     from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B, WatchdogMode
 
-    drv = Keithley2604B("k2604", "USB0::FAKE", watchdog_enabled=False)
+    drv = Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", watchdog_enabled=False)
     assert drv._wdog_mode is WatchdogMode.OFF
     assert drv._wdog_enabled is False
 
@@ -918,7 +1120,9 @@ def test_explicit_mode_wins_over_alias() -> None:
     from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B, WatchdogMode
 
     # alias says off, explicit mode says required — mode wins.
-    drv = Keithley2604B("k2604", "USB0::FAKE", watchdog_mode="required", watchdog_enabled=False)
+    drv = Keithley2604B(
+        "k2604", "USB0::0x05E6::0x2604::04089762::INSTR", watchdog_mode="required", watchdog_enabled=False
+    )
     assert drv._wdog_mode is WatchdogMode.REQUIRED
 
 
@@ -926,7 +1130,7 @@ def test_invalid_mode_string_raises() -> None:
     from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 
     with pytest.raises(ValueError):
-        Keithley2604B("k2604", "USB0::FAKE", watchdog_mode="bogus")
+        Keithley2604B("k2604", "USB0::0x05E6::0x2604::04089762::INSTR", watchdog_mode="bogus")
 
 
 def _load_keithley_driver_mode(tmp_path, mode_literal: str):
@@ -940,7 +1144,7 @@ def _load_keithley_driver_mode(tmp_path, mode_literal: str):
         "instruments:\n"
         "  - type: keithley_2604b\n"
         "    name: k2604\n"
-        "    resource: USB0::FAKE\n",
+        "    resource: USB0::0x05E6::0x2604::04089762::INSTR\n",
         encoding="utf-8",
     )
     return _load_drivers(cfg, mock=True).instrument_configs[0].driver
@@ -987,7 +1191,7 @@ async def test_autonomous_readback_failure_required_refuses_before_run() -> None
     drv = _mode_driver("required")
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_autonomous")
     drv._transport = t
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         await drv.connect()
     assert drv._connected is False
     assert drv._wdog_armed is False
@@ -1003,9 +1207,10 @@ async def test_version_mismatch_best_effort_degrades(caplog) -> None:
     t.wdog_version_raw = "1"  # firmware is an older/partial script
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()  # must NOT raise
+        await drv.connect()
     assert drv._connected is True
     assert drv._wdog_armed is False
+    assert t._opened is True
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
     # A poll after a refused arm must not pet a watchdog it never armed.
     await drv.read_channels()
@@ -1019,7 +1224,7 @@ async def test_version_mismatch_required_raises_and_closes() -> None:
     t = _RecordingTransport()
     t.wdog_version_raw = "999"
     drv._transport = t
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         await drv.connect()
     assert drv._connected is False
     assert drv._wdog_armed is False
@@ -1033,7 +1238,7 @@ async def test_version_unparseable_required_raises() -> None:
     t = _RecordingTransport()
     t.wdog_version_raw = "nil"
     drv._transport = t
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         await drv.connect()
     assert drv._connected is False
 
@@ -1088,7 +1293,8 @@ async def test_arm_state_readback_active_false_required_raises() -> None:
             t.wdog_active_raw = "0"
 
     t.write = _write_swallow_run  # type: ignore[assignment]
-    with pytest.raises(Exception):
+    drv._transport = t
+    with pytest.raises(RuntimeError, match="watchdog arm readback bad"):
         await drv.connect()
     assert drv._connected is False
     assert drv._wdog_armed is False
@@ -1147,9 +1353,11 @@ async def test_arm_readback_timeout_after_run_sends_disarm_best_effort(caplog) -
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_active")
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()  # must NOT raise
-    assert drv._connected is True
+        with pytest.raises(RuntimeError, match="transport authority"):
+            await drv.connect()
+    assert drv._connected is False
     assert drv._wdog_armed is False
+    assert t._opened is False
     assert "cryodaq_wdog_run()" in t.writes, "run() must have been issued before the readback failed"
     assert "cryodaq_wdog_disarm()" in t.writes, "a best-effort disarm write must follow a readback failure after run()"
 
@@ -1163,7 +1371,7 @@ async def test_arm_readback_timeout_after_run_sends_disarm_required(caplog) -> N
     t.wdog_autonomous_raw = "1"  # reach downstream active readback
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             await drv.connect()
     assert drv._connected is False
     assert drv._wdog_armed is False
@@ -1185,9 +1393,7 @@ async def test_arm_readback_failure_before_run_does_not_send_disarm() -> None:
 
 
 async def test_arm_readback_timeout_disarm_write_also_fails_logs_critical(caplog) -> None:
-    """If the best-effort disarm write ALSO fails, TSP activation state is
-    unknown — must log CRITICAL and still route per mode (best_effort
-    degrades host-only, connect still succeeds)."""
+    """A failed disarm cannot downgrade a transport-authority abort."""
     drv = _mode_driver("best_effort")
     t = _RecordingTransport(query_raises_on="cryodaq_wdog_active")
     # _RecordingTransport's fail_on is a substring match, and the uploaded
@@ -1206,9 +1412,11 @@ async def test_arm_readback_timeout_disarm_write_also_fails_logs_critical(caplog
     t.write = _write_fail_disarm_only  # type: ignore[assignment]
     drv._transport = t
     with caplog.at_level(logging.CRITICAL):
-        await drv.connect()  # must NOT raise
-    assert drv._connected is True
+        with pytest.raises(RuntimeError, match="transport authority"):
+            await drv.connect()
+    assert drv._connected is False
     assert drv._wdog_armed is False
+    assert t._opened is False
     crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
     msg = " ".join(r.getMessage() for r in crits).lower()
     assert "unknown" in msg, "disarm-write failure must log that TSP state is UNKNOWN"
@@ -1227,7 +1435,7 @@ def test_config_short_timeout_warns(tmp_path, caplog) -> None:
         "instruments:\n"
         "  - type: keithley_2604b\n"
         "    name: k2604\n"
-        "    resource: USB0::FAKE\n"
+        "    resource: USB0::0x05E6::0x2604::04089762::INSTR\n"
         "    poll_interval_s: 2.0\n",
         encoding="utf-8",
     )
@@ -1256,7 +1464,7 @@ def test_config_watchdog_does_not_warn_when_off_or_at_two_poll_intervals(tmp_pat
         "instruments:\n"
         "  - type: keithley_2604b\n"
         "    name: k2604\n"
-        "    resource: USB0::FAKE\n"
+        "    resource: USB0::0x05E6::0x2604::04089762::INSTR\n"
         "    poll_interval_s: 2.0\n",
         encoding="utf-8",
     )
@@ -1280,7 +1488,7 @@ def test_config_watchdog_mode_wins_over_real_boolean_alias(tmp_path) -> None:
         "instruments:\n"
         "  - type: keithley_2604b\n"
         "    name: k2604\n"
-        "    resource: USB0::FAKE\n",
+        "    resource: USB0::0x05E6::0x2604::04089762::INSTR\n",
         encoding="utf-8",
     )
 
@@ -1302,7 +1510,7 @@ def test_config_watchdog_timeout_invalid_fails_load(tmp_path, literal) -> None:
         "instruments:\n"
         "  - type: keithley_2604b\n"
         "    name: k2604\n"
-        "    resource: USB0::FAKE\n",
+        "    resource: USB0::0x05E6::0x2604::04089762::INSTR\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match=r"keithley\.watchdog\.timeout_s"):

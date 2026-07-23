@@ -4,8 +4,9 @@ F1: stop_source must RAISE on an unverified OFF (readback still ON) instead of
     silently clearing runtime state — so SafetyManager latches FAULT, not
     SAFE_OFF.
 F2: connect() crash-recovery force-OFF must readback-verify both channels; an
-    unverified/still-ON output sets a blocking flag (output_state_unverified)
-    without aborting connect. A later verified emergency_off clears it.
+    unverified/still-ON output aborts connected authority, retains only a
+    recovery transport, and sets output_state_unverified. A later verified
+    emergency_off clears uncertainty without granting connected authority.
 """
 
 from __future__ import annotations
@@ -69,9 +70,11 @@ class _FakeTransport:
 async def test_stop_source_raises_when_output_readback_still_on() -> None:
     """Readback reports output STILL ON after OUTPUT_OFF → stop_source RAISES
     and does NOT clear runtime state (fail-closed)."""
-    driver = Keithley2604B("k", "USB0::FAKE", mock=False)
-    driver._transport = _FakeTransport(output_readback="1")  # still ON
-    driver._connected = True
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
+    transport = _FakeTransport(output_readback="0")
+    driver._transport = transport
+    await driver.connect()
+    transport.output_readback = "1"  # still ON during stop
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
     driver._last_v["smua"] = 5.0
@@ -87,9 +90,9 @@ async def test_stop_source_raises_when_output_readback_still_on() -> None:
 @pytest.mark.asyncio
 async def test_stop_source_clean_off_still_clears_state() -> None:
     """Regression: a readback-confirmed OFF still resets runtime state."""
-    driver = Keithley2604B("k", "USB0::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     driver._transport = _FakeTransport(output_readback="0")  # confirmed OFF
-    driver._connected = True
+    await driver.connect()
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
     driver._last_v["smua"] = 5.0
@@ -107,23 +110,27 @@ async def test_stop_source_clean_off_still_clears_state() -> None:
 
 @pytest.mark.asyncio
 async def test_connect_sets_unverified_flag_when_output_still_on(caplog) -> None:
-    """connect() readback reports output ON → connect SUCCEEDS but the
-    output_state_unverified flag is set (blocking flag, not a connect abort)."""
+    """Unverified connect fails explicitly while retaining recovery I/O."""
     caplog.set_level(logging.CRITICAL)
-    driver = Keithley2604B("k", "USB0::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     driver._transport = _FakeTransport(output_readback="1")  # force-off never verifies
 
-    await driver.connect()
+    with pytest.raises(OutputStateUnverifiedError, match="retained only for recovery"):
+        await driver.connect()
 
-    assert driver._connected is True, "connect must not abort on unverified output"
+    assert driver.connected is False
+    assert driver._recovery_transport_open is True
+    assert driver._instrument_id == ""
     assert driver.output_state_unverified is True
+    with pytest.raises(RuntimeError, match="recovery-only transport"):
+        await driver.start_source("smua", 0.5, 40.0, 1.0)
     assert any("unverified" in r.message.lower() for r in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_connect_clean_output_leaves_flag_false() -> None:
     """Readback confirms OFF on both channels → flag stays False."""
-    driver = Keithley2604B("k", "USB0::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     driver._transport = _FakeTransport(output_readback="0")
 
     await driver.connect()
@@ -134,13 +141,20 @@ async def test_connect_clean_output_leaves_flag_false() -> None:
 
 @pytest.mark.asyncio
 async def test_verified_emergency_off_clears_unverified_flag() -> None:
-    """A later full emergency_off that confirms OFF clears the flag."""
-    driver = Keithley2604B("k", "USB0::FAKE", mock=False)
+    """Recovery OFF clears uncertainty but does not retroactively grant identity."""
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     driver._transport = _FakeTransport(output_readback="1")
-    await driver.connect()
+    with pytest.raises(OutputStateUnverifiedError, match="retained only for recovery"):
+        await driver.connect()
+    assert driver.connected is False
+    assert driver._recovery_transport_open is True
     assert driver.output_state_unverified is True
+    assert driver._instrument_id == ""
 
     # Now the outputs read back OFF; a full emergency_off confirms and clears.
     driver._transport.output_readback = "0"
     assert await driver.emergency_off() is True
     assert driver.output_state_unverified is False
+    assert driver._instrument_id == ""
+    with pytest.raises(RuntimeError, match="recovery-only transport"):
+        await driver.start_source("smua", 0.5, 40.0, 1.0)

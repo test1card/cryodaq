@@ -12,6 +12,7 @@ from cryodaq.drivers.base import ChannelStatus
 from cryodaq.drivers.instruments.keithley_2604b import (
     Keithley2604B,
     OutputStateUnverifiedError,
+    TransportTeardownIncompleteError,
 )
 
 _CANONICAL_IDN = "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
@@ -66,21 +67,22 @@ class _Transport:
 
 
 def _connected_driver(*, readbacks: list[str]) -> tuple[Keithley2604B, _Transport]:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     transport = _Transport(readbacks)
     driver._transport = transport
     driver._connected = True
+    driver._instrument_id = _CANONICAL_IDN
     return driver, transport
 
 
 async def test_never_connected_emergency_off_has_no_optimistic_proof() -> None:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
 
     assert await driver.emergency_off() is False
 
 
 async def test_disconnected_stop_source_fails_closed_without_current_off_proof() -> None:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     driver._channels["smua"].active = True
     driver._channels["smua"].p_target = 0.5
 
@@ -93,7 +95,7 @@ async def test_disconnected_stop_source_fails_closed_without_current_off_proof()
 
 
 async def test_disconnected_verify_off_never_fabricates_readback() -> None:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     driver._output_off_verified["smua"] = True
 
     assert await driver._verify_output_off("smua") is False
@@ -128,7 +130,7 @@ async def test_partial_channel_proof_cannot_authorize_disconnected_success() -> 
 
 @pytest.mark.parametrize("failure", ["write", "read"])
 async def test_transport_failure_cannot_stamp_off_proof(failure: str) -> None:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     transport = _Transport(
         ["0"],
         fail_write=failure == "write",
@@ -253,7 +255,7 @@ async def test_invalid_readback_cannot_clear_runtime_or_authorize_disconnect(
 
 
 async def test_reconnect_invalidates_old_generation_then_reproves_both_off() -> None:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     first = _Transport(["0"])
     driver._transport = first
     await driver.connect()
@@ -262,10 +264,15 @@ async def test_reconnect_invalidates_old_generation_then_reproves_both_off() -> 
 
     second = _Transport(["1"])
     driver._transport = second
-    await driver.connect()
+    with pytest.raises(OutputStateUnverifiedError, match="retained only for recovery"):
+        await driver.connect()
 
+    assert driver.connected is False
+    assert driver._recovery_transport_open is True
     assert driver.output_state_unverified is True
-    driver._connected = False
+    assert driver._instrument_id == ""
+    with pytest.raises(RuntimeError, match="recovery-only transport"):
+        await driver.start_source("smua", 0.5, 40.0, 1.0)
     assert await driver.emergency_off() is False
 
 
@@ -283,16 +290,18 @@ async def test_connect_keeps_output_state_unsafe_until_both_readbacks_finish() -
                 return _off_reply(command)
             return await super().query(command, timeout_ms)
 
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     transport = _TwoStepReadbackTransport(["0"])
     driver._transport = transport
     task = asyncio.create_task(driver.connect())
     await second_read_started.wait()
 
+    assert driver.connected is False
     assert driver.output_state_unverified is True
 
     release_second_read.set()
     await task
+    assert driver.connected is True
     assert driver.output_state_unverified is False
 
 
@@ -305,7 +314,7 @@ async def test_new_connection_revokes_stale_runtime_authority_before_open() -> N
             open_started.set()
             await release_open.wait()
 
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     for runtime in driver._channels.values():
         runtime.active = True
         runtime.p_target = 0.75
@@ -314,6 +323,7 @@ async def test_new_connection_revokes_stale_runtime_authority_before_open() -> N
     task = asyncio.create_task(driver.connect())
     await open_started.wait()
 
+    assert driver.connected is False
     assert all(runtime.active is False for runtime in driver._channels.values())
     assert all(runtime.p_target == 0.0 for runtime in driver._channels.values())
     assert driver.output_state_unverified is True
@@ -330,7 +340,7 @@ async def test_process_control_baseexception_is_not_masked_by_connect_cleanup() 
         async def open(self, _resource: str) -> None:
             raise _ProcessControl("terminate")
 
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     transport = _ExitTransport(["0"])
     driver._transport = transport
 
@@ -359,7 +369,10 @@ async def test_disconnect_cancellation_without_off_proof_refuses_close() -> None
         await driver.disconnect()
 
     assert transport.closed == 0
-    assert driver.connected is True
+    assert driver.connected is False
+    assert driver._recovery_transport_open is True
+    assert driver._instrument_id == ""
+    assert driver.output_state_unverified is True
     assert driver._channels["smua"].active is True
     assert driver.output_state_unverified is True
 
@@ -375,7 +388,7 @@ async def test_connect_cancellation_settles_transport_and_connection_truth() -> 
                 await asyncio.Event().wait()
             return "0"
 
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     transport = _CancelledConnectTransport()
     driver._transport = transport
     task = asyncio.create_task(driver.connect())
@@ -409,7 +422,7 @@ async def test_connect_cancellation_preserved_when_cleanup_close_fails(caplog) -
             self.closed += 1
             raise OSError("cleanup close failed")
 
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     transport = _FailedCleanupTransport()
     driver._transport = transport
     task = asyncio.create_task(driver.connect())
@@ -447,7 +460,7 @@ async def test_concurrent_connect_is_rejected_without_closing_first_attempt() ->
             started.set()
             await release.wait()
 
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
     transport = _BlockingOpenTransport(["0"])
     driver._transport = transport
     first = asyncio.create_task(driver.connect())
@@ -540,7 +553,7 @@ async def test_nonfinite_iv_is_masked_with_bounded_raw_evidence() -> None:
 
 
 def test_nonfinite_raw_buffer_rows_are_rejected_but_finite_truth_is_retained() -> None:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
 
     assert driver._parse_buffer_response("0,nan,1") == []
 
@@ -561,7 +574,7 @@ def test_nonfinite_raw_buffer_rows_are_rejected_but_finite_truth_is_retained() -
 
 
 def test_unavailable_resistance_does_not_hide_valid_iv_or_power() -> None:
-    driver = Keithley2604B("k", "USB::FAKE", mock=False)
+    driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
 
     readings = driver._build_channel_readings("smua", voltage=5.0, current=0.0)
     by_field = {reading.channel.rsplit("/", 1)[-1]: reading for reading in readings}
@@ -586,10 +599,11 @@ async def test_start_source_requires_current_channel_off_proof() -> None:
     assert transport.writes == []
 
 
-async def test_disconnect_cancellation_settles_authorized_close_before_return() -> None:
+async def test_cancelled_disconnect_close_late_success_settles_exact_generation() -> None:
     driver, transport = _connected_driver(readbacks=["0"])
     driver._mark_channel_off_verified("smua")
     driver._mark_channel_off_verified("smub")
+    disconnect_generation = driver._connection_generation
     close_started = asyncio.Event()
     release_close = asyncio.Event()
 
@@ -603,9 +617,15 @@ async def test_disconnect_cancellation_settles_authorized_close_before_return() 
     await close_started.wait()
 
     writes_before = list(transport.writes)
+    queries_before = transport.output_queries
     with pytest.raises(RuntimeError, match="lifecycle transition"):
         await driver.start_source("smua", 0.5, 40.0, 1.0)
+    with pytest.raises(RuntimeError, match="lifecycle transition"):
+        await driver.read_channels()
+    with pytest.raises(RuntimeError, match="lifecycle transition"):
+        await driver.update_source_limit("smua", v_comp=20.0)
     assert transport.writes == writes_before
+    assert transport.output_queries == queries_before
 
     task.cancel()
     await asyncio.sleep(0)
@@ -616,8 +636,75 @@ async def test_disconnect_cancellation_settles_authorized_close_before_return() 
         await task
 
     assert transport.closed == 1
+    assert driver._connection_generation == disconnect_generation
     assert driver.connected is False
     assert driver.output_state_unverified is True
+
+
+async def test_cancelled_disconnect_close_late_failure_keeps_reconnect_blocked() -> None:
+    driver, transport = _connected_driver(readbacks=["0"])
+    driver._mark_channel_off_verified("smua")
+    driver._mark_channel_off_verified("smub")
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def _late_failed_close() -> None:
+        close_started.set()
+        await release_close.wait()
+        raise RuntimeError("late close failed")
+
+    transport.close = _late_failed_close  # type: ignore[method-assign]
+    task = asyncio.create_task(driver.disconnect())
+    await close_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+
+    assert task.done() is False
+    release_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert driver.connected is False
+    assert driver._recovery_transport_open is True
+    assert driver._instrument_id == ""
+    assert driver._teardown_incomplete is True
+    with pytest.raises(TransportTeardownIncompleteError, match="reconnect refused"):
+        await driver.connect()
+
+
+async def test_wrong_generation_late_close_cannot_settle_current_connection() -> None:
+    driver, transport = _connected_driver(readbacks=["0"])
+    driver._mark_channel_off_verified("smua")
+    driver._mark_channel_off_verified("smub")
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def _late_old_generation_close() -> None:
+        close_started.set()
+        await release_close.wait()
+        transport.closed += 1
+
+    transport.close = _late_old_generation_close  # type: ignore[method-assign]
+    task = asyncio.create_task(driver.disconnect())
+    await close_started.wait()
+    old_generation = driver._connection_generation
+    current_identity = "Keithley Instruments Inc., Model 2604B, CURRENTGEN, 4.0.8"
+    driver._connection_generation += 1
+    driver._connected = True
+    driver._instrument_id = current_identity
+    release_close.set()
+
+    with pytest.raises(TransportTeardownIncompleteError, match="late close for generation"):
+        await task
+
+    assert transport.closed == 1
+    assert driver._connection_generation == old_generation + 1
+    assert driver.connected is False
+    assert driver._recovery_transport_open is False
+    assert driver._instrument_id == ""
+    assert driver._teardown_incomplete is True
+    with pytest.raises(TransportTeardownIncompleteError, match="reconnect refused"):
+        await driver.connect()
 
 
 async def test_start_superseded_during_config_never_reaches_output_on() -> None:

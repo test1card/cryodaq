@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -34,6 +35,20 @@ class OutputStateUnverifiedError(RuntimeError):
 
 class TransportTeardownIncompleteError(RuntimeError):
     """The source transport has not produced a terminal close settlement."""
+
+
+class FailedConnectCleanupError(TransportTeardownIncompleteError):
+    """A failed connect and its terminal cleanup failure, preserved together."""
+
+    def __init__(
+        self,
+        *,
+        connect_error: BaseException,
+        cleanup_error: TransportTeardownIncompleteError,
+    ) -> None:
+        super().__init__("Keithley connect failed and transport cleanup did not produce a successful settlement")
+        self.connect_error = connect_error
+        self.cleanup_error = cleanup_error
 
 
 # Minimum measurable current for resistance calculation (avoid division by noise).
@@ -73,6 +88,15 @@ _OUTPUT_STATE_MAX_CHARS = 64
 _PROTOCOL_TRIM_CHARS = " \t\r\n"
 _IDN_MAX_CHARS = 256
 _IDN_VALUE_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+_KEITHLEY_USB_RESOURCE_RE = re.compile(
+    r"USB(?P<board>[0-9]*)::"
+    r"(?P<vendor>0x[0-9A-Fa-f]{4})::"
+    r"(?P<product>0x[0-9A-Fa-f]{4})::"
+    r"(?P<serial>[A-Za-z0-9._-]+)"
+    r"(?:::(?P<interface>[0-9]+))?::INSTR\Z"
+)
+_KEITHLEY_VENDOR_ID = 0x05E6
+_KEITHLEY_2604_PRODUCT_ID = 0x2604
 _MOCK_IDN = "Keithley Instruments Inc., Model 2604B, MOCK00001, 3.0.0"
 _OFF_CHALLENGE_PREFIX = "CRYODAQ_OFF_V1"
 _OFF_CHALLENGE_NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
@@ -117,14 +141,32 @@ def _parse_keithley_idn_family(raw: str, *, mock: bool) -> tuple[str, tuple[str,
     if len(fields) != 4:
         raise ValueError("*IDN? response must contain exactly four comma-separated fields")
     manufacturer, model, serial, firmware = fields
-    if manufacturer.lower() != "keithley instruments inc.":
+    if manufacturer != "Keithley Instruments Inc.":
         raise ValueError("*IDN? manufacturer is not Keithley Instruments Inc.")
-    if model.lower() != "model 2604b":
+    if model != "Model 2604B":
         raise ValueError("*IDN? model is not exactly 2604B")
     return token, (manufacturer, model, serial, firmware)
 
 
-def _parse_keithley_idn(raw: str, *, mock: bool) -> str:
+def _parse_configured_keithley_serial(resource_str: str) -> str:
+    """Return the serial from one canonical Keithley 2604 USB VISA resource."""
+
+    if not isinstance(resource_str, str) or not resource_str.isascii():
+        raise ValueError("Keithley resource must be an ASCII USB VISA resource")
+    match = _KEITHLEY_USB_RESOURCE_RE.fullmatch(resource_str)
+    if match is None:
+        raise ValueError("Keithley resource must be a canonical USB VISA INSTR resource with a serial")
+    if int(match.group("vendor"), 16) != _KEITHLEY_VENDOR_ID:
+        raise ValueError("Keithley resource vendor ID is not exactly 0x05E6")
+    if int(match.group("product"), 16) != _KEITHLEY_2604_PRODUCT_ID:
+        raise ValueError("Keithley resource product ID is not exactly 0x2604")
+    serial = match.group("serial")
+    if len(serial) > 64:
+        raise ValueError("Keithley resource serial is overlong")
+    return serial
+
+
+def _parse_keithley_idn(raw: str, *, mock: bool, expected_serial: str | None = None) -> str:
     """Validate one documented four-field Keithley 2604B identity response."""
 
     token, (_manufacturer, _model, serial, firmware) = _parse_keithley_idn_family(raw, mock=mock)
@@ -132,6 +174,11 @@ def _parse_keithley_idn(raw: str, *, mock: bool) -> str:
         raise ValueError("*IDN? serial field is empty, overlong, or malformed")
     if not mock and serial.upper().startswith("MOCK"):
         raise ValueError("mock identity is not valid for a physical connection")
+    if not mock:
+        if expected_serial is None:
+            raise ValueError("physical Keithley identity requires a configured resource serial")
+        if serial != expected_serial:
+            raise ValueError("*IDN? serial does not exactly match the configured USB resource serial")
     if not firmware or len(firmware) > 64 or _IDN_VALUE_RE.fullmatch(firmware) is None:
         raise ValueError("*IDN? firmware field is empty, overlong, or malformed")
     return token
@@ -191,6 +238,10 @@ class _WatchdogArmError(RuntimeError):
     literal autonomous contract bit ``1``. Version 3 intentionally reports 0,
     so it is usable only as a degraded late-pet check in ``best_effort`` mode.
     """
+
+
+class _WatchdogTransportAuthorityError(RuntimeError):
+    """A watchdog I/O failure that invalidates the underlying session."""
 
 
 def _parse_wdog_version(raw: str, *, field: str) -> int:
@@ -325,8 +376,11 @@ class Keithley2604B(InstrumentDriver):
         # current connection generation may authorize transport teardown.
         self._connection_generation = 0
         self._teardown_incomplete = False
+        self._teardown_can_settle = False
+        self._recovery_transport_open = False
         self._connect_in_progress = False
         self._disconnect_in_progress = False
+        self._ordinary_io_lock = asyncio.Lock()
         self._source_command_epoch: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
         self._source_start_token: dict[SmuChannel, int | None] = {"smua": None, "smub": None}
         self._source_off_depth: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
@@ -347,17 +401,122 @@ class Keithley2604B(InstrumentDriver):
             "smub": None,
         }
 
-    async def connect(self) -> None:
+    def _raise_if_operationally_barred(self, operation: str) -> None:
+        """Reject ordinary traffic after teardown uncertainty or transport loss."""
+
         if self._teardown_incomplete:
             raise TransportTeardownIncompleteError(
-                f"{self.name}: reconnect refused while the previous VISA close remains unsettled"
+                f"{self.name}: {operation} blocked while transport teardown remains incomplete"
             )
+        if self._recovery_transport_open:
+            raise RuntimeError(f"{self.name}: {operation} blocked on recovery-only transport")
+
+    def _require_operational_connection(self, operation: str) -> None:
+        self._raise_if_operationally_barred(operation)
+        if self._connect_in_progress or self._disconnect_in_progress:
+            raise RuntimeError(f"{self.name}: lifecycle transition blocks {operation}")
+        if not self._connected:
+            raise RuntimeError(f"{self.name}: instrument not connected")
+        if not self.mock:
+            try:
+                expected_serial = _parse_configured_keithley_serial(self._resource_str)
+                _parse_keithley_idn(
+                    self._instrument_id,
+                    mock=False,
+                    expected_serial=expected_serial,
+                )
+            except ValueError as exc:
+                self._enter_recovery_after_transport_loss(f"{operation} identity validation")
+                raise OutputStateUnverifiedError(
+                    f"{self.name}: {operation} blocked without exact connected identity authority"
+                ) from exc
+
+    def _enter_recovery_after_transport_loss(self, operation: str) -> None:
+        """Atomically demote a live physical session without closing its handle."""
+
+        if self.mock or not self._connected:
+            return
+        self._connected = False
+        self._recovery_transport_open = True
+        self._instrument_id = ""
+        self._wdog_armed = False
+        self._wdog_autonomous = False
+        self._revoke_off_evidence()
+        log.critical(
+            "%s: SAFETY: %s lost transport authority; retaining the existing handle only for OFF recovery and close",
+            self.name,
+            operation,
+        )
+
+    async def _operational_query(self, command: str, *, timeout_ms: int | None = None) -> str:
+        """Issue one ordinary query and demote any ambiguous transport failure."""
+
+        async with self._ordinary_io_lock:
+            self._require_operational_connection("query")
+            try:
+                if timeout_ms is None:
+                    return await self._transport.query(command)
+                return await self._transport.query(command, timeout_ms=timeout_ms)
+            except BaseException:
+                self._enter_recovery_after_transport_loss("query")
+                raise
+
+    async def _operational_write(
+        self,
+        command: str,
+        *,
+        authority_check: Callable[[], None] | None = None,
+    ) -> None:
+        """Issue one ordinary write and demote any ambiguous transport failure."""
+
+        async with self._ordinary_io_lock:
+            self._require_operational_connection("write")
+            if authority_check is not None:
+                authority_check()
+            try:
+                await self._transport.write(command)
+            except BaseException:
+                self._enter_recovery_after_transport_loss("write")
+                raise
+
+    def _normalize_cleanup_error(self, error: BaseException) -> TransportTeardownIncompleteError:
+        normalized = TransportTeardownIncompleteError(
+            f"{self.name}: VISA teardown is incomplete; reconnect remains blocked"
+        )
+        if isinstance(error, USBTMCIncompleteCloseError) and error.cleanup_error is not None:
+            normalized.__cause__ = error.cleanup_error
+        else:
+            normalized.__cause__ = error
+        return normalized
+
+    async def connect(self) -> None:
+        if self._teardown_incomplete:
+            if not self._teardown_can_settle:
+                raise TransportTeardownIncompleteError(
+                    f"{self.name}: reconnect refused after a terminal VISA teardown failure"
+                )
+            try:
+                await self._transport.close()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                self._teardown_can_settle = isinstance(exc, USBTMCIncompleteCloseError) and not exc.settled
+                raise self._normalize_cleanup_error(exc) from exc
+            self._teardown_incomplete = False
+            self._teardown_can_settle = False
+            self._recovery_transport_open = False
+            self._connected = False
+            self._instrument_id = ""
+            self._revoke_off_evidence()
+        if self._recovery_transport_open:
+            raise RuntimeError(f"{self.name}: recovery transport remains open; settle it before reconnect")
         if self._connected or self._connect_in_progress or self._disconnect_in_progress:
             raise RuntimeError(f"{self.name}: connect already active")
         if any(self._source_start_token.values()) or any(self._source_off_depth.values()):
             raise RuntimeError(f"{self.name}: source transition blocks connect")
-        self._connect_in_progress = True
         self._instrument_id = ""
+        configured_serial = None if self.mock else _parse_configured_keithley_serial(self._resource_str)
+        self._connect_in_progress = True
         log.info("%s: connecting to %s", self.name, self._resource_str)
         self._connection_generation += 1
         for smu_channel, runtime in self._channels.items():
@@ -382,33 +541,46 @@ class Keithley2604B(InstrumentDriver):
             # firmware remain untrusted until every OFF attempt has settled.
             _parse_keithley_idn_family(idn_raw, mock=self.mock)
             family_authorized = True
-            self._connected = True
             off_confirmed, pending_cancel = await self._attempt_owned_off(
                 list(SMU_CHANNELS),
                 context="connect",
             )
-            if not off_confirmed:
-                log.critical(
-                    "%s: SAFETY: output state UNVERIFIED after connect force-OFF; source start remains blocked",
-                    self.name,
+            identity_error: ValueError | None = None
+            try:
+                accepted_identity = _parse_keithley_idn(
+                    idn_raw,
+                    mock=self.mock,
+                    expected_serial=configured_serial,
                 )
+            except ValueError as exc:
+                identity_error = exc
             if pending_cancel is not None:
                 raise pending_cancel
+            if not off_confirmed:
+                log.critical(
+                    "%s: SAFETY: output state UNVERIFIED after connect force-OFF; transport retained only for recovery",
+                    self.name,
+                )
+                raise OutputStateUnverifiedError(
+                    f"{self.name}: connect did not obtain current-generation OFF proof for both channels; "
+                    "transport is retained only for recovery and connected authority was not granted"
+                ) from identity_error
+            if identity_error is not None:
+                raise identity_error
 
-            accepted_identity = _parse_keithley_idn(idn_raw, mock=self.mock)
             # Drain stale errors only after family authorization and OFF
             # settlement; unknown hardware receives no vendor-specific write.
             await self._transport.write("errorqueue.clear()")
             await self._wdog_arm()
-        except BaseException:
+        except BaseException as connect_error:
             self._instrument_id = ""
-            self._connect_in_progress = False
-            retained_for_recovery = (
-                family_authorized
-                and self._connected
-                and not all(self._has_current_off_proof(channel) for channel in SMU_CHANNELS)
+            retained_for_recovery = family_authorized and not all(
+                self._has_current_off_proof(channel) for channel in SMU_CHANNELS
             )
+            self._connect_in_progress = False
             if retained_for_recovery:
+                self._connected = False
+                self._recovery_transport_open = True
                 self._unsafe_output_state = True
                 log.critical(
                     "%s: retaining family-authorized transport for OFF recovery; "
@@ -416,39 +588,58 @@ class Keithley2604B(InstrumentDriver):
                     self.name,
                 )
                 raise
-            await self._settle_failed_connect()
-            raise
+            cleanup_error = await self._settle_failed_connect()
+            if cleanup_error is None:
+                raise
+            primary_connect_error = (
+                connect_error.primary_error
+                if isinstance(connect_error, USBTMCIncompleteCloseError) and connect_error.primary_error is not None
+                else connect_error
+            )
+            combined = FailedConnectCleanupError(
+                connect_error=primary_connect_error,
+                cleanup_error=cleanup_error,
+            )
+            if isinstance(connect_error, asyncio.CancelledError):
+                raise connect_error from combined
+            raise combined from cleanup_error
 
         assert accepted_identity is not None
         self._instrument_id = accepted_identity
+        self._connected = True
+        self._recovery_transport_open = False
         self._connect_in_progress = False
 
-    async def _settle_failed_connect(self) -> None:
-        """Revoke connection truth and settle transport cleanup before return."""
+    async def _settle_failed_connect(
+        self,
+    ) -> TransportTeardownIncompleteError | None:
+        """Attempt cleanup once and retain any unsettled exact owner for later reconciliation."""
 
         self._connected = False
+        self._recovery_transport_open = False
         self._instrument_id = ""
         self._revoke_off_evidence()
+        cleanup_error: TransportTeardownIncompleteError | None = None
         try:
-            close_task = asyncio.create_task(self._transport.close())
-            while not close_task.done():
-                try:
-                    await asyncio.shield(close_task)
-                except asyncio.CancelledError:
-                    continue
-                except BaseException:
-                    break
             try:
-                close_task.result()
+                await self._transport.close()
             except BaseException as exc:
-                if isinstance(exc, USBTMCIncompleteCloseError):
-                    self._teardown_incomplete = True
-                log.critical("%s: failed-connect transport cleanup failed: %s", self.name, exc)
+                settlement_error: BaseException = exc
+                if isinstance(exc, asyncio.CancelledError) and isinstance(exc.__cause__, USBTMCIncompleteCloseError):
+                    settlement_error = exc.__cause__
+                self._teardown_incomplete = True
+                self._teardown_can_settle = (
+                    isinstance(settlement_error, USBTMCIncompleteCloseError) and not settlement_error.settled
+                )
+                cleanup_error = self._normalize_cleanup_error(settlement_error)
+                log.critical("%s: failed-connect transport cleanup failed: %s", self.name, settlement_error)
         finally:
             self._connected = False
+            self._recovery_transport_open = False
             self._connect_in_progress = False
             self._instrument_id = ""
             self._revoke_off_evidence()
+        return cleanup_error
 
     async def disconnect(self) -> None:
         if self._teardown_incomplete:
@@ -458,13 +649,19 @@ class Keithley2604B(InstrumentDriver):
         self._disconnect_in_progress = True
         pending_cancel: asyncio.CancelledError | None = None
         terminal_error: BaseException | None = None
+        recovery_only = self._recovery_transport_open
+        disconnect_generation = self._connection_generation
         try:
-            if not self._connected:
+            if not (self._connected or recovery_only):
                 self._instrument_id = ""
                 self._revoke_off_evidence()
                 return
 
             off_confirmed = all(self._has_current_off_proof(channel) for channel in SMU_CHANNELS)
+            if recovery_only and not off_confirmed:
+                raise OutputStateUnverifiedError(
+                    f"{self.name}: recovery close refused until emergency_off verifies both outputs"
+                )
             if not off_confirmed:
                 try:
                     off_confirmed, pending_cancel = await self._attempt_owned_off(
@@ -489,18 +686,19 @@ class Keithley2604B(InstrumentDriver):
 
             # Terminal current-generation OFF proof authorizes teardown.  Keep
             # the lifecycle barrier raised until disarm and close both settle.
-            try:
-                await self._wdog_disarm()
-            except asyncio.CancelledError as exc:
-                pending_cancel = pending_cancel or exc
-            except BaseException as exc:
-                terminal_error = terminal_error or exc
+            if not recovery_only:
+                try:
+                    await self._wdog_disarm()
+                except asyncio.CancelledError as exc:
+                    pending_cancel = pending_cancel or exc
+                except BaseException as exc:
+                    terminal_error = terminal_error or exc
 
             close_task = asyncio.create_task(self._transport.close())
             close_settled = False
             while not close_task.done():
                 try:
-                    await asyncio.shield(close_task)
+                    await asyncio.wait({close_task})
                 except asyncio.CancelledError as exc:
                     pending_cancel = pending_cancel or exc
                 except BaseException:
@@ -513,15 +711,31 @@ class Keithley2604B(InstrumentDriver):
             except BaseException as exc:
                 terminal_error = terminal_error or exc
             finally:
-                if close_settled:
+                generation_is_current = self._connection_generation == disconnect_generation
+                if close_settled and generation_is_current:
                     self._connected = False
+                    self._recovery_transport_open = False
                     self._instrument_id = ""
                     self._wdog_armed = False
                     self._wdog_autonomous = False
                     self._revoke_off_evidence()
                 else:
+                    self._connected = False
+                    self._recovery_transport_open = not close_settled
+                    self._instrument_id = ""
+                    self._wdog_armed = False
+                    self._wdog_autonomous = False
+                    self._revoke_off_evidence()
                     self._teardown_incomplete = True
+                    self._teardown_can_settle = (
+                        isinstance(terminal_error, USBTMCIncompleteCloseError) and not terminal_error.settled
+                    )
                     self._unsafe_output_state = True
+                    if close_settled:
+                        terminal_error = terminal_error or TransportTeardownIncompleteError(
+                            f"{self.name}: late close for generation {disconnect_generation} "
+                            f"cannot settle current generation {self._connection_generation}"
+                        )
 
             if pending_cancel is not None:
                 raise pending_cancel
@@ -535,19 +749,12 @@ class Keithley2604B(InstrumentDriver):
             self._disconnect_in_progress = False
 
     async def read_channels(self) -> list[Reading]:
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
+        self._require_operational_connection("read_channels")
 
         if self.mock:
             return self._mock_readings()
 
-        try:
-            await self._wdog_pet()
-        except OSError:
-            self._connected = False
-            self._instrument_id = ""
-            self._revoke_off_evidence()
-            raise
+        await self._wdog_pet()
 
         readings: list[Reading] = []
         for smu_channel in SMU_CHANNELS:
@@ -559,7 +766,10 @@ class Keithley2604B(InstrumentDriver):
                 if not runtime.active:
                     # Check output state — source may be OFF or left ON from
                     # a previous session.  measure.iv() errors when output is OFF.
-                    output_raw = await self._transport.query(f"print({smu_channel}.source.output)", timeout_ms=3000)
+                    output_raw = await self._operational_query(
+                        f"print({smu_channel}.source.output)",
+                        timeout_ms=3000,
+                    )
                     output_evidence = output_raw
                     try:
                         output_on = _parse_output_enabled(output_raw)
@@ -585,7 +795,7 @@ class Keithley2604B(InstrumentDriver):
 
                     # Output is ON but not managed by us — read for monitoring.
                     self._invalidate_channel_off_evidence(smu_channel, advance_epoch=True)
-                    raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
+                    raw = await self._operational_query(f"print({smu_channel}.measure.iv())")
                     iv_evidence = raw
                     current, voltage = self._parse_iv_response(raw, smu_channel)
                     readings.extend(self._build_channel_readings(smu_channel, voltage, current))
@@ -594,12 +804,12 @@ class Keithley2604B(InstrumentDriver):
                 # --- Active P=const channel: measure + regulate ---
                 regulation_generation = self._connection_generation
                 regulation_epoch = self._source_command_epoch[smu_channel]
-                raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
+                raw = await self._operational_query(f"print({smu_channel}.measure.iv())")
                 iv_evidence = raw
                 current, voltage = self._parse_iv_response(raw, smu_channel)
 
                 # --- Compliance check ---
-                comp_raw = await self._transport.query(f"print({smu_channel}.source.compliance)")
+                comp_raw = await self._operational_query(f"print({smu_channel}.source.compliance)")
                 compliance_evidence = comp_raw
                 in_compliance = _parse_compliance(comp_raw)
 
@@ -651,7 +861,14 @@ class Keithley2604B(InstrumentDriver):
                                 generation=regulation_generation,
                                 command_epoch=regulation_epoch,
                             ):
-                                await self._transport.write(f"{smu_channel}.source.levelv = {target_v}")
+                                await self._operational_write(
+                                    f"{smu_channel}.source.levelv = {target_v}",
+                                    authority_check=lambda: self._require_current_regulation(
+                                        smu_channel,
+                                        generation=regulation_generation,
+                                        command_epoch=regulation_epoch,
+                                    ),
+                                )
                                 if self._regulation_is_current(
                                     smu_channel,
                                     generation=regulation_generation,
@@ -662,13 +879,12 @@ class Keithley2604B(InstrumentDriver):
                 readings.extend(self._build_channel_readings(smu_channel, voltage, current, extra_meta=extra_meta))
             except OSError as exc:
                 # Transport-level error (USB disconnect, pipe broken) —
-                # mark disconnected so scheduler triggers reconnect.
+                # retain this exact handle for recovery; replacement-open is blocked.
                 log.error("%s: transport error on %s: %s", self.name, smu_channel, exc)
-                self._connected = False
-                self._instrument_id = ""
-                self._revoke_off_evidence()
                 raise
             except Exception as exc:
+                if self._recovery_transport_open:
+                    raise
                 log.error("%s: read failure on %s: %s", self.name, smu_channel, exc)
                 readings.extend(
                     self._error_readings_for_channel(
@@ -690,8 +906,7 @@ class Keithley2604B(InstrumentDriver):
         smu_channel = normalize_smu_channel(channel)
         runtime = self._channels[smu_channel]
 
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
+        self._require_operational_connection("start_source")
         if not (math.isfinite(p_target) and math.isfinite(v_compliance) and math.isfinite(i_compliance)):
             # Non-finite would be formatted straight into the SCPI level/limit
             # writes below (and nan defeats the <= 0 guard). Reject at the
@@ -711,7 +926,10 @@ class Keithley2604B(InstrumentDriver):
 
         async def write_owned(command: str) -> None:
             self._require_current_start(smu_channel, start_token)
-            await self._transport.write(command)
+            await self._operational_write(
+                command,
+                authority_check=lambda: self._require_current_start(smu_channel, start_token),
+            )
             self._require_current_start(smu_channel, start_token)
 
         try:
@@ -738,7 +956,10 @@ class Keithley2604B(InstrumentDriver):
             # A write can reach the instrument and then raise locally. Publish
             # the hazardous possibility before awaiting the command.
             runtime.active = True
-            await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_ON")
+            await self._operational_write(
+                f"{smu_channel}.source.output = {smu_channel}.OUTPUT_ON",
+                authority_check=lambda: self._require_current_start(smu_channel, start_token),
+            )
             self._require_current_start(smu_channel, start_token)
 
             self._last_v[smu_channel] = 0.0
@@ -775,6 +996,57 @@ class Keithley2604B(InstrumentDriver):
             raise
         finally:
             self._finish_start_operation(smu_channel, start_token)
+
+    async def update_source_limit(
+        self,
+        channel: str,
+        *,
+        v_comp: float | None = None,
+        i_comp: float | None = None,
+    ) -> float:
+        """Apply exactly one active-channel compliance limit under operational authority."""
+
+        smu_channel = normalize_smu_channel(channel)
+        if (v_comp is None) == (i_comp is None):
+            raise ValueError("exactly one of v_comp or i_comp is required")
+        value = v_comp if v_comp is not None else i_comp
+        assert value is not None
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("source compliance limit must be finite and > 0")
+
+        self._require_operational_connection("update_source_limit")
+        runtime = self._channels[smu_channel]
+        if not runtime.active:
+            raise RuntimeError(f"{self.name}: {smu_channel} source is not active")
+        update_generation = self._connection_generation
+        update_epoch = self._source_command_epoch[smu_channel]
+
+        def require_update_authority() -> None:
+            self._require_current_regulation(
+                smu_channel,
+                generation=update_generation,
+                command_epoch=update_epoch,
+            )
+
+        require_update_authority()
+
+        if v_comp is not None:
+            if not self.mock:
+                await self._operational_write(
+                    f"{smu_channel}.source.limitv = {value}",
+                    authority_check=require_update_authority,
+                )
+            require_update_authority()
+            runtime.v_comp = value
+        else:
+            if not self.mock:
+                await self._operational_write(
+                    f"{smu_channel}.source.limiti = {value}",
+                    authority_check=require_update_authority,
+                )
+            require_update_authority()
+            runtime.i_comp = value
+        return value
 
     async def _settle_owned_bool_task(
         self,
@@ -827,6 +1099,7 @@ class Keithley2604B(InstrumentDriver):
                 try:
                     await self._transport.write(command)
                 except Exception as exc:
+                    self._enter_recovery_after_transport_loss(f"{context} write")
                     command_failed[smu_channel] = True
                     log.critical(
                         "%s: SAFETY: %s command failed on %s (%s): %s",
@@ -837,6 +1110,7 @@ class Keithley2604B(InstrumentDriver):
                         exc,
                     )
                 except BaseException as exc:
+                    self._enter_recovery_after_transport_loss(f"{context} write")
                     command_failed[smu_channel] = True
                     deferred_error = deferred_error or exc
                     log.critical(
@@ -853,6 +1127,7 @@ class Keithley2604B(InstrumentDriver):
             try:
                 readback_confirmed = await self._verify_output_off(smu_channel)
             except Exception as exc:
+                self._enter_recovery_after_transport_loss(f"{context} query")
                 log.critical(
                     "%s: SAFETY: %s OFF readback failed on %s: %s",
                     self.name,
@@ -862,6 +1137,7 @@ class Keithley2604B(InstrumentDriver):
                 )
                 readback_confirmed = False
             except BaseException as exc:
+                self._enter_recovery_after_transport_loss(f"{context} query")
                 deferred_error = deferred_error or exc
                 log.critical(
                     "%s: SAFETY: %s OFF readback interrupted on %s: %s",
@@ -915,6 +1191,7 @@ class Keithley2604B(InstrumentDriver):
 
     async def stop_source(self, channel: str) -> None:
         smu_channel = normalize_smu_channel(channel)
+        self._raise_if_operationally_barred("stop_source")
 
         if not self._connected:
             if self.mock:
@@ -931,6 +1208,7 @@ class Keithley2604B(InstrumentDriver):
             raise OutputStateUnverifiedError(
                 f"{self.name}: {smu_channel} is disconnected; output OFF cannot be verified"
             )
+        self._require_operational_connection("stop_source")
 
         off_confirmed, pending_cancel = await self._attempt_owned_off(
             [smu_channel],
@@ -945,13 +1223,12 @@ class Keithley2604B(InstrumentDriver):
             )
 
     async def read_buffer(self, start_idx: int = 1, count: int = 100) -> list[dict[str, float]]:
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
+        self._require_operational_connection("read_buffer")
         if self.mock:
             return self._mock_buffer(start_idx, count)
 
         end_idx = start_idx + count - 1
-        raw = await self._transport.query(
+        raw = await self._operational_query(
             f"printbuffer({start_idx}, {end_idx}, smua.nvbuffer1.timestamps, smua.nvbuffer1.sourcevalues, smua.nvbuffer1)",  # noqa: E501
             timeout_ms=10_000,
         )
@@ -965,9 +1242,13 @@ class Keithley2604B(InstrumentDriver):
         failure.  Caller cancellation is delivered only after the full sequence
         reaches a terminal result.
         """
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(
+                f"{self.name}: emergency_off blocked while transport teardown remains incomplete"
+            )
         channels = [normalize_smu_channel(channel)] if channel is not None else list(SMU_CHANNELS)
 
-        if not self._connected:
+        if not (self._connected or self._recovery_transport_open):
             if not self.mock:
                 self._unsafe_output_state = True
                 return False
@@ -1001,7 +1282,7 @@ class Keithley2604B(InstrumentDriver):
         """Return exact OFF evidence without treating an active transition as settled."""
 
         return (
-            self._connected
+            (self._connected or self._connect_in_progress or self._recovery_transport_open)
             and self._output_off_verified[smu_channel] is True
             and self._output_off_verified_generation[smu_channel] == self._connection_generation
             and self._output_off_verified_epoch[smu_channel] == self._source_command_epoch[smu_channel]
@@ -1050,6 +1331,14 @@ class Keithley2604B(InstrumentDriver):
     def _begin_start_operation(self, smu_channel: SmuChannel) -> int:
         if self._connect_in_progress or self._disconnect_in_progress:
             raise RuntimeError(f"{self.name}: lifecycle transition blocks source start")
+        if self._wdog_trip_pending:
+            raise OutputStateUnverifiedError(
+                f"{self.name}: {smu_channel} source start blocked by pending watchdog trip evidence"
+            )
+        if not self.mock and not self._instrument_id:
+            raise OutputStateUnverifiedError(
+                f"{self.name}: {smu_channel} source start blocked without exact connected identity authority"
+            )
         if self._source_start_token[smu_channel] is not None:
             raise RuntimeError(f"{self.name}: {smu_channel} source start already in progress")
         if self._source_off_depth[smu_channel] != 0:
@@ -1067,6 +1356,7 @@ class Keithley2604B(InstrumentDriver):
     def _start_operation_is_current(self, smu_channel: SmuChannel, token: int) -> bool:
         return (
             self._connected
+            and not self._wdog_trip_pending
             and not self._connect_in_progress
             and not self._disconnect_in_progress
             and self._source_start_token[smu_channel] == token
@@ -1092,6 +1382,7 @@ class Keithley2604B(InstrumentDriver):
     ) -> bool:
         return (
             self._connected
+            and not self._wdog_trip_pending
             and not self._connect_in_progress
             and not self._disconnect_in_progress
             and generation == self._connection_generation
@@ -1102,6 +1393,22 @@ class Keithley2604B(InstrumentDriver):
             and self._channels[smu_channel].active
         )
 
+    def _require_current_regulation(
+        self,
+        smu_channel: SmuChannel,
+        *,
+        generation: int,
+        command_epoch: int,
+    ) -> None:
+        if not self._regulation_is_current(
+            smu_channel,
+            generation=generation,
+            command_epoch=command_epoch,
+        ):
+            raise RuntimeError(
+                f"{self.name}: {smu_channel} regulation was superseded by OFF/lifecycle/watchdog authority"
+            )
+
     def _mark_channel_off_verified(
         self,
         smu_channel: SmuChannel,
@@ -1110,7 +1417,8 @@ class Keithley2604B(InstrumentDriver):
         command_epoch: int | None = None,
     ) -> bool:
         """Commit one exact current-connection/current-command OFF readback."""
-        if generation is not None and (not self._connected or generation != self._connection_generation):
+        transport_available = self._connected or self._connect_in_progress or self._recovery_transport_open
+        if generation is not None and (not transport_available or generation != self._connection_generation):
             return False
         proof_epoch = self._source_command_epoch[smu_channel] if command_epoch is None else command_epoch
         if proof_epoch != self._source_command_epoch[smu_channel]:
@@ -1128,9 +1436,8 @@ class Keithley2604B(InstrumentDriver):
         return True
 
     async def check_error(self) -> str | None:
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
-        response = (await self._transport.query("print(errorqueue.count)")).strip()
+        self._require_operational_connection("check_error")
+        response = (await self._operational_query("print(errorqueue.count)")).strip()
         if response in {"", "0"}:
             return None
         return response
@@ -1140,7 +1447,7 @@ class Keithley2604B(InstrumentDriver):
         """True when the crash-recovery force-OFF on connect() could not be
         readback-verified (outputs may still be ON). SafetyManager treats this
         as a blocking RUN precondition until a later verified OFF clears it."""
-        if not self.mock and not self._connected:
+        if not self.mock and not (self._connected or self._recovery_transport_open):
             return True
         return self._unsafe_output_state
 
@@ -1163,17 +1470,20 @@ class Keithley2604B(InstrumentDriver):
 
     async def diagnostics(self) -> dict[str, Any]:
         """Periodic health check — called by scheduler every 30s."""
+        self._raise_if_operationally_barred("diagnostics")
         if not self._connected or self.mock:
             return {}
         result: dict[str, Any] = {}
         try:
-            raw = await self._transport.query("print(errorqueue.count)")
+            raw = await self._operational_query("print(errorqueue.count)")
             err_count = int(float(raw.strip()))
             if err_count > 0:
-                raw = await self._transport.query("print(errorqueue.next())")
+                raw = await self._operational_query("print(errorqueue.next())")
                 log.warning("Keithley error queue: %s", raw.strip())
                 result["error_queue"] = raw.strip()
         except Exception as exc:
+            if self._recovery_transport_open:
+                raise
             log.error("%s: diagnostics error: %s", self.name, exc)
         return result
 
@@ -1202,6 +1512,38 @@ class Keithley2604B(InstrumentDriver):
         )
         return False
 
+    async def _wdog_authority_query(self, command: str) -> str:
+        """Keep transport/session failures distinct from semantic watchdog degradation."""
+
+        try:
+            return await self._transport.query(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.critical(
+                "%s: watchdog query invalidated transport/session authority: %s",
+                self.name,
+                exc,
+            )
+            raise _WatchdogTransportAuthorityError(
+                f"watchdog query invalidated transport authority: {command}"
+            ) from exc
+
+    async def _wdog_authority_write(self, command: str) -> None:
+        """Raise a non-degradable marker for any ambiguous watchdog write."""
+
+        try:
+            await self._transport.write(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.critical(
+                "%s: watchdog write invalidated transport/session authority: %s",
+                self.name,
+                exc,
+            )
+            raise _WatchdogTransportAuthorityError("watchdog write invalidated transport authority") from exc
+
     async def _wdog_arm(self) -> None:
         """Upload and activate the selected watchdog behavior.
 
@@ -1220,6 +1562,7 @@ class Keithley2604B(InstrumentDriver):
         required: fail-CLOSED unless the uploaded script reports the literal
         autonomous bit 1. The current version truthfully reports 0, so required
         refuses it before activation. A pre-existing latch is not a failure."""
+        self._raise_if_operationally_barred("watchdog arm")
         if not self._wdog_enabled or self.mock:
             return
         self._wdog_armed = False
@@ -1240,11 +1583,7 @@ class Keithley2604B(InstrumentDriver):
         #       UNKNOWN. Proceeding re-uploads the script, which re-runs
         #       ``cryodaq_wdog_tripped = 0`` and silently destroys evidence of a
         #       past watchdog trip. This follows failure semantics per mode.
-        try:
-            raw = await self._transport.query("print(cryodaq_wdog_tripped)")
-        except Exception as exc:
-            self._wdog_reject_unknown_latch(f"transport read failed: {exc}")
-            return
+        raw = await self._wdog_authority_query("print(cryodaq_wdog_tripped)")
         try:
             latched = _parse_wdog_latch(raw)
         except ValueError as exc:
@@ -1262,11 +1601,11 @@ class Keithley2604B(InstrumentDriver):
         run_issued = False
         try:
             watchdog_script = await asyncio.to_thread(_load_wdog_script)
-            await self._transport.write(watchdog_script)
+            await self._wdog_authority_write(watchdog_script)
             # DELTA A8a — version stamp: the script is re-uploaded every arm, so
             # a truncated/stale upload passes the fire-and-forget writes silently.
             # Read CRYODAQ_WDOG_VERSION back and refuse to arm on mismatch.
-            ver_raw = await self._transport.query("print(CRYODAQ_WDOG_VERSION)")
+            ver_raw = await self._wdog_authority_query("print(CRYODAQ_WDOG_VERSION)")
             try:
                 ver = _parse_wdog_version(ver_raw, field="CRYODAQ_WDOG_VERSION")
             except ValueError as exc:
@@ -1283,9 +1622,11 @@ class Keithley2604B(InstrumentDriver):
             self._wdog_autonomous = False
             autonomous_read_ok = False
             try:
-                autonomous_raw = await self._transport.query("print(cryodaq_wdog_autonomous)")
+                autonomous_raw = await self._wdog_authority_query("print(cryodaq_wdog_autonomous)")
                 self._wdog_autonomous = _parse_wdog_flag(autonomous_raw, field="cryodaq_wdog_autonomous")
                 autonomous_read_ok = True
+            except _WatchdogTransportAuthorityError:
+                raise
             except Exception as autonomous_exc:
                 if self._wdog_mode is WatchdogMode.REQUIRED:
                     raise _WatchdogArmError(
@@ -1312,19 +1653,19 @@ class Keithley2604B(InstrumentDriver):
                     "and provides ZERO full-host-death coverage",
                     self.name,
                 )
-            await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
+            await self._wdog_authority_write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
             # R2 (Phase A recheck, MEDIUM): mark issued BEFORE the write, not
             # after it returns. A write that raises AFTER the instrument has
             # already accepted the command (ambiguous VISA/TSP failure) must
             # still trigger the best-effort disarm below — conservative:
             # ambiguity means attempt the disarm.
             run_issued = True
-            await self._transport.write("cryodaq_wdog_run()")
+            await self._wdog_authority_write("cryodaq_wdog_run()")
             # Software state readback: confirm the script became active and did
             # not boot latched. This bit says nothing about autonomy; that was
             # read separately above.
-            active_raw = await self._transport.query("print(cryodaq_wdog_active)")
-            tripped_raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+            active_raw = await self._wdog_authority_query("print(cryodaq_wdog_active)")
+            tripped_raw = await self._wdog_authority_query("print(cryodaq_wdog_tripped)")
             active = _parse_wdog_flag(active_raw, field="cryodaq_wdog_active")
             tripped = _parse_wdog_flag(tripped_raw, field="cryodaq_wdog_tripped")
             if not active or tripped:
@@ -1361,6 +1702,13 @@ class Keithley2604B(InstrumentDriver):
                         self.name,
                         disarm_exc,
                     )
+            if isinstance(exc, _WatchdogTransportAuthorityError):
+                log.critical(
+                    "%s: watchdog transport/session authority failed; refusing connected publication: %s",
+                    self.name,
+                    exc,
+                )
+                raise
             if self._wdog_mode is WatchdogMode.REQUIRED:
                 log.critical(
                     "%s: TSP watchdog arm FAILED and mode=required — refusing to connect (fail-closed): %s",
@@ -1377,15 +1725,19 @@ class Keithley2604B(InstrumentDriver):
 
     async def _wdog_pet(self) -> None:
         """Run the TSP late-pet deadline check. No-op unless active."""
+        self._raise_if_operationally_barred("watchdog pet")
         if not (self._wdog_enabled and self._wdog_armed) or self.mock:
             return
         try:
-            await self._transport.write("cryodaq_wdog_pet()")
+            await self._operational_write("cryodaq_wdog_pet()")
         except Exception as exc:
             log.error("%s: TSP watchdog pet failed: %s", self.name, exc)
+            if self._recovery_transport_open:
+                raise
 
     async def _wdog_disarm(self) -> None:
         """Clean release of the TSP late-pet checker on disconnect."""
+        self._raise_if_operationally_barred("watchdog disarm")
         if not (self._wdog_enabled and self._wdog_armed) or self.mock:
             return
         try:
@@ -1404,6 +1756,7 @@ class Keithley2604B(InstrumentDriver):
         the latch and reactivates only the non-autonomous late-pet checker.
         Any ambiguity keeps recovery fault-latched and attempts a disarm.
         """
+        self._raise_if_operationally_barred("watchdog acknowledgment")
         if not self._wdog_enabled or self.mock:
             return True
         if not self._connected:
@@ -1417,7 +1770,7 @@ class Keithley2604B(InstrumentDriver):
         if not self._wdog_armed and not self._wdog_trip_pending:
             return True
 
-        raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+        raw = await self._operational_query("print(cryodaq_wdog_tripped)")
         fresh_instrument = raw.strip(_PROTOCOL_TRIM_CHARS) == "nil"
         if fresh_instrument:
             if not self._wdog_trip_pending:
@@ -1453,31 +1806,31 @@ class Keithley2604B(InstrumentDriver):
             ack_issued = True
             version: int | None = None
             if not force_upload:
-                version_raw = await self._transport.query("print(CRYODAQ_WDOG_VERSION)")
+                version_raw = await self._operational_query("print(CRYODAQ_WDOG_VERSION)")
                 if version_raw.strip().lower() != "nil":
                     version = _parse_wdog_version(version_raw, field="CRYODAQ_WDOG_VERSION")
             if version == _WDOG_SCRIPT_VERSION:
-                await self._transport.write("cryodaq_wdog_acknowledge()")
+                await self._operational_write("cryodaq_wdog_acknowledge()")
             else:
                 # Explicit operator acknowledgment authorizes consuming a latch
                 # left by an older script, but only after verified OFF above.
                 # Upgrade and reactivate v3 in this same visible recovery path.
                 watchdog_script = await asyncio.to_thread(_load_wdog_script)
-                await self._transport.write(watchdog_script)
-                uploaded_raw = await self._transport.query("print(CRYODAQ_WDOG_VERSION)")
+                await self._operational_write(watchdog_script)
+                uploaded_raw = await self._operational_query("print(CRYODAQ_WDOG_VERSION)")
                 uploaded = _parse_wdog_version(uploaded_raw, field="CRYODAQ_WDOG_VERSION")
                 if uploaded != _WDOG_SCRIPT_VERSION:
                     raise _WatchdogArmError(
                         f"watchdog acknowledgment upgrade version mismatch: {uploaded_raw.strip()!r}"
                     )
-                autonomous_raw = await self._transport.query("print(cryodaq_wdog_autonomous)")
+                autonomous_raw = await self._operational_query("print(cryodaq_wdog_autonomous)")
                 autonomous = _parse_wdog_flag(autonomous_raw, field="cryodaq_wdog_autonomous")
                 if autonomous:
                     raise _WatchdogArmError("v3 acknowledgment upgrade unexpectedly reported autonomous=1")
-                await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
-                await self._transport.write("cryodaq_wdog_run()")
-            active_raw = await self._transport.query("print(cryodaq_wdog_active)")
-            tripped_raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+                await self._operational_write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
+                await self._operational_write("cryodaq_wdog_run()")
+            active_raw = await self._operational_query("print(cryodaq_wdog_active)")
+            tripped_raw = await self._operational_query("print(cryodaq_wdog_tripped)")
             active = _parse_wdog_flag(active_raw, field="cryodaq_wdog_active")
             still_tripped = _parse_wdog_flag(tripped_raw, field="cryodaq_wdog_tripped")
             if not active or still_tripped:
@@ -1487,7 +1840,7 @@ class Keithley2604B(InstrumentDriver):
                 )
         except Exception as exc:
             self._wdog_armed = False
-            if ack_issued:
+            if ack_issued and not self._recovery_transport_open:
                 try:
                     await self._transport.write("cryodaq_wdog_disarm()")
                 except Exception as disarm_exc:
@@ -1516,11 +1869,12 @@ class Keithley2604B(InstrumentDriver):
         were removed during complete host death. Inert unless the
         watchdog is enabled+armed on a real connected instrument — so the
         SafetyManager reconcile is a no-op under the default-OFF flag."""
+        self._raise_if_operationally_barred("watchdog status")
         if self._wdog_trip_pending:
             return True
         if not (self._wdog_enabled and self._wdog_armed) or self.mock or not self._connected:
             return False
-        raw = await self._transport.query("print(cryodaq_wdog_tripped)")
+        raw = await self._operational_query("print(cryodaq_wdog_tripped)")
         tripped = _parse_wdog_flag(raw, field="cryodaq_wdog_tripped")
         if tripped:
             self._wdog_trip_pending = True
@@ -1535,7 +1889,7 @@ class Keithley2604B(InstrumentDriver):
         """
         if self.mock:
             return True
-        if not self._connected:
+        if not (self._connected or self._connect_in_progress or self._recovery_transport_open):
             log.critical("%s: cannot verify %s OFF while disconnected", self.name, channel)
             return False
         smu_channel = normalize_smu_channel(channel)
