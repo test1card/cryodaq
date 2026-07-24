@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This lane is the planned integrated endurance gate for the source launcher,
+This lane is the active Linux source-mode short qualification for the launcher,
 mock engine, GUI ZMQ bridge, assistant child, and H3 coordinator. It is
 separate from `scripts/soak_mock_engine.py`: the existing engine-only nightly
 lane remains useful and must not be reported as whole-stack evidence.

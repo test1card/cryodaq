@@ -3,7 +3,7 @@ title: Operator Evidence and Information Retention
 keywords: operator evidence, panorama, stale, acknowledgement, alarms, coalescing, skew, responsive, projector
 applies_to: every operator-visible CryoDAQ surface
 status: canonical
-last_updated: 2026-07-15
+last_updated: 2026-07-17
 references: README.md, patterns/information-hierarchy.md, patterns/real-time-data.md, patterns/state-visualization.md, governance/testing-strategy.md
 ---
 
@@ -74,6 +74,26 @@ Emergency OFF hold-to-confirm remains an open hazard decision. No design-system
 change may remove or add the hold without a separately reviewed tradeoff between
 continued hazardous energy during the hold and accidental experiment/process
 interruption.
+
+## Theme changes are deferred, not operational restarts
+
+Theme selection is a display preference for the next ordinary launcher start.
+It never stops ingress, assistant, bridge, engine, acquisition, recording, or
+an experiment, and it never re-executes the current process. The radio check
+remains on the theme actually loaded in the running process; a separate
+disabled line names the pending next-launch theme. Choosing the active theme
+cancels a pending selection.
+
+Only packs that pass the canonical identifier, metadata, token, color, and
+safety-alias validation may be selected. Settings are replaced atomically.
+Malformed existing settings are preserved and the change fails visibly rather
+than discarding unrelated local keys. Failure text is sanitized; detail stays
+in the launcher log.
+
+This makes application less immediate, but removes an unrelated display choice
+from the acquisition lifecycle. Revise this contract if a theme action touches
+process ownership, hides which palette is actually active, overwrites malformed
+settings, or implies that a pending theme is already rendered.
 
 ## Live data and plots
 

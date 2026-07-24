@@ -4,7 +4,7 @@ keywords: experiment, phase stepper, timeline, finalize, abort, connection gatin
 applies_to: Experiment management overlay (active experiment surface)
 status: active
 implements: src/cryodaq/gui/shell/experiment_overlay.py (B.8 + Phase II.9 harmonization)
-last_updated: 2026-07-12
+last_updated: 2026-07-19
 references: rules/color-rules.md, rules/copy-rules.md, cryodaq-primitives/experiment-card.md
 ---
 
@@ -21,7 +21,7 @@ Stage 0 audit of `experiment_overlay.py`:
 | Forbidden tokens           | **0 hits**              |
 | Emoji (incl. ⬤ ✓ ⚠ ✘)      | **0 hits**              |
 | Hardcoded hex              | **0 hits**              |
-| Current DS tokens in use   | FOREGROUND, MUTED_FOREGROUND, BORDER, STATUS_OK, STATUS_FAULT, SPACE_1..5, RADIUS_MD/SM, FONT_BODY/MONO/DISPLAY |
+| Current DS tokens in use   | FOREGROUND, MUTED_FOREGROUND, BORDER, ACCENT, STATUS_FAULT, SPACE_1..5, RADIUS_MD/SM, FONT_BODY/MONO/DISPLAY |
 
 **Decision: Path A — surgical harmonization.** The overlay was already DS v1.0.1-compliant at shipping (B.8). The single remaining gap was the missing Host Integration Contract: `set_connected(bool)` to disable action buttons on engine silence. Path A lands exactly that hook with a minimal diff; Path B would have been churn without deliverable improvement.
 
@@ -43,7 +43,7 @@ Stage 0 audit of `experiment_overlay.py`:
 - `FOREGROUND` — name label, phase pill (current state).
 - `MUTED_FOREGROUND` — passport line, phase status, timeline header, save-status text, nav arrow, past phase labels.
 - `BORDER` — divider, phase pill borders (past / future).
-- `STATUS_OK` — current phase pill border (green highlight).
+- `ACCENT` — current phase pill border; phase progress is not safety truth.
 - `STATUS_FAULT` — finalize button (destructive accent).
 - Typography: `FONT_BODY` for labels, `FONT_DISPLAY` for the name, `FONT_MONO` for the passport line.
 - Spacing: `SPACE_1 / SPACE_2 / SPACE_3 / SPACE_4 / SPACE_5`.
@@ -82,7 +82,10 @@ See `src/cryodaq/gui/shell/main_window_v2.py` for the canonical wiring (import a
 
 - `rules/color-rules.md` RULE-COLOR-010 — no hardcoded hex (satisfied; zero hits in Stage 0).
 - `rules/copy-rules.md` RULE-COPY-005 — no emoji (satisfied; zero hits in Stage 0).
-- `rules/interaction-rules.md` RULE-INTERACT-001 — engine-command-dispatching buttons must be gated by connection state (satisfied via `set_connected`).
+- Component invariant — engine-command-dispatching buttons are gated by
+  connection and replay/read-only authority via `set_connected` and
+  `set_read_only`; no separate canonical `RULE-INTERACT-*` identifier exists
+  for this component-specific contract.
 
 ## Fail-OPEN
 

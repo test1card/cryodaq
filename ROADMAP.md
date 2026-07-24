@@ -1,6 +1,6 @@
 # CryoDAQ — Feature Roadmap
 
-> **Living document.** Updated 2026-07-14 for the software-side pre-lab
+> **Living document.** Updated 2026-07-19 for the software-side pre-lab
 > readiness campaign. `CHANGELOG.md`
 > is the authoritative shipped-history record; this file is only the forward
 > feature map.
@@ -9,7 +9,8 @@
 > release train v0.58.0 -> v0.64.0 closed the v0.60 Known Limitations backlog.
 > The active milestone is to close every safe software-side prerequisite before
 > hardware validation: H3/H4 runtime/frozen-build reliability, F35 multi-lab
-> extension contracts, and F36 operator-centered product/fleet readiness.
+> extension contracts, and F36 operator-centered product readiness. Fleet-scale
+> 100+ sensor / 4K projector presentation is the separate deferred F37.
 > Physical gates remain governed by `docs/lab_verification_checklist.md` and
 > cannot be closed by simulation.
 
@@ -99,7 +100,7 @@ measurement-series identity use non-safety tokens.
 | F33 | Archive query interface | ✅ DONE (v0.54.0) | M+ | M |
 | F34 | GUI chat overlay | ✅ DONE (v0.54.0; unified into knowledge overlay v0.55.6.1) | M | L |
 | F35 | ASC hardware extension contract | 🔧 PARTIAL — descriptor persistence/receipt activation, live wire, replay/report parity, descriptor-qualified generic and specialist GUI routing, real-localhost lifecycle, conformance/reference driver, and continuous acquisition-to-display software proof committed; real-Windows frozen-build extension proof open | L | H |
-| F36 | Operator-centered control-room surface and fleet readiness | 🔧 PARTIAL — backend snapshot production is active; the panoramic dashboard is home and the POD remains an additive shift-summary route; operator, accessibility, performance, ONEDIR, WSL candidate-integration, and physical gates open | L | H |
+| F36 | Operator-centered control-room surface | 🔧 PARTIAL — backend snapshot production is active; the panoramic dashboard is home and the POD remains an additive shift-summary route; operator, accessibility, performance, ONEDIR, WSL candidate-integration, and physical gates open | L | H |
 | F-X | Physical-state alarms — CooldownAlarm + VacuumGuard | ✅ DONE (v0.51.0; SafetyManager opt-in escalation v0.64.0) | M | H |
 | F-Y | Diagnostic mode rework | ⬜ NOT STARTED — re-evaluate only after lab data shows a concrete need | M | H |
 | F-A | Anomaly detection widget | ❌ RETIRED | M | L |
@@ -154,7 +155,7 @@ an independent final element, or an operator in the physical loop:
    passive reference-driver end-to-end proof.
 3. **F36 operator product foundation.** One backend-truth snapshot for
    readiness/health/attention/experiment/data integrity, preflight and safety
-   recovery UX, passive infrastructure health, fleet-scale performance,
+   recovery UX, passive infrastructure health, ordinary-laboratory performance,
    durable review/support evidence, and design-system-governed navigation.
 4. **Evidence packaging.** Exact real-Windows and physical-lab procedures,
    expected artifacts, pass/fail thresholds, rollback/abort conditions, and
@@ -165,16 +166,19 @@ The irreducible hardware milestone then remains:
 1. SQLite shim and startup gate on the laboratory Ubuntu PC.
 2. H5 / ZMQ idle-death check on the current laboratory PC.
 3. LakeShore runtime calibration on real hardware.
-4. Keithley A8a-A8b upload/late-pet checks on dummy load; A8c-A8e host-death,
-   independent terminal V/I/P + trip-time, and independent final-element /
-   common-cause proof remain physical blockers. Phase C stays blocked until
-   all are evidenced; see the lab checklist for the full matrix.
+4. Keithley A8-0 must first confirm on the real 2604B firmware and Windows
+   USBTMC path that the strict identity query and nonce-bound single-line ASCII
+   OFF reply grammar are exact for both SMU channels. A8a-A8b upload/late-pet
+   checks then run on a dummy load; A8c-A8e host-death, independent terminal
+   V/I/P + trip-time, and independent final-element / common-cause proof remain
+   physical blockers. Phase C stays blocked until all are evidenced; see the
+   lab checklist for the full matrix.
 5. Windows source-install/shortcut smoke and, separately, a genuine packaged
    ONEDIR smoke. The editable `install.bat` path cannot close the frozen gate.
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
-### Active evidence checkpoint — 2026-07-15
+### Active evidence checkpoint — 2026-07-20
 
 This is feature-branch evidence, not shipped history and not a release claim:
 
@@ -182,20 +186,26 @@ This is feature-branch evidence, not shipped history and not a release claim:
   Its detached clean-SHA gate completed with 4,939 passed, 11 skipped, and
   1 deselected. H4 R3a is also committed: periodic delivery now has a
   provider-neutral receipt contract and durable state-v2 migration. H4 R3b is
-  activated for the POSIX source-mode short profile: the registry alone invokes
-  the exact owned execution path, validates the process/artifact/receipt cut,
-  issues and consumes opaque evidence, and settles cleanup before returning.
-  Windows retains a fail-closed unsupported branch. A clean integrated
-  15-minute run on the final SHA, 12/72-hour duration evidence, and
+  implemented for the POSIX source-mode short profile. It is designed to run
+  source and configuration from sealed snapshots of the exact manifest SHA,
+  own all child sessions through a temporary subreaper, continuously bound the
+  launcher log, and join two adjacent durable periodic deliveries across an
+  assistant replacement. The fixture is deliberately limited to one passive
+  mocked `LS218_1` with 16 descriptor/binding pairs; it does not exercise the
+  production alarm/interlock topology. Windows retains a fail-closed unsupported
+  branch. The expanded focused Linux contract gate is green, but a clean
+  integrated 15-minute run on the final SHA, 12/72-hour duration evidence, and
   real-Windows ONEDIR evidence remain open.
-- Recorded exact-SHA GitHub Actions checkpoint `29468630626` at `f5946b9`
-  passed all eight Ubuntu/Windows agents, core, GUI, and remaining
-  jobs. Safe SQLite verification passed in every job; both remaining jobs also
-  passed lint and requirements-lock drift checks. Any newer candidate requires
-  its own exact-SHA eight-job pass before acceptance. This checkpoint does not
-  close frozen-build, soak-duration, physical-hardware, F35 frozen-packaging,
-  or F36 operator/accessibility/performance/external gates. Final-candidate
-  exact-SHA CI evidence is pending and must replace this historical checkpoint.
+- Recorded exact-SHA GitHub Actions checkpoint `29662599972` at
+  `503c8bf8d884654256ede4f08a9e44ab7b382242` passed all eight Ubuntu/Windows
+  agents, core, GUI, and remaining jobs. Safe SQLite verification passed in
+  every job; both remaining jobs also passed lint, format, and requirements-lock
+  drift checks. No hosted Windows ONEDIR run exists for this checkpoint. Any
+  newer candidate requires its own exact-SHA eight-job pass and separate ONEDIR
+  evidence before acceptance. This checkpoint does not include the current
+  unsealed worktree and does not close frozen-build, soak-duration,
+  physical-hardware, F35 frozen-packaging, or F36 operator/accessibility/
+  performance gates. Final-candidate exact-SHA evidence remains pending.
 - The bounded persistence spool is committed with FIFO, physical-cap and
   integrity gates, receipt-authorized acknowledgement, cancellation, and
   close settlement.
@@ -225,14 +235,188 @@ This is feature-branch evidence, not shipped history and not a release claim:
   supervised production path consumes the actual loop-owned experiment,
   acquisition, and direct-SQLite persistence feeds. Both production launch
   roots retain one snapshot-ingress owner, pump newest coherent cuts into the
-  real POD, and settle ingress before normal shutdown or theme re-exec. The
+  real POD, and settle ingress before normal shutdown. Theme selection is
+  validated and atomically deferred to the next ordinary launch; it does not
+  touch the running acquisition process tree. The
   panoramic dashboard is the primary home surface; the POD is retained as an
   additive shift-summary route. A reviewed 1280x800 source-mode POD visual
   exists. The 12 operator scenarios, keyboard/NVDA, DPI/ONEDIR,
   startup/frame/memory/long-session, WSL final-candidate integration, and
   physical gates remain open; the screenshot alone closes none of them.
-- No software, mock, replay, CI, soak, or screenshot evidence closes a real
-  Windows, dummy-load, independent-final-element, or physical-laboratory gate.
+- Exact evidence collected on real Windows can close its matching Windows gate.
+  Mock, replay, another operating system, CI, soak, or screenshot evidence
+  cannot substitute for real-Windows, dummy-load, independent-final-element, or
+  physical-laboratory evidence.
+
+#### Current candidate status in plain language
+
+| Area | Current state | What closes it |
+|---|---|---|
+| Historical published checkpoint | `503c8bf`; reported run `29662599972` passed eight jobs for that SHA only | A newer frozen SHA must earn its own evidence |
+| Current worktree | Large, dirty, moving; no immutable candidate or covering CI | Integrate reviewed slices into one clean candidate, then verify live remote/PR state |
+| Keithley and transport | Moving-tree focused checks exist; physical proof open | Rerun on the frozen candidate, then perform the prescribed 2604B/dummy-load/host-death/final-element procedures |
+| Safety shutdown/HOLD | **Rejected in review:** settlement ownership is unbounded and one terminal child can be replayed | Correct, freeze, test, and pass both mandatory reviews |
+| Safety configuration and channel bindings | Open | One sealed exact-typed configuration and zero dead/ambiguous/unintended descriptor bindings |
+| Writer, operator log, assistant boundary | Open | Bounded persistence, end-to-end event identity, and a strictly read-only assistant authority |
+| GUI and design system | Iterative semantic repair is locally tested; broader freshness/provenance/lifecycle and operator gates remain open | Preserve all operator truth, finish coherent cuts, and pass scenario/accessibility/performance review |
+| Documentation and diagrams | Freshness gate is red; count must be rerun after final doc edits | Candidate-matched docs, metrics, and deterministic four-SVG regeneration |
+| Platform/package evidence | Not started for the current dirty tree | One frozen SHA passes Windows, WSL, packaging, soak, ONEDIR, and eight-job CI |
+| Reviews and PR | Not started for a final candidate | Fresh-context review plus coordinator line/semantic review, then exact-SHA PR/CI audit |
+
+The 100+ sensor / 4K projector fleet view is deferred to F37. It does not
+expand F36 or block ordinary single-machine laboratory readiness.
+
+### Montana final engineering, review, and publication checklist
+
+Every item below applies to one exact frozen candidate object. Historical
+passes, a moving worktree, a predecessor commit, or a review of similar code do
+not transfer automatically.
+
+- [ ] **Keithley command identity and shutdown proof.** The nonce-bound OFF
+  protocol, connection identity, replay rejection, both-channel behavior, and
+  shutdown races are locally verified. Real 2604B identity/reply formatting,
+  terminal OFF, host-death, and independent final-element evidence remain
+  physical gates until the laboratory checklist records them.
+- [ ] **USBTMC desynchronization containment.** A timed-out or ambiguous
+  exchange quarantines the transport until a clean reconnect; no delayed reply
+  may satisfy a later command or OFF proof.
+- [ ] **Transactional safety-configuration authority.** The selected base or
+  complete local safety YAML is one bounded, immutable, exact-typed document;
+  duplicate/unknown keys, aliases, malformed regexes, non-finite or out-of-range
+  values, unsafe filesystem identities, and unreadable selected-local files
+  fail closed without fallback. All scalar, list, and regex validation finishes
+  before one atomic manager commit. SafetyManager cannot start unconfigured or
+  reload after its configuration is sealed, and adversarial rollback/selection
+  tests prove that every failed load leaves the prior authority unchanged.
+- [ ] **Safety-pattern and physical-semantic authority.** One frozen descriptor
+  manifest and safety-config snapshot defines the canonical-to-raw channel
+  translation. Every safety, alarm, interlock, and legacy-throttle pattern that
+  participates in startup has at least one exact intended live binding; raw
+  acquisition never reinterprets canonical labels and prefix matches cannot
+  alias neighbouring sensors. T11 remains the nitrogen plate and T12 the GM
+  second stage across alarms, UI, reports, and operator documents, and they
+  remain the only SafetyManager critical channels absent a separate hazard
+  review. Before command ingress or RUN authority, the exact selected hashes
+  must yield zero dead, ambiguous, or unintended bindings.
+- [ ] **Safety-monitor and process-death containment.** First death becomes a
+  visible unavailable/fault condition, fail-closed OFF escalation is bounded,
+  and no restart invents healthy authority. A launcher hard kill may target
+  only the exact process and only after the verified-OFF permit contract has
+  settled; abandoning a still-running executor future is not shutdown.
+- [ ] **Coordinated shutdown and HOLD authority.** Shutdown closes new command
+  ingress first and retains one coordinator for every accepted mutation,
+  scheduler/persistence tail, safety child, and reviewed-source operation. It
+  may proceed to resource teardown only after exact global OFF proof and bounded
+  settlement. If OFF is unverified, the engine remains in an operator-visible
+  HOLD with its process, instance lock, SafetyManager children, exact driver /
+  transport, logging, and retry path alive; the launcher must not classify it
+  as a clean exit, restart it, release its identity, or hard-kill it. Repeated
+  signals, timeout, or caller cancellation cannot convert HOLD into success.
+  After true OFF, remaining owners drain and one exact exit receipt authorizes
+  final process release.
+- [ ] **Persistence and writer-hang containment.** Uncommitted data is never
+  published, writer failure/hang is bounded and visible, and engine/writer
+  ownership and shutdown settlement have deterministic regression evidence.
+- [ ] **Operator-log identity and idempotency.** One stable event identity and
+  payload is allocated before hot commit. An exact retry is idempotent; the same
+  identity with a different payload fails visibly. Rotation/retry cannot lose or
+  duplicate the event, hot+cold union deduplicates by identity rather than
+  timestamp/text/order, and REST/history, replay, reports, and the observational
+  assistant preserve it. Canonical fingerprints are owner-computed, registries
+  are bounded, cold generations are receipted and crash-recoverable, and legacy
+  rows are deterministic or explicitly marked legacy.
+- [ ] **Observational assistant and ZMQ boundary.** The assistant has no control
+  capability or mutation credential. It binds loopback-only with exact protocol
+  and process-version identity, uses closed read-only schemas, and rejects every
+  unknown or mutating query before opening/sending on ZMQ. Prefix routing cannot
+  pass it an engine capability token; assistant, RAG, report, and Telegram paths
+  hold no write token, source authority, or generic command proxy, and the
+  assistant cannot become a second operator-log writer. Malformed replies and
+  health are reported honestly; maintenance/delivery remain separate bounded
+  observational authorities.
+- [ ] **Shared GUI presentation cuts and lifecycle.** One GUI-thread Store
+  atomically applies each global operator-snapshot revision across all summary
+  widgets; independently, each measurement channel owns one bounded <=2 Hz
+  display cut containing last usable value, current status, source/arrival
+  times, descriptor/provenance, freshness/connectivity/identity, interval
+  extrema, invalid-value, worst-status, and clock-skew evidence. A render never
+  mixes global revisions or partially applies a rejected cut. Later stale,
+  disconnected, or unavailable evidence preserves last coherent values and
+  marks their age rather than blanking or inventing truth. Top watch, sensor
+  cells, Keithley displays, conductivity/analytics display projections, and the
+  panoramic workflow consume only their appropriate presentation authority;
+  urgent fault annunciation remains immediate and acquisition, persistence,
+  alarms, predictors, safety, and control stay full-rate and independent.
+  Timers/workers/ingress owners settle and scenario/design-system/accessibility/
+  DPI/performance/long-session gates pass.
+- [ ] **Conductivity auto-advance freshness decision and authority.** Before
+  auto-sweep is lab-ready, an operator/hazard review must choose and document
+  what freshness loss does: visible PAUSE/HOLD at the current setpoint or
+  verified STOP/OFF. Until that choice is frozen, automatic advance remains
+  unavailable. No point may be recorded and no next setpoint sent without the
+  current operation generation's accepted command plus usable post-command
+  power/readback and every selected temperature sample, bounded source/arrival
+  skew, and a predictor derived from those fresh samples. Stale, disconnected,
+  or non-finite input, clock rollback, delayed reply, or a cached previously
+  settled prediction cannot advance or auto-resume; presentation cuts never
+  gain dispatch authority.
+- [ ] **Documentation and architecture evidence.** README/Russian overview,
+  status, protocol, architecture, operator/deployment/lab procedures, the full
+  Montana report, metrics, and all four SVG maps agree with the candidate and
+  are generated transactionally and deterministically.
+- [ ] **One exact-candidate platform, package, soak, and CI freeze.** Freeze one
+  clean candidate commit and reproduce Ruff check/format, lock drift, every
+  configured test partition on native Windows and WSL/Linux, source-install /
+  config smoke, the sealed final-SHA 15-minute soak, and the recorded status of
+  the separate 12/72-hour elapsed soaks. Build Windows ONEDIR from that same
+  commit, record the artifact hash, and pass every frozen smoke cell against
+  that artifact. Push the identical commit and require all eight hosted Ubuntu /
+  Windows jobs green. Dirty-worktree, predecessor-SHA, stale archive, cached
+  build, or differently built artifact evidence transfers no credit; every
+  unavailable gate stays explicitly open.
+- [ ] **Two mandatory review receipts per gate.** Every engineering and
+  evidence gate is frozen before review. One newly spawned reviewer receives
+  fresh context containing only that frozen scope, its threat model,
+  acceptance contract, and collected evidence; inherited campaign discussion
+  is not a substitute for this independent pass. The coordinating Codex agent
+  then performs a separate mandatory review of the same object. Both receipts
+  bind the exact object/ranges and record findings plus local adjudication.
+  Any correction invalidates both affected receipts and the corrected frozen
+  object must pass both reviews again. External-model reviews from any
+  separately authorized provider/model are additive architecture or high-context
+  evidence only: absence, quota exhaustion, or approval from them neither
+  blocks nor authorizes PR publication.
+- [ ] **Exhaustive object/range disposition.** The generated review map covers
+  every current and deleted text range plus every binary, symlink, gitlink,
+  executable-mode, rename, and LFS pointer/resolved-artifact obligation. It
+  records exact old/new blob identities, separate reviewer dispositions, and
+  evidence hashes. Missing, truncated, unavailable, quota-limited, conditional
+  without an explicitly unaffected range, or stale-hash evidence earns zero
+  credit; any content, path, type, or mode change reopens the affected
+  obligation. The fresh-context reviewer and coordinating Codex dispositions
+  are both mandatory for the current campaign. Evidence from any additional
+  external reviewer stays separately labelled and cannot be silently
+  substituted for either required reviewer.
+- [ ] **Semantic assurance beyond line counting.** Architecture, threat-model,
+  operator-workflow, safety, concurrency/persistence, and test-quality audits
+  are independent mandatory gates. A 100% line/object count never by itself
+  claims that reviewers understood every behavior or hazard.
+- [ ] **Frozen PR audit and publication.** After both final mandatory reviews
+  pass, the exact tested hash is committed, pushed, and watched until every
+  required hosted check completes green. Only that reviewed hash may open the
+  ready PR. The PR diff and hosted checks are then audited again; every finding
+  is adjudicated and corrected/re-reviewed on a new exact hash. A red,
+  cancelled, stale, or unreviewed job keeps the gate open.
+
+The staged target excludes only the generated review-ledger/receipt outputs
+from self-coverage; their generator, schema, and tests are ordinary candidate
+code and require normal review. Ledger generation must be byte-deterministic on
+two consecutive runs. The generated files then carry explicit post-commit PR
+review debt because an output cannot truthfully validate or embed its own final
+hash. `git write-tree` writes an object only; it does not freeze the index or
+worktree. Intent-to-add or unmerged index entries block the final freeze, sparse
+entries remain obligations by blob identity, and carry-forward approval is off
+for the final candidate.
 
 ---
 
@@ -310,7 +494,7 @@ current safety authority.
 
 ---
 
-## Operator product and fleet-readiness milestone — F36
+## Operator product milestone — F36
 
 CryoDAQ must become an operator-centered operating surface, not a collection
 of instrument modules and feature tabs. The primary display must answer, from
@@ -410,10 +594,11 @@ scenario, accessibility, performance, or backend-truth gates.
 
 Current boundary: the reusable operating-display, navigation, backend-truth
 models, snapshot transport, Store, production engine publication path, and
-software POD route exist. The panoramic dashboard is the primary home surface;
-the POD remains available as an additive shift summary. Both production launch
-roots retain one snapshot-ingress owner and settle it before normal shutdown or
-theme re-exec. A reviewed source-mode POD screenshot is evidence input only; no
+  software POD route exist. The panoramic dashboard is the primary home surface;
+  the POD remains available as an additive shift summary. Both production launch
+  roots retain one snapshot-ingress owner and settle it before normal shutdown.
+  Theme selection is a validated next-launch preference and has no acquisition
+  or process-lifecycle authority. A reviewed source-mode POD screenshot is evidence input only; no
 operator, accessibility, performance, ONEDIR, WSL final-candidate integration,
 long-session, or physical acceptance is claimed.
 
@@ -429,7 +614,7 @@ Acceptance: restart/replay tests reproduce the same incident timeline and
 cooldown decision state; missing data is explicit; exported evidence points to
 stable experiment/channel identities.
 
-### F36.4 — Passive infrastructure health and fleet scale
+### F36.4 — Passive infrastructure health at ordinary lab scale
 
 Add an allowlisted read-only `HealthTelemetryDevice` contract for compressor,
 pump-station, cryocooler, and support nodes. It may report identity, heartbeat,
@@ -437,10 +622,13 @@ mode, metrics, alarms, freshness, and provenance. It must not expose
 start/stop/reset/vent/purge/set commands or health-driven automatic
 remediation.
 
-Acceptance: a deterministic simulator proves at least 100 devices and 2,000
-channels at <=2 Hz human-readable update cadence, without unbounded widgets,
-poll tasks, queues, or memory growth. Aggregated/virtualized views meet the
-design-system frame, input, startup, and idle-memory budgets.
+Acceptance: deterministic simulators prove the configured laboratory support
+nodes at <=2 Hz human-readable update cadence without unbounded widgets, poll
+tasks, queues, or memory growth. The ordinary operator surface presents health,
+freshness, provenance, and explicit unavailable state without adding control
+authority or hiding the panoramic dashboard. The 100+ sensor / 4K projector,
+aggregation, semantic-zoom, and fleet-virtualization problem belongs to F37 and
+is not an F36 closure claim.
 
 ### F36.5 — Onboard documentation, read-only API, and support bundle
 
@@ -508,13 +696,236 @@ safety boundaries.
 - **F36 is not deferred.** Complete its safe software and operator-scenario
   gates before laboratory validation; keep its hazardous-control non-goals and
   physical acceptance gates open.
-- **F18 — CI/CD residuals.** Recorded exact-SHA run `29468630626` closes the
-  Ubuntu/Windows matrix gate at checkpoint `f5946b9`; every newer candidate
-  still requires its own eight-job pass. Coverage publishing, release
-  automation, and binary artifacts remain optional.
+- **F18 — CI/CD residuals.** Recorded exact-SHA run `29662599972` closes the
+  Ubuntu/Windows matrix gate at checkpoint `503c8bf`; every newer candidate
+  still requires its own eight-job pass, and this run contains no hosted
+  Windows ONEDIR evidence. Coverage publishing, release automation, and binary
+  artifacts remain optional.
 - **F-Y — Diagnostic mode rework.** Re-spec only if lab operation produces
   concrete diagnostic decisions that the current alarm/overlay path cannot
   support.
+
+---
+
+## Post-Montana engineering-quality and research roadmap
+
+> **Scope boundary — this is the next programme, not current Montana work.**
+> The items below start only after the Montana software, review, CI, publication,
+> and handoff gates are closed. They are not retroactive Montana acceptance
+> criteria and must not delay the current branch merely to pursue an abstract
+> quality score. If future exploration exposes a violation of an existing
+> Montana safety invariant, that concrete defect is handled under the normal
+> safety process; otherwise this section remains post-Montana work.
+> Any real-Windows, ONEDIR, soak-duration, dummy-load,
+> independent-final-element, or physical-laboratory gate still open in
+> `PROJECT_STATUS.md` remains open; no post-Montana analysis, simulation, or
+> model transfers credit to it.
+
+This programme orders the remaining improvement axes by expected return on
+engineering time. It distinguishes inexpensive high-return work, medium-sized
+work that directly supports scientific defensibility and a thesis/dissertation
+defence, larger
+legitimacy/certification projects, and areas where CryoDAQ should deliberately
+avoid feature or architecture inflation.
+
+### Do first after Montana — low cost, high return
+
+#### 1. Mutation testing as a quality gate
+
+The repository has a large test suite, but test count and line coverage do not
+prove that assertions detect meaningful behavioural defects. Pilot a Python
+mutation-testing tool such as `mutmut` or `cosmic-ray` on bounded, deterministic
+modules, classify killed, survived, equivalent, and timed-out mutants, then add
+a ratcheted CI gate once the baseline is understood.
+
+The gate must not reward brittle assertions or indiscriminate test volume.
+Generated code, platform-only launch boundaries, nondeterministic timing probes,
+and hardware procedures need explicit policy rather than silent exclusion.
+Safety, persistence, protocol, and state-machine code should receive the first
+campaigns because surviving mutants there provide the most useful signal.
+
+Acceptance:
+
+- the tool invocation and exclusions are reproducible on a frozen commit;
+- zero high-risk mutants remain untriaged; every non-equivalent survivor is an
+  owned test gap with an explicit disposition rather than pressure to label it
+  equivalent;
+- timeouts and invalid mutants are reported separately and never counted as
+  killed; the denominator/exclusion policy is versioned and reviewable;
+- CI enforces measured per-scope baselines/ratchets and reviewed high-risk
+  floors, not an arbitrary global percentage chosen before measurement;
+- ordinary coverage metrics remain supporting evidence, not a substitute for
+  mutation effectiveness.
+
+#### 2. Reduce concentrated local complexity without removing guarantees
+
+Review the `periodic_png.py` coordination surface (the T5-1 concentration,
+measured at approximately 2,045 lines in the interim Montana report) and the
+six-module operator-snapshot cluster. Reduce ceremony and repeated
+receipt/outcome/projection plumbing where the same guarantee can be expressed
+once, while preserving durable delivery, bounded shutdown, safety cutover,
+single-writer ownership, provenance, and unknown-outcome semantics.
+
+This is a targeted maintenance project, not a rewrite. Before authoring begins,
+the designated integration coordinator alone defines and records the stop-list
+of invariants that may not be compressed away. Measure the result with
+dependency direction, cyclomatic/cognitive complexity, ownership clarity, and
+deleted duplication rather than with a raw “lines removed” target. Start it
+when these areas demonstrably slow review or maintenance; do not churn stable
+code merely to make files shorter.
+
+#### 3. Convert documentation drift into executable consistency checks
+
+Several reviews found prose or docstrings claiming that production wiring was
+absent after the wiring had already landed. Add structured, narrow checks that
+bind important wiring claims to live registration points and runtime constants.
+Prefer explicit markers, parsed inventories, and contract tests over fragile
+whole-corpus phrase matching.
+
+This is a future prevention gate. It does not defer correcting known Montana
+documentation drift or closing the currently red candidate-matched
+documentation-freshness gate.
+
+Acceptance:
+
+- a material wiring change cannot leave its authoritative status statement
+  silently stale;
+- missing source documents and unavailable Git metadata fail closed in the
+  documentation gate rather than becoming empty input or an untracked fallback;
+- checks identify the exact stale contract and remain maintainable when prose is
+  reworded without changing meaning.
+
+### Do next for scientific defensibility or thesis/dissertation defence — medium-sized work
+
+#### 4. Persist receipt latency and clock-domain provenance (T0-1)
+
+Capture a receipt-time value such as `recv_monotonic_ns` at one authoritative
+acquisition boundary. Downstream spool, SQLite/Parquet storage, rotation,
+replay projection, and `archive_reader` must copy that evidence, never
+regenerate it. Because a raw monotonic value is meaningful only inside one
+host/boot clock domain, persist that domain identity, paired monotonic↔UTC
+calibration anchors with stated uncertainty and clock-step metadata, and the
+source clock's semantics and identity. Never compare unrelated or uncalibrated
+domains as if they shared an epoch.
+
+This closes both an engineering observability gap and a scientific-method gap.
+It makes the source-time-to-receipt offset estimable within stated
+clock-calibration uncertainty, so the inverse analysis can demonstrate that it
+is negligible at the apparatus resolution or model it as a nuisance parameter
+rather than assuming it away. Unrelated or uncalibrated domains remain unknown
+and are marginalized; they are never blindly subtracted.
+
+Acceptance:
+
+- schema migration and backward-compatible readers distinguish source time,
+  receipt time, persistence time, and their clock domains;
+- spool, cold rotation, Parquet, replay, reports, and exports preserve the new
+  evidence without inventing values for old records;
+- deterministic delay/skew, wall-clock-step, suspend/resume, reboot,
+  process-restart, and unrelated-domain tests prove the interpretation
+  boundaries;
+- the scientific report states the measured offset distribution and how it is
+  propagated or marginalized in downstream inference.
+
+#### 5. Add a fault-injection campaign harness
+
+Turn robustness from a collection of post-incident regressions into a
+repeatable campaign. Exercise complete mock/replay runs while killing only
+harness-owned, identity-checked processes; using a quota-limited disposable
+filesystem or injected `ENOSPC` rather than consuming workspace/host free
+space; breaking harness sockets; delaying or dropping REP replies; interrupting
+test persistence; and forcing shutdown races. The harness must remain isolated
+from real instruments and hazardous outputs.
+
+Acceptance:
+
+- scenarios are deterministic or carry explicit statistical/repetition rules;
+- every injected fault has an expected fail-closed state, bounded settlement,
+  durable evidence requirement, and recovery/restart contract;
+- resource growth, orphan tasks/processes, duplicate writers, and false-success
+  UI states are asserted, not inspected informally;
+- CI runs a bounded core set, while longer campaigns produce retained nightly or
+  release-candidate evidence bound to the exact commit, configuration,
+  seed/fault schedule, and repetition rule;
+- mock/replay campaigns cannot close host-death, real-Windows, final-element,
+  or physical-laboratory gates.
+
+### Larger projects — pursue for external legitimacy or certification
+
+#### 6. Formally model the safety state machine; separately evaluate independent protection
+
+Model the safety/actuation authority boundary in TLA+, a model checker, or an
+equivalent formal method. State and model-check invariants under explicit
+environment, fairness, and timing assumptions, including that hazardous
+actuation is unreachable without the required permission and transition
+evidence. Distinguish commanded OFF, readback-verified OFF, and independently
+observed physical OFF while exploring cancellation, host death, duplicate
+messages, and stale receipts. Treat model-to-code correspondence as a reviewed
+artifact, not as an automatic proof of the implementation.
+
+An independent watchdog is a separate hardware/system project. Another process
+on the same host is not independent protection: independence must cover the
+common-cause boundaries selected by the hazard analysis. It requires an
+approved hazard analysis, final-element contract, and physical bench evidence.
+Neither model checking nor software simulation closes that physical gate.
+
+#### 7. Build a long-term reproducibility chain
+
+Bind raw acquisition evidence, configuration/descriptors, processing code, and
+generated conclusions so that a reported number can be regenerated years later.
+Record content hashes, schema/tool versions, environment or lockfile identity,
+and the exact processing commit in report manifests. Reuse the existing
+append-only descriptor and authenticated-spool foundations without claiming
+that they already provide an end-to-end scientific provenance chain.
+
+Acceptance:
+
+- tampering or missing inputs are detectable;
+- regeneration starts from immutable identifiers rather than mutable paths;
+- reports explain which inputs are raw observations, operator annotations,
+  calibrations, transformations, and derived results;
+- a clean-room replay of a frozen example reproduces the declared outputs or
+  reports a bounded, explained numerical tolerance.
+
+### Deliberately do not chase
+
+- **More capability for its own sake.** A focused laboratory DAQ has a healthy
+  ceiling. Additional features are not quality unless they answer an observed
+  operator, scientific, or safety need.
+- **Wholesale migration of every panel to a common base (T3-1).** Keep it in the
+  backlog until duplicated behaviour creates a concrete maintenance or safety
+  cost. Visual uniformity alone is insufficient justification.
+- **An abstract S-tier HMI score before field evidence.** Code cannot substitute
+  for real night-shift usability, alarm-load, legibility, and recovery data.
+  The current target is a strong, honest operator interface with explicit open
+  field-validation gates.
+
+### Recommended post-Montana sequence
+
+The default high-return set is roadmap items **1, 3, and 4**: establish
+mutation-testing evidence, make critical documentation/wiring claims
+executable, and add clock-domain-safe receipt-latency evidence for the
+scientific uncertainty model. Documentation checks can proceed in parallel.
+
+If a separate robustness campaign is justified, use the risk sequence
+mutation evidence → receipt-latency evidence → isolated fault injection. Then:
+
+1. Reduce concentrated coordinator/snapshot debt only when the measured
+   maintenance return justifies the change.
+2. Start formal verification only for an external audit or safety-standard
+   path.
+3. Evaluate independent protection only after an approved hazard analysis and
+   with the required bench/final-element evidence.
+4. Build the full reproducibility chain when long-horizon science,
+   collaboration, or external review warrants it.
+
+The aim is not to manufacture work in pursuit of a perfect grade. A strong,
+well-evidenced production system is enough for ordinary laboratory operation,
+scientific defensibility, thesis/dissertation defence, and hiring evidence once
+its stated gates are closed.
+“S-tier” investment is justified when CryoDAQ must demonstrate correctness to
+an external auditor, safety standard, sceptical reviewer, or long-horizon
+reproducibility programme—not simply because further complexity is possible.
 
 ---
 

@@ -4,7 +4,7 @@ keywords: color, token, palette, surface, status, text, plot, stone, accent, hex
 applies_to: all widgets
 enforcement: strict
 priority: critical
-last_updated: 2026-04-17
+last_updated: 2026-07-20
 status: canonical
 ---
 
@@ -82,15 +82,16 @@ Semantic colors with locked meaning. Cross-use is a specification violation.
 > Dark packs ship the hex values in the table below verbatim. Light
 > packs (`gost`, `xcode`, `braun`) ship a shifted-lightness variant of
 > the same HUE to restore WCAG AA contrast (≥4.5:1) against a light
-> `SURFACE_CARD`. Semantic identity («amber = WARNING, red = FAULT»)
-> is preserved 1:1 across mode switches; only lightness adapts to
+> `SURFACE_CARD`. Semantic identity («amber = CAUTION, red = FAULT»)
+> is preserved 1:1 across mode switches; legacy `warning` input maps to the
+> same caution presentation and never creates another rung. Only lightness adapts to
 > substrate. See
 > [`docs/design-system/adr/001-light-theme-status-unlock.md`](../adr/001-light-theme-status-unlock.md)
 > for the rationale and the dark↔light hex correspondence table.
 
 | Token | Hex | Meaning | Use | Anti-use |
 |---|---|---|---|---|
-| `STATUS_OK` | `#4a8a5e` | Normal operating, within spec, healthy | "Норма" badge, safety READY, successful confirmation | Active/completed phase, selection, any non-healthy meaning, decorative |
+| `STATUS_OK` | `#4a8a5e` | Normal operating, within spec, healthy | "Норма" badge, independently demonstrated connection/channel/safety health | READY/permission/activity/completion, selection, any non-healthy meaning, decorative |
 | `STATUS_CAUTION` | `#c4862e` | Abnormal or approaching a limit; investigate | Yellow-orange «Внимание», rate-of-change caution | Fault state (use FAULT); generic notice (use INFO) |
 | `STATUS_WARNING` | `STATUS_CAUTION` | Legacy compatibility input | Existing backend/history `warning` rendered exactly as caution | A separate operator-visible severity step |
 | `STATUS_FAULT` | `#c44545` | Out of spec, interlock, fault_latched | Red alarm badge, "АВАР. ОТКЛ." text, safety fault | Any non-fault red, generic error display text |
@@ -157,12 +158,10 @@ ADR 002):
 - ✗ Progress-bar chunk for user-triggered task → use `ACCENT`.
 - ✗ Active tab / selected ToolRail slot → use `ACCENT`.
 - ✗ Selected table row background → use `SELECTION_BG`.
-- ✓ Safety-state labels (engine/connection/running/permitted) — keep.
-- ✓ Channel-health indicators (ChannelStatus.OK, `_health_color`
-  ≥80 threshold, stability-ok, steady-state-reached banners) — keep.
-- ✓ CoverageBar dense segment, SeverityChip("OK") — keep.
-- ✓ Current-phase pill border in phase stepper — keep (phase is a
-  state indicator, not user activation).
+- ✓ Independently demonstrated connection, channel, and safety health — keep.
+- ✗ `running` / `run_permitted`, task completion, settling/stability,
+  coverage progress, and current experiment phase — use ACCENT or neutral
+  chrome because activity and progress do not prove health.
 
 See `rules/color-rules.md` RULE-COLOR-004 and
 `adr/002-accent-status-decoupling.md`.
@@ -274,7 +273,8 @@ See `ANTI_PATTERNS.md` for historical regressions and their corrections.
 - `RULE-COLOR-001` — No raw hex in widget code (`rules/color-rules.md`)
 - `RULE-COLOR-002` — Status color semantic lock (`rules/color-rules.md`)
 - `RULE-COLOR-003` — One primary accent per composition (`rules/color-rules.md`)
-- `RULE-COLOR-004` — ACCENT reserved for focus/selection (`rules/color-rules.md`)
+- `RULE-COLOR-004` — ACCENT reserved for interaction, selection, primary
+  action, and current activity/progress; never health (`rules/color-rules.md`)
 - `RULE-SURF-001` — Single visible surface per card (`rules/surface-rules.md`)
 - `RULE-A11Y-003` — Status color text contrast constraint (`rules/accessibility-rules.md`)
 
@@ -288,4 +288,6 @@ See `ANTI_PATTERNS.md` for historical regressions and their corrections.
 
 ## Changelog
 
+- 2026-07-20: Reserved OK for independently demonstrated health; documented
+  activity/progress as ACCENT and canonicalized the single caution rung.
 - 2026-04-17: Initial version from theme.py inventory at commit 53e258c (71 color tokens)

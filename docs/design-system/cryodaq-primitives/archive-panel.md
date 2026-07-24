@@ -3,8 +3,8 @@ title: ArchivePanel
 keywords: archive, experiment, history, export, csv, hdf5, xlsx, report, regenerate, k6
 applies_to: Experiment archive overlay (historical experiment list + report regeneration + bulk data export)
 status: active
-implements: src/cryodaq/gui/shell/overlays/archive_panel.py (Phase II.2); legacy src/cryodaq/gui/widgets/archive_panel.py retained (DEPRECATED) until Phase III.3
-last_updated: 2026-04-19
+implements: src/cryodaq/gui/shell/overlays/archive_panel.py; removed v1 widget is historical only
+last_updated: 2026-07-19
 references: rules/data-display-rules.md, rules/interaction-rules.md, rules/content-voice-rules.md, components/card.md, components/input-field.md, components/button.md
 ---
 
@@ -25,8 +25,8 @@ Operator overlay for the experiment archive. Three primary scenarios: find a pas
 > artifact view replaced with ASCII bracketed tags `[ДАННЫЕ]` /
 > `[ИЗМЕРЕНИЯ]` / `[УСТАВКИ]` per RULE-COPY-005. Host Integration
 > Contract wired via `_tick_status` + `_ensure_overlay("archive")`
-> replay. Legacy v1 widget at `src/cryodaq/gui/widgets/archive_panel.py`
-> marked DEPRECATED; removal scheduled for Phase III.3.
+> replay. The former v1 widget has been removed; this overlay is the only live
+> implementation contract.
 >
 > **Known limitations / follow-ups:**
 > - Per-experiment data export (current export card is global, not
@@ -212,4 +212,4 @@ class ArchivePanel(QWidget):
 
 ## Changelog
 
-- **2026-04-19 — Phase II.2 initial version.** Full rewrite from legacy v1 at `src/cryodaq/gui/widgets/archive_panel.py`. DS v1.0.1 tokens throughout; legacy helpers (`PanelHeader` / `StatusBanner` / `build_action_row` / `create_panel_root` / `setup_standard_table` / `add_form_rows` / `TEXT_DISABLED`) purged. Emoji in artifact roles replaced with ASCII bracketed tags. K6 bulk export migration: CSV / HDF5 / Excel card added with `QThread` workers wrapping existing exporter classes unchanged. Host Integration Contract wired via `MainWindowV2._tick_status` mirror + `_ensure_overlay("archive")` replay; `on_reading` is a contract no-op (no engine finalize event). Legacy widget marked DEPRECATED; removal scheduled for Phase III.3.
+- **2026-04-19 — Phase II.2 initial version.** Full rewrite from the former v1 archive widget. DS v1.0.1 tokens throughout; legacy helpers (`PanelHeader` / `StatusBanner` / `build_action_row` / `create_panel_root` / `setup_standard_table` / `add_form_rows` / `TEXT_DISABLED`) purged. Emoji in artifact roles replaced with ASCII bracketed tags. K6 bulk export migration: CSV / HDF5 / Excel card added with `QThread` workers wrapping existing exporter classes unchanged. Host Integration Contract wired via `MainWindowV2._tick_status` mirror + `_ensure_overlay("archive")` replay; `on_reading` is a contract no-op (no engine finalize event). The superseded widget was removed in the Montana cleanup.

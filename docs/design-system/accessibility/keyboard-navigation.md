@@ -5,7 +5,7 @@ applies_to: keyboard operability across the product
 status: canonical
 references: rules/accessibility-rules.md, rules/interaction-rules.md, tokens/keyboard-shortcuts.md, patterns/destructive-actions.md
 external_reference: WCAG 2.2 sections 2.1.x, 2.4.x; Apple HIG Keyboard chapter; Material Design Accessibility
-last_updated: 2026-04-17
+last_updated: 2026-07-17
 ---
 
 # Keyboard Navigation
@@ -60,7 +60,6 @@ Registered globally at application level (QShortcut on the QMainWindow). Mnemoni
 | **Ctrl+C** | Open conductivity panel (**C**onductivity) |
 | **Ctrl+D** | Open sensor diagnostics (**D**iagnostics) |
 | **Ctrl+Shift+M** | Toggle experiment / debug mode |
-| **Ctrl+Shift+X** | **Emergency stop (АВАР. ОТКЛ.)** |
 | **F1** | Open help / shortcut reference |
 | **F5** | Refresh (reload current panel data from engine) |
 | **F11** | Toggle fullscreen |
@@ -85,15 +84,17 @@ Per WCAG 2.1.4 Character Key Shortcuts (Level A): shortcuts using only letter/nu
 
 Exception: function keys (F5, F11) — these are not text input characters.
 
-## The Ctrl+Shift+X exception
+## Current emergency keyboard path
 
-Emergency stop is the one exception to the "every shortcut has a visible affordance" principle. Reasoning:
+No global emergency shortcut is shipped. `Ctrl+K` opens the Keithley panel;
+the operator then activates the visible «АВАР. ОТКЛ.» button and answers its
+cancel-default confirmation modal. Documentation and training must not teach
+`Ctrl+Shift+X`, a one-second hold, or `Shift+Enter` as available behavior.
 
-- Emergency stop may be needed when operator panics — hunting for the АВАР. ОТКЛ. button in the Keithley panel (which might not even be the active panel) costs seconds
-- The three-key combo is itself deliberate — cannot be triggered by accidental single-key press
-- The Keithley panel's АВАР. ОТКЛ. hold-confirm button remains visible AND carries the same shortcut in its tooltip
-
-So the shortcut is discoverable (tooltip), just not globally visually displayed as "press Ctrl+Shift+X here" on every panel.
+A more direct emergency gesture may reduce navigation time, but it also changes
+accidental-activation risk, keyboard reachability, source authority, and
+confirmation latency. It remains an open hazard decision requiring an approved
+contract, implementation, deterministic tests, and physical response evidence.
 
 ## Focus trap in overlays
 
@@ -113,9 +114,10 @@ Per `patterns/destructive-actions.md`:
 
 - **Default focus in destructive Dialog = Cancel button.** Operator pressing Enter (muscle memory) dismisses safely.
 - **Primary action requires explicit Tab navigation** to the destructive button before Enter, OR a mouse click.
-- **HoldConfirmButton does NOT activate on Enter alone** — it requires continuous hold; keyboard holds space for 1 second works; Enter press for 1s also works (via Qt's key-repeat suppression during hold).
-
-Alternative for keyboard users on hold-confirm: **Shift+Enter on a focused HoldConfirmButton** triggers immediately with same destructive dialog as mouse hold-complete. This makes hold-confirm fully keyboard-accessible without requiring held keypress.
+- **The shipped Keithley emergency modal defaults to Cancel.** The operator must
+  explicitly move focus to and activate confirmation.
+- Do not document keyboard behavior for a proposed HoldConfirm component as
+  shipped behavior. Any future gesture needs its own accessibility verification.
 
 ## Per-widget keyboard behavior
 
@@ -189,7 +191,7 @@ Before shipping any panel:
 7. ☐ Modal opens → focus moves to modal (not left behind in parent)
 8. ☐ Modal closes → focus returns to opener
 9. ☐ Global shortcuts work from any panel
-10. ☐ Emergency stop Ctrl+Shift+X works from any context
+10. ☐ Ctrl+K reaches the Keithley panel and the visible emergency action has a complete keyboard path with Cancel as the safe default
 
 ## Rules applied
 
@@ -231,9 +233,13 @@ Before shipping any panel:
 - `accessibility/focus-management.md` — focus ring visuals + restoration logic
 - `accessibility/wcag-baseline.md` — 2.1.x and 2.4.x commitment
 - `tokens/keyboard-shortcuts.md` — the shortcut registry token
-- `patterns/destructive-actions.md` — Ctrl+Shift+X exception documented there
+- `patterns/destructive-actions.md` — shipped emergency confirmation and open gesture decision
 
 ## Changelog
 
 - 2026-04-17: Initial version. Tab order rules + F-pattern alignment. Shortcut registry table. No single-key policy. Ctrl+Shift+X exception rationale. Focus trap spec for overlays. Per-widget keyboard behavior. Screen-reader throttling guidance.
 - 2026-04-17 (v1.0.1): Aligned shortcut registry with mnemonic scheme per architect decision AD-002 (FR-011). Canonical bindings are Ctrl+L/E/A/K/M/R/C/D + Ctrl+Shift+X; numeric Ctrl+1..9 demoted to transitional fallback. Updated "type while focus elsewhere" example to use Ctrl+E. `tokens/keyboard-shortcuts.md` is the canonical registry — this file mirrors it.
+- 2026-07-17 (v4.0.1): Removed unshipped Ctrl+Shift+X, one-second hold,
+  and Shift+Enter claims; documented the current Ctrl+K, visible-button, and
+  cancel-default modal path while retaining alternative gestures as an open
+  hazard decision.

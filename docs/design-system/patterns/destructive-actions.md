@@ -69,19 +69,17 @@ Key: **default focus on Cancel** (safe direction). Enter key must not trigger de
 
 ### Level 3 — Safety-critical destructive
 
-Examples: emergency stop of Keithley output; abort running experiment; disconnect Keithley during active run.
+Examples: emergency stop of Keithley output; abort running experiment;
+disconnect Keithley during active run.
 
-**Protection:** HoldConfirmButton (press-and-hold 1s) + often additional Dialog.
+The protection must match the shipped action, not a proposed component. The
+current Keithley emergency action is a visible button followed by a
+cancel-default modal. It has no global shortcut and no one-second hold. `Ctrl+K`
+only navigates to the Keithley panel.
 
-Rationale: a panic click cannot trigger safety-critical action. Operator must deliberately press, hold, and wait — time enough to think "wait, am I sure?"
-
-```python
-emergency_btn = HoldConfirmButton("АВАР. ОТКЛ.")
-emergency_btn.triggered.connect(self._emergency_stop)
-# HoldConfirmButton emits `triggered` only after 1000ms continuous hold.
-```
-
-For the most critical actions, layer Dialog on top of HoldConfirmButton:
+HoldConfirm may be used by a different action only where the current runtime
+actually implements and tests it. For the most critical actions, a reviewed
+implementation may layer Dialog on top of HoldConfirmButton:
 ```python
 abort_btn = HoldConfirmButton("Прервать эксперимент")
 abort_btn.triggered.connect(self._confirm_abort_dialog)
@@ -152,7 +150,7 @@ From `components/dialog.md` — but specific to destructive context:
 |---|---|---|---|---|
 | Delete archive record | «Удалить эксперимент?» | «Запись 'calibration_run_042' удалится безвозвратно. Архивные данные SQLite останутся.» | «Удалить» | Default focus: Cancel |
 | Abort running experiment | «Прервать эксперимент?» | «Собранные данные сохранятся в архив. Эксперимент завершится сейчас.» | «Прервать» | Layer 1: hold-confirm; Layer 2: dialog |
-| Emergency stop (Keithley) | «АВАР. ОТКЛ. (Ctrl+Shift+X)» | — (no dialog; hold-confirm is sole protection for maximum speed) | «ПОДТВЕРДИТЬ (удерживать)» | Single layer; button itself is the protection; also global shortcut |
+| Emergency stop (Keithley) | «Аварийное отключение» | «Подтвердите аварийное отключение… Действие немедленно обрывает подачу питания.» | «OK» | Current visible button + cancel-default modal; `Ctrl+K` opens the panel; no global shortcut or hold is shipped |
 | Enable SMU output | «Включить выход канала А?» | «Будет подан {setpoint} А на оборудование. Убедитесь, что подключение корректно.» | «Включить» | Default focus: Cancel |
 | Disable SMU output | — (no dialog) | — | (button: «Откл выход») | No confirmation — safe direction |
 | Disconnect Keithley | «Отключить Keithley?» | «Перед отключением выполнится emergency_off. Активный эксперимент прервётся.» | «Отключить» | |
@@ -171,15 +169,14 @@ Over-protection breeds click-through fatigue. Don't confirm:
 
 Rule of thumb: if you click it accidentally and the consequence is "oh, I'll click it away again", no confirmation needed.
 
-## Global emergency shortcut
+## Open emergency-gesture decision
 
-`Ctrl+Shift+X` triggers АВАР. ОТКЛ. from anywhere. This is the one exception to «no shortcut without visible affordance» — emergency stop is too critical to hunt for.
-
-Registration at application level (not panel-local). Always available.
-
-On trigger, it behaves identically to pressing-and-holding the АВАР. ОТКЛ. button: emits emergency_off_requested signal, which the engine handles as immediate hardware-level stop.
-
-No dialog confirmation on Ctrl+Shift+X — the gesture itself is deliberate (three-key combo). Speed matters.
+No global emergency shortcut is currently registered. A future global or hold
+gesture could reduce navigation time, but could also increase accidental
+interruption, conflict with keyboard access, or delay the safe direction. It
+must undergo separate hazard analysis, authority review, implementation,
+discoverability work, deterministic tests, and physical response evidence
+before this design system or operator training may call it available.
 
 ## Keyboard behavior in destructive dialogs
 
@@ -250,3 +247,6 @@ If a dialog is being dismissed-through by the same operator many times per week,
 ## Changelog
 
 - 2026-04-17: Initial version. Three-severity classification. Two-layer protection pattern. Directional safety (enable vs disable toggle). Worked examples. Ctrl+Shift+X global emergency shortcut documented. Anti-pattern list including "Don't show again" rejected.
+- 2026-07-17 (v4.0.1): Corrected the Keithley emergency example to the shipped
+  visible-button and cancel-default modal path; moved any global/hold gesture
+  back to an open hazard decision.

@@ -1,7 +1,7 @@
 # Roadmap 10/10 execution ledger — Phase A→E (handoff scratchpad/montana/HANDOFF_ROADMAP_EXECUTION.md)
 # Base: master f5d6434 (v0.64.1). Branch: feat/montana-phase-a.
-# Protocol: Sonnet=S items, Opus=M/L; Fable reviews+commits per item; Codex gate per phase boundary.
-# NOTE: docs/ORCHESTRATION.md absent from main tree (hygiene train); contract read from .worktrees/v0.56.1-audit copy.
+# Historical 2026-07-09 protocol (superseded): Sonnet=S items, Opus=M/L; Fable reviews+commits per item; Codex gate per phase boundary.
+# Current contract: AGENTS.md and tracked docs/ORCHESTRATION.md; named-provider routing below is historical evidence, not current policy.
 2026-07-09 WAVE A1 dispatch: A2(Opus,engine.py) | A4(Opus,launcher.py) | A1b+A8(Opus,tsp+keithley+smoke) | A10(Opus,safety_manager+GUI confirm) | A6(Sonnet,sqlite_writer) | A7(Sonnet,install.bat+CI+docs) | A9(Sonnet,physical_alarms.yaml). A1(a) config flip = Fable direct. A3 waits on A2+A4 (engine.py+launcher.py overlap). Reports → scratchpad/montana/exec/impl_a*.md.
 2026-07-09 ROUTING UPDATE (Vladimir, mid-wave): "sonnet s and m and l, opus for xl only. sonnet 5 is very capable" — wave A1's 4 Opus dispatches stay (in flight); ALL further dispatches Sonnet except genuinely XL (C1 PID class).
 A4: complete (commit 93dab79, Fable review clean — retry-forever cap 120s, modals→banner+bell, 19 tests green, ruff clean; Codex in phase batch)
@@ -1059,3 +1059,74 @@ worktree after D7.1 is settled.
 - The 12/72-hour elapsed soak, operator/accessibility/performance/DPI evidence,
   dummy-load, independent final element, real cryogenic hardware, and physical
   laboratory acceptance remain open and cannot be closed by software tests.
+
+## 2026-07-17 Fable and frozen-path repair
+
+- Exact checkpoint `7607bc1` passed GitHub Actions run `29488046377`: all eight
+  Ubuntu/Windows agents/core/GUI/remaining jobs, 13,893 tests across shards.
+- Fable high-effort read-only audit found no P0/P1 and two validated P2s:
+  checkout-EOL-dependent SVG content fingerprints and an unguarded duplicate
+  installer SQLite safety policy. The repair normalizes CRLF only for strict
+  UTF-8 text, retains byte-exact binary hashing, and tests installer policy
+  equality with the production corruption gate.
+- Exact `7607bc1` Windows ONEDIR built and contained its process tree, but the
+  timeout cell exposed an insufficient two-second artifact-commit tail after a
+  hung LibreOffice conversion. The repair reserves eight seconds for DOCX
+  hashing, manifest durability, fsync, atomic promotion, and result publication.
+- This repair slice needs its own exact-SHA focused/full, WSL 15-minute soak,
+  Windows ONEDIR, eight-job CI, PR checks, Codex line review, and Fable PR audit.
+2026-07-17 FINAL-CANDIDATE HARDENING (uncommitted/current): final audit repaired checkout-EOL-dependent architecture fingerprints, installer/runtime SQLite-policy drift, Windows report commit-tail budgeting, descriptor-config startup classification, and the POSIX short-soak qualification boundary. The soak now uses one sealed exact-SHA source/config snapshot, a manifest-sealed passive LS218_1 fixture (16 descriptors/bindings, 8 readings), adjacent pre/post assistant receipt joins, continuously bounded launcher output, runner-subreaper process settlement including detached/zombie descendants, and authority-bound mutation detection through PASS publication. Expanded current WSL focused evidence: 178 passed / 4 expected platform skips; Ruff PASS; format pending one mechanical source reformat at this ledger entry. The earlier live preflights were not PASS and are not acceptance evidence. Clean final-SHA 15-minute WSL, combined Windows ONEDIR, fresh eight-job hosted CI, PR review, and final Fable PR audit remain OPEN. Physical/dummy-load/independent-final-element/laboratory gates remain OPEN.
+
+## 2026-07-20 current hardening and explicit remaining gates
+
+- Published branch HEAD and `origin/feat/montana-phase-a` remain
+  `503c8bf8d884654256ede4f08a9e44ab7b382242`. GitHub Actions run
+  `29662599972` is green for that commit only. The large current worktree is
+  newer, moving, uncommitted, and not covered by that run; no pull request is
+  open and no lab-readiness claim applies to it.
+- The Keithley nonce/race and GPIB/USBTMC transport panel is locally green:
+  48 transport tests and 260 Keithley tests passed, with four explicit
+  hardware-only skips. This remains software evidence and does not close the
+  real 2604B, dummy-load, host-death, or independent-final-element gates.
+- The latest SafetyManager child-death/shutdown-HOLD review is **REJECTED**.
+  Repeated failed global-OFF attempts can create an unbounded sequence of
+  retained settlement tasks/timers while the durable fault log is blocked, and
+  a retry can consume the same terminal safety-child outcome again. Earlier
+  green tests and lint do not override those findings. Correction requires one
+  identity-owned coalesced settlement, exact-once child observation,
+  deterministic regressions, new blob hashes, and both mandatory re-reviews.
+- Read-only architecture audits confirmed that the following are separate open
+  gates, now stated explicitly in `ROADMAP.md`: transactional sealed safety
+  configuration; descriptor-qualified safety-pattern/T11-T12 authority;
+  coordinated verified-OFF shutdown/HOLD; durable hot+cold operator-log request
+  identity; strict observational assistant/ZMQ separation; one shared GUI
+  presentation cut; and the conductivity auto-advance freshness decision.
+- GUI work remains an iterative operator-dashboard repair, not a replacement
+  black box. The panoramic dashboard, density, drill-downs, last usable values,
+  provenance, extrema, and current status remain visible. The shared model may
+  bound digit repaint to 2 Hz but cannot throttle acquisition, persistence,
+  alarms, plots, predictors, or control. Every GUI slice remains governed by
+  the design system and needs explicit better/worse, safety, accessibility,
+  performance, and operator-workflow evidence.
+- The narrow GUI semantic correction has a current local focused gate of
+  `76 passed` plus clean Ruff lint/format for the bottom-status and conductivity
+  files. It remains REJECTED until all design-system semantic/governance
+  findings are corrected, the final post-edit blobs are re-tested, and both
+  mandatory reviews pass. No value, status, provenance, or operator drill-down
+  is removed by this slice.
+- The last reproducible documentation freshness run before the latest doc edits
+  was red (`12 passed / 5 failed`). That count is now historical and must be
+  rerun after the final documentation edit. The open classes are canonical
+  design-system tracking, provider-neutral wording, experiment protocol prose,
+  report inventory, and SVGs generated from a different index. Final metrics
+  and all four SVGs must be generated twice from the exact staged candidate.
+- Still open after engineering: exact final documentation/report/SVG
+  reconciliation; frozen Windows and WSL partitions; lock/static/package/source
+  install; short and longest-honest soak; Windows ONEDIR; exact-SHA hosted CI;
+  exhaustive object/range and semantic reviews by both mandatory reviewers;
+  commit/push; ready PR; and post-publication PR/CI audit. Any separately
+  authorized external-model review is additive only and is not a prerequisite
+  for opening the PR.
+- Physical hardware, dummy-load, independent-final-element, 12/72-hour elapsed
+  soak, and laboratory operator acceptance remain open until their prescribed
+  evidence is collected; software work must not relabel them as complete.

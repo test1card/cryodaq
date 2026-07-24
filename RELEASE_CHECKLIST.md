@@ -5,9 +5,17 @@
 Этот чеклист используется перед релизом CryoDAQ.
 Он должен проверять только текущую реализованную реальность, без пунктов про будущие функции.
 
+Этот файл проверяет release/tag procedure, но **не закрывает** физические и
+внешние лабораторные ворота. Их источник истины —
+`docs/lab_verification_checklist.md`. Evidence относится только к точному SHA
+проверенного кандидата: старый CI, mock/replay, WSL или программный smoke не
+заменяет Windows ONEDIR, dummy-load, independent final-element и другие
+предписанные физические проверки.
+
 ## 1. Git и рабочее дерево
 
-- [ ] Работа ведётся на ветке `master`
+- [ ] Явно выбраны и одобрены release target branch и точный candidate SHA;
+      подготовка PR не выдаётся за работу непосредственно на `master`
 - [ ] `git status --short` просмотрен до начала финальной проверки
 - [ ] Нет незакоммиченных изменений в рабочем дереве
 - [ ] Все тесты проходят
@@ -17,12 +25,21 @@
 
 ## 2. Установка и packaging path
 
-- [ ] Поддерживаемый dev/test path: `pip install -e ".[dev,web]"`
-- [ ] Базовый runtime path: `pip install -e .`
-- [ ] Optional web path: `pip install -e ".[web]"`
-- [ ] `pytest` запускается из того же environment, где выполнен `pip install -e ...`
+- [ ] Создан **свежий** поддерживаемый runtime: `conda env create --file environment.yml`
+      и активирован `conda activate cryodaq`; обновление старого environment само по себе
+      не считается воспроизводимым release evidence
+- [ ] Разрешённые Python-пакеты установлены из lock: `pip install -r requirements-lock.txt`
+- [ ] Проект установлен без второго resolver-а:
+      `pip install -e . --no-deps --no-build-isolation`
+- [ ] `pip check` проходит; runtime использует безопасную версию SQLite из
+      `environment.yml`, а не `CRYODAQ_ALLOW_BROKEN_SQLITE=1`
+- [ ] Bare `pip install -e ".[dev,web]"` используется только как developer
+      convenience внутри независимо проверенного safe-SQLite environment и не
+      считается поддерживаемым deployment evidence
+- [ ] `pytest` запускается из того же environment, где установлен проект
 - [ ] GUI/test workflow не проверяется без установленных `PySide6` и `pyqtgraph`
-- [ ] Web dashboard не считается частью базового smoke path без extra `web`
+- [ ] Web dashboard проверяется в поддерживаемом workflow: `requirements-lock.txt`
+      уже включает resolved web-зависимости; extra `web` не подменяет lock
 - [ ] Parquet-экспорт работает из коробки — начиная с IV.4 `pyarrow>=15`
       входит в базовые зависимости, дополнительно ставить `[archive]`
       не требуется. Extra `archive` сохранён как no-op alias для
@@ -30,21 +47,28 @@
 
 ## 3. Обязательный regression matrix
 
-Выполнить:
+Выполнить из поддерживаемого environment:
 
 ```powershell
-python -m pytest tests/core -q
-python -m pytest tests/storage -q
-python -m pytest tests/drivers -q
-python -m pytest tests/analytics -q
-python -m pytest tests/gui -q
-python -m pytest tests/reporting -q
+python -m pytest -q tests/
+python -m ruff check src tests
+python -m ruff format --check src tests
+python -m pip check
+python scripts/check_lock_drift.py
 ```
 
-- [ ] Все команды запущены и результаты зафиксированы
+- [ ] Полный `tests/` прогон включает root tests, agents, core, storage,
+      drivers, analytics, GUI, reporting, web и scripts; выборочные каталоги не
+      выдаются за «все тесты»
+- [ ] Все команды запущены и результаты зафиксированы: точная команда,
+      interpreter/OS, passed/failed/skipped/deselected и candidate SHA
 - [ ] Failures отделены от средовых проблем запуска pytest
 - [ ] Warnings просмотрены и явно интерпретированы
 - [ ] `WindowsSelectorEventLoopPolicy` deprecation warnings не приняты за функциональную регрессию продукта
+- [ ] GitHub Actions имеет зелёный exact-SHA прогон всех Windows/Ubuntu jobs
+      именно для финального candidate SHA; более старый зелёный SHA не переносится
+- [ ] WSL, Windows ONEDIR и физические ворота остаются явно открытыми, пока для
+      этого же SHA не собраны предписанные им evidence; release checklist их не подменяет
 
 ## 4. GUI smoke checks
 
@@ -61,7 +85,8 @@ python -m pytest tests/reporting -q
 - [ ] `Служебный лог`
 - [ ] `База знаний`
 - [ ] `Приборы`
-- [ ] Меню `Ещё`: `Архив`, `Калибровка`, `Настройки`, `Открыть Web-панель`, `Перезапустить Engine`
+- [ ] Меню `Ещё`: `Сводка смены`, `Архив`, `Калибровка`, `Настройки`,
+      `Открыть Web-панель`, `Перезапустить Engine`
 - [ ] `Дашборд` показывает summary/status widgets без старого layout drift
 - [ ] `Источник мощности` не показывает ложный `ON` без backend truth
 - [ ] `Служебный лог` позволяет добавить запись и честно показывает empty state
@@ -72,9 +97,12 @@ python -m pytest tests/reporting -q
 
 - [ ] Tray logic соответствует `src/cryodaq/gui/tray_status.py`
 - [ ] Если системный tray недоступен, GUI продолжает работать без него
-- [ ] `healthy` показывается только при connected backend, `alarm_count == 0` и допустимом safety state
-- [ ] Unknown state не маскируется под healthy
-- [ ] Tray не рекламирует здоровое состояние без backend truth
+- [ ] Tray проверяется только как coarse-индикатор связи/известного safety fault;
+      он не выдаётся за авторитетную сводку alarms/readiness и не заменяет GUI
+- [ ] Недоступная alarm authority (`alarm_count=None`) отображается как
+      caution/unavailable, никогда не нормализуется в `0` и не допускает зелёный tray;
+      это закреплено regression-тестом
+- [ ] Unknown/disconnected safety state не маскируется под healthy
 
 ## 6. Experiment / report / archive workflow
 
@@ -104,12 +132,13 @@ python -m pytest tests/reporting -q
 
 ## 8. Calibration workflow
 
-- [ ] Поддержка `.330` / `.340` есть и покрыта тестами
+- [ ] Импорт `.340` / JSON есть и покрыт тестами; удалённый `.330` явно
+      отклоняется и не рекламируется как поддерживаемый формат
 - [ ] Chebyshev FIT следует task-level contour, и его статус явно отражён в docs
 - [ ] Runtime apply и per-channel apply присутствуют, а их operator-facing ограничения описаны явно
 
 - [ ] Calibration session start / capture / finalize path работает
-- [ ] Fit и export `.330` / `.340` / JSON / CSV path работает
+- [ ] Fit и export `.cof` / `.340` / JSON / CSV path работает
 - [ ] Calibration artifacts пишутся в:
 - [ ] `data/calibration/sessions/<session_id>/`
 - [ ] `data/calibration/curves/<sensor_id>/<curve_id>/`
