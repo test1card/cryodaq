@@ -83,6 +83,17 @@ cooldown_v5/
 # see docs/ORCHESTRATION.md, "Authority and context".
 .worktrees/
 .audit-run/
+/.audit-*
+/.codex-candidate-*
+/.exact-onedir-*
+/.pytest-*
+/.wsl-candidate*
+/.wsl-current*
+/.wsl-head*
+/.wsl-soak*
+/tmpcryodaq-*
+/tmp????????/
+/outputs/
 .omc/
 .swarm/
 .superpowers/

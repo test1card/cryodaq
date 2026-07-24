@@ -1,15 +1,14 @@
 """F35 D4.5 — GUI-process boundary: fail-closed descriptor decode.
 
-``_descriptor_from_envelope`` / ``ZmqBridge.poll_readings_with_descriptor()``
-must decode to ``ChannelDescriptorV1 | None``: malformed, oversize,
-duplicate-key, or identity-mismatched bytes all fail closed to ``None`` —
-never raise into the consumer, never synthesize a descriptor. The legacy
-``poll_readings()`` API stays byte-for-byte unaffected by the new wire field.
+``ZmqBridge.poll_readings_with_descriptor()`` must decode to
+``ChannelDescriptorV1 | None``: malformed, oversize, duplicate-key, or
+identity-mismatched bytes all fail closed to ``None`` — never raise into the
+consumer, never synthesize a descriptor. The legacy ``poll_readings()`` API
+stays byte-for-byte unaffected by the new wire field.
 """
 
 from __future__ import annotations
 
-import json
 import time
 
 import msgpack
@@ -24,7 +23,7 @@ from cryodaq.channels.descriptors import (
 from cryodaq.channels.persistence import MAX_PERSISTED_ENVELOPE_BYTES, PersistedChannelEnvelopeV1
 from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, _decode_reading_frames
 from cryodaq.drivers.base import ChannelStatus
-from cryodaq.gui.zmq_client import ReadingWithDescriptor, ZmqBridge, _descriptor_from_envelope
+from cryodaq.gui.zmq_client import ReadingWithDescriptor, ZmqBridge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -86,108 +85,13 @@ def _drain_with_descriptor_until(bridge: ZmqBridge, predicate, timeout: float = 
     return collected
 
 
-def _decode_descriptor(
-    payload: object,
-    *,
-    channel_id: str = "probe.1",
-    instrument_id: str = "probe",
-    unit: str = "K",
-) -> ChannelDescriptorV1 | None:
-    return _descriptor_from_envelope(
-        payload,
-        expected_channel_id=channel_id,
-        expected_instrument_id=instrument_id,
-        expected_unit=unit,
-    )
-
-
-# ---------------------------------------------------------------------------
-# _descriptor_from_envelope — unit-level fail-closed contract
-# ---------------------------------------------------------------------------
-
-
-def test_absent_envelope_is_none() -> None:
-    assert _decode_descriptor(None) is None
-
-
-def test_valid_envelope_decodes_to_exact_descriptor() -> None:
-    descriptor = _descriptor()
-    result = _decode_descriptor(_envelope_bytes(descriptor))
-    assert result == descriptor
-
-
-def test_malformed_bytes_fail_closed_to_none() -> None:
-    assert _decode_descriptor(b"not json at all") is None
-
-
-def test_truncated_envelope_fails_closed_to_none() -> None:
-    envelope = _envelope_bytes(_descriptor())
-    truncated = envelope[: len(envelope) // 2]
-    assert _decode_descriptor(truncated) is None
-
-
-def test_oversize_envelope_fails_closed_to_none() -> None:
-    oversize = b'{"a":"' + b"x" * MAX_PERSISTED_ENVELOPE_BYTES + b'"}'
-    assert len(oversize) > MAX_PERSISTED_ENVELOPE_BYTES
-    assert _decode_descriptor(oversize) is None
-
-
-def test_non_bytes_payload_fails_closed_to_none() -> None:
-    assert _decode_descriptor("a string, not bytes") is None
-    assert _decode_descriptor(12345) is None
-    assert _decode_descriptor({"channel_id": "probe.1"}) is None
-    assert _decode_descriptor(3.14) is None
-
-
-def test_duplicate_key_json_fails_closed_to_none() -> None:
-    envelope = _envelope_bytes(_descriptor())
-    # Hand-craft a duplicate top-level key — canonical_json has no trailing
-    # whitespace, so this just appends a second "schema_version" before the
-    # closing brace.
-    duplicated = envelope[:-1] + b',"schema_version":1}'
-    assert _decode_descriptor(duplicated) is None
-
-
-def test_non_canonical_key_ordering_still_decodes_to_same_descriptor() -> None:
-    """A structurally valid but byte-different (non-canonical key order)
-    encoding still decodes successfully — decode_persisted_channel_envelope
-    rejects malformed/duplicate-key/oversize, not key ordering — proving the
-    caller never trusts raw bytes as canonical, only the re-verified document."""
-    descriptor = _descriptor()
-    canonical = _envelope_bytes(descriptor)
-    reordered_doc = dict(reversed(list(json.loads(canonical).items())))
-    reordered = json.dumps(reordered_doc, ensure_ascii=False).encode("utf-8")
-    assert reordered != canonical
-
-    result = _decode_descriptor(reordered)
-
-    assert result == descriptor
-
-
-def test_identity_mismatch_channel_id_fails_closed_to_none() -> None:
-    """envelope channel_id != reading's canonical channel -> None, never
-    'helpfully' attached to the wrong reading."""
-    other = _descriptor(channel_id="other.channel")
-    envelope = _envelope_bytes(other)
-
-    assert _decode_descriptor(envelope) is None
-
-
-def test_identity_mismatch_instrument_id_fails_closed_to_none() -> None:
-    assert _decode_descriptor(_envelope_bytes(_descriptor()), instrument_id="other-probe") is None
-
-
-def test_identity_mismatch_unit_fails_closed_to_none() -> None:
-    assert _decode_descriptor(_envelope_bytes(_descriptor()), unit="mK") is None
-
-
 # ---------------------------------------------------------------------------
 # ZmqBridge.poll_readings_with_descriptor() — integration through the mp.Queue
 # ---------------------------------------------------------------------------
 
 
-def test_poll_readings_with_descriptor_valid_envelope() -> None:
-    bridge = ZmqBridge()
+def test_poll_readings_with_descriptor_valid_envelope(live_zmq_bridge) -> None:
+    bridge = live_zmq_bridge
     descriptor = _descriptor()
     bridge._data_queue.put(_reading_dict(descriptor_envelope=_envelope_bytes(descriptor)))
 
@@ -199,10 +103,10 @@ def test_poll_readings_with_descriptor_valid_envelope() -> None:
     assert bridge.descriptor_malformed_count == 0
 
 
-def test_poll_readings_with_descriptor_absent_envelope_is_explicit_none() -> None:
+def test_poll_readings_with_descriptor_absent_envelope_is_explicit_none(live_zmq_bridge) -> None:
     """Unknown/legacy reading with no descriptor -> None, explicit, never
     synthesized from channel/unit/instrument_id heuristics."""
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     bridge._data_queue.put(_reading_dict(descriptor_envelope=None))
 
     collected = _drain_with_descriptor_until(bridge, lambda: bridge._last_reading_time > 0.0)
@@ -213,10 +117,12 @@ def test_poll_readings_with_descriptor_absent_envelope_is_explicit_none() -> Non
     assert bridge.descriptor_malformed_count == 0
 
 
-def test_poll_readings_with_descriptor_malformed_envelope_keeps_reading_drops_descriptor_only() -> None:
+def test_poll_readings_with_descriptor_malformed_envelope_keeps_reading_drops_descriptor_only(
+    live_zmq_bridge,
+) -> None:
     """Corrupt-but-present envelope: the READING is not dropped, only the
     descriptor becomes None — malformed counter increments for observability."""
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     bridge._data_queue.put(_reading_dict(descriptor_envelope=b"corrupt-not-json"))
 
     collected = _drain_with_descriptor_until(bridge, lambda: bridge._last_reading_time > 0.0)
@@ -228,8 +134,10 @@ def test_poll_readings_with_descriptor_malformed_envelope_keeps_reading_drops_de
     assert bridge.descriptor_malformed_count == 1
 
 
-def test_poll_readings_with_descriptor_oversize_envelope_keeps_reading_drops_descriptor_only() -> None:
-    bridge = ZmqBridge()
+def test_poll_readings_with_descriptor_oversize_envelope_keeps_reading_drops_descriptor_only(
+    live_zmq_bridge,
+) -> None:
+    bridge = live_zmq_bridge
     oversize = b'{"a":"' + b"x" * MAX_PERSISTED_ENVELOPE_BYTES + b'"}'
     bridge._data_queue.put(_reading_dict(descriptor_envelope=oversize))
 
@@ -241,10 +149,12 @@ def test_poll_readings_with_descriptor_oversize_envelope_keeps_reading_drops_des
     assert bridge.descriptor_malformed_count == 1
 
 
-def test_poll_readings_with_descriptor_identity_mismatch_keeps_reading_drops_descriptor_only() -> None:
+def test_poll_readings_with_descriptor_identity_mismatch_keeps_reading_drops_descriptor_only(
+    live_zmq_bridge,
+) -> None:
     """A reading whose channel looks like a known channel but the envelope
     belongs to a DIFFERENT channel_id must never be 'helpfully' attached."""
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     other = _descriptor(channel_id="other.channel")
     bridge._data_queue.put(_reading_dict(channel="probe.1", descriptor_envelope=_envelope_bytes(other)))
 
@@ -264,11 +174,12 @@ def test_poll_readings_with_descriptor_identity_mismatch_keeps_reading_drops_des
     ],
 )
 def test_poll_readings_descriptor_join_rejects_instrument_or_unit_mismatch(
+    live_zmq_bridge,
     reading_overrides: dict[str, str],
     mismatched_field: str,
 ) -> None:
     """GUI joins only the exact channel+instrument+unit descriptor tuple."""
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     bridge._data_queue.put(
         _reading_dict(
             descriptor_envelope=_envelope_bytes(_descriptor()),
@@ -284,7 +195,7 @@ def test_poll_readings_descriptor_join_rejects_instrument_or_unit_mismatch(
     assert bridge.descriptor_malformed_count == 1
 
 
-def test_subprocess_malformed_marker_crosses_queue_and_increments_gui_counter() -> None:
+def test_subprocess_malformed_marker_crosses_queue_and_increments_gui_counter(live_zmq_bridge) -> None:
     """Present oversize bytes are dropped before mp.Queue but stay observable."""
     payload = msgpack.packb(
         {
@@ -302,7 +213,7 @@ def test_subprocess_malformed_marker_crosses_queue_and_increments_gui_counter() 
     assert decoded["descriptor_envelope"] is None
     assert decoded["descriptor_envelope_malformed"] is True
 
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     bridge._data_queue.put(decoded)
     collected = _drain_with_descriptor_until(bridge, lambda: bridge._last_reading_time > 0.0)
 
@@ -313,11 +224,11 @@ def test_subprocess_malformed_marker_crosses_queue_and_increments_gui_counter() 
     assert bridge.descriptor_malformed_count == 1
 
 
-def test_poll_readings_with_descriptor_processes_a_full_batch_without_crashing() -> None:
+def test_poll_readings_with_descriptor_processes_a_full_batch_without_crashing(live_zmq_bridge) -> None:
     """A mixed batch of valid/absent/malformed/mismatched entries must all
     decode without ever raising into the caller — one bad entry cannot poison
     the drain of the rest."""
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     good = _descriptor(channel_id="probe.1")
     mismatched = _descriptor(channel_id="other.channel")
     entries = [
@@ -346,10 +257,10 @@ def test_poll_readings_with_descriptor_processes_a_full_batch_without_crashing()
 # ---------------------------------------------------------------------------
 
 
-def test_poll_readings_old_consumer_unaffected_by_descriptor_envelope_key() -> None:
+def test_poll_readings_old_consumer_unaffected_by_descriptor_envelope_key(live_zmq_bridge) -> None:
     """poll_readings() (pre-D4 API) ignores the new dict key entirely —
     old-consumer compatibility, exact Reading reconstruction, no crash."""
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     descriptor = _descriptor()
     bridge._data_queue.put(_reading_dict(descriptor_envelope=_envelope_bytes(descriptor)))
 
@@ -369,11 +280,11 @@ def test_poll_readings_old_consumer_unaffected_by_descriptor_envelope_key() -> N
     assert bridge.descriptor_malformed_count == 0
 
 
-def test_poll_readings_old_consumer_unaffected_even_by_malformed_envelope() -> None:
+def test_poll_readings_old_consumer_unaffected_even_by_malformed_envelope(live_zmq_bridge) -> None:
     """A malformed descriptor envelope must not affect poll_readings() at
     all — the legacy API doesn't look at the field, so it can't be poisoned
     by an adversarial envelope on the wire."""
-    bridge = ZmqBridge()
+    bridge = live_zmq_bridge
     bridge._data_queue.put(_reading_dict(descriptor_envelope=b"\xff\xfe not json"))
 
     readings = []

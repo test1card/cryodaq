@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
@@ -56,13 +57,10 @@ class DiskMonitor:
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        task = self._task
+        settlement = await cancel_and_settle_tasks(() if task is None else (task,))
+        self._task = None
+        settlement.raise_if_unsuccessful()
         logger.info("DiskMonitor остановлен")
 
     async def _check_loop(self) -> None:

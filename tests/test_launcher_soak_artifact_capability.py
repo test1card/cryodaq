@@ -40,7 +40,7 @@ def test_launcher_consumes_and_duplicates_only_exact_artifact_capability(
         capability.commit_generation(generation)
         assert capability.generation == 1
     finally:
-        os.close(duplicate)
+        capability.settle_child_grant(duplicate)
         capability.close()
         runner.close()
 
@@ -62,14 +62,14 @@ def test_failed_child_grant_may_reuse_candidate_but_committed_replacement_is_new
     runner, retained = socket.socketpair()
     capability = launcher._SoakArtifactCapability(retained.detach(), "b" * 64)
     first_fd, first_generation, _ = capability.child_grant()
-    os.close(first_fd)
+    capability.settle_child_grant(first_fd)
     retry_fd, retry_generation, _ = capability.child_grant()
     assert retry_generation == first_generation == 1
     capability.commit_generation(retry_generation)
-    os.close(retry_fd)
+    capability.settle_child_grant(retry_fd)
     replacement_fd, replacement_generation, _ = capability.child_grant()
     assert replacement_generation == 2
-    os.close(replacement_fd)
+    capability.settle_child_grant(replacement_fd)
     capability.close()
     runner.close()
 
@@ -102,7 +102,7 @@ def test_real_exec_receives_only_intended_duplicate() -> None:
         capability.commit_generation(generation)
         os.fstat(capability.fd)
     finally:
-        os.close(duplicate)
+        capability.settle_child_grant(duplicate)
         capability.close()
         runner.close()
 
@@ -131,25 +131,42 @@ def test_at_fork_guard_closes_retained_original_in_generic_child() -> None:
     os.close(read_fd)
 
 
-def test_artifact_close_retains_same_descriptor_after_close_failure(monkeypatch) -> None:
+def test_artifact_close_poison_refuses_retry_and_leaves_reused_descriptor_untouched(monkeypatch) -> None:
     read_fd, write_fd = os.pipe()
+    replacement_read_fd, replacement_write_fd = os.pipe()
     launcher._guard_soak_bridge_fd_from_descendants(write_fd)
     owner = launcher._SoakArtifactCapability(write_fd, "f" * 64)
     real_close = launcher.os.close
+    close_attempts = 0
 
-    def fail_owned(fd: int) -> None:
-        if fd == write_fd:
-            raise OSError("injected close failure")
+    def close_then_reuse(fd: int) -> None:
+        nonlocal close_attempts
+        if fd == write_fd and close_attempts == 0:
+            close_attempts += 1
+            real_close(write_fd)
+            os.dup2(replacement_write_fd, write_fd)
+            raise OSError("injected ambiguous close after descriptor reuse")
         real_close(fd)
 
-    monkeypatch.setattr(launcher.os, "close", fail_owned)
-    with pytest.raises(RuntimeError, match="remained open"):
-        owner.close()
-    assert owner._closed is False
-    assert write_fd in launcher._SOAK_BRIDGE_ACTIVE_FDS
+    monkeypatch.setattr(launcher.os, "close", close_then_reuse)
+    try:
+        with pytest.raises(RuntimeError, match="permanently poisoned"):
+            owner.close()
+        assert owner._closed is False
+        assert owner._fd_owner.settlement_state is launcher._OwnerSettlementState.POISONED
+        assert write_fd in launcher._SOAK_BRIDGE_ACTIVE_FDS
 
-    monkeypatch.setattr(launcher.os, "close", real_close)
-    owner.close()
-    assert owner._closed is True
-    assert write_fd not in launcher._SOAK_BRIDGE_ACTIVE_FDS
-    os.close(read_fd)
+        with pytest.raises(RuntimeError, match="unsafe retry refused"):
+            owner.close()
+        assert close_attempts == 1
+
+        os.write(write_fd, b"a")
+        assert os.read(replacement_read_fd, 1) == b"a"
+    finally:
+        monkeypatch.setattr(launcher.os, "close", real_close)
+        launcher._SOAK_BRIDGE_ACTIVE_FDS.discard(write_fd)
+        for fd in {read_fd, write_fd, replacement_read_fd, replacement_write_fd}:
+            try:
+                real_close(fd)
+            except OSError:
+                pass

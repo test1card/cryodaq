@@ -105,9 +105,12 @@ async def test_operator_log_read_binds_experiment_scope_receipt() -> None:
         }
     )
 
-    assert await EngineContextReader(client).get_operator_log(  # type: ignore[arg-type]
-        experiment_id="exp-1"
-    ) == []
+    assert (
+        await EngineContextReader(client).get_operator_log(  # type: ignore[arg-type]
+            experiment_id="exp-1"
+        )
+        == []
+    )
     assert client.calls[0]["experiment_id"] == "exp-1"
 
 

@@ -9,6 +9,7 @@ docs/PHASE_UI1_V2_WIREFRAME.md section 3 — calibrate on lab PC later.
 
 from __future__ import annotations
 
+import copy
 import html
 import logging
 import math
@@ -23,7 +24,13 @@ from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
+from cryodaq.gui.shell.operator_components._visuals import (
+    bounded_visible_text,
+    plain_text_tooltip,
+    safe_plain_text,
+)
 from cryodaq.gui.utils.plural import ru_plural
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +55,358 @@ _STATUS_LABELS_RU = {
 
 
 _UNKNOWN_STATUS_LABEL_RU = "неизвестный статус"
+_EXPERIMENT_STATUS_MAX_ROWS = 128
+_EXPERIMENT_STATUS_MAX_PHASES = 64
+_EXPERIMENT_STATUS_MAX_TEXT = 4096
+_EXPERIMENT_STATUS_LIVE_KEYS = frozenset(
+    {
+        "ok",
+        "app_mode",
+        "active_experiment",
+        "current_phase",
+        "phase_started_at",
+        "phases",
+        "run_records",
+        "templates",
+        "proto",
+    }
+)
+_EXPERIMENT_STATUS_REPLAY_KEYS = _EXPERIMENT_STATUS_LIVE_KEYS | {
+    "error",
+    "replay_source",
+    "replay_speed",
+    "replay_session_id",
+}
+_LIVE_APP_MODES = frozenset({"experiment", "debug"})
+_LIVE_EXPERIMENT_KEYS = frozenset(
+    {
+        "experiment_id",
+        "name",
+        "title",
+        "template_id",
+        "operator",
+        "cryostat",
+        "sample",
+        "description",
+        "notes",
+        "start_time",
+        "end_time",
+        "status",
+        "config_snapshot",
+        "custom_fields",
+        "report_enabled",
+        "sections",
+        "artifact_dir",
+        "metadata_path",
+        "retroactive",
+    }
+)
+_REPLAY_EXPERIMENT_KEYS = frozenset(
+    {
+        "experiment_id",
+        "title",
+        "sample",
+        "operator",
+        "status",
+        "start_time",
+        "end_time",
+        "description",
+        "notes",
+        "is_replay",
+        "phase",
+        "phase_started_at",
+        "custom_fields",
+    }
+)
+_PHASE_ROW_KEYS = frozenset({"phase", "started_at", "ended_at", "operator"})
+_RUN_RECORD_KEYS = frozenset(
+    {
+        "record_id",
+        "source_run_id",
+        "source_tab",
+        "source_module",
+        "run_type",
+        "status",
+        "started_at",
+        "finished_at",
+        "parameters",
+        "result_summary",
+        "artifact_paths",
+        "experiment_context",
+    }
+)
+_TEMPLATE_KEYS = frozenset({"id", "name", "sections", "report_enabled", "report_sections", "custom_fields"})
+_TEMPLATE_FIELD_KEYS = frozenset({"id", "label", "default"})
+
+
+def _status_text(value: object, *, allow_empty: bool = False, max_chars: int = 256) -> bool:
+    return bool(
+        type(value) is str
+        and (allow_empty or bool(value))
+        and len(value) <= max_chars
+        and (not value or value.isprintable())
+    )
+
+
+def _status_experiment_id(value: object) -> bool:
+    return bool(type(value) is str and len(value) == 12 and all(char in "0123456789abcdef" for char in value))
+
+
+def _status_time(value: object, *, allow_none: bool = False) -> bool:
+    if value is None:
+        return allow_none
+    if not _status_text(value, max_chars=64):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _bounded_status_json(value: object, *, depth: int = 0) -> bool:
+    if depth > 6:
+        return False
+    if value is None or type(value) is bool:
+        return True
+    if type(value) is int:
+        return -(2**63) <= value <= 2**63 - 1
+    if type(value) is float:
+        return math.isfinite(value)
+    if type(value) is str:
+        return len(value) <= _EXPERIMENT_STATUS_MAX_TEXT
+    if type(value) is list:
+        return len(value) <= _EXPERIMENT_STATUS_MAX_ROWS and all(
+            _bounded_status_json(item, depth=depth + 1) for item in value
+        )
+    if type(value) is dict:
+        return len(value) <= _EXPERIMENT_STATUS_MAX_ROWS and all(
+            _status_text(key) and _bounded_status_json(item, depth=depth + 1) for key, item in value.items()
+        )
+    return False
+
+
+def _valid_phase_rows(value: object) -> bool:
+    if type(value) is not list or len(value) > _EXPERIMENT_STATUS_MAX_PHASES:
+        return False
+    for row in value:
+        if type(row) is not dict or set(row) != _PHASE_ROW_KEYS:
+            return False
+        phase = row.get("phase")
+        if (
+            type(phase) is not str
+            or phase not in PHASE_LABELS_RU
+            or not _status_time(row.get("started_at"))
+            or not _status_time(row.get("ended_at"), allow_none=True)
+            or not _status_text(row.get("operator"), allow_empty=True)
+        ):
+            return False
+    return True
+
+
+def _valid_live_experiment(value: object) -> bool:
+    if value is None:
+        return True
+    if type(value) is not dict or set(value) != _LIVE_EXPERIMENT_KEYS:
+        return False
+    sections = value.get("sections")
+    return bool(
+        _status_experiment_id(value.get("experiment_id"))
+        and _status_text(value.get("name"))
+        and _status_text(value.get("title"))
+        and _status_text(value.get("template_id"))
+        and _status_text(value.get("operator"), allow_empty=True)
+        and _status_text(value.get("cryostat"), allow_empty=True)
+        and _status_text(value.get("sample"), allow_empty=True)
+        and _status_text(value.get("description"), allow_empty=True, max_chars=_EXPERIMENT_STATUS_MAX_TEXT)
+        and _status_text(value.get("notes"), allow_empty=True, max_chars=_EXPERIMENT_STATUS_MAX_TEXT)
+        and _status_time(value.get("start_time"))
+        and value.get("end_time") is None
+        and type(value.get("status")) is str
+        and value.get("status") == "RUNNING"
+        and _bounded_status_json(value.get("config_snapshot"))
+        and _bounded_status_json(value.get("custom_fields"))
+        and type(value.get("report_enabled")) is bool
+        and type(sections) is list
+        and len(sections) <= _EXPERIMENT_STATUS_MAX_PHASES
+        and all(_status_text(section) for section in sections)
+        and _status_text(value.get("artifact_dir"), allow_empty=True, max_chars=_EXPERIMENT_STATUS_MAX_TEXT)
+        and _status_text(value.get("metadata_path"), allow_empty=True, max_chars=_EXPERIMENT_STATUS_MAX_TEXT)
+        and type(value.get("retroactive")) is bool
+    )
+
+
+def _valid_replay_experiment(value: object) -> bool:
+    if value is None:
+        return True
+    phase = value.get("phase") if type(value) is dict else None
+    return bool(
+        type(value) is dict
+        and set(value) == _REPLAY_EXPERIMENT_KEYS
+        and _status_experiment_id(value.get("experiment_id"))
+        and _status_text(value.get("title"))
+        and _status_text(value.get("sample"), allow_empty=True)
+        and _status_text(value.get("operator"), allow_empty=True)
+        and type(value.get("status")) is str
+        and value.get("status") == "active"
+        and _status_time(value.get("start_time"))
+        and value.get("end_time") is None
+        and _status_text(value.get("description"), allow_empty=True, max_chars=_EXPERIMENT_STATUS_MAX_TEXT)
+        and _status_text(value.get("notes"), allow_empty=True, max_chars=_EXPERIMENT_STATUS_MAX_TEXT)
+        and value.get("is_replay") is True
+        and type(phase) is str
+        and phase in PHASE_LABELS_RU
+        and _status_time(value.get("phase_started_at"))
+        and _bounded_status_json(value.get("custom_fields"))
+    )
+
+
+def _valid_run_records(value: object) -> bool:
+    if type(value) is not list or len(value) > _EXPERIMENT_STATUS_MAX_ROWS:
+        return False
+    for row in value:
+        if type(row) is not dict or set(row) != _RUN_RECORD_KEYS:
+            return False
+        artifacts = row.get("artifact_paths")
+        if (
+            not _status_text(row.get("record_id"))
+            or not _status_text(row.get("source_run_id"))
+            or not all(
+                _status_text(row.get(field), allow_empty=True) for field in ("source_tab", "source_module", "run_type")
+            )
+            or not _status_text(row.get("status"))
+            or not _status_time(row.get("started_at"))
+            or not _status_time(row.get("finished_at"), allow_none=True)
+            or not _bounded_status_json(row.get("parameters"))
+            or not _bounded_status_json(row.get("result_summary"))
+            or not _bounded_status_json(row.get("experiment_context"))
+            or type(artifacts) is not list
+            or len(artifacts) > _EXPERIMENT_STATUS_MAX_ROWS
+            or any(not _status_text(path, max_chars=_EXPERIMENT_STATUS_MAX_TEXT) for path in artifacts)
+        ):
+            return False
+    return True
+
+
+def _valid_templates(value: object) -> bool:
+    if type(value) is not list or len(value) > _EXPERIMENT_STATUS_MAX_ROWS:
+        return False
+    for template in value:
+        if type(template) is not dict or set(template) != _TEMPLATE_KEYS:
+            return False
+        sections = template.get("sections")
+        report_sections = template.get("report_sections")
+        custom_fields = template.get("custom_fields")
+        if (
+            not _status_text(template.get("id"))
+            or not _status_text(template.get("name"))
+            or type(template.get("report_enabled")) is not bool
+            or type(sections) is not list
+            or len(sections) > _EXPERIMENT_STATUS_MAX_PHASES
+            or any(not _status_text(section) for section in sections)
+            or type(report_sections) is not list
+            or len(report_sections) > _EXPERIMENT_STATUS_MAX_PHASES
+            or any(not _status_text(section) for section in report_sections)
+            or type(custom_fields) is not list
+            or len(custom_fields) > _EXPERIMENT_STATUS_MAX_PHASES
+        ):
+            return False
+        if any(
+            type(field) is not dict
+            or set(field) != _TEMPLATE_FIELD_KEYS
+            or not _status_text(field.get("id"))
+            or not _status_text(field.get("label"))
+            or not _status_text(field.get("default"), allow_empty=True)
+            for field in custom_fields
+        ):
+            return False
+    return True
+
+
+def decode_experiment_status(payload: object) -> dict | None:
+    """Return one detached, exact live/replay experiment authority cut."""
+
+    if type(payload) is not dict or payload.get("ok") is not True:
+        return None
+    if type(payload.get("proto")) is not int or payload.get("proto") != CLIENT_PROTOCOL_VERSION:
+        return None
+    app_mode = payload.get("app_mode")
+    current_phase = payload.get("current_phase")
+    if type(app_mode) is not str:
+        return None
+    if current_phase is not None and (type(current_phase) is not str or current_phase not in PHASE_LABELS_RU):
+        return None
+    if app_mode == "replay":
+        active = payload.get("active_experiment")
+        phases = payload.get("phases")
+        run_records = payload.get("run_records")
+        templates = payload.get("templates")
+        speed = payload.get("replay_speed")
+        if (
+            set(payload) != _EXPERIMENT_STATUS_REPLAY_KEYS
+            or payload.get("error") is not None
+            or not _valid_replay_experiment(active)
+            or not _valid_phase_rows(phases)
+            or type(run_records) is not list
+            or len(run_records) != 0
+            or type(templates) is not list
+            or len(templates) != 0
+            or not _status_text(payload.get("replay_source"), max_chars=_EXPERIMENT_STATUS_MAX_TEXT)
+            or type(speed) is not float
+            or not math.isfinite(speed)
+            or speed < 0.0
+            or (
+                payload.get("replay_session_id") is not None
+                and (
+                    type(payload["replay_session_id"]) is not str
+                    or len(payload["replay_session_id"]) != 32
+                    or any(character not in "0123456789abcdef" for character in payload["replay_session_id"])
+                )
+            )
+            or not _status_time(payload.get("phase_started_at"), allow_none=True)
+            or (
+                active is not None
+                and (current_phase != active["phase"] or payload.get("phase_started_at") != active["phase_started_at"])
+            )
+        ):
+            return None
+    elif app_mode in _LIVE_APP_MODES:
+        active = payload.get("active_experiment")
+        phase_started_at = payload.get("phase_started_at")
+        phases = payload.get("phases")
+        run_records = payload.get("run_records")
+        if (
+            set(payload) != _EXPERIMENT_STATUS_LIVE_KEYS
+            or not _valid_live_experiment(active)
+            or (app_mode == "debug" and active is not None)
+            or (active is None and current_phase is not None)
+            or not _valid_phase_rows(phases)
+            or not _valid_run_records(run_records)
+            or not _valid_templates(payload.get("templates"))
+            or (active is None and (phase_started_at is not None or len(phases) != 0 or len(run_records) != 0))
+            or (active is not None and current_phase is None and (phase_started_at is not None or len(phases) != 0))
+            or (
+                current_phase is not None
+                and (
+                    len(phases) == 0
+                    or phases[-1]["phase"] != current_phase
+                    or phases[-1]["ended_at"] is not None
+                    or phase_started_at is None
+                )
+            )
+            or (
+                phase_started_at is not None
+                and (
+                    type(phase_started_at) not in (int, float)
+                    or not math.isfinite(float(phase_started_at))
+                    or float(phase_started_at) < 0.0
+                )
+            )
+        ):
+            return None
+    else:
+        return None
+    return copy.deepcopy(payload)
 
 
 def _presentation_status(status: object) -> ChannelStatus:
@@ -102,6 +461,17 @@ def _incoming_supersedes(
 ) -> bool:
     """Use source time normally and arrival order while either clock is untrusted."""
     return current_future or incoming_future or incoming.timestamp >= current.timestamp
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayStatusAuthority:
+    """Exact launcher/bridge cut allowed to publish replay status."""
+
+    source: str
+    speed: float
+    session_id: str
+    launcher_generation: int
+    bridge_generation: int
 
 
 @dataclass(slots=True)
@@ -264,8 +634,13 @@ class TopWatchBar(QWidget):
         # Per-channel last-seen tracking: channel_id -> (monotonic_ts, status)
         self._channel_last_seen: dict[str, tuple[float, ChannelStatus]] = {}
         self._alarm_count: int | None = None
-        self._replay_pinned = False
+        # The composition root pins one transport domain before the first
+        # asynchronous poll.  ``live`` accepts only experiment/debug cuts;
+        # ``replay`` additionally requires the exact launcher/bridge authority.
+        self._expected_app_mode_domain = "live"
+        self._replay_authority: ReplayStatusAuthority | None = None
         self._engine_alive: bool | None = None
+        self._last_experiment_full_text = "\u25cb Нет активного эксперимента"
 
         self._build_ui()
         self._build_persistent_context()
@@ -319,7 +694,8 @@ class TopWatchBar(QWidget):
         layout.addWidget(self._make_zone_sep())
 
         # Zone 2: experiment + phase + elapsed (clickable) + time window echo
-        self._exp_label = _ClickableLabel("○ Нет активного эксперимента")
+        self._exp_label = _ClickableLabel(self._last_experiment_full_text)
+        self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._exp_label.setMaximumWidth(220)
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
@@ -328,6 +704,7 @@ class TopWatchBar(QWidget):
         # B.6: Mode badge (ЭКСПЕРИМЕНТ / ОТЛАДКА) — clickable (B.6.2)
         self._mode_badge = _ClickableLabel()
         self._mode_badge.setObjectName("modeBadge")
+        self._mode_badge.setTextFormat(Qt.TextFormat.PlainText)
         self._update_mode_badge(None)
         self._mode_badge.clicked.connect(self._on_mode_badge_clicked)
         self._app_mode: str | None = None
@@ -375,11 +752,26 @@ class TopWatchBar(QWidget):
 
     def _set_experiment_text(self, full_text: str) -> None:
         """Set experiment label with elide + tooltip for long names."""
+        full_text = safe_plain_text(full_text)
+        self._last_experiment_full_text = full_text
         metrics = self._exp_label.fontMetrics()
         max_w = self._exp_label.maximumWidth()
         elided = metrics.elidedText(full_text, Qt.TextElideMode.ElideRight, max_w)
+        self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
         self._exp_label.setText(elided)
-        self._exp_label.setToolTip(full_text)
+        self._exp_label.setToolTip(plain_text_tooltip(full_text))
+
+    def _mark_experiment_status_unavailable(self) -> None:
+        """Retain last evidence while visibly revoking current authority."""
+
+        self._exp_label.setStyleSheet(f"color: {theme.STATUS_CAUTION};")
+        self._exp_label.setToolTip(
+            plain_text_tooltip(
+                "Статус эксперимента недоступен",
+                f"Последние принятые данные: {self._last_experiment_full_text}",
+            )
+        )
+        self._update_mode_badge(None)
 
     def _build_persistent_context(self) -> None:
         """Add 4-value persistent context strip to the watch bar."""
@@ -733,35 +1125,63 @@ class TopWatchBar(QWidget):
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
+        expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
         self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
-        self._experiment_worker.finished.connect(self._on_experiment_result)
+        self._experiment_worker.finished.connect(
+            lambda result, expected=expected_replay_authority: self._on_experiment_result(result, expected)
+        )
         self._experiment_worker.start()
 
-    def _on_experiment_result(self, result: dict) -> None:
-        ok = bool(result.get("ok"))
-        # B.5: forward full result to dashboard phase widget
-        if ok:
-            self.experiment_status_received.emit(result)
-        # B.6: update mode badge
-        self._update_mode_badge(result.get("app_mode") if ok else None, result if ok else None)
+    def _on_experiment_result(
+        self,
+        result: dict,
+        expected_replay_authority: ReplayStatusAuthority | None = None,
+    ) -> None:
+        accepted = decode_experiment_status(result)
+        if accepted is None:
+            self._mark_experiment_status_unavailable()
+            return
+        accepted_mode = accepted["app_mode"]
+        accepted_domain = "replay" if accepted_mode == "replay" else "live"
+        if accepted_domain != self._expected_app_mode_domain:
+            self._mark_experiment_status_unavailable()
+            return
+        if self._expected_app_mode_domain == "replay":
+            current_authority = self._replay_authority
+            if (
+                current_authority is None
+                or expected_replay_authority != current_authority
+                or accepted_mode != "replay"
+                or accepted.get("replay_source") != current_authority.source
+                or type(accepted.get("replay_speed")) is not float
+                or accepted["replay_speed"] != current_authority.speed
+                or accepted.get("replay_session_id") != current_authority.session_id
+            ):
+                self._mark_experiment_status_unavailable()
+                return
+        # B.5: only one detached, fully decoded authority cut may reach the
+        # dashboard and MainWindow identity cache.
+        self.experiment_status_received.emit(accepted)
+        # B.6: update mode badge from the same accepted cut.
+        self._update_mode_badge(accepted["app_mode"], accepted)
         # Zone 2 — experiment (zone 1 engine state is driven externally
         # via set_engine_state() so it stays consistent with the launcher
         # and the reading data flow).
-        exp = result.get("active_experiment") if ok else None
-        if not exp:
-            self._set_experiment_text("○ Нет активного эксперимента")
+        exp = accepted["active_experiment"]
+        if exp is None:
+            self._set_experiment_text("\u25cb Нет активного эксперимента")
             self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
-        name = exp.get("name", "—")
-        phase = result.get("current_phase") or ""
-        phase_label = PHASE_LABELS_RU.get(phase, phase)
-        elapsed = _fmt_elapsed(str(exp.get("start_time", "")))
-        parts = [f"● {name}"]
+        name = safe_plain_text(exp.get("name") or exp.get("title") or "\u2014")
+        phase = accepted["current_phase"] or ""
+        phase_label = safe_plain_text(PHASE_LABELS_RU.get(phase, phase))
+        elapsed = _fmt_elapsed(exp["start_time"])
+        parts = [f"\u25cf {name}"]
         if phase_label:
             parts.append(phase_label)
         if elapsed:
             parts.append(elapsed)
-        self._set_experiment_text(" · ".join(parts))
+        self._set_experiment_text(" \u00b7 ".join(parts))
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_PRIMARY};")
 
     def _refresh_channels(self) -> None:
@@ -860,13 +1280,64 @@ class TopWatchBar(QWidget):
     def set_replay_mode(self, replay: bool) -> None:
         """Pin archive/replay truth before the first asynchronous status poll."""
 
-        if replay:
-            self._replay_pinned = True
-            self._update_mode_badge("replay", None)
+        if type(replay) is not bool:
+            raise TypeError("replay mode must be an exact bool")
+        self._expected_app_mode_domain = "replay" if replay else "live"
+        self._replay_authority = None
+        self._mark_experiment_status_unavailable()
+
+    def bind_replay_authority(
+        self,
+        *,
+        source: str,
+        speed: float,
+        session_id: str,
+        launcher_generation: int,
+        bridge_generation: int,
+    ) -> None:
+        """Bind replay rendering to one immutable launcher/bridge authority cut."""
+
+        if (
+            type(source) is not str
+            or not source
+            or len(source) > _EXPERIMENT_STATUS_MAX_TEXT
+            or not source.isprintable()
+            or type(speed) is not float
+            or not math.isfinite(speed)
+            or speed < 0.0
+            or type(session_id) is not str
+            or len(session_id) != 32
+            or any(character not in "0123456789abcdef" for character in session_id)
+            or type(launcher_generation) is not int
+            or launcher_generation < 0
+            or type(bridge_generation) is not int
+            or bridge_generation < 0
+        ):
+            raise ValueError("replay status authority is invalid")
+        self._expected_app_mode_domain = "replay"
+        self._replay_authority = ReplayStatusAuthority(
+            source,
+            speed,
+            session_id,
+            launcher_generation,
+            bridge_generation,
+        )
+        self._mark_experiment_status_unavailable()
+
+    def invalidate_replay_authority(self) -> None:
+        """Synchronously revoke a replay cut before producer/bridge turnover."""
+
+        self._replay_authority = None
+        if self._expected_app_mode_domain == "replay":
+            self._mark_experiment_status_unavailable()
 
     def _update_mode_badge(self, app_mode: str | None, result: dict | None = None) -> None:
         """Update mode badge from app_mode field in /status response."""
-        if self._replay_pinned and app_mode != "replay":
+        self._mode_badge.setTextFormat(Qt.TextFormat.PlainText)
+        if app_mode is not None and type(app_mode) is not str:
+            app_mode = None
+            result = None
+        if self._expected_app_mode_domain == "replay" and app_mode != "replay":
             app_mode = "replay"
             result = None
         self._app_mode = app_mode
@@ -926,15 +1397,24 @@ class TopWatchBar(QWidget):
 
             src_name = ""
             speed_suffix = ""
-            if result:
+            tooltip_lines = ["REPLAY"]
+            if type(result) is dict:
                 src = result.get("replay_source", "")
-                if src:
-                    src_name = Path(src).name
+                if type(src) is str and src:
+                    raw_name = Path(src).name
+                    src_name, full_name = bounded_visible_text(raw_name, limit=80)
+                    tooltip_lines.append(f"Источник: {full_name}")
                 spd = result.get("replay_speed")
-                if spd is not None:
-                    speed_suffix = f" @ {spd:.0f}x"
+                if type(spd) is float and math.isfinite(spd) and spd >= 0.0:
+                    if spd == 0.0:
+                        speed_suffix = " @ MAX"
+                        tooltip_lines.append("Скорость: максимум")
+                    else:
+                        speed_suffix = f" @ {spd:g}x"
+                        tooltip_lines.append(f"Скорость: {spd:g}x")
             badge_text = f"REPLAY{f': {src_name}' if src_name else ''}{speed_suffix}"
             self._mode_badge.setText(badge_text)
+            self._mode_badge.setToolTip(plain_text_tooltip(*tooltip_lines))
             self._mode_badge.setStyleSheet(
                 f"#modeBadge {{ "
                 f"background-color: {theme.SURFACE_ELEVATED}; "

@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core.zmq_bridge import ZMQCommandServer
 from cryodaq.gui import theme
+from cryodaq.gui.shell import top_watch_bar as top_watch_bar_module
+from cryodaq.gui.shell.operator_components._visuals import safe_plain_text
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 
 
 def _app() -> QApplication:
@@ -204,6 +213,67 @@ def _make_bar():
     return bar
 
 
+def _dispose_bar(bar: TopWatchBar) -> None:
+    bar._fast_timer.stop()
+    bar._slow_timer.stop()
+    bar._channel_refresh_timer.stop()
+    bar._stale_timer.stop()
+    bar.close()
+    bar.deleteLater()
+    _app().processEvents()
+
+
+def _wire_from_handler(handler_payload: dict) -> dict:
+    assert "proto" not in handler_payload
+    wire_payload = json.loads(ZMQCommandServer(handler=None)._encode_reply(handler_payload))
+    assert wire_payload["proto"] == CLIENT_PROTOCOL_VERSION
+    return wire_payload
+
+
+def _live_experiment_handler_status(*, name: str = "test", phase: str = "preparation") -> dict:
+    return {
+        "ok": True,
+        "app_mode": "experiment",
+        "active_experiment": {
+            "experiment_id": "a" * 12,
+            "name": name,
+            "title": "Test experiment",
+            "template_id": "template-1",
+            "operator": "",
+            "cryostat": "",
+            "sample": "",
+            "description": "",
+            "notes": "",
+            "start_time": "2026-07-23T00:00:00+00:00",
+            "end_time": None,
+            "status": "RUNNING",
+            "config_snapshot": {},
+            "custom_fields": {},
+            "report_enabled": True,
+            "sections": [],
+            "artifact_dir": "",
+            "metadata_path": "",
+            "retroactive": False,
+        },
+        "current_phase": phase,
+        "phase_started_at": 0.0,
+        "phases": [
+            {
+                "phase": phase,
+                "started_at": "2026-07-23T00:00:00+00:00",
+                "ended_at": None,
+                "operator": "",
+            }
+        ],
+        "run_records": [],
+        "templates": [],
+    }
+
+
+def _live_experiment_status(*, name: str = "test", phase: str = "preparation") -> dict:
+    return _wire_from_handler(_live_experiment_handler_status(name=name, phase=phase))
+
+
 def test_mode_badge_keeps_unavailable_status_visible() -> None:
     bar = _make_bar()
     assert not bar._mode_badge.isHidden()
@@ -272,12 +342,14 @@ def test_mode_badge_updates_when_no_active_experiment() -> None:
     """Regression for B.6.1: badge must update on /status response
     even when there is no active experiment."""
     bar = _make_bar()
-    result = {
-        "ok": True,
-        "active_experiment": None,
-        "current_phase": None,
-        "app_mode": "debug",
-    }
+    result = _live_experiment_status()
+    result.update(
+        app_mode="debug",
+        active_experiment=None,
+        current_phase=None,
+        phase_started_at=None,
+        phases=[],
+    )
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
     assert "Отладка" in bar._mode_badge.text()
@@ -286,15 +358,271 @@ def test_mode_badge_updates_when_no_active_experiment() -> None:
 def test_mode_badge_updates_when_experiment_active() -> None:
     """Same path but with active experiment."""
     bar = _make_bar()
-    result = {
-        "ok": True,
-        "active_experiment": {"name": "test", "start_time": "2026-04-15T10:00:00+00:00"},
-        "current_phase": "preparation",
-        "app_mode": "experiment",
-    }
+    result = _live_experiment_status()
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
     assert "Эксперимент" in bar._mode_badge.text()
+
+
+def test_top_watch_accepts_live_experiment_manager_status_only_after_real_encoding(tmp_path) -> None:
+    from cryodaq.core.experiment import ExperimentManager
+
+    manager = ExperimentManager(
+        data_dir=tmp_path,
+        instruments_config=tmp_path / "instruments.yaml",
+    )
+    experiment_id = manager.start_experiment(
+        name="producer-backed live experiment",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    handler_payload = manager.get_status_payload()
+    assert "proto" not in handler_payload
+    wire_payload = _wire_from_handler(handler_payload)
+
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    bar.set_replay_mode(False)
+    try:
+        bar._on_experiment_result(wire_payload)
+
+        assert emitted == [wire_payload]
+        assert emitted[0]["active_experiment"]["experiment_id"] == experiment_id
+        assert bar._app_mode == "experiment"
+        assert "producer-backed live experiment" in bar._last_experiment_full_text
+    finally:
+        _dispose_bar(bar)
+
+
+@pytest.mark.parametrize("speed", [2.0, 0.0, 0.25, 1.5])
+def test_top_watch_rejects_replay_in_live_mode_then_accepts_exact_bound_replay(
+    tmp_path,
+    speed: float,
+) -> None:
+    from cryodaq.replay_engine.replay_experiment_stub import ReplayExperimentStub
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    engine = ReplayEngine.__new__(ReplayEngine)
+    engine._source_path = tmp_path / "producer-replay.sqlite"
+    engine._speed = speed
+    engine._launcher_session_id = "c" * 32
+    engine._phase = "preparation"
+    engine._exp_stub = ReplayExperimentStub(tmp_path)
+    active = engine._exp_stub.create_retroactive(
+        title="producer-backed replay experiment",
+        sample="sample-a",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    handler_payload = asyncio.run(engine._handle_command({"cmd": "experiment_status"}))
+    assert "proto" not in handler_payload
+    wire_payload = _wire_from_handler(handler_payload)
+
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    try:
+        bar.set_replay_mode(False)
+        live_label = bar._exp_label.text()
+        bar._on_experiment_result(wire_payload)
+        assert emitted == []
+        assert bar._exp_label.text() == live_label
+        assert "producer-backed replay experiment" not in bar._last_experiment_full_text
+
+        bar.set_replay_mode(True)
+        bar.bind_replay_authority(
+            source=str(engine._source_path),
+            speed=float(speed),
+            session_id=engine._launcher_session_id,
+            launcher_generation=7,
+            bridge_generation=3,
+        )
+        expected = bar._replay_authority
+        assert expected is not None
+        bar._on_experiment_result(wire_payload, expected)
+
+        assert emitted == [wire_payload]
+        assert emitted[0]["active_experiment"]["experiment_id"] == active["experiment_id"]
+        assert bar._app_mode == "replay"
+        assert "producer-backed replay experiment" in bar._last_experiment_full_text
+        assert "REPLAY" in bar._mode_badge.text()
+        if speed == 0.0:
+            assert "MAX" in bar._mode_badge.text()
+            assert "0x" not in bar._mode_badge.text()
+            tooltip = QTextDocument()
+            tooltip.setHtml(bar._mode_badge.toolTip())
+            assert "0x" not in tooltip.toPlainText()
+        else:
+            assert f"{speed:g}x" in bar._mode_badge.text()
+    finally:
+        _dispose_bar(bar)
+
+
+@pytest.mark.parametrize("speed", [0, -1.0, float("nan"), float("inf"), True, "2.0"])
+def test_replay_status_accepts_only_exact_finite_nonnegative_float_speed(tmp_path, speed: object) -> None:
+    from cryodaq.replay_engine.replay_experiment_stub import ReplayExperimentStub
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    engine = ReplayEngine.__new__(ReplayEngine)
+    engine._source_path = tmp_path / "producer-replay.sqlite"
+    engine._speed = 1.0
+    engine._launcher_session_id = "b" * 32
+    engine._phase = "preparation"
+    engine._exp_stub = ReplayExperimentStub(tmp_path)
+    engine._exp_stub.create_retroactive(
+        title="producer-backed replay experiment",
+        sample="sample-a",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    payload = _wire_from_handler(asyncio.run(engine._handle_command({"cmd": "experiment_status"})))
+    payload["replay_speed"] = speed
+
+    assert top_watch_bar_module.decode_experiment_status(payload) is None
+
+
+def test_replay_pin_rejects_live_status_before_emit_cache_or_render(tmp_path) -> None:
+    """A live cut cannot be cosmetically relabelled as replay provenance."""
+    from cryodaq.replay_engine.replay_experiment_stub import ReplayExperimentStub
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    bar.set_replay_mode(True)
+    initial_label = bar._exp_label.text()
+
+    live = _live_experiment_status(name="live cut must not cross replay pin")
+    bar._on_experiment_result(live)
+
+    assert emitted == []
+    assert bar._app_mode == "replay"
+    assert bar._exp_label.text() == initial_label
+    assert "live cut must not cross replay pin" not in bar._last_experiment_full_text
+    assert "REPLAY" in bar._mode_badge.text()
+
+    engine = ReplayEngine.__new__(ReplayEngine)
+    engine._source_path = tmp_path / "producer-replay.sqlite"
+    engine._speed = 1.0
+    engine._launcher_session_id = "b" * 32
+    engine._phase = "preparation"
+    engine._exp_stub = ReplayExperimentStub(tmp_path)
+    engine._exp_stub.create_retroactive(
+        title="verified replay cut",
+        sample="sample-a",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    replay = _wire_from_handler(asyncio.run(engine._handle_command({"cmd": "experiment_status"})))
+    try:
+        bar._on_experiment_result(replay)
+        assert emitted == []
+        assert "verified replay cut" not in bar._last_experiment_full_text
+
+        bar.bind_replay_authority(
+            source=str(engine._source_path),
+            speed=engine._speed,
+            session_id=engine._launcher_session_id,
+            launcher_generation=7,
+            bridge_generation=3,
+        )
+        expected = bar._replay_authority
+        assert expected is not None
+        bar._on_experiment_result(replay, expected)
+        assert emitted == [replay]
+        assert "verified replay cut" in bar._last_experiment_full_text
+    finally:
+        _dispose_bar(bar)
+
+
+def test_raw_experiment_handler_payload_without_transport_proto_is_not_authoritative() -> None:
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    accepted = _live_experiment_status(name="last-known experiment")
+    raw_handler_payload = _live_experiment_handler_status(name="unframed replacement")
+    assert "proto" not in raw_handler_payload
+    try:
+        bar._on_experiment_result(accepted)
+        last_known_text = bar._last_experiment_full_text
+        last_known_display = bar._exp_label.text()
+
+        bar._on_experiment_result(raw_handler_payload)
+
+        assert emitted == [accepted]
+        assert bar._last_experiment_full_text == last_known_text
+        assert bar._exp_label.text() == last_known_display
+        assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
+        assert bar._app_mode is None
+    finally:
+        _dispose_bar(bar)
+
+
+def test_experiment_status_decoder_retains_last_identity_but_revokes_invalid_authority() -> None:
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    valid = _live_experiment_status(name="known experiment")
+    bar._on_experiment_result(valid)
+    last_known_text = bar._exp_label.text()
+    last_known_full_text = bar._last_experiment_full_text
+
+    wrong_proto = copy.deepcopy(valid)
+    wrong_proto["proto"] = True
+    extra_key = copy.deepcopy(valid)
+    extra_key["unexpected"] = "optimistic compatibility data"
+    nonprintable_name = copy.deepcopy(valid)
+    nonprintable_name["active_experiment"]["name"] = "forged\nname"
+    unknown_phase = copy.deepcopy(valid)
+    unknown_phase["current_phase"] = "made_up_phase"
+    for invalid in ({"ok": True}, wrong_proto, extra_key, nonprintable_name, unknown_phase):
+        bar._on_experiment_result(invalid)
+        assert bar._exp_label.text() == last_known_text
+        assert bar._last_experiment_full_text == last_known_full_text
+        assert bar._exp_label.textFormat() == Qt.TextFormat.PlainText
+        assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        tooltip_text = document.toPlainText()
+        assert last_known_full_text in tooltip_text
+        assert "недоступен" in tooltip_text
+        assert bar._app_mode is None
+        assert "нет данных" in bar._mode_badge.text().lower()
+
+    assert emitted == [valid]
+
+
+def test_experiment_name_and_phase_are_plain_text_and_tooltip_markup_is_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bar = _make_bar()
+    bar._exp_label.setMaximumWidth(4096)
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    raw_name = '<b title="forged">A&B</b>'
+    raw_phase = "<i>phase</i>\u202e\n\t"
+    phase_key = "hostile_phase_fixture"
+    monkeypatch.setitem(top_watch_bar_module.PHASE_LABELS_RU, phase_key, raw_phase)
+    monkeypatch.setattr(top_watch_bar_module, "_fmt_elapsed", lambda _value: "")
+    payload = _live_experiment_status(name=raw_name, phase=phase_key)
+
+    bar._on_experiment_result(payload)
+
+    expected = safe_plain_text(f"\u25cf {raw_name} \u00b7 {raw_phase}")
+    tooltip = bar._exp_label.toolTip()
+    assert bar._exp_label.textFormat() == Qt.TextFormat.PlainText
+    assert bar._exp_label.text() == expected
+    assert tooltip.startswith("<qt>") and tooltip.endswith("</qt>")
+    assert "<b" not in tooltip and "<i>" not in tooltip
+    assert "&lt;b title=&quot;forged&quot;&gt;" in tooltip
+    assert "&lt;i&gt;phase&lt;/i&gt;" in tooltip
+    document = QTextDocument()
+    document.setHtml(tooltip)
+    assert document.toPlainText() == expected
+    assert emitted == [payload]
+    payload["active_experiment"]["name"] = "mutated after delivery"
+    assert emitted[0]["active_experiment"]["name"] == raw_name
 
 
 def test_mode_badge_updates_on_change() -> None:

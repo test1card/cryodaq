@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from cryodaq.gui import theme
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.shell.overlays.alarm_panel import AlarmPanel
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 
 
 def _app() -> QApplication:
@@ -61,7 +62,7 @@ def test_v2_count_signal_forwards_to_top_bar():
         window._alarm_panel.update_v2_status(
             {
                 "ok": True,
-                "engine_instance_id": "engine-a",
+                "engine_instance_id": "a" * 32,
                 "snapshot_revision": 1,
                 "active": {
                     "a": {
@@ -71,6 +72,8 @@ def test_v2_count_signal_forwards_to_top_bar():
                         "channels": ["T11"],
                         "triggered_at": 1.0,
                         "acknowledged": False,
+                        "acknowledged_at": 0.0,
+                        "acknowledged_by": "",
                     },
                     "b": {
                         "level": "WARNING",
@@ -79,8 +82,12 @@ def test_v2_count_signal_forwards_to_top_bar():
                         "channels": ["T12"],
                         "triggered_at": 2.0,
                         "acknowledged": False,
+                        "acknowledged_at": 0.0,
+                        "acknowledged_by": "",
                     },
                 },
+                "history": [],
+                "proto": CLIENT_PROTOCOL_VERSION,
             }
         )
         app.processEvents()

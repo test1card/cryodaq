@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,9 +14,107 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.shutdown_settlement import CancelledTaskSettlement, cancel_and_settle_tasks
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
+
+
+async def _settle_without_cancelling(
+    owners: tuple[asyncio.Future[Any], ...],
+) -> CancelledTaskSettlement:
+    """Observe retained executor work without abandoning it on caller cancellation."""
+
+    unique_owners = tuple(dict.fromkeys(owners))
+    if not unique_owners:
+        return CancelledTaskSettlement()
+
+    async def collect() -> list[object]:
+        return await asyncio.gather(*unique_owners, return_exceptions=True)
+
+    drain = asyncio.create_task(collect(), name="housekeeping-executor-terminal-settlement")
+    cancellation: asyncio.CancelledError | None = None
+    while not drain.done():
+        try:
+            await asyncio.shield(drain)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    failures = tuple(
+        result
+        for result in drain.result()
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+    )
+    return CancelledTaskSettlement(failures=failures, cancellation=cancellation)
+
+
+async def _settle_executor_operation[ExecutorResult](
+    operation: asyncio.Future[ExecutorResult],
+) -> ExecutorResult:
+    """Retain the real executor wrapper until its worker thread is terminal.
+
+    Direct cancellation of this owner is remembered but never forwarded to
+    ``operation``.  A terminal worker failure outranks that cancellation so a
+    caller cannot turn a failed mutation into an apparently harmless cancel.
+    """
+
+    cancellation: asyncio.CancelledError | None = None
+    while not operation.done():
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except BaseException:
+            break
+    try:
+        result = operation.result()
+    except BaseException as operation_error:
+        if cancellation is not None and not isinstance(operation_error, asyncio.CancelledError):
+            raise operation_error from cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def _await_executor_owner[ExecutorResult](
+    owner: asyncio.Task[ExecutorResult],
+) -> ExecutorResult:
+    """Await an executor owner without caller cancellation abandoning it."""
+
+    cancellation: asyncio.CancelledError | None = None
+    while not owner.done():
+        try:
+            await asyncio.shield(owner)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+            if owner.done():
+                break
+        except BaseException:
+            break
+    try:
+        result = owner.result()
+    except BaseException as owner_error:
+        if cancellation is not None and not isinstance(owner_error, asyncio.CancelledError):
+            raise owner_error from cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+def _combine_settlements(*settlements: CancelledTaskSettlement) -> CancelledTaskSettlement:
+    failures: list[BaseException] = []
+    cancellation: asyncio.CancelledError | None = None
+    for settlement in settlements:
+        for failure in settlement.failures:
+            if all(failure is not retained for retained in failures):
+                failures.append(failure)
+        if cancellation is None and settlement.cancellation is not None:
+            cancellation = settlement.cancellation
+    return CancelledTaskSettlement(failures=tuple(failures), cancellation=cancellation)
 
 
 class HousekeepingConfigError(RuntimeError):
@@ -379,22 +478,63 @@ class HousekeepingService:
         self._skip_daily_db_compression = bool(skip_daily_db_compression)
         self._running = False
         self._task: asyncio.Task[None] | None = None
+        self._stopping = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._executor_admission_open = True
+        self._executor_futures: set[asyncio.Task[Any]] = set()
+
+    def _lifecycle_transition_lock(self) -> asyncio.Lock:
+        """Return the single owner that serializes start/stop generations."""
+
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            # Compatibility for partially constructed owners used by terminal
+            # settlement and recovery paths.  Creation is atomic on one loop.
+            lock = asyncio.Lock()
+            self._lifecycle_lock = lock
+        return lock
 
     async def start(self) -> None:
         if not self._enabled:
             return
-        self._running = True
-        self._task = asyncio.create_task(self._loop(), name="housekeeping_service")
+        async with self._lifecycle_transition_lock():
+            if self._stopping:
+                raise RuntimeError("housekeeping cannot start while shutdown is settling")
+            retained = self._task
+            if self._running and retained is not None and not retained.done():
+                return
+            self._running = False
+            if retained is not None:
+                settlement = await cancel_and_settle_tasks((retained,))
+                self._task = None
+                settlement.raise_if_unsuccessful()
+            retained_executors = tuple(self._executor_futures)
+            executor_settlement = await _settle_without_cancelling(retained_executors)
+            self._executor_futures.clear()
+            executor_settlement.raise_if_unsuccessful()
+            self._executor_admission_open = True
+            self._running = True
+            self._task = asyncio.create_task(self._loop(), name="housekeeping_service")
 
     async def stop(self) -> None:
-        self._running = False
-        if self._task:
-            self._task.cancel()
+        async with self._lifecycle_transition_lock():
+            self._stopping = True
+            self._executor_admission_open = False
+            self._running = False
+            combined: CancelledTaskSettlement | None = None
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+                task = self._task
+                executor_futures = tuple(getattr(self, "_executor_futures", ()))
+                task_settlement = await cancel_and_settle_tasks(() if task is None else (task,))
+                executor_settlement = await _settle_without_cancelling(executor_futures)
+                self._task = None
+                if hasattr(self, "_executor_futures"):
+                    self._executor_futures.clear()
+                combined = _combine_settlements(task_settlement, executor_settlement)
+            finally:
+                self._stopping = False
+            assert combined is not None
+            combined.raise_if_unsuccessful()
 
     async def _loop(self) -> None:
         try:
@@ -408,9 +548,32 @@ class HousekeepingService:
         actions = self.plan_actions(now=now)
         if self._dry_run:
             return actions
-        for action in actions:
-            await asyncio.to_thread(self._apply, action)
+        for index, action in enumerate(actions):
+            await self._run_owned_executor(self._apply, action)
+            if not self._executor_admission_open and index + 1 < len(actions):
+                raise RuntimeError("housekeeping stopped before all planned actions were applied")
         return actions
+
+    async def _run_owned_executor[ExecutorResult](
+        self,
+        function: Callable[..., ExecutorResult],
+        /,
+        *args: Any,
+    ) -> ExecutorResult:
+        if not self._executor_admission_open:
+            raise RuntimeError("housekeeping is stopping; new executor work is rejected")
+        loop = asyncio.get_running_loop()
+        operation = loop.run_in_executor(None, function, *args)
+        owner = asyncio.create_task(
+            _settle_executor_operation(operation),
+            name="housekeeping-executor-owner",
+        )
+        self._executor_futures.add(owner)
+        try:
+            return await _await_executor_owner(owner)
+        finally:
+            if owner.done():
+                self._executor_futures.discard(owner)
 
     def plan_actions(self, *, now: datetime | None = None) -> list[HousekeepingAction]:
         current = now or datetime.now(UTC)

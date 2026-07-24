@@ -21,6 +21,8 @@ For LAN access route via SSH tunnel; never bind 0.0.0.0 directly.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.metadata import version as _get_version
 
 try:
@@ -74,9 +76,7 @@ _MUTATION_RECEIPT_KEYS = frozenset(
         "capability_token",
     }
 )
-_MUTATION_ENVELOPE_KEYS = frozenset(
-    {"protocol_major", "mutation_capability", "capability_token"}
-)
+_MUTATION_ENVELOPE_KEYS = frozenset({"protocol_major", "mutation_capability", "capability_token"})
 _WEB_READ_ONLY_COMMANDS = frozenset(
     {
         "mutation_capabilities",
@@ -249,19 +249,6 @@ def _send_engine_command(cmd: dict) -> dict:
     return result
 
 
-def _global_log_scope_receipt_matches(result: object) -> bool:
-    if type(result) is not dict:
-        return False
-    receipt = result.get("scope_receipt")
-    return (
-        type(receipt) is dict
-        and set(receipt) == {"schema", "log_scope", "experiment_id"}
-        and receipt.get("schema") == "operator_log_read_scope_v1"
-        and receipt.get("log_scope") == "all"
-        and receipt.get("experiment_id") is None
-    )
-
-
 async def _async_engine_command(cmd: dict) -> dict:
     """Non-blocking engine command via thread pool."""
     return await asyncio.to_thread(_send_engine_command, cmd)
@@ -387,14 +374,18 @@ async def _zmq_to_ws_bridge() -> None:
     """Фоновая задача: получает Reading от ZMQ, рассылает по WebSocket."""
     sub = ZMQSubscriber(callback=_on_reading_callback)
     _state.subscriber = sub
-    await sub.start()
-    logger.info("ZMQ→WS мост запущен")
-    # Задача живёт вечно — остановка через lifespan
     try:
+        await sub.start()
+        logger.info("ZMQ→WS мост запущен")
+        # Задача живёт вечно — остановка через lifespan
         while True:  # noqa: ASYNC110
             await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        await sub.stop()
+    finally:
+        try:
+            await sub.stop()
+        finally:
+            if _state.subscriber is sub:
+                _state.subscriber = None
 
 
 def _on_reading_callback(reading: Reading) -> None:
@@ -499,34 +490,38 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
 
 def create_app() -> FastAPI:
     """Создать и настроить FastAPI-приложение."""
+
+    @asynccontextmanager
+    async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        # Initialize loop-owned state only while this application is live.
+        _state.broadcast_q = asyncio.Queue(maxsize=200)
+        pump_task = asyncio.create_task(_broadcast_pump(), name="broadcast_pump")
+        zmq_task = asyncio.create_task(_zmq_to_ws_bridge(), name="zmq_ws_bridge")
+        tasks = (zmq_task, pump_task)
+        logger.info("Веб-сервер CryoDAQ запущен")
+        try:
+            yield
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            _state.broadcast_q = None
+            failures = [
+                result
+                for result in results
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+            ]
+            logger.info("Веб-сервер CryoDAQ остановлен")
+            if failures:
+                raise RuntimeError("web background task settlement failed") from failures[0]
+
     application = FastAPI(
         title="CryoDAQ Web Dashboard",
         description="Удалённый мониторинг криогенной системы",
         version=_VERSION,
+        lifespan=_lifespan,
     )
-
-    _zmq_task: asyncio.Task[None] | None = None
-    _pump_task: asyncio.Task[None] | None = None
-
-    @application.on_event("startup")
-    async def _startup() -> None:
-        nonlocal _zmq_task, _pump_task
-        # Инициализируем очередь в контексте event loop
-        _state.broadcast_q = asyncio.Queue(maxsize=200)
-        _pump_task = asyncio.create_task(_broadcast_pump(), name="broadcast_pump")
-        _zmq_task = asyncio.create_task(_zmq_to_ws_bridge(), name="zmq_ws_bridge")
-        logger.info("Веб-сервер CryoDAQ запущен")
-
-    @application.on_event("shutdown")
-    async def _shutdown() -> None:
-        for task in (_zmq_task, _pump_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        logger.info("Веб-сервер CryoDAQ остановлен")
 
     # Read-only REST facade + Swagger. Imported here (not at module top) to
     # keep the server<->rest_api import non-circular.

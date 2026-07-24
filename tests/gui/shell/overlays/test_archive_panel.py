@@ -115,6 +115,7 @@ def test_panel_renders_core_surfaces(app):
     assert panel._regenerate_btn is not None
     # Rendered text: header label must be visible.
     from PySide6.QtWidgets import QLabel
+
     titles = [lbl.text() for lbl in panel.findChildren(QLabel) if lbl.text().startswith("АРХИВ")]
     assert "АРХИВ ЭКСПЕРИМЕНТОВ" in titles
     # Export buttons are enabled once connected.
@@ -134,18 +135,14 @@ def test_panel_header_uses_cyrillic_uppercase(app):
     from PySide6.QtWidgets import QLabel
 
     panel = ArchivePanel()
-    titles = [
-        label.text() for label in panel.findChildren(QLabel) if label.text().startswith("АРХИВ")
-    ]
+    titles = [label.text() for label in panel.findChildren(QLabel) if label.text().startswith("АРХИВ")]
     assert "АРХИВ ЭКСПЕРИМЕНТОВ" in titles
 
 
 def test_table_has_nine_columns_with_cyrillic_headers(app):
     panel = ArchivePanel()
     assert panel._table.columnCount() == 9
-    headers = [
-        panel._table.horizontalHeaderItem(i).text() for i in range(panel._table.columnCount())
-    ]
+    headers = [panel._table.horizontalHeaderItem(i).text() for i in range(panel._table.columnCount())]
     assert headers == [
         "Начало",
         "Конец",
@@ -424,9 +421,7 @@ def test_present_unknown_authority_never_uses_old_payload_compatibility(
 
 def test_regenerate_requires_selection_and_emits_signal(app):
     panel = ArchivePanel()
-    panel._on_refresh_result(
-        {"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]}
-    )
+    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]})
     seen: list[str] = []
     panel.regenerate_requested.connect(seen.append)
     panel.set_connected(True)
@@ -437,9 +432,7 @@ def test_regenerate_requires_selection_and_emits_signal(app):
 
 def test_regenerate_blocked_when_report_disabled(app):
     panel = ArchivePanel()
-    panel._on_refresh_result(
-        {"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=False)]}
-    )
+    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=False)]})
     panel.set_connected(True)
     # Regenerate button is disabled at the details level.
     assert not panel._regenerate_btn.isEnabled()
@@ -484,9 +477,7 @@ def test_force_required_confirmation_sends_exact_second_request_once(
         staticmethod(lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes),
     )
 
-    panel._on_regenerate_result(
-        {"ok": False, "error_code": "force_required", "error": "confirm"}
-    )
+    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
 
     assert sent == [
         {
@@ -527,9 +518,7 @@ def test_force_confirmation_cancel_sends_nothing(
         "getText",
         staticmethod(lambda *_args, **_kwargs: ("", False)),
     )
-    panel._on_regenerate_result(
-        {"ok": False, "error_code": "force_required", "error": "confirm"}
-    )
+    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
     assert sent == []
 
 
@@ -561,14 +550,10 @@ def test_force_required_never_applies_to_changed_selection(
         QInputDialog,
         "getText",
         staticmethod(
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("selection change must not prompt")
-            )
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection change must not prompt"))
         ),
     )
-    panel._on_regenerate_result(
-        {"ok": False, "error_code": "force_required", "error": "confirm"}
-    )
+    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
     assert refreshed == [True]
     assert panel._pending_regenerate is None
 
@@ -600,15 +585,11 @@ def test_disconnect_cancels_force_prompt_and_reconnect_keeps_pending_disabled(
         QInputDialog,
         "getText",
         staticmethod(
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("disconnected result must not prompt")
-            )
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disconnected result must not prompt"))
         ),
     )
 
-    panel._on_regenerate_result(
-        {"ok": False, "error_code": "force_required", "error": "confirm"}
-    )
+    panel._on_regenerate_result({"ok": False, "error_code": "force_required", "error": "confirm"})
 
     assert panel._pending_regenerate is None
     assert not panel._regenerate_btn.isEnabled()
@@ -637,9 +618,7 @@ def test_export_csv_click_cancel_no_worker(app, monkeypatch):
     # Signal emitted BEFORE dialog per current ordering; either way, no worker started.
     assert seen == ["csv"]
     assert not panel._export_in_flight
-    assert panel._export_workers == [], (
-        f"No export worker must be created on cancel, got: {panel._export_workers}"
-    )
+    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
     assert panel._export_csv_btn.isEnabled()
 
 
@@ -651,9 +630,7 @@ def test_export_hdf5_click_cancel_no_worker(app, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
     panel._export_hdf5_btn.click()
     assert not panel._export_in_flight
-    assert panel._export_workers == [], (
-        f"No export worker must be created on cancel, got: {panel._export_workers}"
-    )
+    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
 
 
 def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
@@ -664,9 +641,7 @@ def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
     panel._export_xlsx_btn.click()
     assert not panel._export_in_flight
-    assert panel._export_workers == [], (
-        f"No export worker must be created on cancel, got: {panel._export_workers}"
-    )
+    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
 
 
 def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
@@ -681,9 +656,7 @@ def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
     panel._export_parquet_btn.click()
     assert seen == ["parquet"]
     assert not panel._export_in_flight
-    assert panel._export_workers == [], (
-        f"No export worker must be created on cancel, got: {panel._export_workers}"
-    )
+    assert panel._export_workers == [], f"No export worker must be created on cancel, got: {panel._export_workers}"
     assert panel._export_parquet_btn.isEnabled()
 
 
@@ -801,9 +774,7 @@ def test_disconnected_disables_refresh_regenerate_export(app):
 
 def test_reconnect_reenables_controls(app):
     panel = ArchivePanel()
-    panel._on_refresh_result(
-        {"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]}
-    )
+    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="exp-1", report_enabled=True)]})
     panel.set_connected(False)
     panel.set_connected(True)
     assert panel._refresh_btn.isEnabled()
@@ -1049,7 +1020,7 @@ class _StubCSVExporter:
     """Plain-Python stand-in for CSVExporter. Avoids PySide/QThread +
     MagicMock interaction that crashed in the initial attempt."""
 
-    _next_result: int | Exception = 0
+    _next_result: int | BaseException = 0
     calls: list[tuple] = []
 
     def __init__(self, data_dir=None, **kwargs) -> None:
@@ -1058,13 +1029,13 @@ class _StubCSVExporter:
     def export(self, output_path, **kwargs) -> int:
         _StubCSVExporter.calls.append((output_path, kwargs))
         result = _StubCSVExporter._next_result
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             raise result
         return int(result)
 
 
 class _StubHDF5Exporter:
-    _next_result: int | Exception = 0
+    _next_result: int | BaseException = 0
     calls: list[tuple] = []
 
     def __init__(self, *args, **kwargs) -> None:
@@ -1073,13 +1044,13 @@ class _StubHDF5Exporter:
     def export(self, db_file, out) -> int:
         _StubHDF5Exporter.calls.append((db_file, out))
         result = _StubHDF5Exporter._next_result
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             raise result
         return int(result)
 
 
 class _StubXLSXExporter:
-    _next_result: int | Exception = 0
+    _next_result: int | BaseException = 0
     calls: list[tuple] = []
 
     def __init__(self, data_dir) -> None:
@@ -1088,7 +1059,7 @@ class _StubXLSXExporter:
     def export(self, output_path) -> int:
         _StubXLSXExporter.calls.append((output_path,))
         result = _StubXLSXExporter._next_result
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             raise result
         return int(result)
 
@@ -1166,13 +1137,17 @@ def test_csv_export_failure(app, monkeypatch, tmp_path, reset_stub_state):
         "getSaveFileName",
         staticmethod(lambda *a, **k: (str(output), "CSV (*.csv)")),
     )
-    _StubCSVExporter._next_result = OSError("disk full")
+    secret = "disk full C:\\TOP-SECRET\\operator.db\r\nFORGED"
+    _StubCSVExporter._next_result = KeyboardInterrupt(secret)
     _patch_csv(monkeypatch, tmp_path)
 
     panel._export_csv_btn.click()
     assert _wait_until(lambda: not panel._export_in_flight)
 
-    assert "disk full" in panel._banner_label.text()
+    assert "disk full" not in panel._banner_label.text()
+    assert "TOP-SECRET" not in panel._banner_label.text()
+    assert "FORGED" not in panel._banner_label.text()
+    assert "\r" not in panel._banner_label.text()
     assert "Экспорт CSV" in panel._banner_label.text()
     assert theme.STATUS_FAULT in panel._banner_label.styleSheet()
 
@@ -1227,9 +1202,7 @@ def test_xlsx_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     assert len(_StubXLSXExporter.calls) == 1
 
 
-def test_export_thread_retained_during_run_then_pruned(
-    app, monkeypatch, tmp_path, reset_stub_state
-):
+def test_export_thread_retained_during_run_then_pruned(app, monkeypatch, tmp_path, reset_stub_state):
     """While the export is running the QThread + worker must be retained
     (otherwise the Python wrapper can be GC'd mid-flight and crash the
     PySide signal path). On completion both lists are pruned.
@@ -1277,3 +1250,50 @@ def test_export_thread_retained_during_run_then_pruned(
     _release.set()
     assert _wait_until(lambda: not panel._export_in_flight, timeout_s=5.0)
     assert _wait_until(lambda: len(panel._export_workers) == 0)
+
+
+def test_export_worker_remains_owned_until_blocked_runner_settles(
+    app,
+    _isolate_shell_test,
+) -> None:
+    import threading
+
+    from cryodaq.gui.shell.overlays.archive_panel import _ExportWorker
+    from cryodaq.gui.zmq_client import (
+        registered_gui_command_workers,
+        revoke_gui_command_worker_admission,
+        settle_registered_gui_command_workers,
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+    callbacks: list[tuple[str, int, str]] = []
+
+    def runner() -> int:
+        entered.set()
+        assert release.wait(5.0)
+        return 7
+
+    worker = _ExportWorker("csv", runner)
+    worker.result_ready.connect(lambda kind, count, error: callbacks.append((kind, count, error)))
+    try:
+        worker.start()
+        assert entered.wait(1.0)
+        revoke_gui_command_worker_admission(_isolate_shell_test)
+
+        assert settle_registered_gui_command_workers(timeout_ms=10) is False
+        assert worker in registered_gui_command_workers()
+        assert callbacks == []
+
+        release.set()
+        assert worker.wait(2_000)
+        for _ in range(5):
+            app.processEvents()
+        assert callbacks == []
+        assert settle_registered_gui_command_workers()
+        assert worker not in registered_gui_command_workers()
+    finally:
+        release.set()
+        worker.requestInterruption()
+        worker.wait(2_000)
+        settle_registered_gui_command_workers()

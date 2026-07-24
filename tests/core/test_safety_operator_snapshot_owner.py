@@ -19,6 +19,7 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     _issue_registry_runtime_binding,
 )
+from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 from cryodaq.engine_wiring.operator_safety_snapshot import (
     OperatorSafetySnapshot,
     SafetyLifecycle,
@@ -849,7 +850,13 @@ async def test_child_death_during_limit_write_prevents_commit_and_further_update
     async def live_child() -> None:
         await live_release.wait()
 
-    async def blocked_write(command: str) -> None:
+    async def blocked_write(
+        channel: str,
+        *,
+        v_comp: float | None = None,
+        i_comp: float | None = None,
+    ) -> None:
+        command = f"{channel}.source.limitv = {v_comp}" if v_comp is not None else f"{channel}.source.limiti = {i_comp}"
         writes.append(command)
         write_entered.set()
         await write_release.wait()
@@ -862,7 +869,7 @@ async def test_child_death_during_limit_write_prevents_commit_and_further_update
     driver = MagicMock()
     driver.mock = False
     driver._channels = {"smua": runtime}
-    driver._transport.write = AsyncMock(side_effect=blocked_write)
+    driver.update_source_limit = AsyncMock(side_effect=blocked_write)
     driver.emergency_off = AsyncMock(return_value=True)
     manager = _manager(mock=True, driver=driver)
     monkeypatch.setattr(manager, "_collect_loop", terminal_child)
@@ -1519,7 +1526,13 @@ async def test_non_child_fault_stops_limit_update_after_first_applied_write() ->
     write_release = asyncio.Event()
     writes: list[str] = []
 
-    async def blocked_write(command: str) -> None:
+    async def blocked_write(
+        channel: str,
+        *,
+        v_comp: float | None = None,
+        i_comp: float | None = None,
+    ) -> None:
+        command = f"{channel}.source.limitv = {v_comp}" if v_comp is not None else f"{channel}.source.limiti = {i_comp}"
         writes.append(command)
         write_entered.set()
         await write_release.wait()
@@ -1532,7 +1545,7 @@ async def test_non_child_fault_stops_limit_update_after_first_applied_write() ->
     driver = MagicMock()
     driver.mock = False
     driver._channels = {"smua": runtime}
-    driver._transport.write = AsyncMock(side_effect=blocked_write)
+    driver.update_source_limit = AsyncMock(side_effect=blocked_write)
     driver.emergency_off = AsyncMock(return_value=True)
     manager = _manager(mock=True, driver=driver)
     manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]
@@ -2120,7 +2133,13 @@ async def test_cancelled_limit_write_settles_hardware_then_faults_before_return(
     write_release = asyncio.Event()
     writes: list[str] = []
 
-    async def blocked_write(command: str) -> None:
+    async def blocked_write(
+        channel: str,
+        *,
+        v_comp: float | None = None,
+        i_comp: float | None = None,
+    ) -> None:
+        command = f"{channel}.source.limitv = {v_comp}" if v_comp is not None else f"{channel}.source.limiti = {i_comp}"
         writes.append(command)
         write_entered.set()
         await write_release.wait()
@@ -2129,7 +2148,7 @@ async def test_cancelled_limit_write_settles_hardware_then_faults_before_return(
     driver = MagicMock()
     driver.mock = False
     driver._channels = {"smua": runtime}
-    driver._transport.write = AsyncMock(side_effect=blocked_write)
+    driver.update_source_limit = AsyncMock(side_effect=blocked_write)
     driver.emergency_off = AsyncMock(return_value=True)
     manager = _manager(mock=True, driver=driver)
     manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]
@@ -2154,10 +2173,83 @@ async def test_cancelled_limit_write_settles_hardware_then_faults_before_return(
     driver.emergency_off.assert_awaited()
 
 
+async def test_limit_write_transport_loss_demotes_driver_and_blocks_further_ordinary_traffic() -> None:
+    resource = "USB0::0x05E6::0x2604::04089762::INSTR"
+    identity = "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
+    off_nonce = re.compile(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g")
+
+    def _query(command: str, timeout_ms: int | None = None) -> str:
+        del timeout_ms
+        if command == "*IDN?":
+            return identity
+        match = off_nonce.search(command)
+        if match is not None:
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|0"
+        return "0"
+
+    driver = Keithley2604B("k", resource, mock=False)
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=_query)
+    transport.write = AsyncMock()
+    driver._transport = transport
+    await driver.connect()
+    await driver.start_source("smua", 0.5, 40.0, 1.0)
+
+    writes: list[str] = []
+
+    async def _fail_limit_only(command: str) -> None:
+        writes.append(command)
+        if command == "smua.source.limitv = 20.0":
+            raise OSError("ambiguous limit completion")
+
+    transport.write = AsyncMock(side_effect=_fail_limit_only)
+    queries_before = transport.query.await_count
+    manager = _manager(mock=True, driver=driver)
+    manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]
+    await manager.start()
+    manager._state = SafetyState.RUNNING
+    manager._active_sources.add("smua")
+
+    result = await manager.update_limits(channel="smua", v_comp=20.0, i_comp=0.2)
+
+    assert result["ok"] is False
+    assert result["uncertain"] == ["v_comp"]
+    assert driver.connected is False
+    assert driver._recovery_transport_open is True
+    assert driver._instrument_id == ""
+    assert manager.state is SafetyState.FAULT_LATCHED
+    assert writes[0] == "smua.source.limitv = 20.0"
+    assert all(
+        command.endswith(".source.levelv = 0") or ".source.output = " in command and command.endswith(".OUTPUT_OFF")
+        for command in writes[1:]
+    )
+    assert not any("OUTPUT_ON" in command or ".source.limiti" in command for command in writes)
+    recovery_queries = [call.args[0] for call in transport.query.await_args_list[queries_before:]]
+    assert recovery_queries
+    assert all("CRYODAQ_OFF_V1" in command for command in recovery_queries)
+
+    writes_after_fault = list(writes)
+    query_count_after_fault = transport.query.await_count
+    blocked = await manager.update_limits(channel="smua", i_comp=0.2)
+    assert blocked["ok"] is False
+    assert writes == writes_after_fault
+    assert transport.query.await_count == query_count_after_fault
+    await manager.stop()
+    await driver.disconnect()
+
+
 async def test_second_limit_write_error_reports_partial_truth_and_faults() -> None:
     writes: list[str] = []
 
-    async def write(command: str) -> None:
+    async def write(
+        channel: str,
+        *,
+        v_comp: float | None = None,
+        i_comp: float | None = None,
+    ) -> None:
+        command = f"{channel}.source.limitv = {v_comp}" if v_comp is not None else f"{channel}.source.limiti = {i_comp}"
         writes.append(command)
         if ".source.limiti" in command:
             raise OSError("ambiguous transport failure")
@@ -2166,7 +2258,7 @@ async def test_second_limit_write_error_reports_partial_truth_and_faults() -> No
     driver = MagicMock()
     driver.mock = False
     driver._channels = {"smua": runtime}
-    driver._transport.write = AsyncMock(side_effect=write)
+    driver.update_source_limit = AsyncMock(side_effect=write)
     driver.emergency_off = AsyncMock(return_value=True)
     manager = _manager(mock=True, driver=driver)
     manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]

@@ -14,6 +14,7 @@ import pytest
 
 from cryodaq.core.operator_snapshot_ingress import (
     OperatorSnapshotQueueIngress,
+    SnapshotIngressModeError,
     SnapshotIngressOrderingError,
     SnapshotIngressQueueError,
 )
@@ -63,11 +64,12 @@ def _snapshot(
     revision: int,
     *,
     received_at: datetime | None = None,
+    mode: SnapshotMode = SnapshotMode.LIVE,
 ) -> OperatorSnapshot:
     received = NOW + timedelta(seconds=revision) if received_at is None else received_at
-    cut = SnapshotCut(revision, NOW, received, SOURCE, SnapshotMode.LIVE, "experiment-1", SOURCE)
+    cut = SnapshotCut(revision, NOW, received, SOURCE, mode, "experiment-1", SOURCE)
     status = SummaryStatus(
-        OperatorPresentationState.CAUTION,
+        OperatorPresentationState.STALE if mode is SnapshotMode.REPLAY else OperatorPresentationState.CAUTION,
         float(revision),
         0.0,
         ("authority_pending",),
@@ -85,7 +87,7 @@ def _snapshot(
             "experiment-1",
             "Cooldown",
             "cooldown",
-            RecordingTruth.UNKNOWN,
+            RecordingTruth.REPLAY_ONLY if mode is SnapshotMode.REPLAY else RecordingTruth.UNKNOWN,
             None,
         ),
         DataIntegritySummary(cut, status, revision, revision, 0, 0, AvailabilityTruth.UNKNOWN),
@@ -95,7 +97,10 @@ def _snapshot(
 
 
 def _spawn_decode_once(frames: tuple[bytes, bytes], output: Any) -> None:
-    OperatorSnapshotQueueIngress(output).accept_frames(frames)
+    OperatorSnapshotQueueIngress(
+        output,
+        expected_mode=SnapshotMode.LIVE,
+    ).accept_frames(frames)
 
 
 def _free_port() -> int:
@@ -106,7 +111,7 @@ def _free_port() -> int:
 
 def test_capacity_two_coalesces_to_newest_complete_cuts_and_balances_task_done() -> None:
     output: queue.Queue[OperatorSnapshot] = queue.Queue(maxsize=2)
-    ingress = OperatorSnapshotQueueIngress(output)
+    ingress = OperatorSnapshotQueueIngress(output, expected_mode=SnapshotMode.LIVE)
 
     assert ingress.accept_frames(encode_operator_snapshot_frames(_snapshot(1))).dropped_oldest == 0
     assert ingress.accept_frames(encode_operator_snapshot_frames(_snapshot(2))).dropped_oldest == 0
@@ -116,6 +121,36 @@ def test_capacity_two_coalesces_to_newest_complete_cuts_and_balances_task_done()
     for _item in retained:
         output.task_done()
     assert [snapshot.cut.revision for snapshot in retained] == [2, 3]
+    assert output.unfinished_tasks == 0
+
+
+@pytest.mark.parametrize("invalid_mode", [None, "live", True, 1])
+def test_subprocess_ingress_requires_exact_snapshot_mode_authority(invalid_mode: object) -> None:
+    with pytest.raises(TypeError, match="expected_mode"):
+        OperatorSnapshotQueueIngress(queue.Queue(maxsize=2), expected_mode=invalid_mode)
+
+
+def test_opposite_mode_high_revision_cannot_poison_subprocess_high_water() -> None:
+    output: queue.Queue[OperatorSnapshot] = queue.Queue(maxsize=2)
+    ingress = OperatorSnapshotQueueIngress(output, expected_mode=SnapshotMode.LIVE)
+
+    with pytest.raises(SnapshotIngressModeError, match="mode"):
+        ingress.accept_frames(
+            encode_operator_snapshot_frames(
+                _snapshot(999, mode=SnapshotMode.REPLAY),
+            )
+        )
+
+    assert output.empty()
+    assert output.unfinished_tasks == 0
+    assert ingress._last_revision == 0
+    assert ingress._last_received_at is None
+
+    accepted = _snapshot(2, mode=SnapshotMode.LIVE)
+    receipt = ingress.accept_frames(encode_operator_snapshot_frames(accepted))
+    assert receipt.snapshot == accepted
+    assert output.get_nowait() == accepted
+    output.task_done()
     assert output.unfinished_tasks == 0
 
 
@@ -201,7 +236,7 @@ def test_broken_full_queue_fails_bounded_without_advancing_order_authority() -> 
             pytest.fail("nothing was removed")
 
     broken = BrokenQueue()
-    ingress = OperatorSnapshotQueueIngress(broken)
+    ingress = OperatorSnapshotQueueIngress(broken, expected_mode=SnapshotMode.LIVE)
     with pytest.raises(SnapshotIngressQueueError, match="did not settle"):
         ingress.accept_frames(encode_operator_snapshot_frames(_snapshot(1)))
     assert broken.puts == 8
@@ -223,7 +258,7 @@ def test_broken_full_queue_fails_bounded_without_advancing_order_authority() -> 
 )
 def test_malformed_wrong_topic_and_noncanonical_frames_never_enter_queue(frames: tuple[bytes, ...]) -> None:
     output: queue.Queue[OperatorSnapshot] = queue.Queue(maxsize=2)
-    ingress = OperatorSnapshotQueueIngress(output)
+    ingress = OperatorSnapshotQueueIngress(output, expected_mode=SnapshotMode.LIVE)
 
     with pytest.raises(OperatorSnapshotTransportError):
         ingress.accept_frames(frames)
@@ -233,7 +268,7 @@ def test_malformed_wrong_topic_and_noncanonical_frames_never_enter_queue(frames:
 
 def test_out_of_order_duplicate_and_received_at_regression_never_replace_newest() -> None:
     output: queue.Queue[OperatorSnapshot] = queue.Queue(maxsize=2)
-    ingress = OperatorSnapshotQueueIngress(output)
+    ingress = OperatorSnapshotQueueIngress(output, expected_mode=SnapshotMode.LIVE)
     newest = _snapshot(2, received_at=NOW + timedelta(seconds=10))
     ingress.accept_frames(encode_operator_snapshot_frames(newest))
 
@@ -438,6 +473,7 @@ def test_readings_and_snapshots_use_distinct_sub_sockets_topics_and_caps() -> No
 
 def test_gui_poll_accepts_only_decoded_snapshot_and_tracks_independent_age(monkeypatch) -> None:
     bridge = ZmqBridge()
+    bridge._bridge_instance_id = "a" * 32
     bridge._snapshot_queue = queue.Queue(maxsize=2)
     bridge._snapshot_queue.put_nowait(_snapshot(1))
     bridge._snapshot_queue.put_nowait({"optimistic": "ready"})
@@ -459,7 +495,7 @@ def test_gui_poll_accepts_only_decoded_snapshot_and_tracks_independent_age(monke
 
 def test_snapshot_cold_start_and_stall_never_change_bridge_restart_health(monkeypatch) -> None:
     bridge = ZmqBridge()
-    bridge._process = type("Alive", (), {"is_alive": lambda self: True})()
+    monkeypatch.setattr(bridge, "is_alive", lambda: True)
     bridge._last_heartbeat = 100.0
     monkeypatch.setattr("cryodaq.gui.zmq_client.time.monotonic", lambda: 120.0)
 
@@ -492,6 +528,9 @@ def test_bridge_restart_replaces_snapshot_queue_and_invalidates_old_cut(monkeypa
         def is_alive(self) -> bool:
             return self._alive
 
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
     class FakeThread:
         def __init__(self, *args, **kwargs) -> None:
             self._alive = False
@@ -520,6 +559,24 @@ def test_bridge_restart_replaces_snapshot_queue_and_invalidates_old_cut(monkeypa
 
 
 def test_old_child_data_cannot_inherit_new_incarnation(monkeypatch) -> None:
+    class LateWriterQueue(queue.Queue):
+        """Model a retired child handle that can deliver after parent close."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(maxsize=kwargs.get("maxsize", 0))
+            self.cancel_join_called = False
+            self.join_thread_called = False
+            self.closed = False
+
+        def cancel_join_thread(self) -> None:
+            self.cancel_join_called = True
+
+        def close(self) -> None:
+            self.closed = True
+
+        def join_thread(self) -> None:
+            self.join_thread_called = True
+
     class FakeProcess:
         pid = 123
 
@@ -550,7 +607,7 @@ def test_old_child_data_cannot_inherit_new_incarnation(monkeypatch) -> None:
 
     monkeypatch.setattr("cryodaq.gui.zmq_client.mp.Process", FakeProcess)
     monkeypatch.setattr("cryodaq.gui.zmq_client.threading.Thread", FakeThread)
-    monkeypatch.setattr("cryodaq.gui.zmq_client.mp.JoinableQueue", lambda *args, **kwargs: queue.Queue(maxsize=2))
+    monkeypatch.setattr("cryodaq.gui.zmq_client.mp.JoinableQueue", LateWriterQueue)
     bridge = ZmqBridge()
     bridge.start()
     retired_queue = bridge._snapshot_queue
@@ -565,6 +622,9 @@ def test_old_child_data_cannot_inherit_new_incarnation(monkeypatch) -> None:
     assert replacement_queue is not retired_queue
     assert replacement_incarnation is not None
     assert replacement_incarnation != retired_incarnation
+    assert retired_queue.cancel_join_called is False
+    assert retired_queue.join_thread_called is True
+    assert retired_queue.closed is True
     retired_queue.put_nowait(_snapshot(99))
     assert bridge.poll_operator_snapshots() == []
     assert retired_queue.get_nowait().cut.revision == 99
@@ -593,7 +653,7 @@ def test_spawn_failure_invalidates_snapshot_age_and_queued_cut_before_attempt(mo
     bridge._last_heartbeat = 111.0
     bridge._last_reading_time = 222.0
 
-    with pytest.raises(RuntimeError, match="spawn failed"):
+    with pytest.raises(RuntimeError, match="phase=process start; exception=RuntimeError"):
         bridge.start()
 
     assert bridge._snapshot_queue is not old_queue
@@ -619,18 +679,26 @@ def test_restart_cleanup_failure_keeps_drained_old_queue_and_refuses_new_generat
     bridge._last_snapshot_time = time.monotonic()
     broken = BrokenReplyThread()
     bridge._reply_consumer = broken
+    bridge._reply_consumer_started = True
     monkeypatch.setattr(
         "cryodaq.gui.zmq_client.mp.JoinableQueue",
         lambda *args, **kwargs: pytest.fail("cleanup failure must not allocate a replacement snapshot queue"),
     )
 
-    with pytest.raises(RuntimeError, match="reply cleanup failed"):
+    with pytest.raises(
+        RuntimeError,
+        match="previous ZMQ runtime settlement incomplete: ordinary reply consumer settlement raised",
+    ) as caught:
         bridge.start()
 
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert str(caught.value.__cause__) == "reply cleanup failed"
+
     assert bridge._snapshot_queue is old_queue
+    assert not old_queue.empty()
+    assert bridge.poll_operator_snapshots() == []
     assert old_queue.empty()
     assert old_queue.unfinished_tasks == 0
-    assert bridge.poll_operator_snapshots() == []
     assert bridge._reply_consumer is broken
     assert bridge._reply_stop.is_set()
     assert bridge._bridge_instance_id is None

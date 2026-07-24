@@ -8,11 +8,16 @@ request-size limit, plus the read-only contract (no write verbs).
 
 from __future__ import annotations
 
+import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
 from starlette.testclient import TestClient
 
+from cryodaq.core.alarm_ack_codec import alarm_ack_request_fingerprint
+from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQCommandServer
+from cryodaq.storage.sqlite_writer import SQLiteWriter
 from cryodaq.web.server import create_app
 
 
@@ -23,6 +28,64 @@ def client():
         app = create_app()
         with TestClient(app) as c:
             yield c
+
+
+async def test_app_lifespan_owns_and_settles_all_background_tasks(monkeypatch) -> None:
+    from cryodaq.web import server
+
+    started: set[str] = set()
+    settled: set[str] = set()
+
+    async def _background_owner(label: str) -> None:
+        started.add(label)
+        try:
+            await asyncio.Future()
+        finally:
+            settled.add(label)
+
+    monkeypatch.setattr(server, "_broadcast_pump", lambda: _background_owner("pump"))
+    monkeypatch.setattr(server, "_zmq_to_ws_bridge", lambda: _background_owner("zmq"))
+    app = create_app()
+
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        assert started == {"pump", "zmq"}
+        assert server._state.broadcast_q is not None
+        assert server._state.broadcast_q.maxsize == 200
+        live_names = {task.get_name() for task in asyncio.all_tasks() if not task.done()}
+        assert {"broadcast_pump", "zmq_ws_bridge"} <= live_names
+
+    assert settled == {"pump", "zmq"}
+    assert server._state.broadcast_q is None
+
+
+async def test_web_zmq_bridge_cancellation_settles_exact_subscriber(monkeypatch) -> None:
+    from cryodaq.web import server
+
+    started = asyncio.Event()
+
+    class _Subscriber:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        async def start(self) -> None:
+            started.set()
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+
+    subscriber = _Subscriber()
+    monkeypatch.setattr(server, "ZMQSubscriber", lambda **_kwargs: subscriber)
+    task = asyncio.create_task(server._zmq_to_ws_bridge())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert server._state.subscriber is subscriber
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert subscriber.stop_calls == 1
+    assert server._state.subscriber is None
 
 
 def test_temperatures_returns_kelvin_readings(client) -> None:
@@ -484,6 +547,42 @@ def auth_client(monkeypatch, tmp_path):
 _AUTH = {"Authorization": f"Bearer {_TOKEN}"}
 
 
+def _log_headers(request_id: str = "a" * 32) -> dict[str, str]:
+    """Bind each operator-log write to a caller-owned retry identity."""
+
+    return {**_AUTH, "Idempotency-Key": request_id}
+
+
+def _published_log_result(command: dict, *, entry_id: int = 1) -> dict:
+    """Return one complete receipt bound to the exact REST submission."""
+
+    experiment_id = command.get("experiment_id")
+    entry = {
+        "id": entry_id,
+        "timestamp": "2026-07-23T00:00:00+00:00",
+        "experiment_id": experiment_id,
+        "author": _REST_IDENTITY,
+        "source": "rest",
+        "message": command["message"],
+        "tags": list(command.get("tags", [])),
+    }
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "proto": PROTOCOL_VERSION,
+        "entry": entry,
+        "commit_receipt": {
+            "schema": "operator_log_commit_v1",
+            "request_id": command["request_id"],
+            "entry_id": entry_id,
+            "experiment_id": experiment_id,
+            "committed": True,
+        },
+    }
+
+
 # --- POST /api/v1/log -------------------------------------------------------
 
 
@@ -493,16 +592,16 @@ def test_post_log_forwards_log_entry_command(auth_client) -> None:
 
     async def _fake(cmd: dict) -> dict:
         captured.update(cmd)
-        return {"ok": True, "entry": {"id": 1, "message": cmd["message"]}}
+        return _published_log_result(cmd)
 
-    with (
-        patch("cryodaq.web.rest_api.secrets.token_hex", return_value="a" * 32) as token_hex,
-        patch("cryodaq.web.server._async_engine_command", side_effect=_fake),
-    ):
-        resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": "проверка насоса"})
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        resp = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers("a" * 32),
+            json={"message": "проверка насоса"},
+        )
 
     assert resp.status_code == 200
-    token_hex.assert_called_once_with(16)
     assert captured == {
         "cmd": "log_entry",
         "request_id": "a" * 32,
@@ -520,15 +619,12 @@ def test_post_log_forwards_exact_experiment_scope(auth_client) -> None:
 
     async def _fake(cmd: dict) -> dict:
         captured.update(cmd)
-        return {"ok": True, "entry": {"id": 1}}
+        return _published_log_result(cmd)
 
-    with (
-        patch("cryodaq.web.rest_api.secrets.token_hex", return_value="b" * 32),
-        patch("cryodaq.web.server._async_engine_command", side_effect=_fake),
-    ):
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
         response = auth_client.post(
             "/api/v1/log",
-            headers=_AUTH,
+            headers=_log_headers("b" * 32),
             json={"message": "scoped", "experiment_id": "exp-exact"},
         )
 
@@ -539,6 +635,56 @@ def test_post_log_forwards_exact_experiment_scope(auth_client) -> None:
     assert "current_experiment" not in captured
 
 
+def test_post_log_canonicalizes_before_sqlite_admission_and_exact_receipt_reconciliation(auth_client) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def _real_admission(cmd: dict) -> dict:
+        admission = SQLiteWriter.validate_operator_log_publication_admission(
+            request_id=cmd["request_id"],
+            message=cmd["message"],
+            author=cmd["author"],
+            source=cmd["source"],
+            experiment_id=cmd.get("experiment_id"),
+            tags=cmd.get("tags"),
+        )
+        captured.append(dict(cmd))
+        assert cmd["message"] == admission.message
+        assert cmd["experiment_id"] == admission.experiment_id
+        assert cmd["tags"] == list(admission.tags)
+        return _published_log_result(cmd)
+
+    raw = {
+        "message": "  observed locally  ",
+        "experiment_id": "  exp-exact  ",
+        "tags": ["  reviewed  ", "   "],
+    }
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_real_admission):
+        first = auth_client.post("/api/v1/log", headers=_log_headers("9" * 32), json=raw)
+        replay = auth_client.post("/api/v1/log", headers=_log_headers("9" * 32), json=raw)
+
+    assert first.status_code == replay.status_code == 200
+    assert captured == [
+        {
+            "cmd": "log_entry",
+            "request_id": "9" * 32,
+            "message": "observed locally",
+            "author": _REST_IDENTITY,
+            "source": "rest",
+            "experiment_id": "exp-exact",
+            "tags": ["reviewed"],
+        },
+        {
+            "cmd": "log_entry",
+            "request_id": "9" * 32,
+            "message": "observed locally",
+            "author": _REST_IDENTITY,
+            "source": "rest",
+            "experiment_id": "exp-exact",
+            "tags": ["reviewed"],
+        },
+    ]
+
+
 def test_post_log_author_is_server_set_not_spoofable(auth_client) -> None:
     """The author forwarded to the engine is the REST identity, never client
     input — and a client-supplied author key is rejected (422), not honored."""
@@ -546,13 +692,13 @@ def test_post_log_author_is_server_set_not_spoofable(auth_client) -> None:
 
     async def _fake(cmd: dict) -> dict:
         captured.update(cmd)
-        return {"ok": True, "entry": {"id": 1}}
+        return _published_log_result(cmd)
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
-        ok = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": "hi"})
+        ok = auth_client.post("/api/v1/log", headers=_log_headers("c" * 32), json={"message": "hi"})
         spoof = auth_client.post(
             "/api/v1/log",
-            headers=_AUTH,
+            headers=_log_headers("d" * 32),
             json={"message": "hi", "author": "victim"},
         )
 
@@ -561,17 +707,78 @@ def test_post_log_author_is_server_set_not_spoofable(auth_client) -> None:
     assert spoof.status_code == 422  # extra field forbidden — no impersonation
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing_publication",
+        "wrong_request",
+        "wrong_author",
+        "missing_proto",
+        "wrong_proto",
+        "bool_proto",
+        "extra_key",
+    ],
+)
+def test_post_log_rejects_incomplete_or_misbound_success_receipt(auth_client, corruption: str) -> None:
+    async def _fake(cmd: dict) -> dict:
+        result = _published_log_result(cmd)
+        if corruption == "missing_publication":
+            result.pop("publication_state")
+        elif corruption == "wrong_request":
+            result["commit_receipt"]["request_id"] = "f" * 32
+        elif corruption == "wrong_author":
+            result["entry"]["author"] = "forged"
+        elif corruption == "missing_proto":
+            result.pop("proto")
+        elif corruption == "wrong_proto":
+            result["proto"] = PROTOCOL_VERSION + 1
+        elif corruption == "bool_proto":
+            result["proto"] = True
+        else:
+            result["unexpected"] = True
+        return result
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers("e" * 32),
+            json={"message": "exact"},
+        )
+
+    assert response.status_code == 502
+
+
+def test_post_log_accepts_commit_from_real_zmq_reply_encoder(auth_client) -> None:
+    async def _fake(cmd: dict) -> dict:
+        handler_result = _published_log_result(cmd)
+        handler_result.pop("proto")
+        return json.loads(ZMQCommandServer(handler=None)._encode_reply(handler_result))
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers("f" * 32),
+            json={"message": "real encoded receipt"},
+        )
+
+    assert response.status_code == 200
+
+
 def test_post_log_extra_field_rejected(auth_client) -> None:
     """Unknown keys → 422 (strict request model)."""
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
-        resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": "x", "bogus": 1})
+        resp = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(),
+            json={"message": "x", "bogus": 1},
+        )
     assert resp.status_code == 422
 
 
 def test_post_log_empty_message_rejected(auth_client) -> None:
     """Empty message → 422 before any engine call."""
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
-        resp = auth_client.post("/api/v1/log", headers=_AUTH, json={"message": ""})
+        resp = auth_client.post("/api/v1/log", headers=_log_headers(), json={"message": ""})
     assert resp.status_code == 422
 
 
@@ -586,7 +793,7 @@ def test_post_log_empty_message_rejected(auth_client) -> None:
 def test_post_log_rejects_oversized_fields(auth_client, payload: dict) -> None:
     """Authenticated writes remain bounded below the global body cap."""
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
-        resp = auth_client.post("/api/v1/log", headers=_AUTH, json=payload)
+        resp = auth_client.post("/api/v1/log", headers=_log_headers(), json=payload)
     assert resp.status_code == 422
 
 
@@ -594,6 +801,7 @@ def test_post_log_rejects_chunked_transfer_before_body_parse(auth_client) -> Non
     """The facade does not accept an unbounded body without Content-Length."""
     headers = {
         **_AUTH,
+        "Idempotency-Key": "a" * 32,
         "Content-Type": "application/json",
         "Transfer-Encoding": "chunked",
     }
@@ -629,33 +837,157 @@ def test_post_log_no_token_configured_is_403(monkeypatch, tmp_path) -> None:
     with patch("cryodaq.web.server._zmq_to_ws_bridge"):
         app = create_app()
         with TestClient(app) as c:
-            resp = c.post("/api/v1/log", headers=_AUTH, json={"message": "x"})
+            resp = c.post("/api/v1/log", headers=_log_headers(), json={"message": "x"})
     assert resp.status_code == 403
 
 
 # --- POST /api/v1/alarms/{alarm_id}/ack ------------------------------------
 
 
+_ENGINE_A = "1" * 32
+_ACK_REQUEST_ID = "a" * 32
+_ACK_REASON = "operator verified the active alarm"
+
+
+def _ack_headers(request_id: str = _ACK_REQUEST_ID) -> dict[str, str]:
+    return {**_AUTH, "Idempotency-Key": request_id}
+
+
+def _ack_payload(
+    *,
+    engine_instance_id: object = _ENGINE_A,
+    activation_id: object = "activation-1",
+    reason: object = _ACK_REASON,
+) -> dict[str, object]:
+    return {
+        "engine_instance_id": engine_instance_id,
+        "activation_id": activation_id,
+        "reason": reason,
+    }
+
+
+def _alarm_ack_handler_result(command: dict, state: str) -> dict:
+    fingerprint = alarm_ack_request_fingerprint(command)
+    source_activation_id = "1"
+    if state == "aborted":
+        return {
+            "ok": False,
+            "committed": False,
+            "retry_safe": False,
+            "publication_state": "aborted",
+            "event_emitted": False,
+            "error_code": "alarm_ack_aborted",
+            "error": "alarm acknowledgement was terminally aborted before durable commit",
+            "alarm_name": command["alarm_name"],
+            "activation_id": command["activation_id"],
+            "engine_instance_id": command["engine_instance_id"],
+            "source_activation_id": source_activation_id,
+            "request_id": command["request_id"],
+            "request_fingerprint": fingerprint,
+            "terminal_code": "activation_changed_before_ack_commit",
+            "terminal_engine_instance_id": command["engine_instance_id"],
+        }
+    result = {
+        "ok": state == "published",
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": state,
+        "event_emitted": state == "published",
+        "alarm_name": command["alarm_name"],
+        "activation_id": command["activation_id"],
+        "engine_instance_id": command["engine_instance_id"],
+        "source_activation_id": source_activation_id,
+        "request_id": command["request_id"],
+        "commit_receipt": {
+            "schema": "alarm_ack_commit_v1",
+            "request_id": command["request_id"],
+            "request_fingerprint": fingerprint,
+            "alarm_name": command["alarm_name"],
+            "activation_id": command["activation_id"],
+            "engine_instance_id": command["engine_instance_id"],
+            "source_activation_id": source_activation_id,
+            "acknowledged_at": 1.0,
+            "committed": True,
+        },
+    }
+    if state == "pending":
+        result.update(
+            error_code="alarm_ack_publication_pending",
+            error="alarm acknowledgement is committed; publication settlement is pending",
+        )
+    return result
+
+
+def _alarm_ack_wire_result(command: dict, state: str) -> dict:
+    handler_result = _alarm_ack_handler_result(command, state)
+    assert "proto" not in handler_result
+    return json.loads(ZMQCommandServer(handler=None)._encode_reply(handler_result))
+
+
 def test_post_ack_forwards_alarm_v2_ack_command(auth_client) -> None:
-    """POST /alarms/{id}/ack forwards cmd=alarm_v2_ack for that alarm."""
+    """REST binds one exact command to caller-owned retry and engine identity."""
     captured: dict = {}
 
     async def _fake(cmd: dict) -> dict:
         captured.update(cmd)
-        return {"ok": True, "alarm_name": cmd["alarm_name"], "event_emitted": True}
+        return _alarm_ack_wire_result(cmd, "published")
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
         resp = auth_client.post(
             "/api/v1/alarms/T1_high/ack",
-            headers=_AUTH,
-            json={"engine_instance_id": "engine-a", "activation_id": "a1"},
+            headers=_ack_headers(),
+            json=_ack_payload(reason="  operator verified the active alarm  "),
         )
 
     assert resp.status_code == 200
-    assert captured["cmd"] == "alarm_v2_ack"
-    assert captured["alarm_name"] == "T1_high"
-    assert captured["engine_instance_id"] == "engine-a"
-    assert captured["activation_id"] == "a1"
+    assert captured == {
+        "cmd": "alarm_v2_ack",
+        "alarm_name": "T1_high",
+        "engine_instance_id": _ENGINE_A,
+        "activation_id": "activation-1",
+        "operator": _REST_IDENTITY,
+        "reason": _ACK_REASON,
+        "request_id": _ACK_REQUEST_ID,
+    }
+
+
+def test_post_ack_accepts_complete_handler_result_only_after_real_zmq_encoding(auth_client) -> None:
+    handler_results: list[dict] = []
+
+    async def _fake(cmd: dict) -> dict:
+        handler_result = _alarm_ack_handler_result(cmd, "published")
+        assert "proto" not in handler_result
+        handler_results.append(handler_result)
+        return json.loads(ZMQCommandServer(handler=None)._encode_reply(handler_result))
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_ack_headers("7" * 32),
+            json=_ack_payload(),
+        )
+
+    assert len(handler_results) == 1
+    assert response.status_code == 200
+    assert response.json()["proto"] == PROTOCOL_VERSION
+    assert response.json()["request_id"] == "7" * 32
+
+
+def test_post_ack_rejects_complete_but_unframed_handler_result(auth_client) -> None:
+    async def _fake(cmd: dict) -> dict:
+        handler_result = _alarm_ack_handler_result(cmd, "published")
+        assert "proto" not in handler_result
+        return handler_result
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_ack_headers("8" * 32),
+            json=_ack_payload(),
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "incomplete alarm acknowledgement receipt"}
 
 
 def test_post_ack_operator_is_server_set_not_spoofable(auth_client) -> None:
@@ -665,20 +997,19 @@ def test_post_ack_operator_is_server_set_not_spoofable(auth_client) -> None:
 
     async def _fake(cmd: dict) -> dict:
         captured.update(cmd)
-        return {"ok": True}
+        return _alarm_ack_wire_result(cmd, "published")
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
         ok = auth_client.post(
             "/api/v1/alarms/T1_high/ack",
-            headers=_AUTH,
-            json={"engine_instance_id": "engine-a", "activation_id": "a1"},
+            headers=_ack_headers("b" * 32),
+            json=_ack_payload(),
         )
         spoof = auth_client.post(
             "/api/v1/alarms/T1_high/ack",
-            headers=_AUTH,
+            headers=_ack_headers("c" * 32),
             json={
-                "engine_instance_id": "engine-a",
-                "activation_id": "a1",
+                **_ack_payload(),
                 "operator": "victim",
             },
         )
@@ -690,40 +1021,158 @@ def test_post_ack_operator_is_server_set_not_spoofable(auth_client) -> None:
 
 def test_post_ack_without_expected_activation_fails_closed(auth_client) -> None:
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
-        response = auth_client.post("/api/v1/alarms/T1_high/ack", headers=_AUTH)
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_ack_headers(),
+            json={"engine_instance_id": _ENGINE_A, "reason": _ACK_REASON},
+        )
 
     assert response.status_code == 422
 
 
-def test_post_ack_rejects_reason_over_engine_limit(auth_client) -> None:
+@pytest.mark.parametrize(
+    "engine_instance_id",
+    [
+        pytest.param("engine-a", id="noncanonical-text"),
+        pytest.param("A" * 32, id="uppercase"),
+        pytest.param("g" * 32, id="nonhex"),
+        pytest.param("a" * 31, id="short"),
+        pytest.param("a" * 33, id="long"),
+        pytest.param("", id="empty"),
+        pytest.param(None, id="null"),
+        pytest.param(True, id="bool"),
+    ],
+)
+def test_post_ack_rejects_noncanonical_engine_identity_without_forwarding(
+    auth_client,
+    engine_instance_id: object,
+) -> None:
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
         response = auth_client.post(
             "/api/v1/alarms/T1_high/ack",
-            headers=_AUTH,
-            json={
-                "engine_instance_id": "engine-a",
-                "activation_id": "a1",
-                "reason": "x" * 257,
-            },
+            headers=_ack_headers(),
+            json=_ack_payload(engine_instance_id=engine_instance_id),
         )
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="whitespace"),
+        pytest.param("line one\nline two", id="control"),
+        pytest.param("operator\u202eoverride", id="bidi-format"),
+        pytest.param("x" * 257, id="over-limit"),
+    ],
+)
+def test_post_ack_rejects_nonprintable_or_empty_reason_without_forwarding(
+    auth_client,
+    reason: str,
+) -> None:
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_ack_headers(),
+            json=_ack_payload(reason=reason),
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"Idempotency-Key": "a" * 31}, id="short"),
+        pytest.param({"Idempotency-Key": "a" * 33}, id="long"),
+        pytest.param({"Idempotency-Key": "A" * 32}, id="uppercase"),
+        pytest.param({"Idempotency-Key": "g" * 32}, id="nonhex"),
+    ],
+)
+def test_post_ack_rejects_noncanonical_idempotency_key_without_forwarding(
+    auth_client,
+    headers: dict[str, str],
+) -> None:
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers={**_AUTH, **headers},
+            json=_ack_payload(),
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_status"),
+    [("published", 200), ("pending", 503), ("aborted", 200)],
+)
+def test_post_ack_requires_complete_bound_terminal_or_pending_reply(
+    auth_client,
+    state: str,
+    expected_status: int,
+) -> None:
+    returned: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        returned.update(_alarm_ack_wire_result(cmd, state))
+        return returned
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_ack_headers("d" * 32),
+            json=_ack_payload(),
+        )
+
+    assert response.status_code == expected_status
+    if state == "pending":
+        assert response.json() == {
+            "detail": "alarm acknowledgement committed; retry the same Idempotency-Key to settle publication"
+        }
+    else:
+        assert response.json() == returned
+
+
+@pytest.mark.parametrize("state", ["published", "pending", "aborted"])
+@pytest.mark.parametrize("corruption", ["wrong_request", "missing_proto"])
+def test_post_ack_rejects_incomplete_or_misbound_settlement(
+    auth_client,
+    state: str,
+    corruption: str,
+) -> None:
+    async def _fake(cmd: dict) -> dict:
+        result = _alarm_ack_wire_result(cmd, state)
+        if corruption == "wrong_request":
+            result["request_id"] = "f" * 32
+        else:
+            result.pop("proto")
+        return result
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_ack_headers("e" * 32),
+            json=_ack_payload(),
+        )
+
+    assert response.status_code == 502
+
+
 def test_delayed_rest_ack_never_substitutes_latest_activation(auth_client) -> None:
-    active = {"activation_id": "a1", "acknowledged": False}
+    active = {"activation_id": "activation-1", "acknowledged": False}
 
     async def _fake(cmd: dict) -> dict:
         if cmd == {"cmd": "alarm_v2_status"}:
             return {
                 "ok": True,
-                "engine_instance_id": "engine-a",
+                "engine_instance_id": _ENGINE_A,
                 "snapshot_revision": 1,
                 "active": {"T1_high": dict(active)},
             }
         assert cmd["cmd"] == "alarm_v2_ack"
         if cmd["activation_id"] == active["activation_id"]:
             active["acknowledged"] = True
-        return {"ok": False, "error": "stale_or_unknown_activation"}
+        return _alarm_ack_wire_result(cmd, "aborted")
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
         snapshot_response = auth_client.get("/api/v1/alarms")
@@ -731,13 +1180,14 @@ def test_delayed_rest_ack_never_substitutes_latest_activation(auth_client) -> No
 
         # The first activation clears and the same named alarm fires again
         # before the operator submits the acknowledgement.
-        active = {"activation_id": "a2", "acknowledged": False}
+        active = {"activation_id": "activation-2", "acknowledged": False}
         response = auth_client.post(
             "/api/v1/alarms/T1_high/ack",
-            headers=_AUTH,
+            headers=_ack_headers("f" * 32),
             json={
                 "engine_instance_id": snapshot["engine_instance_id"],
                 "activation_id": snapshot["active"]["T1_high"]["activation_id"],
+                "reason": _ACK_REASON,
             },
         )
 
@@ -745,7 +1195,9 @@ def test_delayed_rest_ack_never_substitutes_latest_activation(auth_client) -> No
     assert snapshot["snapshot_revision"] == 1
     assert response.status_code == 200
     assert response.json()["ok"] is False
-    assert active["activation_id"] == "a2"
+    assert response.json()["publication_state"] == "aborted"
+    assert response.json()["error_code"] == "alarm_ack_aborted"
+    assert active["activation_id"] == "activation-2"
     assert active["acknowledged"] is False
 
 
@@ -854,14 +1306,15 @@ def test_invalid_json_wrong_token_is_401_not_422(monkeypatch, tmp_path) -> None:
 
 def test_unauthorized_log_request_never_generates_mutation_identity(auth_client) -> None:
     """Middleware rejects before body parsing and before producer-side mutation setup."""
-    with (
-        patch("cryodaq.web.rest_api.secrets.token_hex", side_effect=AssertionError),
-        patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError),
-    ):
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
         response = auth_client.post(
             "/api/v1/log",
             content="{",
-            headers={"Content-Type": "application/json", "Authorization": "Bearer wrong"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer wrong",
+                "Idempotency-Key": "a" * 32,
+            },
         )
 
     assert response.status_code == 401
@@ -874,7 +1327,7 @@ def test_valid_auth_then_invalid_json_is_422(auth_client) -> None:
         resp = auth_client.post(
             "/api/v1/log",
             content="{",
-            headers={**_AUTH, "Content-Type": "application/json"},
+            headers={**_log_headers(), "Content-Type": "application/json"},
         )
     assert resp.status_code == 422
 
@@ -908,7 +1361,7 @@ def test_post_log_rejects_reserved_tag(auth_client, reserved: str, canonical: st
     with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
         resp = auth_client.post(
             "/api/v1/log",
-            headers=_AUTH,
+            headers=_log_headers(),
             json={"message": "ok", "tags": [reserved]},
         )
     assert resp.status_code == 422
@@ -921,12 +1374,12 @@ def test_post_log_freeform_tags_pass_through(auth_client) -> None:
 
     async def _fake(cmd: dict) -> dict:
         captured.update(cmd)
-        return {"ok": True, "entry": {"id": 1}}
+        return _published_log_result(cmd)
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
         resp = auth_client.post(
             "/api/v1/log",
-            headers=_AUTH,
+            headers=_log_headers(),
             json={"message": "ok", "tags": ["насос", "проверка"]},
         )
     assert resp.status_code == 200

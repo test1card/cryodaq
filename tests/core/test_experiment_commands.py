@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ import pytest
 import yaml
 
 from cryodaq.core.experiment import ExperimentManager
-from cryodaq.core.operator_log import OperatorLogCommitResult
+from cryodaq.core.operator_log import OperatorLogCommitResult, OperatorLogEntry
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.contracts import (
@@ -25,11 +26,12 @@ from cryodaq.engine import (
     _drain_experiment_command_tasks,
     _handle_gui_command,
     _is_mutating_command,
+    _owned_experiment_task_done,
+    _owned_operator_log_done,
     _run_experiment_command,
     _run_keithley_command,
-    _run_operator_log_command,
 )
-from cryodaq.storage.sqlite_writer import SQLiteWriter
+from cryodaq.storage.sqlite_writer import OperatorLogPublicationOutboxRecord, SQLiteWriter
 
 _MUTATION_TOKEN = "test-mutation-token-1"
 
@@ -95,6 +97,61 @@ class _EventBus:
     async def publish(self, event) -> None:
         self.events.append(event)
 
+    async def publish_required(
+        self,
+        event,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> dict[str, object]:
+        self.events.append(event)
+        return {
+            "accepted": True,
+            "request_id": request_id,
+            "request_fingerprint": request_fingerprint,
+        }
+
+    @staticmethod
+    def validates_required_publication(
+        receipt: object,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> bool:
+        return receipt == {
+            "accepted": True,
+            "request_id": request_id,
+            "request_fingerprint": request_fingerprint,
+        }
+
+
+class _RecoveringEventBus(_EventBus):
+    """Fail one required publish, then expose a controlled recovery send."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+        self.retry_entered = asyncio.Event()
+        self.release_retry = asyncio.Event()
+
+    async def publish_required(
+        self,
+        event,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> dict[str, object]:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("injected transient publication failure")
+        self.retry_entered.set()
+        await self.release_retry.wait()
+        return await super().publish_required(
+            event,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+
 
 class _Calibration:
     def __init__(self) -> None:
@@ -111,6 +168,7 @@ def _context(
     event_bus: _EventBus | None = None,
     calibration: _Calibration | None = None,
     writer=None,
+    broker=None,
 ) -> EngineCommandContext:
     return EngineCommandContext(
         safety_manager=None,
@@ -121,7 +179,7 @@ def _context(
         leak_cfg={},
         alarm_v2_state_mgr=None,
         alarm_ring=None,
-        broker=None,
+        broker=broker,
         experiment_manager=manager,
         calibration_acquisition=calibration or _Calibration(),
         event_bus=event_bus or _EventBus(),
@@ -618,6 +676,92 @@ async def test_shutdown_drain_holds_resources_until_owner_settles(
     assert "shutdown remains blocked" in caplog.text
 
 
+async def test_shutdown_drain_defers_repeated_caller_cancellation_until_mutation_settles() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    terminal = asyncio.Event()
+
+    async def retained_mutation() -> None:
+        entered.set()
+        await release.wait()
+        terminal.set()
+
+    mutation = asyncio.create_task(retained_mutation())
+    context = SimpleNamespace(
+        experiment_commands_accepting=True,
+        experiment_command_tasks={mutation},
+        experiment_read_tasks=set(),
+        operator_log_tasks={},
+        alarm_ack_tasks={},
+        experiment_status_task=None,
+    )
+    drain = asyncio.create_task(
+        _drain_experiment_command_tasks(
+            context,
+            logging.getLogger("test.experiment-drain.cancellation"),
+            timeout=1.0,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+
+    drain.cancel()
+    await asyncio.sleep(0)
+    drain.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not drain.done()
+        assert not terminal.is_set()
+        assert context.experiment_commands_accepting is False
+    finally:
+        release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(drain, timeout=0.5)
+    await asyncio.wait_for(mutation, timeout=0.5)
+    assert terminal.is_set()
+
+
+async def test_shutdown_drain_holds_for_exact_alarm_ack_reconciliation_owner() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    terminal = asyncio.Event()
+
+    async def retained_reconciliation() -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        terminal.set()
+        return {"ok": True, "publication_state": "published"}
+
+    owner = asyncio.create_task(retained_reconciliation())
+    context = SimpleNamespace(
+        experiment_commands_accepting=True,
+        experiment_command_tasks=set(),
+        experiment_read_tasks=set(),
+        operator_log_tasks={},
+        alarm_ack_tasks={},
+        alarm_ack_reconciliation_tasks={"a" * 32: ("b" * 64, owner)},
+        experiment_status_task=None,
+    )
+    drain = asyncio.create_task(
+        _drain_experiment_command_tasks(
+            context,
+            logging.getLogger("test.alarm-ack-reconciliation-drain"),
+            timeout=0.01,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    await asyncio.sleep(0.05)
+
+    assert context.experiment_commands_accepting is False
+    assert not drain.done()
+    assert not terminal.is_set()
+
+    release.set()
+    assert await asyncio.wait_for(drain, timeout=0.5) is False
+    assert terminal.is_set()
+    assert owner.done()
+
+
 async def test_post_commit_failure_is_explicit_and_does_not_skip_later_steps(
     manager: ExperimentManager,
     monkeypatch: pytest.MonkeyPatch,
@@ -738,7 +882,7 @@ async def test_mutation_protocol_gate_refuses_unknown_clients_before_dispatch(
         reply = await _handle_gui_command(command, context=context)
         assert reply["ok"] is False
         assert reply["error_code"] == "mutation_protocol_incompatible"
-        assert reply["delivery_state"] == "not_dispatched"
+        assert reply["delivery_state"] == "dispatched"
         assert reply["commit_state"] == "not_committed"
         assert reply["retry_safe"] is True
     assert manager.active_experiment is None
@@ -839,7 +983,7 @@ async def test_emergency_off_rejects_non_exact_wire_shape_before_safety_manager(
 
     assert reply["ok"] is False
     assert reply["error_code"] == "safe_direction_command_invalid"
-    assert reply["delivery_state"] == "not_dispatched"
+    assert reply["delivery_state"] == "dispatched"
     assert reply["commit_state"] == "not_committed"
     assert calls == []
 
@@ -856,9 +1000,105 @@ async def test_unknown_engine_action_defaults_to_compatibility_gated_mutation(
     )
 
     assert refused["error_code"] == "mutation_protocol_incompatible"
-    assert refused["delivery_state"] == "not_dispatched"
+    assert refused["delivery_state"] == "dispatched"
     assert refused["commit_state"] == "not_committed"
-    assert dispatched == {"ok": False, "error": "unknown command: future_mutation"}
+    assert dispatched == {
+        "ok": False,
+        "error_code": "command_unknown",
+        "error": "Command is not supported.",
+        "delivery_state": "dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": False,
+    }
+
+
+async def test_engine_command_failure_does_not_expose_exception_secret(
+    manager: ExperimentManager,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "TOP-SECRET\r\nCONTROL"
+    context = _context(manager)
+
+    def fail_status() -> dict[str, object]:
+        raise RuntimeError(secret)
+
+    context.safety_manager = SimpleNamespace(get_status=fail_status)
+    with caplog.at_level(logging.ERROR):
+        reply = await _handle_gui_command({"cmd": "safety_status"}, context=context)
+
+    assert reply == {"ok": False, "error": "command execution failed"}
+    assert secret not in str(reply)
+    assert secret not in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "\r" not in caplog.text and "\nCONTROL" not in caplog.text
+
+
+async def test_command_specific_failures_redact_exception_secret(
+    manager: ExperimentManager,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "TOP-SECRET\r\nFORGED"
+    context = _context(manager)
+    context.safety_manager = SimpleNamespace()
+
+    class MultiLineDriver:
+        async def reconfigure_channels(self, _channels: list[int]) -> list[int]:
+            raise RuntimeError(secret)
+
+        def burst_status(self) -> dict[str, object]:
+            raise RuntimeError(secret)
+
+    context.drivers_by_name = {"multiline": MultiLineDriver()}
+    with caplog.at_level(logging.ERROR):
+        keithley = await _handle_gui_command(
+            _mutation({"cmd": "keithley_start", "p_target": secret}),
+            context=context,
+        )
+        multiline = await _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "multiline.set_channels",
+                    "name": "multiline",
+                    "channels": [1],
+                }
+            ),
+            context=context,
+        )
+        burst = await _handle_gui_command(
+            {"cmd": "multiline.burst_status", "name": "multiline"},
+            context=context,
+        )
+
+    for reply in (keithley, multiline, burst):
+        assert reply["ok"] is False
+        assert type(reply.get("error_code")) is str
+        assert secret not in str(reply)
+        assert "\r" not in str(reply) and "\nFORGED" not in str(reply)
+    assert secret not in caplog.text
+    assert "\r" not in caplog.text and "\nFORGED" not in caplog.text
+
+
+async def test_detached_experiment_owner_log_redacts_exception_secret(
+    manager: ExperimentManager,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "TOP-SECRET\r\nFORGED"
+    context = _context(manager)
+
+    async def fail() -> dict[str, object]:
+        raise RuntimeError(secret)
+
+    task = asyncio.create_task(fail())
+    context.experiment_command_tasks.add(task)
+    with pytest.raises(RuntimeError, match="TOP-SECRET"):
+        await task
+    with caplog.at_level(logging.ERROR):
+        _owned_experiment_task_done(context, "experiment_update", task)
+
+    assert task not in context.experiment_command_tasks
+    assert secret not in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "\r" not in caplog.text and "\nFORGED" not in caplog.text
 
 
 async def test_mutation_protocol_gate_fails_closed_when_server_token_missing(
@@ -883,7 +1123,7 @@ async def test_mutation_protocol_gate_fails_closed_when_server_token_missing(
         context=context,
     )
     assert refused["error_code"] == "mutation_protocol_incompatible"
-    assert refused["delivery_state"] == "not_dispatched"
+    assert refused["delivery_state"] == "dispatched"
     assert refused["commit_state"] == "not_committed"
     assert refused["retry_safe"] is True
     assert manager.get_app_mode().value == "experiment"
@@ -955,37 +1195,86 @@ async def test_operator_log_timeout_retry_commits_one_idempotent_entry(
     release = asyncio.Event()
 
     class Entry:
-        id = 71
+        def __init__(self) -> None:
+            self.id = 71
+            self.timestamp = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+            self.experiment_id = experiment_id
+            self.author = "operator"
+            self.source = "gui"
+            self.message = "stable"
+            self.tags: tuple[str, ...] = ()
 
         def to_payload(self):
             return {
                 "id": self.id,
-                "experiment_id": experiment_id,
-                "message": "stable",
+                "timestamp": self.timestamp.isoformat(),
+                "experiment_id": self.experiment_id,
+                "author": self.author,
+                "source": self.source,
+                "message": self.message,
+                "tags": list(self.tags),
             }
 
     class Writer:
         def __init__(self) -> None:
             self.calls = 0
             self.publication_calls = 0
+            self.prepared: list[dict] = []
+            self.settled: list[dict] = []
+            self.publication: OperatorLogPublicationOutboxRecord | None = None
 
-        async def append_operator_log_idempotent(self, **kwargs):
+        async def find_operator_log_request(self, **_kwargs):
+            return None
+
+        async def append_operator_log_with_publication_intent(self, **kwargs):
             self.calls += 1
             assert kwargs["experiment_id"] == experiment_id
             assert len(kwargs["request_fingerprint"]) == 64
             entered.set()
             await release.wait()
-            return OperatorLogCommitResult(entry=Entry(), replayed=False)
-
-        async def prepare_operator_log_publication_outbox(self, **_kwargs):
             self.publication_calls += 1
-            return SimpleNamespace(state="intent")
+            self.prepared.append(kwargs)
+            entry = OperatorLogEntry(
+                id=71,
+                timestamp=datetime(2026, 7, 23, 12, 0, tzinfo=UTC),
+                experiment_id=experiment_id,
+                author="operator",
+                source="gui",
+                message="stable",
+            )
+            event = {"schema": "operator_log_commit_v1", "entry": entry.to_payload()}
+            receipt = {
+                "schema": "operator_log_commit_v1",
+                "request_id": kwargs["request_id"],
+                "entry_id": entry.id,
+                "experiment_id": experiment_id,
+                "committed": True,
+            }
+            self.publication = OperatorLogPublicationOutboxRecord(
+                request_id=kwargs["request_id"],
+                request_fingerprint=kwargs["request_fingerprint"],
+                state="intent",
+                event=event,
+                receipt=receipt,
+            )
+            return OperatorLogCommitResult(entry=entry, replayed=False), self.publication
 
-        async def publish_operator_log_publication_outbox(self, **_kwargs):
-            return SimpleNamespace(state="published")
+        async def publish_operator_log_publication_outbox(self, **kwargs):
+            self.settled.append(kwargs)
+            assert self.publication is not None
+            assert kwargs["request_id"] == self.publication.request_id
+            assert kwargs["request_fingerprint"] == self.publication.request_fingerprint
+            return OperatorLogPublicationOutboxRecord(
+                request_id=kwargs["request_id"],
+                request_fingerprint=kwargs["request_fingerprint"],
+                state="published",
+                event=self.publication.event,
+                receipt=self.publication.receipt,
+            )
 
     writer = Writer()
-    context = _context(manager, writer=writer)
+    broker = _EventBus()
+    context = _context(manager, writer=writer, broker=broker)
     command = _mutation(
         {
             "cmd": "log_entry",
@@ -1018,10 +1307,355 @@ async def test_operator_log_timeout_retry_commits_one_idempotent_entry(
     repeated = await _handle_gui_command(command, context=context)
     assert repeated == retry
     assert writer.calls == 1
+    assert writer.publication_calls == 1
+    assert len(writer.settled) == 1
+    assert len(broker.events) == 1
+    published = broker.events[0]
+    assert published.channel == "analytics/operator_log_entry"
+    assert published.metadata["request_id"] == "a" * 32
+    assert published.metadata["publication_schema"] == "operator_log_commit_v1"
+    assert published.metadata["author"] == "operator"
+    assert published.metadata["source"] == "gui"
 
     conflict = await _handle_gui_command({**command, "message": "different"}, context=context)
     assert conflict["error_code"] == "idempotency_key_conflict"
     assert writer.calls == 1
+
+
+async def test_committed_operator_log_reconciles_without_client_resubmission(
+    tmp_path: Path,
+    manager: ExperimentManager,
+) -> None:
+    writer = SQLiteWriter(tmp_path / "operator-log-reconcile")
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    experiment_id = manager.create_experiment("autonomous reconciliation", "operator").experiment_id
+    broker = _RecoveringEventBus()
+    context = _context(manager, writer=writer, broker=broker)
+    request_id = "6" * 32
+    command = _mutation(
+        {
+            "cmd": "log_entry",
+            "request_id": request_id,
+            "experiment_id": experiment_id,
+            "message": "publish after transient failure",
+            "author": "operator",
+            "source": "gui",
+        }
+    )
+    try:
+        first = await _handle_gui_command(command, context=context)
+        assert first["ok"] is False
+        assert first["committed"] is True
+        assert first["publication_state"] == "pending"
+        assert first["error_code"] == "committed_reconciliation_failed"
+
+        await asyncio.wait_for(broker.retry_entered.wait(), timeout=1.0)
+        fingerprint, owner = context.operator_log_reconciliation_tasks[request_id]
+        assert len(fingerprint) == 64
+        assert not owner.done()
+        assert broker.attempts == 2
+        assert broker.events == []
+
+        broker.release_retry.set()
+        result = await asyncio.wait_for(asyncio.shield(owner), timeout=1.0)
+        await asyncio.sleep(0)
+
+        assert result["ok"] is True
+        assert result["committed"] is True
+        assert result["publication_state"] == "published"
+        assert broker.attempts == 2
+        assert len(broker.events) == 1
+        assert broker.events[0].metadata["request_id"] == request_id
+        assert request_id not in context.operator_log_reconciliation_tasks
+        assert context.operator_log_receipts[request_id] == (fingerprint, result)
+        assert await writer.pending_operator_log_publication_outbox() == ()
+    finally:
+        broker.release_retry.set()
+        context.experiment_commands_accepting = False
+        owners = [task for _fingerprint, task in context.operator_log_reconciliation_tasks.values()]
+        if owners:
+            await asyncio.gather(*owners, return_exceptions=True)
+        await writer.stop()
+
+
+async def test_operator_log_reconciliation_survives_waiter_cancel_and_shutdown_drain(
+    tmp_path: Path,
+    manager: ExperimentManager,
+) -> None:
+    writer = SQLiteWriter(tmp_path / "operator-log-drain")
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    experiment_id = manager.create_experiment("reconciliation drain", "operator").experiment_id
+    broker = _RecoveringEventBus()
+    context = _context(manager, writer=writer, broker=broker)
+    request_id = "7" * 32
+    command = _mutation(
+        {
+            "cmd": "log_entry",
+            "request_id": request_id,
+            "experiment_id": experiment_id,
+            "message": "retain through shutdown",
+            "author": "operator",
+            "source": "gui",
+        }
+    )
+    try:
+        first = await _handle_gui_command(command, context=context)
+        assert first["committed"] is True
+        assert first["publication_state"] == "pending"
+        await asyncio.wait_for(broker.retry_entered.wait(), timeout=1.0)
+        _fingerprint, owner = context.operator_log_reconciliation_tasks[request_id]
+
+        waiter = asyncio.create_task(_handle_gui_command(command, context=context))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not owner.done()
+
+        drain = asyncio.create_task(
+            _drain_experiment_command_tasks(
+                context,
+                logging.getLogger("test.operator-log-reconciliation"),
+                timeout=1.0,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not drain.done()
+        assert not owner.done()
+
+        broker.release_retry.set()
+        assert await asyncio.wait_for(drain, timeout=1.0) is True
+        result = await asyncio.wait_for(asyncio.shield(owner), timeout=1.0)
+        await asyncio.sleep(0)
+        assert result["ok"] is True
+        assert result["publication_state"] == "published"
+        assert request_id not in context.operator_log_reconciliation_tasks
+        assert len(broker.events) == 1
+    finally:
+        broker.release_retry.set()
+        context.experiment_commands_accepting = False
+        owners = [task for _fingerprint, task in context.operator_log_reconciliation_tasks.values()]
+        if owners:
+            await asyncio.gather(*owners, return_exceptions=True)
+        await writer.stop()
+
+
+async def test_operator_log_done_cache_requires_both_ok_and_committed(
+    manager: ExperimentManager,
+) -> None:
+    context = _context(manager)
+    request_id = "9" * 32
+    fingerprint = "8" * 64
+
+    async def completed(result: dict[str, object]) -> dict[str, object]:
+        return result
+
+    for result in (
+        {"ok": False, "committed": True, "error_code": "committed_reconciliation_failed"},
+        {"ok": True, "committed": False},
+        {"committed": True},
+        {"ok": True, "committed": True},
+        {"ok": True, "committed": True, "commit_receipt": {"request_id": request_id}},
+        {
+            "ok": True,
+            "committed": True,
+            "entry": {
+                "id": 71,
+                "timestamp": "2026-07-23T12:00:00+00:00",
+                "experiment_id": None,
+                "author": "operator",
+                "source": "gui",
+                "message": "stable",
+                "tags": [],
+            },
+            "commit_receipt": {
+                "schema": "operator_log_commit_v1",
+                "request_id": "7" * 32,
+                "entry_id": 71,
+                "experiment_id": None,
+                "committed": True,
+            },
+        },
+    ):
+        task = asyncio.create_task(completed(result))
+        await task
+        context.operator_log_tasks[request_id] = (fingerprint, task)
+        _owned_operator_log_done(context, request_id, fingerprint, task)
+        assert request_id not in context.operator_log_receipts
+
+    success = {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "entry": {
+            "id": 71,
+            "timestamp": "2026-07-23T12:00:00+00:00",
+            "experiment_id": None,
+            "author": "operator",
+            "source": "gui",
+            "message": "stable",
+            "tags": [],
+        },
+        "commit_receipt": {
+            "schema": "operator_log_commit_v1",
+            "request_id": request_id,
+            "entry_id": 71,
+            "experiment_id": None,
+            "committed": True,
+        },
+    }
+    task = asyncio.create_task(completed(success))
+    await task
+    context.operator_log_tasks[request_id] = (fingerprint, task)
+    _owned_operator_log_done(context, request_id, fingerprint, task)
+
+    assert context.operator_log_receipts[request_id] == (fingerprint, success)
+    success["entry"]["message"] = "caller mutation"
+    success["commit_receipt"]["entry_id"] = 999
+    cached = context.operator_log_receipts[request_id][1]
+    assert cached["entry"]["message"] == "stable"
+    assert cached["commit_receipt"]["entry_id"] == 71
+
+
+async def test_operator_log_publication_admission_precedes_authoritative_append(
+    manager: ExperimentManager,
+) -> None:
+    experiment_id = manager.create_experiment("admission", "operator").experiment_id
+
+    class Writer:
+        def __init__(self) -> None:
+            self.append_calls = 0
+
+        def validate_operator_log_publication_admission(self, **kwargs):
+            from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+            return SQLiteWriter.validate_operator_log_publication_admission(**kwargs)
+
+        async def append_operator_log_idempotent(self, **_kwargs):
+            self.append_calls += 1
+            raise AssertionError("invalid producer payload reached durable append")
+
+    writer = Writer()
+    context = _context(manager, writer=writer)
+    reply = await _handle_gui_command(
+        _mutation(
+            {
+                "cmd": "log_entry",
+                "request_id": "7" * 32,
+                "experiment_id": experiment_id,
+                "message": "must retain author identity",
+                "author": "",
+                "source": "gui",
+            }
+        ),
+        context=context,
+    )
+
+    assert reply["ok"] is False
+    assert reply["error_code"] == "operator_log_admission_invalid"
+    assert reply["committed"] is False
+    assert writer.append_calls == 0
+
+
+async def test_operator_log_requires_explicit_source_provenance(
+    manager: ExperimentManager,
+) -> None:
+    experiment_id = manager.create_experiment("source", "operator").experiment_id
+
+    class Writer:
+        def __init__(self) -> None:
+            self.append_calls = 0
+
+        async def append_operator_log_idempotent(self, **_kwargs):
+            self.append_calls += 1
+            raise AssertionError("missing source reached durable append")
+
+    writer = Writer()
+    context = _context(manager, writer=writer)
+    reply = await _handle_gui_command(
+        _mutation(
+            {
+                "cmd": "log_entry",
+                "request_id": "6" * 32,
+                "experiment_id": experiment_id,
+                "message": "source must be explicit",
+                "author": "operator",
+            }
+        ),
+        context=context,
+    )
+
+    assert reply["ok"] is False
+    assert reply["error_code"] == "operator_log_admission_invalid"
+    assert reply["committed"] is False
+    assert writer.append_calls == 0
+
+
+@pytest.mark.parametrize("recovery_fails", [False, True])
+async def test_command_ingress_starts_only_after_outbox_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_fails: bool,
+) -> None:
+    import cryodaq.engine as engine_module
+
+    events: list[str] = []
+
+    class Writer:
+        async def initialize_operator_log_idempotency(self) -> None:
+            events.append("operator-log-initialize")
+
+    writer = Writer()
+    broker = object()
+    engine_instance_id = "a" * 32
+
+    async def reconcile(exact_writer, exact_broker) -> None:
+        assert exact_writer is writer
+        assert exact_broker is broker
+        events.append("recover-enter")
+        if recovery_fails:
+            raise RuntimeError("recovery unavailable")
+        events.append("recover-complete")
+
+    async def settle_ack(exact_writer, exact_broker, exact_engine_instance_id):
+        assert exact_writer is writer
+        assert exact_broker is broker
+        assert exact_engine_instance_id == engine_instance_id
+        events.append("ack-settle")
+        return ()
+
+    class CommandServer:
+        async def start(self) -> None:
+            events.append("command-start")
+
+    monkeypatch.setattr(engine_module, "_reconcile_operator_log_publication_outbox", reconcile)
+    monkeypatch.setattr(engine_module, "_settle_alarm_ack_outbox_startup", settle_ack)
+    authority = engine_module._CommandIngressRecoveryAuthority(
+        writer=writer,
+        broker=broker,
+        engine_instance_id=engine_instance_id,
+    )
+
+    if recovery_fails:
+        with pytest.raises(RuntimeError, match="recovery unavailable"):
+            await authority.settle()
+        with pytest.raises(RuntimeError, match="recovery proof is unavailable"):
+            await authority.start(CommandServer())
+        assert events == ["operator-log-initialize", "recover-enter"]
+    else:
+        proof = await authority.settle()
+        assert proof.engine_instance_id == engine_instance_id
+        await authority.start(CommandServer())
+        assert events == [
+            "operator-log-initialize",
+            "recover-enter",
+            "recover-complete",
+            "ack-settle",
+            "command-start",
+        ]
 
 
 async def test_operator_log_stale_experiment_scope_is_rejected_before_write(
@@ -1035,7 +1669,10 @@ async def test_operator_log_stale_experiment_scope_is_rejected_before_write(
         def __init__(self) -> None:
             self.calls = 0
 
-        async def append_operator_log_idempotent(self, **_kwargs):
+        async def find_operator_log_request(self, **_kwargs):
+            return None
+
+        async def append_operator_log_with_publication_intent(self, **_kwargs):
             self.calls += 1
             raise AssertionError("stale command reached persistence")
 
@@ -1048,6 +1685,8 @@ async def test_operator_log_stale_experiment_scope_is_rejected_before_write(
                 "request_id": "b" * 32,
                 "experiment_id": first.experiment_id,
                 "message": "late note",
+                "author": "operator",
+                "source": "gui",
             }
         ),
         context=context,
@@ -1083,6 +1722,7 @@ async def test_operator_log_submission_is_frozen_before_shutdown_drain(
 
     assert reply == {
         "ok": False,
+        "committed": False,
         "error_code": "engine_shutting_down",
         "error": "operator log submissions are frozen for shutdown",
         "retry_safe": True,
@@ -1254,7 +1894,8 @@ async def test_operator_log_command_uses_durable_writer_identity(tmp_path: Path,
     await writer.start_immediate()
     await writer.initialize_operator_log_idempotency()
     experiment_id = manager.create_experiment("durable log", "operator").experiment_id
-    context = _context(manager, writer=writer)
+    broker = _EventBus()
+    context = _context(manager, writer=writer, broker=broker)
     command = _mutation(
         {
             "cmd": "log_entry",
@@ -1268,6 +1909,10 @@ async def test_operator_log_command_uses_durable_writer_identity(tmp_path: Path,
     try:
         first = await _handle_gui_command(command, context=context)
         replay = await _handle_gui_command(command, context=context)
+        context.operator_log_receipts.clear()
+        manager.finalize_experiment(experiment_id)
+        replacement = manager.create_experiment("replacement", "operator")
+        restart_replay = await _handle_gui_command(command, context=context)
         conflict = await _handle_gui_command({**command, "message": "different"}, context=context)
         rows = await writer.get_operator_log(experiment_id=experiment_id)
     finally:
@@ -1275,8 +1920,13 @@ async def test_operator_log_command_uses_durable_writer_identity(tmp_path: Path,
 
     assert first["ok"] is True
     assert replay == first
+    assert restart_replay == first
     assert conflict["error_code"] == "idempotency_key_conflict"
+    assert manager.active_experiment_id == replacement.experiment_id
     assert [row.message for row in rows] == ["one durable note"]
+    assert len(broker.events) == 1
+    assert broker.events[0].metadata["request_id"] == "d" * 32
+    assert broker.events[0].metadata["publication_schema"] == "operator_log_commit_v1"
 
 
 async def test_async_quick_log_cas_blocks_replacement_during_durable_await(
@@ -1287,20 +1937,41 @@ async def test_async_quick_log_cas_blocks_replacement_during_durable_await(
     release_durable = asyncio.Event()
 
     class BlockingWriter:
-        async def append_operator_log(self, **kwargs):
+        async def find_operator_log_request(self, **_kwargs):
+            return None
+
+        async def append_operator_log_with_publication_intent(self, **kwargs):
             assert kwargs["experiment_id"] == experiment_id
             durable_entered.set()
             await release_durable.wait()
-            return SimpleNamespace(
-                to_payload=lambda: {"experiment_id": experiment_id},
+            return (
+                OperatorLogCommitResult(
+                    entry=OperatorLogEntry(
+                        id=71,
+                        timestamp=datetime(2026, 7, 23, 12, 0, tzinfo=UTC),
+                        experiment_id=experiment_id,
+                        author="operator",
+                        source="gui",
+                        message="bound to A",
+                    ),
+                    replayed=False,
+                ),
+                SimpleNamespace(state="published"),
             )
 
     owner = asyncio.create_task(
-        _run_operator_log_command(
-            "log_entry",
-            {"message": "bound to A", "experiment_id": experiment_id},
-            BlockingWriter(),
-            manager,
+        _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "log_entry",
+                    "request_id": "e" * 32,
+                    "message": "bound to A",
+                    "experiment_id": experiment_id,
+                    "author": "operator",
+                    "source": "gui",
+                }
+            ),
+            context=_context(manager, writer=BlockingWriter()),
         )
     )
     await asyncio.wait_for(durable_entered.wait(), 1.0)
@@ -1314,6 +1985,9 @@ async def test_async_quick_log_cas_blocks_replacement_during_durable_await(
         await asyncio.gather(owner, return_exceptions=True)
 
     assert owner.result()["entry"]["experiment_id"] == experiment_id
+    manager.finalize_experiment(experiment_id)
+    replacement = manager.start_experiment("CAS replacement", "operator")
+    assert manager.active_experiment_id == replacement
 
 
 async def test_cancelled_quick_log_retains_cas_until_executor_settlement(
@@ -1324,34 +1998,48 @@ async def test_cancelled_quick_log_retains_cas_until_executor_settlement(
     experiment_id = manager.start_experiment("Cancelled CAS run", "operator")
     writer = SQLiteWriter(tmp_path / "writer")
     await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
     durable_entered = threading.Event()
     release_durable = threading.Event()
+    original_append = writer._append_operator_log_with_publication_intent_sync
 
     def blocked_write(**kwargs):
         assert kwargs["experiment_id"] == experiment_id
         durable_entered.set()
         assert release_durable.wait(2.0)
-        return SimpleNamespace(to_payload=lambda: {"experiment_id": experiment_id})
+        return original_append(**kwargs)
 
-    monkeypatch.setattr(writer, "_write_operator_log_entry", blocked_write)
+    monkeypatch.setattr(writer, "_append_operator_log_with_publication_intent_sync", blocked_write)
+    context = _context(manager, writer=writer, broker=_EventBus())
+    request_id = "f" * 32
     owner = asyncio.create_task(
-        _run_operator_log_command(
-            "log_entry",
-            {"message": "cancelled but admitted", "experiment_id": experiment_id},
-            writer,
-            manager,
+        _handle_gui_command(
+            _mutation(
+                {
+                    "cmd": "log_entry",
+                    "request_id": request_id,
+                    "message": "cancelled but admitted",
+                    "experiment_id": experiment_id,
+                    "author": "operator",
+                    "source": "gui",
+                }
+            ),
+            context=context,
         )
     )
     assert await asyncio.to_thread(durable_entered.wait, 1.0)
+    retained = context.operator_log_tasks[request_id][1]
     owner.cancel()
-    await asyncio.sleep(0)
-    assert not owner.done()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    assert not retained.done()
     with pytest.raises(RuntimeError, match="mutation.*progress|durable.*mutation"):
         manager.finalize_experiment(experiment_id)
 
     release_durable.set()
-    with pytest.raises(asyncio.CancelledError):
-        await owner
+    result = await retained
+    assert result["ok"] is True
+    assert result["publication_state"] == "published"
     assert manager.active_experiment_id == experiment_id
     await writer.stop()
 
@@ -1495,20 +2183,28 @@ async def test_delayed_quick_log_cannot_attach_to_replacement_experiment(
     before = metadata_b.read_bytes()
 
     class RejectUnexpectedWriter:
-        async def append_operator_log(self, **_kwargs):
+        async def find_operator_log_request(self, **_kwargs):
+            return None
+
+        async def append_operator_log_with_publication_intent(self, **_kwargs):
             raise AssertionError("stale quick-log command reached durable writer")
 
-    with pytest.raises(RuntimeError, match="identity mismatch"):
-        await _run_operator_log_command(
-            "log_entry",
+    reply = await _handle_gui_command(
+        _mutation(
             {
+                "cmd": "log_entry",
+                "request_id": "1" * 32,
                 "message": "late log for A",
                 "experiment_id": experiment_a,
-            },
-            RejectUnexpectedWriter(),
-            manager,
-        )
+                "author": "operator",
+                "source": "gui",
+            }
+        ),
+        context=_context(manager, writer=RejectUnexpectedWriter()),
+    )
 
+    assert reply["ok"] is False
+    assert reply["error_code"] == "stale_experiment_command"
     assert manager.active_experiment_id == experiment_b
     assert metadata_b.read_bytes() == before
 

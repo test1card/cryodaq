@@ -103,7 +103,7 @@ jobs:
 
       - name: Lint
         if: matrix.suite == 'remaining'
-        run: ruff check src/ tests/
+        run: ruff check --no-cache src/ tests/
 
       - name: Check formatting of changed Python files
         if: matrix.suite == 'remaining'
@@ -123,7 +123,7 @@ jobs:
           if [[ -s "$changed_file" ]]; then
             # Bounded batches avoid the Windows CreateProcess command-line
             # limit while preserving arbitrary Git-valid path names.
-            xargs -0 -n 100 python -m ruff format --check -- <"$changed_file"
+            xargs -0 -n 100 python -m ruff format --check --no-cache -- <"$changed_file"
           else
             echo "No changed Python files to format-check."
           fi
@@ -135,49 +135,6 @@ jobs:
         # --no-build-isolation. Any
         # top-level dep missing from the lock is absent from the bundle.
         run: python scripts/check_lock_drift.py
-
-      - name: Run app-palette tests (isolated)
-        if: ${{ false }}
-        # test_app_palette mutates the *global* QApplication stylesheet. Run in
-        # its own process so there are no leaked widgets from earlier tests to
-        # re-polish — re-polishing a large accumulated widget tree under the
-        # Windows offscreen platform deterministically access-violates in
-        # teardown. In isolation these tests pass cleanly. Harmless on Linux.
-        run: pytest tests/gui/test_app_palette.py --tb=short -v --timeout=120 --timeout-method=thread
-
-      - name: Run operator ownership tests (isolated)
-        if: ${{ false }}
-        # These tests intentionally delete owned Qt children and wait for
-        # queued button activation to prove fail-closed behavior. In the
-        # monolithic GUI process, either operation also drains deferred
-        # QGraphicsScene teardown left by unrelated pyqtgraph tests; PySide can
-        # then crash natively before the ownership assertion runs. A fresh
-        # process retains every assertion while removing that cross-file Qt
-        # lifetime contamination.
-        run: pytest tests/gui/shell/operator_components/test_freshness_and_card.py tests/gui/shell/views/test_operator_display.py --tb=short -v --timeout=120 --timeout-method=thread
-
-      - name: Run core tests
-        if: ${{ false }}
-        run: pytest tests/core tests/health tests/engine_wiring --tb=short -v --timeout=120 --timeout-method=thread
-
-      - name: Run GUI tests
-        if: ${{ false }}
-        # -v names the running test (a Qt segfault on Windows prints no
-        # traceback); --timeout turns a hang into a faulthandler dump. Keep the
-        # partition running after assertion failures so one red run reports the
-        # complete failure set. The job-level timeout above backstops native
-        # hangs that pytest's thread timeout cannot kill.
-        run: pytest tests/gui --deselect tests/gui/test_app_palette.py --deselect tests/gui/shell/operator_components/test_freshness_and_card.py --deselect tests/gui/shell/views/test_operator_display.py --tb=short -v --timeout=120 --timeout-method=thread
-
-      - name: Run agent and reporting tests
-        if: ${{ false }}
-        run: pytest tests/agents tests/periodic tests/reporting tests/notifications --tb=short -v --timeout=120 --timeout-method=thread
-
-      - name: Run remaining tests
-        if: ${{ false }}
-        # This complement keeps new top-level test areas covered by default.
-        # Named shards are ignored here so every non-isolated test runs once.
-        run: pytest tests/ --ignore=tests/core --ignore=tests/health --ignore=tests/engine_wiring --ignore=tests/gui --ignore=tests/agents --ignore=tests/periodic --ignore=tests/reporting --ignore=tests/notifications --tb=short -v --timeout=120 --timeout-method=thread
 
       - name: Run exact exported candidate suite
         id: candidate

@@ -375,38 +375,6 @@ class DirectoryReplay:
             await publish_cb(reading)
         return previous_timestamp
 
-    async def _run_cold_day(
-        self,
-        reader: ArchiveReader,
-        day_iso: str,
-        publish_cb: PublishCallback,
-        base_offset: float,
-    ) -> None:
-        """Replay one cold (Parquet-archived) day, mirroring SQLiteReplay.run."""
-        rows = await asyncio.to_thread(_load_cold_day_rows, reader, day_iso)
-        prev_ts: float | None = None
-        for ts_posix, channel, value, unit, status_str, inst_id in rows:
-            if not self._running:
-                return
-            if prev_ts is not None and self._speed > 0.0:
-                delta = ts_posix - prev_ts
-                if delta > 0:
-                    await asyncio.sleep(delta / self._speed)
-            prev_ts = ts_posix
-            status = _replay_status(status_str)
-            ch = channel if self._channel_map is None else self._channel_map.get(channel, channel)
-            # query_rows already decoded value per NaN-доктрина — do NOT decode again.
-            reading = Reading(
-                timestamp=datetime.fromtimestamp(ts_posix + base_offset, tz=UTC),
-                instrument_id=inst_id,
-                channel=ch,
-                value=value,
-                unit=unit,
-                status=status,
-                metadata={"source": "replay"},
-            )
-            await publish_cb(reading)
-
 
 def resolve_source(
     path: Path,

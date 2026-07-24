@@ -7,10 +7,12 @@ import logging
 
 import pytest
 
+from cryodaq.core import broker as broker_module
 from cryodaq.core.broker import (
     PERSISTENCE_AUTHORITATIVE_METADATA_KEY,
     DataBroker,
     OverflowPolicy,
+    RequiredPublication,
 )
 from cryodaq.drivers.base import Reading
 
@@ -68,8 +70,22 @@ async def test_multiple_subscribers() -> None:
     delivered = q1.get_nowait()
     assert delivered == r
     assert delivered is not r
-    assert q2.get_nowait() is delivered
-    assert q3.get_nowait() is delivered
+    delivered_2 = q2.get_nowait()
+    delivered_3 = q3.get_nowait()
+    assert delivered_2 == r
+    assert delivered_3 == r
+    assert len({id(delivered), id(delivered_2), id(delivered_3), id(r)}) == 4
+    assert (
+        len(
+            {
+                id(delivered.metadata),
+                id(delivered_2.metadata),
+                id(delivered_3.metadata),
+                id(r.metadata),
+            }
+        )
+        == 4
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +197,20 @@ async def test_unsubscribe() -> None:
     # Queue should still contain only r1; r2 was published after unsubscribe
     assert q.qsize() == 1
     assert q.get_nowait() == r1
+
+
+async def test_exact_queue_owner_prevents_stale_unsubscribe_from_removing_replacement() -> None:
+    broker = DataBroker()
+    retired = await broker.subscribe("replaceable", maxsize=10)
+    assert await broker.unsubscribe("replaceable", expected_queue=retired) is True
+    replacement = await broker.subscribe("replaceable", maxsize=10)
+
+    assert await broker.unsubscribe("replaceable", expected_queue=retired) is False
+    reading = _reading("T1", 3.0)
+    await broker.publish(reading)
+
+    assert await replacement.get() == reading
+    assert await broker.unsubscribe("replaceable", expected_queue=replacement) is True
 
 
 # ---------------------------------------------------------------------------
@@ -511,9 +541,10 @@ async def test_filter_mutation_cannot_forge_shared_delivery_authority() -> None:
     mutator_delivery = mutator_queue.get_nowait()
     authority_delivery = authority_queue.get_nowait()
     assert observed_authority == [False]
-    assert mutator_delivery is authority_delivery
-    assert _persistence_authority(mutator_delivery) is False
-    assert "filter_mutation" not in mutator_delivery.metadata
+    assert mutator_delivery is not authority_delivery
+    for delivered in (mutator_delivery, authority_delivery):
+        assert _persistence_authority(delivered) is False
+        assert "filter_mutation" not in delivered.metadata
 
 
 async def test_authority_copy_preserves_filter_and_drop_oldest_policy() -> None:
@@ -535,3 +566,227 @@ async def test_authority_copy_preserves_filter_and_drop_oldest_policy() -> None:
     assert _persistence_authority(delivered) is True
     queue.task_done()
     await asyncio.wait_for(queue.join(), timeout=0.1)
+
+
+async def test_required_publication_deep_detaches_metadata_and_issues_exact_broker_receipt() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
+    nested_metadata = {
+        "audit": {
+            "labels": ["original"],
+            "identity": {"experiment_id": "exp-a"},
+        }
+    }
+    reading = _reading("operator_log", 17.0, "")
+    object.__setattr__(reading, "metadata", nested_metadata)
+    request_id = "a" * 32
+    fingerprint = "b" * 64
+
+    publication = asyncio.create_task(
+        broker.publish_required(
+            reading,
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+    )
+    envelope = await asyncio.wait_for(queue.get(), timeout=0.1)
+    assert type(envelope) is RequiredPublication
+
+    nested_metadata["audit"]["labels"].append("forged-after-enqueue")
+    nested_metadata["audit"]["identity"]["experiment_id"] = "exp-b"
+    assert envelope.reading is not reading
+    assert envelope.reading.metadata == {
+        "audit": {
+            "labels": ["original"],
+            "identity": {"experiment_id": "exp-a"},
+        }
+    }
+    assert envelope.reading.metadata["audit"] is not nested_metadata["audit"]
+    assert envelope.reading.metadata["audit"]["labels"] is not nested_metadata["audit"]["labels"]
+
+    with pytest.raises(RuntimeError, match="must be claimed before acknowledgement"):
+        envelope.acknowledge()
+    assert not publication.done()
+    assert envelope.claim() == envelope.reading
+    envelope.acknowledge()
+    queue.task_done()
+    receipt = await asyncio.wait_for(publication, timeout=0.1)
+    assert (
+        broker.validates_required_publication(
+            receipt,
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+        is True
+    )
+    assert (
+        broker.validates_required_publication(
+            receipt,
+            request_id="c" * 32,
+            request_fingerprint=fingerprint,
+        )
+        is False
+    )
+    assert (
+        DataBroker().validates_required_publication(
+            receipt,
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+        is False
+    )
+    await asyncio.wait_for(queue.join(), timeout=0.1)
+
+
+async def test_required_publication_unsubscribe_rejects_pending_envelope_without_false_receipt() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
+    publication = asyncio.create_task(
+        broker.publish_required(
+            _reading("operator_log", 18.0, ""),
+            request_id="c" * 32,
+            request_fingerprint="d" * 64,
+        )
+    )
+    await asyncio.sleep(0)
+    assert queue.qsize() == 1
+
+    await broker.unsubscribe("required_zmq")
+
+    with pytest.raises(RuntimeError, match="required publisher did not settle the event"):
+        await asyncio.wait_for(publication, timeout=0.1)
+    assert queue.empty()
+    await asyncio.wait_for(queue.join(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="required publisher is unavailable"):
+        await broker.publish_required(
+            _reading("operator_log", 19.0, ""),
+            request_id="e" * 32,
+            request_fingerprint="f" * 64,
+        )
+
+
+async def test_unclaimed_required_publication_timeout_withdraws_tombstone_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=1, required_publisher=True)
+    monkeypatch.setattr(broker_module, "REQUIRED_PUBLICATION_TIMEOUT_S", 0.01)
+
+    timed_out = asyncio.create_task(
+        broker.publish_required(
+            _reading("operator_log", 20.0, ""),
+            request_id="1" * 32,
+            request_fingerprint="2" * 64,
+        )
+    )
+    with pytest.raises(RuntimeError, match="timed out before claim"):
+        await asyncio.wait_for(timed_out, timeout=0.5)
+    assert queue.full()
+    with pytest.raises(RuntimeError, match="required publisher queue is full"):
+        await broker.publish_required(
+            _reading("operator_log", 21.0, ""),
+            request_id="3" * 32,
+            request_fingerprint="4" * 64,
+        )
+
+    tombstone = queue.get_nowait()
+    assert type(tombstone) is RequiredPublication
+    with pytest.raises(RuntimeError, match="no longer claimable"):
+        tombstone.claim()
+    with pytest.raises(RuntimeError, match="no longer acknowledgeable"):
+        tombstone.acknowledge()
+    queue.task_done()
+
+    retry = asyncio.create_task(
+        broker.publish_required(
+            _reading("operator_log", 21.0, ""),
+            request_id="3" * 32,
+            request_fingerprint="4" * 64,
+        )
+    )
+    replacement = await asyncio.wait_for(queue.get(), timeout=0.1)
+    assert type(replacement) is RequiredPublication
+    assert replacement.claim().value == 21.0
+    replacement.acknowledge()
+    queue.task_done()
+    receipt = await asyncio.wait_for(retry, timeout=0.1)
+    assert broker.validates_required_publication(
+        receipt,
+        request_id="3" * 32,
+        request_fingerprint="4" * 64,
+    )
+
+
+async def test_unclaimed_required_publication_cancellation_revokes_envelope_without_receipt() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=1, required_publisher=True)
+    publication = asyncio.create_task(
+        broker.publish_required(
+            _reading("operator_log", 22.0, ""),
+            request_id="5" * 32,
+            request_fingerprint="6" * 64,
+        )
+    )
+    envelope = await asyncio.wait_for(queue.get(), timeout=0.1)
+    assert type(envelope) is RequiredPublication
+
+    publication.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await publication
+    with pytest.raises(RuntimeError, match="no longer claimable"):
+        envelope.claim()
+    with pytest.raises(RuntimeError, match="no longer acknowledgeable"):
+        envelope.acknowledge()
+    queue.task_done()
+
+
+async def test_claimed_required_publication_ignores_nominal_timeout_until_exact_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=1, required_publisher=True)
+    monkeypatch.setattr(broker_module, "REQUIRED_PUBLICATION_TIMEOUT_S", 0.01)
+    publication = asyncio.create_task(
+        broker.publish_required(
+            _reading("operator_log", 23.0, ""),
+            request_id="7" * 32,
+            request_fingerprint="8" * 64,
+        )
+    )
+    envelope = await asyncio.wait_for(queue.get(), timeout=0.1)
+    assert type(envelope) is RequiredPublication
+    assert envelope.claim().value == 23.0
+
+    await asyncio.sleep(0.03)
+    assert not publication.done()
+    envelope.acknowledge()
+    queue.task_done()
+    receipt = await asyncio.wait_for(publication, timeout=0.1)
+    assert broker.validates_required_publication(
+        receipt,
+        request_id="7" * 32,
+        request_fingerprint="8" * 64,
+    )
+
+
+async def test_claimed_required_publication_cancellation_waits_and_surfaces_late_rejection() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=1, required_publisher=True)
+    publication = asyncio.create_task(
+        broker.publish_required(
+            _reading("operator_log", 24.0, ""),
+            request_id="9" * 32,
+            request_fingerprint="a" * 64,
+        )
+    )
+    envelope = await asyncio.wait_for(queue.get(), timeout=0.1)
+    assert type(envelope) is RequiredPublication
+    envelope.claim()
+
+    publication.cancel()
+    await asyncio.sleep(0)
+    assert not publication.done()
+    envelope.reject()
+    queue.task_done()
+    with pytest.raises(RuntimeError, match="required publisher did not settle the event"):
+        await publication

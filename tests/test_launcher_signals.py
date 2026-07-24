@@ -6,7 +6,9 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from cryodaq.launcher import LauncherWindow, _ShutdownPhase
+import pytest
+
+from cryodaq.launcher import LauncherWindow, _LauncherConstructionHold, _ShutdownPhase
 
 
 class _Loop:
@@ -45,6 +47,8 @@ def _host(*, bridge: _Bridge | None = None) -> SimpleNamespace:
     app = SimpleNamespace(quit=lambda: events.append("app.quit"))
     host = SimpleNamespace(
         _shutdown_requested=False,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=1,
         _restart_pending=True,
         _assistant_restart_pending=True,
         _health_timer=MagicMock(name="health_timer"),
@@ -55,6 +59,7 @@ def _host(*, bridge: _Bridge | None = None) -> SimpleNamespace:
         _tray_icon_yellow=None,
         _stop_engine_down_alarm=lambda: events.append("alarm.stop"),
         _invalidate_descriptor_transport=lambda: events.append("descriptor.invalidate"),
+        _invalidate_engine_producer=lambda: events.append("producer.invalidate"),
         _snapshot_ingress=None,
         _stop_assistant=lambda: events.append("assistant.stop"),
         _bridge=bridge or _Bridge(),
@@ -88,6 +93,7 @@ def test_main_registers_sigint_and_sigterm_handlers() -> None:
 
 def test_shutdown_success_is_monotonic_and_quits_once() -> None:
     host = _host()
+    bridge = host._bridge
 
     assert LauncherWindow._do_shutdown(host) is True
 
@@ -95,15 +101,95 @@ def test_shutdown_success_is_monotonic_and_quits_once() -> None:
     assert host._shutdown_phase is _ShutdownPhase.COMPLETE
     assert host._restart_pending is False
     assert host._assistant_restart_pending is False
-    assert host._bridge.shutdown_calls == 1
-    assert host._bridge.close_calls == 1
+    assert bridge.shutdown_calls == 1
+    assert bridge.close_calls == 1
+    assert host._bridge is None
     assert host._loop.closed is True
     assert host.events[-1] == "app.quit"
     host._tray.hide.assert_called_once_with()
 
     assert LauncherWindow._do_shutdown(host) is True
-    assert host._bridge.shutdown_calls == 1
+    assert bridge.shutdown_calls == 1
     assert host.events.count("app.quit") == 1
+
+
+def test_gui_workers_settle_before_assistant_engine_and_bridge() -> None:
+    host = _host()
+
+    class _MainWindow:
+        def settle_owned_workers(self) -> bool:
+            host.events.append("gui.settle")
+            return True
+
+        def complete_root_shutdown(self) -> None:
+            host.events.append("gui.complete")
+
+    host._main_window = _MainWindow()
+    original_shutdown = host._bridge.shutdown
+
+    def bridge_shutdown() -> None:
+        host.events.append("bridge.shutdown")
+        original_shutdown()
+
+    host._bridge.shutdown = bridge_shutdown
+
+    assert LauncherWindow._do_shutdown(host) is True
+    assert host.events.index("gui.settle") < host.events.index("assistant.stop")
+    assert host.events.index("gui.settle") < host.events.index("engine.stop")
+    assert host.events.index("gui.settle") < host.events.index("bridge.shutdown")
+    assert host.events.index("bridge.shutdown") < host.events.index("gui.complete")
+    assert host.events.index("gui.complete") < host.events.index("app.quit")
+
+
+def test_live_gui_worker_blocks_engine_and_bridge_teardown() -> None:
+    host = _host()
+    host._main_window = SimpleNamespace(settle_owned_workers=lambda: False)
+    callbacks: list[object] = []
+
+    with patch("cryodaq.launcher.QTimer.singleShot", side_effect=lambda _delay, callback: callbacks.append(callback)):
+        assert LauncherWindow._do_shutdown(host) is False
+
+    assert "assistant.stop" not in host.events
+    assert "engine.stop" not in host.events
+    assert host._bridge.shutdown_calls == 0
+    assert host._loop.closed is False
+    assert len(callbacks) == 1
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["engine", "assistant", "soak_bridge_handshake", "ui", "tray", "data_timer", "health_timer", "status_timer"],
+)
+def test_construction_failure_transfers_exact_owner_to_hold(phase: str) -> None:
+    identity = "a" * 32
+    capability = "b" * 64
+    host = SimpleNamespace(
+        _construction_failure_phase=None,
+        _engine_proc=object(),
+        _engine_instance_id=identity,
+        _engine_shutdown_capability=capability,
+        setWindowTitle=MagicMock(),
+        show=MagicMock(),
+    )
+
+    with (
+        patch.object(LauncherWindow, "_do_shutdown", return_value=False) as settle,
+        pytest.raises(_LauncherConstructionHold) as raised,
+    ):
+        LauncherWindow._run_construction_step(
+            host,
+            phase,
+            lambda: (_ for _ in ()).throw(RuntimeError("injected")),
+        )
+
+    assert raised.value.window is host
+    assert raised.value.phase == phase
+    assert host._construction_failure_phase == phase
+    assert host._engine_proc is not None
+    assert host._engine_instance_id == identity
+    assert host._engine_shutdown_capability == capability
+    settle.assert_called_once_with(host)
+    host.show.assert_called_once_with()
 
 
 def test_incomplete_owner_keeps_app_and_tray_live_then_retries_only_unsettled_owner() -> None:
@@ -161,7 +247,9 @@ def test_pending_restart_callback_cannot_respawn_after_shutdown_latch() -> None:
     host._restart_pending = False
     host._shutdown_requested = False
     host._engine_proc = SimpleNamespace(poll=lambda: 1)
-    host._engine_external = False
+    # Only an unowned/external or replay startup may enter backoff. An owned
+    # acquisition death is covered separately and must remain in HOLD.
+    host._engine_external = True
     host._restart_giving_up = False
     host._restart_attempts = 0
     host._restart_backoff_s = [0]

@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import json
 import threading
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -48,7 +49,7 @@ def test_concurrent_managers_persist_exactly_one_running_experiment(tmp_path: Pa
     assert len(winners) == 1
     assert len(losers) == 1
     db_path = next(tmp_path.glob("data_????-??-??.db"))
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn:
         rows = conn.execute("SELECT experiment_id FROM experiments WHERE status = 'RUNNING'").fetchall()
     assert rows == [(winners[0],)]
     assert not (tmp_path / "experiment_transition.json").exists()
@@ -112,7 +113,7 @@ def test_interrupted_finalize_replays_journal_to_one_terminal_truth(
     )
     assert payload["experiment"]["status"] == "COMPLETED"
     db_path = tmp_path / f"data_{active.start_time.date().isoformat()}.db"
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn:
         status = conn.execute(
             "SELECT status FROM experiments WHERE experiment_id = ?", (active.experiment_id,)
         ).fetchone()
@@ -159,7 +160,7 @@ def test_stale_journal_and_restart_replay_fail_durable_cas(
     metadata = json.loads(before_metadata)
     assert metadata["experiment"]["title"] == original_title
     db_path = tmp_path / f"data_{active.start_time.date().isoformat()}.db"
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn:
         persisted = conn.execute(
             "SELECT title, status FROM experiments WHERE experiment_id = ?",
             (active.experiment_id,),

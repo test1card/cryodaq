@@ -36,12 +36,26 @@ def test_theme_menu_is_radio_exclusive_and_runtime_truthful() -> None:
     assert "_update_theme_pending_indicator" in src
 
 
-def test_theme_handler_is_only_a_deferred_selection_delegate() -> None:
+def test_theme_handler_has_exact_runtime_guard_then_deferred_selection_delegate() -> None:
     method = _method("_on_theme_selected")
     statements = method.body[1:] if isinstance(method.body[0], ast.Expr) else method.body
-    assert len(statements) == 1
-    assert isinstance(statements[0], ast.Return)
-    call = statements[0].value
+    assert len(statements) == 2
+
+    runtime_guard = statements[0]
+    assert isinstance(runtime_guard, ast.If)
+    assert isinstance(runtime_guard.test, ast.UnaryOp)
+    assert isinstance(runtime_guard.test.op, ast.Not)
+    current_call = runtime_guard.test.operand
+    assert isinstance(current_call, ast.Call)
+    assert isinstance(current_call.func, ast.Attribute)
+    assert current_call.func.attr == "_runtime_callback_is_current"
+    assert len(runtime_guard.body) == 1
+    assert isinstance(runtime_guard.body[0], ast.Return)
+    assert runtime_guard.body[0].value is None
+    assert runtime_guard.orelse == []
+
+    assert isinstance(statements[1], ast.Return)
+    call = statements[1].value
     assert isinstance(call, ast.Call)
     assert isinstance(call.func, ast.Attribute)
     assert call.func.attr == "_defer_theme_selection"

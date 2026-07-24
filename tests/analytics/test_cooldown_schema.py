@@ -4,6 +4,7 @@ Verifies that load_curves() and ingest_curve() accept both 't_hours' (current
 schema) and 'elapsed_hours' (legacy) field names, and warn gracefully when
 neither is present.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,6 +25,8 @@ _N = 60
 _T_HOURS: list[float] = np.linspace(0, 20, _N).tolist()
 _T_COLD: list[float] = np.linspace(280, 4.5, _N).tolist()
 _T_WARM: list[float] = np.linspace(290, 10.0, _N).tolist()
+_PHASE1_HOURS = next(time for time, cold in zip(_T_HOURS, _T_COLD, strict=True) if cold < 50.0)
+_PHASE2_HOURS = _T_HOURS[-1] - _PHASE1_HOURS
 
 
 def _write_curve(path: Path, time_field: str = "t_hours") -> None:
@@ -35,8 +38,8 @@ def _write_curve(path: Path, time_field: str = "t_hours") -> None:
         "T_cold": _T_COLD,
         "T_warm": _T_WARM,
         "duration_hours": 20.0,
-        "phase1_hours": 10.0,
-        "phase2_hours": 10.0,
+        "phase1_hours": _PHASE1_HOURS,
+        "phase2_hours": _PHASE2_HOURS,
         "T_cold_final": 4.5,
         "T_warm_final": 10.0,
     }
@@ -80,9 +83,7 @@ def test_load_curves_neither_field(tmp_path, caplog):
 
 @pytest.mark.skipif(not _COOLDOWN_V5.is_dir(), reason="cooldown_v5/ not present")
 def test_load_cooldown_v5_directory(tmp_path):
-    curve_files = sorted(
-        f for f in _COOLDOWN_V5.glob("*.json") if f.name != "predictor_model.json"
-    )[:2]
+    curve_files = sorted(f for f in _COOLDOWN_V5.glob("*.json") if f.name != "predictor_model.json")[:2]
     for f in curve_files:
         shutil.copy(f, tmp_path / f.name)
     curves = load_curves(tmp_path)

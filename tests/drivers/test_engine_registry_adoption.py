@@ -34,11 +34,34 @@ def test_main_labels_registry_subclasses_and_exits_as_config_error(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _fail_startup(*, mock: bool) -> None:
+    async def _fail_startup(
+        *,
+        mock: bool,
+        engine_instance_id: str,
+        shutdown_capability: str,
+        engine_ready_nonce: str,
+        engine_ready_channel_fd: int | None,
+    ) -> None:
         assert mock is True
+        assert engine_instance_id == "a" * 32
+        assert shutdown_capability == "b" * 64
+        assert engine_ready_nonce == "c" * 64
+        assert engine_ready_channel_fd == 71
         raise registry_error
 
+    authority_calls = 0
+
+    def _consume_exact_launch_authority() -> tuple[str, str, str, int]:
+        nonlocal authority_calls
+        authority_calls += 1
+        return "a" * 32, "b" * 64, "c" * 64, 71
+
     monkeypatch.setattr(engine_module.sys, "argv", ["cryodaq-engine", "--mock"])
+    monkeypatch.setattr(
+        engine_module,
+        "_consume_engine_launch_authority",
+        _consume_exact_launch_authority,
+    )
     monkeypatch.setattr(engine_module, "_acquire_engine_lock", lambda: 42)
     monkeypatch.setattr(engine_module, "_release_engine_lock", lambda _fd: None)
     monkeypatch.setattr(engine_module, "_run_engine", _fail_startup)
@@ -48,6 +71,7 @@ def test_main_labels_registry_subclasses_and_exits_as_config_error(
         engine_module.main()
 
     assert exc_info.value.code == engine_module.ENGINE_CONFIG_ERROR_EXIT_CODE == 2
+    assert authority_calls == 1
     assert "CONFIG ERROR (driver registry config)" in caplog.text
 
 

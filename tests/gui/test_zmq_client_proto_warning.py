@@ -6,7 +6,7 @@ See docs/protocol.md for the compatibility policy this enforces.
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION, ZmqBridge
 
@@ -54,20 +54,85 @@ def test_warning_stays_once_per_bridge_lifetime_across_process_start(caplog) -> 
     bridge = ZmqBridge()
     newer = {"ok": True, "proto": CLIENT_PROTOCOL_VERSION + 1}
 
+    class _LiveProcess:
+        pid = 1234
+
+        def __init__(self) -> None:
+            self._alive = False
+            self.exitcode = None
+
+        def start(self) -> None:
+            assert not self._alive
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+            self.exitcode = 0
+
+        def terminate(self) -> None:
+            self._alive = False
+            self.exitcode = -15
+
+        def kill(self) -> None:
+            self._alive = False
+            self.exitcode = -9
+
+    class _LiveThread:
+        def __init__(self) -> None:
+            self._alive = False
+
+        def start(self) -> None:
+            assert not self._alive
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
+    process = _LiveProcess()
+    consumers: list[_LiveThread] = []
+
+    def _thread_factory(*args, **kwargs) -> _LiveThread:
+        consumer = _LiveThread()
+        consumers.append(consumer)
+        return consumer
+
     with caplog.at_level(logging.WARNING, logger="cryodaq.gui.zmq_client"):
         bridge._check_proto(newer)
-        process = MagicMock()
-        process.is_alive.return_value = False
-        process.pid = 1234
-        thread = MagicMock()
         with (
             patch("cryodaq.gui.zmq_client.mp.Process", return_value=process),
-            patch("cryodaq.gui.zmq_client.threading.Thread", return_value=thread),
+            patch("cryodaq.gui.zmq_client.threading.Thread", side_effect=_thread_factory),
             patch("cryodaq.gui.zmq_client._drain"),
         ):
             bridge.start()
-        bridge._check_proto(newer)
+            assert bridge._process_started is True
+            assert bridge._reply_consumer_started is True
+            assert bridge._safe_reply_consumer_started is True
+            assert len(consumers) == 2
+            assert consumers[0] is not consumers[1]
+            assert all(consumer.is_alive() for consumer in consumers)
+            assert bridge.is_alive() is True
+            assert bridge.bridge_instance_id is not None
+            assert len(bridge.bridge_instance_id) == 32
+            bridge._check_proto(newer)
+            bridge.shutdown()
 
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert bridge._proto_warned is True
+    assert process.is_alive() is False
+    assert all(not consumer.is_alive() for consumer in consumers)
+    assert bridge._process is None
+    assert bridge._reply_consumer is None
+    assert bridge._safe_reply_consumer is None
+    assert bridge._process_started is False
+    assert bridge._reply_consumer_started is False
+    assert bridge._safe_reply_consumer_started is False
+    assert bridge.is_alive() is False
+    assert bridge.bridge_instance_id is None
+    bridge.close()

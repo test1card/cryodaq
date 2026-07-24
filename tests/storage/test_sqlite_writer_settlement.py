@@ -12,9 +12,7 @@ async def _wait_thread_event(event: threading.Event) -> None:
     assert await asyncio.to_thread(event.wait, 1.0)
 
 
-async def test_persistence_stopped_waits_for_cancelled_executor_commit(
-    tmp_path, monkeypatch
-) -> None:
+async def test_persistence_stopped_waits_for_cancelled_executor_commit(tmp_path, monkeypatch) -> None:
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
     started = threading.Event()

@@ -329,40 +329,98 @@ def test_child_environments_always_strip_launcher_only_descriptor_authority() ->
 
 
 def test_bridge_pid_accessor_is_read_only_hint_and_never_a_process_handle() -> None:
-    bridge = object.__new__(ZmqBridge)
+    bridge = ZmqBridge()
     process = MagicMock()
     process.pid = 1234
     process.is_alive.return_value = True
-    bridge._process = process
-    assert bridge.process_pid() == 1234
-    process.is_alive.return_value = False
-    assert bridge.process_pid() is None
-    bridge._process = None
+    ordinary_consumer = MagicMock()
+    ordinary_consumer.is_alive.return_value = True
+    safe_consumer = MagicMock()
+    safe_consumer.is_alive.return_value = True
+    try:
+        assert bridge.process_pid() is None
+        bridge._process = process
+        assert bridge.process_pid() is None
+
+        bridge._process_started = True
+        bridge._reply_consumer = ordinary_consumer
+        bridge._safe_reply_consumer = safe_consumer
+        bridge._reply_consumer_started = True
+        bridge._safe_reply_consumer_started = True
+        with bridge._pending_lock:
+            bridge._command_admission_open = True
+        assert bridge.process_pid() == 1234
+
+        with bridge._pending_lock:
+            bridge._command_admission_open = False
+        assert bridge.process_pid() is None
+        with bridge._pending_lock:
+            bridge._command_admission_open = True
+        bridge._reply_stop.set()
+        assert bridge.process_pid() is None
+        bridge._reply_stop.clear()
+
+        process.is_alive.return_value = False
+        assert bridge.process_pid() is None
+        process.is_alive.return_value = True
+        ordinary_consumer.is_alive.return_value = False
+        assert bridge.process_pid() is None
+        ordinary_consumer.is_alive.return_value = True
+
+        bridge._record_generation_fatal(
+            reply_queue=bridge._reply_queue,
+            lane="ordinary",
+            source_generation=bridge._generation,
+            error=RuntimeError("synthetic terminal transport failure"),
+        )
+        assert bridge.process_pid() is None
+    finally:
+        bridge._process = None
+        bridge._process_started = False
+        bridge._reply_consumer = None
+        bridge._safe_reply_consumer = None
+        bridge._reply_consumer_started = False
+        bridge._safe_reply_consumer_started = False
+        bridge.close()
     assert bridge.process_pid() is None
 
 
-def test_handshake_close_retains_same_descriptor_after_close_failure(monkeypatch) -> None:
+def test_handshake_close_poison_refuses_retry_and_leaves_reused_descriptor_untouched(monkeypatch) -> None:
     read_fd, write_fd = os.pipe()
+    replacement_read_fd, replacement_write_fd = os.pipe()
     launcher._guard_soak_bridge_fd_from_descendants(write_fd)
     owner = launcher._SoakBridgeHandshake(write_fd, "e" * 64)
     real_close = launcher.os.close
+    close_attempts = 0
 
-    def fail_owned(fd: int) -> None:
-        if fd == write_fd:
-            raise OSError("injected close failure")
+    def close_then_reuse(fd: int) -> None:
+        nonlocal close_attempts
+        if fd == write_fd and close_attempts == 0:
+            close_attempts += 1
+            real_close(write_fd)
+            os.dup2(replacement_write_fd, write_fd)
+            raise OSError("injected ambiguous close after descriptor reuse")
         real_close(fd)
 
-    monkeypatch.setattr(launcher.os, "close", fail_owned)
-    with pytest.raises(RuntimeError, match="remained open"):
-        owner.close()
-    assert owner._closed is False
-    assert write_fd in launcher._SOAK_BRIDGE_ACTIVE_FDS
-    os.fstat(write_fd)
+    monkeypatch.setattr(launcher.os, "close", close_then_reuse)
+    try:
+        with pytest.raises(RuntimeError, match="permanently poisoned"):
+            owner.close()
+        assert owner._closed is False
+        assert owner._fd_owner.settlement_state is launcher._OwnerSettlementState.POISONED
+        assert write_fd in launcher._SOAK_BRIDGE_ACTIVE_FDS
 
-    monkeypatch.setattr(launcher.os, "close", real_close)
-    owner.close()
-    assert owner._closed is True
-    assert write_fd not in launcher._SOAK_BRIDGE_ACTIVE_FDS
-    with pytest.raises(OSError):
-        os.fstat(write_fd)
-    os.close(read_fd)
+        with pytest.raises(RuntimeError, match="unsafe retry refused"):
+            owner.close()
+        assert close_attempts == 1
+
+        os.write(write_fd, b"b")
+        assert os.read(replacement_read_fd, 1) == b"b"
+    finally:
+        monkeypatch.setattr(launcher.os, "close", real_close)
+        launcher._SOAK_BRIDGE_ACTIVE_FDS.discard(write_fd)
+        for fd in {read_fd, write_fd, replacement_read_fd, replacement_write_fd}:
+            try:
+                real_close(fd)
+            except OSError:
+                pass

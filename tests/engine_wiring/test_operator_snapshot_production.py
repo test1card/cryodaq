@@ -276,8 +276,12 @@ async def test_shutdown_is_dark_and_restart_uses_next_durable_revision(tmp_path:
 def test_engine_owns_one_post_scheduler_service_and_stops_it_before_transport() -> None:
     source = inspect.getsource(_run_engine)
     assert source.count("build_operator_snapshot_publication_service(") == 1
-    assert source.count('"operator_snapshot_publication"') == 2
+    assert source.count('supervisor.spawn,\n                "operator_snapshot_publication"') == 1
     assert source.index("_start_scheduler_with_recording_feed(", source.index("async def _run_engine")) < source.index(
         '"operator_snapshot_publication"'
     )
-    assert source.index("operator_snapshot_service.request_stop()") < source.index("await zmq_pub.stop()")
+    shutdown = source.index("await teardown_sequence.settle_ingress_off()")
+    snapshot_owner = source.index('"operator_snapshot_publication"', shutdown)
+    terminal_dependencies = source.index('"terminal_dependencies"', snapshot_owner)
+    assert "_request_and_settle_terminal_task_owner" in source[snapshot_owner:terminal_dependencies]
+    assert snapshot_owner < terminal_dependencies

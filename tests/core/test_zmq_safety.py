@@ -269,12 +269,12 @@ async def test_serve_loop_sends_reply_on_serialization_error() -> None:
         req.connect(address)
 
         # First command: handler returns a truly non-serializable value
-        await req.send(json.dumps({"cmd": "ping"}).encode())
+        await req.send(json.dumps({"cmd": "safety_status"}).encode())
         raw = await asyncio.wait_for(req.recv(), timeout=3.0)
         first = json.loads(raw)
 
         # Second command: server must still be serving (REP not wedged)
-        await req.send(json.dumps({"cmd": "ping2"}).encode())
+        await req.send(json.dumps({"cmd": "safety_status"}).encode())
         raw2 = await asyncio.wait_for(req.recv(), timeout=3.0)
         second = json.loads(raw2)
 
@@ -287,8 +287,8 @@ async def test_serve_loop_sends_reply_on_serialization_error() -> None:
         assert first.get("error_code") == "command_reply_serialization_failed"
         assert first.get("error") == ("Command reply could not be serialized; outcome may be unknown.")
         assert first.get("delivery_state") == "dispatched"
-        assert first.get("commit_state") == "unknown"
-        assert first.get("retry_safe") is False
+        assert first.get("commit_state") == "not_applicable"
+        assert first.get("retry_safe") is True
         assert first.get("proto") == 2
         # Second reply: server was not wedged
         assert second.get("ok") is True, f"second command must succeed; got {second}"

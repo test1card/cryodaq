@@ -6,9 +6,11 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -64,11 +66,70 @@ class _FakeReplyConsumer:
             self._alive = False
 
 
+class _FeederTerminalProofProbe:
+    def __init__(self) -> None:
+        self.join_calls = 0
+        self.alive_proof: object = False
+
+    def join(self, timeout: float) -> None:
+        assert timeout == 2.0
+        self.join_calls += 1
+
+    def is_alive(self) -> object:
+        return self.alive_proof
+
+
+class _QueueTerminalProofProbe:
+    def __init__(self) -> None:
+        self._thread = _FeederTerminalProofProbe()
+        self.close_calls = 0
+        self.join_thread_calls = 0
+        self._valid_join = self._thread.join
+        self._valid_is_alive = self._thread.is_alive
+        self._valid_join_thread = self.join_thread
+
+    @staticmethod
+    def get_nowait() -> object:
+        raise queue.Empty
+
+    @staticmethod
+    def task_done() -> None:
+        return None
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+    def join_thread(self) -> None:
+        self.join_thread_calls += 1
+
+    def invalidate_terminal_proof(self, failure: str) -> None:
+        if failure == "noncallable_join":
+            self._thread.join = None  # type: ignore[method-assign]
+        elif failure == "noncallable_is_alive":
+            self._thread.is_alive = None  # type: ignore[method-assign]
+        elif failure == "non_boolean_is_alive":
+            self._thread.alive_proof = 0
+        elif failure == "noncallable_join_thread":
+            self.join_thread = None  # type: ignore[method-assign]
+        else:  # pragma: no cover - test helper contract
+            raise AssertionError(f"unknown terminal proof failure: {failure}")
+
+    def repair_terminal_proof(self) -> None:
+        self._thread.join = self._valid_join  # type: ignore[method-assign]
+        self._thread.is_alive = self._valid_is_alive  # type: ignore[method-assign]
+        self._thread.alive_proof = False
+        self.join_thread = self._valid_join_thread  # type: ignore[method-assign]
+
+
 def _bridge(process: _FakeProcess, *, reply_stops: bool = True) -> tuple[ZmqBridge, _FakeReplyConsumer]:
     bridge = ZmqBridge()
     reply = _FakeReplyConsumer(stops=reply_stops)
     bridge._process = process  # type: ignore[assignment]
+    bridge._process_started = True
     bridge._reply_consumer = reply  # type: ignore[assignment]
+    bridge._reply_consumer_started = True
+    bridge._command_admission_open = True
+    bridge._bridge_instance_id = "f" * 32
     bridge._last_snapshot_time = 123.0
     return bridge, reply
 
@@ -91,7 +152,7 @@ def test_shutdown_clears_ownership_only_after_process_and_reply_consumer_settle(
     bridge.shutdown()
 
     assert [call for call in process.calls if call != "is_alive"] == expected_process_calls
-    assert reply.calls == ["is_alive", "join:3", "is_alive"]
+    assert reply.calls == ["join:3", "is_alive"]
     assert bridge._process is None
     assert bridge._reply_consumer is None
     assert bridge._last_snapshot_time == 0.0
@@ -146,7 +207,7 @@ def test_start_refuses_to_replace_ownership_when_old_reply_consumer_survives(
 
     with pytest.raises(
         RuntimeError,
-        match="previous reply consumer remained alive after stop and join",
+        match="previous ZMQ runtime settlement incomplete: ordinary reply consumer remained alive after join",
     ):
         bridge.start()
 
@@ -155,7 +216,7 @@ def test_start_refuses_to_replace_ownership_when_old_reply_consumer_survives(
     assert bridge._reply_stop.is_set()
     assert bridge._process is process
     assert bridge._snapshot_queue is old_snapshot_queue
-    assert reply.calls == ["is_alive", "join:1", "is_alive"]
+    assert reply.calls == ["is_alive", "join:3", "is_alive"]
     process_factory.assert_not_called()
     thread_factory.assert_not_called()
 
@@ -167,8 +228,22 @@ def test_terminal_close_settles_then_closes_all_parent_queues() -> None:
     bridge.close()
 
     assert bridge._terminal_closed is True
-    assert bridge._terminal_queues_closed == {"data", "command", "reply", "snapshot"}
-    assert bridge._terminal_queues_joined == {"data", "command", "reply", "snapshot"}
+    assert bridge._terminal_queues_closed == {
+        "data",
+        "command",
+        "safe_command",
+        "reply",
+        "safe_reply",
+        "snapshot",
+    }
+    assert bridge._terminal_queues_joined == {
+        "data",
+        "command",
+        "safe_command",
+        "reply",
+        "safe_reply",
+        "snapshot",
+    }
     assert bridge._process is None
     assert bridge._reply_consumer is None
     bridge.close()  # exact terminal close is idempotent
@@ -189,11 +264,650 @@ def test_terminal_close_retains_queues_when_process_survives() -> None:
     assert bridge._process is process
 
 
+def test_terminal_close_refuses_to_abandon_unresolved_mutation_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = ZmqBridge()
+    request_id = "unresolved-mutation"
+    owner: Future[dict[str, object]] = Future()
+    bridge._outcome_unknown[request_id] = owner
+    bridge._request_generation[request_id] = bridge._generation
+    bridge._request_bindings[request_id] = zmq_client._RequestBinding(
+        bridge._generation,
+        zmq_client.CommandClass.MUTATION,
+        "experiment_finalize",
+    )
+    monkeypatch.setattr(bridge, "shutdown", lambda: None)
+
+    try:
+        with pytest.raises(RuntimeError, match="unresolved mutation reconciliation"):
+            bridge.close()
+
+        assert bridge._terminal_closed is False
+        assert bridge._terminal_queues_closed == set()
+        assert bridge._terminal_queues_joined == set()
+        assert bridge._outcome_unknown[request_id] is owner
+        assert bridge._request_bindings[request_id].generation == bridge._generation
+    finally:
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._safe_cmd_queue,
+            bridge._reply_queue,
+            bridge._safe_reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_terminal_close_refuses_unreconciled_terminal_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = ZmqBridge()
+    request_id = "terminal-unreconciled"
+    bridge._late_results[request_id] = zmq_client.LateCommandResult(
+        request_id,
+        bridge._generation,
+        {"ok": True, "scope": "global"},
+        zmq_client.CommandClass.SAFE_DIRECTION,
+        "keithley_emergency_off",
+        "global",
+    )
+    monkeypatch.setattr(bridge, "shutdown", lambda: None)
+
+    try:
+        with pytest.raises(RuntimeError, match="unresolved mutation reconciliation"):
+            bridge.close()
+
+        assert bridge._terminal_closed is False
+        assert bridge._terminal_queues_closed == set()
+        assert bridge._late_results[request_id].reply == {"ok": True, "scope": "global"}
+    finally:
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._safe_cmd_queue,
+            bridge._reply_queue,
+            bridge._safe_reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_start_retains_live_process_when_retired_owner_settlement_is_incomplete() -> None:
+    bridge = ZmqBridge()
+
+    class _LiveProcess:
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    bridge._process = _LiveProcess()
+    bridge._process_started = True
+    bridge._command_admission_open = False
+    try:
+        with pytest.raises(RuntimeError, match="previous ZMQ runtime settlement incomplete"):
+            bridge.start()
+        assert bridge._process is not None
+        assert bridge._command_admission_open is False
+    finally:
+        bridge._process = None
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._safe_cmd_queue,
+            bridge._reply_queue,
+            bridge._safe_reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_safe_reply_consumer_death_closes_admission_and_invalidates_bridge_health() -> None:
+    bridge = ZmqBridge()
+    retired_safe_queue = bridge._safe_reply_queue
+    request_id = "a" * 32
+    owner: Future[dict[str, object]] = Future()
+    bridge._pending[request_id] = owner
+    bridge._request_generation[request_id] = bridge._generation
+    bridge._request_bindings[request_id] = zmq_client._RequestBinding(
+        bridge._generation,
+        zmq_client.CommandClass.SAFE_DIRECTION,
+        "keithley_emergency_off",
+        "global",
+    )
+
+    class _LiveProcess:
+        exitcode = None
+
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    class _BrokenSafeReplyQueue:
+        @staticmethod
+        def get(timeout=None):
+            del timeout
+            raise EOFError("safe reply pipe closed")
+
+    bridge._process = _LiveProcess()  # type: ignore[assignment]
+    bridge._process_started = True
+    bridge._reply_consumer = MagicMock(name="live_ordinary_consumer")
+    bridge._reply_consumer.is_alive.return_value = True
+    bridge._reply_consumer_started = True
+    bridge._safe_reply_consumer = MagicMock(name="live_safe_consumer")
+    bridge._safe_reply_consumer.is_alive.return_value = True
+    bridge._safe_reply_consumer_started = True
+    bridge._safe_reply_queue = _BrokenSafeReplyQueue()  # type: ignore[assignment]
+    bridge._last_heartbeat = time.monotonic()
+    bridge._command_admission_open = True
+    bridge._reply_stop.clear()
+    assert bridge.is_alive() is True
+    assert bridge.is_healthy() is True
+    consumer = threading.Thread(target=bridge._consume_safe_replies, daemon=True)
+    bridge._safe_reply_consumer = consumer
+    consumer.start()
+    consumer.join(1.0)
+
+    try:
+        assert consumer.is_alive() is False
+        assert bridge._command_admission_open is False
+        assert bridge._shutdown_event.is_set()
+        assert bridge.is_alive() is False
+        assert bridge.is_healthy() is False
+        assert request_id not in bridge._pending
+        assert bridge._outcome_unknown[request_id] is owner
+        assert owner.result(timeout=1.0)["outcome_unknown"] is True
+    finally:
+        bridge._process = None
+        bridge._process_started = False
+        bridge._reply_consumer = None
+        bridge._reply_consumer_started = False
+        bridge._safe_reply_consumer = None
+        bridge._safe_reply_consumer_started = False
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._safe_cmd_queue,
+            bridge._reply_queue,
+            retired_safe_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_real_safe_reply_pipe_eof_retires_healthy_generation_without_reply_timeout() -> None:
+    bridge = ZmqBridge()
+    request_id = "d" * 32
+    owner: Future[dict[str, object]] = Future()
+    bridge._pending[request_id] = owner
+    bridge._request_generation[request_id] = bridge._generation
+    bridge._request_bindings[request_id] = zmq_client._RequestBinding(
+        bridge._generation,
+        zmq_client.CommandClass.SAFE_DIRECTION,
+        "keithley_emergency_off",
+        "global",
+    )
+
+    class _LiveProcess:
+        exitcode = None
+
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    bridge._process = _LiveProcess()  # type: ignore[assignment]
+    bridge._process_started = True
+    bridge._reply_consumer = MagicMock(name="live_ordinary_consumer")
+    bridge._reply_consumer.is_alive.return_value = True
+    bridge._reply_consumer_started = True
+    bridge._safe_reply_consumer = MagicMock(name="live_safe_consumer")
+    bridge._safe_reply_consumer.is_alive.return_value = True
+    bridge._safe_reply_consumer_started = True
+    bridge._last_heartbeat = time.monotonic()
+    bridge._command_admission_open = True
+    bridge._reply_stop.clear()
+    assert bridge.is_alive() is True
+    assert bridge.is_healthy() is True
+
+    bridge._safe_reply_child_sender.close()
+    consumer = threading.Thread(target=bridge._consume_safe_replies, daemon=True)
+    bridge._safe_reply_consumer = consumer
+    started_at = time.monotonic()
+    consumer.start()
+    consumer.join(1.0)
+    elapsed = time.monotonic() - started_at
+
+    try:
+        assert elapsed < 1.0
+        assert consumer.is_alive() is False
+        assert bridge._command_admission_open is False
+        assert bridge._shutdown_event.is_set()
+        assert bridge.is_alive() is False
+        assert bridge.is_healthy() is False
+        assert bridge._generation_fatal is not None
+        assert bridge._generation_fatal.lane == "safe"
+        assert request_id not in bridge._pending
+        assert bridge._outcome_unknown[request_id] is owner
+        assert owner.result(timeout=0.1)["outcome_unknown"] is True
+    finally:
+        bridge._process = None
+        bridge._process_started = False
+        bridge._reply_consumer = None
+        bridge._reply_consumer_started = False
+        bridge._safe_reply_consumer = None
+        bridge._safe_reply_consumer_started = False
+        for endpoint in (
+            bridge._safe_cmd_queue,
+            bridge._safe_cmd_child_receiver,
+            bridge._safe_reply_queue,
+            bridge._safe_reply_child_sender,
+        ):
+            if endpoint is not None:
+                endpoint.close()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_real_safe_command_pipe_failure_retires_generation_and_retains_unknown_owner() -> None:
+    bridge = ZmqBridge()
+
+    class _LiveProcess:
+        exitcode = None
+
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    bridge._process = _LiveProcess()  # type: ignore[assignment]
+    bridge._process_started = True
+    bridge._reply_consumer = MagicMock(name="live_ordinary_consumer")
+    bridge._reply_consumer.is_alive.return_value = True
+    bridge._reply_consumer_started = True
+    bridge._safe_reply_consumer = MagicMock(name="live_safe_consumer")
+    bridge._safe_reply_consumer.is_alive.return_value = True
+    bridge._safe_reply_consumer_started = True
+    bridge._last_heartbeat = time.monotonic()
+    bridge._command_admission_open = True
+    bridge._reply_stop.clear()
+    assert bridge.is_alive() is True
+    assert bridge.is_healthy() is True
+
+    bridge._safe_cmd_child_receiver.close()
+    started_at = time.monotonic()
+    result = bridge.send_command({"cmd": "keithley_emergency_off"})
+    elapsed = time.monotonic() - started_at
+
+    try:
+        assert elapsed < 1.0
+        assert result["outcome_unknown"] is True
+        assert result["dispatched"] is True
+        request_id = result["request_id"]
+        assert bridge._command_admission_open is False
+        assert bridge._shutdown_event.is_set()
+        assert bridge.is_alive() is False
+        assert bridge.is_healthy() is False
+        assert bridge._generation_fatal is not None
+        assert bridge._generation_fatal.lane == "safe_command"
+        assert request_id in bridge._outcome_unknown
+    finally:
+        bridge._process = None
+        bridge._process_started = False
+        bridge._reply_consumer = None
+        bridge._reply_consumer_started = False
+        bridge._safe_reply_consumer = None
+        bridge._safe_reply_consumer_started = False
+        for endpoint in (
+            bridge._safe_cmd_queue,
+            bridge._safe_cmd_child_receiver,
+            bridge._safe_reply_queue,
+            bridge._safe_reply_child_sender,
+        ):
+            if endpoint is not None:
+                endpoint.close()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_shutdown_closes_admission_before_reply_consumers_observe_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = ZmqBridge()
+
+    class _LiveProcess:
+        exitcode = None
+
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    observations: list[bool] = []
+    real_stop = threading.Event()
+
+    class _ObservedStop:
+        def set(self) -> None:
+            observations.append(bridge._command_admission_open)
+            real_stop.set()
+
+        def is_set(self) -> bool:
+            return real_stop.is_set()
+
+        def clear(self) -> None:
+            real_stop.clear()
+
+    bridge._process = _LiveProcess()  # type: ignore[assignment]
+    bridge._process_started = True
+    bridge._reply_consumer = MagicMock(name="ordinary_consumer")
+    bridge._reply_consumer.is_alive.return_value = True
+    bridge._reply_consumer_started = True
+    bridge._safe_reply_consumer = MagicMock(name="safe_consumer")
+    bridge._safe_reply_consumer.is_alive.return_value = True
+    bridge._safe_reply_consumer_started = True
+    bridge._command_admission_open = True
+    bridge._reply_stop = _ObservedStop()  # type: ignore[assignment]
+    monkeypatch.setattr(bridge, "_settle_runtime_owners_locked", lambda **_kwargs: 0)
+
+    assert bridge.is_alive() is True
+    bridge.shutdown()
+
+    assert observations == [False]
+    assert bridge._command_admission_open is False
+    assert bridge.is_alive() is False
+
+
+def test_stop_set_defensively_rejects_dispatch_even_if_admission_flag_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = ZmqBridge()
+    cancelled = threading.Event()
+
+    class _DispatchProbe:
+        def __init__(self) -> None:
+            self.items: list[dict[str, object]] = []
+
+        def put(self, item, timeout=None) -> None:  # noqa: ANN001
+            del timeout
+            self.items.append(item)
+            cancelled.set()
+
+        def put_nowait(self, item) -> None:  # noqa: ANN001
+            self.put(item)
+
+    dispatch = _DispatchProbe()
+    bridge._cmd_queue = dispatch  # type: ignore[assignment]
+    bridge._command_admission_open = True
+    bridge._reply_stop.set()
+    monkeypatch.setattr(bridge, "is_alive", lambda: True)
+
+    result = bridge._send_command_once(
+        {"cmd": "safety_status"},
+        cancellation_requested=cancelled,
+    )
+
+    assert result["error_code"] == "bridge_lifecycle_retired"
+    assert result["delivery_state"] == "not_dispatched"
+    assert dispatch.items == []
+
+
+@pytest.mark.parametrize(
+    ("failure_owner", "failure_phase"),
+    [
+        ("process", "process start"),
+        ("zmq-reply-consumer", "ordinary reply consumer start"),
+        ("zmq-safe-reply-consumer", "safe reply consumer start"),
+    ],
+)
+def test_start_failure_rolls_back_every_started_owner_and_allows_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_owner: str,
+    failure_phase: str,
+) -> None:
+    bridge = ZmqBridge()
+    controller = SimpleNamespace(failure_owner=failure_owner)
+    processes: list[object] = []
+    consumers: list[object] = []
+
+    class _Process:
+        pid = 7319
+        exitcode: int | None = None
+
+        def __init__(self, *, args, **_kwargs) -> None:  # noqa: ANN001
+            self.shutdown_event = args[5]
+            self.started = False
+            self.alive = False
+            processes.append(self)
+
+        def start(self) -> None:
+            if controller.failure_owner == "process":
+                raise RuntimeError("process start failed")
+            self.started = True
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout=None) -> None:
+            del timeout
+            if not self.started:
+                raise AssertionError("never-started process must not be joined")
+            if self.shutdown_event.is_set():
+                self.alive = False
+                self.exitcode = 0
+
+        def terminate(self) -> None:
+            self.alive = False
+            self.exitcode = -15
+
+        def kill(self) -> None:
+            self.alive = False
+            self.exitcode = -9
+
+    class _Thread:
+        def __init__(self, *, name: str, **_kwargs) -> None:
+            self.name = name
+            self.started = False
+            self.alive = False
+            consumers.append(self)
+
+        def start(self) -> None:
+            if controller.failure_owner == self.name:
+                raise RuntimeError(f"{self.name} start failed")
+            self.started = True
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout=None) -> None:
+            del timeout
+            if self.started:
+                self.alive = False
+
+    monkeypatch.setattr(zmq_client.mp, "Process", _Process)
+    monkeypatch.setattr(zmq_client.threading, "Thread", _Thread)
+
+    try:
+        with pytest.raises(RuntimeError, match="startup failed"):
+            bridge.start()
+
+        assert bridge._command_admission_open is False
+        assert bridge._process is None
+        assert bridge._reply_consumer is None
+        assert bridge._safe_reply_consumer is None
+        assert all(not owner.alive for owner in [*processes, *consumers])
+        failed_generation = bridge._generation
+        assert bridge._generation_fatal == zmq_client._BridgeGenerationFatal(
+            failed_generation,
+            failure_phase,
+            "RuntimeError",
+        )
+
+        controller.failure_owner = None
+        bridge.start()
+        assert bridge._generation > failed_generation
+        assert bridge._generation_fatal is None
+        assert bridge._process is not None
+        assert bridge._reply_consumer is not None
+        assert bridge._safe_reply_consumer is not None
+        assert bridge._command_admission_open is True
+        bridge.shutdown()
+        assert bridge._process is None
+        assert bridge._reply_consumer is None
+        assert bridge._safe_reply_consumer is None
+    finally:
+        bridge._process = None
+        bridge._reply_consumer = None
+        bridge._safe_reply_consumer = None
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._safe_cmd_queue,
+            bridge._reply_queue,
+            bridge._safe_reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+@pytest.mark.parametrize(
+    ("command", "queue_name"),
+    [
+        ({"cmd": "protocol_version"}, "_cmd_queue"),
+        ({"cmd": "experiment_finalize"}, "_cmd_queue"),
+        ({"cmd": "keithley_emergency_off"}, "_safe_cmd_queue"),
+        (
+            {
+                "cmd": "launcher_shutdown",
+                "engine_instance_id": "a" * 32,
+                "request_id": "c" * 32,
+                "shutdown_capability": "b" * 64,
+            },
+            "_safe_cmd_queue",
+        ),
+    ],
+)
+def test_shutdown_admission_cut_rejects_every_command_before_retiring_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    command: dict[str, str],
+    queue_name: str,
+) -> None:
+    bridge = ZmqBridge()
+    monkeypatch.setattr(bridge, "is_alive", lambda: True)
+    bridge._mutation_receipt = {
+        "schema": "mutation_compatibility_v1",
+        "accepted": True,
+        "server_protocol_major": 1,
+        "required_capability": "cryodaq_mutation_v1",
+        "capability_token": "a" * 32,
+    }
+
+    join_entered = threading.Event()
+    allow_join = threading.Event()
+
+    class _BlockingConsumer:
+        def is_alive(self) -> bool:
+            return not allow_join.is_set()
+
+        def join(self, timeout: float) -> None:
+            join_entered.set()
+            assert allow_join.wait(timeout)
+
+    cancellation_requested = threading.Event()
+
+    class _RecordingQueue:
+        def __init__(self) -> None:
+            self.items: list[dict[str, object]] = []
+
+        def put(self, item: dict[str, object], timeout: float) -> None:
+            del timeout
+            self.items.append(item)
+            cancellation_requested.set()
+
+    bridge._reply_consumer = _BlockingConsumer()
+    bridge._reply_consumer_started = True
+    dispatch = _RecordingQueue()
+    setattr(bridge, queue_name, dispatch)
+    shutdown_error: list[BaseException] = []
+
+    def _shutdown() -> None:
+        try:
+            bridge.shutdown()
+        except BaseException as exc:
+            shutdown_error.append(exc)
+
+    shutdown_owner = threading.Thread(target=_shutdown, name="bridge-shutdown-owner")
+    shutdown_owner.start()
+    assert join_entered.wait(1.0)
+    try:
+        result = bridge.send_command(
+            command,
+            cancellation_requested=cancellation_requested,
+        )
+        assert result["ok"] is False
+        assert result["error_code"] == "bridge_lifecycle_retired"
+        assert result["dispatched"] is False
+        assert result["delivery_state"] == "not_dispatched"
+        assert result["commit_state"] == "not_committed"
+        assert dispatch.items == []
+    finally:
+        allow_join.set()
+        shutdown_owner.join(5.0)
+        assert not shutdown_owner.is_alive()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._safe_cmd_queue,
+            bridge._reply_queue,
+            bridge._safe_reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+    assert shutdown_error == []
+    assert bridge._pending == {}
+    assert bridge._outcome_unknown == {}
+
+
 def test_restart_settles_old_reply_consumer_before_queue_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bridge = ZmqBridge()
     bridge._last_snapshot_time = 123.0
+    bridge._bridge_instance_id = "e" * 32
     assert bridge.bridge_instance_id is not None
     close_attempted = threading.Event()
 
@@ -221,6 +935,7 @@ def test_restart_settles_old_reply_consumer_before_queue_replacement(
     consumer = threading.Thread(target=bridge._consume_replies, daemon=True)
     bridge._reply_consumer = consumer
     consumer.start()
+    bridge._reply_consumer_started = True
     assert old_queue.entered.wait(1.0)
 
     real_join = consumer.join
@@ -233,7 +948,7 @@ def test_restart_settles_old_reply_consumer_before_queue_replacement(
     )
 
     try:
-        with pytest.raises(RuntimeError, match="reply consumer.*settle"):
+        with pytest.raises(RuntimeError, match="ordinary reply consumer remained alive after join"):
             bridge.start()
         assert bridge._last_snapshot_time == 0.0
         assert bridge.bridge_instance_id is None
@@ -245,6 +960,391 @@ def test_restart_settles_old_reply_consumer_before_queue_replacement(
         old_queue.release.set()
         real_join(1.0)
         assert not consumer.is_alive()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._safe_cmd_queue,
+            bridge._reply_queue,
+            bridge._safe_reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+@pytest.mark.parametrize(
+    ("attribute", "drain_before_close", "task_done"),
+    [
+        ("_snapshot_queue", True, True),
+        ("_data_queue", True, False),
+        ("_cmd_queue", True, False),
+        ("_reply_queue", False, False),
+    ],
+    ids=["snapshot", "data", "command", "reply"],
+)
+def test_restart_queue_close_failure_preserves_exact_owner_for_retry(
+    attribute: str,
+    drain_before_close: bool,
+    task_done: bool,
+) -> None:
+    bridge = ZmqBridge()
+    original = getattr(bridge, attribute)
+
+    class _RetryCloseQueue:
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self.cancel_calls = 0
+            self.join_calls = 0
+            self.fail_close = True
+
+        @staticmethod
+        def get_nowait():  # noqa: ANN205
+            raise queue.Empty
+
+        def cancel_join_thread(self) -> None:
+            self.cancel_calls += 1
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.fail_close:
+                raise OSError("retired queue close failed")
+
+        def join_thread(self) -> None:
+            self.join_calls += 1
+
+    retired = _RetryCloseQueue()
+    setattr(bridge, attribute, retired)
+    try:
+        with pytest.raises(OSError, match="retired queue close failed"):
+            bridge._close_retired_mp_queue_locked(
+                attribute,
+                drain_before_close=drain_before_close,
+                task_done=task_done,
+            )
+
+        assert getattr(bridge, attribute) is retired
+        assert attribute not in bridge._restart_queue_closure_proofs
+        assert retired.close_calls == 1
+
+        retired.fail_close = False
+        bridge._close_retired_mp_queue_locked(
+            attribute,
+            drain_before_close=drain_before_close,
+            task_done=task_done,
+        )
+
+        assert getattr(bridge, attribute) is retired
+        assert attribute in bridge._restart_queue_closure_proofs
+        assert retired.close_calls == 2
+        assert retired.cancel_calls == 0
+        assert retired.join_calls == 1
+    finally:
+        setattr(bridge, attribute, original)
+        for endpoint in (
+            bridge._safe_cmd_queue,
+            bridge._safe_cmd_child_receiver,
+            bridge._safe_reply_queue,
+            bridge._safe_reply_child_sender,
+        ):
+            if endpoint is not None:
+                with contextlib.suppress(Exception):
+                    endpoint.close()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_restart_refuses_replacement_until_retired_queue_feeder_is_terminal() -> None:
+    bridge = ZmqBridge()
+    attribute = "_cmd_queue"
+    original = getattr(bridge, attribute)
+    release = threading.Event()
+    feeder = threading.Thread(target=release.wait, name="retired-command-feeder")
+    feeder.start()
+
+    class _OwnedQueue:
+        def __init__(self) -> None:
+            self._thread = feeder
+            self.close_calls = 0
+            self.join_calls = 0
+
+        @staticmethod
+        def get_nowait():  # noqa: ANN205
+            raise queue.Empty
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+        def join_thread(self) -> None:
+            self.join_calls += 1
+
+    retired = _OwnedQueue()
+    setattr(bridge, attribute, retired)
+    try:
+        with pytest.raises(RuntimeError, match="queue feeder remained alive"):
+            bridge._close_retired_mp_queue_locked(
+                attribute,
+                drain_before_close=True,
+            )
+
+        assert getattr(bridge, attribute) is retired
+        assert attribute not in bridge._restart_queue_closure_proofs
+        assert retired.close_calls == 1
+        assert retired.join_calls == 0
+
+        release.set()
+        feeder.join(timeout=1.0)
+        assert not feeder.is_alive()
+        bridge._close_retired_mp_queue_locked(
+            attribute,
+            drain_before_close=True,
+        )
+        assert attribute in bridge._restart_queue_closure_proofs
+        assert retired.close_calls == 2
+        assert retired.join_calls == 1
+    finally:
+        release.set()
+        feeder.join(timeout=1.0)
+        setattr(bridge, attribute, original)
+        for endpoint in (
+            bridge._safe_cmd_queue,
+            bridge._safe_cmd_child_receiver,
+            bridge._safe_reply_queue,
+            bridge._safe_reply_child_sender,
+        ):
+            if endpoint is not None:
+                with contextlib.suppress(Exception):
+                    endpoint.close()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_cause"),
+    [
+        pytest.param("noncallable_join", TypeError, id="noncallable-join"),
+        pytest.param("noncallable_is_alive", TypeError, id="noncallable-is-alive"),
+        pytest.param("non_boolean_is_alive", RuntimeError, id="non-boolean-is-alive"),
+        pytest.param("noncallable_join_thread", TypeError, id="noncallable-join-thread"),
+    ],
+)
+def test_restart_candidate_owner_is_retained_until_terminal_proof_succeeds(
+    failure: str,
+    expected_cause: type[BaseException],
+) -> None:
+    bridge = ZmqBridge()
+    attribute = "_cmd_queue"
+    candidate = _QueueTerminalProofProbe()
+    candidate.invalidate_terminal_proof(failure)
+    bridge._restart_queue_candidates[attribute] = candidate
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match=r"replacement candidate cleanup incomplete: _cmd_queue:(TypeError|RuntimeError)",
+        ) as raised:
+            bridge._settle_restart_candidates_locked()
+
+        assert isinstance(raised.value.__cause__, expected_cause)
+        assert bridge._restart_queue_candidates[attribute] is candidate
+        assert candidate.close_calls == 1
+        assert candidate.join_thread_calls == 0
+
+        candidate.repair_terminal_proof()
+        bridge._settle_restart_candidates_locked()
+
+        assert attribute not in bridge._restart_queue_candidates
+        assert candidate.close_calls == 2
+        assert candidate.join_thread_calls == 1
+        assert candidate._thread.is_alive() is False
+    finally:
+        bridge._restart_queue_candidates.clear()
+        for endpoint in (
+            bridge._safe_cmd_queue,
+            bridge._safe_cmd_child_receiver,
+            bridge._safe_reply_queue,
+            bridge._safe_reply_child_sender,
+        ):
+            if endpoint is not None:
+                with contextlib.suppress(Exception):
+                    endpoint.close()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        pytest.param("noncallable_join", TypeError, id="noncallable-join"),
+        pytest.param("noncallable_is_alive", TypeError, id="noncallable-is-alive"),
+        pytest.param("non_boolean_is_alive", RuntimeError, id="non-boolean-is-alive"),
+        pytest.param("noncallable_join_thread", TypeError, id="noncallable-join-thread"),
+    ],
+)
+def test_terminal_queue_is_not_marked_joined_until_terminal_proof_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_error: type[BaseException],
+) -> None:
+    bridge = ZmqBridge()
+    queue_attributes = (
+        "_data_queue",
+        "_cmd_queue",
+        "_safe_cmd_queue",
+        "_reply_queue",
+        "_safe_reply_queue",
+        "_snapshot_queue",
+    )
+    originals = {attribute: getattr(bridge, attribute) for attribute in queue_attributes}
+    terminal_queues = {attribute: _QueueTerminalProofProbe() for attribute in queue_attributes}
+    for attribute, terminal_queue in terminal_queues.items():
+        setattr(bridge, attribute, terminal_queue)
+    failing_queue = terminal_queues["_data_queue"]
+    failing_queue.invalidate_terminal_proof(failure)
+    monkeypatch.setattr(bridge, "shutdown", lambda: None)
+
+    try:
+        with pytest.raises(expected_error):
+            bridge.close()
+
+        assert bridge._terminal_closed is False
+        assert bridge._terminal_queues_closed == {"data"}
+        assert bridge._terminal_queues_joined == set()
+        assert bridge._data_queue is failing_queue
+        assert failing_queue.close_calls == 1
+        assert failing_queue.join_thread_calls == 0
+
+        failing_queue.repair_terminal_proof()
+        bridge.close()
+
+        expected_names = {
+            "data",
+            "command",
+            "safe_command",
+            "reply",
+            "safe_reply",
+            "snapshot",
+        }
+        assert bridge._terminal_closed is True
+        assert bridge._terminal_queues_closed == expected_names
+        assert bridge._terminal_queues_joined == expected_names
+        assert failing_queue.close_calls == 1
+        assert failing_queue.join_thread_calls == 1
+        assert all(
+            getattr(bridge, attribute) is terminal_queue for attribute, terminal_queue in terminal_queues.items()
+        )
+    finally:
+        for attribute, original in originals.items():
+            setattr(bridge, attribute, original)
+        for endpoint in (
+            bridge._safe_cmd_queue,
+            bridge._safe_cmd_child_receiver,
+            bridge._safe_reply_queue,
+            bridge._safe_reply_child_sender,
+        ):
+            if endpoint is not None:
+                with contextlib.suppress(Exception):
+                    endpoint.close()
+        for owned_queue in (
+            bridge._data_queue,
+            bridge._cmd_queue,
+            bridge._reply_queue,
+            bridge._snapshot_queue,
+        ):
+            with contextlib.suppress(Exception):
+                owned_queue.cancel_join_thread()
+            with contextlib.suppress(Exception):
+                owned_queue.close()
+
+
+def test_partial_safe_ipc_construction_owner_is_retained_until_retry_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.core.safe_command_ipc import SafeIpcConstructionError
+
+    bridge = ZmqBridge()
+    live_bundle = {
+        attribute: getattr(bridge, attribute)
+        for attribute in (
+            "_snapshot_queue",
+            "_data_queue",
+            "_cmd_queue",
+            "_reply_queue",
+            "_safe_cmd_queue",
+            "_safe_reply_queue",
+        )
+    }
+
+    class _RetryEndpoint:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise OSError("partial endpoint close failed")
+
+    retained = _RetryEndpoint()
+    construction_error = SafeIpcConstructionError(
+        "partial safe IPC construction",
+        (retained,),
+    )
+
+    def _fail_safe_ipc(_capacity: int):
+        raise construction_error
+
+    monkeypatch.setattr(zmq_client, "create_safe_command_ipc", _fail_safe_ipc)
+    try:
+        with pytest.raises(RuntimeError, match="construction and cleanup failed"):
+            bridge._construct_and_install_restart_bundle_locked()
+
+        assert bridge._restart_safe_ipc_construction_failure is construction_error
+        assert construction_error.retained_endpoints == (retained,)
+        assert retained.close_calls == 1
+        assert bridge._restart_queue_candidates == {}
+        assert all(getattr(bridge, attribute) is owner for attribute, owner in live_bundle.items())
+
+        bridge._settle_restart_candidates_locked()
+
+        assert retained.close_calls == 2
+        assert construction_error.retained_endpoints == ()
+        assert bridge._restart_safe_ipc_construction_failure is None
+        assert all(getattr(bridge, attribute) is owner for attribute, owner in live_bundle.items())
+    finally:
+        for endpoint in (
+            bridge._safe_cmd_queue,
+            bridge._safe_cmd_child_receiver,
+            bridge._safe_reply_queue,
+            bridge._safe_reply_child_sender,
+        ):
+            if endpoint is not None:
+                with contextlib.suppress(Exception):
+                    endpoint.close()
         for owned_queue in (
             bridge._data_queue,
             bridge._cmd_queue,
@@ -266,6 +1366,20 @@ def test_shutdown_drains_reply_emitted_during_terminal_child_join() -> None:
     owner: Future = Future()
     bridge._pending[request_id] = owner
     bridge._request_generation[request_id] = generation
+    bridge._request_bindings[request_id] = zmq_client._RequestBinding(
+        generation,
+        zmq_client.CommandClass.MUTATION,
+        "experiment_abort",
+    )
+    read_request_id = "retired-read"
+    read_owner: Future = Future()
+    bridge._pending[read_request_id] = read_owner
+    bridge._request_generation[read_request_id] = generation
+    bridge._request_bindings[read_request_id] = zmq_client._RequestBinding(
+        generation,
+        zmq_client.CommandClass.READ,
+        "protocol_version",
+    )
 
     class TerminalProcess:
         exitcode = 0
@@ -278,24 +1392,64 @@ def test_shutdown_drains_reply_emitted_during_terminal_child_join() -> None:
             return False
 
     bridge._process = TerminalProcess()
+    bridge._process_started = True
     bridge.shutdown()
 
     result = bridge.reconcile_late_result(request_id, generation=generation)
     assert result is not None
     assert result.reply == {"ok": True, "settled": "terminal"}
+    read_result = read_owner.result(timeout=1.0)
+    assert read_result["outcome_unknown"] is False
+    assert read_result["commit_state"] == "not_applicable"
+    assert read_result["retry_safe"] is True
+    assert read_request_id not in bridge._pending
+    assert read_request_id not in bridge._outcome_unknown
+    assert read_request_id not in bridge._request_generation
+    assert read_request_id not in bridge._request_bindings
 
 
 def test_restart_routes_reply_arriving_during_retired_queue_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bridge = ZmqBridge()
-    retired_reply_queue: queue.Queue = queue.Queue()
+
+    class _CloseableReplyQueue(queue.Queue):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancelled_join = False
+            self.joined = False
+            self.closed = False
+
+        def cancel_join_thread(self) -> None:
+            self.cancelled_join = True
+
+        def close(self) -> None:
+            self.closed = True
+
+        def join_thread(self) -> None:
+            self.joined = True
+
+    retired_reply_queue = _CloseableReplyQueue()
     bridge._reply_queue = retired_reply_queue
     request_id = "between-drains"
     generation = bridge._generation
     owner: Future = Future()
     bridge._pending[request_id] = owner
     bridge._request_generation[request_id] = generation
+    bridge._request_bindings[request_id] = zmq_client._RequestBinding(
+        generation,
+        zmq_client.CommandClass.MUTATION,
+        "experiment_abort",
+    )
+    read_request_id = "restart-retired-read"
+    read_owner: Future = Future()
+    bridge._pending[read_request_id] = read_owner
+    bridge._request_generation[read_request_id] = generation
+    bridge._request_bindings[read_request_id] = zmq_client._RequestBinding(
+        generation,
+        zmq_client.CommandClass.READ,
+        "protocol_version",
+    )
 
     class TriggerQueue:
         def __init__(self) -> None:
@@ -311,6 +1465,9 @@ def test_restart_routes_reply_arriving_during_retired_queue_settlement(
             pass
 
         def close(self) -> None:
+            pass
+
+        def join_thread(self) -> None:
             pass
 
     class FakeProcess:
@@ -349,16 +1506,35 @@ def test_restart_routes_reply_arriving_during_retired_queue_settlement(
         assert replacement["request_id"] == request_id
         assert replacement["generation"] == generation
         assert replacement["outcome_unknown"] is True
+        read_replacement = read_owner.result(timeout=1.0)
+        assert read_replacement["request_id"] == read_request_id
+        assert read_replacement["generation"] == generation
+        assert read_replacement["outcome_unknown"] is False
+        assert read_replacement["commit_state"] == "not_applicable"
+        assert read_replacement["retry_safe"] is True
+        assert read_request_id not in bridge._pending
+        assert read_request_id not in bridge._outcome_unknown
+        assert read_request_id not in bridge._request_generation
+        assert read_request_id not in bridge._request_bindings
         result = bridge.reconcile_late_result(request_id, generation=generation)
         assert result is not None
         assert result.reply == {"ok": True, "settled": "during-retirement"}
+        assert request_id not in bridge._request_bindings
+        assert retired_reply_queue.cancelled_join is False
+        assert retired_reply_queue.joined is True
+        assert retired_reply_queue.closed is True
+        assert bridge._reply_queue is not retired_reply_queue
     finally:
         if bridge._reply_consumer is not None:
             bridge._reply_consumer.join()
+        if bridge._safe_reply_consumer is not None:
+            bridge._safe_reply_consumer.join()
         for owned_queue in (
             bridge._data_queue,
             bridge._cmd_queue,
+            bridge._safe_cmd_queue,
             bridge._reply_queue,
+            bridge._safe_reply_queue,
             bridge._snapshot_queue,
         ):
             with contextlib.suppress(Exception):
@@ -379,8 +1555,9 @@ def test_shutdown_fails_closed_when_reply_consumer_does_not_settle() -> None:
             del timeout
 
     bridge._reply_consumer = BlockingConsumer()
+    bridge._reply_consumer_started = True
 
-    with pytest.raises(RuntimeError, match="reply consumer.*settle"):
+    with pytest.raises(RuntimeError, match="reply consumer remained alive after join"):
         bridge.shutdown()
 
     assert bridge._last_snapshot_time == 0.0
@@ -389,7 +1566,9 @@ def test_shutdown_fails_closed_when_reply_consumer_does_not_settle() -> None:
     for owned_queue in (
         bridge._data_queue,
         bridge._cmd_queue,
+        bridge._safe_cmd_queue,
         bridge._reply_queue,
+        bridge._safe_reply_queue,
         bridge._snapshot_queue,
     ):
         with contextlib.suppress(Exception):
@@ -447,6 +1626,7 @@ def test_application_close_settles_all_real_qthreads(
     from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 
     app = QApplication.instance() or QApplication([])
+    session_epoch = zmq_client.open_gui_command_worker_admission()
     window = MainWindowV2()
     nested_owner = QObject(window)
     deferred_owner = QObject(window)
@@ -492,6 +1672,7 @@ def test_application_close_settles_all_real_qthreads(
     deferred_owner.deleteLater()
 
     try:
+        zmq_client.revoke_gui_command_worker_admission(session_epoch)
         window.close()
         app.processEvents()
         assert not window.isVisible()
@@ -510,6 +1691,8 @@ def test_application_close_settles_all_real_qthreads(
         assert not isValid(window)
         assert all(not isValid(worker) for worker in workers)
     finally:
+        if zmq_client.gui_command_worker_admission_open():
+            zmq_client.revoke_gui_command_worker_admission(session_epoch)
         for worker in workers:
             if isValid(worker) and worker.isRunning():
                 worker.requestInterruption()

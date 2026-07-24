@@ -139,8 +139,13 @@ def _events_until(predicate, *, timeout_s: float = 1.0) -> None:
     assert predicate()
 
 
+def test_owner_requires_explicit_snapshot_mode_authority(qapp) -> None:
+    with pytest.raises(TypeError, match="expected_mode"):
+        OperatorSnapshotIngressOwner(_Bridge())  # type: ignore[call-arg]
+
+
 def test_owner_constructs_exactly_one_store_and_direct_slot_accepts_complete_cut(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     assert type(owner._store) is OperatorSnapshotStore
     assert not hasattr(owner, "store")
     owner.start()
@@ -157,7 +162,7 @@ def test_pump_crosses_queued_signal_and_applies_only_on_gui_thread(qapp) -> None
     bridge = _Bridge()
     bridge.snapshots = [_snapshot(1)]
     bridge.age = 0.25
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
     applied_threads: list[QThread] = []
     owner.snapshot_changed.connect(lambda _snapshot: applied_threads.append(QThread.currentThread()))
     owner.start()
@@ -177,7 +182,7 @@ def test_new_cut_and_stale_transport_emit_once_as_one_atomic_presentation(qapp) 
     bridge = _Bridge()
     bridge.snapshots = [_snapshot(1)]
     bridge.age = 6.0
-    owner = OperatorSnapshotIngressOwner(bridge, stale_after_s=5)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE, stale_after_s=5)
     emitted: list[OperatorSnapshot] = []
     owner.snapshot_changed.connect(emitted.append)
     owner.start()
@@ -197,7 +202,7 @@ def test_two_queued_cuts_coalesce_to_one_newest_qualified_revision(qapp) -> None
     bridge = _Bridge()
     bridge.snapshots = [_snapshot(1), _snapshot(2)]
     bridge.age = 0.2
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
     emitted: list[OperatorSnapshot] = []
     owner.snapshot_changed.connect(emitted.append)
     owner.start()
@@ -213,7 +218,7 @@ def test_two_queued_cuts_coalesce_to_one_newest_qualified_revision(qapp) -> None
 def test_invalid_member_quarantines_the_entire_drained_batch_before_replacement(qapp) -> None:
     bridge = _Bridge()
     bridge.age = 0.2
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
     bridge.snapshots = [_snapshot(2), {"not": "a snapshot"}]
@@ -228,7 +233,7 @@ def test_invalid_member_quarantines_the_entire_drained_batch_before_replacement(
 
 
 def test_mixed_identity_batch_is_quarantined_atomically(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1, producer_id="engine-a"))
 
@@ -249,7 +254,7 @@ def test_mixed_identity_batch_is_quarantined_atomically(qapp) -> None:
 
 
 def test_wrong_thread_direct_mutation_rejected_but_signal_delivery_is_queued(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     errors: list[BaseException] = []
 
@@ -275,7 +280,7 @@ def test_wrong_thread_direct_mutation_rejected_but_signal_delivery_is_queued(qap
 def test_restart_invalidation_discards_queued_old_epoch_and_degrades_current_cut(qapp) -> None:
     bridge = _Bridge()
     bridge.age = 0.1
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
     owner._apply_transport(owner._epoch)
@@ -298,7 +303,7 @@ def test_restart_invalidation_discards_queued_old_epoch_and_degrades_current_cut
 
 
 def test_bridge_only_restart_still_rejects_foreign_engine_producer(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1, producer_id="engine-a"))
 
@@ -313,7 +318,7 @@ def test_bridge_only_restart_still_rejects_foreign_engine_producer(qapp) -> None
 
 
 def test_explicit_engine_replacement_accepts_new_and_never_resurrects_retired_producer(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(7, producer_id="engine-a"))
 
@@ -334,7 +339,7 @@ def test_explicit_engine_replacement_accepts_new_and_never_resurrects_retired_pr
 
 def test_stale_and_disconnected_health_are_snapshot_only_and_never_restart(qapp) -> None:
     bridge = _Bridge()
-    owner = OperatorSnapshotIngressOwner(bridge, stale_after_s=5)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE, stale_after_s=5)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
 
@@ -355,7 +360,7 @@ def test_stale_and_disconnected_health_are_snapshot_only_and_never_restart(qapp)
 
 
 def test_nonmonotonic_or_wrong_type_candidate_rejects_and_fails_closed(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(2, received_at=NOW + timedelta(seconds=99)))
 
@@ -370,7 +375,7 @@ def test_nonmonotonic_or_wrong_type_candidate_rejects_and_fails_closed(qapp) -> 
 
 
 def test_identical_duplicate_revision_is_idempotent_without_authority_flap(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     original = _snapshot(2)
     assert owner._apply_snapshot(owner._epoch, original) is True
@@ -386,7 +391,7 @@ def test_identical_duplicate_revision_is_idempotent_without_authority_flap(qapp)
 
 
 def test_same_revision_equivocation_rejects_and_fails_closed(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     assert owner._apply_snapshot(owner._epoch, _snapshot(2)) is True
 
@@ -400,45 +405,66 @@ def test_same_revision_equivocation_rejects_and_fails_closed(qapp) -> None:
     assert all("transport_disconnected" in summary.transport_reason_codes for summary in owner.snapshot.summaries())
 
 
-def test_source_and_mode_transitions_preserve_store_protocol_authority(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+def test_opposite_mode_high_revision_is_quarantined_without_poisoning_high_water(qapp) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     live_a = _snapshot(1, source="live/a")
     replay = _snapshot(
-        2,
+        99,
         source="replay/session-a",
         mode=SnapshotMode.REPLAY,
         observed_at=NOW - timedelta(days=1),
     )
     live_b = _snapshot(
-        3,
+        2,
         source="live/b",
         observed_at=NOW + timedelta(seconds=1),
         producer_id="live/a",
     )
 
-    for snapshot in (live_a, replay, live_b):
-        owner._apply_snapshot(owner._epoch, snapshot)
+    assert owner._apply_snapshot(owner._epoch, live_a) is True
+    assert owner._apply_snapshot(owner._epoch, replay) is False
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.revision == 1
+    assert all("transport_disconnected" in summary.transport_reason_codes for summary in owner.snapshot.summaries())
+    assert owner._apply_snapshot(owner._epoch, live_b) is True
 
-    assert owner.accepted_count == 3
+    assert owner.accepted_count == 2
+    assert owner.rejected_count == 1
     assert owner.snapshot is not None
     assert owner.snapshot.cut.source == "live/b"
     assert owner.snapshot.cut.mode is SnapshotMode.LIVE
 
-    regressed_live_b = _snapshot(
-        4,
-        source="live/b",
-        observed_at=NOW,
-        received_at=NOW + timedelta(seconds=5),
-        producer_id="live/a",
-    )
-    owner._apply_snapshot(owner._epoch, regressed_live_b)
+
+@pytest.mark.parametrize(
+    ("expected_mode", "opposite_mode"),
+    [
+        (SnapshotMode.LIVE, SnapshotMode.REPLAY),
+        (SnapshotMode.REPLAY, SnapshotMode.LIVE),
+    ],
+)
+def test_opposite_mode_batch_is_rejected_before_store_acceptance(
+    qapp,
+    expected_mode: SnapshotMode,
+    opposite_mode: SnapshotMode,
+) -> None:
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=expected_mode)
+    owner.start()
+    expected = _snapshot(1, mode=expected_mode)
+    opposite = _snapshot(999, mode=opposite_mode)
+
+    owner._apply_snapshot_batch(owner._epoch, (expected, opposite))
+
+    assert owner.accepted_count == 0
     assert owner.rejected_count == 1
-    assert owner.snapshot.cut.revision == 3
+    assert owner.snapshot is None
+    assert owner._apply_snapshot(owner._epoch, expected) is True
+    assert owner.snapshot is not None
+    assert owner.snapshot.cut.mode is expected_mode
 
 
 def test_foreign_live_producer_is_quarantined_without_replacing_current_truth(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1, producer_id="engine-a"))
     owner._apply_snapshot(owner._epoch, _snapshot(2, producer_id="engine-b"))
@@ -452,7 +478,7 @@ def test_foreign_live_producer_is_quarantined_without_replacing_current_truth(qa
 
 def test_stop_cancels_queued_epoch_drains_bridge_and_leaves_store_disconnected(qapp) -> None:
     bridge = _Bridge()
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
     owner._snapshot_queued.emit(owner._epoch, (_snapshot(2),))
@@ -470,7 +496,7 @@ def test_stop_cancels_queued_epoch_drains_bridge_and_leaves_store_disconnected(q
 
 
 def test_malformed_old_epoch_after_stop_has_zero_side_effects(qapp) -> None:
-    owner = OperatorSnapshotIngressOwner(_Bridge())
+    owner = OperatorSnapshotIngressOwner(_Bridge(), expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
     old_epoch = owner._epoch
@@ -497,7 +523,7 @@ def test_malformed_old_epoch_after_stop_has_zero_side_effects(qapp) -> None:
 
 def test_stop_failure_keeps_owner_active_and_epoch_current(qapp, monkeypatch) -> None:
     bridge = _Bridge()
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
     epoch = owner._epoch
@@ -518,7 +544,7 @@ def test_stop_failure_keeps_owner_active_and_epoch_current(qapp, monkeypatch) ->
 def test_cold_start_and_inactive_pump_never_synthesize_backend_truth(qapp) -> None:
     bridge = _Bridge()
     bridge.snapshots = [_snapshot(1)]
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
 
     owner.pump()
 
@@ -529,7 +555,7 @@ def test_cold_start_and_inactive_pump_never_synthesize_backend_truth(qapp) -> No
 
 def test_queue_or_health_failure_only_degrades_presentation_and_never_restarts(qapp) -> None:
     bridge = _Bridge()
-    owner = OperatorSnapshotIngressOwner(bridge)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=SnapshotMode.LIVE)
     owner.start()
     owner._apply_snapshot(owner._epoch, _snapshot(1))
 
@@ -548,7 +574,11 @@ def test_queue_or_health_failure_only_degrades_presentation_and_never_restarts(q
 @pytest.mark.parametrize("threshold", [0, -1, True, float("nan"), float("inf"), "5"])
 def test_stale_threshold_is_exact_finite_and_positive(qapp, threshold: Any) -> None:
     with pytest.raises((TypeError, ValueError)):
-        OperatorSnapshotIngressOwner(_Bridge(), stale_after_s=threshold)
+        OperatorSnapshotIngressOwner(
+            _Bridge(),
+            expected_mode=SnapshotMode.LIVE,
+            stale_after_s=threshold,
+        )
 
 
 def test_app_composition_root_has_one_owner_and_visible_pod_cutover() -> None:
@@ -559,6 +589,7 @@ def test_app_composition_root_has_one_owner_and_visible_pod_cutover() -> None:
     app_source = app_path.read_text(encoding="utf-8")
     launcher_source = launcher_path.read_text(encoding="utf-8")
     app_tree = ast.parse(app_source)
+    launcher_tree = ast.parse(launcher_source)
     owner_tree = ast.parse(owner_path.read_text(encoding="utf-8"))
 
     compositions = [
@@ -569,7 +600,34 @@ def test_app_composition_root_has_one_owner_and_visible_pod_cutover() -> None:
         and node.func.id == "start_operator_snapshot_ingress"
     ]
     assert len(compositions) == 1
-    assert "start_operator_snapshot_ingress(self._bridge, self._main_window)" in launcher_source
+    app_composition = compositions[0]
+    assert len(app_composition.args) == 2
+    assert {keyword.arg for keyword in app_composition.keywords} == {"anchor", "expected_mode"}
+    app_mode = next(keyword.value for keyword in app_composition.keywords if keyword.arg == "expected_mode")
+    assert ast.unparse(app_mode) == "SnapshotMode.LIVE"
+    launcher_compositions = [
+        node
+        for node in ast.walk(launcher_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "start_operator_snapshot_ingress"
+    ]
+    assert len(launcher_compositions) == 1
+    launcher_composition = launcher_compositions[0]
+    assert len(launcher_composition.args) == 2
+    assert {keyword.arg for keyword in launcher_composition.keywords} == {"anchor", "expected_mode"}
+    launcher_mode = next(keyword.value for keyword in launcher_composition.keywords if keyword.arg == "expected_mode")
+    assert ast.unparse(launcher_mode) == (
+        "SnapshotMode.REPLAY if self._replay_source is not None else SnapshotMode.LIVE"
+    )
+    anchor = next(keyword.value for keyword in launcher_composition.keywords if keyword.arg == "anchor")
+    assert isinstance(anchor, ast.Lambda)
+    assert isinstance(anchor.body, ast.Call)
+    assert isinstance(anchor.body.func, ast.Name)
+    assert anchor.body.func.id == "setattr"
+    assert len(anchor.body.args) == 3
+    assert isinstance(anchor.body.args[1], ast.Constant)
+    assert anchor.body.args[1].value == "_snapshot_ingress"
     assert "OperatorSnapshotStore" not in app_source
     imports = {
         node.module for node in ast.walk(owner_tree) if isinstance(node, ast.ImportFrom) and node.module is not None
@@ -605,7 +663,11 @@ def test_shared_launch_composition_pumps_newest_typed_cut_once(qapp) -> None:
     bridge = _Bridge()
     bridge.snapshots = [_snapshot(1), _snapshot(2)]
     window = Window()
-    owner = start_operator_snapshot_ingress(bridge, window)
+    owner = start_operator_snapshot_ingress(
+        bridge,
+        window,
+        expected_mode=SnapshotMode.LIVE,
+    )
 
     owner.pump()
     _events_until(lambda: owner.snapshot is not None)

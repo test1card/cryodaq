@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -63,7 +64,11 @@ from cryodaq.gui.state.descriptor_store import (
     IdentityStatus,
     IngestResult,
 )
-from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.gui.zmq_client import (
+    ZmqBridge,
+    gui_command_worker_admission_open,
+    settle_registered_gui_command_workers,
+)
 from cryodaq.operator_snapshot import (
     OperatorPresentationState,
     OperatorSnapshot,
@@ -74,8 +79,7 @@ from cryodaq.operator_snapshot import (
 
 logger = logging.getLogger(__name__)
 
-_SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
-_SAFETY_REASON_MAX_CHARS = 120
+_LEGACY_SAFETY_READY_STATES = frozenset({SafetyLifecycle.READY.value})
 _DISK_FUTURE_TOLERANCE_S = 5.0
 _DISK_MAX_SOURCE_AGE_S = 600.0
 _SAFETY_FUTURE_TOLERANCE_S = 5.0
@@ -96,34 +100,6 @@ def _is_manifest_cold_stage_descriptor(descriptor: ChannelDescriptorV1) -> bool:
     )
 
 
-def _map_safety_state(state: str | None, reason: str) -> tuple[bool, str]:
-    """Translate engine safety state + reason into the Keithley overlay's
-    (ready, reason_text) gate input. Pure function; testable in isolation.
-
-    - Ready states (``ready`` / ``run_permitted`` / ``running``) return
-      ``(True, "")`` — normal control allowed.
-    - Blocked states return ``(False, reason_or_state_name)``. The engine's
-      free-form reason text (e.g. ``"Interlock 'vacuum_lost' tripped: ..."``)
-      is preferred; falls back to the state name when no reason is published.
-    """
-
-    if state in _SAFETY_READY_STATES:
-        return True, ""
-    fallback = state if state else "unknown"
-    text = reason.strip()
-    if not text:
-        text = fallback
-    if len(text) > _SAFETY_REASON_MAX_CHARS:
-        logger.warning(
-            "Safety reason truncated from %d to %d chars: %s",
-            len(text),
-            _SAFETY_REASON_MAX_CHARS,
-            text[:_SAFETY_REASON_MAX_CHARS],
-        )
-        text = text[:_SAFETY_REASON_MAX_CHARS] + "…"
-    return False, text
-
-
 class MainWindowV2(QMainWindow):
     """New shell-based main window for CryoDAQ."""
 
@@ -137,11 +113,22 @@ class MainWindowV2(QMainWindow):
         embedded: bool = False,
         subscriber: Any | None = None,
         replay_mode: bool = False,
+        owner_anchor: Callable[[MainWindowV2], None] | None = None,
+        shutdown_request: Callable[[], Any] | None = None,
     ) -> None:
+        if type(replay_mode) is not bool:
+            raise TypeError("replay_mode must be an exact bool")
         super().__init__(parent)
+        self._shutting_down = False
+        self._root_shutdown_request = shutdown_request
         self._bridge = bridge
         self._embedded = embedded
-        self._replay_mode = bool(replay_mode)
+        self._replay_mode = replay_mode
+        self._status_timer: QTimer | None = None
+        self._annunciation_controller: AnnunciationController | None = None
+        self._create_exp_worker: Any | None = None
+        if owner_anchor is not None:
+            owner_anchor(self)
         self._start_time = time.monotonic()
         self._reading_count = 0
         self._rate_count = 0
@@ -203,7 +190,7 @@ class MainWindowV2(QMainWindow):
         self._overview_panel.set_read_only(self._replay_mode)
         self._overview_panel.set_connected(False)
         self._operator_display = OperatorDisplay()
-        self._alarm_panel = AlarmPanel()
+        self._alarm_panel = AlarmPanel(live_authority=not self._replay_mode)
         self._alarm_panel.set_read_only(self._replay_mode)
         # Lazy panel slots — populated on first overlay open
         self._experiment_overlay: ExperimentOverlay | None = None
@@ -240,7 +227,8 @@ class MainWindowV2(QMainWindow):
         self._bottom_bar = BottomStatusBar()
         # The only in-shell owner of engine annunciation sound.  Launcher
         # process-death sound remains deliberately separate.
-        self._annunciation_controller = AnnunciationController(self)
+        if not self._replay_mode:
+            self._annunciation_controller = AnnunciationController(self)
         self._overlay = OverlayContainer()
 
         self._overlay.register("home", self._overview_panel)
@@ -295,6 +283,19 @@ class MainWindowV2(QMainWindow):
     @Slot(object)
     def render_operator_snapshot(self, snapshot: object) -> None:
         """Present one ingress-qualified cut through the POD transaction."""
+        if getattr(self, "_shutting_down", False):
+            return
+        if type(snapshot) is OperatorSnapshot:
+            expected_mode = SnapshotMode.REPLAY if self._replay_mode else SnapshotMode.LIVE
+            if snapshot.cut.mode is not expected_mode:
+                self._typed_safety_authority_seen = True
+                self._overview_panel.set_operator_snapshot(None)
+                self._invalidate_safety_authority(
+                    "Operator snapshot belongs to the opposite runtime domain",
+                    disconnected=True,
+                )
+                logger.error("Rejected operator snapshot from the opposite runtime domain")
+                return
         # Actuator gating is the fail-closed edge of the transaction. Revoke
         # it before any passive presentation sink is allowed to reject/raise.
         self._apply_operator_snapshot_safety(snapshot)
@@ -326,6 +327,7 @@ class MainWindowV2(QMainWindow):
             return
         ready = (
             bridge_instance_id is not None
+            and not self._replay_mode
             and cut.mode is SnapshotMode.LIVE
             and readiness.readiness is ReadinessTruth.READY
             and readiness.lifecycle is SafetyLifecycle.READY
@@ -360,13 +362,18 @@ class MainWindowV2(QMainWindow):
 
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        if not gui_command_worker_admission_open():
+            logger.warning("Shell route rejected because worker admission is closed")
+            return
         if self._replay_mode and name in {
             "new_experiment",
             "restart_engine",
             "settings",
             "calibration",
         }:
-            logger.warning("Replay mode rejected mutating shell route: %s", name)
+            logger.warning("Replay mode rejected a mutating shell route")
             return
         if name == "new_experiment":
             self._show_new_experiment_dialog()
@@ -394,6 +401,9 @@ class MainWindowV2(QMainWindow):
 
     def _ensure_overlay(self, name: str) -> None:
         """Build the overlay panel and register it on first access."""
+        if not gui_command_worker_admission_open():
+            logger.warning("Overlay construction rejected because worker admission is closed")
+            return
         if name not in self._OVERLAY_FACTORIES:
             return
         attr, factory = self._OVERLAY_FACTORIES[name]
@@ -556,6 +566,8 @@ class MainWindowV2(QMainWindow):
         2. Delegates the bare reading to all legacy sinks exactly once via
            ``_dispatch_reading()``.  No double dispatch.
         """
+        if getattr(self, "_shutting_down", False):
+            return
         if type(qualified) is not DescriptorQualifiedReading or type(qualified.reading) is not Reading:
             logger.warning("malformed descriptor-qualified reading dropped")
             return
@@ -567,18 +579,14 @@ class MainWindowV2(QMainWindow):
             result = self._descriptor_store.ingest(qualified)
         except RuntimeError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "descriptor ingest failed for channel %s; reading dispatched to legacy sinks",
-                qualified.reading.channel,
-                exc_info=True,
+                "Descriptor ingest failed; phase=qualified_dispatch exception=%s",
+                type(exc).__name__,
             )
         else:
             if result is IngestResult.CAPACITY_EXHAUSTED:
-                logger.debug(
-                    "DescriptorStore capacity exhausted for channel %s; reading still dispatched",
-                    qualified.reading.channel,
-                )
+                logger.debug("DescriptorStore capacity exhausted; reading still dispatched")
             else:
                 view = self._descriptor_store.view(qualified.reading.channel)
                 if view is not None:
@@ -601,7 +609,48 @@ class MainWindowV2(QMainWindow):
         that stale legacy-absent readings arriving in the new session cannot
         silently restore authoritative identity status.
         """
-        self._descriptor_store.invalidate_transport()
+        descriptor_store = getattr(self, "_descriptor_store", None)
+        if descriptor_store is not None:
+            descriptor_store.invalidate_transport()
+        annunciation_controller = getattr(self, "_annunciation_controller", None)
+        if annunciation_controller is not None:
+            annunciation_controller.invalidate_transport()
+        top_bar = getattr(self, "_top_bar", None)
+        if self._replay_mode and top_bar is not None:
+            top_bar.invalidate_replay_authority()
+
+    def invalidate_engine_producer(self) -> None:
+        """Retire every GUI consumer anchored to the outgoing engine."""
+
+        self.invalidate_descriptor_transport()
+        self._overview_panel.invalidate_operator_snapshot_producer()
+
+    def bind_replay_authority(
+        self,
+        *,
+        source: str,
+        speed: float,
+        session_id: str,
+        launcher_generation: int,
+        bridge_generation: int,
+    ) -> None:
+        """Publish one launcher-owned replay cut to the TopWatch status pin."""
+
+        if not self._replay_mode:
+            raise RuntimeError("cannot bind replay authority in live mode")
+        self._top_bar.bind_replay_authority(
+            source=source,
+            speed=speed,
+            session_id=session_id,
+            launcher_generation=launcher_generation,
+            bridge_generation=bridge_generation,
+        )
+
+    def invalidate_replay_authority(self) -> None:
+        """Revoke replay status authority before producer or bridge turnover."""
+
+        if self._replay_mode:
+            self._top_bar.invalidate_replay_authority()
 
     @Slot(object)
     def _dispatch_reading(
@@ -609,6 +658,8 @@ class MainWindowV2(QMainWindow):
         reading: Reading,
         dashboard_identity: IdentityStatus = IdentityStatus.LEGACY_ABSENT,
     ) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         channel = reading.channel
         # System, analytics, and support messages are informative but cannot
         # establish measurement flow, engine presence, or mutation authority.
@@ -622,8 +673,11 @@ class MainWindowV2(QMainWindow):
         self._overview_panel.on_reading(reading, dashboard_identity)
         try:
             self._top_bar.on_reading(reading)
-        except Exception:
-            logger.warning("TopWatchBar reading dispatch failed", exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "TopWatchBar dispatch failed; phase=reading_dispatch exception=%s",
+                type(exc).__name__,
+            )
 
         if channel == "system/disk_free_gb":
             self._dispatch_disk_evidence(reading)
@@ -658,7 +712,13 @@ class MainWindowV2(QMainWindow):
 
     def _current_bridge_instance_id(self) -> str | None:
         value = getattr(self._bridge, "bridge_instance_id", None)
-        return value if type(value) is str and len(value) == 32 else None
+        if (
+            type(value) is not str
+            or len(value) != 32
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            return None
+        return value
 
     def _dispatch_safety_evidence(self, reading: Reading) -> None:
         """Present ordered legacy telemetry without outranking typed authority."""
@@ -694,7 +754,7 @@ class MainWindowV2(QMainWindow):
             self._invalidate_safety_authority("Состояние Safety устарело")
             return
         if self._last_safety_observed_at is not None and observed_at <= self._last_safety_observed_at:
-            if state_name not in _SAFETY_READY_STATES:
+            if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._invalidate_safety_authority("Нарушен порядок состояния Safety")
             return
         reason = metadata.get("reason", "") or ""
@@ -702,7 +762,7 @@ class MainWindowV2(QMainWindow):
             # READY-looking analytics cannot overwrite the coherent typed cut.
             # A negative observation is allowed to revoke it, and remains
             # visible until a newer typed cut supplies recovery authority.
-            if state_name not in _SAFETY_READY_STATES:
+            if state_name not in _LEGACY_SAFETY_READY_STATES:
                 self._last_safety_state = state_name
                 self._last_safety_reason = str(reason) if reason else ""
                 self._last_safety_observed_at = observed_at
@@ -719,7 +779,7 @@ class MainWindowV2(QMainWindow):
         # revoke a previously accepted typed cut, but even a fresh, matching
         # READY-looking packet cannot create bindings or restore mutation
         # readiness. Recovery requires a newer coherent OperatorSnapshot.
-        if state_name not in _SAFETY_READY_STATES:
+        if state_name not in _LEGACY_SAFETY_READY_STATES:
             self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
         else:
             self._accepted_safety_bridge_instance_id = None
@@ -759,15 +819,9 @@ class MainWindowV2(QMainWindow):
 
     def _dispatch_disk_evidence(self, reading: Reading) -> None:
         """Accept only current, ordered disk evidence from this bridge instance."""
-        bridge = self._bridge
-        bridge_instance_id = getattr(bridge, "bridge_instance_id", None)
+        bridge_instance_id = self._current_bridge_instance_id()
         metadata = reading.metadata
-        if (
-            bridge is None
-            or type(bridge_instance_id) is not str
-            or len(bridge_instance_id) != 32
-            or type(metadata) is not dict
-        ):
+        if bridge_instance_id is None or type(metadata) is not dict:
             return
         if metadata.get("bridge_instance_id") != bridge_instance_id:
             if self._accepted_disk_bridge_instance_id not in (None, bridge_instance_id):
@@ -992,6 +1046,8 @@ class MainWindowV2(QMainWindow):
 
     @Slot()
     def _tick_status(self) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         now = time.monotonic()
         silence = now - self._last_reading_time if self._last_reading_time > 0 else 999.0
         connected = silence < 3.0
@@ -1090,65 +1146,157 @@ class MainWindowV2(QMainWindow):
         if self._experiment_overlay is not None:
             self._experiment_overlay.set_connected(connected)
 
-    def closeEvent(self, event):  # noqa: ANN001
+    def settle_owned_workers(self) -> bool:
         """Teardown: stop the status timer and join the experiment-create worker
         (the only ZmqCommandWorker this window owns directly) before the C++
         objects are destroyed, so we don't trip Qt's "QThread: Destroyed while
         thread is still running" on exit. Panel-owned workers self-clean via
         their own ``_WorkerCleanupMixin.closeEvent``. Bounded + guarded so
         teardown can never hang."""
+        # The composition root must revoke its explicit worker session before
+        # inventory. A child widget has no authority to open or close the
+        # process-wide gate.
+        self._shutting_down = True
         try:
-            self._status_timer.stop()
+            self.setEnabled(False)
         except RuntimeError:
             pass
+        try:
+            status_timer = getattr(self, "_status_timer", None)
+            if status_timer is not None:
+                status_timer.stop()
+        except RuntimeError:
+            pass
+        try:
+            timers = list(self.findChildren(QTimer))
+        except RuntimeError:
+            timers = []
+        for timer in timers:
+            try:
+                timer.stop()
+            except RuntimeError:
+                continue
+        for attr in (
+            "_keithley_panel",
+            "_operator_log_panel",
+            "_archive_panel",
+            "_conductivity_panel",
+            "_multiline_panel",
+            "_knowledge_base_panel",
+            "_calibration_panel",
+            "_instrument_panel",
+            "_experiment_overlay",
+            "_alarm_panel",
+        ):
+            panel = getattr(self, attr, None)
+            set_connected = getattr(panel, "set_connected", None)
+            if callable(set_connected):
+                try:
+                    set_connected(False)
+                except RuntimeError:
+                    pass
+        settlement_failures: list[str] = []
         controller = getattr(self, "_annunciation_controller", None)
         if controller is not None:
             try:
-                if not controller.shutdown():
-                    logger.critical("Annunciation controller did not settle all owned workers during GUI shutdown")
-                    event.ignore()
-                    return
-            except RuntimeError:
-                logger.critical("Annunciation controller shutdown could not establish worker settlement", exc_info=True)
-                event.ignore()
-                return
+                if not controller.settle_for_shutdown():
+                    settlement_failures.append("annunciation controller workers did not settle")
+            except RuntimeError as exc:
+                logger.critical(
+                    "Annunciation controller shutdown could not establish worker settlement; exception=%s",
+                    type(exc).__name__,
+                )
+                settlement_failures.append("annunciation controller settlement unavailable")
         worker = getattr(self, "_create_exp_worker", None)
         if worker is not None:
             try:
                 if worker.isRunning():
                     worker.wait(2000)
+                if worker.isRunning():
+                    return False
+                self._create_exp_worker = None
             except RuntimeError:
                 pass
         # Child overlays may own command workers independently of the
         # annunciation controller. Snapshot the descendants first, then try
         # every valid owner even if one wrapper is already deleting. A single
         # RuntimeError must not prevent later workers from being joined.
-        settlement_failures: list[str] = []
-        try:
-            candidates = list(self.findChildren(QThread))
-        except RuntimeError:
-            candidates = []
-            settlement_failures.append("QThread descendant inventory unavailable")
-        for index, thread in enumerate(candidates):
-            owner = f"QThread[{index}]"
+        seen_threads: set[int] = set()
+        stable_inventory = False
+        for inventory_pass in range(4):
             try:
-                if thread.isRunning():
-                    thread.requestInterruption()
-                    thread.quit()
-                    if not thread.wait(_WORKER_SETTLE_MS):
-                        settlement_failures.append(f"{owner} did not settle")
-                        continue
-                # Join first, then consolidate QObject ownership under the
-                # closing window.  Reparenting settled workers to the global
-                # application leaked them past window teardown and could race
-                # deferred deletion of their former nested parent.
-                if thread.parent() is not self:
-                    thread.setParent(self)
+                candidates = list(self.findChildren(QThread))
             except RuntimeError:
-                settlement_failures.append(f"{owner} became invalid during shutdown")
-                continue
+                settlement_failures.append("QThread descendant inventory unavailable")
+                break
+            current_ids = {id(thread) for thread in candidates}
+            for index, thread in enumerate(candidates):
+                owner = f"QThread[{inventory_pass}:{index}]"
+                try:
+                    if thread.isRunning():
+                        thread.requestInterruption()
+                        thread.quit()
+                        if not thread.wait(_WORKER_SETTLE_MS):
+                            settlement_failures.append(f"{owner} did not settle")
+                            continue
+                    if thread.parent() is not self:
+                        thread.setParent(self)
+                except RuntimeError:
+                    settlement_failures.append(f"{owner} became invalid during shutdown")
+            try:
+                after = list(self.findChildren(QThread))
+            except RuntimeError:
+                settlement_failures.append("QThread descendant revalidation unavailable")
+                break
+            after_ids = {id(thread) for thread in after}
+            try:
+                any_running = any(thread.isRunning() for thread in after)
+            except RuntimeError:
+                settlement_failures.append("QThread descendant changed during revalidation")
+                break
+            if not any_running and after_ids == current_ids and after_ids.issubset(seen_threads | current_ids):
+                stable_inventory = True
+                break
+            seen_threads.update(current_ids)
+        if not stable_inventory and not settlement_failures:
+            settlement_failures.append("QThread descendant inventory did not stabilize")
         if settlement_failures:
             logger.critical("GUI child QThread shutdown incomplete: %s", "; ".join(settlement_failures))
+            return False
+        if not settle_registered_gui_command_workers(timeout_ms=_WORKER_SETTLE_MS):
+            logger.critical("Process-wide GUI command worker inventory did not settle")
+            return False
+        return True
+
+    def complete_root_shutdown(self) -> None:
+        """Release annunciation only after the root settles engine/transport."""
+
+        controller = getattr(self, "_annunciation_controller", None)
+        if controller is not None:
+            controller.complete_root_shutdown()
+
+    def closeEvent(self, event):  # noqa: ANN001
+        """Transfer a close request to the one composition-root owner."""
+        shutdown_request = self._root_shutdown_request
+        if shutdown_request is not None:
+            try:
+                shutdown_request()
+            except Exception as exc:
+                logger.critical(
+                    "GUI root shutdown request failed; exception=%s",
+                    type(exc).__name__,
+                )
+            event.ignore()
+            return
+        if gui_command_worker_admission_open():
+            event.ignore()
+            return
+        if not self.settle_owned_workers():
+            event.ignore()
+            return
+        try:
+            self.complete_root_shutdown()
+        except RuntimeError:
             event.ignore()
             return
         super().closeEvent(event)
@@ -1163,6 +1311,8 @@ class MainWindowV2(QMainWindow):
 
     def _on_experiment_status_received(self, status: dict) -> None:
         """Forward status to dashboard + overlay, cache for routing."""
+        if getattr(self, "_shutting_down", False):
+            return
         previous_exp_id = self._active_experiment_id()
         self._latest_experiment_status = status
 
@@ -1219,6 +1369,8 @@ class MainWindowV2(QMainWindow):
 
     def _on_experiment_clicked(self) -> None:
         """TopWatchBar experiment label click — open overlay or dialog."""
+        if getattr(self, "_shutting_down", False):
+            return
         has_active = (
             self._latest_experiment_status is not None
             and self._latest_experiment_status.get("active_experiment") is not None
@@ -1230,6 +1382,11 @@ class MainWindowV2(QMainWindow):
 
     def _show_new_experiment_dialog(self) -> None:
 
+        if getattr(self, "_shutting_down", False):
+            return
+        if not gui_command_worker_admission_open():
+            logger.warning("Experiment dialog rejected because worker admission is closed")
+            return
         if self._replay_mode:
             logger.warning("Replay mode rejected experiment creation dialog")
             return
@@ -1242,6 +1399,11 @@ class MainWindowV2(QMainWindow):
         dialog.exec()
 
     def _on_create_experiment(self, payload: dict) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        if not gui_command_worker_admission_open():
+            logger.warning("Experiment creation rejected because worker admission is closed")
+            return
         if self._replay_mode:
             logger.warning("Replay mode rejected experiment_create dispatch")
             return
@@ -1253,11 +1415,13 @@ class MainWindowV2(QMainWindow):
         self._create_exp_worker.start()
 
     def _on_create_exp_result(self, result: dict) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         if not result.get("ok"):
-            logger.warning("experiment_create failed: %s", result.get("error"))
+            logger.warning("experiment_create failed")
             return
         # Status poll will pick up new experiment, dashboard updates automatically
-        logger.info("Experiment created: %s", result.get("experiment_id", "?"))
+        logger.info("Experiment created")
 
     # ------------------------------------------------------------------
     # Other tool actions

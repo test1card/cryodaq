@@ -95,13 +95,22 @@ class GPIBTransport:
         Block B P1).
         """
         with cls._rm_lock:
-            for bus, rm in cls._resource_managers.items():
+            failed = False
+            for bus, rm in tuple(cls._resource_managers.items()):
                 try:
                     rm.close()
-                    log.info("GPIB: ResourceManager for %s closed", bus)
                 except Exception as exc:
-                    log.warning("GPIB: error closing RM for %s — %s", bus, exc)
-            cls._resource_managers.clear()
+                    failed = True
+                    log.warning(
+                        "GPIB ResourceManager close failed; exception=%s",
+                        type(exc).__name__,
+                    )
+                    continue
+                if cls._resource_managers.get(bus) is rm:
+                    del cls._resource_managers[bus]
+                log.info("GPIB: ResourceManager for %s closed", bus)
+            if failed:
+                raise GPIBIncompleteCloseError("GPIB ResourceManager settlement is incomplete")
 
     @classmethod
     def _get_rm(cls, bus_prefix: str) -> Any:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from cryodaq.replay_engine.sources import CurveReplay, DirectoryReplay, SQLiteRe
 
 
 def _db(path: Path, rows: list[tuple[float, str, float, str, str, str | None]]) -> None:
-    with sqlite3.connect(str(path)) as conn:
+    with closing(sqlite3.connect(str(path))) as conn:
         conn.execute(
             "CREATE TABLE readings (timestamp REAL, channel TEXT, value REAL, "
             "unit TEXT, status TEXT, instrument_id TEXT)"

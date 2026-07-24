@@ -714,24 +714,38 @@ def test_inbound_notifications_and_llm_relay_contracts_remain_in_engine() -> Non
         "telegram_bot._query_agent = _RemoteAssistantQueryProxy()",
         '"alarm_cleared"',
         '"periodic_report_request"',
-        'event_bus.unsubscribe("assistant_zmq_relay")',
-        "await telegram_bot.start()",
-        "await telegram_bot.stop()",
-        "await _photo_handler.start()",
-        "await _photo_handler.stop()",
+        'functools.partial(event_bus.unsubscribe, "assistant_zmq_relay")',
+        "telegram_bot.start(),",
+        "rollback=telegram_bot.stop",
+        "_photo_handler.start(),",
+        "rollback=_photo_handler.stop",
         '_engine_config_path("notifications")',
     ):
         assert required in source
 
-    bot_start = source.index("await telegram_bot.start()")
-    photo_start = source.index("await _photo_handler.start()")
-    relay_start = source.index('supervisor.spawn(\n        "assistant_event_relay"')
-    scheduler_start = source.index("acquisition_lifecycle_sequence = await _start_scheduler_with_recording_feed(")
+    bot_start = source.index("telegram_bot.start(),")
+    photo_start = source.index("_photo_handler.start(),")
+    relay_start = source.index('"assistant_event_relay",', photo_start)
+    scheduler_start = source.index("_start_scheduler_with_recording_feed(", relay_start)
     assert bot_start < photo_start < relay_start < scheduler_start
 
-    scheduler_stop = source.index("acquisition_lifecycle_sequence = await _stop_scheduler_with_recording_feed(")
-    relay_stop = source.index('event_bus.unsubscribe("assistant_zmq_relay")')
-    photo_stop = source.index("await _photo_handler.stop()")
-    bot_stop = source.index("await telegram_bot.stop()")
-    interlock_stop = source.index("await interlock_engine.stop()")
-    assert scheduler_stop < relay_stop < photo_stop < bot_stop < interlock_stop
+    ingress_off = source.index("await teardown_sequence.settle_ingress_off()")
+    layers = source.index("shutdown_layers: list[_EngineShutdownLayer] = [", ingress_off)
+    scheduler_stop = source.index('"scheduler",', layers)
+    runtime_producers = source.index('"runtime_producers"', scheduler_stop)
+    producer_services = source.index('"producer_services"', runtime_producers)
+    relay_stop = source.index('"event_relay_cutover"', producer_services)
+    photo_stop = source.index('"composition_photo_handler"', relay_stop)
+    notification_stop = source.index('"downstream_notifications"', photo_stop)
+    terminal_dependencies = source.index('"terminal_dependencies"', notification_stop)
+    assert (
+        ingress_off
+        < layers
+        < scheduler_stop
+        < runtime_producers
+        < producer_services
+        < relay_stop
+        < photo_stop
+        < notification_stop
+        < terminal_dependencies
+    )

@@ -16,20 +16,33 @@ class _Queue:
         if self.on_put:
             self.on_put(item)
 
+    def put_nowait(self, item):
+        self.put(item)
+
     def get_nowait(self):
         if not self.items:
             raise __import__("queue").Empty
         return self.items.pop(0)
 
 
-def test_post_enqueue_cancellation_retains_outcome_unknown_until_reply(monkeypatch):
-    cancelled = threading.Event()
-    bridge = ZmqBridge()
-    bridge._process = object()
-    bridge.is_alive = lambda: True
-    bridge._cmd_queue = _Queue(lambda _item: cancelled.set())
+def _install_mutation_receipt(bridge: ZmqBridge) -> None:
+    bridge._mutation_receipt = {
+        "schema": "mutation_compatibility_v1",
+        "accepted": True,
+        "server_protocol_major": 1,
+        "required_capability": "cryodaq_mutation_v1",
+        "capability_token": "a" * 32,
+    }
 
-    result = bridge.send_command({"cmd": "mutate"}, cancellation_requested=cancelled)
+
+def test_post_enqueue_cancellation_retains_outcome_unknown_until_reply(live_zmq_bridge, monkeypatch):
+    cancelled = threading.Event()
+    bridge = live_zmq_bridge
+    _install_mutation_receipt(bridge)
+
+    with monkeypatch.context() as command_queue_patch:
+        command_queue_patch.setattr(bridge, "_cmd_queue", _Queue(lambda _item: cancelled.set()))
+        result = bridge.send_command({"cmd": "mutate"}, cancellation_requested=cancelled)
 
     assert result["error"] == "ZMQ command outcome unknown after cancellation"
     request_id = result["request_id"]
@@ -45,7 +58,9 @@ def test_post_enqueue_cancellation_retains_outcome_unknown_until_reply(monkeypat
     bridge._reply_stop.set()
     consumer.join(timeout=1.0)
     assert not consumer.is_alive()
-    assert request_id in bridge._outcome_unknown
+    assert request_id not in bridge._outcome_unknown
+    assert request_id not in bridge._request_generation
+    assert request_id not in bridge._request_bindings
     late = bridge.reconcile_late_result(request_id)
     assert late is not None
     assert late.request_id == request_id
@@ -54,25 +69,36 @@ def test_post_enqueue_cancellation_retains_outcome_unknown_until_reply(monkeypat
     assert future.result(timeout=0.1) == {"ok": True}
 
 
-def test_request_nonce_collision_never_overwrites_pending_owner(monkeypatch):
-    bridge = ZmqBridge()
-    bridge._process = object()
-    bridge.is_alive = lambda: True
+def test_request_nonce_collision_never_overwrites_pending_owner(live_zmq_bridge, monkeypatch):
+    bridge = live_zmq_bridge
     existing = Future()
     bridge._pending["deadbeef"] = existing
     cancelled = threading.Event()
-    bridge._cmd_queue = _Queue(lambda _item: cancelled.set())
+    _install_mutation_receipt(bridge)
 
     values = iter(("deadbeef", "fresh-owner"))
     monkeypatch.setattr(
         "cryodaq.gui.zmq_client.uuid.uuid4",
         lambda: type("_UUID", (), {"hex": next(values)})(),
     )
-    result = bridge.send_command({"cmd": "mutate"}, cancellation_requested=cancelled)
+    with monkeypatch.context() as command_queue_patch:
+        command_queue_patch.setattr(bridge, "_cmd_queue", _Queue(lambda _item: cancelled.set()))
+        result = bridge.send_command({"cmd": "mutate"}, cancellation_requested=cancelled)
 
     assert result["request_id"] == "fresh-owner"
     assert bridge._pending["deadbeef"] is existing
     assert "fresh-owner" in bridge._outcome_unknown
+    with bridge._pending_lock:
+        assert bridge._route_reply_locked(
+            {"_rid": "fresh-owner", "ok": True},
+            source_generation=bridge._generation,
+            source_lane="ordinary",
+        )
+        assert bridge._retire_definitely_unsent_owner_locked("deadbeef", existing)
+    late = bridge.reconcile_late_result("fresh-owner", generation=bridge._generation)
+    assert late is not None
+    assert late.reply == {"ok": True}
+    assert existing.done() is False
 
 
 def test_shutdown_retains_late_reply_for_exact_generation() -> None:

@@ -1663,7 +1663,7 @@ class SafetyManager:
             if v_comp is not None:
                 if not self._keithley.mock:
                     write_task = asyncio.create_task(
-                        self._keithley._transport.write(f"{smu_channel}.source.limitv = {v_comp}"),
+                        self._keithley.update_source_limit(smu_channel, v_comp=v_comp),
                         name=f"safety_limitv_write_{smu_channel}",
                     )
                     _result, write_error, write_cancelled = await _settle_shielded_hardware_task(write_task)
@@ -1712,7 +1712,7 @@ class SafetyManager:
             if i_comp is not None:
                 if not self._keithley.mock:
                     write_task = asyncio.create_task(
-                        self._keithley._transport.write(f"{smu_channel}.source.limiti = {i_comp}"),
+                        self._keithley.update_source_limit(smu_channel, i_comp=i_comp),
                         name=f"safety_limiti_write_{smu_channel}",
                     )
                     _result, write_error, write_cancelled = await _settle_shielded_hardware_task(write_task)

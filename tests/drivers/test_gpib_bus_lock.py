@@ -74,6 +74,46 @@ def test_gpib_resource_manager_shared_per_bus(monkeypatch):
     assert len(created) == 2, f"expected exactly 2 RMs (one per bus), got {len(created)}"
 
 
+def test_close_all_managers_retains_failed_exact_handle_and_attempts_every_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+
+    class ResourceManager:
+        def __init__(self, label: str, *, fail_once: bool = False) -> None:
+            self.label = label
+            self.fail_once = fail_once
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            events.append(f"{self.label}:{self.close_calls}")
+            if self.fail_once and self.close_calls == 1:
+                raise OSError("backend-secret\r\nforged-log")
+
+    retained = ResourceManager("retained", fail_once=True)
+    sibling = ResourceManager("sibling")
+    exact_registry = {"GPIB0": retained, "GPIB1": sibling}
+    monkeypatch.setattr(GPIBTransport, "_resource_managers", exact_registry, raising=False)
+
+    with caplog.at_level("WARNING"), pytest.raises(GPIBIncompleteCloseError) as failure:
+        GPIBTransport.close_all_managers()
+
+    assert str(failure.value) == "GPIB ResourceManager settlement is incomplete"
+    assert "backend-secret" not in str(failure.value)
+    assert "backend-secret" not in caplog.text
+    assert "forged-log" not in caplog.text
+    assert events == ["retained:1", "sibling:1"]
+    assert GPIBTransport._resource_managers == {"GPIB0": retained}
+    assert GPIBTransport._get_rm("GPIB0") is retained
+    assert retained.close_calls == 1
+
+    GPIBTransport.close_all_managers()
+    assert events == ["retained:1", "sibling:1", "retained:2"]
+    assert GPIBTransport._resource_managers == {}
+
+
 async def test_gpib_different_buses_independent():
     """Transports on different buses have different prefixes."""
     t1 = GPIBTransport(mock=True)

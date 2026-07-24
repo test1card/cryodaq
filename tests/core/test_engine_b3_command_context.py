@@ -56,7 +56,7 @@ async def test_importable_command_handler_reads_context() -> None:
 
     result = await _handle_gui_command({"cmd": "safety_status"}, context=context)
 
-    assert result == {"ok": True, "state": "ready"}
+    assert result == {"ok": True, "state": "ready", "engine_instance_id": ""}
 
 
 async def test_command_context_preserves_late_bound_cooldown_service() -> None:

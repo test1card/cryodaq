@@ -120,12 +120,12 @@ def test_command_server_sets_linger_before_bind():
     """LINGER=0 is set on REP socket BEFORE _bind_with_retry in ZMQCommandServer.start."""
     import inspect
 
-    src = inspect.getsource(zmq_bridge.ZMQCommandServer.start)
+    src = inspect.getsource(zmq_bridge.ZMQCommandServer._open_bound_socket)
     linger_pos = src.find("setsockopt(zmq.LINGER")
     bind_pos = src.find("_bind_with_retry(")
-    assert linger_pos >= 0, "ZMQCommandServer.start must call setsockopt(zmq.LINGER, ...)"
-    assert bind_pos >= 0, "ZMQCommandServer.start must call _bind_with_retry"
-    assert linger_pos < bind_pos, "setsockopt(LINGER) must appear before _bind_with_retry in ZMQCommandServer.start"
+    assert linger_pos >= 0, "REP socket factory must call setsockopt(zmq.LINGER, ...)"
+    assert bind_pos >= 0, "REP socket factory must call _bind_with_retry"
+    assert linger_pos < bind_pos, "setsockopt(LINGER) must precede bind in the REP socket factory"
 
     # Verify with tracked socket the combined LINGER→bind sequence works:
     call_log: list[str] = []
@@ -145,6 +145,37 @@ def test_command_server_sets_linger_before_bind():
 
     assert call_log[0] == "LINGER_0", "LINGER must be set before bind is called"
     assert "bind_done" in call_log
+
+
+def test_command_server_production_factory_sets_linger_before_bind() -> None:
+    call_log: list[str] = []
+
+    class _TrackedSocket:
+        def setsockopt(self, opt, val):
+            if opt == zmq.LINGER:
+                call_log.append(f"LINGER_{val}")
+
+        def bind(self, addr):
+            call_log.append("bind")
+
+    class _TrackedContext:
+        def __init__(self, socket):
+            self._socket = socket
+
+        def socket(self, socket_type):
+            assert socket_type == zmq.REP
+            call_log.append("socket")
+            return self._socket
+
+    async def exercise_production_factory() -> None:
+        sock = _TrackedSocket()
+        server = zmq_bridge.ZMQCommandServer(address="tcp://127.0.0.1:0")
+        server._ctx = _TrackedContext(sock)
+        assert await server._open_bound_socket() is sock
+
+    asyncio.run(exercise_production_factory())
+
+    assert call_log == ["socket", "LINGER_0", "bind"]
 
 
 def test_no_raw_bind_in_publisher_or_command_server():

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -27,6 +26,7 @@ from cryodaq.core.broker import DataBroker
 # errors for phases that exist locally.
 from cryodaq.core.experiment import ExperimentPhase as _ExperimentPhase
 from cryodaq.core.ru_labels import phase_display_name
+from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
 
@@ -73,6 +73,12 @@ _MUTATION_RECEIPT_KEYS = frozenset(
         "capability_token",
     }
 )
+_OPERATOR_LOG_SUCCESS_KEYS = frozenset(
+    {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt"}
+)
+_OPERATOR_LOG_PENDING_KEYS = _OPERATOR_LOG_SUCCESS_KEYS | {"error_code", "error"}
+_OPERATOR_LOG_ENTRY_KEYS = frozenset({"id", "timestamp", "experiment_id", "author", "source", "message", "tags"})
+_OPERATOR_LOG_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
 
 
 class _TelegramAuthError(Exception):
@@ -181,28 +187,54 @@ class TelegramCommandBot:
         return self._session
 
     async def stop(self) -> None:
-        for task in (self._collect_task, self._poll_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        tasks = tuple(
+            task
+            for task in (
+                self._collect_task,
+                self._poll_task,
+                self._mutation_discovery_task,
+            )
+            if task is not None
+        )
+        settlement = await cancel_and_settle_tasks(tasks)
         self._collect_task = None
         self._poll_task = None
-        discovery_task = self._mutation_discovery_task
-        if discovery_task is not None and not discovery_task.done():
-            discovery_task.cancel()
-            try:
-                await discovery_task
-            except asyncio.CancelledError:
-                pass
         self._mutation_discovery_task = None
         self._mutation_envelope = None
-        if self._session and not self._session.closed:
-            await self._session.close()
+        dependency_failures: list[BaseException] = []
+        session = self._session
+        if session is None or session.closed is True:
             self._session = None
-        await self._broker.unsubscribe(_SUBSCRIBE_NAME)
+        else:
+            try:
+                await session.close()
+                if session.closed is not True:
+                    raise RuntimeError("Telegram HTTP session did not report exact terminal closure")
+            except Exception as exc:
+                dependency_failures.append(exc)
+            else:
+                self._session = None
+        queue = self._queue
+        if queue is not None:
+            try:
+                unsubscribe_result = await self._broker.unsubscribe(
+                    _SUBSCRIBE_NAME,
+                    expected_queue=queue,
+                )
+                if unsubscribe_result is not True:
+                    raise RuntimeError("Telegram broker did not release the exact queue owner")
+            except Exception as exc:
+                dependency_failures.append(exc)
+            else:
+                self._queue = None
+        if dependency_failures:
+            if settlement.failures:
+                logger.error(
+                    "Telegram terminal task failed during dependency settlement; exception=%s",
+                    type(settlement.failures[0]).__name__,
+                )
+            raise RuntimeError("Telegram shutdown dependencies remain unsettled") from dependency_failures[0]
+        settlement.raise_if_unsuccessful()
         logger.info("TelegramCommandBot остановлен")
 
     # ------------------------------------------------------------------
@@ -317,9 +349,15 @@ class TelegramCommandBot:
         even though ``_fetch_updates`` already filters. Direct callers
         (tests, future code paths) must NOT bypass the allowlist.
         """
-        text = msg.get("text", "").strip()
-        chat_id = msg.get("chat", {}).get("id")
-        if not chat_id or not text.startswith("/"):
+        if type(msg) is not dict:
+            return
+        raw_text = msg.get("text")
+        chat = msg.get("chat")
+        if type(raw_text) is not str or type(chat) is not dict:
+            return
+        text = raw_text.strip()
+        chat_id = chat.get("id")
+        if type(chat_id) is not int or chat_id == 0 or not text.startswith("/"):
             return
 
         if not self._is_chat_allowed(chat_id):
@@ -348,7 +386,7 @@ class TelegramCommandBot:
             if len(log_args) != 2:
                 await self._send(
                     chat_id,
-                    "вќЊ РЈРєР°Р¶РёС‚Рµ experiment_id Рё С‚РµРєСЃС‚: /log <experiment_id> <text>",
+                    "❌ Укажите experiment_id и текст: /log &lt;experiment_id&gt; &lt;текст&gt;",
                 )
                 return
             await self._cmd_log(chat_id, log_args[1], log_args[0], msg)
@@ -568,7 +606,10 @@ class TelegramCommandBot:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("Telegram mutation capability/dispatch failed: %s", exc, exc_info=True)
+            logger.error(
+                "Telegram mutation capability/dispatch failed: exception=%s",
+                type(exc).__name__,
+            )
             return {
                 "ok": False,
                 "error_code": "mutation_capability_unavailable",
@@ -585,13 +626,98 @@ class TelegramCommandBot:
         return result
 
     @staticmethod
-    def _operator_log_request_id(msg: dict[str, Any]) -> str:
-        chat_id = msg.get("chat", {}).get("id")
+    def _operator_log_request_id(msg: dict[str, Any], expected_chat_id: int) -> str | None:
+        chat = msg.get("chat")
+        if type(chat) is not dict:
+            return None
+        chat_id = chat.get("id")
         message_id = msg.get("message_id")
-        if type(chat_id) is int and type(message_id) is int:
+        if (
+            type(expected_chat_id) is int
+            and type(chat_id) is int
+            and chat_id == expected_chat_id
+            and type(message_id) is int
+            and message_id > 0
+        ):
             identity = f"telegram:{chat_id}:{message_id}".encode()
             return hashlib.sha256(identity).hexdigest()[:32]
-        return secrets.token_hex(16)
+        return None
+
+    @staticmethod
+    def _operator_log_author(msg: dict[str, Any]) -> str | None:
+        from_info = msg.get("from")
+        if type(from_info) is not dict:
+            return None
+        raw = from_info.get("username") or from_info.get("first_name")
+        if type(raw) is not str:
+            return None
+        author = raw.strip()
+        if (
+            not author
+            or not author.isprintable()
+            or len(author.encode("utf-8")) > 4096
+            or author.casefold() in {"system", "auto", "machine"}
+        ):
+            return None
+        return author
+
+    @staticmethod
+    def _operator_log_commit_matches(
+        result: object,
+        payload: dict[str, Any],
+        *,
+        publication_state: str,
+    ) -> bool:
+        if publication_state not in {"published", "pending"}:
+            return False
+        expected_keys = _OPERATOR_LOG_SUCCESS_KEYS if publication_state == "published" else _OPERATOR_LOG_PENDING_KEYS
+        expected_ok = publication_state == "published"
+        if (
+            type(result) is not dict
+            or set(result) != expected_keys
+            or result.get("ok") is not expected_ok
+            or result.get("committed") is not True
+            or result.get("retry_safe") is not False
+            or result.get("publication_state") != publication_state
+        ):
+            return False
+        if publication_state == "pending" and (
+            result.get("error_code") != "committed_reconciliation_failed"
+            or type(result.get("error")) is not str
+            or len(result["error"]) > 512
+        ):
+            return False
+        entry = result.get("entry")
+        receipt = result.get("commit_receipt")
+        if (
+            type(entry) is not dict
+            or set(entry) != _OPERATOR_LOG_ENTRY_KEYS
+            or type(receipt) is not dict
+            or set(receipt) != _OPERATOR_LOG_RECEIPT_KEYS
+        ):
+            return False
+        entry_id = entry.get("id")
+        timestamp = entry.get("timestamp")
+        if type(entry_id) is not int or entry_id <= 0 or type(timestamp) is not str or len(timestamp) > 128:
+            return False
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return False
+        if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed) or parsed.isoformat() != timestamp:
+            return False
+        return (
+            receipt.get("schema") == "operator_log_commit_v1"
+            and receipt.get("request_id") == payload.get("request_id")
+            and receipt.get("entry_id") == entry_id
+            and receipt.get("experiment_id") == payload.get("experiment_id")
+            and receipt.get("committed") is True
+            and entry.get("experiment_id") == payload.get("experiment_id")
+            and entry.get("author") == payload.get("author")
+            and entry.get("source") == "telegram"
+            and entry.get("message") == payload.get("message")
+            and entry.get("tags") == []
+        )
 
     async def _cmd_log(self, chat_id: int, text: str, experiment_id: str, msg: dict) -> None:
         if not text:
@@ -600,22 +726,31 @@ class TelegramCommandBot:
         if self._command_handler is None:
             await self._send(chat_id, "❌ Команды недоступны: нет обработчика команд")
             return
-        from_info = msg.get("from", {})
-        username = from_info.get("username") or from_info.get("first_name", "telegram")
-        result = await self._dispatch_mutation(
-            {
-                "cmd": "log_entry",
-                "request_id": self._operator_log_request_id(msg),
-                "message": text,
-                "author": username,
-                "source": "telegram",
-                "experiment_id": experiment_id,
-            }
-        )
-        if result.get("ok"):
+        request_id = self._operator_log_request_id(msg, chat_id)
+        username = self._operator_log_author(msg)
+        if request_id is None or username is None:
+            logger.warning("Telegram /log refused: stable message or actor identity unavailable")
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
+            return
+        payload = {
+            "cmd": "log_entry",
+            "request_id": request_id,
+            "message": text,
+            "author": username,
+            "source": "telegram",
+            "experiment_id": experiment_id,
+        }
+        result = await self._dispatch_mutation(payload)
+        if self._operator_log_commit_matches(result, payload, publication_state="published"):
             await self._send(chat_id, "✅ Записано в журнал")
+        elif self._operator_log_commit_matches(result, payload, publication_state="pending"):
+            await self._send(chat_id, "⚠️ Запись сохранена; подтверждение публикации ожидается")
         else:
-            logger.warning("Telegram /log failed: %s", result.get("error"))
+            error_code = result.get("error_code")
+            logger.warning(
+                "Telegram /log failed: error_code=%s",
+                error_code if type(error_code) is str and len(error_code) <= 128 else "invalid_response",
+            )
             await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
     async def _cmd_phase(self, chat_id: int, phase: str, expected_experiment_id: str, msg: dict) -> None:

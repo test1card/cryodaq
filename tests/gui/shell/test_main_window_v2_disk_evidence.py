@@ -4,10 +4,12 @@ import os
 import time
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-def _window():
+def _window(bridge=None):
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
@@ -16,7 +18,8 @@ def _window():
 
     app = QApplication.instance() or QApplication([])
     assert app is not None
-    bridge = ZmqBridge()
+    if bridge is None:
+        bridge = ZmqBridge()
     window = MainWindowV2(bridge=bridge)
     for timer in window.findChildren(QTimer):
         timer.stop()
@@ -40,8 +43,27 @@ def _disk_reading(bridge_id: str):
     )
 
 
-def test_disk_evidence_expires_while_measurement_stream_remains_live(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "invalid_bridge_id",
+    ["A" * 32, "g" * 32, "a" * 31 + "\n"],
+)
+def test_noncanonical_bridge_identity_cannot_bind_disk_evidence(
+    invalid_bridge_id: str,
+) -> None:
     window, bridge = _window()
+    try:
+        bridge._bridge_instance_id = invalid_bridge_id
+        window._dispatch_reading(_disk_reading(invalid_bridge_id))
+
+        assert window._current_bridge_instance_id() is None
+        assert window._accepted_disk_bridge_instance_id is None
+        assert window._last_disk_observed_at is None
+    finally:
+        window.close()
+
+
+def test_disk_evidence_expires_while_measurement_stream_remains_live(live_zmq_bridge, monkeypatch) -> None:
+    window, bridge = _window(live_zmq_bridge)
     stale_calls: list[bool] = []
     try:
         assert bridge.bridge_instance_id is not None
@@ -60,8 +82,8 @@ def test_disk_evidence_expires_while_measurement_stream_remains_live(monkeypatch
         window.close()
 
 
-def test_bridge_replacement_immediately_stales_prior_disk_evidence(monkeypatch) -> None:
-    window, bridge = _window()
+def test_bridge_replacement_immediately_stales_prior_disk_evidence(live_zmq_bridge, monkeypatch) -> None:
+    window, bridge = _window(live_zmq_bridge)
     stale_calls: list[bool] = []
     try:
         assert bridge.bridge_instance_id is not None

@@ -57,16 +57,17 @@ def real_zmq_worker(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_shell_test(monkeypatch):
+def _isolate_shell_test(monkeypatch, gui_worker_root_epoch):
     import cryodaq.gui.zmq_client as zc
 
+    assert gui_worker_root_epoch is not None
     monkeypatch.setattr(
         zc,
         "send_command",
         lambda _cmd, *, cancellation_requested=None: {"ok": False, "stub": True},
     )
     monkeypatch.setattr(zc, "ZmqCommandWorker", _SyncCommandWorkerStub)
-    yield
+    yield gui_worker_root_epoch
     from PySide6.QtCore import QThread, QTimer
     from PySide6.QtWidgets import QApplication
 

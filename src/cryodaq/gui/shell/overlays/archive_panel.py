@@ -34,7 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QDate, QObject, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QDate, QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -61,12 +61,20 @@ from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
 from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase
-from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.gui.zmq_client import (
+    ZmqCommandWorker,
+    capture_gui_worker_session_token,
+    gui_worker_delivery_is_current,
+    record_gui_worker_delivery_disposition,
+    start_gui_worker_with_ownership,
+)
 from cryodaq.report_state import ReportContractError, load_current_manifest
 
 logger = logging.getLogger(__name__)
 
 _BANNER_AUTO_CLEAR_MS = 4000
+_EXPORT_ERROR_CODE = "archive_export_failed"
+_EXPORT_KINDS = frozenset({"csv", "hdf5", "xlsx", "parquet"})
 
 # Text-view heights composed from SPACE_* tokens so RULE-SPACE-001 holds.
 # MD = three multi-line snippets (notes / runs / artifacts).
@@ -203,11 +211,7 @@ def _resolve_report_path(
     authority = entry.get("report_authority")
     if not raw_root:
         primary = str(entry.get(key, "")).strip()
-        return (
-            _safe_report_file(Path(primary), None)
-            if not authority_present and primary
-            else None
-        )
+        return _safe_report_file(Path(primary), None) if not authority_present and primary else None
     root = Path(raw_root)
     pointer = root / "reports" / "current_report.json"
     if authority == "manifest":
@@ -316,9 +320,7 @@ def _format_artifacts(entry: dict[str, Any]) -> str:
             size_str = ""
             if path.exists():
                 size_kb = path.stat().st_size / 1024
-                size_str = (
-                    f" | {size_kb / 1024:.1f} MB" if size_kb > 1024 else f" | {size_kb:.0f} KB"
-                )
+                size_str = f" | {size_kb / 1024:.1f} MB" if size_kb > 1024 else f" | {size_kb:.0f} KB"
             lines.append(f"[ДАННЫЕ] | {fmt} | {row_count} строк | {ch_count} каналов{size_str}")
         elif role == "measured_values":
             lines.append(f"[ИЗМЕРЕНИЯ] | {summary.get('rows', '?')} строк | CSV")
@@ -343,9 +345,7 @@ def _format_results(entry: dict[str, Any]) -> str:
         for item in results
     ]
     if summary:
-        lines.append(
-            "summary | " + ", ".join(f"{key}={value}" for key, value in sorted(summary.items()))
-        )
+        lines.append("summary | " + ", ".join(f"{key}={value}" for key, value in sorted(summary.items())))
     return "\n".join(lines)
 
 
@@ -361,12 +361,16 @@ class _ExportWorker(QThread):
     The earlier QObject+moveToThread+deleteLater chain produced GC races
     that segfaulted inside ``QThread::started`` signal delivery.
 
-    ``result_ready(kind, count, error)`` is the completion signal. The
-    inherited ``finished()`` signal (no args) fires after run() returns,
-    which callers can use for lifecycle cleanup.
+    ``result_ready(kind, count, error_code)`` is emitted only by a private
+    GUI-thread trampoline while the captured root-session epoch remains
+    current. ``delivery_settled`` fires after the queued result was either
+    delivered or explicitly suppressed. The shared worker registry retains
+    the exact thread until both that disposition and thread termination.
     """
 
-    result_ready = Signal(str, int, str)  # kind, count, error_text
+    result_ready = Signal(str, int, str)  # kind, count, error_code
+    delivery_settled = Signal()
+    _result_pending = Signal(int, str, int, str)
 
     def __init__(
         self,
@@ -377,15 +381,61 @@ class _ExportWorker(QThread):
         super().__init__(parent)
         self._kind = kind
         self._runner = runner
+        self._session_epoch: int | None = None
+        self._result_pending.connect(
+            self._deliver_result_if_current,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def start(self, priority: QThread.Priority = QThread.Priority.InheritPriority) -> None:
+        """Atomically join the explicit root-owned GUI worker session."""
+
+        session_epoch = capture_gui_worker_session_token()
+        self._session_epoch = session_epoch
+        try:
+            start_gui_worker_with_ownership(self, session_epoch, priority)
+        except BaseException:
+            self._session_epoch = None
+            raise
 
     def run(self) -> None:
+        count = 0
+        error_code = ""
         try:
             count = int(self._runner())
-        except Exception as exc:  # noqa: BLE001 — broad catch acceptable at worker boundary
-            logger.exception("Export failed (%s)", self._kind)
-            self.result_ready.emit(self._kind, 0, str(exc))
-            return
-        self.result_ready.emit(self._kind, count, "")
+        except BaseException as exc:
+            exception_type = type(exc).__name__
+            if not exception_type.isascii() or not exception_type.isidentifier() or len(exception_type) > 64:
+                exception_type = "Exception"
+            kind = self._kind if self._kind in _EXPORT_KINDS else "unknown"
+            logger.error(
+                "Archive export failed; kind=%s exception=%s",
+                kind,
+                exception_type,
+            )
+            error_code = _EXPORT_ERROR_CODE
+        session_epoch = self._session_epoch
+        if session_epoch is not None:
+            self._result_pending.emit(session_epoch, self._kind, count, error_code)
+
+    @Slot(int, str, int, str)
+    def _deliver_result_if_current(
+        self,
+        session_epoch: int,
+        kind: str,
+        count: int,
+        error_code: str,
+    ) -> None:
+        """Deliver on the GUI thread or explicitly suppress a stale result."""
+
+        try:
+            if not self.isInterruptionRequested() and gui_worker_delivery_is_current(session_epoch):
+                self.result_ready.emit(kind, count, error_code)
+        finally:
+            try:
+                record_gui_worker_delivery_disposition(self)
+            finally:
+                self.delivery_settled.emit()
 
 
 class ArchivePanel(OverlayPanelBase, QWidget):
@@ -464,10 +514,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
 
         title = QLabel("АРХИВ ЭКСПЕРИМЕНТОВ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -477,9 +524,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("archiveBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._banner_label.setVisible(False)
         return self._banner_label
 
@@ -614,9 +659,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._empty_state_label.setFont(_body_font())
         self._empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_state_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_4}px;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_4}px;"
         )
         self._empty_state_label.setVisible(False)
         layout.addWidget(self._empty_state_label)
@@ -640,9 +683,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._summary_label = QLabel("Эксперимент не выбран.")
         self._summary_label.setFont(_title_font())
         self._summary_label.setWordWrap(True)
-        self._summary_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-        )
+        self._summary_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(self._summary_label)
 
         metadata = QFrame()
@@ -733,9 +774,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         cap.setFont(_label_font())
         # v0.55.2 ds-104: 3 * SPACE_6 = 96 — keeps the column on the scale.
         cap.setFixedWidth(3 * theme.SPACE_6)
-        cap.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        cap.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         row.addWidget(cap)
         value = QLabel("—")
         value.setFont(_body_font())
@@ -763,9 +802,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
 
         caption = QLabel("Экспортировать все данные из SQLite (полный временной ряд):")
         caption.setFont(_label_font())
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(caption)
 
         row = QHBoxLayout()
@@ -789,9 +826,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         # bulk export.
         self._export_parquet_btn = QPushButton("Parquet...")
         _style_button(self._export_parquet_btn, "neutral")
-        self._export_parquet_btn.setToolTip(
-            "Экспорт всех SQLite данных в Parquet (Snappy compression)"
-        )
+        self._export_parquet_btn.setToolTip("Экспорт всех SQLite данных в Parquet (Snappy compression)")
         self._export_parquet_btn.clicked.connect(self._on_export_parquet_clicked)
         row.addWidget(self._export_parquet_btn)
         row.addStretch()
@@ -802,9 +837,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
     def _caption(text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(_label_font())
-        label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         return label
 
     # ------------------------------------------------------------------
@@ -871,10 +904,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
             report_text = "Да" if has_report else "—"
             self._set_cell(row, 7, report_text)
             artifacts = entry.get("artifact_index", []) or []
-            has_data = any(
-                isinstance(item, dict) and item.get("role") == "experiment_data"
-                for item in artifacts
-            )
+            has_data = any(isinstance(item, dict) and item.get("role") == "experiment_data" for item in artifacts)
             data_text = "Да" if has_data else "—"
             self._set_cell(row, 8, data_text)
         if self._table.rowCount() > 0:
@@ -918,18 +948,13 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._summary_label.setText(
             f"{title}\nID: {entry.get('experiment_id', '')}\nСтатус: {entry.get('status', '—')}"
         )
-        self._template_label.setText(
-            str(entry.get("template_name", entry.get("template_id", ""))) or "—"
-        )
+        self._template_label.setText(str(entry.get("template_name", entry.get("template_id", ""))) or "—")
         self._operator_label.setText(str(entry.get("operator", "")) or "—")
         self._sample_label.setText(str(entry.get("sample", "")) or "—")
         self._date_label.setText(
-            f"{_format_datetime(entry.get('start_time'))} → "
-            f"{_format_datetime(entry.get('end_time'))}"
+            f"{_format_datetime(entry.get('start_time'))} → {_format_datetime(entry.get('end_time'))}"
         )
-        self._artifact_label.setText(
-            str(folder_path) if folder_path else "Папка артефактов не найдена"
-        )
+        self._artifact_label.setText(str(folder_path) if folder_path else "Папка артефактов не найдена")
         authority = entry.get("report_authority")
         if authority == "invalid":
             self._report_label.setText("Поколение отчёта по манифесту недоступно или повреждено")
@@ -957,20 +982,15 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._open_folder_btn.setEnabled(folder_path is not None)
         self._open_pdf_btn.setEnabled(pdf_path is not None)
         self._open_docx_btn.setEnabled(docx_path is not None)
-        self._regenerate_btn.setEnabled(
-            self._connected and report_enabled and self._pending_regenerate is None
-        )
+        self._regenerate_btn.setEnabled(self._connected and report_enabled and self._pending_regenerate is None)
         force_required = bool(entry.get("report_force_required"))
-        self._regenerate_btn.setText(
-            "Повторить принудительно" if force_required else "Перегенерировать"
-        )
+        self._regenerate_btn.setText("Повторить принудительно" if force_required else "Перегенерировать")
         if force_required:
             attempt = entry.get("report_attempt_count")
             maximum = entry.get("report_max_attempts")
             error = str(entry.get("report_error_text") or "Лимит попыток исчерпан.")
             self._report_label.setText(
-                f"{self._report_label.text()}\nТребуется явный повтор "
-                f"(попытки {attempt}/{maximum}): {error}"
+                f"{self._report_label.text()}\nТребуется явный повтор (попытки {attempt}/{maximum}): {error}"
             )
 
     def _clear_details(self, summary: str = "Эксперимент не выбран.") -> None:
@@ -1039,9 +1059,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
             self.show_error("Не удалось определить ID эксперимента.")
             return
         self.regenerate_requested.emit(experiment_id)
-        self._start_regenerate_request(
-            {"cmd": "experiment_generate_report", "experiment_id": experiment_id}
-        )
+        self._start_regenerate_request({"cmd": "experiment_generate_report", "experiment_id": experiment_id})
 
     def _start_regenerate_request(self, payload: dict[str, Any]) -> None:
         self._pending_regenerate = dict(payload)
@@ -1131,19 +1149,13 @@ class ArchivePanel(OverlayPanelBase, QWidget):
             if code == "force_required" and request.get("force") is not True:
                 if not self._connected:
                     self._pending_regenerate = None
-                    self.show_warning(
-                        "Соединение потеряно. Подтверждение принудительного повтора отменено."
-                    )
+                    self.show_warning("Соединение потеряно. Подтверждение принудительного повтора отменено.")
                     return
                 request_id = str(request.get("experiment_id", "")).strip()
-                selected_id = (
-                    str(entry.get("experiment_id", "")).strip() if entry is not None else ""
-                )
+                selected_id = str(entry.get("experiment_id", "")).strip() if entry is not None else ""
                 if not request_id or selected_id != request_id:
                     self._pending_regenerate = None
-                    self.show_warning(
-                        "Выбор эксперимента изменился. Архив будет обновлён без повтора."
-                    )
+                    self.show_warning("Выбор эксперимента изменился. Архив будет обновлён без повтора.")
                     self.refresh_archive()
                     return
                 if entry is not None and self._confirm_force_retry(entry):
@@ -1221,9 +1233,7 @@ class ArchivePanel(OverlayPanelBase, QWidget):
 
     def _on_export_xlsx_clicked(self) -> None:
         self.export_requested.emit("xlsx")
-        path_str, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт в Excel", "", "Excel файлы (*.xlsx)"
-        )
+        path_str, _ = QFileDialog.getSaveFileName(self, "Экспорт в Excel", "", "Excel файлы (*.xlsx)")
         if not path_str:
             return
         output = Path(path_str)
@@ -1291,22 +1301,29 @@ class ArchivePanel(OverlayPanelBase, QWidget):
 
         worker = _ExportWorker(kind, runner, parent=self)
 
-        def on_result(k: str, count: int, error: str, u: str = unit) -> None:
+        def on_result(k: str, count: int, error_code: str, u: str = unit) -> None:
             self._export_in_flight = False
             self._update_control_enablement()
-            if error:
-                self.show_error(f"Экспорт {k.upper()}: {error}")
+            if error_code:
+                self.show_error(f"Экспорт {k.upper()} не завершён.")
             else:
                 self.show_info(f"Экспорт {k.upper()} завершён: {count} {u}.")
 
         worker.result_ready.connect(on_result)
-        worker.finished.connect(lambda w=worker: self._prune_export_worker(w))
+        worker.delivery_settled.connect(lambda w=worker: self._prune_export_worker(w))
         self._export_workers.append(worker)
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError:
+            self._prune_export_worker(worker)
+            logger.warning("Archive export start refused; phase=worker_admission")
+            self.show_error("Экспорт не запущен: сеанс приложения завершается.")
 
     def _prune_export_worker(self, worker: _ExportWorker) -> None:
         if worker in self._export_workers:
             self._export_workers.remove(worker)
+        self._export_in_flight = bool(self._export_workers)
+        self._update_control_enablement()
 
     # ------------------------------------------------------------------
     # Public state pushers
@@ -1338,13 +1355,9 @@ class ArchivePanel(OverlayPanelBase, QWidget):
         self._refresh_btn.setEnabled(self._connected)
         entry = self._selected_entry()
         report_enabled = bool(entry.get("report_enabled", True)) if entry else False
-        self._regenerate_btn.setEnabled(
-            self._connected and report_enabled and self._pending_regenerate is None
-        )
+        self._regenerate_btn.setEnabled(self._connected and report_enabled and self._pending_regenerate is None)
         self._regenerate_btn.setText(
-            "Повторить принудительно"
-            if entry and bool(entry.get("report_force_required"))
-            else "Перегенерировать"
+            "Повторить принудительно" if entry and bool(entry.get("report_force_required")) else "Перегенерировать"
         )
         export_ok = self._connected and not self._export_in_flight
         self._export_csv_btn.setEnabled(export_ok)

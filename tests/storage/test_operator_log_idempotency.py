@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import gc
 import hashlib
+import inspect
 import json
 import os
 import sqlite3
+import textwrap
+import threading
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -31,6 +36,92 @@ CREATE TABLE operator_log (
 """
 
 
+def _publication_payload(
+    request_id: str,
+    *,
+    entry_id: int = 7,
+    experiment_id: str | None = "exp-001",
+    message: str = "stable",
+) -> tuple[dict[str, object], dict[str, object]]:
+    event: dict[str, object] = {
+        "schema": "operator_log_commit_v1",
+        "entry": {
+            "id": entry_id,
+            "timestamp": "2026-07-23T12:00:00+00:00",
+            "experiment_id": experiment_id,
+            "author": "operator",
+            "source": "gui",
+            "message": message,
+            "tags": ["reviewed"],
+        },
+    }
+    receipt: dict[str, object] = {
+        "schema": "operator_log_commit_v1",
+        "request_id": request_id,
+        "entry_id": entry_id,
+        "experiment_id": experiment_id,
+        "committed": True,
+    }
+    return event, receipt
+
+
+def _write_legacy_keyed_row_without_outbox(
+    writer: SQLiteWriter,
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    message: str,
+    experiment_id: str | None = None,
+    tags: tuple[str, ...] = (),
+):
+    """Seed the pre-reservation crash shape without using the safe public API."""
+    return writer._write_operator_log_entry(
+        timestamp=datetime.now(UTC),
+        experiment_id=experiment_id,
+        author="operator",
+        source="gui",
+        message=message,
+        tags=tags,
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+    )
+
+
+def _publication_rows(data_dir: Path) -> tuple[tuple[object, ...], ...]:
+    path = data_dir / "control.db"
+    if not path.exists():
+        return ()
+    conn = sqlite3.connect(path)
+    try:
+        return tuple(
+            conn.execute(
+                "SELECT request_id, request_fingerprint, state, event_json, receipt_json, "
+                "created_at, updated_at FROM operator_log_publication_outbox ORDER BY request_id"
+            ).fetchall()
+        )
+    finally:
+        conn.close()
+
+
+def _exception_chain_text(error: BaseException) -> str:
+    """Return every cause/context message, including suppressed contexts."""
+
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    messages: list[str] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        messages.append(str(current))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return "\n".join(messages)
+
+
 def _legacy_database(path: Path, *, message: str = "legacy") -> None:
     conn = sqlite3.connect(path)
     try:
@@ -43,6 +134,1891 @@ def _legacy_database(path: Path, *, message: str = "legacy") -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "event_extra",
+        "receipt_request",
+        "entry_identity",
+        "experiment_identity",
+        "nonfinite",
+    ],
+)
+async def test_publication_prepare_rejects_noncanonical_identity_without_mutation(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    event, receipt = _publication_payload(request_id)
+    entry = event["entry"]
+    assert isinstance(entry, dict)
+    if case == "event_extra":
+        event["unexpected"] = True
+    elif case == "receipt_request":
+        receipt["request_id"] = "b" * 32
+    elif case == "entry_identity":
+        receipt["entry_id"] = 8
+    elif case == "experiment_identity":
+        receipt["experiment_id"] = "exp-other"
+    else:
+        entry["message"] = float("nan")
+
+    with pytest.raises(RuntimeError, match="operator-log publication"):
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint="f" * 64,
+            event=event,
+            receipt=receipt,
+        )
+
+    assert _publication_rows(tmp_path) == ()
+    await writer.stop()
+
+
+async def test_publication_prepare_rejects_nonfinite_and_oversize_json_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    with pytest.raises(RuntimeError, match="not serializable"):
+        writer._encode_operator_log_publication_json({"value": float("nan")}, field="event_json")
+
+    request_id = "a" * 32
+    event, receipt = _publication_payload(request_id, message="x" * 512)
+    monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_JSON_BYTES", 256)
+    with pytest.raises(RuntimeError, match="exceeds byte cap"):
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint="f" * 64,
+            event=event,
+            receipt=receipt,
+        )
+
+    assert _publication_rows(tmp_path) == ()
+    await writer.stop()
+
+
+async def test_publication_prepare_freezes_payload_before_executor_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    event, receipt = _publication_payload(request_id)
+    entered = threading.Event()
+    released = threading.Event()
+    original_prepare = writer._prepare_operator_log_publication_outbox_sync
+
+    def delayed_prepare(*args):
+        entered.set()
+        assert released.wait(timeout=5)
+        return original_prepare(*args)
+
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", delayed_prepare)
+    caller = asyncio.create_task(
+        writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint="f" * 64,
+            event=event,
+            receipt=receipt,
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    entry = event["entry"]
+    assert isinstance(entry, dict)
+    entry["message"] = "mutated after handoff"
+    receipt["entry_id"] = 999
+    released.set()
+    prepared = await caller
+
+    assert prepared.event["entry"]["message"] == "stable"
+    assert prepared.receipt["entry_id"] == 7
+    await writer.stop()
+
+
+@pytest.mark.parametrize(
+    ("case", "column", "raw"),
+    [
+        (
+            "duplicate",
+            "event_json",
+            '{"entry":{},"entry":{},"schema":"operator_log_commit_v1"}',
+        ),
+        (
+            "nonfinite",
+            "event_json",
+            '{"entry":{"id":NaN},"schema":"operator_log_commit_v1"}',
+        ),
+        ("nonobject", "event_json", "[]"),
+        (
+            "cross_identity",
+            "receipt_json",
+            '{"committed":true,"entry_id":999,"experiment_id":"exp-001",'
+            '"request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":"operator_log_commit_v1"}',
+        ),
+        ("request_id", "request_id", "not-a-request-id"),
+        ("fingerprint", "request_fingerprint", "not-a-fingerprint"),
+    ],
+)
+async def test_pending_publication_validation_is_all_or_nothing(
+    tmp_path: Path,
+    case: str,
+    column: str,
+    raw: str,
+) -> None:
+    del case
+    writer = SQLiteWriter(tmp_path)
+    for index, request_id in enumerate(("a" * 32, "b" * 32), start=1):
+        event, receipt = _publication_payload(request_id, entry_id=index)
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=str(index) * 64,
+            event=event,
+            receipt=receipt,
+        )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute(
+            f"UPDATE operator_log_publication_outbox SET {column} = ? WHERE request_id = ?",
+            (raw, "b" * 32),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _publication_rows(tmp_path)
+
+    with pytest.raises(RuntimeError, match="operator-log publication"):
+        await writer.pending_operator_log_publication_outbox()
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+async def test_pending_publication_order_is_stable_and_published_rows_are_excluded(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_ids = ("a" * 32, "b" * 32, "c" * 32)
+    for index, request_id in enumerate(request_ids, start=1):
+        event, receipt = _publication_payload(request_id, entry_id=index)
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=str(index) * 64,
+            event=event,
+            receipt=receipt,
+        )
+    await writer.publish_operator_log_publication_outbox(
+        request_id="c" * 32,
+        request_fingerprint="3" * 64,
+    )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute(
+            "UPDATE operator_log_publication_outbox SET created_at = 20, updated_at = 20 WHERE request_id = ?",
+            ("a" * 32,),
+        )
+        conn.execute(
+            "UPDATE operator_log_publication_outbox SET created_at = 10, updated_at = 10 WHERE request_id = ?",
+            ("b" * 32,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    first = await writer.pending_operator_log_publication_outbox()
+    second = await writer.pending_operator_log_publication_outbox()
+
+    assert tuple(record.request_id for record in first) == ("b" * 32, "a" * 32)
+    assert second == first
+    await writer.stop()
+
+
+async def test_pending_publication_rejects_invalid_state_instead_of_omitting_it(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint="f" * 64,
+        event=event,
+        receipt=receipt,
+    )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute(
+            "UPDATE operator_log_publication_outbox SET state = 'unknown' WHERE request_id = ?",
+            (request_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _publication_rows(tmp_path)
+
+    with pytest.raises(RuntimeError, match="state registry is invalid"):
+        await writer.pending_operator_log_publication_outbox()
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+@pytest.mark.parametrize("bound", ["count", "json", "row", "aggregate"])
+async def test_pending_publication_bounds_fail_without_partial_return_or_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bound: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    for index, request_id in enumerate(("a" * 32, "b" * 32), start=1):
+        event, receipt = _publication_payload(request_id, entry_id=index, message="x" * 256)
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=str(index) * 64,
+            event=event,
+            receipt=receipt,
+        )
+    if bound == "count":
+        monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_PENDING", 1)
+        match = "count exceeds cap"
+    elif bound == "json":
+        monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_JSON_BYTES", 128)
+        match = "exceeds byte cap"
+    elif bound == "row":
+        monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_ROW_BYTES", 256)
+        match = "pending row exceeds cap"
+    else:
+        monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_PENDING_BYTES", 256)
+        match = "pending bytes exceed cap"
+    before = _publication_rows(tmp_path)
+
+    with pytest.raises(RuntimeError, match=match):
+        await writer.pending_operator_log_publication_outbox()
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+@pytest.mark.parametrize("capacity", ["count", "aggregate"])
+async def test_publication_prepare_rejects_capacity_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capacity: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    first_event, first_receipt = _publication_payload("a" * 32, message="first")
+    await writer.prepare_operator_log_publication_outbox(
+        request_id="a" * 32,
+        request_fingerprint="1" * 64,
+        event=first_event,
+        receipt=first_receipt,
+    )
+    before = _publication_rows(tmp_path)
+    assert len(before) == 1
+    if capacity == "count":
+        monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_PENDING", 1)
+        match = "count exceeds cap"
+    else:
+        retained_bytes = sum(len(str(value).encode("utf-8")) for value in before[0][:5])
+        monkeypatch.setattr(
+            sqlite_writer_module,
+            "_OPERATOR_LOG_PUBLICATION_MAX_PENDING_BYTES",
+            retained_bytes,
+        )
+        match = "bytes exceed cap"
+    second_event, second_receipt = _publication_payload("b" * 32, message="second")
+
+    with pytest.raises(RuntimeError, match=match):
+        await writer.prepare_operator_log_publication_outbox(
+            request_id="b" * 32,
+            request_fingerprint="2" * 64,
+            event=second_event,
+            receipt=second_receipt,
+        )
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+async def test_publication_mark_published_is_exact_and_idempotent(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    fingerprint = "f" * 64
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+
+    first = await writer.publish_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    before = _publication_rows(tmp_path)
+    replay = await writer.publish_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+
+    assert first.state == replay.state == "published"
+    assert first.event == replay.event == event
+    assert first.receipt == replay.receipt == receipt
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+@pytest.mark.parametrize("trigger_kind", ["lost_update", "corrupt_reread"])
+async def test_publication_mark_published_cas_rolls_back_nonexact_transition(
+    tmp_path: Path,
+    trigger_kind: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    fingerprint = "f" * 64
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        if trigger_kind == "lost_update":
+            conn.execute(
+                "CREATE TRIGGER publication_test_guard BEFORE UPDATE OF state "
+                "ON operator_log_publication_outbox BEGIN SELECT RAISE(IGNORE); END"
+            )
+            match = "lost its authority"
+        else:
+            conn.execute(
+                "CREATE TRIGGER publication_test_guard AFTER UPDATE OF state "
+                "ON operator_log_publication_outbox BEGIN "
+                "UPDATE operator_log_publication_outbox SET receipt_json = '[]' "
+                "WHERE request_id = NEW.request_id; END"
+            )
+            match = "must be a JSON object"
+        conn.commit()
+    finally:
+        conn.close()
+    before = _publication_rows(tmp_path)
+
+    with pytest.raises(RuntimeError, match=match):
+        await writer.publish_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+async def test_cross_table_trigger_cannot_forge_publication_state(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    fingerprint = "f" * 64
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute(
+            "CREATE TRIGGER forge_publication_from_alarm AFTER INSERT ON alarm_ack_outbox BEGIN "
+            "UPDATE operator_log_publication_outbox SET state = 'published' "
+            "WHERE request_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; END"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _publication_rows(tmp_path)
+    engine_instance_id = "1" * 32
+    source_activation_id = "1"
+    alarm_request_id = "b" * 32
+    alarm_fingerprint = "c" * 64
+    acknowledged_at = 123.5
+    alarm_event = {
+        "schema": "alarm_ack_event_v1",
+        "request_id": alarm_request_id,
+        "request_fingerprint": alarm_fingerprint,
+        "alarm_name": "alarm",
+        "engine_instance_id": engine_instance_id,
+        "source_activation_id": source_activation_id,
+        "activation_id": "activation-1",
+        "acknowledged_at": acknowledged_at,
+        "operator": "operator",
+        "reason": "observed",
+    }
+    alarm_receipt = {
+        "schema": "alarm_ack_commit_v1",
+        "request_id": alarm_request_id,
+        "request_fingerprint": alarm_fingerprint,
+        "alarm_name": "alarm",
+        "engine_instance_id": engine_instance_id,
+        "source_activation_id": source_activation_id,
+        "activation_id": "activation-1",
+        "acknowledged_at": acknowledged_at,
+        "committed": True,
+    }
+
+    with pytest.raises(RuntimeError, match="control database authority is unavailable"):
+        await writer.prepare_alarm_ack_outbox(
+            request_id=alarm_request_id,
+            request_fingerprint=alarm_fingerprint,
+            alarm_name="alarm",
+            activation_id="activation-1",
+            engine_instance_id=engine_instance_id,
+            source_activation_id=source_activation_id,
+            operator_name="operator",
+            reason="observed",
+            event=alarm_event,
+            receipt=alarm_receipt,
+        )
+
+    assert _publication_rows(tmp_path) == before
+    assert before[0][2] == "intent"
+    await writer.stop()
+
+
+async def test_control_handle_close_failure_retains_same_handle_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    authority = sqlite_writer_module._ControlDatabaseAuthority(tmp_path)
+    handle = sqlite_writer_module._open_control_authority_handle(tmp_path, directory=True)
+    real_close = sqlite_writer_module._close_control_authority_handle
+    calls: list[int] = []
+
+    def fail_once(current: int) -> None:
+        calls.append(current)
+        if len(calls) == 1:
+            raise OSError("TOP-SECRET\r\nFORGED")
+        real_close(current)
+
+    monkeypatch.setattr(sqlite_writer_module, "_close_control_authority_handle", fail_once)
+    with pytest.raises(RuntimeError, match="handle settlement is incomplete") as captured:
+        authority._close_transient_handle(handle)
+    assert "TOP-SECRET" not in str(captured.value)
+    assert "TOP-SECRET" not in _exception_chain_text(captured.value)
+    assert "FORGED" not in _exception_chain_text(captured.value)
+    assert authority._orphan_handles == {handle}
+    writer._retained_control_authorities.add(authority)
+    assert writer.control_settlement_incomplete is True
+
+    await writer.retry_control_settlement()
+
+    assert calls == [handle, handle]
+    assert writer.control_settlement_incomplete is False
+    await writer.stop()
+
+
+def test_owned_control_connection_keeps_authority_until_connection_close_settles() -> None:
+    events: list[str] = []
+
+    class Connection:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            events.append(f"connection-close-{self.close_calls}")
+            if self.close_calls == 1:
+                raise RuntimeError("TOP-SECRET\r\nFORGED")
+
+    class Authority:
+        def __init__(self) -> None:
+            self._directory_handles = [(Path("owned"), 1, (1, 1, 1, 1, 1))]
+            self._database_handle = (2, (2, 2, 2, 2, 2))
+            self._sidecar_handles = {}
+            self.close_calls = 0
+
+        def validate(self) -> None:
+            events.append("authority-validate")
+
+        def validate_retained_handles(self, *, allow_unlinked_sidecars: bool = False) -> None:
+            assert allow_unlinked_sidecars is True
+            events.append("authority-retained-validate")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            events.append(f"authority-close-{self.close_calls}")
+            self._directory_handles.clear()
+            self._database_handle = None
+
+    connection = Connection()
+    authority = Authority()
+    retained: set[object] = set()
+    owned = sqlite_writer_module._OwnedControlConnection(connection, authority, retained)
+
+    with pytest.raises(RuntimeError, match="close settlement is incomplete") as captured:
+        owned.close()
+
+    assert "TOP-SECRET" not in str(captured.value)
+    assert "TOP-SECRET" not in _exception_chain_text(captured.value)
+    assert "FORGED" not in _exception_chain_text(captured.value)
+    assert connection.close_calls == 1
+    assert authority.close_calls == 0
+    assert authority._directory_handles
+    assert authority._database_handle is not None
+    assert owned in retained
+
+    owned.close()
+
+    assert connection.close_calls == 2
+    assert authority.close_calls == 1
+    assert events.index("connection-close-2") < events.index("authority-close-1")
+    assert owned not in retained
+
+
+async def test_failed_stop_owner_is_cleared_for_exact_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    calls = 0
+
+    async def fail_once() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("TOP-SECRET\r\nFORGED")
+
+    monkeypatch.setattr(writer, "_stop_impl", fail_once)
+
+    with pytest.raises(RuntimeError, match="stop settlement is incomplete") as captured:
+        await writer.stop()
+    assert "TOP-SECRET" not in _exception_chain_text(captured.value)
+    assert "FORGED" not in _exception_chain_text(captured.value)
+    assert writer._stop_owner is None
+
+    await writer.stop()
+
+    assert calls == 2
+    assert writer._stop_owner is not None and writer._stop_owner.done()
+
+
+async def test_control_initialization_deadline_rolls_back_before_ddl_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"expired": False}
+    original_verify = SQLiteWriter._verify_operator_log_publication_storage
+
+    def verify_then_expire(cls, conn, *, allow_transactional_trigger_challenge: bool):
+        del cls
+        result = original_verify(
+            conn,
+            allow_transactional_trigger_challenge=allow_transactional_trigger_challenge,
+        )
+        clock["expired"] = True
+        return result
+
+    monkeypatch.setattr(
+        SQLiteWriter,
+        "_verify_operator_log_publication_storage",
+        classmethod(verify_then_expire),
+    )
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_operator_log_monotonic",
+        lambda: 10.0 if clock["expired"] else 0.0,
+    )
+    writer = SQLiteWriter(tmp_path)
+    event, receipt = _publication_payload("a" * 32)
+
+    with pytest.raises(RuntimeError, match="initialization deadline expired"):
+        await writer.prepare_operator_log_publication_outbox(
+            request_id="a" * 32,
+            request_fingerprint="f" * 64,
+            event=event,
+            receipt=receipt,
+        )
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operator_log_publication_outbox'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert table is None
+    await writer.stop()
+
+
+async def test_control_directory_failure_does_not_export_exception_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "TOP-SECRET\r\nFORGED"
+    injected = False
+
+    def fail_directory(_path: Path, *, retained_on_failure: set[int]) -> Path:
+        nonlocal injected
+        assert isinstance(retained_on_failure, set)
+        injected = True
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(sqlite_writer_module, "_prepare_control_data_directory", fail_directory)
+    writer = SQLiteWriter(tmp_path)
+    event, receipt = _publication_payload("a" * 32)
+
+    with pytest.raises(RuntimeError, match="control database authority is unavailable") as captured:
+        await writer.prepare_operator_log_publication_outbox(
+            request_id="a" * 32,
+            request_fingerprint="f" * 64,
+            event=event,
+            receipt=receipt,
+        )
+
+    assert injected is True
+    assert secret not in _exception_chain_text(captured.value)
+    assert "TOP-SECRET" not in caplog.text
+    assert "FORGED" not in caplog.text
+    await writer.stop()
+
+
+async def test_control_wal_and_shm_created_by_transaction_are_handle_bound(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    conn = writer._open_control_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO alarm_ack_outbox "
+            "(request_id, request_fingerprint, alarm_name, activation_id, engine_instance_id, "
+            "source_activation_id, operator_name, reason, state, event_json, receipt_json, "
+            "terminal_code, terminal_engine_instance_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?, NULL, NULL, ?, ?)",
+            (
+                "a" * 32,
+                "b" * 64,
+                "alarm",
+                "activation",
+                "1" * 32,
+                "source-a",
+                "operator",
+                "reason",
+                json.dumps(
+                    {
+                        "schema": "alarm_ack_event_v1",
+                        "engine_instance_id": "1" * 32,
+                        "source_activation_id": "source-a",
+                        "activation_id": "activation",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    {
+                        "schema": "alarm_ack_commit_v1",
+                        "request_id": "a" * 32,
+                        "engine_instance_id": "1" * 32,
+                        "source_activation_id": "source-a",
+                        "committed": True,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                1.0,
+                1.0,
+            ),
+        )
+        expected = {
+            Path(f"{tmp_path / 'control.db'}-wal"),
+            Path(f"{tmp_path / 'control.db'}-shm"),
+        }
+        assert expected == set(conn._authority._sidecar_handles)
+        for sidecar in expected:
+            handle, identity = conn._authority._sidecar_handles[sidecar]
+            assert sqlite_writer_module._control_handle_identity(handle, directory=False) == identity
+        if os.name == "nt":
+            assert conn._sidecar_descriptors == ()
+            assert all(sqlite_writer_module._probe_windows_delete_access(path) is None for path in expected)
+        else:
+            records = {record.role: record for record in conn._sidecar_descriptors}
+            assert set(records) == {"wal", "shm"}
+            assert len({record.descriptor for record in records.values()}) == 2
+            for role, record in records.items():
+                sidecar = Path(f"{tmp_path / 'control.db'}-{role}")
+                retained_identity = conn._authority._sidecar_handles[sidecar][1]
+                assert (
+                    sqlite_writer_module._control_handle_identity(record.descriptor, directory=False) == record.identity
+                )
+                assert record.identity == retained_identity
+                assert os.path.samestat(os.fstat(record.descriptor), sidecar.stat())
+    finally:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+        await writer.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permits pathname replacement while SQLite descriptors stay open")
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+async def test_live_sqlite_sidecar_path_aba_is_rejected_before_the_next_operation(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    conn = writer._open_control_db()
+    sidecar = Path(f"{tmp_path / 'control.db'}{suffix}")
+    original = sidecar.with_name(sidecar.name + ".original")
+
+    def replace_sidecar() -> None:
+        sidecar.replace(original)
+        sidecar.write_bytes(b"forged-sidecar")
+
+    def restore_sidecar() -> None:
+        if sidecar.exists():
+            sidecar.unlink()
+        if original.exists():
+            original.replace(sidecar)
+
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS authority_probe(value INTEGER)")
+        conn.commit()
+        await asyncio.to_thread(replace_sidecar)
+
+        with pytest.raises(RuntimeError, match="SQLite authority changed during operation|sidecar authority changed"):
+            conn.execute("SELECT COUNT(*) FROM authority_probe").fetchone()
+    finally:
+        await asyncio.to_thread(restore_sidecar)
+        conn.close()
+        await writer.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX /proc descriptor ambiguity proof")
+async def test_duplicate_native_sidecar_descriptors_fail_activation_binding_as_ambiguous(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    conn = writer._open_control_db()
+    authority = conn._authority
+    records = {record.role: record for record in conn._sidecar_descriptors}
+    baseline = authority.sqlite_descriptor_baseline()
+    duplicate_one = os.dup(records["wal"].descriptor)
+    duplicate_two = os.dup(records["wal"].descriptor)
+    try:
+        with pytest.raises(RuntimeError, match="unavailable or ambiguous"):
+            authority.bind_sqlite_sidecar_descriptors(baseline)
+    finally:
+        os.close(duplicate_two)
+        os.close(duplicate_one)
+        conn.close()
+        await writer.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX borrowed-descriptor number reuse proof")
+async def test_reused_native_sidecar_descriptor_number_never_validates_old_identity(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    conn = writer._open_control_db()
+    authority = conn._authority
+    records = list(conn._sidecar_descriptors)
+    wal_index = next(index for index, record in enumerate(records) if record.role == "wal")
+    original = records[wal_index]
+    borrowed_duplicate = os.dup(original.descriptor)
+    records[wal_index] = sqlite_writer_module._SQLiteNativeDescriptor(
+        role="wal",
+        descriptor=borrowed_duplicate,
+        identity=original.identity,
+    )
+    authority.validate_sqlite_sidecar_authority(tuple(records))
+
+    os.close(borrowed_duplicate)
+    unrelated = tmp_path / "unrelated-descriptor-target"
+    unrelated.write_bytes(b"not sqlite evidence")
+    reused = os.open(unrelated, os.O_RDONLY)
+    try:
+        assert reused == borrowed_duplicate
+        with pytest.raises(RuntimeError, match="sidecar descriptor authority changed"):
+            authority.validate_sqlite_sidecar_authority(tuple(records))
+    finally:
+        os.close(reused)
+        conn.close()
+        await writer.stop()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native delete-sharing proof")
+async def test_windows_sqlite_sidecars_block_replacement_until_native_close(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    conn = writer._open_control_db()
+    sidecars = (Path(f"{tmp_path / 'control.db'}-wal"), Path(f"{tmp_path / 'control.db'}-shm"))
+    for sidecar in sidecars:
+        assert sqlite_writer_module._probe_windows_delete_access(sidecar) is None
+        with pytest.raises(OSError):
+            sidecar.replace(sidecar.with_name(sidecar.name + ".blocked"))
+
+    conn.execute("CREATE TABLE IF NOT EXISTS sharing_probe(value INTEGER)")
+    conn.execute("INSERT INTO sharing_probe VALUES (1)")
+    conn.rollback()
+    conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+    conn.close()
+
+    for sidecar in sidecars:
+        if not sidecar.exists():
+            sidecar.write_bytes(b"closed")
+        moved = sidecar.with_name(sidecar.name + ".after-close")
+        sidecar.replace(moved)
+        moved.replace(sidecar)
+    await writer.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-bound SQLite authority")
+def test_posix_sqlite_target_remains_bound_to_renamed_directory(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    moved_dir = tmp_path / "moved"
+    authority = sqlite_writer_module._ControlDatabaseAuthority(data_dir)
+    authority.open()
+    target, uri = authority.sqlite_connect_target()
+    data_dir.rename(moved_dir)
+    data_dir.mkdir()
+    conn = sqlite3.connect(target, uri=uri)
+    try:
+        conn.execute("CREATE TABLE descriptor_bound(value INTEGER)")
+        conn.commit()
+    finally:
+        conn.close()
+        authority.close()
+
+    assert not (data_dir / "control.db").exists()
+    moved = sqlite3.connect(moved_dir / "control.db")
+    try:
+        assert moved.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='descriptor_bound'"
+        ).fetchone() == (1,)
+    finally:
+        moved.close()
+
+
+def test_sqlite_connection_cannot_aba_swap_around_retained_database_authority(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    database = data_dir / "data_2026-07-23.db"
+    forged = data_dir / "forged.db"
+    backup = data_dir / "original.db"
+    for path, value in ((database, "legitimate"), (forged, "forged")):
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("CREATE TABLE proof(value TEXT NOT NULL)")
+            connection.execute("INSERT INTO proof VALUES (?)", (value,))
+            connection.commit()
+        finally:
+            connection.close()
+
+    authority = sqlite_writer_module._ControlDatabaseAuthority(
+        data_dir,
+        database_name=database.name,
+        read_only=True,
+    )
+    authority.open()
+    connection = None
+    try:
+        if os.name == "nt":
+            with pytest.raises(OSError):
+                database.replace(backup)
+            assert database.exists()
+            assert not backup.exists()
+            return
+
+        target, uri = authority.sqlite_connect_target()
+        baseline = authority.sqlite_descriptor_baseline()
+        database.replace(backup)
+        forged.replace(database)
+        connection = sqlite3.connect(target, uri=uri)
+        database.replace(forged)
+        backup.replace(database)
+
+        with pytest.raises(RuntimeError, match="not bound to the retained database authority"):
+            authority.bind_sqlite_connection_descriptor(baseline)
+        assert connection.execute("SELECT value FROM proof").fetchone() == ("forged",)
+        legitimate = sqlite3.connect(database)
+        try:
+            assert legitimate.execute("SELECT value FROM proof").fetchone() == ("legitimate",)
+        finally:
+            legitimate.close()
+    finally:
+        if connection is not None:
+            connection.close()
+        if backup.exists() and not database.exists():
+            backup.replace(database)
+        authority.close()
+
+
+async def test_published_replay_still_validates_durable_payload(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    fingerprint = "f" * 64
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    await writer.publish_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute(
+            "UPDATE operator_log_publication_outbox SET event_json = '[]' WHERE request_id = ?",
+            (request_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _publication_rows(tmp_path)
+
+    with pytest.raises(RuntimeError, match="must be a JSON object"):
+        await writer.publish_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+async def test_pending_publication_enumeration_retains_executor_owner_on_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    entered = threading.Event()
+    released = threading.Event()
+    settled = threading.Event()
+
+    def blocked_enumeration():
+        entered.set()
+        assert released.wait(timeout=5)
+        settled.set()
+        return ()
+
+    monkeypatch.setattr(writer, "_pending_operator_log_publication_outbox_sync", blocked_enumeration)
+    caller = asyncio.create_task(writer.pending_operator_log_publication_outbox())
+    assert await asyncio.to_thread(entered.wait, 5)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    released.set()
+    await writer.stop()
+
+    assert settled.is_set()
+
+
+async def test_cancelled_publication_owner_failure_is_retained_consumed_and_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    entered = threading.Event()
+    released = threading.Event()
+    settled = threading.Event()
+    secret = "TOP-SECRET\r\nFORGED"
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(dict(context)))
+
+    def failing_enumeration():
+        entered.set()
+        assert released.wait(timeout=5)
+        settled.set()
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(writer, "_pending_operator_log_publication_outbox_sync", failing_enumeration)
+    caller = asyncio.create_task(writer.pending_operator_log_publication_outbox())
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert len(writer._owned_read_tasks) == 1
+        retained_owner = next(iter(writer._owned_read_tasks))
+        owner_done = threading.Event()
+        retained_owner.add_done_callback(lambda _owner: owner_done.set())
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        released.set()
+        assert await asyncio.to_thread(settled.wait, 5)
+        assert await asyncio.to_thread(owner_done.wait, 5)
+        assert retained_owner.done()
+        assert retained_owner in writer._owned_read_tasks, (
+            "terminal failures must remain owned until stop consumes them"
+        )
+
+        await writer.stop()
+        assert writer._owned_read_tasks == set()
+        del retained_owner
+        del caller
+        gc.collect()
+        await asyncio.sleep(0)
+        assert unhandled == []
+        assert "TOP-SECRET" not in caplog.text
+        assert "FORGED" not in caplog.text
+    finally:
+        released.set()
+        if writer._executor is not None or writer._read_executor is not None:
+            await writer.stop()
+        loop.set_exception_handler(previous_handler)
+
+
+async def test_restart_reconstructs_append_committed_before_outbox_intent(tmp_path: Path) -> None:
+    request_id = "d" * 32
+    fingerprint = "e" * 64
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    entry = _write_legacy_keyed_row_without_outbox(
+        writer,
+        message="crash after append before intent",
+        experiment_id="exp-001",
+        tags=("reviewed",),
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    assert _publication_rows(tmp_path) == ()
+    await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    first = await restarted.reconcile_missing_operator_log_publication_outbox()
+    second = await restarted.reconcile_missing_operator_log_publication_outbox()
+
+    assert len(first) == 1
+    assert second == first
+    assert first[0].request_id == request_id
+    assert first[0].request_fingerprint == fingerprint
+    assert first[0].state == "intent"
+    assert first[0].event["entry"] == entry.to_payload()
+    assert len(_publication_rows(tmp_path)) == 1
+    await restarted.stop()
+
+
+async def test_combined_append_reserves_outbox_capacity_before_daily_row_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    event, receipt = _publication_payload("a" * 32)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id="a" * 32,
+        request_fingerprint="b" * 64,
+        event=event,
+        receipt=receipt,
+    )
+    monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_PENDING", 1)
+
+    with pytest.raises(RuntimeError, match="pending count exceeds cap"):
+        await writer.append_operator_log_with_publication_intent(
+            message="must not reach the daily database",
+            author="operator",
+            source="gui",
+            request_id="c" * 32,
+            request_fingerprint="d" * 64,
+        )
+
+    assert await asyncio.to_thread(lambda: list(tmp_path.glob("data_*.db"))) == []
+    assert [row[:3] for row in _publication_rows(tmp_path)] == [("a" * 32, "b" * 64, "intent")]
+    await writer.stop()
+
+
+async def test_restart_promotes_matching_committed_reservation_after_intent_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_id = "7" * 32
+    fingerprint = "8" * 64
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    original_prepare = writer._prepare_operator_log_publication_outbox_sync
+
+    def fail_promotion(*_args, **_kwargs):
+        raise RuntimeError("TOP-SECRET\r\nFORGED promotion failure")
+
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", fail_promotion)
+    commit, publication = await writer.append_operator_log_with_publication_intent(
+        message="daily row committed behind reservation",
+        author="operator",
+        source="gui",
+        experiment_id="exp-001",
+        tags=["reviewed"],
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+
+    assert publication.state == "reserved"
+    assert publication.request_id == request_id
+    assert _publication_rows(tmp_path)[0][2] == "reserved"
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", original_prepare)
+    await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    first = await restarted.reconcile_missing_operator_log_publication_outbox()
+    second = await restarted.reconcile_missing_operator_log_publication_outbox()
+
+    assert len(first) == 1
+    assert second == first
+    assert first[0].state == "intent"
+    assert first[0].request_id == request_id
+    assert first[0].event["entry"] == commit.entry.to_payload()
+    assert _publication_rows(tmp_path)[0][2] == "intent"
+    await restarted.stop()
+
+
+async def test_registry_byte_capacity_rejects_before_append_and_preserves_exact_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_REGISTRY_BYTES", 4_096)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    admitted: list[tuple[str, str, str]] = []
+    rejection: OperatorLogIdempotencyUnavailableError | None = None
+    try:
+        for index in range(12):
+            request_id = f"{index + 1:x}" * 32
+            fingerprint = f"{index + 4:x}" * 64
+            message = f"bounded-{index}-" + ("x" * 2_000)
+            try:
+                await writer.append_operator_log_idempotent(
+                    message=message,
+                    request_id=request_id,
+                    request_fingerprint=fingerprint,
+                    author="operator",
+                    source="gui",
+                    experiment_id="exp-001",
+                    tags=["reviewed"],
+                )
+            except OperatorLogIdempotencyUnavailableError as exc:
+                rejection = exc
+                break
+            admitted.append((request_id, fingerprint, message))
+
+        assert rejection is not None
+        assert "capacity" in str(rejection)
+        assert 0 < len(admitted) < 12
+        assert len(await writer.get_operator_log(limit=50)) == len(admitted)
+        assert len(_publication_rows(tmp_path)) == len(admitted)
+
+        replay = await writer.append_operator_log_idempotent(
+            message=admitted[0][2],
+            request_id=admitted[0][0],
+            request_fingerprint=admitted[0][1],
+            author="operator",
+            source="gui",
+            experiment_id="exp-001",
+            tags=["reviewed"],
+        )
+        assert replay.replayed is True
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        await restarted.initialize_operator_log_idempotency()
+        replay = await restarted.append_operator_log_idempotent(
+            message=admitted[-1][2],
+            request_id=admitted[-1][0],
+            request_fingerprint=admitted[-1][1],
+            author="operator",
+            source="gui",
+            experiment_id="exp-001",
+            tags=["reviewed"],
+        )
+        assert replay.replayed is True
+        assert len(await restarted.get_operator_log(limit=50)) == len(admitted)
+    finally:
+        await restarted.stop()
+
+
+async def test_reconstruction_capacity_rejects_all_missing_without_partial_insert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    for index, request_id in enumerate(("a" * 32, "b" * 32), start=1):
+        _write_legacy_keyed_row_without_outbox(
+            writer,
+            message=f"committed-{index}",
+            request_id=request_id,
+            request_fingerprint=str(index) * 64,
+        )
+    await writer.stop()
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_PENDING", 1)
+
+    def forbid_payload_materialization(_persisted):  # noqa: ANN001
+        raise AssertionError("payload materialized before missing-count admission")
+
+    monkeypatch.setattr(restarted, "_operator_log_publication_for_persisted", forbid_payload_materialization)
+
+    with pytest.raises(RuntimeError, match="reconciliation exceeds pending capacity"):
+        await restarted.reconcile_missing_operator_log_publication_outbox()
+
+    assert _publication_rows(tmp_path) == ()
+    await restarted.stop()
+
+
+def test_reconstruction_streams_rows_instead_of_fetchall_before_capacity_guard() -> None:
+    source = textwrap.dedent(inspect.getsource(SQLiteWriter._reconcile_missing_operator_log_publication_outbox_sync))
+    tree = ast.parse(source)
+    fetchall_calls = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "fetchall"
+    ]
+
+    assert fetchall_calls == [], f"reconstruction materializes rows before its cap at lines {fetchall_calls}"
+
+
+async def test_reconstruction_stops_payload_materialization_at_aggregate_byte_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    for index, request_id in enumerate(("4" * 32, "5" * 32, "6" * 32), start=4):
+        _write_legacy_keyed_row_without_outbox(
+            writer,
+            message=f"committed-{index}",
+            request_id=request_id,
+            request_fingerprint=str(index) * 64,
+        )
+    await writer.stop()
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_PENDING_BYTES", 1)
+    original_payload = restarted._operator_log_publication_for_persisted
+    materialized = 0
+
+    def bounded_payload(persisted):  # noqa: ANN001
+        nonlocal materialized
+        materialized += 1
+        if materialized > 1:
+            raise AssertionError("payload materialization continued past aggregate byte rejection")
+        return original_payload(persisted)
+
+    monkeypatch.setattr(restarted, "_operator_log_publication_for_persisted", bounded_payload)
+
+    with pytest.raises(RuntimeError, match="reconciliation exceeds pending byte capacity"):
+        await restarted.reconcile_missing_operator_log_publication_outbox()
+
+    assert materialized == 1
+    assert _publication_rows(tmp_path) == ()
+    await restarted.stop()
+
+
+async def test_reserved_outbox_byte_preflight_precedes_decode_promotion_or_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+
+    def fail_promotion(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("retain reservation for restart preflight")
+
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", fail_promotion)
+    for request_id, fingerprint in (("d" * 32, "4" * 64), ("e" * 32, "5" * 64)):
+        _commit, publication = await writer.append_operator_log_with_publication_intent(
+            message="reserved-" + ("x" * 256),
+            author="operator",
+            source="gui",
+            experiment_id="exp-001",
+            tags=["reviewed"],
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+        assert publication.state == "reserved"
+    await writer.stop()
+    before = _publication_rows(tmp_path)
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    monkeypatch.setattr(sqlite_writer_module, "_OPERATOR_LOG_PUBLICATION_MAX_PENDING_BYTES", 1)
+
+    def forbid_reservation_decode(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("reserved row decoded before SQL aggregate byte preflight")
+
+    monkeypatch.setattr(restarted, "_operator_log_reservation_record", forbid_reservation_decode)
+
+    with pytest.raises(RuntimeError, match="pending byte capacity"):
+        await restarted.reconcile_missing_operator_log_publication_outbox()
+
+    assert _publication_rows(tmp_path) == before
+    await restarted.stop()
+
+
+async def test_promotion_and_missing_insert_bytes_reject_before_any_outbox_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+
+    def retain_reservation(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("retain exact reservation for restart")
+
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", retain_reservation)
+    reserved_request_id = "1" * 32
+    reserved_fingerprint = "2" * 64
+    _commit, publication = await writer.append_operator_log_with_publication_intent(
+        message="reserved promotion " + ("x" * 512),
+        author="operator",
+        source="gui",
+        experiment_id="exp-001",
+        tags=["reviewed"],
+        request_id=reserved_request_id,
+        request_fingerprint=reserved_fingerprint,
+    )
+    assert publication.state == "reserved"
+    missing_request_id = "3" * 32
+    missing_fingerprint = "4" * 64
+    _write_legacy_keyed_row_without_outbox(
+        writer,
+        message="missing publication intent " + ("y" * 512),
+        experiment_id="exp-001",
+        tags=("reviewed",),
+        request_id=missing_request_id,
+        request_fingerprint=missing_fingerprint,
+    )
+    await writer.stop()
+    before = _publication_rows(tmp_path)
+    assert len(before) == 1
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    registry = restarted._operator_log_idempotency_registry
+    assert registry is not None
+    row = before[0]
+    request_id, fingerprint, state, event_json, receipt_json, _created, _updated = row
+    assert request_id == reserved_request_id
+    assert fingerprint == reserved_fingerprint
+    assert state == "reserved"
+    reserved_bytes = restarted._operator_log_publication_row_bytes(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        state=state,
+        event_json=event_json,
+        receipt_json=receipt_json,
+    )
+    promoted_event, promoted_receipt = restarted._operator_log_publication_for_persisted(registry[reserved_request_id])
+    promoted_bytes = restarted._operator_log_publication_row_bytes(
+        request_id=reserved_request_id,
+        request_fingerprint=reserved_fingerprint,
+        state="intent",
+        event_json=restarted._encode_operator_log_publication_json(
+            promoted_event,
+            field="event_json",
+        ),
+        receipt_json=restarted._encode_operator_log_publication_json(
+            promoted_receipt,
+            field="receipt_json",
+        ),
+    )
+    missing_event, missing_receipt = restarted._operator_log_publication_for_persisted(registry[missing_request_id])
+    missing_bytes = restarted._operator_log_publication_row_bytes(
+        request_id=missing_request_id,
+        request_fingerprint=missing_fingerprint,
+        state="intent",
+        event_json=restarted._encode_operator_log_publication_json(
+            missing_event,
+            field="event_json",
+        ),
+        receipt_json=restarted._encode_operator_log_publication_json(
+            missing_receipt,
+            field="receipt_json",
+        ),
+    )
+    exact_cap = max(reserved_bytes, promoted_bytes) + max(1, missing_bytes // 2)
+    assert reserved_bytes < exact_cap
+    assert promoted_bytes < exact_cap < promoted_bytes + missing_bytes
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_OPERATOR_LOG_PUBLICATION_MAX_PENDING_BYTES",
+        exact_cap,
+    )
+
+    with pytest.raises(RuntimeError, match="reconciliation exceeds pending byte capacity"):
+        await restarted.reconcile_missing_operator_log_publication_outbox()
+
+    assert _publication_rows(tmp_path) == before
+    await restarted.stop()
+
+
+async def test_semantically_valid_promotion_expansion_rolls_back_exact_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+
+    def retain_reservation(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("retain exact reservation for restart")
+
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", retain_reservation)
+    request_id = "5" * 32
+    fingerprint = "6" * 64
+    _commit, publication = await writer.append_operator_log_with_publication_intent(
+        message="future canonical encoder representation",
+        author="operator",
+        source="gui",
+        experiment_id="exp-001",
+        tags=["reviewed"],
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    assert publication.state == "reserved"
+    await writer.stop()
+    before = _publication_rows(tmp_path)
+    assert len(before) == 1
+    row = before[0]
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    reserved_bytes = restarted._operator_log_publication_row_bytes(
+        request_id=row[0],
+        request_fingerprint=row[1],
+        state=row[2],
+        event_json=row[3],
+        receipt_json=row[4],
+    )
+    original_encode = restarted._encode_operator_log_publication_json
+
+    def encode_with_valid_trailing_whitespace(payload: object, *, field: str) -> str:
+        # JSON permits trailing whitespace. This models a future semantically
+        # valid encoder representation that is larger than today's deliberate
+        # max-rowid reservation sentinel and locks the positive-delta defense.
+        return original_encode(payload, field=field) + (" " * 128)
+
+    monkeypatch.setattr(
+        restarted,
+        "_encode_operator_log_publication_json",
+        encode_with_valid_trailing_whitespace,
+    )
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_OPERATOR_LOG_PUBLICATION_MAX_PENDING_BYTES",
+        reserved_bytes + 64,
+    )
+
+    with pytest.raises(RuntimeError, match="reconciliation exceeds pending byte capacity"):
+        await restarted.reconcile_missing_operator_log_publication_outbox()
+
+    assert _publication_rows(tmp_path) == before
+    await restarted.stop()
+
+
+async def test_immediate_reservation_promotion_expansion_preflights_replacement_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    original_prepare = writer._prepare_operator_log_publication_outbox_sync
+
+    def retain_reservation(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("retain exact reservation for immediate retry")
+
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", retain_reservation)
+    request_id = "7" * 32
+    fingerprint = "8" * 64
+    _commit, publication = await writer.append_operator_log_with_publication_intent(
+        message="immediate promotion expansion",
+        author="operator",
+        source="gui",
+        experiment_id="exp-001",
+        tags=["reviewed"],
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    assert publication.state == "reserved"
+    before = _publication_rows(tmp_path)
+    assert len(before) == 1
+    row = before[0]
+    reserved_bytes = writer._operator_log_publication_row_bytes(
+        request_id=row[0],
+        request_fingerprint=row[1],
+        state=row[2],
+        event_json=row[3],
+        receipt_json=row[4],
+    )
+    registry = writer._operator_log_idempotency_registry
+    assert registry is not None
+    event, receipt = writer._operator_log_publication_for_persisted(registry[request_id])
+    original_encode = writer._encode_operator_log_publication_json
+
+    def encode_with_valid_trailing_whitespace(payload: object, *, field: str) -> str:
+        return original_encode(payload, field=field) + (" " * 128)
+
+    monkeypatch.setattr(writer, "_prepare_operator_log_publication_outbox_sync", original_prepare)
+    monkeypatch.setattr(
+        writer,
+        "_encode_operator_log_publication_json",
+        encode_with_valid_trailing_whitespace,
+    )
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_OPERATOR_LOG_PUBLICATION_MAX_PENDING_BYTES",
+        reserved_bytes + 64,
+    )
+
+    with pytest.raises(RuntimeError, match="pending bytes exceed cap"):
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+            event=event,
+            receipt=receipt,
+        )
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
+
+
+async def test_reconstruction_holds_writer_lock_across_existence_and_capacity_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    request_id = "c" * 32
+    await writer.append_operator_log_idempotent(
+        message="committed before reconstruction",
+        author="operator",
+        source="gui",
+        request_id=request_id,
+        request_fingerprint="3" * 64,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original_usage = writer._operator_log_publication_pending_usage
+
+    def block_after_snapshot(conn):  # noqa: ANN001
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_usage(conn)
+
+    monkeypatch.setattr(writer, "_operator_log_publication_pending_usage", block_after_snapshot)
+    reconciliation = asyncio.create_task(writer.reconcile_missing_operator_log_publication_outbox())
+    assert await asyncio.to_thread(entered.wait, 5)
+
+    competing = sqlite3.connect(tmp_path / "control.db", timeout=0)
+    competing_locked = False
+    try:
+        try:
+            competing.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            competing_locked = "locked" in str(exc).casefold()
+        finally:
+            if competing.in_transaction:
+                competing.rollback()
+    finally:
+        competing.close()
+        release.set()
+
+    pending = await asyncio.wait_for(reconciliation, timeout=5)
+    assert competing_locked, "reconstruction released writer authority between its existence and capacity snapshots"
+    assert [record.request_id for record in pending] == [request_id]
+    assert [row[0] for row in _publication_rows(tmp_path)] == [request_id]
+    await writer.stop()
+
+
+async def test_publish_failure_restart_replays_pending_outbox_once(tmp_path: Path) -> None:
+    """A durable commit survives publish failure and replays once with a stable key."""
+
+    from cryodaq.engine import _reconcile_operator_log_publication_outbox
+
+    request_id = "a" * 32
+    fingerprint = "f" * 64
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    commit = await writer.append_operator_log_idempotent(
+        message="durable before publish",
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        author="operator",
+        source="gui",
+        experiment_id="exp-001",
+        tags=["reviewed"],
+    )
+    entry = commit.entry
+    receipt = {
+        "schema": "operator_log_commit_v1",
+        "request_id": request_id,
+        "entry_id": entry.id,
+        "experiment_id": entry.experiment_id,
+        "committed": True,
+    }
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event={"schema": "operator_log_commit_v1", "entry": entry.to_payload()},
+        receipt=receipt,
+    )
+
+    class Broker:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.fail = fail
+            self.readings: list[object] = []
+            self._authority = object()
+
+        async def publish_required(
+            self,
+            reading: object,
+            *,
+            request_id: str,
+            request_fingerprint: str,
+        ) -> object:
+            self.readings.append(reading)
+            if self.fail:
+                raise RuntimeError("simulated crash window")
+            return (self._authority, request_id, request_fingerprint)
+
+        def validates_required_publication(
+            self,
+            receipt: object,
+            *,
+            request_id: str,
+            request_fingerprint: str,
+        ) -> bool:
+            return receipt == (self._authority, request_id, request_fingerprint)
+
+    failed_broker = Broker(fail=True)
+    with pytest.raises(RuntimeError, match="simulated crash window"):
+        await _reconcile_operator_log_publication_outbox(writer, failed_broker)
+    pending = await writer.pending_operator_log_publication_outbox()
+    assert [record.request_id for record in pending] == [request_id]
+    await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    await restarted.initialize_operator_log_idempotency()
+    broker = Broker()
+    try:
+        await _reconcile_operator_log_publication_outbox(restarted, broker)
+        await _reconcile_operator_log_publication_outbox(restarted, broker)
+        pending_after = await restarted.pending_operator_log_publication_outbox()
+    finally:
+        await restarted.stop()
+
+    assert pending_after == ()
+    assert len(broker.readings) == 1
+    reading = broker.readings[0]
+    assert getattr(reading, "channel") == "analytics/operator_log_entry"
+    metadata = getattr(reading, "metadata")
+    assert metadata["request_id"] == request_id
+    assert metadata["publication_schema"] == "operator_log_commit_v1"
+    assert metadata["id"] == entry.id
+
+
+async def test_pending_outbox_requires_a_live_broker_and_remains_intent(tmp_path: Path) -> None:
+    from cryodaq.engine import _reconcile_operator_log_publication_outbox
+
+    writer = SQLiteWriter(tmp_path)
+    request_id = "b" * 32
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint="e" * 64,
+        event=event,
+        receipt=receipt,
+    )
+
+    with pytest.raises(RuntimeError, match="publisher|broker|unavailable"):
+        await _reconcile_operator_log_publication_outbox(writer, None)
+
+    pending = await writer.pending_operator_log_publication_outbox()
+    assert [record.request_id for record in pending] == [request_id]
+    await writer.stop()
+
+
+async def test_control_db_hardlink_cannot_escape_data_directory(tmp_path: Path) -> None:
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    authority_writer = SQLiteWriter(authority)
+    first_request = "a" * 32
+    event, receipt = _publication_payload(first_request)
+    await authority_writer.prepare_operator_log_publication_outbox(
+        request_id=first_request,
+        request_fingerprint="1" * 64,
+        event=event,
+        receipt=receipt,
+    )
+    await authority_writer.stop()
+    authority_db = authority / "control.db"
+    before = authority_db.read_bytes()
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    os.link(authority_db, data_dir / "control.db")
+    writer = SQLiteWriter(data_dir)
+    second_request = "b" * 32
+    second_event, second_receipt = _publication_payload(second_request, entry_id=8)
+
+    with pytest.raises(RuntimeError, match="control database|hardlink|authority"):
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=second_request,
+            request_fingerprint="2" * 64,
+            event=second_event,
+            receipt=second_receipt,
+        )
+
+    assert authority_db.read_bytes() == before
+    assert not (data_dir / "control.db-wal").exists()
+    assert not (data_dir / "control.db-shm").exists()
+    await writer.stop()
+
+
+async def test_pending_publication_schema_has_bounded_ordered_state_index(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint="f" * 64,
+        event=event,
+        receipt=receipt,
+    )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        plan = tuple(
+            str(row[3])
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT request_id, request_fingerprint, state, event_json, receipt_json, "
+                "created_at, updated_at FROM operator_log_publication_outbox "
+                "WHERE state = 'intent' ORDER BY created_at ASC, request_id ASC LIMIT 1025"
+            )
+        )
+    finally:
+        conn.close()
+
+    assert any("USING INDEX" in step or "USING COVERING INDEX" in step for step in plan), plan
+    assert all("USE TEMP B-TREE" not in step for step in plan), plan
+    await writer.stop()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("experiment_id", ""),
+        ("author", " untrimmed "),
+        ("source", ""),
+        ("message", ""),
+        ("tags", ["", "  "]),
+        ("timestamp", "2026-07-23T15:00:00+03:00"),
+    ],
+)
+async def test_publication_rejects_payloads_the_authoritative_append_cannot_produce(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    event, receipt = _publication_payload(request_id)
+    entry = event["entry"]
+    assert isinstance(entry, dict)
+    entry[field] = value
+    if field == "experiment_id":
+        receipt["experiment_id"] = value
+
+    with pytest.raises(RuntimeError, match="operator-log publication"):
+        await writer.prepare_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint="f" * 64,
+            event=event,
+            receipt=receipt,
+        )
+
+    assert _publication_rows(tmp_path) == ()
+    await writer.stop()
+
+
+@pytest.mark.parametrize("mutation", ["created_at", "updated_at", "row_replacement"])
+async def test_publication_mark_published_cas_binds_row_identity_and_timestamps(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    request_id = "a" * 32
+    fingerprint = "f" * 64
+    event, receipt = _publication_payload(request_id)
+    await writer.prepare_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        if mutation == "created_at":
+            body = "UPDATE operator_log_publication_outbox SET created_at = 0 WHERE request_id = NEW.request_id;"
+        elif mutation == "updated_at":
+            body = (
+                "UPDATE operator_log_publication_outbox SET updated_at = updated_at + 1 "
+                "WHERE request_id = NEW.request_id;"
+            )
+        else:
+            body = (
+                "DELETE FROM operator_log_publication_outbox WHERE rowid = NEW.rowid; "
+                "INSERT INTO operator_log_publication_outbox "
+                "(request_id, request_fingerprint, state, event_json, receipt_json, created_at, updated_at) "
+                "VALUES (NEW.request_id, NEW.request_fingerprint, NEW.state, NEW.event_json, "
+                "NEW.receipt_json, NEW.created_at, NEW.updated_at);"
+            )
+        conn.execute(
+            "CREATE TRIGGER publication_identity_guard AFTER UPDATE OF state "
+            f"ON operator_log_publication_outbox BEGIN {body} END"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _publication_rows(tmp_path)
+
+    with pytest.raises(RuntimeError, match="operator-log publication"):
+        await writer.publish_operator_log_publication_outbox(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+
+    assert _publication_rows(tmp_path) == before
+    await writer.stop()
 
 
 async def test_legacy_schema_migrates_exactly_and_preserves_public_row(tmp_path: Path) -> None:
@@ -116,6 +2092,8 @@ async def test_keyed_append_replays_original_and_conflict_is_fail_closed(tmp_pat
     with pytest.raises(OperatorLogIdempotencyConflictError):
         await writer.append_operator_log_idempotent(
             message="conflict",
+            author="operator",
+            source="test",
             request_id=request_id,
             request_fingerprint="b" * 64,
         )
@@ -145,6 +2123,188 @@ async def test_keyed_append_replays_original_and_conflict_is_fail_closed(tmp_pat
     }
 
 
+@pytest.mark.parametrize(
+    "trigger_sql",
+    [
+        "CREATE TRIGGER operator_log_ignore BEFORE INSERT ON operator_log BEGIN SELECT RAISE(IGNORE); END",
+        "CREATE TRIGGER operator_log_rewrite AFTER INSERT ON operator_log "
+        "BEGIN UPDATE operator_log SET author='forged' WHERE rowid=NEW.rowid; END",
+    ],
+)
+async def test_keyed_append_rejects_triggered_loss_or_mutation_before_commit(
+    tmp_path: Path,
+    trigger_sql: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    first = await writer.append_operator_log_idempotent(
+        message="first retained row",
+        author="operator",
+        source="gui",
+        request_id="1" * 32,
+        request_fingerprint="a" * 64,
+    )
+    daily_path = tmp_path / f"data_{first.entry.timestamp.date().isoformat()}.db"
+    external = sqlite3.connect(daily_path)
+    try:
+        external.execute(trigger_sql)
+        external.commit()
+    finally:
+        external.close()
+
+    with pytest.raises(RuntimeError, match="operator_log trigger authority is invalid"):
+        await writer.append_operator_log_idempotent(
+            message="must not be lost or rewritten",
+            author="operator",
+            source="gui",
+            request_id="2" * 32,
+            request_fingerprint="b" * 64,
+        )
+
+    external = sqlite3.connect(daily_path)
+    try:
+        rows = external.execute("SELECT request_id, author, message FROM operator_log ORDER BY id").fetchall()
+    finally:
+        external.close()
+    assert rows == [("1" * 32, "operator", "first retained row")]
+    await writer.stop()
+
+
+@pytest.mark.parametrize(
+    "trigger_sql",
+    [
+        "CREATE TRIGGER operator_log_ignore_unkeyed BEFORE INSERT ON operator_log BEGIN SELECT RAISE(IGNORE); END",
+        "CREATE TRIGGER operator_log_rewrite_unkeyed AFTER INSERT ON operator_log "
+        "BEGIN UPDATE operator_log SET author='forged' WHERE rowid=NEW.rowid; END",
+    ],
+)
+async def test_unkeyed_append_rejects_triggered_loss_or_mutation_before_success(
+    tmp_path: Path,
+    trigger_sql: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    first = await writer.append_operator_log(
+        message="first retained unkeyed row",
+        author="operator",
+        source="gui",
+    )
+    daily_path = tmp_path / f"data_{first.timestamp.date().isoformat()}.db"
+    external = sqlite3.connect(daily_path)
+    try:
+        external.execute(trigger_sql)
+        external.commit()
+    finally:
+        external.close()
+
+    with pytest.raises(RuntimeError, match="operator_log trigger authority is invalid"):
+        await writer.append_operator_log(
+            message="must not report a lost or rewritten row",
+            author="operator",
+            source="gui",
+        )
+
+    external = sqlite3.connect(daily_path)
+    try:
+        rows = external.execute("SELECT author, message FROM operator_log ORDER BY id").fetchall()
+    finally:
+        external.close()
+    assert rows == [("operator", "first retained unkeyed row")]
+    await writer.stop()
+
+
+async def test_keyed_append_postcommit_authority_failure_is_outcome_unknown_and_replayable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_id = "3" * 32
+    fingerprint = "d" * 64
+    day = datetime.now(UTC).date()
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
+    writer._ensure_connection(day)
+    real_commit = sqlite_writer_module._OwnedControlConnection.commit
+    injected = False
+
+    def fail_once_after_commit(connection) -> None:  # noqa: ANN001
+        nonlocal injected
+        if not injected and connection._authority.db_path.name == f"data_{day.isoformat()}.db":
+            injected = True
+            connection.validate_authority()
+            connection._connection.commit()
+            raise RuntimeError("TOP-SECRET\r\nFORGED postcommit detail")
+        real_commit(connection)
+
+    monkeypatch.setattr(sqlite_writer_module._OwnedControlConnection, "commit", fail_once_after_commit)
+    with pytest.raises(sqlite_writer_module.OperatorLogCommitOutcomeUnknownError) as captured:
+        await writer.append_operator_log_idempotent(
+            message="committed before authority loss",
+            author="operator",
+            source="gui",
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+
+    error = captured.value
+    assert getattr(error, "commit_state", None) == "unknown"
+    assert getattr(error, "request_id", None) == request_id
+    assert getattr(error, "retry_safe", None) is False
+    assert "TOP-SECRET" not in _exception_chain_text(error)
+    assert "FORGED" not in _exception_chain_text(error)
+
+    monkeypatch.setattr(sqlite_writer_module._OwnedControlConnection, "commit", real_commit)
+    daily_path = tmp_path / f"data_{day.isoformat()}.db"
+    external = sqlite3.connect(daily_path)
+    try:
+        rows = external.execute(
+            "SELECT request_id, request_fingerprint, message FROM operator_log WHERE request_id = ?",
+            (request_id,),
+        ).fetchall()
+    finally:
+        external.close()
+    assert rows == [(request_id, fingerprint, "committed before authority loss")]
+    await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.initialize_operator_log_idempotency()
+    replay = await restarted.append_operator_log_idempotent(
+        message="committed before authority loss",
+        author="operator",
+        source="gui",
+        request_id=request_id,
+        request_fingerprint=fingerprint,
+    )
+    assert replay.replayed is True
+    assert replay.entry.message == "committed before authority loss"
+    await restarted.stop()
+
+
+@pytest.mark.parametrize(
+    ("author", "source"),
+    [("", "gui"), ("   ", "gui"), ("operator", ""), ("operator", "   ")],
+)
+async def test_keyed_append_rejects_missing_provenance_before_write(
+    tmp_path: Path,
+    author: str,
+    source: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.initialize_operator_log_idempotency()
+
+    with pytest.raises(RuntimeError, match="publication text admission is empty"):
+        await writer.append_operator_log_idempotent(
+            message="must retain exact provenance",
+            author=author,
+            source=source,
+            request_id="0" * 32,
+            request_fingerprint="f" * 64,
+        )
+
+    assert await asyncio.to_thread(lambda: list(tmp_path.glob("data_*.db"))) == []
+    await writer.stop()
+
+
 async def test_restart_registry_returns_original_row_without_new_insert(tmp_path: Path) -> None:
     request_id = "2" * 32
     fingerprint = "c" * 64
@@ -152,6 +2312,8 @@ async def test_restart_registry_returns_original_row_without_new_insert(tmp_path
     await first_writer.initialize_operator_log_idempotency()
     committed = await first_writer.append_operator_log_idempotent(
         message="restart-safe",
+        author="operator",
+        source="test",
         request_id=request_id,
         request_fingerprint=fingerprint,
     )
@@ -165,6 +2327,8 @@ async def test_restart_registry_returns_original_row_without_new_insert(tmp_path
     )
     replay = await restarted.append_operator_log_idempotent(
         message="ignored-on-replay",
+        author="operator",
+        source="test",
         request_id=request_id,
         request_fingerprint=fingerprint,
     )
@@ -214,6 +2378,8 @@ async def test_keyed_append_is_disabled_until_bounded_registry_is_ready(tmp_path
     with pytest.raises(OperatorLogIdempotencyUnavailableError, match="not initialized"):
         await writer.append_operator_log_idempotent(
             message="must not persist",
+            author="operator",
+            source="test",
             request_id="4" * 32,
             request_fingerprint="e" * 64,
         )
@@ -419,6 +2585,8 @@ async def _assert_cold_registry_unavailable(
     with pytest.raises(OperatorLogIdempotencyUnavailableError, match="not initialized"):
         await writer.append_operator_log_idempotent(
             message="must not be appended",
+            author="operator",
+            source="test",
             request_id=request_id,
             request_fingerprint=request_fingerprint,
         )
@@ -443,6 +2611,8 @@ async def test_rotation_restart_returns_original_request_receipt(tmp_path: Path)
     )
     replay = await writer.append_operator_log_idempotent(
         message="must return the cold durable row",
+        author="operator",
+        source="test",
         request_id=request_id,
         request_fingerprint=fingerprint,
     )
@@ -1119,6 +3289,8 @@ async def test_keyed_registry_capacity_rejects_before_append_without_eviction(
     await writer.initialize_operator_log_idempotency()
     first = await writer.append_operator_log_idempotent(
         message="retained identity",
+        author="operator",
+        source="test",
         request_id="8" * 32,
         request_fingerprint="c" * 64,
     )
@@ -1126,6 +3298,8 @@ async def test_keyed_registry_capacity_rejects_before_append_without_eviction(
     assert any(name.endswith(".db") for name in before_manifest)
 
     class ForbiddenDatetime:
+        fromisoformat = staticmethod(datetime.fromisoformat)
+
         @classmethod
         def now(cls, _timezone):
             raise AssertionError("capacity rejection must happen before server time is observed")
@@ -1139,6 +3313,8 @@ async def test_keyed_registry_capacity_rejects_before_append_without_eviction(
     with pytest.raises(OperatorLogIdempotencyUnavailableError, match="capacity"):
         await writer.append_operator_log_idempotent(
             message="must not displace retained identity",
+            author="operator",
+            source="test",
             request_id="9" * 32,
             request_fingerprint="d" * 64,
         )
@@ -1149,6 +3325,8 @@ async def test_keyed_registry_capacity_rejects_before_append_without_eviction(
     assert _durable_operator_log_manifest(tmp_path) == before_manifest
     replay = await writer.append_operator_log_idempotent(
         message="payload is ignored only for the exact retained fingerprint",
+        author="operator",
+        source="test",
         request_id="8" * 32,
         request_fingerprint="c" * 64,
     )
@@ -1158,6 +3336,8 @@ async def test_keyed_registry_capacity_rejects_before_append_without_eviction(
     with pytest.raises(OperatorLogIdempotencyConflictError):
         await writer.append_operator_log_idempotent(
             message="conflict must outrank capacity",
+            author="operator",
+            source="test",
             request_id="8" * 32,
             request_fingerprint="d" * 64,
         )

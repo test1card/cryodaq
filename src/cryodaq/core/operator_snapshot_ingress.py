@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from cryodaq.operator_snapshot import OperatorSnapshot
+from cryodaq.operator_snapshot import OperatorSnapshot, SnapshotMode
 from cryodaq.operator_snapshot_transport import decode_operator_snapshot_frames
 
 _MAX_ENQUEUE_ATTEMPTS = 8
@@ -15,6 +15,10 @@ _MAX_ENQUEUE_ATTEMPTS = 8
 
 class SnapshotIngressOrderingError(ValueError):
     """A valid snapshot regressed the accepted global cut ordering."""
+
+
+class SnapshotIngressModeError(ValueError):
+    """A decoded snapshot belongs to a different runtime authority domain."""
 
 
 class SnapshotIngressQueueError(RuntimeError):
@@ -30,14 +34,19 @@ class SnapshotIngressReceipt:
 class OperatorSnapshotQueueIngress:
     """Decode exact frames and retain only the newest complete global cut."""
 
-    def __init__(self, snapshot_queue: Any) -> None:
+    def __init__(self, snapshot_queue: Any, *, expected_mode: SnapshotMode) -> None:
+        if type(expected_mode) is not SnapshotMode:
+            raise TypeError("expected_mode must be an exact SnapshotMode")
         self._queue = snapshot_queue
+        self._expected_mode = expected_mode
         self._last_revision = 0
         self._last_received_at: datetime | None = None
 
     def accept_frames(self, frames: list[bytes] | tuple[bytes, ...]) -> SnapshotIngressReceipt:
         snapshot = decode_operator_snapshot_frames(frames)
         cut = snapshot.cut
+        if cut.mode is not self._expected_mode:
+            raise SnapshotIngressModeError("snapshot mode does not match ingress authority")
         if cut.revision <= self._last_revision:
             raise SnapshotIngressOrderingError("snapshot revision did not increase")
         if self._last_received_at is not None and cut.received_at < self._last_received_at:
@@ -68,6 +77,7 @@ class OperatorSnapshotQueueIngress:
 
 __all__ = [
     "OperatorSnapshotQueueIngress",
+    "SnapshotIngressModeError",
     "SnapshotIngressOrderingError",
     "SnapshotIngressQueueError",
     "SnapshotIngressReceipt",

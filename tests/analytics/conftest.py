@@ -113,7 +113,7 @@ def synthetic_curves() -> list[dict]:
                 "T_cold": T_cold,
                 "T_warm": T_warm,
                 "name": f"synthetic_{i + 1:02d}",
-                "date": f"2025-{6 + i:02d}-01",
+                "date": f"2025-06-{i + 1:02d}",
                 "duration_hours": float(t[-1]),
                 "phase1_hours": actual_ph1,
                 "phase2_hours": float(t[-1]) - actual_ph1,

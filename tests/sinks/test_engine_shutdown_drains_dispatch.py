@@ -40,19 +40,34 @@ async def test_drain_awaits_in_flight_task() -> None:
 
 @pytest.mark.asyncio
 async def test_drain_cancels_after_timeout() -> None:
-    """Long-running sink past timeout gets cancelled."""
+    """Timeout must not return until a cancellation-resistant sink is terminal."""
+
+    cancel_observed = asyncio.Event()
+    release_cancellation = asyncio.Event()
+    terminal = asyncio.Event()
 
     async def slow_sink() -> None:
-        await asyncio.sleep(5.0)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancel_observed.set()
+            await release_cancellation.wait()
+            terminal.set()
+            raise
 
     tasks: set[asyncio.Task] = set()
     t = asyncio.create_task(slow_sink())
     tasks.add(t)
 
     logger = logging.getLogger("test")
-    await _drain_dispatch_tasks(tasks, logger, timeout=0.1)
-    await asyncio.sleep(0.05)
+    drain = asyncio.create_task(_drain_dispatch_tasks(tasks, logger, timeout=0.01))
+    await asyncio.wait_for(cancel_observed.wait(), timeout=0.5)
 
-    # Must be cancelled, not just done via normal completion (which would mean
-    # the timeout logic is broken and the slow sink actually finished normally).
-    assert t.cancelled(), f"Expected task cancelled after timeout; done={t.done()}, cancelled={t.cancelled()}"
+    assert not drain.done()
+    assert not terminal.is_set()
+
+    release_cancellation.set()
+    await asyncio.wait_for(drain, timeout=0.5)
+
+    assert terminal.is_set()
+    assert t.cancelled(), "drain returned without exact terminal cancellation"

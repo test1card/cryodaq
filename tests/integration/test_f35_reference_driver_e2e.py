@@ -281,9 +281,14 @@ async def test_f35_full_chain_scheduler_drives_canonical_identity_through_d4(
     subprocess_reading = _decode_reading_frames(socket.frames[0])
     assert subprocess_reading["descriptor_envelope_malformed"] is False
     bridge = ZmqBridge()
+    # This test injects the already-decoded subprocess item directly instead
+    # of calling bridge.start(), so bind the exact incarnation that real
+    # startup establishes before any reading is admissible.
+    bridge._bridge_instance_id = "f" * 32
     bridge._data_queue.put(subprocess_reading)
     gui_readings = await asyncio.to_thread(_poll_gui_descriptor_readings, bridge)
     assert len(gui_readings) == 1
+    assert gui_readings[0].reading.metadata["bridge_instance_id"] == bridge.bridge_instance_id
 
     # --- LEG 2: bind rewrites raw label -> canonical ---
     published_reading = gui_readings[0].reading

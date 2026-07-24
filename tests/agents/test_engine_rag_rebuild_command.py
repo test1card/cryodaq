@@ -53,15 +53,13 @@ async def test_live_engine_rag_rebuild_commands_never_dispatch(
     context = _context()
     context.mutation_capability_token = "current-token-1234"
     forbidden_target = tmp_path / "live-index-must-not-exist"
-    command = {"cmd": action, "target": str(forbidden_target)}
-    if action == "rag.rebuild_index":
-        command.update(
-            {
-                "protocol_major": 1,
-                "mutation_capability": "cryodaq_mutation_v1",
-                "capability_token": "current-token-1234",
-            }
-        )
+    command = {
+        "cmd": action,
+        "target": str(forbidden_target),
+        "protocol_major": 1,
+        "mutation_capability": "cryodaq_mutation_v1",
+        "capability_token": "current-token-1234",
+    }
 
     result = await _handle_gui_command(
         command,
@@ -71,10 +69,31 @@ async def test_live_engine_rag_rebuild_commands_never_dispatch(
     assert result["ok"] is False
     assert result.get("available") is not True
     assert result.get("state") not in {"running", "complete"}
-    if action == "rag.rebuild_index":
-        assert result["error_code"] == "assistant_read_only"
-        assert result["delivery_state"] == "not_dispatched"
-        assert result["commit_state"] == "not_committed"
+    assert result["error_code"] == "command_unknown"
+    assert result["error"] == "Command is not supported."
+    assert result["delivery_state"] == "dispatched"
+    assert result["commit_state"] == "not_committed"
+    assert result["retry_safe"] is False
     build_index.assert_not_awaited()
     context.sink_registry.dispatch.assert_not_awaited()
     assert not forbidden_target.exists()
+
+
+@pytest.mark.parametrize("action", ["assistant.query", "rag.search"])
+async def test_live_engine_has_no_assistant_compatibility_route(action: str) -> None:
+    context = _context()
+
+    result = await _handle_gui_command(
+        {"cmd": action, "query": "status"},
+        context=context,
+    )
+
+    assert result == {
+        "ok": False,
+        "error_code": "command_unknown",
+        "error": "Command is not supported.",
+        "delivery_state": "dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": False,
+    }
+    context.sink_registry.dispatch.assert_not_awaited()

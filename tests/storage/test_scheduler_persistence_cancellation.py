@@ -136,9 +136,7 @@ async def test_receipt_fingerprint_mismatch_never_settles_admitted_batch() -> No
     assert ambiguous == [True]
 
 
-async def test_receipt_capacity_never_silently_evicts_unsettled_proof(
-    tmp_path, monkeypatch
-) -> None:
+async def test_receipt_capacity_never_silently_evicts_unsettled_proof(tmp_path, monkeypatch) -> None:
     writer = SQLiteWriter(tmp_path)
     writer._live_channel_catalog = object()
     writer._commit_settlement_capacity = 1

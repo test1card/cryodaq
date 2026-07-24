@@ -1182,7 +1182,7 @@ class PeriodicPngCoordinator:
                 raise
             current = await self._load_state()
             current_active = _active(current)
-            if self._same_active(active, current_active, expected_status=PeriodicStatus.PENDING):
+            if _same_periodic_active(active, current_active, expected_status=PeriodicStatus.PENDING):
                 await self._record_render_failure(
                     current,
                     current_active,
@@ -1199,7 +1199,7 @@ class PeriodicPngCoordinator:
         if self._stopping:
             return False
         fresh_active = _active(fresh)
-        if not self._same_active(active, fresh_active, expected_status=PeriodicStatus.PENDING):
+        if not _same_periodic_active(active, fresh_active, expected_status=PeriodicStatus.PENDING):
             return False
         rendering = mark_rendering(
             fresh,
@@ -1233,7 +1233,7 @@ class PeriodicPngCoordinator:
 
         current = await self._load_state()
         current_active = _active(current)
-        if not self._same_active(rendering_active, current_active, expected_status=PeriodicStatus.RENDERING):
+        if not _same_periodic_active(rendering_active, current_active, expected_status=PeriodicStatus.RENDERING):
             return False
         await self._adopt_render_result(current, current_active, result)
         return True
@@ -1249,7 +1249,7 @@ class PeriodicPngCoordinator:
         )
         current = await self._load_state()
         current_active = _active(current)
-        if not self._same_active(rendering_active, current_active, expected_status=PeriodicStatus.RENDERING):
+        if not _same_periodic_active(rendering_active, current_active, expected_status=PeriodicStatus.RENDERING):
             return False
         if recovered is not None:
             await self._adopt_render_result(current, current_active, recovered)
@@ -1446,7 +1446,7 @@ class PeriodicPngCoordinator:
             return False
         fresh_active = _active(fresh)
         expected_status = PeriodicStatus(active["status"])
-        if not self._same_active(active, fresh_active, expected_status=expected_status):
+        if not _same_periodic_active(active, fresh_active, expected_status=expected_status):
             return False
         if (
             fresh_active["artifact"] != active["artifact"]
@@ -1617,21 +1617,6 @@ class PeriodicPngCoordinator:
             finally:
                 timer = None
         return task.result()
-
-    @staticmethod
-    def _same_active(
-        expected: Mapping[str, object],
-        observed: dict[str, Any] | None,
-        *,
-        expected_status: PeriodicStatus,
-    ) -> bool:
-        return bool(
-            observed is not None
-            and observed["slot_id"] == expected["slot_id"]
-            and observed["owner_token"] == expected["owner_token"]
-            and observed["generation_id"] == expected["generation_id"]
-            and observed["status"] == expected_status.value
-        )
 
 
 CoordinatorFactory = Callable[[PeriodicPngConfig], PeriodicPngCoordinator]

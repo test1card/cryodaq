@@ -8,11 +8,13 @@ from datetime import UTC, datetime
 
 import pytest
 
+from cryodaq.core.broker import DataBroker
 from cryodaq.core.zmq_bridge import (
     HANDLER_TIMEOUT_FAST_S,
     HANDLER_TIMEOUT_SLOW_S,
     PROTOCOL_VERSION,
     ZMQCommandServer,
+    ZMQPublisher,
     _pack_reading,
     _timeout_for,
     _unpack_reading,
@@ -42,6 +44,154 @@ def _make_reading(
         raw=raw,
         metadata=metadata or {},
     )
+
+
+async def test_publisher_stop_rejects_inflight_required_publication_without_false_receipt() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
+    send_entered = asyncio.Event()
+    socket_closed: list[int] = []
+    context_terminated: list[bool] = []
+
+    class BlockingSocket:
+        async def send_multipart(self, _frames: list[bytes]) -> None:
+            send_entered.set()
+            await asyncio.Event().wait()
+
+        def close(self, *, linger: int) -> None:
+            socket_closed.append(linger)
+
+    class Context:
+        def term(self) -> None:
+            context_terminated.append(True)
+
+    publisher = ZMQPublisher()
+    publisher._queue = queue
+    publisher._socket = BlockingSocket()  # type: ignore[assignment]
+    publisher._ctx = Context()  # type: ignore[assignment]
+    publisher._session_id = "a" * 32
+    publisher._running = True
+    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
+    publication = asyncio.create_task(
+        broker.publish_required(
+            _make_reading(channel="operator_log", value=21.0, unit=""),
+            request_id="b" * 32,
+            request_fingerprint="c" * 64,
+        )
+    )
+    await asyncio.wait_for(send_entered.wait(), timeout=0.1)
+
+    await publisher.stop()
+
+    with pytest.raises(RuntimeError, match="required publisher did not settle the event"):
+        await asyncio.wait_for(publication, timeout=0.1)
+    assert socket_closed == [0]
+    assert context_terminated == [True]
+    assert publisher._task is None
+    assert publisher._queue is None
+    assert queue.empty()
+    await asyncio.wait_for(queue.join(), timeout=0.1)
+
+
+async def test_required_publication_receipt_waits_for_exact_zmq_send_settlement() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
+    send_entered = asyncio.Event()
+    release_send = asyncio.Event()
+    sent_frames: list[tuple[bytes, bytes]] = []
+
+    class BlockingSocket:
+        async def send_multipart(self, frames: list[bytes]) -> None:
+            sent_frames.append((frames[0], frames[1]))
+            send_entered.set()
+            await release_send.wait()
+
+        def close(self, *, linger: int) -> None:
+            assert linger == 0
+
+    class Context:
+        def term(self) -> None:
+            pass
+
+    publisher = ZMQPublisher()
+    publisher._queue = queue
+    publisher._socket = BlockingSocket()  # type: ignore[assignment]
+    publisher._ctx = Context()  # type: ignore[assignment]
+    publisher._session_id = "a" * 32
+    publisher._running = True
+    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
+    reading = _make_reading(channel="operator_log", value=21.0, unit="")
+    publication = asyncio.create_task(
+        broker.publish_required(
+            reading,
+            request_id="b" * 32,
+            request_fingerprint="c" * 64,
+        )
+    )
+
+    await asyncio.wait_for(send_entered.wait(), timeout=0.1)
+    await asyncio.sleep(0)
+    assert not publication.done()
+    assert len(sent_frames) == 1
+
+    release_send.set()
+    receipt = await asyncio.wait_for(publication, timeout=0.1)
+    assert broker.validates_required_publication(
+        receipt,
+        request_id="b" * 32,
+        request_fingerprint="c" * 64,
+    )
+    assert len(sent_frames) == 1
+    topic, frame = sent_frames[0]
+    assert topic == publisher._topic
+    assert _unpack_reading(frame) == reading
+    assert publisher._total_sent == 1
+    await asyncio.wait_for(queue.join(), timeout=0.1)
+    await publisher.stop()
+
+
+async def test_required_publication_send_failure_issues_no_broker_receipt() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=2, required_publisher=True)
+    send_attempted = asyncio.Event()
+    attempts: list[tuple[bytes, bytes]] = []
+
+    class FailingSocket:
+        async def send_multipart(self, frames: list[bytes]) -> None:
+            attempts.append((frames[0], frames[1]))
+            send_attempted.set()
+            raise OSError("forced send failure")
+
+        def close(self, *, linger: int) -> None:
+            assert linger == 0
+
+    class Context:
+        def term(self) -> None:
+            pass
+
+    publisher = ZMQPublisher()
+    publisher._queue = queue
+    publisher._socket = FailingSocket()  # type: ignore[assignment]
+    publisher._ctx = Context()  # type: ignore[assignment]
+    publisher._session_id = "a" * 32
+    publisher._running = True
+    publisher._task = asyncio.create_task(publisher._publish_loop(queue))
+    publication = asyncio.create_task(
+        broker.publish_required(
+            _make_reading(channel="operator_log", value=21.0, unit=""),
+            request_id="b" * 32,
+            request_fingerprint="c" * 64,
+        )
+    )
+
+    await asyncio.wait_for(send_attempted.wait(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="required publisher did not settle the event"):
+        await asyncio.wait_for(publication, timeout=0.1)
+    assert len(attempts) == 1
+    assert publisher._total_sent == 0
+    assert publisher.publish_failure_count == 1
+    await asyncio.wait_for(queue.join(), timeout=0.1)
+    await publisher.stop()
 
 
 # ---------------------------------------------------------------------------

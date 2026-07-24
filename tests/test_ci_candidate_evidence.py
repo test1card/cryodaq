@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,13 @@ from tools.ci_candidate_evidence import (
     validate_execution_and_attestation,
     write_artifact_attestation,
     write_execution_bundle,
+)
+from tools.ci_guard_execution import (
+    RECEIPT_PREFIX,
+    GuardExecutionError,
+    GuardSpec,
+    canonical_receipt,
+    current_guard_platform,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -207,13 +215,16 @@ def test_gui_candidate_runner_executes_every_subcommand_and_aggregates_failures(
 ) -> None:
     (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
     observed: list[tuple[str, ...]] = []
+    observed_state_roots: list[str] = []
     returncodes = iter((7, 0, 9))
 
     def fake_run(command, **kwargs):
         observed.append(tuple(command))
+        observed_state_roots.append(kwargs["env"]["CRYODAQ_STATE_ROOT"])
         return subprocess.CompletedProcess(command, next(returncodes))
 
     monkeypatch.setattr(ci_candidate_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(ci_candidate_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
     result = ci_candidate_runner.run_suite(
         "gui",
         root=tmp_path,
@@ -224,6 +235,220 @@ def test_gui_candidate_runner_executes_every_subcommand_and_aggregates_failures(
     assert len(observed) == 3
     assert all("no:cacheprovider" in command for command in observed)
     assert all("--basetemp" in command for command in observed)
+    assert len(set(observed_state_roots)) == 3
+
+
+def test_candidate_runner_executes_strict_active_guard_phase_and_propagates_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+    node = "tests/gui/test_guard.py::test_guard"
+    observed: list[tuple[str, ...]] = []
+    observed_state_roots: list[str] = []
+    returncodes = iter((13, 0, 0, 0))
+
+    def fake_run(command, **kwargs):
+        observed.append(tuple(command))
+        observed_state_roots.append(kwargs["env"]["CRYODAQ_STATE_ROOT"])
+        return subprocess.CompletedProcess(command, next(returncodes))
+
+    monkeypatch.setattr(ci_candidate_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        ci_candidate_runner,
+        "active_guard_specs",
+        lambda *_args, **_kwargs: (GuardSpec(node, "gui", None),),
+    )
+
+    result = ci_candidate_runner.run_suite(
+        "gui",
+        root=tmp_path,
+        basetemp=tmp_path.parent / "candidate-runner-strict-state",
+    )
+
+    assert result == 13
+    assert len(observed) == 4
+    assert len(set(observed_state_roots)) == 4
+    strict = observed[0]
+    assert "tools.ci_guard_execution" in strict
+    assert strict[strict.index("--cryodaq-active-guard-suite") + 1] == "gui"
+    assert "-W" in strict and strict[strict.index("-W") + 1] == "error"
+    response_files = [argument for argument in strict if argument.startswith("@")]
+    assert len(response_files) == 1
+    assert Path(response_files[0][1:]).read_text(encoding="utf-8") == f"{node}\n"
+    ordinary_response_files = {argument for command in observed[1:] for argument in command if argument.startswith("@")}
+    assert len(ordinary_response_files) == 1
+    ordinary_response = Path(ordinary_response_files.pop()[1:])
+    assert ordinary_response.read_text(encoding="utf-8").splitlines() == ["--deselect", node]
+
+
+def test_strict_guard_receipt_parser_rejects_missing_duplicate_tampered_or_misbound_receipts() -> None:
+    node = "tests/core/test_guard.py::test_guard"
+    platform = current_guard_platform()
+    expected_platforms = {node: None}
+    payload = {
+        "concrete_nodes": [
+            {
+                "guards": [node],
+                "markers": [],
+                "nodeid": node,
+                "phases": {"setup": ["passed"], "call": ["passed"], "teardown": ["passed"]},
+                "was_xfail": False,
+            }
+        ],
+        "deselected_nodes": [],
+        "expected_guards": [node],
+        "expected_guard_platforms": expected_platforms,
+        "platform": platform,
+        "result": "passed",
+        "schema_version": 3,
+        "suite": "core",
+        "violations": [],
+        "warnings": [],
+    }
+    valid = f"{RECEIPT_PREFIX}{canonical_receipt(payload)}\n"
+    ci_candidate_runner._validate_strict_guard_receipt(
+        valid,
+        suite="core",
+        expected=(node,),
+        expected_platforms=expected_platforms,
+        platform=platform,
+    )
+
+    mutations = ["", valid + valid]
+    for field, value in (
+        ("suite", "gui"),
+        ("platform", "posix" if platform == "windows" else "windows"),
+        ("expected_guards", ["tests/core/test_other.py::test_other"]),
+        ("expected_guard_platforms", {node: platform}),
+        ("result", "failed"),
+        ("violations", ["forged failure"]),
+    ):
+        changed = copy.deepcopy(payload)
+        changed[field] = value
+        mutations.append(f"{RECEIPT_PREFIX}{canonical_receipt(changed)}\n")
+    duplicate_phase = copy.deepcopy(payload)
+    duplicate_phase["concrete_nodes"][0]["phases"]["call"] = ["failed", "passed"]
+    mutations.append(f"{RECEIPT_PREFIX}{canonical_receipt(duplicate_phase)}\n")
+    tampered = json.loads(canonical_receipt(payload))
+    tampered["sha256"] = "sha256:" + "0" * 64
+    mutations.append(f"{RECEIPT_PREFIX}{json.dumps(tampered, sort_keys=True, separators=(',', ':'))}\n")
+
+    for mutation in mutations:
+        with pytest.raises(GuardExecutionError):
+            ci_candidate_runner._validate_strict_guard_receipt(
+                mutation,
+                suite="core",
+                expected=(node,),
+                expected_platforms=expected_platforms,
+                platform=platform,
+            )
+
+
+def test_strict_guard_receipt_parser_rejects_forged_marker_semantics() -> None:
+    node = "tests/core/test_guard.py::test_guard"
+    platform = current_guard_platform()
+    expected_platforms = {node: platform}
+    payload = {
+        "concrete_nodes": [
+            {
+                "guards": [node],
+                "markers": [
+                    {
+                        "condition": False,
+                        "name": "skipif",
+                        "reason": "exact platform",
+                        "target_platform": platform,
+                    },
+                    {"filters": ["error::UserWarning"], "name": "filterwarnings"},
+                ],
+                "nodeid": node,
+                "phases": {"setup": ["passed"], "call": ["passed"], "teardown": ["passed"]},
+                "was_xfail": False,
+            }
+        ],
+        "deselected_nodes": [],
+        "expected_guards": [node],
+        "expected_guard_platforms": expected_platforms,
+        "platform": platform,
+        "result": "passed",
+        "schema_version": 3,
+        "suite": "core",
+        "violations": [],
+        "warnings": [],
+    }
+
+    def validate(candidate: dict) -> None:
+        ci_candidate_runner._validate_strict_guard_receipt(
+            f"{RECEIPT_PREFIX}{canonical_receipt(candidate)}\n",
+            suite="core",
+            expected=(node,),
+            expected_platforms=expected_platforms,
+            platform=platform,
+        )
+
+    validate(payload)
+    mutations: list[dict] = []
+    suppressive = copy.deepcopy(payload)
+    suppressive["concrete_nodes"][0]["markers"][1]["filters"] = ["ignore::UserWarning"]
+    mutations.append(suppressive)
+    true_skip = copy.deepcopy(payload)
+    true_skip["concrete_nodes"][0]["markers"][0]["condition"] = True
+    mutations.append(true_skip)
+    empty_reason = copy.deepcopy(payload)
+    empty_reason["concrete_nodes"][0]["markers"][0]["reason"] = ""
+    mutations.append(empty_reason)
+    wrong_target = copy.deepcopy(payload)
+    wrong_target["concrete_nodes"][0]["markers"][0]["target_platform"] = "posix" if platform == "windows" else "windows"
+    mutations.append(wrong_target)
+    missing_skipif = copy.deepcopy(payload)
+    missing_skipif["concrete_nodes"][0]["markers"] = missing_skipif["concrete_nodes"][0]["markers"][1:]
+    mutations.append(missing_skipif)
+    extra_field = copy.deepcopy(payload)
+    extra_field["concrete_nodes"][0]["markers"][1]["forged"] = True
+    mutations.append(extra_field)
+
+    for mutation in mutations:
+        with pytest.raises(GuardExecutionError):
+            validate(mutation)
+
+
+def test_candidate_runner_response_file_dependency_floor_is_pytest_8_2_or_newer() -> None:
+    payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dev_dependencies = payload["project"]["optional-dependencies"]["dev"]
+    assert "pytest>=8.2" in dev_dependencies
+
+
+def test_candidate_runner_rejects_zero_exit_without_exact_passed_guard_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+    node = "tests/core/test_guard.py::test_guard"
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(command, 0, stdout="guard exited without a receipt\n", stderr="")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(ci_candidate_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        ci_candidate_runner,
+        "active_guard_specs",
+        lambda *_args, **_kwargs: (GuardSpec(node, "core", None),),
+    )
+
+    result = ci_candidate_runner.run_suite(
+        "core",
+        root=tmp_path,
+        basetemp=tmp_path.parent / "candidate-runner-missing-receipt-state",
+    )
+
+    assert result == 1
+    assert calls == 2
 
 
 def test_candidate_runner_rejects_invalid_python_before_pytest(
@@ -254,7 +479,15 @@ def test_candidate_runner_rejects_invalid_python_before_pytest(
 def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(tmp_path: Path) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     job = payload["jobs"]["test"]
+    matrix = job["strategy"]["matrix"]
+    assert matrix == {
+        "os": ["ubuntu-latest", "windows-latest"],
+        "suite": ["core", "gui", "agents", "remaining"],
+    }
     steps = job["steps"]
+    assert all(step.get("if") not in (False, "false", "${{ false }}") for step in steps)
+    step_ids = [step["id"] for step in steps if "id" in step]
+    assert len(step_ids) == len(set(step_ids))
     indexed = {step.get("id"): step for step in steps if step.get("id")}
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     active = indexed["active-remaining"]
@@ -280,6 +513,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     ):
         assert selection in active["run"]
     assert candidate.get("if") not in (False, "false", "${{ false }}")
+    assert "if" not in candidate
     assert candidate["continue-on-error"] is True
     assert "tools.ci_candidate_evidence run" in candidate["run"]
     assert '--revision "${GITHUB_SHA:?}"' in candidate["run"]
@@ -288,6 +522,14 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert attestation_upload["uses"] == upload_pin
     assert '--artifact-digest "sha256:${{ steps.candidate-upload.outputs.artifact-digest }}"' in attest["run"]
     assert "always()" in enforce["if"]
+    assert enforce.get("continue-on-error") is not True
+    assert (
+        steps.index(candidate)
+        < steps.index(upload)
+        < steps.index(attest)
+        < steps.index(attestation_upload)
+        < steps.index(enforce)
+    )
     for dependency in (
         "steps.active-remaining.outcome",
         "steps.candidate.outcome",
@@ -296,10 +538,13 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     ):
         assert dependency in enforce["run"]
 
+    active_nodes = tuple(spec.node for spec in ci_candidate_runner.active_guard_specs(ROOT, "remaining"))
+    assert active_nodes
     commands = ci_candidate_runner._suite_commands(
         "remaining",
         root=ROOT,
         basetemp=tmp_path / "candidate-structural-test-state",
+        active_nodes=active_nodes,
     )
     assert len(commands) == 1
     command = commands[0]
@@ -308,3 +553,18 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     for node in ci_candidate_runner.EXPORTED_REMAINING_EXCLUDED_NODES:
         offset = command.index("--deselect")
         assert node in command[offset + 1 :]
+    ordinary_response_files = [argument for argument in command if argument.startswith("@")]
+    assert len(ordinary_response_files) == 1
+    ordinary_lines = Path(ordinary_response_files[0][1:]).read_text(encoding="utf-8").splitlines()
+    assert ordinary_lines == [argument for node in active_nodes for argument in ("--deselect", node)]
+    strict = ci_candidate_runner._strict_guard_command(
+        "remaining",
+        active_nodes=active_nodes,
+        basetemp=tmp_path / "candidate-structural-test-state",
+    )
+    assert strict is not None
+    strict_response_files = [argument for argument in strict if argument.startswith("@")]
+    assert len(strict_response_files) == 1
+    assert Path(strict_response_files[0][1:]).read_text(encoding="utf-8").splitlines() == list(active_nodes)
+    assert "--timeout=120" in strict
+    assert "--timeout-method=thread" in strict

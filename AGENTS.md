@@ -127,6 +127,14 @@ boundary during searches and refactors.
    Record post-author and post-formatter blob IDs separately. Preserve a
    byte-exact pre-formatter preimage; without it, never claim exact hunk
    attribution.
+   Agents and repository automation must not invoke Ruff in any mutation-capable
+   mode. Only read-only `ruff format --check --no-cache`,
+   `ruff format --diff --no-cache`, and `ruff check --no-cache` without
+   `--fix`, `--fix-only`, or `--unsafe-fixes` are sanctioned. Formatting
+   corrections are explicit reviewed patches; rerun both read-only checks
+   afterward. A custom transactional formatter is not a substitute: if safe
+   mutation needs a complex wrapper, prohibit the mutation and keep the smaller
+   reviewable control.
 3. State the intended slice and acceptance evidence. Keep safety-critical
    changes small enough to review independently.
 4. Parallelize genuinely independent lanes. Use the host's isolated
@@ -213,8 +221,8 @@ Typical local gates are:
 ```bash
 PYTHONPATH="$PWD/src" .venv/bin/python -m pytest -q <focused paths>
 PYTHONPATH="$PWD/src" .venv/bin/python -m pytest -q tests/
-.venv/bin/python -m ruff check src tests
-.venv/bin/python -m ruff format --check src tests
+.venv/bin/python -m ruff check --no-cache src tests
+.venv/bin/python -m ruff format --check --no-cache src tests
 ```
 
 Use the repository's configured interpreter if `.venv` is unavailable. Tests
@@ -365,8 +373,8 @@ are:
 python -m pytest -q tests/conformance/
 python -m pytest -q tests/docs/test_docs_freshness.py
 python -m pytest -q tests/
-python -m ruff check src tests plugins
-python -m ruff format --check src tests plugins
+python -m ruff check --no-cache src tests plugins
+python -m ruff format --check --no-cache src tests plugins
 ```
 
 ## GUI, UX, and design-system gate

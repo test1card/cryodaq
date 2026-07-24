@@ -15,6 +15,10 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.core.command_authority import (
+    MUTATION_PROTOCOL_MAJOR,
+    REPLAY_MUTATION_CAPABILITY,
+)
 from cryodaq.replay_engine.replay_experiment_stub import (
     REPLAY_METADATA_SCHEMA,
     ReplayExperimentStub,
@@ -27,6 +31,27 @@ from cryodaq.replay_engine.server import (
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _replay_mutation(engine, command: dict) -> dict:
+    canonical = dict(command)
+    if canonical.get("cmd") == "experiment_create_retroactive":
+        canonical.setdefault("description", "")
+        canonical.setdefault("notes", "")
+        canonical.setdefault("custom_fields", {})
+    elif canonical.get("cmd") == "experiment_advance_phase":
+        canonical.setdefault("operator", "operator")
+        expected = canonical.get("expected_experiment_id")
+        if expected is not None:
+            canonical.setdefault("experiment_id", expected)
+    return await engine._handle_command(
+        {
+            **canonical,
+            "protocol_major": MUTATION_PROTOCOL_MAJOR,
+            "mutation_capability": REPLAY_MUTATION_CAPABILITY,
+            "capability_token": engine._mutation_capability_token,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +399,8 @@ def replay_engine_with_stub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     engine._speed = 1.0
     engine._phase = "cooldown"
     engine._session_start = 0.0
+    engine._launcher_session_id = "1" * 32
+    engine._mutation_capability_token = "test-replay-capability-20260723"
     from cryodaq.replay_engine.replay_experiment_stub import (
         ReplayExperimentStub,
     )
@@ -385,14 +412,15 @@ def replay_engine_with_stub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 async def test_handle_command_create_retroactive_returns_experiment(
     replay_engine_with_stub,
 ) -> None:
-    result = await replay_engine_with_stub._handle_command(
+    result = await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "Replay session 1",
             "sample": "Detector",
             "operator": "tester",
             "start_time": "2026-05-07T10:00:00+00:00",
-        }
+        },
     )
     assert result["ok"] is True
     assert result["experiment"]["title"] == "Replay session 1"
@@ -402,22 +430,24 @@ async def test_handle_command_create_retroactive_returns_experiment(
 async def test_handle_command_advance_phase_returns_experiment(
     replay_engine_with_stub,
 ) -> None:
-    await replay_engine_with_stub._handle_command(
+    await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "T",
             "sample": "S",
             "operator": "o",
             "start_time": "2026-05-07T10:00:00+00:00",
-        }
+        },
     )
     experiment_id = replay_engine_with_stub._exp_stub.active_experiment["experiment_id"]
-    result = await replay_engine_with_stub._handle_command(
+    result = await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_advance_phase",
             "phase": "cooldown",
             "expected_experiment_id": experiment_id,
-        }
+        },
     )
     assert result["ok"] is True
     assert result["experiment"]["phase"] == "cooldown"
@@ -448,22 +478,24 @@ async def test_handle_command_status_includes_replay_experiment(
 ) -> None:
     """After create_retroactive + advance_phase, ``/status`` exposes
     the replay-experiment state."""
-    await replay_engine_with_stub._handle_command(
+    await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "T",
             "sample": "S",
             "operator": "o",
             "start_time": "2026-05-07T10:00:00+00:00",
-        }
+        },
     )
     experiment_id = replay_engine_with_stub._exp_stub.active_experiment["experiment_id"]
-    await replay_engine_with_stub._handle_command(
+    await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_advance_phase",
             "phase": "cooldown",
             "expected_experiment_id": experiment_id,
-        }
+        },
     )
     status = await replay_engine_with_stub._handle_command({"cmd": "/status"})
     assert status["ok"] is True
@@ -477,14 +509,15 @@ async def test_handle_command_status_includes_replay_experiment(
 async def test_handle_command_experiment_status_includes_stub_state(
     replay_engine_with_stub,
 ) -> None:
-    await replay_engine_with_stub._handle_command(
+    await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "T2",
             "sample": "S",
             "operator": "o",
             "start_time": "2026-05-07T10:00:00+00:00",
-        }
+        },
     )
     out = await replay_engine_with_stub._handle_command({"cmd": "experiment_status"})
     assert out["ok"] is True
@@ -492,15 +525,16 @@ async def test_handle_command_experiment_status_includes_stub_state(
     assert out["active_experiment"]["title"] == "T2"
 
 
-async def test_handle_command_create_retroactive_default_args(
+async def test_handle_command_create_retroactive_rejects_incomplete_schema(
     replay_engine_with_stub,
 ) -> None:
     """Missing fields fall back to sensible defaults — operator can
     create a session with just `cmd`."""
-    result = await replay_engine_with_stub._handle_command({"cmd": "experiment_create_retroactive"})
-    assert result["ok"] is True
-    assert result["experiment"]["title"] == "Replay session"
-    assert result["experiment"]["is_replay"] is True
+    result = await _replay_mutation(
+        replay_engine_with_stub,
+        {"cmd": "experiment_create_retroactive"},
+    )
+    assert result == {"ok": False, "error_code": "replay_mutation_schema_invalid"}
 
 
 async def test_handle_command_double_create_returns_error_dict(
@@ -508,23 +542,25 @@ async def test_handle_command_double_create_returns_error_dict(
 ) -> None:
     """Second create_retroactive while one is active surfaces error
     dict rather than crashing the dispatcher."""
-    await replay_engine_with_stub._handle_command(
+    await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "T",
             "sample": "S",
             "operator": "o",
             "start_time": "2026-05-07T10:00:00+00:00",
-        }
+        },
     )
-    result = await replay_engine_with_stub._handle_command(
+    result = await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "T2",
             "sample": "S",
             "operator": "o",
             "start_time": "2026-05-07T11:00:00+00:00",
-        }
+        },
     )
     assert result["ok"] is False
     assert "already active" in result["error"]
@@ -533,7 +569,16 @@ async def test_handle_command_double_create_returns_error_dict(
 async def test_handle_command_advance_phase_without_active_returns_error_dict(
     replay_engine_with_stub,
 ) -> None:
-    result = await replay_engine_with_stub._handle_command({"cmd": "experiment_advance_phase", "phase": "cooldown"})
+    result = await _replay_mutation(
+        replay_engine_with_stub,
+        {
+            "cmd": "experiment_advance_phase",
+            "phase": "cooldown",
+            "operator": "operator",
+            "experiment_id": "missing",
+            "expected_experiment_id": "missing",
+        },
+    )
     assert result["ok"] is False
     assert "No active" in result["error"]
 
@@ -542,26 +587,28 @@ async def test_handle_command_rejects_invalid_phase_with_exact_identity_without_
     replay_engine_with_stub,
     tmp_path: Path,
 ) -> None:
-    created = await replay_engine_with_stub._handle_command(
+    created = await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "Exact identity",
             "sample": "S",
             "operator": "operator",
             "start_time": "2026-05-07T10:00:00+00:00",
-        }
+        },
     )
     experiment_id = created["experiment"]["experiment_id"]
     metadata_path = tmp_path / "experiments" / experiment_id / "metadata.json"
     before = metadata_path.read_bytes()
 
-    result = await replay_engine_with_stub._handle_command(
+    result = await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_advance_phase",
             "phase": "definitely-not-a-phase",
             "operator": "operator",
             "expected_experiment_id": experiment_id,
-        }
+        },
     )
 
     assert result["ok"] is False
@@ -575,14 +622,15 @@ async def test_replay_phase_status_timestamp_tracks_exact_transition_not_session
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    created = await replay_engine_with_stub._handle_command(
+    created = await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_create_retroactive",
             "title": "Timestamp",
             "sample": "S",
             "operator": "operator",
             "start_time": "2026-05-07T10:00:00+00:00",
-        }
+        },
     )
     experiment_id = created["experiment"]["experiment_id"]
     exact_transition = "2026-05-07T10:17:23.456789+00:00"
@@ -598,13 +646,14 @@ async def test_replay_phase_status_timestamp_tracks_exact_transition_not_session
         "cryodaq.replay_engine.replay_experiment_stub.datetime",
         _ExactTransitionClock,
     )
-    advanced = await replay_engine_with_stub._handle_command(
+    advanced = await _replay_mutation(
+        replay_engine_with_stub,
         {
             "cmd": "experiment_advance_phase",
             "phase": "cooldown",
             "operator": "operator",
             "expected_experiment_id": experiment_id,
-        }
+        },
     )
     transition = advanced["experiment"]["phase_started_at"]
 

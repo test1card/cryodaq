@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from cryodaq.storage.parquet_archive import export_experiment_readings_to_parque
 
 def _write_day(root: Path, day: str, timestamp: float, value: float) -> None:
     db_path = root / f"data_{day}.db"
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn:
         conn.execute(
             "CREATE TABLE readings ("
             "timestamp REAL NOT NULL, instrument_id TEXT NOT NULL, channel TEXT NOT NULL, "

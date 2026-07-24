@@ -7,9 +7,7 @@ from pathlib import Path
 from cryodaq.analytics import cross_experiment
 
 
-def test_production_cross_experiment_export_requires_expected_experiment_id(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_production_cross_experiment_export_requires_expected_experiment_id(tmp_path: Path, monkeypatch) -> None:
     experiment_id = "experiment-a"
     experiment_dir = tmp_path / "experiments" / experiment_id
     experiment_dir.mkdir(parents=True)

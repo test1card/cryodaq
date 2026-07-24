@@ -1,0 +1,111 @@
+Fetch Shard Index for conda-forge/linux-64                                                      ⧖ Starting
+Fetch Shard Index for conda-forge/linux-64                                                ✔ Done (1.0 sec)
+Fetch Shard Index for conda-forge/noarch                                                        ⧖ Starting
+Fetch Shard Index for conda-forge/noarch                                                  ✔ Done (1.1 sec)
+Fetching and Parsing Packages' Shards                                                           ⧖ Starting
+Fetching and Parsing Packages' Shards                                                    ✔ Done (78.8 sec)
+Using Flat Repodata for conda-forge/linux-64                                                    ✔ Starting
+Using Flat Repodata for conda-forge/linux-64                                              ✔ Done (6.3 sec)
+Using Cached Shard Index for conda-forge/noarch                                                     ✔ Done
+Using Cached Shard Index for conda-forge/linux-64                                                   ✔ Done
+Fetching and Parsing Packages' Shards                                                           ⧖ Starting
+Fetching and Parsing Packages' Shards                                                     ✔ Done (2.1 sec)
+Parsing Packages' Records                                                                 ✔ Done (8.4 sec)
+
+Resolving Environment                                                                           ⧖ Starting
+Resolving Environment                                                                     ✔ Done (0.3 sec)
+
+Transaction
+
+  Prefix: /root/.cache/cryodaq-safe
+
+  Updating specs:
+
+   - python=3.12
+   - sqlite
+   - pip
+
+
+  Package               Version  Build                 Channel          Size
+──────────────────────────────────────────────────────────────────────────────
+  Install:
+──────────────────────────────────────────────────────────────────────────────
+
+  + _openmp_mutex           4.5  20_gnu                conda-forge      29kB
+  + bzip2                 1.0.8  hda65f42_9            conda-forge     260kB
+  + ca-certificates   2026.6.17  hbd8a1cb_0            conda-forge     129kB
+  + ld_impl_linux-64     2.45.1  default_hbd61a6d_102  conda-forge     728kB
+  + libexpat              2.8.1  hecca717_1            conda-forge      78kB
+  + libffi                3.5.2  h3435931_0            conda-forge      59kB
+  + libgcc               15.2.0  he0feb66_19           conda-forge       1MB
+  + libgcc-ng            15.2.0  h69a702a_19           conda-forge      28kB
+  + libgomp              15.2.0  he0feb66_19           conda-forge     604kB
+  + liblzma               5.8.3  hb03c661_0            conda-forge     113kB
+  + libnsl                2.0.1  hb9d3cd8_1            conda-forge      34kB
+  + libsqlite            3.53.3  h0c1763c_0            conda-forge     962kB
+  + libuuid              2.42.2  h5347b49_0            conda-forge      40kB
+  + libxcrypt            4.4.36  hd590300_1            conda-forge     100kB
+  + libzlib               1.3.2  h25fd6f3_2            conda-forge      64kB
+  + ncurses                 6.6  hdb14827_0            conda-forge     919kB
+  + openssl               3.6.3  h35e630c_0            conda-forge       3MB
+  + packaging              26.2  pyhc364b38_0          conda-forge      92kB
+  + pip                  26.1.2  pyh8b19718_0          conda-forge       1MB
+  + python              3.12.13  hd63d673_0_cpython    conda-forge      32MB
+  + readline                8.3  h853b02a_0            conda-forge     345kB
+  + setuptools           83.0.0  pyh332efcf_0          conda-forge     642kB
+  + sqlite               3.53.3  hbc0de68_0            conda-forge     206kB
+  + tk                   8.6.13  noxft_h366c992_103    conda-forge       3MB
+  + tzdata                2025c  hc9c84f9_1            conda-forge     119kB
+  + wheel                0.47.0  pyhd8ed1ab_0          conda-forge      33kB
+  + zstd                  1.5.7  hb78ec9c_6            conda-forge     601kB
+
+  Summary:
+
+  Install: 27 packages
+
+  Total download: 46MB
+
+──────────────────────────────────────────────────────────────────────────────
+
+
+
+Transaction starting
+Linking tzdata-2025c-hc9c84f9_1
+Linking ca-certificates-2026.6.17-hbd8a1cb_0
+Linking libzlib-1.3.2-h25fd6f3_2
+Linking libgomp-15.2.0-he0feb66_19
+Linking zstd-1.5.7-hb78ec9c_6
+Linking _openmp_mutex-4.5-20_gnu
+Linking ld_impl_linux-64-2.45.1-default_hbd61a6d_102
+Linking libgcc-15.2.0-he0feb66_19
+Linking libgcc-ng-15.2.0-h69a702a_19
+Linking tk-8.6.13-noxft_h366c992_103
+Linking openssl-3.6.3-h35e630c_0
+Linking libuuid-2.42.2-h5347b49_0
+Linking libnsl-2.0.1-hb9d3cd8_1
+Linking liblzma-5.8.3-hb03c661_0
+Linking libffi-3.5.2-h3435931_0
+Linking libexpat-2.8.1-hecca717_1
+Linking bzip2-1.0.8-hda65f42_9
+Linking ncurses-6.6-hdb14827_0
+Linking libsqlite-3.53.3-h0c1763c_0
+Linking libxcrypt-4.4.36-hd590300_1
+Linking readline-8.3-h853b02a_0
+Linking sqlite-3.53.3-hbc0de68_0
+Linking python-3.12.13-hd63d673_0_cpython
+Linking pip-26.1.2-pyh8b19718_0
+Linking setuptools-83.0.0-pyh332efcf_0
+Linking packaging-26.2-pyhc364b38_0
+Linking wheel-0.47.0-pyhd8ed1ab_0
+
+Transaction finished
+
+
+To activate this environment, use:
+
+    micromamba activate /root/.cache/cryodaq-safe
+
+Or to execute a single command in this environment, use:
+
+    micromamba run -p /root/.cache/cryodaq-safe mycommand
+

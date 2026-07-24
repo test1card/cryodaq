@@ -115,7 +115,7 @@ def test_experiment_cut_tracks_in_memory_lifecycle_when_state_write_fails(
     monkeypatch.setattr(
         manager,
         "_write_state",
-        lambda: (_ for _ in ()).throw(OSError("state write failed")),
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("state write failed")),
     )
     with pytest.raises(OSError, match="state write failed"):
         manager._clear_active()

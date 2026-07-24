@@ -61,7 +61,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8",
+    "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4",
     "pytest-timeout>=2.0",
@@ -127,6 +127,7 @@ markers = [
     "smoke: requires live external services (ollama, instruments); excluded from default CI",
     "ollama: requires a live Ollama HTTP server on localhost:11434. Skipped by default. Run with: pytest -m ollama",
     "golden: golden-run replay regression (roadmap D4) — pins alarm/analytics outcomes on a fixed fixture. Runs by default; also selectable via pytest -m golden",
+    "owns_gui_command_worker_admission: test deliberately owns or replaces the process-wide GUI worker admission root",
 ]
 
 [tool.ruff]

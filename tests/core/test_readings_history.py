@@ -73,16 +73,12 @@ def test_read_readings_history_all(writer_with_data) -> None:
     assert len(data["Т1 Камера"]) == 100
     # Verify exact values: row i should have value 4.2 + i * 0.01 (ASC order)
     points = data["Т1 Камера"]
-    assert abs(points[0][1] - 4.2) < 1e-6, (
-        f"First point value must be 4.2, got {points[0][1]}"
-    )
+    assert abs(points[0][1] - 4.2) < 1e-6, f"First point value must be 4.2, got {points[0][1]}"
     assert abs(points[-1][1] - (4.2 + 99 * 0.01)) < 1e-6, (
         f"Last point value must be {4.2 + 99 * 0.01:.4f}, got {points[-1][1]}"
     )
     # Verify timestamps: first point must be at base_ts (±1s for float precision)
-    assert abs(points[0][0] - base_ts) < 1.0, (
-        f"First timestamp must be near base_ts={base_ts}, got {points[0][0]}"
-    )
+    assert abs(points[0][0] - base_ts) < 1.0, f"First timestamp must be near base_ts={base_ts}, got {points[0][0]}"
     # Oldest point must be first, newest last
     assert points[0][0] < points[-1][0], "Points must be sorted oldest-first"
 
@@ -104,8 +100,7 @@ def test_read_readings_history_time_filter(writer_with_data) -> None:
 
     # Exactly 50 rows: indices 50..99 (inclusive lower bound).
     assert len(points) == 50, (
-        f"Expected exactly 50 points after midpoint filter (timestamp >= boundary), "
-        f"got {len(points)}"
+        f"Expected exactly 50 points after midpoint filter (timestamp >= boundary), got {len(points)}"
     )
     # All returned timestamps must be >= from_ts (timestamps are exact multiples).
     for ts, _ in points:
@@ -113,14 +108,12 @@ def test_read_readings_history_time_filter(writer_with_data) -> None:
     # First returned point must be row 50: value = 4.2 + 50 * 0.01
     expected_first_value = 4.2 + 50 * 0.01
     assert abs(points[0][1] - expected_first_value) < 1e-6, (
-        f"First filtered point must be row 50 (value={expected_first_value:.4f}), "
-        f"got {points[0][1]}"
+        f"First filtered point must be row 50 (value={expected_first_value:.4f}), got {points[0][1]}"
     )
     # Last returned point must be row 99: value = 4.2 + 99 * 0.01
     expected_last_value = 4.2 + 99 * 0.01
     assert abs(points[-1][1] - expected_last_value) < 1e-6, (
-        f"Last filtered point must be row 99 (value={expected_last_value:.4f}), "
-        f"got {points[-1][1]}"
+        f"Last filtered point must be row 99 (value={expected_last_value:.4f}), got {points[-1][1]}"
     )
 
 
@@ -193,9 +186,7 @@ def test_history_channel_list_capped(writer_with_data) -> None:
     # 64 filler names, then a real channel at index 64 (just past the cap).
     channels = [f"fake_{i}" for i in range(_HISTORY_MAX_CHANNELS)] + ["Т1 Камера"]
     data = writer._read_readings_history(channels=channels)
-    assert "Т1 Камера" not in data, (
-        "channel past the cap must be dropped by the channel-list clamp"
-    )
+    assert "Т1 Камера" not in data, "channel past the cap must be dropped by the channel-list clamp"
 
 
 def test_history_clamps_hostile_request(writer_with_data) -> None:
@@ -212,11 +203,46 @@ def test_history_clamps_hostile_request(writer_with_data) -> None:
         assert len(points) <= _HISTORY_MAX_ROWS
 
 
-def test_mixed_rate_channels_each_get_their_limit(tmp_path: Path) -> None:
-    """A fast channel must not crowd out a slow one's rows (mixed rates are
-    normal: vacuum vs thermometry). 10 old rows on "quiet" + 100 newer rows
-    on "noisy", limit_per_channel=10 -> BOTH channels return their latest 10.
-    """
+def test_filtered_history_channels_share_one_deterministic_total_row_budget(
+    writer_with_data,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-channel limits must not multiply the reply-wide production cap."""
+    from cryodaq.storage import sqlite_writer as sqlite_writer_module
+
+    writer, _base_ts = writer_with_data
+    monkeypatch.setattr(sqlite_writer_module, "_HISTORY_MAX_TOTAL_ROWS", 125)
+    channels = ["Т1 Камера", "Т2 Экран"]
+
+    first = writer._read_readings_history(
+        channels=channels,
+        limit_per_channel=100,
+    )
+    second = writer._read_readings_history(
+        channels=channels,
+        limit_per_channel=100,
+    )
+    reversed_order = writer._read_readings_history(
+        channels=list(reversed(channels)),
+        limit_per_channel=100,
+    )
+
+    assert first == second
+    assert first == reversed_order
+    assert set(first) == set(channels)
+    assert sum(len(points) for points in first.values()) == 125
+    assert all(len(points) <= 100 for points in first.values())
+    assert max(map(len, first.values())) - min(map(len, first.values())) <= 1
+
+
+def test_sparse_history_budget_redistributes_without_caller_order_bias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unused sparse shares must be redistributed without caller-order bias."""
+    from cryodaq.storage import sqlite_writer as sqlite_writer_module
+
+    monkeypatch.setattr(sqlite_writer_module, "_HISTORY_MAX_TOTAL_ROWS", 15)
     os.environ.setdefault("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
     writer = SQLiteWriter(tmp_path)
     loop = asyncio.new_event_loop()
@@ -224,8 +250,8 @@ def test_mixed_rate_channels_each_get_their_limit(tmp_path: Path) -> None:
     try:
         base_ts = float(int(time.time()) - 7200)
         readings: list[Reading] = []
-        # 10 OLD rows on "quiet" (earliest timestamps).
-        for i in range(10):
+        # Two old rows leave unused capacity that the noisy channel may claim.
+        for i in range(2):
             readings.append(
                 Reading(
                     timestamp=datetime.fromtimestamp(base_ts + i, tz=UTC),
@@ -250,13 +276,12 @@ def test_mixed_rate_channels_each_get_their_limit(tmp_path: Path) -> None:
             )
         loop.run_until_complete(writer.write_immediate(readings))
 
-        data = writer._read_readings_history(channels=["quiet", "noisy"], limit_per_channel=10)
-        assert len(data.get("quiet", [])) == 10, (
-            f"quiet channel crowded out: got {len(data.get('quiet', []))} rows"
-        )
-        assert len(data.get("noisy", [])) == 10, (
-            f"noisy channel wrong count: got {len(data.get('noisy', []))} rows"
-        )
+        forward = writer._read_readings_history(channels=["quiet", "noisy"], limit_per_channel=10)
+        reverse = writer._read_readings_history(channels=["noisy", "quiet"], limit_per_channel=10)
+        assert forward == reverse
+        assert len(forward.get("quiet", [])) == 2
+        assert len(forward.get("noisy", [])) == 10
+        assert sum(map(len, forward.values())) == 12 <= 15
     finally:
         loop.run_until_complete(writer.stop())
         loop.close()
@@ -352,10 +377,7 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
         cold_day = now - timedelta(days=3)
         cold_ts = cold_day.timestamp()
         archive_dir = tmp_path / "archive"
-        rel = (
-            f"year={cold_day:%Y}/month={cold_day:%m}/"
-            f"data_{cold_day.date().isoformat()}.db.parquet"
-        )
+        rel = f"year={cold_day:%Y}/month={cold_day:%m}/data_{cold_day.date().isoformat()}.db.parquet"
         ppath = archive_dir / rel
         ppath.parent.mkdir(parents=True, exist_ok=True)
         table = pa.table(
@@ -386,9 +408,7 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
             encoding="utf-8",
         )
 
-        data = writer._read_readings_history(
-            from_ts=cold_ts - 10, to_ts=now.timestamp()
-        )
+        data = writer._read_readings_history(from_ts=cold_ts - 10, to_ts=now.timestamp())
         vals = [v for _, v in data["Т1"]]
         assert 5.0 in vals, "cold archived row must be unioned in"
         assert 10.0 in vals, "hot row must remain"
@@ -437,10 +457,7 @@ def test_read_readings_history_unbounded_unions_cold_archive(tmp_path: Path) -> 
         cold_day = now - timedelta(days=3)
         cold_ts = cold_day.timestamp()
         archive_dir = tmp_path / "archive"
-        rel = (
-            f"year={cold_day:%Y}/month={cold_day:%m}/"
-            f"data_{cold_day.date().isoformat()}.db.parquet"
-        )
+        rel = f"year={cold_day:%Y}/month={cold_day:%m}/data_{cold_day.date().isoformat()}.db.parquet"
         ppath = archive_dir / rel
         ppath.parent.mkdir(parents=True, exist_ok=True)
         table = pa.table(
@@ -491,9 +508,7 @@ async def test_async_read_readings_history(writer_with_data) -> None:
     sync_data = writer._read_readings_history(channels=["Т1 Камера"], limit_per_channel=5)
     # Get async result
     async_data = await writer.read_readings_history(channels=["Т1 Камера"], limit_per_channel=5)
-    assert len(async_data["Т1 Камера"]) == 5, (
-        f"Async wrapper must return 5 points, got {len(async_data['Т1 Камера'])}"
-    )
+    assert len(async_data["Т1 Камера"]) == 5, f"Async wrapper must return 5 points, got {len(async_data['Т1 Камера'])}"
     # Async and sync must return identical data
     assert async_data["Т1 Камера"] == sync_data["Т1 Камера"], (
         "Async wrapper must return identical data to sync implementation"

@@ -24,6 +24,7 @@ Out of scope (follow-ups):
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Iterable
@@ -49,7 +50,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.operator_log import normalize_operator_log_tags
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
-from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION, ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,15 @@ _BANNER_AUTO_CLEAR_MS = 4000
 _LOG_ENTRY_CHANNEL = "analytics/operator_log_entry"
 _LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
 _LOG_READ_SCOPE_SCHEMA = "operator_log_read_scope_v1"
+_LOG_SUCCESS_KEYS = frozenset(
+    {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt", "proto"}
+)
+_LOG_ENTRY_KEYS = frozenset({"id", "timestamp", "experiment_id", "author", "source", "message", "tags"})
+_LOG_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
+_UNRESOLVED_SETTINGS_KEY = "operator_log/unresolved_submit_v1"
+_MAX_UNRESOLVED_BYTES = 64 * 1024
+_MAX_IDENTITY_BYTES = 4096
+_MAX_MESSAGE_BYTES = 1024 * 1024
 
 _KNOWN_UNCOMMITTED_LOG_ERRORS = frozenset(
     {
@@ -68,7 +78,8 @@ _KNOWN_UNCOMMITTED_LOG_ERRORS = frozenset(
         "operator_log_scope_invalid",
         "stale_experiment_command",
         "operator_log_message_invalid",
-        "operator_log_persistence_failed",
+        "operator_log_admission_invalid",
+        "engine_shutting_down",
         "idempotency_key_conflict",
         "operator_log_busy",
     }
@@ -197,14 +208,206 @@ def _result_is_unknown(result: object) -> bool:
     retryable failure.
     """
 
-    if not isinstance(result, dict):
+    if type(result) is not dict:
         return True
     if result.get("_handler_timeout") or result.get("_unknown"):
         return True
     if result.get("committed") is True:
         return False
     error_code = result.get("error_code")
-    return not (result.get("ok") is False and error_code in _KNOWN_UNCOMMITTED_LOG_ERRORS)
+    return not (
+        result.get("ok") is False and result.get("committed") is False and error_code in _KNOWN_UNCOMMITTED_LOG_ERRORS
+    )
+
+
+def bounded_operator_log_identity(value: object) -> str | None:
+    """Return one bounded printable operator identity, never a role guess."""
+
+    if type(value) is not str:
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or not normalized.isprintable()
+        or len(normalized.encode("utf-8")) > _MAX_IDENTITY_BYTES
+        or normalized.casefold() in {"system", "auto", "machine"}
+    ):
+        return None
+    return normalized
+
+
+def _bounded_identity_line(value: object, *, fallback: str = "unavailable") -> str:
+    if type(value) is not str:
+        return fallback
+    normalized = " ".join(value.splitlines()).strip()
+    normalized = "".join(char if char.isprintable() else " " for char in normalized).strip()
+    if not normalized:
+        return fallback
+    encoded = normalized.encode("utf-8")
+    if len(encoded) <= _MAX_IDENTITY_BYTES:
+        return normalized
+    return encoded[:_MAX_IDENTITY_BYTES].decode("utf-8", errors="ignore").rstrip() or fallback
+
+
+def operator_log_commit_receipt_matches(result: object, context: dict[str, Any]) -> bool:
+    """Validate a complete published receipt against every submitted field."""
+
+    if type(result) is not dict or set(result) != _LOG_SUCCESS_KEYS:
+        return False
+    if (
+        result.get("ok") is not True
+        or result.get("committed") is not True
+        or result.get("retry_safe") is not False
+        or result.get("publication_state") != "published"
+        or type(result.get("proto")) is not int
+        or result.get("proto") != CLIENT_PROTOCOL_VERSION
+    ):
+        return False
+    receipt = result.get("commit_receipt")
+    entry = result.get("entry")
+    payload = context.get("payload")
+    if (
+        type(receipt) is not dict
+        or set(receipt) != _LOG_RECEIPT_KEYS
+        or type(entry) is not dict
+        or set(entry) != _LOG_ENTRY_KEYS
+        or type(payload) is not dict
+    ):
+        return False
+    entry_id = entry.get("id")
+    timestamp = entry.get("timestamp")
+    if type(entry_id) is not int or entry_id <= 0 or type(timestamp) is not str or len(timestamp) > 128:
+        return False
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0) or parsed.isoformat() != timestamp:
+        return False
+    request_id = context.get("request_id")
+    experiment_id = context.get("experiment_id")
+    expected_tags = payload.get("tags", [])
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+        or (experiment_id is not None and (type(experiment_id) is not str or not experiment_id))
+        or type(expected_tags) is not list
+        or any(type(tag) is not str for tag in expected_tags)
+    ):
+        return False
+    for field, limit in (("author", _MAX_IDENTITY_BYTES), ("source", _MAX_IDENTITY_BYTES)):
+        value = entry.get(field)
+        if type(value) is not str or not value or len(value.encode("utf-8")) > limit:
+            return False
+    message = entry.get("message")
+    tags = entry.get("tags")
+    if (
+        type(message) is not str
+        or not message
+        or len(message.encode("utf-8")) > _MAX_MESSAGE_BYTES
+        or type(tags) is not list
+        or any(type(tag) is not str or len(tag.encode("utf-8")) > _MAX_IDENTITY_BYTES for tag in tags)
+    ):
+        return False
+    return (
+        receipt.get("schema") == _LOG_COMMIT_SCHEMA
+        and receipt.get("request_id") == request_id
+        and receipt.get("experiment_id") == experiment_id
+        and receipt.get("committed") is True
+        and type(receipt.get("entry_id")) is int
+        and receipt.get("entry_id") == entry_id
+        and entry.get("experiment_id") == experiment_id
+        and entry.get("author") == payload.get("author")
+        and entry.get("source") == payload.get("source")
+        and entry.get("message") == payload.get("message")
+        and tags == expected_tags
+    )
+
+
+def encode_operator_log_unresolved(context: dict[str, Any]) -> str:
+    """Serialize only the bounded stable request fields needed for replay."""
+
+    payload = context.get("payload")
+    if type(payload) is not dict:
+        raise ValueError("operator-log unresolved payload is invalid")
+    allowed = {"cmd", "request_id", "message", "author", "source", "tags", "experiment_id", "experiment_unbound"}
+    if not set(payload).issubset(allowed) or payload.get("cmd") != "log_entry":
+        raise ValueError("operator-log unresolved payload schema is invalid")
+    request_id = context.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+        or payload.get("request_id") != request_id
+    ):
+        raise ValueError("operator-log unresolved request identity is invalid")
+    author = bounded_operator_log_identity(payload.get("author"))
+    source = payload.get("source")
+    message = payload.get("message")
+    tags = payload.get("tags", [])
+    tags_text = context.get("tags_text", ", ".join(tags) if type(tags) is list else "")
+    try:
+        normalized_tags = list(normalize_operator_log_tags(tags))
+    except ValueError:
+        normalized_tags = None
+    if (
+        author is None
+        or payload.get("author") != author
+        or type(source) is not str
+        or source not in {"gui", "dashboard"}
+        or len(source.encode("utf-8")) > _MAX_IDENTITY_BYTES
+        or type(message) is not str
+        or not message.strip()
+        or message != message.strip()
+        or len(message.encode("utf-8")) > _MAX_MESSAGE_BYTES
+        or type(tags) is not list
+        or normalized_tags != tags
+        or any(type(tag) is not str or len(tag.encode("utf-8")) > _MAX_IDENTITY_BYTES for tag in tags)
+        or type(tags_text) is not str
+        or len(tags_text.encode("utf-8")) > _MAX_UNRESOLVED_BYTES
+        or context.get("message") != message
+        or ("author" in context and context.get("author") != author)
+    ):
+        raise ValueError("operator-log unresolved fields are invalid")
+    experiment_id = context.get("experiment_id")
+    if experiment_id is None:
+        if payload.get("experiment_unbound") is not True or "experiment_id" in payload:
+            raise ValueError("operator-log unresolved unbound scope is invalid")
+    elif (
+        type(experiment_id) is not str
+        or not experiment_id
+        or not experiment_id.isprintable()
+        or len(experiment_id.encode("utf-8")) > _MAX_IDENTITY_BYTES
+        or payload.get("experiment_id") != experiment_id
+        or "experiment_unbound" in payload
+    ):
+        raise ValueError("operator-log unresolved bound scope is invalid")
+    stable = {
+        "payload": payload,
+        "request_id": request_id,
+        "experiment_id": experiment_id,
+        "message": message,
+        "author": author,
+        "tags_text": tags_text,
+    }
+    raw = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if len(raw.encode("utf-8")) > _MAX_UNRESOLVED_BYTES:
+        raise ValueError("operator-log unresolved record exceeds cap")
+    return raw
+
+
+def decode_operator_log_unresolved(raw: object) -> dict[str, Any] | None:
+    if type(raw) is not str or not raw or len(raw.encode("utf-8")) > _MAX_UNRESOLVED_BYTES:
+        return None
+    try:
+        decoded = json.loads(raw)
+        if type(decoded) is not dict:
+            return None
+        encode_operator_log_unresolved(decoded)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return decoded
 
 
 class OperatorLogPanel(QWidget):
@@ -251,6 +454,16 @@ class OperatorLogPanel(QWidget):
         self._search_debounce.timeout.connect(self._apply_filters)
 
         self._build_ui()
+        restored = decode_operator_log_unresolved(self._settings.value(_UNRESOLVED_SETTINGS_KEY, ""))
+        if restored is not None:
+            self._unresolved_submit = restored
+            self._message_edit.setPlainText(restored["message"])
+            self._author_edit.setText(restored["author"])
+            self._tags_edit.setText(str(restored.get("tags_text", "")))
+            self.show_unknown(
+                "Найдена незавершённая запись. После соединения с Engine "
+                "повторите тот же ключ через «Сверить сохранение»."
+            )
         # Initial state: composer disabled until shell pushes connected=True.
         self._update_composer_enablement()
         self.refresh_entries()
@@ -291,6 +504,7 @@ class OperatorLogPanel(QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("operatorLogBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._banner_label.setTextFormat(Qt.TextFormat.PlainText)
         self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._banner_label.setVisible(False)
         return self._banner_label
@@ -324,9 +538,9 @@ class OperatorLogPanel(QWidget):
         # v0.55.2 ds-012: 13 * SPACE_4 + SPACE_3 = 208 + 12 = 220 keeps the
         # cap on the spacing scale.
         self._author_edit.setMaximumWidth(13 * theme.SPACE_4 + theme.SPACE_3)
-        saved_author = self._settings.value("last_log_author", "")
-        if saved_author:
-            self._author_edit.setText(str(saved_author))
+        saved_author = bounded_operator_log_identity(self._settings.value("last_log_author", ""))
+        if saved_author is not None:
+            self._author_edit.setText(saved_author)
         _style_input(self._author_edit)
         fields_row.addWidget(self._author_edit)
         fields_row.addWidget(self._caption("Теги:"))
@@ -514,7 +728,10 @@ class OperatorLogPanel(QWidget):
         if not message:
             self.show_warning("Введите текст записи.")
             return
-        author = self._author_edit.text().strip()
+        author = bounded_operator_log_identity(self._author_edit.text())
+        if author is None:
+            self.show_error("Укажите допустимое имя оператора; запись не отправлена.")
+            return
         tags = list(normalize_operator_log_tags(self._tags_edit.text()))
         bind_experiment = self._bind_experiment_check.isChecked()
         experiment_id = self._current_experiment_id if bind_experiment else None
@@ -548,6 +765,12 @@ class OperatorLogPanel(QWidget):
     def _start_submit(self, context: dict[str, Any]) -> None:
         if self._read_only or not self._connected or self._submit_worker is not None:
             return
+        if not self._persist_unresolved_submit(context):
+            self.show_error(
+                "Не удалось надёжно сохранить ключ повтора. Запись не отправлена.",
+                persistent=True,
+            )
+            return
         context["attempt_generation"] = self._state_generation
         self._submit_context = context
         self._submit_btn.setEnabled(False)
@@ -564,20 +787,7 @@ class OperatorLogPanel(QWidget):
 
     @staticmethod
     def _commit_receipt_matches(result: object, context: dict[str, Any]) -> bool:
-        if not isinstance(result, dict) or result.get("committed") is not True:
-            return False
-        receipt = result.get("commit_receipt")
-        entry = result.get("entry")
-        if not isinstance(receipt, dict) or not isinstance(entry, dict):
-            return False
-        return (
-            receipt.get("schema") == _LOG_COMMIT_SCHEMA
-            and receipt.get("request_id") == context.get("request_id")
-            and receipt.get("experiment_id") == context.get("experiment_id")
-            and receipt.get("committed") is True
-            and receipt.get("entry_id") is not None
-            and receipt.get("entry_id") == entry.get("id")
-        )
+        return operator_log_commit_receipt_matches(result, context)
 
     def _on_submit_result(
         self,
@@ -600,6 +810,7 @@ class OperatorLogPanel(QWidget):
         if self._commit_receipt_matches(result, expected):
             if self._unresolved_submit is expected:
                 self._unresolved_submit = None
+            self._clear_persisted_unresolved_submit()
             self._settings.setValue("last_log_author", str(expected.get("author", "")))
             if self._message_edit.toPlainText().strip() == expected.get("message"):
                 self._message_edit.clear()
@@ -616,7 +827,7 @@ class OperatorLogPanel(QWidget):
             self.refresh_entries()
             return
 
-        if result.get("committed") is True or _result_is_unknown(result):
+        if (type(result) is dict and result.get("committed") is True) or _result_is_unknown(result):
             self._mark_submit_unknown(
                 expected,
                 "Engine не подтвердил, сохранена ли запись. Текст сохранён; "
@@ -626,14 +837,31 @@ class OperatorLogPanel(QWidget):
 
         if self._unresolved_submit is expected:
             self._unresolved_submit = None
-        error = result.get("error", "Не удалось сохранить запись.")
-        self.show_error(str(error))
+        self._clear_persisted_unresolved_submit()
+        error_code = _bounded_identity_line(result.get("error_code"), fallback="unknown")
+        self.show_error("Engine proved that the operator-log entry was not committed.")
+        logger.warning("operator-log submission not committed: error_code=%s", error_code)
         self._update_composer_enablement()
 
     def _mark_submit_unknown(self, context: dict[str, Any], message: str) -> None:
         self._unresolved_submit = context
+        if not self._persist_unresolved_submit(context):
+            logger.error("operator-log unresolved request persistence failed")
         self.show_unknown(message)
         self._update_composer_enablement()
+
+    def _persist_unresolved_submit(self, context: dict[str, Any]) -> bool:
+        try:
+            encoded = encode_operator_log_unresolved(context)
+            self._settings.setValue(_UNRESOLVED_SETTINGS_KEY, encoded)
+            self._settings.sync()
+            return self._settings.status() == QSettings.Status.NoError
+        except (TypeError, ValueError):
+            return False
+
+    def _clear_persisted_unresolved_submit(self) -> None:
+        self._settings.remove(_UNRESOLVED_SETTINGS_KEY)
+        self._settings.sync()
 
     def _prune_workers(self) -> None:
         remaining: list[ZmqCommandWorker] = []
@@ -904,8 +1132,9 @@ class OperatorLogPanel(QWidget):
         time_label.setFixedWidth(52)
         head_row.addWidget(time_label)
 
-        author_text = str(entry.get("author") or entry.get("source") or "system")
+        author_text = _bounded_identity_line(entry.get("author") or entry.get("source"))
         author_label = QLabel(author_text)
+        author_label.setTextFormat(Qt.TextFormat.PlainText)
         author_label.setFont(_label_font())
         author_label.setStyleSheet(
             f"color: {primary_color}; background: transparent; border: none; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
@@ -914,7 +1143,10 @@ class OperatorLogPanel(QWidget):
         head_row.addStretch()
         layout.addLayout(head_row)
 
-        message_label = QLabel(str(entry.get("message", "")))
+        raw_message = entry.get("message")
+        message_text = raw_message if type(raw_message) is str else ""
+        message_label = QLabel(message_text[:65536])
+        message_label.setTextFormat(Qt.TextFormat.PlainText)
         message_label.setFont(_body_font())
         message_label.setWordWrap(True)
         message_label.setStyleSheet(
@@ -927,10 +1159,10 @@ class OperatorLogPanel(QWidget):
         chips_row.setSpacing(theme.SPACE_1)
         experiment_id = entry.get("experiment_id")
         if experiment_id:
-            chips_row.addWidget(self._build_chip(f"experiment: {experiment_id}"))
+            chips_row.addWidget(self._build_chip(f"experiment: {_bounded_identity_line(experiment_id)}"))
         tags = entry.get("tags") or []
         for tag in tags:
-            chips_row.addWidget(self._build_chip(f"tag: {tag}"))
+            chips_row.addWidget(self._build_chip(f"tag: {_bounded_identity_line(tag)}"))
         chips_row.addStretch()
         if experiment_id or tags:
             layout.addLayout(chips_row)
@@ -940,6 +1172,7 @@ class OperatorLogPanel(QWidget):
 
     def _build_chip(self, text: str) -> QLabel:
         chip = QLabel(text)
+        chip.setTextFormat(Qt.TextFormat.PlainText)
         chip.setFont(_label_font())
         chip.setStyleSheet(
             f"QLabel {{"

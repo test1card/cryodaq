@@ -307,7 +307,18 @@ def test_finalize_order_has_no_renderer_step(
         template_id="thermal_conductivity",
         start_time="2026-03-16T10:00:00+00:00",
     )
+    predecessor_revision = manager._state_revision
     events: list[str] = []
+    clear_calls: list[tuple[int, dict[str, object]]] = []
+
+    def record_clear(
+        *,
+        state_revision: int,
+        transition_receipt: dict[str, object],
+    ) -> None:
+        events.append("clear")
+        clear_calls.append((state_revision, transition_receipt))
+
     monkeypatch.setattr(manager, "list_run_records", lambda **_kwargs: [])
     monkeypatch.setattr(
         manager,
@@ -325,7 +336,7 @@ def test_finalize_order_has_no_renderer_step(
         "_write_artifact",
         lambda *_args, **_kwargs: events.append("archive"),
     )
-    monkeypatch.setattr(manager, "_clear_active", lambda: events.append("clear"))
+    monkeypatch.setattr(manager, "_clear_active", record_clear)
     parquet = types.ModuleType("cryodaq.storage.parquet_archive")
     parquet.export_experiment_readings_to_parquet = (  # type: ignore[attr-defined]
         lambda **_kwargs: events.append("parquet")
@@ -343,6 +354,13 @@ def test_finalize_order_has_no_renderer_step(
     # derivative Parquet export. A slow or failed export must not leave the
     # experiment looking RUNNING after its terminal metadata was published.
     assert events == ["metadata", "archive", "clear", "parquet"]
+    assert len(clear_calls) == 1
+    state_revision, transition_receipt = clear_calls[0]
+    assert state_revision == predecessor_revision + 1
+    assert transition_receipt["schema"] == "experiment_transition_receipt_v2"
+    assert transition_receipt["experiment_id"] == exp_id
+    assert transition_receipt["predecessor_revision"] == predecessor_revision
+    assert transition_receipt["result_revision"] == state_revision
 
 
 async def test_archive_normalizes_none_text_fields(manager: ExperimentManager) -> None:

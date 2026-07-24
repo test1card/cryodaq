@@ -217,21 +217,27 @@ def test_cmd_socket_recovers_after_timeout(_bridge_fixture):
     # deadline tracks the live constant (+8 s slack) so the initial timeout
     # reply arrives before the assertion fails and the test self-adjusts if
     # the timeout is retuned.
-    # IV.6 B1 fix: timeout error now reads "Engine не отвечает (<exc>)"
-    # — the <exc> part comes straight from pyzmq (e.g. "Resource
-    # temporarily unavailable"), so assert on the stable Russian prefix
-    # rather than the OS-specific tail.
+    # The machine receipt, not localized operator prose, is the authority for
+    # whether retry is safe after an unavailable REP endpoint.
     deadline = time.monotonic() + SUBPROCESS_REQ_TIMEOUT_S + 8.0
-    saw_timeout_reply = False
-    while time.monotonic() < deadline and not saw_timeout_reply:
+    timeout_reply = None
+    while time.monotonic() < deadline and timeout_reply is None:
         try:
             reply = reply_q.get(timeout=0.5)
         except stdlib_queue.Empty:
             continue
-        if reply.get("_rid") == "t1" and reply.get("ok") is False:
-            saw_timeout_reply = "не отвечает" in str(reply.get("error", ""))
+        if reply.get("_rid") == "t1":
+            timeout_reply = reply
 
-    assert saw_timeout_reply, "initial timed-out command did not produce timeout reply"
+    assert timeout_reply == {
+        "ok": False,
+        "error_code": "command_endpoint_unavailable",
+        "error": "Engine command endpoint is unavailable.",
+        "delivery_state": "unknown",
+        "commit_state": "unknown",
+        "retry_safe": False,
+        "_rid": "t1",
+    }
 
     ctx = zmq.Context()
     rep = ctx.socket(zmq.REP)

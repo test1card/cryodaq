@@ -392,3 +392,26 @@ def test_exact_release_surfaces_close_failure(
         release_lock_exact(fd, name, lock_dir=tmp_path)
     monkeypatch.setattr(module.os, "close", real_close)
     release_lock_exact(fd, name, lock_dir=tmp_path)
+
+
+def test_exact_release_closes_descriptor_even_when_path_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.instance_lock as module
+
+    name = ".launcher-validation-failure.lock"
+    fd = try_acquire_lock(name, lock_dir=tmp_path)
+    assert fd is not None
+
+    class BrokenDiagnosticPath:
+        def lstat(self):  # noqa: ANN201
+            raise RuntimeError("injected lock path validation failure")
+
+    monkeypatch.setattr(module, "_lock_path", lambda *_args, **_kwargs: BrokenDiagnosticPath())
+
+    with pytest.raises(RuntimeError, match="validation failure"):
+        release_lock_exact(fd, name, lock_dir=tmp_path)
+
+    with pytest.raises(OSError):
+        os.fstat(fd)

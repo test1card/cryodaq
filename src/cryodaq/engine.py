@@ -14,19 +14,23 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import math
 import os
 import secrets
 import signal
+import stat
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +40,29 @@ from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
-from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_ABORT_TERMINAL_CODES as _ALARM_ACK_ABORT_TERMINAL_CODES,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_COMMIT_KEYS as _ALARM_ACK_COMMIT_KEYS,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_COMMIT_SCHEMA as _ALARM_ACK_COMMIT_SCHEMA,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_EVENT_KEYS as _ALARM_ACK_EVENT_KEYS,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_EVENT_SCHEMA as _ALARM_ACK_EVENT_SCHEMA,
+)
+from cryodaq.core.alarm_ack_codec import (
+    alarm_ack_request_fingerprint,
+    deterministic_safety_audio_ack_request_id,
+    is_canonical_engine_instance_id,
+    is_canonical_source_activation_id,
+    safety_audio_ack_request_fingerprint,
+)
+from cryodaq.core.alarm_config import AlarmConfig, AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
@@ -52,7 +78,9 @@ from cryodaq.core.command_authority import (
     MUTATION_ENVELOPE_KEYS,
     MUTATION_PROTOCOL_MAJOR,
     MUTATION_RECEIPT_SCHEMA,
+    is_exact_safe_direction_envelope,
     is_mutation,
+    is_ordinary_command_endpoint_admitted,
     requires_compatibility,
     strip_mutation_envelope,
     valid_capability_token,
@@ -72,6 +100,7 @@ from cryodaq.core.housekeeping import (
 )
 from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
 from cryodaq.core.operator_log import (
+    OperatorLogCommitResult,
     OperatorLogEntry,
     OperatorLogIdempotencyConflictError,
     OperatorLogIdempotencyUnavailableError,
@@ -90,13 +119,23 @@ from cryodaq.core.scheduler import (
     Scheduler,
 )
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
+from cryodaq.core.shutdown_settlement import ShutdownOwnerSettledError
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.vacuum_guard import VacuumGuard
 from cryodaq.core.zmq_bridge import (
+    DEFAULT_CMD_ADDR,
+    DEFAULT_PUB_ADDR,
+    DEFAULT_SAFE_CMD_ADDR,
     PERIODIC_BARRIER_SCHEMA,
     PERIODIC_QUERY_SCHEMA,
+    PROTOCOL_VERSION,
+    CommandAuthorityRegistry,
+    ZMQCommandIngressPair,
+    ZMQCommandIngressTerminalError,
+    ZMQCommandIngressTerminalFailure,
     ZMQCommandServer,
     ZMQPublisher,
+    _bounded_action_label,
     encode_periodic_command_reply,
 )
 from cryodaq.drivers.base import InstrumentDriver, Reading
@@ -147,6 +186,7 @@ from cryodaq.engine_wiring.supervision import (
     install_loop_exception_backstop,
     stop_safety_manager_with_hold,
 )
+from cryodaq.instance_lock import try_acquire_lock
 from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
 from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
@@ -157,7 +197,13 @@ from cryodaq.storage.channel_descriptors import (
     load_live_channel_descriptor_catalog,
 )
 from cryodaq.storage.cold_rotation import build_cold_rotation_service, normalize_schedule_time
-from cryodaq.storage.sqlite_writer import SQLiteWriter
+from cryodaq.storage.sqlite_writer import (
+    AlarmAckOutboxAbortDisposition,
+    AlarmAckOutboxRecord,
+    OperatorLogCommitOutcomeUnknownError,
+    OperatorLogPublicationOutboxRecord,
+    SQLiteWriter,
+)
 
 logger = logging.getLogger("cryodaq.engine")
 
@@ -187,6 +233,195 @@ _DATA_DIR = get_data_dir()
 _WATCHDOG_INTERVAL_S = 30.0
 _LOG_GET_TIMEOUT_S = 5.0
 _EXPERIMENT_STATUS_TIMEOUT_S = 5.0
+_ENGINE_INSTANCE_ID_ENV = "CRYODAQ_ENGINE_INSTANCE_ID"
+_ENGINE_SHUTDOWN_CAPABILITY_ENV = "CRYODAQ_ENGINE_SHUTDOWN_CAPABILITY"
+_ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
+_CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
+_ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
+_ENGINE_READY_WIRE_PREFIX = b"CRYODAQ_ENGINE_READY_V2 "
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v1"
+_OPERATOR_LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
+_OPERATOR_LOG_SUCCESS_KEYS = frozenset(
+    {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt"}
+)
+_OPERATOR_LOG_COMMAND_REQUIRED_KEYS = frozenset({"cmd", "request_id", "message", "author", "source"})
+_OPERATOR_LOG_COMMAND_ALLOWED_KEYS = _OPERATOR_LOG_COMMAND_REQUIRED_KEYS | {
+    "tags",
+    "experiment_id",
+    "experiment_unbound",
+}
+_OPERATOR_LOG_UNTRUSTED_SOURCES = frozenset({"dashboard", "gui", "rest", "telegram", "zmq"})
+_OPERATOR_LOG_RESERVED_ACTORS = frozenset({"system", "auto", "machine"})
+_OPERATOR_LOG_RESERVED_TAGS = frozenset(
+    {
+        "ai",
+        "auto",
+        "alarm",
+        "alarm_ack",
+        "safety_fault",
+        "phase",
+        "phase_transition",
+        "experiment",
+        "calibration",
+        "system",
+        "machine",
+    }
+)
+
+
+def _consume_engine_shutdown_authority(
+    environment: MutableMapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Remove inherited shutdown secrets before any engine child can spawn."""
+
+    target = os.environ if environment is None else environment
+    absent = object()
+    instance_id = target.pop(_ENGINE_INSTANCE_ID_ENV, absent)
+    capability = target.pop(_ENGINE_SHUTDOWN_CAPABILITY_ENV, absent)
+    if instance_id is absent and capability is absent:
+        return "", ""
+    valid = (
+        type(instance_id) is str
+        and len(instance_id) == 32
+        and all(ch in "0123456789abcdef" for ch in instance_id)
+        and type(capability) is str
+        and len(capability) == 64
+        and all(ch in "0123456789abcdef" for ch in capability)
+    )
+    if not valid:
+        raise RuntimeError("launcher shutdown authority is invalid")
+    return instance_id, capability
+
+
+def _canonical_engine_instance_id(supplied: object) -> str:
+    """Validate launcher identity or generate exactly once for direct mode."""
+
+    if type(supplied) is str and supplied == "":
+        return secrets.token_hex(16)
+    if type(supplied) is not str or len(supplied) != 32 or any(char not in "0123456789abcdef" for char in supplied):
+        raise ValueError("engine_instance_id must be exactly 32 lowercase hexadecimal characters")
+    return supplied
+
+
+def _consume_engine_ready_nonce(environment: MutableMapping[str, str] | None = None) -> str:
+    """Consume the launcher's one-use readiness challenge before child spawn."""
+
+    target = os.environ if environment is None else environment
+    absent = object()
+    nonce = target.pop(_ENGINE_READY_NONCE_ENV, absent)
+    if nonce is absent:
+        return ""
+    if type(nonce) is str and len(nonce) == 64 and all(char in "0123456789abcdef" for char in nonce):
+        return nonce
+    raise RuntimeError("launcher readiness nonce is invalid")
+
+
+def _consume_child_ready_channel(environment: MutableMapping[str, str] | None = None) -> int | None:
+    """Consume and de-inherit the launcher's one-child readiness pipe.
+
+    The launcher passes only the write end.  It is converted to a CRT file
+    descriptor on Windows, verified as a pipe, and made non-inheritable before
+    any engine-owned subprocess can be constructed.
+    """
+
+    target = os.environ if environment is None else environment
+    absent = object()
+    encoded = target.pop(_CHILD_READY_CHANNEL_ENV, absent)
+    if encoded is absent:
+        return None
+    descriptor: int | None = None
+    try:
+        if type(encoded) is not str:
+            raise ValueError("readiness channel descriptor is not text")
+        if sys.platform == "win32":
+            import msvcrt
+
+            prefix = "handle:"
+            suffix = encoded[len(prefix) :] if encoded.startswith(prefix) else ""
+            if not (1 <= len(suffix) <= 20 and suffix.isascii() and suffix.isdecimal()):
+                raise ValueError("invalid readiness channel handle")
+            handle = int(suffix)
+            if handle <= 0:
+                raise ValueError("invalid readiness channel handle")
+            standard_handles: set[int] = set()
+            for standard_descriptor in (0, 1, 2):
+                try:
+                    standard_handle = msvcrt.get_osfhandle(standard_descriptor)
+                except OSError:
+                    continue
+                if standard_handle > 0:
+                    standard_handles.add(standard_handle)
+            if handle in standard_handles:
+                raise ValueError("unsafe readiness channel handle")
+            descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+            if not stat.S_ISFIFO(os.fstat(descriptor).st_mode):
+                raise ValueError("readiness channel is not a pipe")
+        else:
+            prefix = "fd:"
+            suffix = encoded[len(prefix) :] if encoded.startswith(prefix) else ""
+            if not (1 <= len(suffix) <= 20 and suffix.isascii() and suffix.isdecimal()):
+                raise ValueError("invalid readiness channel descriptor")
+            candidate = int(suffix)
+            if candidate <= 2:
+                raise ValueError("unsafe readiness channel descriptor")
+            if not stat.S_ISFIFO(os.fstat(candidate).st_mode):
+                raise ValueError("readiness channel is not a pipe")
+            descriptor = candidate
+        os.set_inheritable(descriptor, False)
+        return descriptor
+    except (OSError, ValueError) as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise RuntimeError("launcher readiness channel is invalid") from exc
+
+
+def _consume_engine_launch_authority(
+    environment: MutableMapping[str, str] | None = None,
+) -> tuple[str, str, str, int | None]:
+    """Consume exactly one complete launcher envelope or direct-mode absence."""
+
+    target = os.environ if environment is None else environment
+    absent = object()
+    raw_channel = target.pop(_CHILD_READY_CHANNEL_ENV, absent)
+    raw_nonce = target.pop(_ENGINE_READY_NONCE_ENV, absent)
+    raw_instance_id = target.pop(_ENGINE_INSTANCE_ID_ENV, absent)
+    raw_shutdown_capability = target.pop(_ENGINE_SHUTDOWN_CAPABILITY_ENV, absent)
+    channel_environment = {} if raw_channel is absent else {_CHILD_READY_CHANNEL_ENV: raw_channel}
+    nonce_environment = {} if raw_nonce is absent else {_ENGINE_READY_NONCE_ENV: raw_nonce}
+    shutdown_environment = {}
+    if raw_instance_id is not absent:
+        shutdown_environment[_ENGINE_INSTANCE_ID_ENV] = raw_instance_id
+    if raw_shutdown_capability is not absent:
+        shutdown_environment[_ENGINE_SHUTDOWN_CAPABILITY_ENV] = raw_shutdown_capability
+
+    ready_channel_fd: int | None = None
+    try:
+        # Acquire the descriptor first so every later envelope rejection can
+        # settle the one-use handle rather than leaking launcher authority.
+        ready_channel_fd = _consume_child_ready_channel(channel_environment)
+        ready_nonce = _consume_engine_ready_nonce(nonce_environment)
+        instance_id, shutdown_capability = _consume_engine_shutdown_authority(shutdown_environment)
+        components_present = (
+            bool(instance_id),
+            bool(shutdown_capability),
+            bool(ready_nonce),
+            ready_channel_fd is not None,
+        )
+        if all(components_present):
+            return instance_id, shutdown_capability, ready_nonce, ready_channel_fd
+        if not any(components_present):
+            return "", "", "", None
+        raise RuntimeError("launcher engine authority envelope is incomplete")
+    except BaseException:
+        if ready_channel_fd is not None:
+            try:
+                os.close(ready_channel_fd)
+            except OSError:
+                pass
+        raise
 
 
 def _coerce_finite_setpoint(raw: Any, name: str) -> float:
@@ -217,8 +452,13 @@ async def _run_keithley_command(
             p = _coerce_finite_setpoint(cmd.get("p_target", 0), "p_target")
             v = _coerce_finite_setpoint(cmd.get("v_comp", 40), "v_comp")
             i = _coerce_finite_setpoint(cmd.get("i_comp", 1.0), "i_comp")
-        except (TypeError, ValueError, OverflowError) as exc:
-            return {"ok": False, "channel": smu_channel, "error": str(exc)}
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "channel": smu_channel,
+                "error_code": "keithley_parameters_invalid",
+                "error": "Keithley command parameters are invalid.",
+            }
         return await safety_manager.request_run(p, v, i, channel=smu_channel)
 
     if action == "keithley_stop":
@@ -237,8 +477,13 @@ async def _run_keithley_command(
         smu_channel = normalize_smu_channel(cmd.get("channel"))
         try:
             p = _coerce_finite_setpoint(cmd.get("p_target", 0), "p_target")
-        except (TypeError, ValueError, OverflowError) as exc:
-            return {"ok": False, "channel": smu_channel, "error": str(exc)}
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "channel": smu_channel,
+                "error_code": "keithley_parameters_invalid",
+                "error": "Keithley command parameters are invalid.",
+            }
         return await safety_manager.update_target(p, channel=smu_channel)
 
     if action == "keithley_set_limits":
@@ -246,8 +491,13 @@ async def _run_keithley_command(
         try:
             v = _coerce_finite_setpoint(cmd["v_comp"], "v_comp") if cmd.get("v_comp") is not None else None
             i = _coerce_finite_setpoint(cmd["i_comp"], "i_comp") if cmd.get("i_comp") is not None else None
-        except (TypeError, ValueError, OverflowError) as exc:
-            return {"ok": False, "channel": smu_channel, "error": str(exc)}
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "channel": smu_channel,
+                "error_code": "keithley_parameters_invalid",
+                "error": "Keithley command parameters are invalid.",
+            }
         return await safety_manager.update_limits(channel=smu_channel, v_comp=v, i_comp=i)
 
     raise ValueError(f"Unsupported Keithley command: {action}")
@@ -286,9 +536,8 @@ def _load_experiment_metadata_sync(meta_path: Path) -> dict:
         return _json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         logger.warning(
-            "F31: metadata.json read failed (%s): %s",
-            meta_path.parent.name,
-            exc,
+            "Engine metadata read failed: phase=f31_metadata exception=%s",
+            type(exc).__name__,
         )
         return {}
 
@@ -311,6 +560,171 @@ async def _publish_operator_log_entry(
     )
 
 
+async def _publish_operator_log_publication(
+    writer: SQLiteWriter,
+    broker: DataBroker | None,
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    event: dict[str, Any],
+    receipt: dict[str, Any],
+) -> OperatorLogPublicationOutboxRecord:
+    """Publish one durable intent at least once, then mark that exact intent."""
+
+    if broker is None:
+        raise RuntimeError("operator-log publication broker is unavailable")
+    event_copy, _receipt_copy = SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event=event,
+        receipt=receipt,
+    )
+    entry = event_copy["entry"]
+    metadata = {
+        **entry,
+        "request_id": request_id,
+        "publication_schema": event_copy["schema"],
+    }
+    publish_required = getattr(broker, "publish_required", None)
+    validates_required = getattr(broker, "validates_required_publication", None)
+    if not callable(publish_required) or not callable(validates_required):
+        raise RuntimeError("operator-log required publisher is unavailable")
+    publication_receipt = await publish_required(
+        Reading(
+            timestamp=datetime.fromisoformat(entry["timestamp"]),
+            instrument_id="operator_log",
+            channel="analytics/operator_log_entry",
+            value=float(entry["id"]),
+            unit="",
+            metadata=metadata,
+        ),
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+    )
+    if (
+        validates_required(
+            publication_receipt,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        is not True
+    ):
+        raise RuntimeError("operator-log required publisher receipt is invalid")
+    published = await writer.publish_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+    )
+    state = _validated_operator_log_publication_record(
+        published,
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    if state != "published":
+        raise RuntimeError("operator-log publication settlement is incomplete")
+    return published
+
+
+async def _reconcile_operator_log_publication_outbox(
+    writer: SQLiteWriter,
+    broker: DataBroker | None,
+) -> None:
+    """Reconstruct crash-stranded intents and replay them with stable keys."""
+
+    if broker is None:
+        raise RuntimeError("operator-log publication broker is unavailable")
+    pending = await writer.reconcile_missing_operator_log_publication_outbox()
+    for publication in pending:
+        await _publish_operator_log_publication(
+            writer,
+            broker,
+            request_id=publication.request_id,
+            request_fingerprint=publication.request_fingerprint,
+            event=publication.event,
+            receipt=publication.receipt,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _CommandIngressRecoveryProof:
+    """Exact retained-state settlement completed before REP admission."""
+
+    engine_instance_id: str
+    operator_log_initialized: bool
+    operator_log_reconciled: bool
+    alarm_ack_dispositions: tuple[AlarmAckOutboxAbortDisposition, ...]
+    _authority_capability: object | None = field(default=None, repr=False, compare=False)
+
+
+class _CommandIngressRecoveryAuthority:
+    """One-use owner that makes retained recovery a prerequisite for REP."""
+
+    def __init__(
+        self,
+        *,
+        writer: SQLiteWriter,
+        broker: DataBroker | None,
+        engine_instance_id: str,
+    ) -> None:
+        if not is_canonical_engine_instance_id(engine_instance_id):
+            raise ValueError("engine_instance_id must be exactly 32 lowercase hexadecimal characters")
+        self._writer = writer
+        self._broker = broker
+        self._engine_instance_id = engine_instance_id
+        self.__capability = object()
+        self.__issued_proof: _CommandIngressRecoveryProof | None = None
+        self._settlement_attempted = False
+        self._start_attempted = False
+        self._proof: _CommandIngressRecoveryProof | None = None
+
+    @property
+    def proof(self) -> _CommandIngressRecoveryProof | None:
+        return self._proof
+
+    async def settle(self) -> _CommandIngressRecoveryProof:
+        """Initialize, reconcile, abort stale ACKs, then replay committed ACKs."""
+
+        if self._settlement_attempted:
+            raise RuntimeError("command ingress recovery settlement is one-use")
+        self._settlement_attempted = True
+        await self._writer.initialize_operator_log_idempotency()
+        await _reconcile_operator_log_publication_outbox(self._writer, self._broker)
+        dispositions = await _settle_alarm_ack_outbox_startup(
+            self._writer,
+            self._broker,
+            self._engine_instance_id,
+        )
+        proof = _CommandIngressRecoveryProof(
+            engine_instance_id=self._engine_instance_id,
+            operator_log_initialized=True,
+            operator_log_reconciled=True,
+            alarm_ack_dispositions=dispositions,
+            _authority_capability=self.__capability,
+        )
+        self.__issued_proof = proof
+        self._proof = proof
+        return proof
+
+    async def start(self, command_server: ZMQCommandIngressPair) -> None:
+        """Open REP exactly once and only after this owner retained its proof."""
+
+        if self._start_attempted:
+            raise RuntimeError("command ingress start is one-use")
+        self._start_attempted = True
+        proof = self._proof
+        if (
+            type(proof) is not _CommandIngressRecoveryProof
+            or proof is not self.__issued_proof
+            or proof._authority_capability is not self.__capability
+            or proof.engine_instance_id != self._engine_instance_id
+            or proof.operator_log_initialized is not True
+            or proof.operator_log_reconciled is not True
+            or type(proof.alarm_ack_dispositions) is not tuple
+        ):
+            raise RuntimeError("command ingress recovery proof is unavailable")
+        await command_server.start()
+
+
 async def _run_operator_log_command(
     action: str,
     cmd: dict[str, Any],
@@ -318,44 +732,6 @@ async def _run_operator_log_command(
     experiment_manager: ExperimentManager,
     broker: DataBroker | None = None,
 ) -> dict[str, Any]:
-    if action == "log_entry":
-        message = str(cmd.get("message", "")).strip()
-        if not message:
-            raise ValueError("Operator log message must not be empty.")
-
-        experiment_id = cmd.get("experiment_id")
-        if type(experiment_id) is not str or not experiment_id.strip():
-            raise ValueError("experiment_id is required for operator log mutations.")
-        with experiment_manager.experiment_cas(experiment_id):
-            experiment_manager.assert_experiment_cas(experiment_id)
-            write_owner = asyncio.create_task(
-                writer.append_operator_log(
-                    message=message,
-                    author=str(cmd.get("author", "")).strip(),
-                    source=str(cmd.get("source", "")).strip() or "command",
-                    experiment_id=experiment_id,
-                    tags=cmd.get("tags"),
-                    timestamp=_parse_log_time(cmd.get("timestamp")),
-                ),
-                name="operator_log_durable_write",
-            )
-            caller_cancelled: asyncio.CancelledError | None = None
-            while not write_owner.done():
-                try:
-                    await asyncio.shield(write_owner)
-                except asyncio.CancelledError as exc:
-                    caller_cancelled = caller_cancelled or exc
-            try:
-                entry = write_owner.result()
-            except BaseException as operation_error:
-                if caller_cancelled is not None:
-                    raise caller_cancelled from operation_error
-                raise
-            if caller_cancelled is not None:
-                raise caller_cancelled
-        await _publish_operator_log_entry(broker, entry)
-        return {"ok": True, "entry": entry.to_payload()}
-
     if action == "log_get":
         experiment_id = cmd.get("experiment_id")
         if experiment_id is None and cmd.get("current_experiment", False):
@@ -420,33 +796,16 @@ class _RemoteAssistantQueryProxy:
             await sock.send_string(_json.dumps({"cmd": "assistant.query", "query": query, "chat_id": chat_id}))
             reply = _json.loads(await sock.recv_string())
         except Exception as exc:  # noqa: BLE001
-            return f"🤖 Гемма: ассистент недоступен ({exc})."
+            logger.warning(
+                "Assistant query transport failed: exception=%s",
+                type(exc).__name__,
+            )
+            return "🤖 Гемма: ассистент недоступен."
         finally:
             sock.close(linger=0)
         if reply.get("ok"):
             return str(reply.get("response", ""))
         return str(reply.get("error", "Ассистент вернул ошибку."))
-
-
-def _assistant_process_unavailable_reply(action: str) -> dict[str, Any]:
-    """B1: Гемма/RAG moved out of the engine into the standalone
-    ``cryodaq-assistant`` process (own REP at ``tcp://127.0.0.1:5557``).
-
-    The GUI's ZMQ bridge subprocess routes ``assistant.*`` / ``rag.*``
-    actions directly to that port now (see ``core/zmq_subprocess.py``),
-    so this engine-side handler should not normally be hit. It exists as
-    a backward-compat safety net — an old bridge build, or any other
-    client still pointed at the engine's REP (:5556) for these actions —
-    gets a clear redirect message instead of "unknown command".
-    """
-    return {
-        "ok": False,
-        "error": (
-            f"'{action}' обслуживается процессом cryodaq-assistant "
-            "(tcp://127.0.0.1:5557), а не engine. Убедитесь, что ассистент "
-            "запущен, и что GUI подключается к его порту."
-        ),
-    }
 
 
 def _leak_rate_volume_warning(chamber_cfg: dict[str, Any]) -> str | None:
@@ -502,7 +861,15 @@ async def _handle_leak_rate_command(
             leak_rate_estimator.start_measurement(window_s=window_s)
             return {"ok": True, "action": "leak_rate_start"}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)}
+            logger.error(
+                "Leak-rate start failed: exception=%s",
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error_code": "leak_rate_start_failed",
+                "error": "Leak-rate measurement could not be started.",
+            }
     if action == "leak_rate_stop":
         try:
             from dataclasses import asdict as _asdict  # noqa: PLC0415
@@ -513,8 +880,12 @@ async def _handle_leak_rate_command(
                 f"Leak rate: {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
             )
             return {"ok": True, "action": "leak_rate_stop", "measurement": _asdict(result)}
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+        except ValueError:
+            return {
+                "ok": False,
+                "error_code": "leak_rate_stop_invalid",
+                "error": "Leak-rate measurement is not ready to stop.",
+            }
     return None
 
 
@@ -533,24 +904,46 @@ async def _drain_dispatch_tasks(
     timeout (previously the hardcoded 10 s) surfaced as a parameter so the
     warning text reports the actual cap.
     """
-    if tasks:
+    if not tasks:
+        return
+    owners = tuple(tasks)
+
+    async def settle() -> BaseException | None:
         logger_.info(
             "Draining %d in-flight dispatch task(s) before shutdown",
-            len(tasks),
+            len(owners),
         )
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout,
-            )
-        except TimeoutError:
+        _done, pending = await asyncio.wait(owners, timeout=timeout)
+        if pending:
             logger_.warning(
                 "Sink drain timed out (%ss); cancelling %d remaining",
                 timeout,
-                len(tasks),
+                len(pending),
             )
-            for t in tasks:
-                t.cancel()
+            for task in pending:
+                task.cancel()
+        results = await asyncio.gather(*owners, return_exceptions=True)
+        return next(
+            (
+                result
+                for result in results
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+            ),
+            None,
+        )
+
+    settlement = asyncio.create_task(settle(), name="engine-dispatch-task-settlement")
+    cancellation_seen = False
+    while not settlement.done():
+        try:
+            await asyncio.shield(settlement)
+        except asyncio.CancelledError:
+            cancellation_seen = True
+    failure = settlement.result()
+    if failure is not None:
+        raise _EngineShutdownSettledFailure(failure)
+    if cancellation_seen:
+        raise asyncio.CancelledError
 
 
 # ───────────────────────── Task supervision (A2) ──────────────────────────
@@ -717,20 +1110,31 @@ async def _handle_multiline_set_channels_command(
 
     driver = drivers_by_name.get(name)
     if driver is None or driver.__class__.__name__ != "MultiLineDriver":
-        return {"ok": False, "error": f"MultiLine driver '{name}' not found"}
+        return {
+            "ok": False,
+            "error_code": "multiline_driver_unavailable",
+            "error": "The requested MultiLine driver is unavailable.",
+        }
 
     try:
         applied = await driver.reconfigure_channels(channels)
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 — surface the message to GUI
+    except ValueError:
+        return {
+            "ok": False,
+            "error_code": "multiline_channels_invalid",
+            "error": "The requested MultiLine channel set is invalid.",
+        }
+    except Exception as exc:  # noqa: BLE001
         logger.error(
-            "multiline.set_channels reconfigure failed for '%s': %s",
-            name,
-            exc,
-            exc_info=True,
+            "multiline.set_channels reconfigure failed: driver=%s exception=%s",
+            _bounded_action_label(name),
+            type(exc).__name__,
         )
-        return {"ok": False, "error": f"reconfigure failed: {exc}"}
+        return {
+            "ok": False,
+            "error_code": "multiline_reconfigure_failed",
+            "error": "MultiLine channel reconfiguration failed.",
+        }
 
     persist_warning: str | None = None
     try:
@@ -744,12 +1148,12 @@ async def _handle_multiline_set_channels_command(
         )
     except Exception as exc:  # noqa: BLE001 — non-fatal; runtime change stuck
         logger.warning(
-            "multiline.set_channels persist failed for '%s': %s — "
-            "change is runtime-only and will revert on engine restart",
-            name,
-            exc,
+            "multiline.set_channels persistence failed: driver=%s exception=%s; "
+            "the runtime change will revert on engine restart",
+            _bounded_action_label(name),
+            type(exc).__name__,
         )
-        persist_warning = f"persist failed: {exc}"
+        persist_warning = "Channel selection persistence failed; the change is runtime-only."
 
     return {
         "ok": True,
@@ -894,15 +1298,24 @@ async def _handle_multiline_burst_command(
     if driver is None or driver.__class__.__name__ != "MultiLineDriver":
         return {
             "ok": False,
-            "error": f"MultiLine driver '{name}' не сконфигурирован.",
+            "error_code": "multiline_driver_unavailable",
+            "error": "The requested MultiLine driver is unavailable.",
         }
 
     if action == "multiline.burst_status":
         try:
             return {"ok": True, **driver.burst_status()}
         except Exception as exc:  # noqa: BLE001
-            logger.error("multiline.burst_status error: %s", exc, exc_info=True)
-            return {"ok": False, "error": str(exc)}
+            logger.error(
+                "multiline.burst_status failed: driver=%s exception=%s",
+                _bounded_action_label(name),
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error_code": "multiline_burst_status_failed",
+                "error": "MultiLine burst status is unavailable.",
+            }
 
     if action == "multiline.burst_start":
         duration_s = cmd.get("duration_s")
@@ -923,8 +1336,12 @@ async def _handle_multiline_burst_command(
                 active_id = None
         try:
             await driver.burst_start(experiment_id=active_id)
-        except RuntimeError as exc:
-            return {"ok": False, "error": str(exc)}
+        except RuntimeError:
+            return {
+                "ok": False,
+                "error_code": "multiline_burst_start_failed",
+                "error": "MultiLine burst capture could not be started.",
+            }
         if duration is not None and auto_stop_tasks is not None:
             # The auto-stop task lives on the engine event loop; the
             # caller schedules it because asyncio.create_task here would
@@ -945,18 +1362,30 @@ async def _handle_multiline_burst_command(
         try:
             path = await driver.burst_stop(experiments_root=experiments_root)
         except Exception as exc:  # noqa: BLE001
-            logger.error("multiline.burst_stop error: %s", exc, exc_info=True)
-            return {"ok": False, "error": str(exc)}
+            logger.error(
+                "multiline.burst_stop failed: driver=%s exception=%s",
+                _bounded_action_label(name),
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error_code": "multiline_burst_stop_failed",
+                "error": "MultiLine burst capture could not be stopped.",
+            }
         if path is None:
             return {"ok": True, "path": None, "saved": False}
         if auto_stop_tasks is not None:
             auto_stop_tasks.pop(name, None)
         return {"ok": True, "path": str(path), "saved": True}
 
-    return {"ok": False, "error": f"unknown burst action: {action}"}
+    return {
+        "ok": False,
+        "error_code": "multiline_burst_action_invalid",
+        "error": "MultiLine burst action is invalid.",
+    }
 
 
-# B1 (2026-07): the rag.rebuild_index state machine + bootstrap-on-empty
+# B1 (2026-07): live index mutation and bootstrap-on-empty were removed.
 # index logic below moved to cryodaq.agents.assistant_main — the standalone
 # assistant process now owns the RAG index end-to-end (own REP command
 # surface at tcp://127.0.0.1:5557). See scratchpad/montana/exec/impl_b1.md.
@@ -1150,10 +1579,16 @@ def _try_activate_calibration_acquisition(
             service.activate(reference, targets)
         else:
             logger.warning("Calibration experiment missing reference_channel/target_channels in custom_fields")
-    except CalibrationCommandError as e:
-        logger.error("Calibration activation rejected: %s", e)
-    except Exception:
-        logger.warning("Failed to activate calibration acquisition", exc_info=True)
+    except CalibrationCommandError as exc:
+        logger.error(
+            "Calibration activation rejected: exception=%s",
+            type(exc).__name__,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Calibration activation failed: exception=%s",
+            type(exc).__name__,
+        )
 
 
 async def _run_cooldown_history_command(
@@ -1487,11 +1922,11 @@ def _run_experiment_command(
                 operator,
                 expected_experiment_id=expected_experiment_id,
             )
-        except ExperimentIdentityMismatchError as exc:
+        except ExperimentIdentityMismatchError:
             return {
                 "ok": False,
                 "error_code": "stale_experiment_command",
-                "error": str(exc),
+                "error": "Experiment identity changed before the command could commit.",
                 "experiment_id": expected_experiment_id,
             }
         return {"ok": True, "phase": entry, "experiment_id": expected_experiment_id}
@@ -1508,9 +1943,8 @@ def _run_experiment_command(
                 elapsed = (_dt.now(UTC) - started.astimezone(UTC)).total_seconds()
             except Exception as exc:
                 logger.warning(
-                    "Не удалось вычислить elapsed_in_phase_s из started_at=%r: %s — возвращаю 0.0 (display-only)",
-                    history[-1].get("started_at"),
-                    exc,
+                    "Experiment phase elapsed-time projection failed: exception=%s",
+                    type(exc).__name__,
                 )
         return {
             "ok": True,
@@ -1852,7 +2286,10 @@ async def _safety_fault_log_callback(
     try:
         await _publish_operator_log_entry(context.broker, entry)
     except Exception as exc:
-        logger.error("Failed to publish safety fault operator_log entry: %s", exc)
+        logger.error(
+            "Safety fault operator-log publication failed: exception=%s",
+            type(exc).__name__,
+        )
 
     try:
         await _dispatch_alarm_notification(
@@ -1867,7 +2304,10 @@ async def _safety_fault_log_callback(
             value=value,
         )
     except Exception as exc:
-        logger.error("Failed to dispatch safety fault alarm/telegram: %s", exc)
+        logger.error(
+            "Safety fault notification dispatch failed: exception=%s",
+            type(exc).__name__,
+        )
 
 
 @dataclass(slots=True)
@@ -1899,26 +2339,21 @@ async def _interlock_trip_handler(
         )
     except Exception as exc:
         logger.critical(
-            "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — escalating to guaranteed fault.",
-            condition.name,
-            condition.action,
-            exc,
-            exc_info=True,
+            "Interlock trip handler failed; action=%s exception=%s; escalating to fault",
+            _bounded_action_label(condition.action),
+            type(exc).__name__,
         )
         try:
             await context.safety_manager.latch_fault(
-                reason=f"Interlock trip_handler failed: {condition.name}: {exc}",
+                reason=f"interlock_trip_handler_failed:{type(exc).__name__}",
                 source="interlock",
                 channel=reading.channel,
                 value=float(reading.value) if reading.value is not None else 0.0,
             )
         except Exception as exc2:
             logger.critical(
-                "INTERLOCK escalation _fault FAILED for '%s': %s — "
-                "instrument state UNKNOWN, immediate operator intervention!",
-                condition.name,
-                exc2,
-                exc_info=True,
+                "Interlock fault escalation failed: exception=%s; instrument state is unknown",
+                type(exc2).__name__,
             )
 
 
@@ -1937,25 +2372,20 @@ async def _interlock_dead_channel_handler(
         )
     except Exception as exc:
         logger.critical(
-            "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — escalating to guaranteed fault.",
-            condition.name,
-            reading.channel,
-            exc,
-            exc_info=True,
+            "Interlock dead-channel handler failed: exception=%s; escalating to fault",
+            type(exc).__name__,
         )
         try:
             await context.safety_manager.latch_fault(
-                reason=f"Interlock dead_channel handler failed: {condition.name}: {exc}",
+                reason=f"interlock_dead_channel_handler_failed:{type(exc).__name__}",
                 source="interlock",
                 channel=reading.channel,
             )
             return True
         except Exception as exc2:
             logger.critical(
-                "INTERLOCK dead-channel escalation _fault FAILED for '%s': %s",
-                condition.name,
-                exc2,
-                exc_info=True,
+                "Interlock dead-channel escalation failed: exception=%s",
+                type(exc2).__name__,
             )
             return False
 
@@ -1978,9 +2408,8 @@ async def _interlock_dead_channel_handler(
             )
         except Exception as exc:
             logger.error(
-                "Dead-channel audible dispatch failed for '%s': %s",
-                reading.channel,
-                exc,
+                "Dead-channel notification dispatch failed: exception=%s",
+                type(exc).__name__,
             )
     return escalated
 
@@ -2009,10 +2438,9 @@ async def _multiline_burst_auto_stop(
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "MultiLine '%s' auto-stop failed: %s",
-                driver_name,
-                exc,
-                exc_info=True,
+                "MultiLine auto-stop failed: driver=%s exception=%s",
+                _bounded_action_label(driver_name),
+                type(exc).__name__,
             )
     finally:
         auto_stop_tasks.pop(driver_name, None)
@@ -2051,6 +2479,11 @@ _EXPERIMENT_READ_ACTIONS = frozenset(
 )
 _MAX_PENDING_EXPERIMENT_READS = 4
 _MAX_PENDING_OPERATOR_LOG_ENTRIES = 4
+_MAX_PENDING_ALARM_ACK_ENTRIES = 4
+_OPERATOR_LOG_RECONCILE_BACKOFF_BASE_S = 0.05
+_OPERATOR_LOG_RECONCILE_BACKOFF_MAX_S = 2.0
+_ALARM_ACK_RECONCILE_BACKOFF_BASE_S = 0.05
+_ALARM_ACK_RECONCILE_BACKOFF_MAX_S = 2.0
 _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS = 4096
 _MUTATION_PROTOCOL_MAJOR = MUTATION_PROTOCOL_MAJOR
 _MUTATION_CAPABILITY = ENGINE_MUTATION_CAPABILITY
@@ -2083,6 +2516,13 @@ class EngineCommandContext:
     alarm_v2_state_tracker: Any
     multiline_burst_auto_stop_meta: dict[str, dict[str, Any]]
     multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]]
+    shutdown_event: asyncio.Event | None = None
+    engine_instance_id: str = ""
+    shutdown_capability: str = ""
+    engine_ready_nonce: str = ""
+    engine_ready_channel_fd: int | None = None
+    engine_ready_pid: int = 0
+    engine_ready_advertised: bool = False
     escalation_service: Any = None
     cooldown_service: Any = None
     zmq_publisher: ZMQPublisher | None = None
@@ -2095,9 +2535,125 @@ class EngineCommandContext:
     experiment_commands_accepting: bool = True
     mutation_capability_token: str | None = None
     operator_log_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    operator_log_reconciliation_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
     operator_log_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
     alarm_ack_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    alarm_ack_reconciliation_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
     alarm_ack_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+    alarm_ack_activation_owners: dict[tuple[str, str], asyncio.Future[None]] = field(default_factory=dict)
+    shutdown_request_id: str | None = None
+    shutdown_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    shutdown_receipt: dict[str, Any] | None = None
+
+
+def _engine_ready_receipt(context: EngineCommandContext) -> dict[str, Any] | None:
+    nonce = context.engine_ready_nonce
+    instance_id = context.engine_instance_id
+    pid = context.engine_ready_pid
+    if (
+        not context.engine_ready_advertised
+        or type(nonce) is not str
+        or len(nonce) != 64
+        or any(char not in "0123456789abcdef" for char in nonce)
+        or type(instance_id) is not str
+        or len(instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in instance_id)
+        or type(pid) is not int
+        or pid <= 0
+    ):
+        return None
+    return {
+        "schema": _ENGINE_READY_SCHEMA,
+        "nonce": nonce,
+        "engine_instance_id": instance_id,
+        "mode": "live",
+        "pid": pid,
+        "pub_addr": DEFAULT_PUB_ADDR,
+        "cmd_addr": DEFAULT_CMD_ADDR,
+        "safe_cmd_addr": DEFAULT_SAFE_CMD_ADDR,
+    }
+
+
+def _engine_ready_response(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    """Answer only one exact launcher-owned startup challenge."""
+
+    if type(cmd) is not dict or cmd.get("cmd") != "engine_ready":
+        return {"ok": False, "error_code": "engine_ready_invalid"}
+    receipt = _engine_ready_receipt(context)
+    if receipt is None:
+        return {"ok": False, "error_code": "engine_ready_unavailable"}
+    expected_keys = {"cmd", "nonce", "engine_instance_id", "pid", "pub_addr", "cmd_addr", "safe_cmd_addr"}
+    if set(cmd) != expected_keys:
+        return {"ok": False, "error_code": "engine_ready_invalid"}
+    expected_values = {
+        "nonce": receipt["nonce"],
+        "engine_instance_id": receipt["engine_instance_id"],
+        "pid": receipt["pid"],
+        "pub_addr": receipt["pub_addr"],
+        "cmd_addr": receipt["cmd_addr"],
+        "safe_cmd_addr": receipt["safe_cmd_addr"],
+    }
+    for key, expected in expected_values.items():
+        value = cmd.get(key)
+        if type(value) is not type(expected) or value != expected:
+            return {"ok": False, "error_code": "engine_ready_mismatch"}
+    return {"ok": True, **receipt}
+
+
+def _safe_engine_command_is_admitted(
+    cmd: dict[str, Any],
+    *,
+    context: EngineCommandContext,
+) -> bool:
+    """Admit only one exact readiness proof or one exact safe direction."""
+
+    if type(cmd) is not dict:
+        return False
+    if cmd.get("cmd") == "engine_ready":
+        return _engine_ready_response(cmd, context).get("ok") is True
+    return is_exact_safe_direction_envelope(cmd)
+
+
+def _emit_engine_ready_receipt(context: EngineCommandContext) -> None:
+    """Emit one machine-only receipt and permanently close its private pipe."""
+
+    if context.engine_ready_advertised:
+        raise RuntimeError("engine readiness was already advertised")
+    descriptor = context.engine_ready_channel_fd
+    if type(descriptor) is not int or descriptor <= 2:
+        raise RuntimeError("engine readiness channel is unavailable")
+    try:
+        # Build with a temporary flag so validation and serialization use the
+        # same exact receipt that the REP challenge will expose after
+        # publication.
+        context.engine_ready_advertised = True
+        receipt = _engine_ready_receipt(context)
+        context.engine_ready_advertised = False
+        if receipt is None:
+            raise RuntimeError("engine readiness authority is unavailable")
+        payload = json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        wire = _ENGINE_READY_WIRE_PREFIX + payload + b"\n"
+        if len(wire) > 1024:
+            raise RuntimeError("engine readiness receipt exceeds wire bound")
+        offset = 0
+        while offset < len(wire):
+            written = os.write(descriptor, wire[offset:])
+            if written <= 0:
+                raise OSError("engine readiness pipe write made no progress")
+            offset += written
+    finally:
+        context.engine_ready_channel_fd = None
+        os.close(descriptor)
+    context.engine_ready_advertised = True
 
 
 def _is_mutating_command(action: object) -> bool:
@@ -2132,7 +2688,7 @@ def _mutation_protocol_failure(
         "ok": False,
         "error_code": "mutation_protocol_incompatible",
         "error": "mutating command refused; perform mutation_capabilities discovery and retry explicitly",
-        "delivery_state": "not_dispatched",
+        "delivery_state": "dispatched",
         "commit_state": "not_committed",
         "retry_safe": True,
         "compatibility_receipt": {
@@ -2144,73 +2700,554 @@ def _mutation_protocol_failure(
     }
 
 
-def _operator_log_fingerprint(cmd: dict[str, Any]) -> str:
+def _operator_log_command_admission(cmd: dict[str, Any]) -> tuple[Any, str]:
+    """Validate one untrusted command and fingerprint the persisted tuple."""
+
+    keys = set(cmd)
+    if not _OPERATOR_LOG_COMMAND_REQUIRED_KEYS.issubset(keys) or not keys.issubset(_OPERATOR_LOG_COMMAND_ALLOWED_KEYS):
+        raise RuntimeError("operator-log command schema is invalid")
+    if cmd.get("cmd") != "log_entry":
+        raise RuntimeError("operator-log command action is invalid")
+    if "tags" in cmd and (type(cmd["tags"]) is not list or any(type(tag) is not str for tag in cmd["tags"])):
+        raise RuntimeError("operator-log tags must be an exact string list")
+    if "experiment_id" in cmd:
+        if "experiment_unbound" in cmd:
+            raise RuntimeError("operator-log experiment binding conflicts")
+        experiment_id = cmd["experiment_id"]
+    else:
+        if cmd.get("experiment_unbound") is not True:
+            raise RuntimeError("operator-log experiment binding is ambiguous")
+        experiment_id = None
+    admission = SQLiteWriter.validate_operator_log_publication_admission(
+        request_id=cmd["request_id"],
+        message=cmd["message"],
+        author=cmd["author"],
+        source=cmd["source"],
+        experiment_id=experiment_id,
+        tags=cmd.get("tags"),
+    )
+    if admission.source not in _OPERATOR_LOG_UNTRUSTED_SOURCES:
+        raise RuntimeError("operator-log source is not an untrusted ingress role")
+    if admission.author.casefold() in _OPERATOR_LOG_RESERVED_ACTORS:
+        raise RuntimeError("operator-log author impersonates a reserved actor")
+    if any(tag.casefold() in _OPERATOR_LOG_RESERVED_TAGS for tag in admission.tags):
+        raise RuntimeError("operator-log tags impersonate an internal event")
     semantic = {
-        key: value
-        for key, value in cmd.items()
-        if key not in {"request_id", "protocol_major", "mutation_capability", "capability_token"}
+        "schema": "operator_log_request_v1",
+        "experiment_id": admission.experiment_id,
+        "author": admission.author,
+        "source": admission.source,
+        "message": admission.message,
+        "tags": list(admission.tags),
     }
-    canonical = json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    canonical = json.dumps(
+        semantic,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return admission, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _operator_log_entry_matches_admission(entry: object, admission: Any) -> bool:
+    return (
+        type(entry) is OperatorLogEntry
+        and entry.experiment_id == admission.experiment_id
+        and entry.author == admission.author
+        and entry.source == admission.source
+        and entry.message == admission.message
+        and entry.tags == admission.tags
+    )
+
+
+def _operator_log_success(entry: OperatorLogEntry, request_id: str) -> dict[str, Any]:
+    payload = entry.to_payload()
+    receipt = {
+        "schema": _OPERATOR_LOG_COMMIT_SCHEMA,
+        "request_id": request_id,
+        "entry_id": entry.id,
+        "experiment_id": entry.experiment_id,
+        "committed": True,
+    }
+    event_copy, receipt_copy = SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event={"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": payload},
+        receipt=receipt,
+    )
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "entry": event_copy["entry"],
+        "commit_receipt": receipt_copy,
+    }
+
+
+def _operator_log_committed_pending(entry: OperatorLogEntry, request_id: str) -> dict[str, Any]:
+    success = _operator_log_success(entry, request_id)
+    return {
+        "ok": False,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "pending",
+        "error_code": "committed_reconciliation_failed",
+        "error": "operator log committed, but required publication remains pending",
+        "entry": success["entry"],
+        "commit_receipt": success["commit_receipt"],
+    }
+
+
+def _strict_operator_log_success(result: object, request_id: str) -> dict[str, Any] | None:
+    """Detach only one exact, published, fully bound success receipt."""
+
+    if type(result) is not dict or set(result) != _OPERATOR_LOG_SUCCESS_KEYS:
+        return None
+    if (
+        result.get("ok") is not True
+        or result.get("committed") is not True
+        or result.get("retry_safe") is not False
+        or result.get("publication_state") != "published"
+    ):
+        return None
+    entry = result.get("entry")
+    receipt = result.get("commit_receipt")
+    try:
+        event_copy, receipt_copy = SQLiteWriter.validate_operator_log_publication(
+            request_id=request_id,
+            event={"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": entry},
+            receipt=receipt,
+        )
+    except RuntimeError:
+        return None
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "entry": event_copy["entry"],
+        "commit_receipt": receipt_copy,
+    }
+
+
+async def _await_retained_operator_log(operation: Awaitable[Any], *, name: str) -> Any:
+    """Retain one persistence/publication owner through caller cancellation."""
+
+    task = asyncio.create_task(operation, name=name)
+    caller_cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            caller_cancelled = caller_cancelled or exc
+    try:
+        result = task.result()
+    except BaseException as operation_error:
+        if caller_cancelled is not None:
+            raise caller_cancelled from operation_error
+        raise
+    if caller_cancelled is not None:
+        raise caller_cancelled
+    return result
+
+
+async def _settle_operator_log_publication(
+    *,
+    context: EngineCommandContext,
+    entry: OperatorLogEntry,
+    request_id: str,
+    request_fingerprint: str,
+    publication: object | None = None,
+) -> None:
+    payload = entry.to_payload()
+    receipt = {
+        "schema": _OPERATOR_LOG_COMMIT_SCHEMA,
+        "request_id": request_id,
+        "entry_id": entry.id,
+        "experiment_id": entry.experiment_id,
+        "committed": True,
+    }
+    event = {"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": payload}
+    if publication is None:
+        publication = await _await_retained_operator_log(
+            context.writer.prepare_operator_log_publication_outbox(
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+                event=event,
+                receipt=receipt,
+            ),
+            name=f"operator_log_intent_reconcile_{request_id[:8]}",
+        )
+    state = _validated_operator_log_publication_record(
+        publication,
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    if state == "published":
+        return
+    if state != "intent":
+        raise RuntimeError("operator-log publication intent state is invalid")
+    await _await_retained_operator_log(
+        _publish_operator_log_publication(
+            context.writer,
+            context.broker,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+            event=event,
+            receipt=receipt,
+        ),
+        name=f"operator_log_required_publish_{request_id[:8]}",
+    )
+
+
+def _operator_log_publication_identity(
+    entry: OperatorLogEntry,
+    request_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    success = _operator_log_success(entry, request_id)
+    event = {"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": success["entry"]}
+    receipt = success["commit_receipt"]
+    return SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event=event,
+        receipt=receipt,
+    )
+
+
+def _validated_operator_log_publication_record(
+    publication: object,
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    event: dict[str, Any],
+    receipt: dict[str, Any],
+) -> str:
+    if type(publication) is not OperatorLogPublicationOutboxRecord:
+        raise RuntimeError("operator-log reconciliation record type is invalid")
+    if (
+        publication.request_id != request_id
+        or publication.request_fingerprint != request_fingerprint
+        or publication.event != event
+        or publication.receipt != receipt
+        or publication.state not in {"intent", "published"}
+    ):
+        raise RuntimeError("operator-log reconciliation authority changed")
+    event_copy, receipt_copy = SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event=publication.event,
+        receipt=publication.receipt,
+    )
+    if event_copy != event or receipt_copy != receipt:
+        raise RuntimeError("operator-log reconciliation payload changed")
+    return publication.state
+
+
+async def _run_operator_log_publication_reconciliation(
+    context: EngineCommandContext,
+    entry: OperatorLogEntry,
+    request_id: str,
+    request_fingerprint: str,
+) -> dict[str, Any]:
+    event, receipt = _operator_log_publication_identity(entry, request_id)
+    delay = _OPERATOR_LOG_RECONCILE_BACKOFF_BASE_S
+    while context.experiment_commands_accepting:
+        await asyncio.sleep(delay)
+        if not context.experiment_commands_accepting:
+            break
+        try:
+            publication = await _await_retained_operator_log(
+                context.writer.prepare_operator_log_publication_outbox(
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    event=event,
+                    receipt=receipt,
+                ),
+                name=f"operator_log_background_prepare_{request_id[:8]}",
+            )
+            state = _validated_operator_log_publication_record(
+                publication,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+                event=event,
+                receipt=receipt,
+            )
+            if state == "intent":
+                await _await_retained_operator_log(
+                    _publish_operator_log_publication(
+                        context.writer,
+                        context.broker,
+                        request_id=request_id,
+                        request_fingerprint=request_fingerprint,
+                        event=event,
+                        receipt=receipt,
+                    ),
+                    name=f"operator_log_background_publish_{request_id[:8]}",
+                )
+                publication = await _await_retained_operator_log(
+                    context.writer.prepare_operator_log_publication_outbox(
+                        request_id=request_id,
+                        request_fingerprint=request_fingerprint,
+                        event=event,
+                        receipt=receipt,
+                    ),
+                    name=f"operator_log_background_verify_{request_id[:8]}",
+                )
+                state = _validated_operator_log_publication_record(
+                    publication,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    event=event,
+                    receipt=receipt,
+                )
+            if state != "published":
+                raise RuntimeError("operator-log background publication is incomplete")
+            result = _operator_log_success(entry, request_id)
+            if _strict_operator_log_success(result, request_id) is None:
+                raise RuntimeError("operator-log background success receipt is invalid")
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Operator-log background publication retry failed: request=%s exception=%s",
+                request_id,
+                type(exc).__name__,
+            )
+            delay = min(delay * 2.0, _OPERATOR_LOG_RECONCILE_BACKOFF_MAX_S)
+    return _operator_log_committed_pending(entry, request_id)
+
+
+def _remember_operator_log_receipt(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    result: object,
+) -> None:
+    validated = _strict_operator_log_success(result, request_id)
+    if validated is None:
+        return
+    context.operator_log_receipts[request_id] = (fingerprint, copy.deepcopy(validated))
+    while len(context.operator_log_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
+        context.operator_log_receipts.pop(next(iter(context.operator_log_receipts)))
+
+
+def _owned_operator_log_reconciliation_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.operator_log_reconciliation_tasks.get(request_id)
+    owns_mapping = current is not None and current[0] == fingerprint and current[1] is task
+    if owns_mapping:
+        del context.operator_log_reconciliation_tasks[request_id]
+    if task.cancelled():
+        logger.critical("Operator-log reconciliation owner was cancelled: %s", request_id)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Operator-log reconciliation owner failed: request=%s exception=%s",
+            request_id,
+            type(exception).__name__,
+        )
+        return
+    if owns_mapping:
+        _remember_operator_log_receipt(context, request_id, fingerprint, task.result())
+
+
+def _ensure_operator_log_publication_reconciliation(
+    context: EngineCommandContext,
+    entry: OperatorLogEntry,
+    request_id: str,
+    request_fingerprint: str,
+) -> asyncio.Task[dict[str, Any]] | None:
+    _operator_log_publication_identity(entry, request_id)
+    current = context.operator_log_reconciliation_tasks.get(request_id)
+    if current is not None:
+        if current[0] != request_fingerprint:
+            raise RuntimeError("operator-log reconciliation identity conflict")
+        return current[1]
+    if not context.experiment_commands_accepting:
+        return None
+    active_ids = set(context.operator_log_tasks) | set(context.operator_log_reconciliation_tasks)
+    if request_id not in active_ids and len(active_ids) >= _MAX_PENDING_OPERATOR_LOG_ENTRIES:
+        raise RuntimeError("operator-log reconciliation lane is full")
+    task = asyncio.create_task(
+        _run_operator_log_publication_reconciliation(
+            context,
+            entry,
+            request_id,
+            request_fingerprint,
+        ),
+        name=f"operator_log_reconcile_{request_id[:8]}",
+    )
+    context.operator_log_reconciliation_tasks[request_id] = (request_fingerprint, task)
+    task.add_done_callback(
+        functools.partial(
+            _owned_operator_log_reconciliation_done,
+            context,
+            request_id,
+            request_fingerprint,
+        )
+    )
+    return task
 
 
 async def _execute_owned_operator_log_entry(
-    cmd: dict[str, Any],
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    admission: Any,
     context: EngineCommandContext,
 ) -> dict[str, Any]:
-    request_id = cmd["request_id"]
     try:
-        experiment_id = await asyncio.to_thread(
-            context.experiment_manager.resolve_operator_log_scope,
-            expected_experiment_id=cmd.get("experiment_id"),
-            unbound=cmd.get("experiment_unbound", False),
+        find_request = getattr(context.writer, "find_operator_log_request", None)
+        if not callable(find_request):
+            raise OperatorLogIdempotencyUnavailableError("durable operator-log lookup is unavailable")
+        retained = await _await_retained_operator_log(
+            find_request(
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            ),
+            name=f"operator_log_lookup_{request_id[:8]}",
         )
-    except ExperimentIdentityMismatchError as exc:
-        return {
-            "ok": False,
-            "error_code": "stale_experiment_command",
-            "error": str(exc),
-            "retry_safe": False,
-            "request_id": request_id,
-        }
-    except (TypeError, ValueError) as exc:
-        return {
-            "ok": False,
-            "error_code": "operator_log_scope_invalid",
-            "error": str(exc),
-            "retry_safe": True,
-            "request_id": request_id,
-        }
+        if retained is not None:
+            if not _operator_log_entry_matches_admission(retained.entry, admission):
+                raise OperatorLogIdempotencyConflictError("retained operator-log payload does not match request")
+            try:
+                await _settle_operator_log_publication(
+                    context=context,
+                    entry=retained.entry,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - committed intent stays pending
+                logger.error(
+                    "Committed operator log reconciliation failed: request=%s exception=%s",
+                    request_id,
+                    type(exc).__name__,
+                )
+                _ensure_operator_log_publication_reconciliation(
+                    context,
+                    retained.entry,
+                    request_id,
+                    request_fingerprint,
+                )
+                return _operator_log_committed_pending(retained.entry, request_id)
+            return _operator_log_success(retained.entry, request_id)
 
-    message = str(cmd.get("message", "")).strip()
-    if not message:
-        return {
-            "ok": False,
-            "error_code": "operator_log_message_invalid",
-            "error": "Operator log message must not be empty.",
-            "retry_safe": True,
-            "request_id": request_id,
-        }
-    try:
-        commit = await context.writer.append_operator_log_idempotent(
-            message=message,
-            request_id=request_id,
-            request_fingerprint=_operator_log_fingerprint(cmd),
-            author=str(cmd.get("author", "")).strip(),
-            source=str(cmd.get("source", "")).strip() or "command",
-            experiment_id=experiment_id,
-            tags=cmd.get("tags"),
-        )
+        atomic_append = getattr(context.writer, "append_operator_log_with_publication_intent", None)
+        if not callable(atomic_append):
+            raise OperatorLogIdempotencyUnavailableError(
+                "atomic operator-log append and publication intent API is unavailable"
+            )
+
+        async def append_and_settle() -> dict[str, Any]:
+            atomic_result = await _await_retained_operator_log(
+                atomic_append(
+                    message=admission.message,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    author=admission.author,
+                    source=admission.source,
+                    experiment_id=admission.experiment_id,
+                    tags=admission.tags,
+                ),
+                name=f"operator_log_atomic_append_{request_id[:8]}",
+            )
+            if type(atomic_result) is not tuple or len(atomic_result) != 2:
+                raise OperatorLogIdempotencyUnavailableError("atomic operator-log result is malformed")
+            commit, publication = atomic_result
+            entry = getattr(commit, "entry", None)
+            if not _operator_log_entry_matches_admission(entry, admission):
+                raise OperatorLogIdempotencyUnavailableError("atomic operator-log result lost payload binding")
+            try:
+                await _settle_operator_log_publication(
+                    context=context,
+                    entry=entry,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    publication=publication,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - atomic commit is already durable
+                logger.error(
+                    "Committed operator log publication failed: request=%s exception=%s",
+                    request_id,
+                    type(exc).__name__,
+                )
+                _ensure_operator_log_publication_reconciliation(
+                    context,
+                    entry,
+                    request_id,
+                    request_fingerprint,
+                )
+                return _operator_log_committed_pending(entry, request_id)
+            return _operator_log_success(entry, request_id)
+
+        expected_experiment_id = admission.experiment_id
+        if expected_experiment_id is None:
+            return await append_and_settle()
+        try:
+            reservation = context.experiment_manager.experiment_cas(expected_experiment_id)
+            reservation.__enter__()
+        except RuntimeError:
+            if context.experiment_manager.active_experiment_id != expected_experiment_id:
+                return {
+                    "ok": False,
+                    "committed": False,
+                    "error_code": "stale_experiment_command",
+                    "error": "Experiment identity changed before the operator log could commit.",
+                    "retry_safe": False,
+                    "request_id": request_id,
+                }
+            return {
+                "ok": False,
+                "committed": False,
+                "error_code": "operator_log_busy",
+                "error": "another durable experiment mutation is still authoritative",
+                "retry_safe": True,
+                "request_id": request_id,
+            }
+        try:
+            context.experiment_manager.assert_experiment_cas(expected_experiment_id)
+            settled = await append_and_settle()
+        except BaseException:
+            reservation.__exit__(*sys.exc_info())
+            raise
+        reservation.__exit__(None, None, None)
+        return settled
     except OperatorLogIdempotencyConflictError:
         return {
             "ok": False,
+            "committed": False,
             "error_code": "idempotency_key_conflict",
             "error": "request_id was already committed with different content",
             "retry_safe": False,
             "request_id": request_id,
         }
-    except OperatorLogIdempotencyUnavailableError:
-        logger.error("Operator log idempotency registry unavailable for request %s", request_id, exc_info=True)
+    except OperatorLogCommitOutcomeUnknownError:
+        return {
+            "ok": False,
+            "error_code": "operator_log_commit_outcome_unknown",
+            "error": "operator log commit outcome is unknown; reconcile this exact request key",
+            "commit_state": "unknown",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except OperatorLogIdempotencyUnavailableError as exc:
+        logger.error(
+            "Operator-log idempotency registry unavailable: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
         return {
             "ok": False,
             "error_code": "operator_log_idempotency_unavailable",
@@ -2218,56 +3255,20 @@ async def _execute_owned_operator_log_entry(
             "retry_safe": False,
             "request_id": request_id,
         }
-    except Exception as exc:  # noqa: BLE001 - pre-commit persistence failure
-        logger.error("Operator log persistence failed for request %s: %s", request_id, exc, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - atomic commit outcome is not proven
+        logger.error(
+            "Operator log persistence failed: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
         return {
             "ok": False,
             "error_code": "operator_log_persistence_failed",
-            "error": "operator log persistence failed",
-            "retry_safe": True,
+            "error": "operator log persistence outcome is unknown; reconcile this exact request key",
+            "commit_state": "unknown",
+            "retry_safe": False,
             "request_id": request_id,
         }
-
-    entry = commit.entry
-    payload = entry.to_payload()
-    receipt = {
-        "schema": "operator_log_commit_v1",
-        "request_id": request_id,
-        "entry_id": entry.id,
-        "experiment_id": experiment_id,
-        "committed": True,
-    }
-    try:
-        publication = await context.writer.prepare_operator_log_publication_outbox(
-            request_id=request_id,
-            request_fingerprint=_operator_log_fingerprint(cmd),
-            event={"schema": "operator_log_commit_v1", "entry": payload},
-            receipt=receipt,
-        )
-        if publication.state != "published":
-            await _publish_operator_log_entry(context.broker, entry)
-            await context.writer.publish_operator_log_publication_outbox(
-                request_id=request_id,
-                request_fingerprint=_operator_log_fingerprint(cmd),
-            )
-    except Exception as exc:  # noqa: BLE001 - committed publication reconciliation
-        logger.error("Committed operator log publication failed: %s", exc, exc_info=True)
-        return {
-            "ok": False,
-            "committed": True,
-            "error_code": "committed_reconciliation_failed",
-            "error": "operator log committed, but publication reconciliation failed",
-            "retry_safe": False,
-            "entry": payload,
-            "commit_receipt": receipt,
-        }
-    return {
-        "ok": True,
-        "committed": True,
-        "retry_safe": False,
-        "entry": payload,
-        "commit_receipt": receipt,
-    }
 
 
 def _owned_operator_log_done(
@@ -2277,7 +3278,8 @@ def _owned_operator_log_done(
     task: asyncio.Task[dict[str, Any]],
 ) -> None:
     current = context.operator_log_tasks.get(request_id)
-    if current is not None and current[1] is task:
+    owns_mapping = current is not None and current[0] == fingerprint and current[1] is task
+    if owns_mapping:
         del context.operator_log_tasks[request_id]
     if task.cancelled():
         logger.critical("Operator log owner was cancelled: %s", request_id)
@@ -2285,18 +3287,14 @@ def _owned_operator_log_done(
     exception = task.exception()
     if exception is not None:
         logger.error(
-            "Operator log owner failed after submission (%s): %s",
+            "Operator log owner failed after submission: request=%s exception=%s",
             request_id,
-            exception,
-            exc_info=(type(exception), exception, exception.__traceback__),
+            type(exception).__name__,
         )
         return
-    result = task.result()
-    if result.get("committed") is not True:
+    if not owns_mapping:
         return
-    context.operator_log_receipts[request_id] = (fingerprint, dict(result))
-    while len(context.operator_log_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
-        context.operator_log_receipts.pop(next(iter(context.operator_log_receipts)))
+    _remember_operator_log_receipt(context, request_id, fingerprint, task.result())
 
 
 async def _submit_operator_log_entry(
@@ -2306,6 +3304,7 @@ async def _submit_operator_log_entry(
     if not context.experiment_commands_accepting:
         return {
             "ok": False,
+            "committed": False,
             "error_code": "engine_shutting_down",
             "error": "operator log submissions are frozen for shutdown",
             "retry_safe": True,
@@ -2318,45 +3317,617 @@ async def _submit_operator_log_entry(
     ):
         return {
             "ok": False,
+            "committed": False,
             "error_code": "operator_log_request_id_invalid",
             "error": "request_id must be exactly 32 lowercase hexadecimal characters",
             "retry_safe": True,
         }
-    fingerprint = _operator_log_fingerprint(cmd)
+    try:
+        admission, fingerprint = _operator_log_command_admission(cmd)
+    except RuntimeError:
+        return {
+            "ok": False,
+            "committed": False,
+            "error_code": "operator_log_admission_invalid",
+            "error": "Operator-log command or publication fields are invalid.",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
     completed = context.operator_log_receipts.get(request_id)
     if completed is not None:
         if completed[0] != fingerprint:
             return {
                 "ok": False,
+                "committed": False,
                 "error_code": "idempotency_key_conflict",
                 "error": "request_id was already committed with different content",
                 "retry_safe": False,
             }
-        return dict(completed[1])
+        return copy.deepcopy(completed[1])
     pending = context.operator_log_tasks.get(request_id)
     if pending is not None:
         if pending[0] != fingerprint:
             return {
                 "ok": False,
+                "committed": False,
                 "error_code": "idempotency_key_conflict",
                 "error": "request_id is already in flight with different content",
                 "retry_safe": False,
             }
-        return await asyncio.shield(pending[1])
-    if len(context.operator_log_tasks) >= _MAX_PENDING_OPERATOR_LOG_ENTRIES:
+        return copy.deepcopy(await asyncio.shield(pending[1]))
+    reconciliation = context.operator_log_reconciliation_tasks.get(request_id)
+    if reconciliation is not None:
+        if reconciliation[0] != fingerprint:
+            return {
+                "ok": False,
+                "committed": False,
+                "error_code": "idempotency_key_conflict",
+                "error": "request_id is reconciling different committed content",
+                "retry_safe": False,
+            }
+        return copy.deepcopy(await asyncio.shield(reconciliation[1]))
+    active_request_ids = set(context.operator_log_tasks) | set(context.operator_log_reconciliation_tasks)
+    if len(active_request_ids) >= _MAX_PENDING_OPERATOR_LOG_ENTRIES:
         return {
             "ok": False,
+            "committed": False,
             "error_code": "operator_log_busy",
             "error": "the bounded operator log commit lane is full",
             "retry_safe": True,
         }
     task = asyncio.create_task(
-        _execute_owned_operator_log_entry(cmd, context),
+        _execute_owned_operator_log_entry(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+            admission=admission,
+            context=context,
+        ),
         name=f"operator_log_{request_id[:8]}",
     )
     context.operator_log_tasks[request_id] = (fingerprint, task)
     task.add_done_callback(functools.partial(_owned_operator_log_done, context, request_id, fingerprint))
-    return await asyncio.shield(task)
+    return copy.deepcopy(await asyncio.shield(task))
+
+
+def _validated_alarm_ack_outbox(
+    outbox: AlarmAckOutboxRecord,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate the exact durable/public ACK identity before any side effect."""
+
+    if type(outbox) is not AlarmAckOutboxRecord:
+        raise RuntimeError("alarm ACK outbox record type is invalid")
+    event = outbox.event
+    receipt = outbox.receipt
+    if type(event) is not dict or set(event) != _ALARM_ACK_EVENT_KEYS:
+        raise RuntimeError("alarm ACK durable event schema is invalid")
+    if type(receipt) is not dict or set(receipt) != _ALARM_ACK_COMMIT_KEYS:
+        raise RuntimeError("alarm ACK durable receipt schema is invalid")
+    acknowledged_at = event.get("acknowledged_at")
+    identity = {
+        "request_id": outbox.request_id,
+        "request_fingerprint": outbox.request_fingerprint,
+        "alarm_name": outbox.alarm_name,
+        "activation_id": outbox.activation_id,
+        "engine_instance_id": outbox.engine_instance_id,
+        "source_activation_id": outbox.source_activation_id,
+    }
+    if (
+        event.get("schema") != _ALARM_ACK_EVENT_SCHEMA
+        or receipt.get("schema") != _ALARM_ACK_COMMIT_SCHEMA
+        or any(type(value) is not str or not value for value in identity.values())
+        or any(event.get(key) != value for key, value in identity.items())
+        or any(receipt.get(key) != value for key, value in identity.items())
+        or type(acknowledged_at) is not float
+        or not math.isfinite(acknowledged_at)
+        or acknowledged_at <= 0.0
+        or receipt.get("acknowledged_at") != acknowledged_at
+        or type(event.get("operator")) is not str
+        or not event["operator"]
+        or type(event.get("reason")) is not str
+        or not event["reason"]
+        or receipt.get("committed") is not True
+    ):
+        raise RuntimeError("alarm ACK durable identity is invalid")
+    return dict(event), dict(receipt)
+
+
+def _alarm_ack_published_result(outbox: AlarmAckOutboxRecord) -> dict[str, Any]:
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "published":
+        raise RuntimeError("alarm ACK publication is not settled")
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "event_emitted": True,
+        "alarm_name": event["alarm_name"],
+        "activation_id": event["activation_id"],
+        "engine_instance_id": event["engine_instance_id"],
+        "source_activation_id": event["source_activation_id"],
+        "request_id": event["request_id"],
+        "commit_receipt": receipt,
+    }
+
+
+def _alarm_ack_publication_pending(outbox: AlarmAckOutboxRecord) -> dict[str, Any]:
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK pending result is not durably committed")
+    return {
+        "ok": False,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "pending",
+        "event_emitted": False,
+        "error_code": "alarm_ack_publication_pending",
+        "error": "alarm acknowledgement is committed; publication settlement is pending",
+        "alarm_name": event["alarm_name"],
+        "activation_id": event["activation_id"],
+        "engine_instance_id": event["engine_instance_id"],
+        "source_activation_id": event["source_activation_id"],
+        "request_id": event["request_id"],
+        "commit_receipt": receipt,
+    }
+
+
+def _alarm_ack_aborted_result(outbox: AlarmAckOutboxRecord) -> dict[str, Any]:
+    """Return a terminal non-commit result without exposing intent receipts."""
+
+    event, _receipt = _validated_alarm_ack_outbox(outbox)
+    terminal_code = outbox.terminal_code
+    terminal_engine_instance_id = outbox.terminal_engine_instance_id
+    if (
+        outbox.state != "aborted"
+        or type(terminal_code) is not str
+        or terminal_code not in _ALARM_ACK_ABORT_TERMINAL_CODES
+        or type(terminal_engine_instance_id) is not str
+        or len(terminal_engine_instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in terminal_engine_instance_id)
+        or (
+            terminal_code == "activation_changed_before_ack_commit"
+            and terminal_engine_instance_id != outbox.engine_instance_id
+        )
+        or (
+            terminal_code == "engine_restart_before_ack_commit"
+            and terminal_engine_instance_id == outbox.engine_instance_id
+        )
+    ):
+        raise RuntimeError("alarm ACK terminal disposition is invalid")
+    return {
+        "ok": False,
+        "committed": False,
+        "retry_safe": False,
+        "publication_state": "aborted",
+        "event_emitted": False,
+        "error_code": "alarm_ack_aborted",
+        "error": "alarm acknowledgement was terminally aborted before durable commit",
+        "alarm_name": event["alarm_name"],
+        "activation_id": event["activation_id"],
+        "engine_instance_id": event["engine_instance_id"],
+        "source_activation_id": event["source_activation_id"],
+        "request_id": event["request_id"],
+        "request_fingerprint": event["request_fingerprint"],
+        "terminal_code": terminal_code,
+        "terminal_engine_instance_id": terminal_engine_instance_id,
+    }
+
+
+def _validate_alarm_ack_abort_disposition(
+    disposition: AlarmAckOutboxAbortDisposition,
+    *,
+    expected_request_id: str | None = None,
+    expected_fingerprint: str | None = None,
+    expected_activation_id: str | None = None,
+    expected_source_activation_id: str | None = None,
+    expected_prior_engine_instance_id: str | None = None,
+    expected_terminal_code: str,
+    expected_recovery_engine_instance_id: str,
+) -> None:
+    request_id = getattr(disposition, "request_id", None)
+    request_fingerprint = getattr(disposition, "request_fingerprint", None)
+    prior_engine_instance_id = getattr(disposition, "prior_engine_instance_id", None)
+    activation_id = getattr(disposition, "activation_id", None)
+    source_activation_id = getattr(disposition, "source_activation_id", None)
+    recovery_engine_instance_id = getattr(disposition, "recovery_engine_instance_id", None)
+    if (
+        type(disposition) is not AlarmAckOutboxAbortDisposition
+        or disposition.schema != "alarm_ack_abort_disposition_v1"
+        or disposition.state != "aborted"
+        or type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+        or type(request_fingerprint) is not str
+        or len(request_fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in request_fingerprint)
+        or type(prior_engine_instance_id) is not str
+        or len(prior_engine_instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in prior_engine_instance_id)
+        or type(activation_id) is not str
+        or not activation_id
+        or not activation_id.isprintable()
+        or not is_canonical_source_activation_id(source_activation_id)
+        or type(recovery_engine_instance_id) is not str
+        or len(recovery_engine_instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in recovery_engine_instance_id)
+        or disposition.terminal_code != expected_terminal_code
+        or disposition.recovery_engine_instance_id != expected_recovery_engine_instance_id
+        or (
+            expected_terminal_code == "engine_restart_before_ack_commit"
+            and disposition.recovery_engine_instance_id == disposition.prior_engine_instance_id
+        )
+        or (
+            expected_terminal_code == "activation_changed_before_ack_commit"
+            and disposition.recovery_engine_instance_id != disposition.prior_engine_instance_id
+        )
+        or type(disposition.disposed_at) is not float
+        or not math.isfinite(disposition.disposed_at)
+        or disposition.disposed_at <= 0.0
+        or (expected_request_id is not None and disposition.request_id != expected_request_id)
+        or (expected_fingerprint is not None and disposition.request_fingerprint != expected_fingerprint)
+        or (expected_activation_id is not None and disposition.activation_id != expected_activation_id)
+        or (
+            expected_source_activation_id is not None
+            and disposition.source_activation_id != expected_source_activation_id
+        )
+        or (
+            expected_prior_engine_instance_id is not None
+            and disposition.prior_engine_instance_id != expected_prior_engine_instance_id
+        )
+    ):
+        raise RuntimeError("alarm ACK abort disposition is invalid")
+
+
+async def _abort_prepared_alarm_ack(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> dict[str, Any]:
+    """Durably terminalize one known PREPARED loser and re-read authority."""
+
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "prepared":
+        raise RuntimeError("alarm ACK abort requires a prepared intent")
+    disposition = await context.writer.abort_alarm_ack_outbox(
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+        engine_instance_id=outbox.engine_instance_id,
+        activation_id=outbox.activation_id,
+        source_activation_id=outbox.source_activation_id,
+        event=event,
+        receipt=receipt,
+    )
+    _validate_alarm_ack_abort_disposition(
+        disposition,
+        expected_request_id=outbox.request_id,
+        expected_fingerprint=outbox.request_fingerprint,
+        expected_activation_id=outbox.activation_id,
+        expected_source_activation_id=outbox.source_activation_id,
+        expected_prior_engine_instance_id=outbox.engine_instance_id,
+        expected_terminal_code="activation_changed_before_ack_commit",
+        expected_recovery_engine_instance_id=outbox.engine_instance_id,
+    )
+    find_outbox = getattr(context.writer, "find_alarm_ack_outbox", None)
+    if not callable(find_outbox):
+        raise RuntimeError("alarm ACK durable lookup is unavailable")
+    aborted = await find_outbox(
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+    )
+    if (
+        type(aborted) is not AlarmAckOutboxRecord
+        or aborted.request_id != outbox.request_id
+        or aborted.request_fingerprint != outbox.request_fingerprint
+        or aborted.alarm_name != outbox.alarm_name
+        or aborted.activation_id != outbox.activation_id
+        or aborted.engine_instance_id != outbox.engine_instance_id
+        or aborted.source_activation_id != outbox.source_activation_id
+        or aborted.operator_name != outbox.operator_name
+        or aborted.reason != outbox.reason
+        or aborted.event != outbox.event
+        or aborted.receipt != outbox.receipt
+    ):
+        raise RuntimeError("alarm ACK aborted authority changed immutable identity")
+    return _alarm_ack_aborted_result(aborted)
+
+
+async def _publish_committed_alarm_ack(
+    writer: SQLiteWriter,
+    broker: DataBroker,
+    outbox: AlarmAckOutboxRecord,
+) -> AlarmAckOutboxRecord:
+    """Settle one exact ACK publication, then CAS its durable state."""
+
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state == "published":
+        return outbox
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK cannot publish before durable commit")
+    publication_receipt = await broker.publish_required(
+        Reading(
+            timestamp=datetime.fromtimestamp(event["acknowledged_at"], UTC),
+            instrument_id="alarm_v2",
+            channel="alarm_v2/acknowledged",
+            value=event["acknowledged_at"],
+            unit="",
+            # Transport is explicitly at-least-once. These stable identities
+            # let every consumer collapse a late send plus an exact retry.
+            metadata=event,
+        ),
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+    )
+    if not broker.validates_required_publication(
+        publication_receipt,
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+    ):
+        raise RuntimeError("alarm ACK required publisher receipt is invalid")
+    published = await writer.publish_alarm_ack_outbox(
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    _validated_alarm_ack_outbox(published)
+    if published.state != "published":
+        raise RuntimeError("alarm ACK publication settlement is incomplete")
+    return published
+
+
+async def _reconcile_committed_alarm_ack_outbox(
+    writer: SQLiteWriter,
+    broker: DataBroker,
+) -> None:
+    """Replay every committed ACK before exposing command ingress."""
+
+    for outbox in await writer.committed_alarm_ack_outbox():
+        await _publish_committed_alarm_ack(writer, broker, outbox)
+
+
+def _remember_alarm_ack_receipt(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    result: dict[str, Any],
+) -> None:
+    """Retain only one exact terminal publication receipt under a hard cap."""
+
+    if not (
+        result.get("ok") is True
+        and result.get("committed") is True
+        and result.get("publication_state") == "published"
+        and result.get("event_emitted") is True
+    ):
+        return
+    context.alarm_ack_receipts[request_id] = (fingerprint, dict(result))
+    while len(context.alarm_ack_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
+        context.alarm_ack_receipts.pop(next(iter(context.alarm_ack_receipts)))
+
+
+async def _run_alarm_ack_publication_reconciliation(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> dict[str, Any]:
+    """Retry one durable COMMITTED ACK independently of its REP/GUI waiter."""
+
+    _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK reconciliation requires a committed outbox")
+    delay = _ALARM_ACK_RECONCILE_BACKOFF_BASE_S
+    while context.experiment_commands_accepting:
+        await asyncio.sleep(delay)
+        if not context.experiment_commands_accepting:
+            break
+        try:
+            retained = await context.writer.find_alarm_ack_outbox(
+                request_id=outbox.request_id,
+                request_fingerprint=outbox.request_fingerprint,
+            )
+            if (
+                type(retained) is not AlarmAckOutboxRecord
+                or retained.request_id != outbox.request_id
+                or retained.request_fingerprint != outbox.request_fingerprint
+                or retained.alarm_name != outbox.alarm_name
+                or retained.activation_id != outbox.activation_id
+                or retained.engine_instance_id != outbox.engine_instance_id
+                or retained.source_activation_id != outbox.source_activation_id
+                or retained.operator_name != outbox.operator_name
+                or retained.reason != outbox.reason
+                or retained.event != outbox.event
+                or retained.receipt != outbox.receipt
+            ):
+                raise RuntimeError("alarm ACK reconciliation authority changed")
+            _validated_alarm_ack_outbox(retained)
+            if retained.state == "published":
+                return _alarm_ack_published_result(retained)
+            if retained.state != "committed":
+                raise RuntimeError("alarm ACK reconciliation state is invalid")
+            published = await _publish_committed_alarm_ack(
+                context.writer,
+                context.broker,
+                retained,
+            )
+            return _alarm_ack_published_result(published)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - durable intent remains authoritative
+            logger.warning(
+                "Alarm ACK background publication retry failed: request=%s exception=%s",
+                outbox.request_id,
+                type(exc).__name__,
+            )
+            delay = min(delay * 2.0, _ALARM_ACK_RECONCILE_BACKOFF_MAX_S)
+    return _alarm_ack_publication_pending(outbox)
+
+
+def _owned_alarm_ack_reconciliation_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.alarm_ack_reconciliation_tasks.get(request_id)
+    if current is not None and current[1] is task:
+        del context.alarm_ack_reconciliation_tasks[request_id]
+    if task.cancelled():
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Alarm ACK background reconciler failed: request=%s exception=%s",
+            request_id,
+            type(exception).__name__,
+        )
+        return
+    _remember_alarm_ack_receipt(context, request_id, fingerprint, task.result())
+
+
+def _ensure_alarm_ack_publication_reconciliation(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> asyncio.Task[dict[str, Any]] | None:
+    """Own one exact bounded same-process reconciler for a committed ACK."""
+
+    _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK reconciliation requires a committed outbox")
+    current = context.alarm_ack_reconciliation_tasks.get(outbox.request_id)
+    if current is not None:
+        if current[0] != outbox.request_fingerprint:
+            raise RuntimeError("alarm ACK reconciliation identity conflict")
+        return current[1]
+    if not context.experiment_commands_accepting:
+        return None
+    task = asyncio.create_task(
+        _run_alarm_ack_publication_reconciliation(context, outbox),
+        name=f"alarm_ack_reconcile_{outbox.request_id[:8]}",
+    )
+    context.alarm_ack_reconciliation_tasks[outbox.request_id] = (outbox.request_fingerprint, task)
+    task.add_done_callback(
+        functools.partial(
+            _owned_alarm_ack_reconciliation_done,
+            context,
+            outbox.request_id,
+            outbox.request_fingerprint,
+        )
+    )
+    return task
+
+
+async def _settle_alarm_ack_outbox_startup(
+    writer: SQLiteWriter,
+    broker: DataBroker,
+    engine_instance_id: str,
+) -> tuple[AlarmAckOutboxAbortDisposition, ...]:
+    """Abort every PREPARED intent, then replay COMMITTED before REP opens."""
+
+    dispositions = await writer.abort_prepared_alarm_ack_outbox(
+        recovery_engine_instance_id=engine_instance_id,
+    )
+    if type(dispositions) is not tuple:
+        raise RuntimeError("alarm ACK startup disposition inventory is invalid")
+    for disposition in dispositions:
+        _validate_alarm_ack_abort_disposition(
+            disposition,
+            expected_terminal_code="engine_restart_before_ack_commit",
+            expected_recovery_engine_instance_id=engine_instance_id,
+        )
+    await _reconcile_committed_alarm_ack_outbox(writer, broker)
+    return dispositions
+
+
+async def _claim_alarm_ack_activation(
+    context: EngineCommandContext,
+    *,
+    engine_instance_id: str,
+    activation_id: str,
+) -> tuple[tuple[str, str], asyncio.Future[None]]:
+    """Serialize durable commits for one exact alarm activation."""
+
+    key = (engine_instance_id, activation_id)
+    while True:
+        predecessor = context.alarm_ack_activation_owners.get(key)
+        if predecessor is None:
+            capability = asyncio.get_running_loop().create_future()
+            context.alarm_ack_activation_owners[key] = capability
+            return key, capability
+        await asyncio.shield(predecessor)
+
+
+def _release_alarm_ack_activation(
+    context: EngineCommandContext,
+    key: tuple[str, str],
+    capability: asyncio.Future[None],
+) -> None:
+    """Release only the exact activation-owner capability that was issued."""
+
+    if context.alarm_ack_activation_owners.get(key) is not capability:
+        raise RuntimeError("alarm ACK activation ownership changed")
+    del context.alarm_ack_activation_owners[key]
+    if capability.done():
+        raise RuntimeError("alarm ACK activation capability was already settled")
+    capability.set_result(None)
+
+
+def _apply_committed_alarm_ack_state(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> None:
+    """Apply one COMMITTED ACK to the matching live activation, never earlier."""
+
+    event, _receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state not in {"committed", "published"}:
+        raise RuntimeError("alarm ACK live transition requires durable commit")
+    registry_engine_instance_id = getattr(context.annunciation_registry, "engine_instance_id", None)
+    context_engine_instance_id = context.engine_instance_id
+    if is_canonical_engine_instance_id(context_engine_instance_id):
+        live_engine_instance_id = context_engine_instance_id
+        if (
+            is_canonical_engine_instance_id(registry_engine_instance_id)
+            and registry_engine_instance_id != live_engine_instance_id
+        ):
+            raise RuntimeError("alarm ACK live incarnation authorities disagree")
+    elif is_canonical_engine_instance_id(registry_engine_instance_id):
+        live_engine_instance_id = registry_engine_instance_id
+    else:
+        raise RuntimeError("alarm ACK live incarnation authority is unavailable")
+    if outbox.engine_instance_id != live_engine_instance_id:
+        return
+
+    source_activation_id = int(outbox.source_activation_id)
+    active = context.alarm_v2_state_mgr.get_active()
+    current = active.get(outbox.alarm_name) if type(active) is dict else None
+    if current is None or getattr(current, "activation_id", None) != source_activation_id:
+        # A cleared/replaced activation must never transfer its durable ACK to
+        # the current alarm incarnation.
+        return
+    if context.alarm_v2_state_mgr.acknowledgement_matches(
+        outbox.alarm_name,
+        operator=outbox.operator_name,
+        reason=outbox.reason,
+        request_id=outbox.request_id,
+        expected_activation_id=source_activation_id,
+        acknowledged_at=event["acknowledged_at"],
+    ):
+        return
+    if getattr(current, "acknowledged", None) is not False:
+        raise RuntimeError("alarm ACK durable authority conflicts with live acknowledgement")
+    ack_event = context.alarm_v2_state_mgr.acknowledge(
+        outbox.alarm_name,
+        operator=outbox.operator_name,
+        reason=outbox.reason,
+        expected_activation_id=source_activation_id,
+        acknowledged_at=event["acknowledged_at"],
+        request_id=outbox.request_id,
+    )
+    if ack_event != {
+        "alarm_id": outbox.alarm_name,
+        "acknowledged_at": event["acknowledged_at"],
+        "operator": outbox.operator_name,
+        "reason": outbox.reason,
+        "request_id": outbox.request_id,
+    }:
+        raise RuntimeError("alarm ACK committed live transition is not exact")
 
 
 async def _execute_owned_alarm_ack(
@@ -2367,17 +3938,89 @@ async def _execute_owned_alarm_ack(
 ) -> dict[str, Any]:
     alarm_name = cmd["alarm_name"]
     activation_id = cmd["activation_id"]
-    operator = cmd["operator"].strip()
-    reason = cmd["reason"].strip()
+    engine_instance_id = cmd["engine_instance_id"]
+    operator = cmd["operator"]
+    reason = cmd["reason"]
+    target = None
+
     try:
-        outbox = await context.writer.prepare_alarm_ack_outbox(
+        find_outbox = getattr(context.writer, "find_alarm_ack_outbox", None)
+        if not callable(find_outbox):
+            raise RuntimeError("alarm ACK durable lookup is unavailable")
+        outbox = await find_outbox(
             request_id=request_id,
             request_fingerprint=fingerprint,
-            alarm_name=alarm_name,
-            activation_id=activation_id,
-            operator_name=operator,
-            reason=reason,
         )
+        if outbox is None:
+            if context.annunciation_registry is None:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            try:
+                context.annunciation_registry.sync(
+                    context.alarm_v2_state_mgr.get_active(),
+                    context.safety_manager.get_status(),
+                )
+            except AnnunciationProjectionUnavailable:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            target = context.annunciation_registry.resolve(engine_instance_id, activation_id)
+            if target is None or target.source != "alarm_v2" or target.source_key != alarm_name:
+                return {
+                    "ok": False,
+                    "error_code": "stale_or_unknown_activation",
+                    "error": "alarm activation is stale or unknown",
+                    "retry_safe": False,
+                    "request_id": request_id,
+                }
+            source_activation_id = str(target.source_activation_id)
+            acknowledged_at = time.time()
+            if type(acknowledged_at) is not float or not math.isfinite(acknowledged_at) or acknowledged_at <= 0.0:
+                raise RuntimeError("alarm ACK clock authority is invalid")
+            event = {
+                "schema": _ALARM_ACK_EVENT_SCHEMA,
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "alarm_name": alarm_name,
+                "activation_id": activation_id,
+                "engine_instance_id": engine_instance_id,
+                "source_activation_id": source_activation_id,
+                "acknowledged_at": acknowledged_at,
+                "operator": operator,
+                "reason": reason,
+            }
+            receipt = {
+                "schema": _ALARM_ACK_COMMIT_SCHEMA,
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "alarm_name": alarm_name,
+                "activation_id": activation_id,
+                "engine_instance_id": engine_instance_id,
+                "source_activation_id": source_activation_id,
+                "acknowledged_at": acknowledged_at,
+                "committed": True,
+            }
+            outbox = await context.writer.prepare_alarm_ack_outbox(
+                request_id=request_id,
+                request_fingerprint=fingerprint,
+                alarm_name=alarm_name,
+                activation_id=activation_id,
+                engine_instance_id=engine_instance_id,
+                source_activation_id=source_activation_id,
+                operator_name=operator,
+                reason=reason,
+                event=event,
+                receipt=receipt,
+            )
     except OperatorLogIdempotencyConflictError:
         return {
             "ok": False,
@@ -2386,8 +4029,12 @@ async def _execute_owned_alarm_ack(
             "retry_safe": False,
             "request_id": request_id,
         }
-    except Exception:
-        logger.error("Alarm ACK outbox intent failed for request %s", request_id, exc_info=True)
+    except Exception as exc:
+        logger.error(
+            "Alarm ACK outbox intent failed: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
         return {
             "ok": False,
             "error_code": "alarm_ack_persistence_failed",
@@ -2396,69 +4043,125 @@ async def _execute_owned_alarm_ack(
             "request_id": request_id,
         }
 
-    if outbox.state == "published" and outbox.receipt is not None:
-        return dict(outbox.receipt)
-
-    event = outbox.event
-    if outbox.state == "intent":
-        target = (
-            context.annunciation_registry.resolve(cmd["engine_instance_id"], activation_id)
-            if context.annunciation_registry is not None
-            else None
-        )
-        if target is None or target.source != "alarm_v2" or target.source_key != alarm_name:
-            return {
-                "ok": False,
-                "error_code": "stale_or_unknown_activation",
-                "error": "alarm activation is stale or unknown",
-                "retry_safe": False,
-                "request_id": request_id,
-            }
-        ack_event = context.alarm_v2_state_mgr.acknowledge(
-            alarm_name,
-            operator=operator,
-            reason=reason,
-            expected_activation_id=target.source_activation_id,
-        )
-        if ack_event is None:
-            return {
-                "ok": False,
-                "error_code": "activation_changed",
-                "error": "alarm activation changed before acknowledgement commit",
-                "retry_safe": False,
-                "request_id": request_id,
-            }
-        event = {**ack_event, "activation_id": activation_id, "engine_instance_id": cmd["engine_instance_id"]}
-        receipt = {
-            "ok": True,
-            "alarm_name": alarm_name,
-            "activation_id": activation_id,
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if (
+        outbox.request_id != request_id
+        or outbox.request_fingerprint != fingerprint
+        or outbox.alarm_name != alarm_name
+        or outbox.activation_id != activation_id
+        or outbox.engine_instance_id != engine_instance_id
+        or outbox.operator_name != operator
+        or outbox.reason != reason
+    ):
+        return {
+            "ok": False,
+            "error_code": "idempotency_key_conflict",
+            "error": "request_id was already retained with different content",
+            "retry_safe": False,
             "request_id": request_id,
-            "event_emitted": True,
-            "committed": True,
         }
-        outbox = await context.writer.commit_alarm_ack_outbox(
-            request_id=request_id,
-            request_fingerprint=fingerprint,
-            event=event,
-            receipt=receipt,
+    if outbox.state == "aborted":
+        return _alarm_ack_aborted_result(outbox)
+    if outbox.state == "published":
+        _apply_committed_alarm_ack_state(context, outbox)
+        return _alarm_ack_published_result(outbox)
+
+    if outbox.state == "prepared":
+        owner_key, owner_capability = await _claim_alarm_ack_activation(
+            context,
+            engine_instance_id=engine_instance_id,
+            activation_id=activation_id,
         )
-    if outbox.event is None or outbox.receipt is None:
-        raise RuntimeError("alarm ACK outbox is committed without event or receipt")
-    event = dict(outbox.event)
-    receipt = dict(outbox.receipt)
-    await context.broker.publish(
-        Reading(
-            timestamp=datetime.now(UTC),
-            instrument_id="alarm_v2",
-            channel="alarm_v2/acknowledged",
-            value=event["acknowledged_at"],
-            unit="",
-            metadata=event,
+        try:
+            if context.annunciation_registry is None:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            try:
+                context.annunciation_registry.sync(
+                    context.alarm_v2_state_mgr.get_active(),
+                    context.safety_manager.get_status(),
+                )
+            except AnnunciationProjectionUnavailable:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            target = context.annunciation_registry.resolve(engine_instance_id, activation_id)
+            if (
+                target is None
+                or target.source != "alarm_v2"
+                or target.source_key != alarm_name
+                or str(target.source_activation_id) != outbox.source_activation_id
+                or target.acknowledged is not False
+            ):
+                try:
+                    return await _abort_prepared_alarm_ack(context, outbox)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "Alarm ACK stale intent disposition failed: request=%s exception=%s",
+                        request_id,
+                        type(exc).__name__,
+                    )
+                    return {
+                        "ok": False,
+                        "error_code": "alarm_ack_persistence_failed",
+                        "error": "alarm acknowledgement persistence failed",
+                        "retry_safe": True,
+                        "request_id": request_id,
+                    }
+            # Persistence is the authority boundary. No AlarmStateManager or
+            # annunciation-visible acknowledgement exists before this await
+            # returns one exact COMMITTED record.
+            outbox = await context.writer.commit_alarm_ack_outbox(
+                request_id=request_id,
+                request_fingerprint=fingerprint,
+                event=event,
+                receipt=receipt,
+            )
+            _validated_alarm_ack_outbox(outbox)
+            if outbox.state not in {"committed", "published"}:
+                raise RuntimeError("alarm ACK durable commit state is invalid")
+            _apply_committed_alarm_ack_state(context, outbox)
+        finally:
+            _release_alarm_ack_activation(context, owner_key, owner_capability)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK outbox state is invalid")
+    _apply_committed_alarm_ack_state(context, outbox)
+    if context.annunciation_registry is not None:
+        try:
+            context.annunciation_registry.sync(
+                context.alarm_v2_state_mgr.get_active(),
+                context.safety_manager.get_status(),
+            )
+        except AnnunciationProjectionUnavailable:
+            logger.error("Alarm acknowledgement projection refresh failed")
+    try:
+        published = await _publish_committed_alarm_ack(
+            context.writer,
+            context.broker,
+            outbox,
         )
-    )
-    await context.writer.publish_alarm_ack_outbox(request_id=request_id, request_fingerprint=fingerprint)
-    return receipt
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - exact committed intent remains retryable
+        logger.error(
+            "Alarm ACK publication remains pending: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
+        _ensure_alarm_ack_publication_reconciliation(context, outbox)
+        return _alarm_ack_publication_pending(outbox)
+    return _alarm_ack_published_result(published)
 
 
 def _owned_alarm_ack_done(
@@ -2472,11 +4175,7 @@ def _owned_alarm_ack_done(
         del context.alarm_ack_tasks[request_id]
     if task.cancelled() or task.exception() is not None:
         return
-    result = task.result()
-    if result.get("committed") is True:
-        context.alarm_ack_receipts[request_id] = (fingerprint, dict(result))
-        while len(context.alarm_ack_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
-            context.alarm_ack_receipts.pop(next(iter(context.alarm_ack_receipts)))
+    _remember_alarm_ack_receipt(context, request_id, fingerprint, task.result())
 
 
 async def _submit_alarm_ack(cmd: dict[str, Any], context: EngineCommandContext) -> dict[str, Any]:
@@ -2492,7 +4191,22 @@ async def _submit_alarm_ack(cmd: dict[str, Any], context: EngineCommandContext) 
             "error": "request_id must be exactly 32 lowercase hexadecimal characters",
             "retry_safe": True,
         }
-    fingerprint = _operator_log_fingerprint(cmd)
+    if any(type(cmd.get(field)) is not str or cmd[field] != cmd[field].strip() for field in ("operator", "reason")):
+        return {
+            "ok": False,
+            "error_code": "invalid_alarm_ack_command",
+            "error": "alarm acknowledgement attribution must be canonical",
+            "retry_safe": True,
+        }
+    try:
+        fingerprint = alarm_ack_request_fingerprint(cmd)
+    except ValueError:
+        return {
+            "ok": False,
+            "error_code": "invalid_alarm_ack_command",
+            "error": "alarm acknowledgement command is invalid",
+            "retry_safe": True,
+        }
     completed = context.alarm_ack_receipts.get(request_id)
     if completed is not None:
         if completed[0] != fingerprint:
@@ -2503,6 +4217,28 @@ async def _submit_alarm_ack(cmd: dict[str, Any], context: EngineCommandContext) 
         if pending[0] != fingerprint:
             return {"ok": False, "error_code": "idempotency_key_conflict", "retry_safe": False}
         return await asyncio.shield(pending[1])
+    reconciliation = context.alarm_ack_reconciliation_tasks.get(request_id)
+    if reconciliation is not None:
+        if reconciliation[0] != fingerprint:
+            return {"ok": False, "error_code": "idempotency_key_conflict", "retry_safe": False}
+        return await asyncio.shield(reconciliation[1])
+    if not context.experiment_commands_accepting:
+        return {
+            "ok": False,
+            "error_code": "engine_shutting_down",
+            "error": "alarm acknowledgement submissions are frozen for shutdown",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+    active_request_ids = set(context.alarm_ack_tasks) | set(context.alarm_ack_reconciliation_tasks)
+    if len(active_request_ids) >= _MAX_PENDING_ALARM_ACK_ENTRIES:
+        return {
+            "ok": False,
+            "error_code": "alarm_ack_busy",
+            "error": "the bounded alarm acknowledgement lane is full",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
     task = asyncio.create_task(
         _execute_owned_alarm_ack(cmd, context, request_id, fingerprint),
         name=f"alarm_ack_{request_id[:8]}",
@@ -2553,7 +4289,11 @@ def _feed_recording_experiment_lifecycle(
             snapshot.phase,
         )
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
-        logger.warning("Recording lifecycle feed unavailable after %s: %s", action, exc, exc_info=True)
+        logger.warning(
+            "Recording lifecycle feed unavailable: action=%s exception=%s",
+            _bounded_action_label(action),
+            type(exc).__name__,
+        )
         return "recording_lifecycle_feed"
     return None
 
@@ -2585,29 +4325,44 @@ async def _start_scheduler_with_recording_feed(
     try:
         feed.persistence_started(epoch_id)
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
-        logger.warning("Recording persistence feed unavailable before scheduler start: %s", exc, exc_info=True)
+        logger.warning(
+            "Recording persistence feed unavailable: phase=before_scheduler_start exception=%s",
+            type(exc).__name__,
+        )
         try:
             feed.persistence_ambiguous()
         except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
-            logger.warning("Recording persistence feed could not be terminalized: %s", terminal_exc, exc_info=True)
+            logger.warning(
+                "Recording persistence feed terminalization failed: exception=%s",
+                type(terminal_exc).__name__,
+            )
     try:
         await scheduler.start()
     except BaseException:
         try:
             feed.persistence_ambiguous()
         except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
-            logger.warning("Recording persistence feed unavailable after scheduler failure: %s", exc, exc_info=True)
+            logger.warning(
+                "Recording persistence feed unavailable: phase=scheduler_start_failure exception=%s",
+                type(exc).__name__,
+            )
         sequence += 1
         try:
             feed.acquisition_unavailable(sequence)
         except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
-            logger.warning("Recording acquisition feed unavailable after scheduler failure: %s", exc, exc_info=True)
+            logger.warning(
+                "Recording acquisition feed unavailable: phase=scheduler_start_failure exception=%s",
+                type(exc).__name__,
+            )
         raise
     sequence += 1
     try:
         feed.acquisition_running(sequence, epoch_id)
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
-        logger.warning("Recording acquisition feed unavailable after scheduler start: %s", exc, exc_info=True)
+        logger.warning(
+            "Recording acquisition feed unavailable: phase=after_scheduler_start exception=%s",
+            type(exc).__name__,
+        )
     return sequence
 
 
@@ -2630,54 +4385,70 @@ async def _stop_scheduler_with_recording_feed(
                 feed.persistence_ambiguous()
             except Exception as feed_exc:  # noqa: BLE001 - settlement retry must continue
                 logger.warning(
-                    "Recording persistence feed unavailable during reviewed-source settlement: %s",
-                    feed_exc,
-                    exc_info=True,
+                    "Recording persistence feed unavailable: phase=reviewed_source_settlement exception=%s",
+                    type(feed_exc).__name__,
                 )
             sequence += 1
             try:
                 feed.acquisition_unavailable(sequence)
             except Exception as feed_exc:  # noqa: BLE001 - settlement retry must continue
                 logger.warning(
-                    "Recording acquisition feed unavailable during reviewed-source settlement: %s",
-                    feed_exc,
-                    exc_info=True,
+                    "Recording acquisition feed unavailable: phase=reviewed_source_settlement exception=%s",
+                    type(feed_exc).__name__,
                 )
             logger.critical(
-                "Scheduler stop retains reviewed-source authority; retrying in %.3fs: %s",
+                "Scheduler stop retains reviewed-source authority: retry_s=%.3f exception=%s",
                 bounded_retry_delay_s,
-                exc,
+                type(exc).__name__,
             )
             await sleep(bounded_retry_delay_s)
         except BaseException:
             try:
                 feed.persistence_ambiguous()
             except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
-                logger.warning("Recording persistence feed unavailable after scheduler failure: %s", exc, exc_info=True)
+                logger.warning(
+                    "Recording persistence feed unavailable: phase=scheduler_stop_failure exception=%s",
+                    type(exc).__name__,
+                )
             sequence += 1
             try:
                 feed.acquisition_unavailable(sequence)
             except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
-                logger.warning("Recording acquisition feed unavailable after scheduler failure: %s", exc, exc_info=True)
+                logger.warning(
+                    "Recording acquisition feed unavailable: phase=scheduler_stop_failure exception=%s",
+                    type(exc).__name__,
+                )
             raise
     sequence += 1
     try:
         feed.acquisition_stopped(sequence)
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
-        logger.warning("Recording acquisition feed unavailable after scheduler stop: %s", exc, exc_info=True)
+        logger.warning(
+            "Recording acquisition feed unavailable: phase=after_scheduler_stop exception=%s",
+            type(exc).__name__,
+        )
         sequence += 1
         try:
             feed.acquisition_unavailable(sequence)
         except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
-            logger.warning("Recording acquisition feed could not be terminalized: %s", terminal_exc, exc_info=True)
+            logger.warning(
+                "Recording acquisition feed terminalization failed: exception=%s",
+                type(terminal_exc).__name__,
+            )
     try:
         feed.persistence_stopped()
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
-        logger.warning("Recording persistence feed unavailable after scheduler stop: %s", exc, exc_info=True)
+        logger.warning(
+            "Recording persistence feed unavailable: phase=after_scheduler_stop exception=%s",
+            type(exc).__name__,
+        )
         try:
             feed.persistence_ambiguous()
         except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
-            logger.warning("Recording persistence feed could not be terminalized: %s", terminal_exc, exc_info=True)
+            logger.warning(
+                "Recording persistence feed terminalization failed: exception=%s",
+                type(terminal_exc).__name__,
+            )
     return sequence
 
 
@@ -2741,16 +4512,16 @@ def _owned_experiment_read_done(
     task: asyncio.Task[dict[str, Any]],
 ) -> None:
     context.experiment_read_tasks.discard(task)
+    action_label = _bounded_action_label(action)
     if task.cancelled():
-        logger.critical("Experiment read owner was cancelled: %s", action)
+        logger.critical("Experiment read owner was cancelled: action=%s", action_label)
         return
     exception = task.exception()
     if exception is not None:
         logger.error(
-            "Experiment read owner failed after submission (%s): %s",
-            action,
-            exception,
-            exc_info=(type(exception), exception, exception.__traceback__),
+            "Experiment read owner failed after submission: action=%s exception=%s",
+            action_label,
+            type(exception).__name__,
         )
 
 
@@ -2766,9 +4537,8 @@ def _owned_experiment_status_done(
     exception = task.exception()
     if exception is not None:
         logger.error(
-            "Experiment status owner failed after submission: %s",
-            exception,
-            exc_info=(type(exception), exception, exception.__traceback__),
+            "Experiment status owner failed after submission: exception=%s",
+            type(exception).__name__,
         )
 
 
@@ -2794,7 +4564,9 @@ async def _drain_experiment_command_tasks(
     pending = set(context.experiment_command_tasks)
     pending.update(context.experiment_read_tasks)
     pending.update(task for _fingerprint, task in context.operator_log_tasks.values())
+    pending.update(task for _fingerprint, task in getattr(context, "operator_log_reconciliation_tasks", {}).values())
     pending.update(task for _fingerprint, task in context.alarm_ack_tasks.values())
+    pending.update(task for _fingerprint, task in getattr(context, "alarm_ack_reconciliation_tasks", {}).values())
     if context.experiment_status_task is not None:
         pending.add(context.experiment_status_task)
     pending = {task for task in pending if not task.done()}
@@ -2803,16 +4575,30 @@ async def _drain_experiment_command_tasks(
 
     logger_.info("Draining %d retained experiment command task(s) before shutdown", len(pending))
     drain = asyncio.gather(*pending, return_exceptions=True)
-    try:
-        await asyncio.wait_for(asyncio.shield(drain), timeout=timeout_s)
-        return True
-    except TimeoutError:
-        logger_.critical(
-            "Experiment command drain exceeded %.3fs; shutdown remains blocked until authority settles",
-            timeout_s,
-        )
-        await drain
-        return False
+
+    async def settle() -> bool:
+        try:
+            await asyncio.wait_for(asyncio.shield(drain), timeout=timeout_s)
+            return True
+        except TimeoutError:
+            logger_.critical(
+                "Experiment command drain exceeded %.3fs; shutdown remains blocked until authority settles",
+                timeout_s,
+            )
+            await drain
+            return False
+
+    settlement = asyncio.create_task(settle(), name="engine-retained-command-settlement")
+    cancellation_seen = False
+    while not settlement.done():
+        try:
+            await asyncio.shield(settlement)
+        except asyncio.CancelledError:
+            cancellation_seen = True
+    completed_within_deadline = settlement.result()
+    if cancellation_seen:
+        raise asyncio.CancelledError
+    return completed_within_deadline
 
 
 def _note_experiment_reconciliation_failure(
@@ -2822,10 +4608,9 @@ def _note_experiment_reconciliation_failure(
 ) -> None:
     failures.append(step)
     logger.error(
-        "Committed experiment command reconciliation failed at %s: %s",
+        "Committed experiment command reconciliation failed; step=%s exception=%s",
         step,
-        exc,
-        exc_info=(type(exc), exc, exc.__traceback__),
+        type(exc).__name__,
     )
 
 
@@ -3082,17 +4867,106 @@ def _owned_experiment_task_done(
     task: asyncio.Task[dict[str, Any]],
 ) -> None:
     context.experiment_command_tasks.discard(task)
+    action_label = _bounded_action_label(action)
     if task.cancelled():
-        logger.critical("Experiment command owner was cancelled: %s", action)
+        logger.critical("Experiment command owner was cancelled: action=%s", action_label)
         return
     exception = task.exception()
     if exception is not None:
         logger.error(
-            "Experiment command owner failed after submission (%s): %s",
-            action,
-            exception,
-            exc_info=(type(exception), exception, exception.__traceback__),
+            "Experiment command owner failed after submission: action=%s exception=%s",
+            action_label,
+            type(exception).__name__,
         )
+
+
+def _request_teardown_after_shutdown_receipt(
+    context: EngineCommandContext,
+    cmd: dict[str, Any],
+    reply: dict[str, Any],
+) -> None:
+    """Release engine teardown only after the exact receipt reached REP."""
+
+    receipt = context.shutdown_receipt
+    expected_wire_receipt = None if receipt is None else {**receipt, "proto": PROTOCOL_VERSION}
+    if (
+        cmd.get("cmd") == "launcher_shutdown"
+        and receipt is not None
+        and reply == expected_wire_receipt
+        and reply.get("engine_instance_id") == context.engine_instance_id
+        and reply.get("global_off_verified") is True
+        and reply.get("teardown_requested") is True
+        and context.shutdown_event is not None
+    ):
+        context.shutdown_event.set()
+
+
+def _shutdown_command_identity(cmd: dict[str, Any]) -> tuple[str, str, str] | None:
+    required = {"cmd", "engine_instance_id", "request_id", "shutdown_capability"}
+    instance_id = cmd.get("engine_instance_id")
+    request_id = cmd.get("request_id")
+    capability = cmd.get("shutdown_capability")
+    if not (
+        set(cmd) == required
+        and cmd.get("cmd") == "launcher_shutdown"
+        and type(instance_id) is str
+        and len(instance_id) == 32
+        and all(ch in "0123456789abcdef" for ch in instance_id)
+        and type(request_id) is str
+        and len(request_id) == 32
+        and all(ch in "0123456789abcdef" for ch in request_id)
+        and type(capability) is str
+        and len(capability) == 64
+        and all(ch in "0123456789abcdef" for ch in capability)
+    ):
+        return None
+    return instance_id, request_id, capability
+
+
+def _shutdown_latch_failure(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any] | None:
+    """Reject every post-latch state change except exact safety reconciliation."""
+
+    request_id = context.shutdown_request_id
+    if request_id is None:
+        return None
+    action = cmd.get("cmd")
+    if not _is_mutating_command(action):
+        return None
+    if action == "keithley_emergency_off" and set(cmd) == {"cmd"}:
+        return None
+    if action == "launcher_shutdown":
+        identity = _shutdown_command_identity(cmd)
+        if (
+            identity is not None
+            and identity[1] == request_id
+            and secrets.compare_digest(identity[0], context.engine_instance_id)
+            and secrets.compare_digest(identity[2], context.shutdown_capability)
+        ):
+            return None
+        if (
+            identity is not None
+            and secrets.compare_digest(identity[0], context.engine_instance_id)
+            and secrets.compare_digest(identity[2], context.shutdown_capability)
+        ):
+            return {
+                "ok": False,
+                "error_code": "launcher_shutdown_already_requested",
+                "error": "a different shutdown request already owns this engine incarnation",
+                "delivery_state": "dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": False,
+            }
+    return {
+        "ok": False,
+        "error_code": "engine_shutdown_latched",
+        "error": "engine shutdown owns mutation admission; later state changes are refused",
+        "delivery_state": "dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": False,
+    }
 
 
 async def _handle_gui_command(
@@ -3127,6 +5001,8 @@ async def _handle_gui_command(
     escalation_service = context.escalation_service
     cooldown_service = context.cooldown_service
     action = cmd.get("cmd", "")
+    if action == "engine_ready":
+        return _engine_ready_response(cmd, context)
     if action == "mutation_capabilities":
         token = context.mutation_capability_token
         accepted = _valid_mutation_capability_token(token)
@@ -3148,7 +5024,73 @@ async def _handle_gui_command(
     # Compatibility material is transport metadata, never handler input.  This
     # also strips a forged envelope from direct read and safe-direction calls.
     cmd = strip_mutation_envelope(cmd)
+    shutdown_latch_failure = _shutdown_latch_failure(cmd, context)
+    if shutdown_latch_failure is not None:
+        return shutdown_latch_failure
     try:
+        if action == "launcher_shutdown":
+            identity = _shutdown_command_identity(cmd)
+            if identity is None:
+                return {
+                    "ok": False,
+                    "error_code": "launcher_shutdown_invalid",
+                    "error": "launcher shutdown requires one exact typed authority envelope",
+                    "delivery_state": "dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
+            instance_id, request_id, capability = identity
+            if not (
+                secrets.compare_digest(instance_id, context.engine_instance_id)
+                and secrets.compare_digest(capability, context.shutdown_capability)
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "launcher_shutdown_authority_mismatch",
+                    "error": "launcher shutdown authority does not match this engine incarnation",
+                    "delivery_state": "dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": False,
+                }
+            async with context.shutdown_lock:
+                if context.shutdown_request_id is None:
+                    context.shutdown_request_id = request_id
+                elif context.shutdown_request_id != request_id:
+                    return {
+                        "ok": False,
+                        "error_code": "launcher_shutdown_already_requested",
+                        "error": "a different shutdown request already owns this engine incarnation",
+                        "delivery_state": "dispatched",
+                        "commit_state": "not_committed",
+                        "retry_safe": False,
+                    }
+                prior = context.shutdown_receipt
+                if prior is not None:
+                    return dict(prior)
+                off_result = await _run_keithley_command(
+                    "keithley_emergency_off", {"cmd": "keithley_emergency_off"}, safety_manager
+                )
+                if off_result.get("ok") is not True or off_result.get("active_channels") != []:
+                    return {
+                        "ok": False,
+                        "error_code": "launcher_shutdown_global_off_unverified",
+                        "error": "launcher shutdown is held because exact global OFF was not verified",
+                        "delivery_state": "dispatched",
+                        "commit_state": "not_committed",
+                        "retry_safe": True,
+                    }
+                receipt = {
+                    "ok": True,
+                    "schema": _ENGINE_SHUTDOWN_RECEIPT_SCHEMA,
+                    "engine_instance_id": instance_id,
+                    "request_id": request_id,
+                    "global_off_verified": True,
+                    "teardown_requested": True,
+                    "delivery_state": "dispatched",
+                    "commit_state": "committed",
+                }
+                context.shutdown_receipt = receipt
+                return dict(receipt)
         if action == "periodic_subscription_barrier":
             if set(cmd) != {"cmd", "schema", "nonce"}:
                 return _periodic_barrier_failure("barrier_invalid")
@@ -3172,18 +5114,18 @@ async def _handle_gui_command(
                     "ok": False,
                     "error_code": "safe_direction_command_invalid",
                     "error": "emergency-OFF accepts only cmd and an optional non-empty string channel",
-                    "delivery_state": "not_dispatched",
+                    "delivery_state": "dispatched",
                     "commit_state": "not_committed",
                     "retry_safe": True,
                 }
             try:
                 normalize_smu_channel(channel)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError):
                 return {
                     "ok": False,
                     "error_code": "safe_direction_command_invalid",
-                    "error": str(exc),
-                    "delivery_state": "not_dispatched",
+                    "error": "Safe-direction channel identity is invalid.",
+                    "delivery_state": "dispatched",
                     "commit_state": "not_committed",
                     "retry_safe": True,
                 }
@@ -3210,7 +5152,11 @@ async def _handle_gui_command(
                         )
             return result
         if action == "safety_status":
-            return {"ok": True, **safety_manager.get_status()}
+            return {
+                "ok": True,
+                **safety_manager.get_status(),
+                "engine_instance_id": context.engine_instance_id,
+            }
         if action == "annunciation_status":
             if set(cmd) != {"cmd"}:
                 return {"ok": False, "error": "invalid_annunciation_command"}
@@ -3223,15 +5169,30 @@ async def _handle_gui_command(
                 return {"ok": False, "error": "annunciation_unavailable"}
             return {"ok": True, **annunciation_registry.snapshot()}
         if action == "annunciation_ack":
-            required = {"cmd", "engine_instance_id", "activation_id", "operator", "reason"}
+            required = {"cmd", "engine_instance_id", "activation_id", "operator", "reason", "request_id"}
             if set(cmd) != required or not all(
                 type(cmd[key]) is str and len(cmd[key]) <= 256 for key in required - {"cmd"}
             ):
                 return {"ok": False, "error": "invalid_annunciation_command"}
             if not cmd["engine_instance_id"] or not cmd["activation_id"]:
                 return {"ok": False, "error": "invalid_annunciation_command"}
-            if any(not cmd[key].strip() or not cmd[key].isprintable() for key in ("operator", "reason")):
+            if any(
+                not cmd[key].strip() or cmd[key] != cmd[key].strip() or not cmd[key].isprintable()
+                for key in ("operator", "reason")
+            ):
                 return {"ok": False, "error": "invalid_annunciation_command"}
+            try:
+                request_fingerprint = safety_audio_ack_request_fingerprint(cmd)
+            except ValueError:
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            expected_request_id = deterministic_safety_audio_ack_request_id(
+                engine_instance_id=cmd["engine_instance_id"],
+                activation_id=cmd["activation_id"],
+                operator=cmd["operator"],
+                reason=cmd["reason"],
+            )
+            if cmd["request_id"] != expected_request_id:
+                return {"ok": False, "error": "invalid_annunciation_request_identity"}
             if annunciation_registry is None:
                 return {"ok": False, "error": "annunciation_unavailable"}
             try:
@@ -3245,60 +5206,71 @@ async def _handle_gui_command(
             )
             if target is None:
                 return {"ok": False, "error": "stale_or_unknown_activation"}
-            event_emitted = False
-            if target.source == "alarm_v2" and not target.acknowledged:
-                ack_event = alarm_v2_state_mgr.acknowledge(
-                    target.source_key,
-                    operator=cmd["operator"],
-                    reason=cmd["reason"],
-                    expected_activation_id=target.source_activation_id,
+            if target.source == "alarm_v2":
+                return {
+                    "ok": False,
+                    "error_code": "canonical_alarm_ack_required",
+                    "error": "alarm acknowledgements require the durable alarm_v2_ack command",
+                }
+            if target.source == "safety_fault":
+                message = json.dumps(
+                    {
+                        "activation_id": target.activation_id,
+                        "engine_instance_id": cmd["engine_instance_id"],
+                        "event": "safety_audio_ack_request",
+                        "reason": cmd["reason"].strip(),
+                        "source_activation_id": str(target.source_activation_id),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
                 )
-                if ack_event is None:
-                    return {"ok": False, "error": "activation_changed"}
                 try:
-                    annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
-                except AnnunciationProjectionUnavailable:
-                    logger.error("Annunciation projection unavailable")
-                    return {"ok": False, "error": "annunciation_unavailable"}
-                await broker.publish(
-                    Reading(
-                        timestamp=datetime.now(UTC),
-                        instrument_id="alarm_v2",
-                        channel="alarm_v2/acknowledged",
-                        value=ack_event["acknowledged_at"],
-                        unit="",
-                        metadata=ack_event,
-                    )
-                )
-                event_emitted = True
-            elif target.source == "safety_fault" and not target.acknowledged:
-                try:
-                    await writer.append_operator_log(
-                        message=json.dumps(
-                            {
-                                "activation_id": target.activation_id,
-                                "event": "safety_audio_ack_request",
-                                "reason": cmd["reason"].strip(),
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
+                    audit_commit = await writer.append_operator_log_idempotent(
+                        message=message,
                         author=cmd["operator"].strip(),
                         source="operator",
-                        experiment_id=experiment_manager.active_experiment_id,
+                        experiment_id=None,
                         tags=("safety_audio_ack", "safety_fault"),
+                        request_id=cmd["request_id"],
+                        request_fingerprint=request_fingerprint,
                     )
-                except Exception:
-                    logger.error("Safety-audio acknowledgement audit persistence failed", exc_info=True)
+                except Exception as exc:
+                    logger.error(
+                        "Safety-audio acknowledgement audit persistence failed: exception=%s",
+                        type(exc).__name__,
+                    )
                     return {"ok": False, "error": "audit_persistence_failed"}
+                if (
+                    type(audit_commit) is not OperatorLogCommitResult
+                    or audit_commit.entry.message != message
+                    or audit_commit.entry.author != cmd["operator"].strip()
+                    or audit_commit.entry.source != "operator"
+                    or audit_commit.entry.experiment_id is not None
+                    or audit_commit.entry.tags != ("safety_audio_ack", "safety_fault")
+                ):
+                    return {"ok": False, "error": "audit_receipt_invalid"}
                 if not annunciation_registry.acknowledge_safety_audio(target.activation_id):
                     return {"ok": False, "error": "activation_changed"}
-            return {
-                "ok": True,
-                "activation_id": target.activation_id,
-                "event_emitted": event_emitted,
-                "snapshot_revision": annunciation_registry.snapshot()["snapshot_revision"],
-            }
+                return {
+                    "ok": True,
+                    "engine_instance_id": cmd["engine_instance_id"],
+                    "activation_id": target.activation_id,
+                    "request_id": cmd["request_id"],
+                    "snapshot_revision": annunciation_registry.snapshot()["snapshot_revision"],
+                    "audit_receipt": {
+                        "schema": "safety_audio_ack_v1",
+                        "request_id": cmd["request_id"],
+                        "request_fingerprint": request_fingerprint,
+                        "engine_instance_id": cmd["engine_instance_id"],
+                        "activation_id": target.activation_id,
+                        "source_activation_id": str(target.source_activation_id),
+                        "entry_id": audit_commit.entry.id,
+                        "committed": True,
+                    },
+                }
+            return {"ok": False, "error": "stale_or_unknown_activation"}
         if action == "sinks_status":
             return {
                 "ok": True,
@@ -3322,8 +5294,12 @@ async def _handle_gui_command(
             try:
                 interlock_engine.acknowledge(name)
                 return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
-            except KeyError as exc:
-                return {"ok": False, "error": str(exc)}
+            except KeyError:
+                return {
+                    "ok": False,
+                    "error_code": "interlock_unknown",
+                    "error": "The requested interlock is unknown.",
+                }
         _leak_resp = await _handle_leak_rate_command(action, cmd, leak_rate_estimator, _leak_cfg, event_logger)
         if _leak_resp is not None:
             return _leak_resp
@@ -3431,18 +5407,11 @@ async def _handle_gui_command(
                 return {"ok": False, "error": "invalid_alarm_ack_command"}
             if not cmd["alarm_name"] or not cmd["engine_instance_id"] or not cmd["activation_id"]:
                 return {"ok": False, "error": "invalid_alarm_ack_command"}
-            if any(not cmd[key].strip() or not cmd[key].isprintable() for key in ("operator", "reason")):
+            if any(
+                not cmd[key].strip() or cmd[key] != cmd[key].strip() or not cmd[key].isprintable()
+                for key in ("operator", "reason")
+            ):
                 return {"ok": False, "error": "invalid_alarm_ack_command"}
-            if annunciation_registry is None:
-                return {"ok": False, "error": "annunciation_unavailable"}
-            try:
-                annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
-            except AnnunciationProjectionUnavailable:
-                logger.error("Alarm activation projection unavailable")
-                return {"ok": False, "error": "alarm_activation_unavailable"}
-            target = annunciation_registry.resolve(cmd["engine_instance_id"], cmd["activation_id"])
-            if target is None or target.source != "alarm_v2" or target.source_key != cmd["alarm_name"]:
-                return {"ok": False, "error": "stale_or_unknown_activation"}
             return await _submit_alarm_ack(cmd, context)
         if action in _EXPERIMENT_MUTATION_ACTIONS:
             if not context.experiment_commands_accepting:
@@ -3460,7 +5429,7 @@ async def _handle_gui_command(
                 }
             owner_task = asyncio.create_task(
                 _execute_owned_experiment_command(action, cmd, context),
-                name=f"experiment_command_{action}",
+                name=f"experiment_command_{_bounded_action_label(action)}",
             )
             context.experiment_command_tasks.add(owner_task)
             owner_task.add_done_callback(functools.partial(_owned_experiment_task_done, context, action))
@@ -3468,9 +5437,9 @@ async def _handle_gui_command(
                 return await asyncio.shield(owner_task)
             except asyncio.CancelledError:
                 logger.warning(
-                    "Experiment command reply cancelled (%s): outcome unknown; "
+                    "Experiment command reply cancelled (action=%s): outcome unknown; "
                     "authoritative owner continues and automatic retry is unsafe",
-                    action,
+                    _bounded_action_label(action),
                 )
                 raise
         if action == "experiment_status":
@@ -3514,7 +5483,7 @@ async def _handle_gui_command(
                 }
             read_task = asyncio.create_task(
                 _execute_owned_experiment_read(action, cmd, context),
-                name=f"experiment_read_{action}",
+                name=f"experiment_read_{_bounded_action_label(action)}",
             )
             context.experiment_read_tasks.add(read_task)
             read_task.add_done_callback(functools.partial(_owned_experiment_read_done, context, action))
@@ -3678,11 +5647,6 @@ async def _handle_gui_command(
             if _vacuum_guard is None:
                 return {"state": "UNAVAILABLE"}
             return {"state": _vacuum_guard.state.name}
-        if action in ("assistant.query", "rag.search"):
-            # B1 (2026-07): the GUI bridge routes these directly to
-            # the cryodaq-assistant process's own REP (:5557) now —
-            # this is a backward-compat fallback, see the helper.
-            return _assistant_process_unavailable_reply(action)
         if action == "multiline.set_channels":
             # v0.55.16.0.1 (smoke hotfix): operator picks 1..32
             # channels via the panel selector dialog.
@@ -3718,7 +5682,7 @@ async def _handle_gui_command(
                         experiments_root=_DATA_DIR / "experiments",
                         auto_stop_tasks=_multiline_burst_auto_stop_tasks,
                     ),
-                    name=f"multiline_burst_auto_stop_{target_name}",
+                    name=f"multiline_burst_auto_stop_{_bounded_action_label(target_name)}",
                 )
                 # Cancel any pre-existing auto-stop for the same
                 # driver — operator restarting the timer wins.
@@ -3727,18 +5691,6 @@ async def _handle_gui_command(
                     prev.cancel()
                 _multiline_burst_auto_stop_tasks[target_name] = _t
             return response
-        if action == "rag.rebuild_index":
-            return {
-                "ok": False,
-                "error_code": "assistant_read_only",
-                "error": "Live RAG index rebuild is disabled; use the approved offline procedure",
-                "delivery_state": "not_dispatched",
-                "commit_state": "not_committed",
-                "retry_safe": False,
-            }
-        if action == "rag.rebuild_status":
-            # B1 (2026-07): observational status moved to assistant REP (:5557).
-            return _assistant_process_unavailable_reply(action)
         if action == "cooldown_eta_get":
             # B1 (2026-07): additive read-only command — exposes the
             # same CooldownService.last_prediction() the old in-process
@@ -3748,9 +5700,20 @@ async def _handle_gui_command(
             if cooldown_service is None:
                 return {"ok": True, "prediction": None}
             return {"ok": True, "prediction": cooldown_service.last_prediction()}
-        return {"ok": False, "error": f"unknown command: {action}"}
+        return {
+            "ok": False,
+            "error_code": "command_unknown",
+            "error": "Command is not supported.",
+            "delivery_state": "dispatched",
+            "commit_state": "not_committed",
+            "retry_safe": False,
+        }
     except Exception as exc:
-        logger.error("Ошибка выполнения команды '%s': %s", action, exc)
+        logger.error(
+            "Engine command failed: action=%s exception=%s",
+            _bounded_action_label(action),
+            type(exc).__name__,
+        )
         if _is_mutating_command(action):
             return {
                 "ok": False,
@@ -3769,9 +5732,643 @@ def _zmq_publisher_drop_count(broker: DataBroker) -> int:
     return int(broker.stats["zmq_publisher"]["dropped"])
 
 
-async def _run_engine(*, mock: bool = False) -> None:
+class _EngineStartupRollback:
+    """Retain reverse-order cleanup authority until live REP is acquired."""
+
+    def __init__(self) -> None:
+        self._callbacks: list[tuple[str, Callable[[], Any]]] = []
+        self._settled = False
+        self._rollback_started = False
+        self._rollback_task: asyncio.Task[None] | None = None
+
+    def add(self, label: str, callback: Callable[[], Any]) -> None:
+        if self._settled or self._rollback_started:
+            raise RuntimeError("engine startup transaction is already settled")
+        self._callbacks.append((label, callback))
+
+    async def acquire(
+        self,
+        operation: Awaitable[Any],
+        *,
+        label: str,
+        rollback: Callable[[], Any],
+    ) -> Any:
+        # Register first: a start method may acquire a partial resource and
+        # then raise, so its stop path must still run.
+        self.add(label, rollback)
+        return await self.guard(operation)
+
+    async def call(self, operation: Callable[[], Any]) -> Any:
+        try:
+            result = operation()
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        except BaseException:
+            await self.rollback()
+            raise
+
+    async def guard(self, operation: Awaitable[Any]) -> Any:
+        try:
+            return await operation
+        except BaseException:
+            await self.rollback()
+            raise
+
+    async def rollback(self) -> None:
+        if self._settled:
+            return
+        self._rollback_started = True
+        task = self._rollback_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._rollback_until_settled(), name="engine-startup-rollback")
+            self._rollback_task = task
+
+        cancellation_seen = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # The acquired resources outlive the cancelled caller. Keep
+                # awaiting the retained cleanup task through every repeated
+                # cancellation, then propagate cancellation after settlement.
+                cancellation_seen = True
+        task.result()
+        if cancellation_seen:
+            raise asyncio.CancelledError
+
+    async def _rollback_until_settled(self) -> None:
+        """Retry retained cleanup until no startup owner remains."""
+
+        while not self._settled:
+            try:
+                await self._rollback_once()
+            except BaseException as exc:  # noqa: BLE001 - retained owner stays in HOLD
+                logger.critical(
+                    "Engine startup rollback retained owners; exception=%s",
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(0.05)
+
+    async def _rollback_once(self) -> None:
+        failed: list[tuple[str, Callable[[], Any], BaseException]] = []
+        while self._callbacks:
+            label, callback = self._callbacks.pop()
+            try:
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
+            except BaseException as exc:  # noqa: BLE001 - continue complete rollback
+                failed.append((label, callback, exc))
+                logger.error(
+                    "Engine startup rollback failed: owner=%s exception=%s",
+                    label,
+                    type(exc).__name__,
+                )
+        if failed:
+            # Preserve only unsettled owners, in their original registration
+            # order, so a later rollback attempt retries them in reverse order.
+            self._callbacks.extend((label, callback) for label, callback, _exc in reversed(failed))
+            labels = ", ".join(label for label, _callback, _exc in failed)
+            raise RuntimeError(f"engine startup rollback incomplete: {labels}") from failed[0][2]
+        self._settled = True
+
+    def commit(self) -> None:
+        if self._settled or self._rollback_started:
+            raise RuntimeError("engine startup transaction is already settled")
+        self._settled = True
+        self._callbacks.clear()
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineShutdownOwner:
+    """One retained shutdown callback with a stable, non-secret label."""
+
+    label: str
+    stop: Callable[[], Any]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.label) is not str
+            or not self.label
+            or len(self.label) > 64
+            or not self.label.isascii()
+            or not all(char.isalnum() or char in {"_", "-"} for char in self.label)
+            or not callable(self.stop)
+        ):
+            raise ValueError("engine shutdown owner is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineShutdownLayer:
+    """One dependency layer whose owners are true settlement peers."""
+
+    label: str
+    owners: tuple[_EngineShutdownOwner, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.label) is not str
+            or not self.label
+            or len(self.label) > 64
+            or not self.label.isascii()
+            or not all(char.isalnum() or char in {"_", "-"} for char in self.label)
+            or type(self.owners) is not tuple
+            or not self.owners
+        ):
+            raise ValueError("engine shutdown layer is invalid")
+
+
+class _EngineShutdownSettledFailure(ShutdownOwnerSettledError):
+    """A terminal task owner settled, but its terminal result was failure."""
+
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__(failure)
+
+
+async def _invoke_engine_shutdown_owner(owner: _EngineShutdownOwner) -> None:
+    result = owner.stop()
+    if inspect.isawaitable(result):
+        result = await result
+    if result is not None:
+        raise RuntimeError("shutdown callback did not return exact success")
+
+
+async def _run_engine_shutdown_phase(
+    owners: tuple[_EngineShutdownOwner, ...],
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float,
+    sleep: Callable[[float], Awaitable[None]],
+) -> tuple[tuple[str, BaseException], ...]:
+    """Attempt all retained peers per pass and retry failures without a cap."""
+
+    remaining = list(owners)
+    first_failures: list[tuple[str, BaseException]] = []
+    failed_labels: set[str] = set()
+    while remaining:
+        tasks = tuple(
+            asyncio.create_task(
+                _invoke_engine_shutdown_owner(owner),
+                name=f"engine-shutdown-{owner.label}",
+            )
+            for owner in remaining
+        )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        retry: list[_EngineShutdownOwner] = []
+        for owner, result in zip(remaining, results, strict=True):
+            if result is None:
+                logger_.info("Engine shutdown owner settled: owner=%s", owner.label)
+                continue
+            if isinstance(result, ShutdownOwnerSettledError):
+                if owner.label not in failed_labels:
+                    failed_labels.add(owner.label)
+                    first_failures.append((owner.label, result.failure))
+                logger_.error(
+                    "Engine shutdown terminal owner failed after settlement: owner=%s exception=%s",
+                    owner.label,
+                    type(result.failure).__name__,
+                )
+                continue
+            assert isinstance(result, BaseException)
+            if owner.label not in failed_labels:
+                failed_labels.add(owner.label)
+                first_failures.append((owner.label, result))
+            logger_.error(
+                "Engine shutdown owner retained for retry: owner=%s exception=%s",
+                owner.label,
+                type(result).__name__,
+            )
+            retry.append(owner)
+        remaining = retry
+        if remaining:
+            await sleep(retry_delay_s)
+    return tuple(first_failures)
+
+
+async def _settle_engine_shutdown_phase(
+    owners: tuple[_EngineShutdownOwner, ...],
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float = 0.1,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> tuple[tuple[str, BaseException], ...]:
+    """Retain one attempt-all phase through repeated caller cancellation."""
+
+    if len({owner.label for owner in owners}) != len(owners):
+        raise ValueError("engine shutdown owner labels must be unique")
+    requested_delay = float(retry_delay_s)
+    bounded_delay = min(max(requested_delay, 0.0), 1.0) if math.isfinite(requested_delay) else 0.1
+    settlement = asyncio.create_task(
+        _run_engine_shutdown_phase(
+            owners,
+            logger_,
+            retry_delay_s=bounded_delay,
+            sleep=sleep,
+        ),
+        name="engine-shutdown-phase-settlement",
+    )
+    cancellation: asyncio.CancelledError | None = None
+    while not settlement.done():
+        try:
+            await asyncio.shield(settlement)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    failures = settlement.result()
+    if cancellation is None:
+        return failures
+    return (("phase_wait", cancellation), *failures)
+
+
+async def _settle_engine_shutdown_plan(
+    layers: tuple[_EngineShutdownLayer, ...],
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float = 0.1,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> tuple[tuple[str, BaseException], ...]:
+    """Settle dependency layers sequentially and true peers concurrently."""
+
+    if type(layers) is not tuple:
+        raise TypeError("engine shutdown plan must be a tuple")
+    if len({layer.label for layer in layers}) != len(layers):
+        raise ValueError("engine shutdown layer labels must be unique")
+    owner_labels = tuple(owner.label for layer in layers for owner in layer.owners)
+    if len(set(owner_labels)) != len(owner_labels):
+        raise ValueError("engine shutdown owner labels must be globally unique")
+
+    failures: list[tuple[str, BaseException]] = []
+    for layer in layers:
+        logger_.info("Engine shutdown layer starting: layer=%s", layer.label)
+        layer_failures = await _settle_engine_shutdown_phase(
+            layer.owners,
+            logger_,
+            retry_delay_s=retry_delay_s,
+            sleep=sleep,
+        )
+        failures.extend((f"{layer.label}.{owner_label}", failure) for owner_label, failure in layer_failures)
+        logger_.info("Engine shutdown layer settled: layer=%s", layer.label)
+    return tuple(failures)
+
+
+async def _drain_retained_command_tasks_owner(
+    context: EngineCommandContext,
+    logger_: logging.Logger,
+) -> None:
+    """Normalize the retained-command deadline result for strict shutdown."""
+
+    completed_within_deadline = await _drain_experiment_command_tasks(context, logger_)
+    if completed_within_deadline is not True:
+        raise _EngineShutdownSettledFailure(TimeoutError("retained command settlement exceeded its visible deadline"))
+
+
+async def _stop_scheduler_shutdown_owner(
+    scheduler: Scheduler,
+    feed: RecordingLifecycleFeed,
+    sequence: int,
+) -> None:
+    await _stop_scheduler_with_recording_feed(scheduler, feed, sequence)
+
+
+async def _stop_terminal_task_owner(task: asyncio.Task[Any]) -> None:
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    except BaseException as exc:  # noqa: BLE001 - task ownership is terminal
+        raise _EngineShutdownSettledFailure(exc) from None
+
+
+async def _request_and_settle_terminal_task_owner(
+    request_stop: Callable[[], Any],
+    task: asyncio.Task[Any] | None,
+) -> None:
+    result = request_stop()
+    if inspect.isawaitable(result):
+        result = await result
+    if result is not None:
+        raise RuntimeError("shutdown request did not return exact success")
+    if task is None:
+        return
+    try:
+        await task
+    except BaseException as exc:  # noqa: BLE001 - task ownership is terminal
+        raise _EngineShutdownSettledFailure(exc) from None
+
+
+async def _settle_command_server_before_safety(
+    command_server: Any,
+    safety_manager: Any,
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float = 1.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> tuple[BaseException, ...]:
+    """Freeze mutation ingress and retain teardown until global OFF is final.
+
+    A command-server failure must never bypass the safety owner.  After every
+    failed/cancelled server-stop attempt we prove global OFF, retain the
+    process, and retry server settlement.  Once every command owner is settled,
+    global OFF is proved one final time so no late mutation can invalidate it.
+    Earlier failures are returned for deferred reporting after the remaining
+    teardown owners have been attempted.
+    """
+
+    command_server.freeze_admission()
+    failures: list[BaseException] = []
+    while True:
+        settlement = asyncio.create_task(
+            command_server.stop(),
+            name="command-server-shutdown-owner",
+        )
+        # Attempt OFF immediately, before waiting on an intentionally
+        # cancellation-resistant mutation owner. While such an owner remains,
+        # periodically reassert OFF; the process and all dependencies stay
+        # retained until the command owner terminally settles.
+        while not settlement.done():
+            await stop_safety_manager_with_hold(safety_manager, logger_)
+            if settlement.done():
+                break
+            retry_timer = asyncio.create_task(
+                sleep(retry_delay_s),
+                name="command-server-shutdown-safety-retry",
+            )
+            while not settlement.done() and not retry_timer.done():
+                try:
+                    await asyncio.wait(
+                        {settlement, retry_timer},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError as cancel_exc:
+                    failures.append(cancel_exc)
+            if not retry_timer.done():
+                retry_timer.cancel()
+            try:
+                await retry_timer
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            settlement.result()
+        except BaseException as exc:  # noqa: BLE001 - safety settlement must still run
+            failures.append(exc)
+            logger_.critical(
+                "Command-server shutdown incomplete; retaining process through safety settlement: %s",
+                type(exc).__name__,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            await stop_safety_manager_with_hold(safety_manager, logger_)
+            continue
+        break
+
+    # The final OFF proof starts only after the last command owner is known to
+    # be terminal, covering a mutation that settled after an earlier proof.
+    await stop_safety_manager_with_hold(safety_manager, logger_)
+    return tuple(failures)
+
+
+class _EngineTeardownState(Enum):
+    """Monotonic engine teardown checkpoints."""
+
+    NEW = "new"
+    INGRESS_OFF_SETTLED = "ingress_off_settled"
+    PLAN_SETTLED = "plan_settled"
+
+
+class _EngineTeardownSequence:
+    """Own ordered teardown settlement and its single final disposition."""
+
+    def __init__(
+        self,
+        *,
+        command_ingress: ZMQCommandIngressPair,
+        safety_manager: Any,
+        logger_: logging.Logger,
+        ingress_terminal_failure: ZMQCommandIngressTerminalFailure | None,
+    ) -> None:
+        self._command_ingress = command_ingress
+        self._safety_manager = safety_manager
+        self._logger = logger_
+        self._initial_ingress_terminal_failure = ingress_terminal_failure
+        self._state = _EngineTeardownState.NEW
+        self._ingress_failures: tuple[BaseException, ...] = ()
+        self._plan_failures: tuple[tuple[str, BaseException], ...] = ()
+
+    @property
+    def state(self) -> _EngineTeardownState:
+        return self._state
+
+    async def settle_ingress_off(self) -> None:
+        if self._state is not _EngineTeardownState.NEW:
+            raise RuntimeError("engine teardown ingress/OFF settlement is out of sequence")
+        self._ingress_failures = await _settle_command_server_before_safety(
+            self._command_ingress,
+            self._safety_manager,
+            self._logger,
+        )
+        self._state = _EngineTeardownState.INGRESS_OFF_SETTLED
+
+    async def settle_plan(self, layers: tuple[_EngineShutdownLayer, ...]) -> None:
+        if self._state is not _EngineTeardownState.INGRESS_OFF_SETTLED:
+            raise RuntimeError("engine teardown plan settlement is out of sequence")
+        self._plan_failures = await _settle_engine_shutdown_plan(layers, self._logger)
+        self._state = _EngineTeardownState.PLAN_SETTLED
+
+    def finalize(self) -> None:
+        if self._state is not _EngineTeardownState.PLAN_SETTLED:
+            raise RuntimeError("engine teardown cannot finalize before the shutdown plan settles")
+        shutdown_failures = (
+            tuple(("command_server", failure) for failure in self._ingress_failures) + self._plan_failures
+        )
+        ingress_terminal_failure = self._command_ingress.terminal_failure or self._initial_ingress_terminal_failure
+        if ingress_terminal_failure is not None:
+            self._logger.error(
+                "Engine command ingress terminated; endpoint=%s stage=%s failure=%s",
+                ingress_terminal_failure.endpoint,
+                ingress_terminal_failure.stage,
+                ingress_terminal_failure.failure_type,
+            )
+            if shutdown_failures:
+                self._logger.error(
+                    "Engine ingress failure teardown recovered owner failures: owners=%s",
+                    ",".join(label for label, _failure in shutdown_failures),
+                )
+            raise ZMQCommandIngressTerminalError(ingress_terminal_failure) from None
+        if shutdown_failures:
+            failure_labels = ",".join(label for label, _failure in shutdown_failures)
+            first_label, first_failure = shutdown_failures[0]
+            if isinstance(first_failure, asyncio.CancelledError):
+                raise first_failure
+            raise RuntimeError(
+                f"engine shutdown settled after recovered owner failures: first={first_label}; owners={failure_labels}"
+            ) from first_failure
+
+
+async def _rollback_supervisor(supervisor: TaskSupervisor) -> None:
+    """Stop restart authority and settle non-safety tasks during failed boot."""
+
+    supervisor.stop()
+    tasks = tuple(
+        task
+        for name, task in supervisor.supervised_tasks.items()
+        if name not in {"safety_collect", "safety_monitor"} and not task.done()
+    )
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _rollback_scheduler_startup(
+    scheduler: Scheduler,
+    recording_lifecycle_feed: RecordingLifecycleFeed,
+    rollback_state: dict[str, Any],
+) -> None:
+    """Settle a scheduler whose startup transaction reached its start attempt."""
+
+    if rollback_state["attempted"] is True:
+        await _stop_scheduler_with_recording_feed(
+            scheduler,
+            recording_lifecycle_feed,
+            rollback_state["sequence"],
+        )
+
+
+def _engine_startup_summary(
+    driver_configs: tuple[InstrumentConfig, ...],
+    alarm_configs: list[AlarmConfig],
+    interlock_engine: InterlockEngine,
+) -> tuple[int, int, int]:
+    """Return the bounded startup counts logged after all owners are live."""
+
+    return (
+        len(driver_configs),
+        len(alarm_configs),
+        len(interlock_engine.get_state()),
+    )
+
+
+def _install_engine_signal_handlers(shutdown_event: asyncio.Event) -> Callable[[], None]:
+    """Install shutdown ownership and return its exact rollback action."""
+
+    loop = asyncio.get_running_loop()
+    request_shutdown = functools.partial(_request_shutdown, shutdown_event)
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGINT, request_shutdown)
+        try:
+            loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+        except BaseException:
+            loop.remove_signal_handler(signal.SIGINT)
+            raise
+
+        def remove() -> None:
+            loop.remove_signal_handler(signal.SIGTERM)
+            loop.remove_signal_handler(signal.SIGINT)
+
+        return remove
+
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, request_shutdown)
+
+    def remove() -> None:
+        signal.signal(signal.SIGINT, previous)
+
+    return remove
+
+
+async def _commit_engine_command_ingress_startup(
+    *,
+    command_ingress: ZMQCommandIngressPair,
+    command_context: EngineCommandContext,
+    startup: _EngineStartupRollback,
+) -> None:
+    """Commit READY inside one synchronous health/emit/health boundary."""
+
+    try:
+        health_result = command_ingress.require_healthy()
+        _require_exact_synchronous_none(
+            health_result,
+            boundary="engine command ingress health check",
+        )
+        if command_context.engine_ready_nonce:
+            ready_result = _emit_engine_ready_receipt(command_context)
+            _require_exact_synchronous_none(
+                ready_result,
+                boundary="engine READY emitter",
+            )
+        health_result = command_ingress.require_healthy()
+        _require_exact_synchronous_none(
+            health_result,
+            boundary="engine command ingress health check",
+        )
+        command_context.experiment_commands_accepting = True
+        startup.commit()
+    except BaseException:
+        await startup.rollback()
+        raise
+
+
+def _require_exact_synchronous_none(result: object, *, boundary: str) -> None:
+    """Reject and settle an unexpected awaitable without yielding to it."""
+
+    if result is None:
+        return
+    if inspect.isawaitable(result):
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        elif isinstance(result, asyncio.Future):
+            result.cancel()
+    raise TypeError(f"{boundary} must return exactly None")
+
+
+async def _wait_for_engine_shutdown_or_ingress_failure(
+    shutdown_event: asyncio.Event,
+    command_ingress: ZMQCommandIngressPair,
+) -> ZMQCommandIngressTerminalFailure | None:
+    """Wait for normal shutdown or sticky ingress failure, prioritizing failure."""
+
+    shutdown_waiter = asyncio.create_task(shutdown_event.wait(), name="engine-shutdown-signal-waiter")
+    ingress_waiter = asyncio.create_task(
+        command_ingress.wait_terminal_failure(),
+        name="engine-command-ingress-terminal-waiter",
+    )
+    failure: ZMQCommandIngressTerminalFailure | None = None
+    try:
+        await asyncio.wait(
+            {shutdown_waiter, ingress_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Read the sticky pair authority after the wait returns and before any
+        # further suspension. If both events are ready, ingress failure wins.
+        failure = command_ingress.terminal_failure
+        if failure is None and ingress_waiter.done():
+            failure = ingress_waiter.result()
+    finally:
+        for waiter in (shutdown_waiter, ingress_waiter):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(shutdown_waiter, ingress_waiter, return_exceptions=True)
+    # Include a failure that latched while the losing waiter was being settled.
+    # This closes the normal-signal/fatal-callback boundary race.
+    return command_ingress.terminal_failure or failure
+
+
+async def _run_engine(
+    *,
+    mock: bool = False,
+    engine_instance_id: str = "",
+    shutdown_capability: str = "",
+    engine_ready_nonce: str = "",
+    engine_ready_channel_fd: int | None = None,
+) -> None:
     """Инициализировать и запустить все подсистемы engine."""
+    engine_instance_id = _canonical_engine_instance_id(engine_instance_id)
     start_ts = time.monotonic()
+    shutdown_event = asyncio.Event()
     logger.info("═══ CryoDAQ Engine запускается ═══")
 
     # --- Конфигурация путей (*.local.yaml приоритетнее *.yaml) ---
@@ -3859,11 +6456,6 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR, channel_catalog=live_descriptor_catalog)
-    await writer.start_immediate()
-    # Keyed operator-log mutations require a bounded, retained-data registry
-    # before the command server can accept any request. A failed proof keeps
-    # the engine from exposing a mutation path with process-local deduplication.
-    await writer.initialize_operator_log_idempotency()
     # Disk-full graceful degradation (Phase 2a H.1): wire writer to the
     # engine event loop and SafetyManager so a disk-full error in the
     # writer thread can latch a safety fault via run_coroutine_threadsafe.
@@ -3883,7 +6475,10 @@ async def _run_engine(*, mock: bool = False) -> None:
             persistence_freshness_s=persistence_freshness_s,
         )
     except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
-        logger.warning("Direct SQLite recording feed unavailable at engine boot: %s", exc, exc_info=True)
+        logger.warning(
+            "Engine boot degraded; owner=recording_lifecycle_feed exception=%s",
+            type(exc).__name__,
+        )
         recording_lifecycle_feed = RecordingLifecycleFeed()
 
     # H.6: wire safety fault → operator_log machine event. Dependencies that
@@ -3929,7 +6524,11 @@ async def _run_engine(*, mock: bool = False) -> None:
     # F35 D4: only the ZMQ publisher path opts in to the descriptor envelope
     # companion — every other subscriber (writer, alarms, safety broker,
     # sound-carrier, assistant relay) stays on the default bare-Reading path.
-    zmq_queue = await broker.subscribe("zmq_publisher", wants_descriptor_envelope=True)
+    zmq_queue = await broker.subscribe(
+        "zmq_publisher",
+        wants_descriptor_envelope=True,
+        required_publisher=True,
+    )
     zmq_pub = ZMQPublisher()
 
     # Interlock Engine — действия делегируются SafetyManager.
@@ -3972,7 +6571,10 @@ async def _run_engine(*, mock: bool = False) -> None:
     try:
         _seed_recording_lifecycle(recording_lifecycle_feed, experiment_manager)
     except Exception as exc:  # noqa: BLE001 - dark presentation cannot block engine boot
-        logger.warning("Recording lifecycle feed unavailable at engine boot: %s", exc, exc_info=True)
+        logger.warning(
+            "Engine boot degraded; owner=recording_lifecycle_seed exception=%s",
+            type(exc).__name__,
+        )
     acquisition_lifecycle_sequence = 0
 
     # F31: sinks foundation (vault + webhooks). Local override beats base.
@@ -4091,7 +6693,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                 safety_manager=(safety_manager if _vacuum_cfg.get("escalate_to_safety") is True else None),
             )
         except Exception as exc:
-            logger.warning("VacuumGuard: ошибка инициализации, отключён — %s", exc)
+            logger.warning(
+                "Engine boot degraded: owner=vacuum_guard exception=%s",
+                type(exc).__name__,
+            )
     else:
         logger.info("VacuumGuard: отключён в конфиге")
 
@@ -4203,16 +6808,48 @@ async def _run_engine(*, mock: bool = False) -> None:
         alarm_v2_state_tracker=_alarm_v2_state_tracker,
         multiline_burst_auto_stop_meta=_multiline_burst_auto_stop_meta,
         multiline_burst_auto_stop_tasks=_multiline_burst_auto_stop_tasks,
+        shutdown_event=shutdown_event,
+        engine_instance_id=engine_instance_id,
+        shutdown_capability=shutdown_capability,
+        engine_ready_nonce=engine_ready_nonce,
+        engine_ready_channel_fd=engine_ready_channel_fd,
+        engine_ready_pid=os.getpid(),
         zmq_publisher=zmq_pub,
         recording_lifecycle_feed=recording_lifecycle_feed,
-        annunciation_registry=AnnunciationRegistry(),
+        annunciation_registry=AnnunciationRegistry(engine_instance_id=engine_instance_id),
         mutation_capability_token=secrets.token_urlsafe(32),
     )
     handle_gui_command = functools.partial(
         _handle_gui_command,
         context=command_context,
     )
-    cmd_server = ZMQCommandServer(handler=handle_gui_command)
+
+    command_authority_registry = CommandAuthorityRegistry()
+    cmd_server = ZMQCommandServer(
+        DEFAULT_CMD_ADDR,
+        handler=handle_gui_command,
+        reply_sent_callback=functools.partial(
+            _request_teardown_after_shutdown_receipt,
+            command_context,
+        ),
+        authority_registry=command_authority_registry,
+        accepted_command_predicate=is_ordinary_command_endpoint_admitted,
+    )
+    safe_cmd_server = ZMQCommandServer(
+        DEFAULT_SAFE_CMD_ADDR,
+        handler=handle_gui_command,
+        reply_sent_callback=functools.partial(
+            _request_teardown_after_shutdown_receipt,
+            command_context,
+        ),
+        authority_registry=command_authority_registry,
+        accepted_actions=frozenset({"engine_ready", "keithley_emergency_off", "launcher_shutdown"}),
+        accepted_command_predicate=functools.partial(
+            _safe_engine_command_is_admitted,
+            context=command_context,
+        ),
+    )
+    command_ingress = ZMQCommandIngressPair(ordinary=cmd_server, safe=safe_cmd_server)
 
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
@@ -4244,7 +6881,10 @@ async def _run_engine(*, mock: bool = False) -> None:
                 if _cooldown_alarm is not None:
                     _cooldown_alarm.set_steady_state_predictor(cooldown_service._ss_predictor)
         except Exception as exc:
-            logger.error("Ошибка создания CooldownService: %s", exc)
+            logger.error(
+                "Engine boot degraded: owner=cooldown_service exception=%s",
+                type(exc).__name__,
+            )
     command_context.cooldown_service = cooldown_service
 
     # --- Уведомления (один раз разбираем YAML) ---
@@ -4318,7 +6958,10 @@ async def _run_engine(*, mock: bool = False) -> None:
             if not token_valid:
                 logger.info("Telegram-уведомления отключены (bot_token не настроен)")
         except Exception as exc:
-            logger.error("Ошибка загрузки конфигурации уведомлений: %s", exc)
+            logger.error(
+                "Engine boot degraded: owner=notification_config exception=%s",
+                type(exc).__name__,
+            )
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
     command_context.escalation_service = escalation_service
@@ -4360,7 +7003,21 @@ async def _run_engine(*, mock: bool = False) -> None:
     _assistant_relay_queue = await event_bus.subscribe("assistant_zmq_relay", maxsize=1000)
 
     # --- Запуск всех подсистем ---
-    await safety_manager.start()
+    startup = _EngineStartupRollback()
+    startup.add(
+        "assistant_event_relay_subscription",
+        functools.partial(event_bus.unsubscribe, "assistant_zmq_relay"),
+    )
+    await startup.acquire(
+        writer.start_immediate(),
+        label="sqlite_writer",
+        rollback=writer.stop,
+    )
+    await startup.acquire(
+        safety_manager.start(),
+        label="safety_manager",
+        rollback=functools.partial(stop_safety_manager_with_hold, safety_manager, logger),
+    )
     logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
 
     # ─────────────────── Надзор за долгоживущими задачами (A2) ────────────────
@@ -4371,13 +7028,17 @@ async def _run_engine(*, mock: bool = False) -> None:
     # движок надзирает за ними снаружи и после _SAFETY_TASK_MAX_RESTARTS
     # неудачных перезапусков латчит FAULT вместо бесконечного цикла. Политика
     # надзора вынесена в engine_wiring.supervision.TaskSupervisor.
-    supervisor = TaskSupervisor(
-        event_bus=event_bus,
-        experiment_manager=experiment_manager,
-        safety_manager=safety_manager,
-        alarm_dispatch_tasks=_alarm_dispatch_tasks,
-        logger_=logger,
+    supervisor = await startup.call(
+        functools.partial(
+            TaskSupervisor,
+            event_bus=event_bus,
+            experiment_manager=experiment_manager,
+            safety_manager=safety_manager,
+            alarm_dispatch_tasks=_alarm_dispatch_tasks,
+            logger_=logger,
+        )
     )
+    startup.add("task_supervisor_restart_authority", supervisor.stop)
     operator_snapshot_service = None
     try:
         operator_snapshot_service = build_operator_snapshot_publication_service(
@@ -4387,7 +7048,10 @@ async def _run_engine(*, mock: bool = False) -> None:
             data_root=_DATA_DIR,
         )
     except Exception as exc:  # noqa: BLE001 - observational publication is fail-dark
-        logger.warning("Operator snapshot publication unavailable at engine boot: %s", exc, exc_info=True)
+        logger.warning(
+            "Engine boot degraded; owner=operator_snapshot_publication exception=%s",
+            type(exc).__name__,
+        )
 
     # safety_collect/safety_monitor уже созданы SafetyManager.start(); надзираем
     # за ними снаружи, не трогая safety_manager.py. Перезапуск повторно запускает
@@ -4400,171 +7064,287 @@ async def _run_engine(*, mock: bool = False) -> None:
         _stask = getattr(safety_manager, _sattr, None)
         if _stask is not None:
             _loop_fn = getattr(safety_manager, f"_{_sname.split('_', 1)[1]}_loop")
-            supervisor.register(
-                _sname,
-                _stask,
-                _loop_fn,
-                safety_critical=True,
-                on_spawn=functools.partial(_set_safety_task_ref, safety_manager, _srole),
+            await startup.call(
+                functools.partial(
+                    supervisor.register,
+                    _sname,
+                    _stask,
+                    _loop_fn,
+                    safety_critical=True,
+                    on_spawn=functools.partial(_set_safety_task_ref, safety_manager, _srole),
+                )
             )
 
-    install_loop_exception_backstop(asyncio.get_running_loop(), logger)
+    await startup.call(
+        functools.partial(
+            install_loop_exception_backstop,
+            asyncio.get_running_loop(),
+            logger,
+        )
+    )
 
     # writer уже запущен через start_immediate() выше
-    await zmq_pub.start(zmq_queue)
-    await cmd_server.start()
-    await interlock_engine.start()
-    await plugin_pipeline.start()
+    await startup.acquire(
+        zmq_pub.start(zmq_queue),
+        label="zmq_publisher",
+        rollback=zmq_pub.stop,
+    )
+    # Keyed operator-log mutations remain unavailable until the complete
+    # retained registry is proven and every durable publication intent has
+    # been replayed. Cancellation or failure therefore leaves REP unopened.
+    # SQLiteWriter already retains its executor owner through cancellation.
+    # Await that owner directly so a cancelled startup cannot abandon an outer
+    # shield task while rollback concurrently settles the writer.
+    command_ingress_recovery = _CommandIngressRecoveryAuthority(
+        writer=writer,
+        broker=broker,
+        engine_instance_id=engine_instance_id,
+    )
+    await startup.guard(command_ingress_recovery.settle())
+    await startup.acquire(
+        interlock_engine.start(),
+        label="interlock_engine",
+        rollback=interlock_engine.stop,
+    )
+    await startup.acquire(
+        plugin_pipeline.start(),
+        label="plugin_pipeline",
+        rollback=plugin_pipeline.stop,
+    )
     if cooldown_service is not None:
-        await cooldown_service.start()
+        await startup.acquire(
+            cooldown_service.start(),
+            label="cooldown_service",
+            rollback=cooldown_service.stop,
+        )
     if telegram_bot is not None:
-        await telegram_bot.start()
+        await startup.acquire(
+            telegram_bot.start(),
+            label="telegram_bot",
+            rollback=telegram_bot.stop,
+        )
     if _photo_handler is not None:
-        await _photo_handler.start()
+        await startup.acquire(
+            _photo_handler.start(),
+            label="composition_photo_handler",
+            rollback=_photo_handler.stop,
+        )
+    scheduler_rollback: dict[str, Any] = {
+        "attempted": False,
+        "sequence": acquisition_lifecycle_sequence,
+    }
+
+    startup.add(
+        "scheduler",
+        functools.partial(
+            _rollback_scheduler_startup,
+            scheduler,
+            recording_lifecycle_feed,
+            scheduler_rollback,
+        ),
+    )
+    startup.add(
+        "task_supervisor",
+        functools.partial(_rollback_supervisor, supervisor),
+    )
     # B1: relay EngineEvents to the assistant process over ZMQ (see the
     # wiring comment above _assistant_relay_queue for what this replaces).
-    assistant_event_relay_task = supervisor.spawn(
-        "assistant_event_relay",
+    assistant_event_relay_task = await startup.call(
         functools.partial(
-            assistant_event_relay_loop,
-            _assistant_relay_queue,
-            zmq_pub,
-            _ASSISTANT_RELAY_EVENT_TYPES,
-        ),
-    )
-    acquisition_lifecycle_sequence = await _start_scheduler_with_recording_feed(
-        scheduler,
-        recording_lifecycle_feed,
-        acquisition_lifecycle_sequence,
-    )
-    if operator_snapshot_service is not None:
-        supervisor.spawn(
-            "operator_snapshot_publication",
-            operator_snapshot_service.run,
+            supervisor.spawn,
+            "assistant_event_relay",
+            functools.partial(
+                assistant_event_relay_loop,
+                _assistant_relay_queue,
+                zmq_pub,
+                _ASSISTANT_RELAY_EVENT_TYPES,
+            ),
         )
-    throttle_task = supervisor.spawn(
-        "adaptive_throttle_runtime",
-        functools.partial(track_runtime_signals, broker, adaptive_throttle),
     )
-    alarm_v2_feed_task = supervisor.spawn(
-        "alarm_v2_feed",
+    scheduler_rollback["attempted"] = True
+    acquisition_lifecycle_sequence = await startup.guard(
+        _start_scheduler_with_recording_feed(
+            scheduler,
+            recording_lifecycle_feed,
+            acquisition_lifecycle_sequence,
+        )
+    )
+    scheduler_rollback["sequence"] = acquisition_lifecycle_sequence
+    if operator_snapshot_service is not None:
+        await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "operator_snapshot_publication",
+                operator_snapshot_service.run,
+            )
+        )
+        startup.add(
+            "operator_snapshot_stop_signal",
+            operator_snapshot_service.request_stop,
+        )
+    throttle_task = await startup.call(
         functools.partial(
-            alarm_v2_feed_readings,
-            broker,
-            _alarm_v2_state_tracker,
-            _alarm_v2_rate,
-        ),
+            supervisor.spawn,
+            "adaptive_throttle_runtime",
+            functools.partial(track_runtime_signals, broker, adaptive_throttle),
+        )
     )
-    alarm_ring_task = supervisor.spawn(
-        "alarm_ring_buffer_feed",
-        functools.partial(alarm_ring_feed, event_bus, _alarm_ring),
+    alarm_v2_feed_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "alarm_v2_feed",
+            functools.partial(
+                alarm_v2_feed_readings,
+                broker,
+                _alarm_v2_state_tracker,
+                _alarm_v2_rate,
+            ),
+        )
+    )
+    alarm_ring_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "alarm_ring_buffer_feed",
+            functools.partial(alarm_ring_feed, event_bus, _alarm_ring),
+        )
     )
     alarm_v2_tick_task: asyncio.Task | None = None
     if _alarm_v2_configs:
-        alarm_v2_tick_task = supervisor.spawn(
-            "alarm_v2_tick",
+        alarm_v2_tick_task = await startup.call(
             functools.partial(
-                alarm_v2_tick,
-                engine_cfg=_alarm_v2_engine_cfg,
-                configs=_alarm_v2_configs,
-                phase_provider=_alarm_v2_phase,
-                evaluator=alarm_v2_evaluator,
-                state_mgr=alarm_v2_state_mgr,
-                broker=broker,
-                telegram_bot=telegram_bot,
-                alarm_dispatch_tasks=_alarm_dispatch_tasks,
-                event_bus=event_bus,
-                experiment_manager=experiment_manager,
-            ),
+                supervisor.spawn,
+                "alarm_v2_tick",
+                functools.partial(
+                    alarm_v2_tick,
+                    engine_cfg=_alarm_v2_engine_cfg,
+                    configs=_alarm_v2_configs,
+                    phase_provider=_alarm_v2_phase,
+                    evaluator=alarm_v2_evaluator,
+                    state_mgr=alarm_v2_state_mgr,
+                    broker=broker,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
         )
 
     cooldown_alarm_task: asyncio.Task | None = None
     vacuum_guard_task: asyncio.Task | None = None
     if _cooldown_alarm is not None:
-        cooldown_alarm_task = supervisor.spawn(
-            "cooldown_alarm_tick",
+        cooldown_alarm_task = await startup.call(
             functools.partial(
-                cooldown_alarm_tick_loop,
-                cooldown_cfg=_cooldown_cfg,
-                cooldown_alarm=_cooldown_alarm,
-                state_mgr=alarm_v2_state_mgr,
-                telegram_bot=telegram_bot,
-                alarm_dispatch_tasks=_alarm_dispatch_tasks,
-                event_bus=event_bus,
-                experiment_manager=experiment_manager,
-            ),
+                supervisor.spawn,
+                "cooldown_alarm_tick",
+                functools.partial(
+                    cooldown_alarm_tick_loop,
+                    cooldown_cfg=_cooldown_cfg,
+                    cooldown_alarm=_cooldown_alarm,
+                    state_mgr=alarm_v2_state_mgr,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
         )
     if _vacuum_guard is not None:
-        vacuum_guard_task = supervisor.spawn(
-            "vacuum_guard_tick",
+        vacuum_guard_task = await startup.call(
             functools.partial(
-                vacuum_guard_tick_loop,
-                vacuum_cfg=_vacuum_cfg,
-                vacuum_guard=_vacuum_guard,
-                state_mgr=alarm_v2_state_mgr,
-                telegram_bot=telegram_bot,
-                alarm_dispatch_tasks=_alarm_dispatch_tasks,
-                event_bus=event_bus,
-                experiment_manager=experiment_manager,
-            ),
+                supervisor.spawn,
+                "vacuum_guard_tick",
+                functools.partial(
+                    vacuum_guard_tick_loop,
+                    vacuum_cfg=_vacuum_cfg,
+                    vacuum_guard=_vacuum_guard,
+                    state_mgr=alarm_v2_state_mgr,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
         )
 
     sd_feed_task: asyncio.Task | None = None
     sd_tick_task: asyncio.Task | None = None
     if sensor_diag is not None:
-        sd_feed_task = supervisor.spawn(
-            "sensor_diag_feed",
-            functools.partial(sensor_diag_feed, sensor_diag, broker),
-        )
-        sd_tick_task = supervisor.spawn(
-            "sensor_diag_tick",
+        sd_feed_task = await startup.call(
             functools.partial(
-                sensor_diag_tick,
-                sensor_diag=sensor_diag,
-                sd_cfg=_sd_cfg,
-                telegram_bot=telegram_bot,
-                alarm_dispatch_tasks=_alarm_dispatch_tasks,
-                event_bus=event_bus,
-                experiment_manager=experiment_manager,
-            ),
+                supervisor.spawn,
+                "sensor_diag_feed",
+                functools.partial(sensor_diag_feed, sensor_diag, broker),
+            )
+        )
+        sd_tick_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "sensor_diag_tick",
+                functools.partial(
+                    sensor_diag_tick,
+                    sensor_diag=sensor_diag,
+                    sd_cfg=_sd_cfg,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
         )
         # v0.55.5 — anchor the cold-start grace at the moment the feed
         # and tick tasks are actually live. Doing this here (rather than
         # in the constructor) avoids counting the engine bootstrap
         # window as part of the grace.
-        sensor_diag.mark_engine_started()
+        await startup.call(sensor_diag.mark_engine_started)
     vt_feed_task: asyncio.Task | None = None
     vt_tick_task: asyncio.Task | None = None
     if vacuum_trend is not None:
-        vt_feed_task = supervisor.spawn(
-            "vacuum_trend_feed",
-            functools.partial(vacuum_trend_feed, vacuum_trend, _vt_cfg, broker),
+        vt_feed_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "vacuum_trend_feed",
+                functools.partial(vacuum_trend_feed, vacuum_trend, _vt_cfg, broker),
+            )
         )
-        vt_tick_task = supervisor.spawn(
-            "vacuum_trend_tick",
-            functools.partial(vacuum_trend_tick, vacuum_trend, _vt_cfg),
+        vt_tick_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "vacuum_trend_tick",
+                functools.partial(vacuum_trend_tick, vacuum_trend, _vt_cfg),
+            )
         )
-    leak_rate_feed_task = supervisor.spawn(
-        "leak_rate_feed",
+    leak_rate_feed_task = await startup.call(
         functools.partial(
-            leak_rate_feed,
-            vt_cfg=_vt_cfg,
-            broker=broker,
-            leak_rate_estimator=leak_rate_estimator,
-            event_logger=event_logger,
-        ),
+            supervisor.spawn,
+            "leak_rate_feed",
+            functools.partial(
+                leak_rate_feed,
+                vt_cfg=_vt_cfg,
+                broker=broker,
+                leak_rate_estimator=leak_rate_estimator,
+                event_logger=event_logger,
+            ),
+        )
     )
-    await housekeeping_service.start()
+    await startup.acquire(
+        housekeeping_service.start(),
+        label="housekeeping_service",
+        rollback=housekeeping_service.stop,
+    )
 
     cold_rotation_task: asyncio.Task | None = None
     if cold_rotation_service is not None:
-        cold_rotation_task = supervisor.spawn(
-            "cold_rotation_scheduler",
+        cold_rotation_task = await startup.call(
             functools.partial(
-                cold_rotation_scheduler,
-                cold_rotation_service,
-                cold_rotation_schedule,
-            ),
+                supervisor.spawn,
+                "cold_rotation_scheduler",
+                functools.partial(
+                    cold_rotation_scheduler,
+                    cold_rotation_service,
+                    cold_rotation_schedule,
+                ),
+            )
         )
         logger.info(
             "ColdRotationService запущен: archive=%s, age_days=%d, schedule=%s",
@@ -4576,38 +7356,73 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.info("ColdRotationService отключён (cold_rotation.enabled != true)")
 
     # Watchdog
-    watchdog_task = supervisor.spawn(
-        "engine_watchdog",
-        functools.partial(_watchdog, broker, scheduler, writer, start_ts),
+    watchdog_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "engine_watchdog",
+            functools.partial(_watchdog, broker, scheduler, writer, start_ts),
+        )
     )
 
     # DiskMonitor — also wires the writer so disk-recovery can clear the
     # _disk_full flag (Phase 2a H.1).
-    disk_monitor = DiskMonitor(data_dir=_DATA_DIR, broker=broker, sqlite_writer=writer)
-    await disk_monitor.start()
+    disk_monitor = await startup.call(
+        functools.partial(
+            DiskMonitor,
+            data_dir=_DATA_DIR,
+            broker=broker,
+            sqlite_writer=writer,
+        )
+    )
+    await startup.acquire(
+        disk_monitor.start(),
+        label="disk_monitor",
+        rollback=disk_monitor.stop,
+    )
+
+    startup_summary = await startup.call(
+        functools.partial(
+            _engine_startup_summary,
+            driver_configs,
+            _alarm_v2_configs,
+            interlock_engine,
+        )
+    )
+
+    remove_signal_handlers = await startup.call(functools.partial(_install_engine_signal_handlers, shutdown_event))
+    startup.add("signal_handlers", remove_signal_handlers)
+
+    # REP is the final startup acquisition. No external command surface exists
+    # while any dependency or retained operator-log intent is unsettled.
+    command_context.experiment_commands_accepting = False
+    await startup.acquire(
+        command_ingress_recovery.start(command_ingress),
+        label="command_ingress",
+        rollback=command_ingress.stop,
+    )
+    await _commit_engine_command_ingress_startup(
+        command_ingress=command_ingress,
+        command_context=command_context,
+        startup=startup,
+    )
 
     logger.info(
         "═══ CryoDAQ Engine запущен ═══ | приборов=%d | тревог=%d | блокировок=%d | mock=%s",
-        len(driver_configs),
-        len(_alarm_v2_configs),
-        len(interlock_engine.get_state()),
+        *startup_summary,
         mock,
     )
 
     # --- Ожидание сигнала завершения ---
-    shutdown_event = asyncio.Event()
-
-    # Регистрация обработчиков сигналов
-    loop = asyncio.get_running_loop()
-    request_shutdown = functools.partial(_request_shutdown, shutdown_event)
-    if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGINT, request_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, request_shutdown)
-    else:
-        # Windows: signal.signal работает только в главном потоке
-        signal.signal(signal.SIGINT, request_shutdown)
-
-    await shutdown_event.wait()
+    ingress_terminal_failure = await _wait_for_engine_shutdown_or_ingress_failure(
+        shutdown_event,
+        command_ingress,
+    )
+    teardown_sequence = _EngineTeardownSequence(
+        command_ingress=command_ingress,
+        safety_manager=safety_manager,
+        logger_=logger,
+        ingress_terminal_failure=ingress_terminal_failure,
+    )
 
     # --- Корректное завершение ---
     logger.info("═══ Завершение CryoDAQ Engine ═══")
@@ -4616,183 +7431,187 @@ async def _run_engine(*, mock: bool = False) -> None:
     # REP task may cancel a reply waiter, but shielded experiment owners remain
     # authoritative and are settled below before any dependent resource stops.
     command_context.experiment_commands_accepting = False
-    await cmd_server.stop()
-    logger.info("ZMQ CommandServer остановлен")
     # A2: гасим надзор до отмены задач — иначе done-callback перезапустит
     # только что отменённую задачу прямо во время завершения.
     supervisor.stop()
 
-    # Prove global OFF while the reviewed source is still connected and every
-    # observation/logging dependency remains alive. An unverified attempt is a
-    # process-retaining HOLD, never an exception path out of _run_engine.
-    await stop_safety_manager_with_hold(safety_manager, logger)
+    # Synchronously freeze admission, settle every retained command owner, and
+    # prove final global OFF. A REP teardown failure/cancellation is retained
+    # and retried; it can neither bypass safety nor invalidate OFF later.
+    await teardown_sequence.settle_ingress_off()
+    logger.info("ZMQ CommandServer остановлен")
 
-    # Retained persistence owners drain only after the safety cutover.
-    await _drain_experiment_command_tasks(command_context, logger)
+    # Build one explicit dependency plan. Owners inside a layer are true peers;
+    # layers settle in order so no producer can enqueue behind a completed
+    # dispatch drain and no persistence/transport dependency closes early.
+    runtime_producer_owners: list[_EngineShutdownOwner] = []
+    known_quiesce_tasks: set[asyncio.Task[Any]] = set()
     logger.info("SafetyManager остановлен: состояние=%s", safety_manager.state.value)
 
     if operator_snapshot_service is not None:
-        operator_snapshot_service.request_stop()
         operator_snapshot_task = supervisor.supervised_tasks.get("operator_snapshot_publication")
         if operator_snapshot_task is not None:
-            try:
-                await operator_snapshot_task
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - presentation failure cannot block shutdown
-                logger.warning("Operator snapshot publication stopped with failure: %s", exc, exc_info=True)
+            known_quiesce_tasks.add(operator_snapshot_task)
+        runtime_producer_owners.append(
+            _EngineShutdownOwner(
+                "operator_snapshot_publication",
+                functools.partial(
+                    _request_and_settle_terminal_task_owner,
+                    operator_snapshot_service.request_stop,
+                    operator_snapshot_task,
+                ),
+            )
+        )
 
-    # F31 H3: drain in-flight sink dispatches before downstream teardown.
-    # _alarm_dispatch_tasks holds vault-write and webhook-POST tasks
-    # that are mid-flight at SIGTERM time; cancelling them mid-flight
-    # corrupts vault notes and aborts webhook POSTs. Cap at 10s.
-    await _drain_dispatch_tasks(_alarm_dispatch_tasks, logger)
-
-    watchdog_task.cancel()
-    try:
-        await watchdog_task
-    except asyncio.CancelledError:
-        pass
-
-    throttle_task.cancel()
-    try:
-        await throttle_task
-    except asyncio.CancelledError:
-        pass
-
-    alarm_v2_feed_task.cancel()
-    try:
-        await alarm_v2_feed_task
-    except asyncio.CancelledError:
-        pass
-
-    alarm_ring_task.cancel()
-    try:
-        await alarm_ring_task
-    except asyncio.CancelledError:
-        pass
-    if alarm_v2_tick_task is not None:
-        alarm_v2_tick_task.cancel()
-        try:
-            await alarm_v2_tick_task
-        except asyncio.CancelledError:
-            pass
-
-    if sd_feed_task is not None:
-        sd_feed_task.cancel()
-        try:
-            await sd_feed_task
-        except asyncio.CancelledError:
-            pass
-    if sd_tick_task is not None:
-        sd_tick_task.cancel()
-        try:
-            await sd_tick_task
-        except asyncio.CancelledError:
-            pass
-    if cooldown_alarm_task is not None:
-        cooldown_alarm_task.cancel()
-        try:
-            await cooldown_alarm_task
-        except asyncio.CancelledError:
-            pass
-    if vacuum_guard_task is not None:
-        vacuum_guard_task.cancel()
-        try:
-            await vacuum_guard_task
-        except asyncio.CancelledError:
-            pass
-
-    if vt_feed_task is not None:
-        vt_feed_task.cancel()
-        try:
-            await vt_feed_task
-        except asyncio.CancelledError:
-            pass
-    if vt_tick_task is not None:
-        vt_tick_task.cancel()
-        try:
-            await vt_tick_task
-        except asyncio.CancelledError:
-            pass
-    assistant_event_relay_task.cancel()
-    try:
-        await assistant_event_relay_task
-    except asyncio.CancelledError:
-        pass
-    leak_rate_feed_task.cancel()
-    try:
-        await leak_rate_feed_task
-    except asyncio.CancelledError:
-        pass
+    terminal_task_specs = (
+        ("watchdog_task", watchdog_task),
+        ("throttle_task", throttle_task),
+        ("alarm_v2_feed_task", alarm_v2_feed_task),
+        ("alarm_ring_task", alarm_ring_task),
+        ("alarm_v2_tick_task", alarm_v2_tick_task),
+        ("sensor_diagnostic_feed_task", sd_feed_task),
+        ("sensor_diagnostic_tick_task", sd_tick_task),
+        ("cooldown_alarm_task", cooldown_alarm_task),
+        ("vacuum_guard_task", vacuum_guard_task),
+        ("vacuum_trend_feed_task", vt_feed_task),
+        ("vacuum_trend_tick_task", vt_tick_task),
+        ("assistant_event_relay_task", assistant_event_relay_task),
+        ("leak_rate_feed_task", leak_rate_feed_task),
+    )
+    for label, task in terminal_task_specs:
+        if task is None:
+            continue
+        known_quiesce_tasks.add(task)
+        runtime_producer_owners.append(
+            _EngineShutdownOwner(
+                label,
+                functools.partial(_stop_terminal_task_owner, task),
+            )
+        )
 
     # A2: подметаем перезапущенные надзором задачи — их именованные ссылки
     # выше могут указывать на уже мёртвый оригинал, а живой перезапуск висит
     # только в _supervised_tasks. safety_collect/safety_monitor исключаем:
     # их снимает safety_manager.stop() последними (ссылки синхронизированы при
     # перезапуске), чтобы мониторинг безопасности жил до конца завершения.
-    _stragglers = [
-        t
-        for name, t in supervisor.supervised_tasks.items()
-        if name not in ("safety_collect", "safety_monitor") and not t.done()
+    for index, (name, task) in enumerate(sorted(supervisor.supervised_tasks.items())):
+        if name in {"safety_collect", "safety_monitor"} or task in known_quiesce_tasks or task.done():
+            continue
+        known_quiesce_tasks.add(task)
+        runtime_producer_owners.append(
+            _EngineShutdownOwner(
+                f"supervised_task_{index}",
+                functools.partial(_stop_terminal_task_owner, task),
+            )
+        )
+
+    shutdown_layers: list[_EngineShutdownLayer] = [
+        _EngineShutdownLayer(
+            "retained_mutations",
+            (
+                _EngineShutdownOwner(
+                    "retained_command_tasks",
+                    functools.partial(
+                        _drain_retained_command_tasks_owner,
+                        command_context,
+                        logger,
+                    ),
+                ),
+            ),
+        ),
+        _EngineShutdownLayer(
+            "scheduler",
+            (
+                _EngineShutdownOwner(
+                    "scheduler",
+                    functools.partial(
+                        _stop_scheduler_shutdown_owner,
+                        scheduler,
+                        recording_lifecycle_feed,
+                        acquisition_lifecycle_sequence,
+                    ),
+                ),
+            ),
+        ),
+        _EngineShutdownLayer(
+            "plugin_pipeline",
+            (_EngineShutdownOwner("plugin_pipeline", plugin_pipeline.stop),),
+        ),
     ]
-    for _t in _stragglers:
-        _t.cancel()
-    if _stragglers:
-        await asyncio.gather(*_stragglers, return_exceptions=True)
+    if runtime_producer_owners:
+        shutdown_layers.append(_EngineShutdownLayer("runtime_producers", tuple(runtime_producer_owners)))
 
     # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
-    acquisition_lifecycle_sequence = await _stop_scheduler_with_recording_feed(
-        scheduler,
-        recording_lifecycle_feed,
-        acquisition_lifecycle_sequence,
-    )
-    logger.info("Планировщик остановлен")
-
-    await plugin_pipeline.stop()
-    logger.info("Пайплайн плагинов остановлен")
-
+    producer_service_owners: list[_EngineShutdownOwner] = []
     if cooldown_service is not None:
-        await cooldown_service.stop()
-        logger.info("CooldownService остановлен")
+        producer_service_owners.append(_EngineShutdownOwner("cooldown_service", cooldown_service.stop))
 
-    event_bus.unsubscribe("assistant_zmq_relay")
-
-    if _photo_handler is not None:
-        await _photo_handler.stop()
-        logger.info("CompositionPhotoHandler остановлен")
-
-    if telegram_bot is not None:
-        await telegram_bot.stop()
-        logger.info("TelegramCommandBot остановлен")
-
-    await interlock_engine.stop()
-    logger.info("Движок блокировок остановлен")
-
-    await disk_monitor.stop()
-    logger.info("DiskMonitor остановлен")
-
-    await housekeeping_service.stop()
-    logger.info("HousekeepingService остановлен")
+    producer_service_owners.append(_EngineShutdownOwner("interlock_engine", interlock_engine.stop))
+    producer_service_owners.append(_EngineShutdownOwner("disk_monitor", disk_monitor.stop))
+    producer_service_owners.append(_EngineShutdownOwner("housekeeping_service", housekeeping_service.stop))
 
     if cold_rotation_task is not None:
-        cold_rotation_task.cancel()
-        try:
-            await cold_rotation_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("ColdRotationService остановлен")
+        producer_service_owners.append(
+            _EngineShutdownOwner(
+                "cold_rotation_task",
+                functools.partial(_stop_terminal_task_owner, cold_rotation_task),
+            )
+        )
 
-    await writer.stop()
-    logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))
-
-    await zmq_pub.stop()
-    logger.info("ZMQ Publisher остановлен")
+    shutdown_layers.append(_EngineShutdownLayer("producer_services", tuple(producer_service_owners)))
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "event_relay_cutover",
+            (
+                _EngineShutdownOwner(
+                    "assistant_event_subscription",
+                    functools.partial(event_bus.unsubscribe, "assistant_zmq_relay"),
+                ),
+            ),
+        )
+    )
+    if _photo_handler is not None:
+        shutdown_layers.append(
+            _EngineShutdownLayer(
+                "composition_photo_handler",
+                (_EngineShutdownOwner("composition_photo_handler", _photo_handler.stop),),
+            )
+        )
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "alarm_dispatch_drain",
+            (
+                _EngineShutdownOwner(
+                    "alarm_dispatch_tasks",
+                    functools.partial(_drain_dispatch_tasks, _alarm_dispatch_tasks, logger),
+                ),
+            ),
+        )
+    )
+    if telegram_bot is not None:
+        shutdown_layers.append(
+            _EngineShutdownLayer(
+                "downstream_notifications",
+                (_EngineShutdownOwner("telegram_bot", telegram_bot.stop),),
+            )
+        )
 
     from cryodaq.drivers.transport.gpib import GPIBTransport
 
-    GPIBTransport.close_all_managers()
-    logger.info("GPIB ResourceManagers закрыты")
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "terminal_dependencies",
+            (
+                _EngineShutdownOwner("sqlite_writer", writer.stop),
+                _EngineShutdownOwner("zmq_publisher", zmq_pub.stop),
+                _EngineShutdownOwner("gpib_managers", GPIBTransport.close_all_managers),
+                _EngineShutdownOwner("signal_handlers", remove_signal_handlers),
+            ),
+        )
+    )
+    await teardown_sequence.settle_plan(tuple(shutdown_layers))
+    logger.info("SQLite shutdown settled: total_written=%d", writer.stats.get("total_written", 0))
+    teardown_sequence.finalize()
 
     uptime = time.monotonic() - start_ts
     logger.info(
@@ -4808,118 +7627,51 @@ async def _run_engine(*, mock: bool = False) -> None:
 _LOCK_FILE = get_data_dir() / ".engine.lock"
 
 
-def _is_pid_alive(pid: int) -> bool:
-    """Check if process with given PID exists."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
-            return False
-        else:
-            os.kill(pid, 0)
-            return True
-    except (OSError, ProcessLookupError):
-        return False
-
-
 def _acquire_engine_lock() -> int:
-    """Acquire exclusive engine lock via flock/msvcrt. Returns fd.
+    """Acquire the exclusive engine lock on one persistent lock-file inode.
 
-    If lock is held by a dead process, auto-cleans and retries.
-    Shows helpful error with PID and kill command if lock is live.
+    Kernel lock ownership is authoritative. Keeping one validated inode at
+    the stable path prevents two contenders from holding locks on different
+    files after an unlink/recreate race.
     """
-    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        # Lock held by another process (flock/msvcrt is authoritative)
-        os.close(fd)
+    fd = try_acquire_lock(_LOCK_FILE.name, lock_dir=_LOCK_FILE.parent)
+    if fd is None:
         logger.error(
             "CryoDAQ engine уже запущен (lock: %s).\n"
-            "  Для принудительного запуска: cryodaq-engine --force\n"
-            "  Или завершите процесс через Диспетчер задач (python/pythonw).",
+            "  Автоматическое завершение процесса без проверяемой инкарнации запрещено.\n"
+            "  Завершите подтверждённый процесс через launcher или Диспетчер задач.",
             _LOCK_FILE,
         )
         raise SystemExit(1)
-
-    os.ftruncate(fd, 0)
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, f"{os.getpid()}\n".encode())
     return fd
 
 
 def _force_kill_existing() -> None:
-    """Force-kill any running engine and remove lock."""
-    if not _LOCK_FILE.exists():
-        return
-    # Read PID via os.open — works even when file is locked by msvcrt
-    pid = None
-    fd = None
-    try:
-        fd = os.open(str(_LOCK_FILE), os.O_RDONLY)
-        raw = os.read(fd, 64).decode().strip()
-        pid = int(raw)
-    except (OSError, ValueError):
-        pass
-    finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-    if pid is None:
-        try:
-            _LOCK_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return
-    if _is_pid_alive(pid):
-        logger.warning("Принудительная остановка engine (PID %d)...", pid)
-        try:
-            if sys.platform == "win32":
-                import subprocess
+    """Refuse unauthenticated termination while tolerating a free stale record.
 
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=5)
-            else:
-                os.kill(pid, 9)  # SIGKILL
-        except Exception as exc:
-            logger.error("Не удалось завершить PID %d: %s", pid, exc)
-            raise SystemExit(1)
-        for _ in range(20):
-            time.sleep(0.25)
-            if not _is_pid_alive(pid):
-                break
-        else:
-            logger.error("PID %d не завершился после 5с", pid)
-            raise SystemExit(1)
-    try:
-        _LOCK_FILE.unlink(missing_ok=True)
-    except OSError:
-        logger.debug("Lock file busy (will be released by OS)")
-    logger.info("Старый engine остановлен, lock очищен")
+    A PID and executable name cannot bind a live process to this data-root lock:
+    the PID may have been reused, and another CryoDAQ installation has the same
+    command line.  Therefore ``--force`` may only prove that no owner exists;
+    a held lock requires operator-controlled shutdown of the actual incumbent.
+    """
+
+    probe_fd = try_acquire_lock(_LOCK_FILE.name, lock_dir=_LOCK_FILE.parent)
+    if probe_fd is not None:
+        _release_engine_lock(probe_fd)
+        logger.info("Engine lock is free; no forced termination is required")
+        return
+    logger.error(
+        "Refusing unauthenticated forced termination: the engine lock is held "
+        "but its owning process incarnation cannot be proven"
+    )
+    raise SystemExit(1)
 
 
 def _release_engine_lock(fd: int) -> None:
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-    try:
-        _LOCK_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # The persistent path is intentionally retained. Closing is the only
+    # ownership transition, so no successor-created lock can be deleted in a
+    # close/unlink gap and every contender continues to address one inode.
+    os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -4933,12 +7685,18 @@ ENGINE_CONFIG_ERROR_EXIT_CODE = 2
 
 def main() -> None:
     """Точка входа cryodaq-engine."""
+    engine_instance_id, shutdown_capability, engine_ready_nonce, engine_ready_channel_fd = (
+        _consume_engine_launch_authority()
+    )
     import argparse
-    import traceback
 
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")
     parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
-    parser.add_argument("--force", action="store_true", help="Kill existing engine and take over")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Proceed only when the engine lock is free; never kill an unauthenticated owner",
+    )
     args = parser.parse_args()
 
     from cryodaq.logging_setup import resolve_log_level, setup_logging
@@ -4962,9 +7720,25 @@ def main() -> None:
                 # WindowsSelectorEventLoopPolicy (the policy system is deprecated
                 # in Python 3.14+ and warns on import).
                 with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-                    runner.run(_run_engine(mock=mock))
+                    runner.run(
+                        _run_engine(
+                            mock=mock,
+                            engine_instance_id=engine_instance_id,
+                            shutdown_capability=shutdown_capability,
+                            engine_ready_nonce=engine_ready_nonce,
+                            engine_ready_channel_fd=engine_ready_channel_fd,
+                        )
+                    )
             else:
-                asyncio.run(_run_engine(mock=mock))
+                asyncio.run(
+                    _run_engine(
+                        mock=mock,
+                        engine_instance_id=engine_instance_id,
+                        shutdown_capability=shutdown_capability,
+                        engine_ready_nonce=engine_ready_nonce,
+                        engine_ready_channel_fd=engine_ready_channel_fd,
+                    )
+                )
         except KeyboardInterrupt:
             logger.info("Прервано оператором (Ctrl+C)")
         except yaml.YAMLError as exc:
@@ -4972,18 +7746,16 @@ def main() -> None:
             # unrecoverable by retry — exit with a distinct code so the
             # launcher refuses to spin in a tight restart loop.
             logger.critical(
-                "CONFIG ERROR (YAML parse): %s\n%s",
-                exc,
-                traceback.format_exc(),
+                "Engine startup config failed: phase=yaml exception=%s",
+                type(exc).__name__,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except FileNotFoundError as exc:
             # Missing required config file at startup is also a config
             # error: same exit code.
             logger.critical(
-                "CONFIG ERROR (file not found): %s\n%s",
-                exc,
-                traceback.format_exc(),
+                "Engine startup config failed: phase=file_missing exception=%s",
+                type(exc).__name__,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except (
@@ -5009,10 +7781,9 @@ def main() -> None:
                 "config",
             )
             logger.critical(
-                "CONFIG ERROR (%s config): %s\n%s",
+                "CONFIG ERROR (%s config): exception=%s",
                 label,
-                exc,
-                traceback.format_exc(),
+                type(exc).__name__,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
     finally:

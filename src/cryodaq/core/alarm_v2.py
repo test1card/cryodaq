@@ -46,6 +46,8 @@ class AlarmEvent:
     acknowledged: bool = False
     acknowledged_at: float = 0.0
     acknowledged_by: str = ""
+    acknowledged_reason: str = ""
+    acknowledgement_request_id: str = ""
     activation_id: int = 0
 
 
@@ -84,6 +86,8 @@ def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
         acknowledged=event.acknowledged,
         acknowledged_at=event.acknowledged_at,
         acknowledged_by=event.acknowledged_by,
+        acknowledged_reason=event.acknowledged_reason,
+        acknowledgement_request_id=event.acknowledgement_request_id,
         activation_id=event.activation_id,
     )
 
@@ -807,6 +811,8 @@ class AlarmStateManager:
         operator: str = "",
         reason: str = "",
         expected_activation_id: int | None = None,
+        acknowledged_at: float | None = None,
+        request_id: str | None = None,
     ) -> dict | None:
         """Подтвердить аларм — записать факт подтверждения в историю.
 
@@ -816,6 +822,16 @@ class AlarmStateManager:
         Returns event dict on new acknowledgement (caller should publish),
         or None if alarm unknown or already acknowledged (idempotent no-op).
         """
+        if acknowledged_at is not None and (
+            type(acknowledged_at) is not float or not math.isfinite(acknowledged_at) or acknowledged_at <= 0.0
+        ):
+            raise ValueError("acknowledged_at must be one positive finite float")
+        if request_id is not None and (
+            type(request_id) is not str
+            or len(request_id) != 32
+            or any(char not in "0123456789abcdef" for char in request_id)
+        ):
+            raise ValueError("request_id must be exactly 32 lowercase hexadecimal characters")
         if alarm_id not in self._active:
             logger.warning("ALARM ACK IGNORED: %s not in active alarms", alarm_id)
             return None
@@ -838,32 +854,73 @@ class AlarmStateManager:
             return None
 
         event.acknowledged = True
-        event.acknowledged_at = time.time()
+        event.acknowledged_at = time.time() if acknowledged_at is None else acknowledged_at
         event.acknowledged_by = operator
+        event.acknowledged_reason = reason
+        event.acknowledgement_request_id = "" if request_id is None else request_id
         self._mark_active_mutation()
 
-        self._history.append(
-            {
-                "alarm_id": alarm_id,
-                "transition": "ACKNOWLEDGED",
-                "at": event.acknowledged_at,
-                "level": event.level,
-                "operator": operator,
-                "reason": reason,
-            }
-        )
+        history_entry: dict[str, object] = {
+            "alarm_id": alarm_id,
+            "transition": "ACKNOWLEDGED",
+            "at": event.acknowledged_at,
+            "level": event.level,
+            "operator": operator,
+            "reason": reason,
+        }
+        if request_id is not None:
+            history_entry["request_id"] = request_id
+        self._history.append(history_entry)
         logger.info(
             "ALARM ACKNOWLEDGED: %s by %s (reason: %s)",
             alarm_id,
             operator or "—",
             reason or "—",
         )
-        return {
+        result: dict[str, object] = {
             "alarm_id": alarm_id,
             "acknowledged_at": event.acknowledged_at,
             "operator": operator,
             "reason": reason,
         }
+        if request_id is not None:
+            result["request_id"] = request_id
+        return result
+
+    def acknowledgement_matches(
+        self,
+        alarm_id: str,
+        *,
+        operator: str,
+        reason: str,
+        request_id: str,
+        expected_activation_id: int,
+        acknowledged_at: float,
+    ) -> bool:
+        """Prove one staged ACK is the exact current in-memory transition."""
+
+        if (
+            type(operator) is not str
+            or type(reason) is not str
+            or type(request_id) is not str
+            or len(request_id) != 32
+            or any(char not in "0123456789abcdef" for char in request_id)
+            or type(expected_activation_id) is not int
+            or type(acknowledged_at) is not float
+            or not math.isfinite(acknowledged_at)
+            or acknowledged_at <= 0.0
+        ):
+            return False
+        event = self._active.get(alarm_id)
+        return bool(
+            event is not None
+            and event.activation_id == expected_activation_id
+            and event.acknowledged is True
+            and event.acknowledged_at == acknowledged_at
+            and event.acknowledged_by == operator
+            and event.acknowledged_reason == reason
+            and event.acknowledgement_request_id == request_id
+        )
 
 
 def tick_alarm(

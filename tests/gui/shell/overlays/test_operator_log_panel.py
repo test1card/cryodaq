@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import UTC, datetime, timedelta
@@ -9,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QSettings, Qt
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
@@ -22,11 +23,33 @@ from cryodaq.gui.shell.overlays.operator_log_panel import (
     _FILTER_CHIP_LAST_24H,
     OperatorLogPanel,
 )
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 
 
 @pytest.fixture(scope="session")
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operator_log_settings():
+    """Keep durable retry/identity state explicit and local to each test."""
+
+    settings = QSettings("FIAN", "CryoDAQ")
+    keys = ("operator_log/unresolved_submit_v1", "last_log_author")
+    saved = {key: (settings.contains(key), settings.value(key)) for key in keys}
+    settings.remove("operator_log/unresolved_submit_v1")
+    settings.setValue("last_log_author", "operator")
+    settings.sync()
+    try:
+        yield
+    finally:
+        for key, (present, value) in saved.items():
+            if present:
+                settings.setValue(key, value)
+            else:
+                settings.remove(key)
+        settings.sync()
 
 
 def _wait(ms: int) -> None:
@@ -101,15 +124,26 @@ def _submit_context(
 
 
 def _commit_result(context: dict, entry: dict, *, ok: bool = True) -> dict:
+    payload = context["payload"]
+    bound_entry = {
+        **entry,
+        "experiment_id": context["experiment_id"],
+        "author": payload["author"],
+        "source": payload["source"],
+        "message": payload["message"],
+        "tags": list(payload["tags"]),
+    }
     return {
         "ok": ok,
         "committed": True,
         "retry_safe": False,
-        "entry": entry,
+        "publication_state": "published",
+        "proto": CLIENT_PROTOCOL_VERSION,
+        "entry": bound_entry,
         "commit_receipt": {
             "schema": "operator_log_commit_v1",
             "request_id": context["request_id"],
-            "entry_id": entry["id"],
+            "entry_id": bound_entry["id"],
             "experiment_id": context["experiment_id"],
             "committed": True,
         },
@@ -304,7 +338,7 @@ def test_submit_result_ok_clears_message_and_persists_author(app):
     assert not any(e["id"] == 42 for e in panel._entries_all)
 
 
-def test_submit_result_failure_shows_error_banner(app):
+def test_ambiguous_persistence_failure_retains_draft_and_retry_identity(app):
     panel = OperatorLogPanel()
     panel.set_connected(True)
     panel._message_edit.setPlainText("Note")
@@ -318,8 +352,9 @@ def test_submit_result_failure_shows_error_banner(app):
         },
         context,
     )
-    assert "server exploded" in panel._banner_label.text()
-    # Message preserved so operator can retry.
+    assert "не подтвердил" in panel._banner_label.text()
+    assert panel._unresolved_submit is context
+    # Message and the original idempotency key are preserved for reconciliation.
     assert panel._message_edit.toPlainText() == "Note"
 
 
@@ -555,6 +590,102 @@ def test_system_entries_rendered_with_muted_foreground(app):
     system_labels = [label for label in labels if label.text() == "system"]
     assert system_labels, "system entry row should render author label"
     assert any(theme.MUTED_FOREGROUND in label.styleSheet() for label in system_labels)
+
+
+def test_untrusted_timeline_and_banner_values_are_literal_plain_text(app):
+    from PySide6.QtWidgets import QLabel
+
+    panel = OperatorLogPanel()
+    panel._on_chip_selected(_FILTER_CHIP_ALL)
+    hostile_values = {
+        "author": '<a href="file:///secret">operator</a>',
+        "message": "<b>trusted</b>",
+        "experiment_id": "<img src=x>",
+        "tag": "<i>alarm</i>",
+    }
+    panel._entries_all = [
+        _entry(
+            id=1,
+            author=hostile_values["author"],
+            message=hostile_values["message"],
+            experiment_id=hostile_values["experiment_id"],
+            tags=[hostile_values["tag"]],
+        )
+    ]
+    panel._apply_filters()
+    expected_texts = {
+        hostile_values["author"],
+        hostile_values["message"],
+        f"experiment: {hostile_values['experiment_id']}",
+        f"tag: {hostile_values['tag']}",
+    }
+    rendered = {
+        label.text(): label.textFormat()
+        for label in panel._timeline_container.findChildren(QLabel)
+        if label.text() in expected_texts
+    }
+    assert set(rendered) == expected_texts
+    assert set(rendered.values()) == {Qt.TextFormat.PlainText}
+
+    hostile_error = '<a href="https://example.invalid">retry</a>\r\nforged'
+    panel.show_error(hostile_error, persistent=True)
+    assert panel._banner_label.text() == hostile_error
+    assert panel._banner_label.textFormat() == Qt.TextFormat.PlainText
+
+
+@pytest.mark.parametrize(
+    ("entry_id", "timestamp"),
+    [
+        (True, "2026-07-19T08:00:00+00:00"),
+        (1.0, "2026-07-19T08:00:00+00:00"),
+        (1, "not-an-iso-timestamp"),
+    ],
+)
+def test_operator_log_panel_rejects_type_confused_or_malformed_commit_evidence(
+    entry_id,
+    timestamp,
+) -> None:
+    context = _submit_context(experiment_id="exp-log", message="exact message", author="operator")
+    result = _commit_result(context, _entry(id=entry_id, ts=datetime.now(UTC)))
+    result["entry"]["timestamp"] = timestamp
+
+    assert OperatorLogPanel._commit_receipt_matches(result, context) is False
+
+
+@pytest.mark.parametrize(
+    ("corruption", "value"),
+    [
+        ("missing", None),
+        ("wrong", CLIENT_PROTOCOL_VERSION + 1),
+        ("bool", True),
+        ("extra", "unexpected"),
+    ],
+)
+def test_operator_log_panel_requires_exact_real_transport_protocol(corruption: str, value: object) -> None:
+    context = _submit_context(experiment_id="exp-log", message="exact message", author="operator")
+    result = _commit_result(context, _entry(experiment_id="exp-log", message="exact message", author="operator"))
+    if corruption == "missing":
+        result.pop("proto")
+    elif corruption == "extra":
+        result[str(value)] = True
+    else:
+        result["proto"] = value
+
+    assert OperatorLogPanel._commit_receipt_matches(result, context) is False
+
+
+def test_operator_log_panel_accepts_commit_from_real_zmq_reply_encoder() -> None:
+    from cryodaq.core.zmq_bridge import ZMQCommandServer
+
+    context = _submit_context(experiment_id="exp-log", message="exact message", author="operator")
+    handler_result = _commit_result(
+        context,
+        _entry(experiment_id="exp-log", message="exact message", author="operator"),
+    )
+    handler_result.pop("proto")
+    wire_result = json.loads(ZMQCommandServer(handler=None)._encode_reply(handler_result))
+
+    assert OperatorLogPanel._commit_receipt_matches(wire_result, context) is True
 
 
 def test_empty_timeline_shows_empty_state(app):
@@ -852,6 +983,58 @@ def test_mismatched_commit_receipt_keeps_draft_and_unknown_latch(app, monkeypatc
     assert "не подтвердил" in panel._banner_label.text()
 
 
+@pytest.mark.parametrize(
+    ("field", "forged"),
+    [
+        ("message", "forged message"),
+        ("experiment_id", "other-experiment"),
+        ("author", "other-author"),
+        ("source", "other-source"),
+        ("tags", ["forged"]),
+    ],
+)
+def test_operator_log_receipt_binds_complete_submitted_payload(
+    app,
+    monkeypatch,
+    field,
+    forged,
+):
+    _install_deferred_worker(monkeypatch)
+    panel = OperatorLogPanel()
+    _connect_and_settle_initial_refresh(panel)
+    panel.set_current_experiment("exp-bind")
+    draft = "Bind every persisted field"
+    panel._message_edit.setPlainText(draft)
+    panel._on_submit_clicked()
+    worker = _DeferredWorker.instances.pop(0)
+    context = panel._submit_context
+    assert context is not None
+    result = _commit_result(context, _entry(id=54))
+    result["entry"][field] = forged
+
+    worker.finish(result)
+
+    assert panel._unresolved_submit is context
+    assert panel._message_edit.toPlainText() == draft
+    assert panel._entries_all == []
+
+
+def test_operator_log_admission_invalid_is_known_uncommitted() -> None:
+    from cryodaq.gui.shell.overlays.operator_log_panel import _result_is_unknown
+
+    assert (
+        _result_is_unknown(
+            {
+                "ok": False,
+                "committed": False,
+                "error_code": "operator_log_admission_invalid",
+                "retry_safe": True,
+            }
+        )
+        is False
+    )
+
+
 def test_disconnect_before_reply_latches_unknown_but_exact_late_receipt_settles(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     panel = OperatorLogPanel()
@@ -885,6 +1068,7 @@ def test_committed_reconciliation_failure_is_not_presented_as_data_loss(app, mon
         _entry(id=54, message="Сохранено, публикация не удалась"),
         ok=False,
     )
+    result["publication_state"] = "pending"
     result.update(
         {
             "error_code": "committed_reconciliation_failed",
@@ -894,8 +1078,9 @@ def test_committed_reconciliation_failure_is_not_presented_as_data_loss(app, mon
 
     worker.finish(result)
 
-    assert panel._message_edit.toPlainText() == ""
-    assert "Запись сохранена" in panel._banner_label.text()
+    assert panel._message_edit.toPlainText() == "Сохранено, публикация не удалась"
+    assert panel._unresolved_submit is context
+    assert "не подтвердил" in panel._banner_label.text()
     assert panel._banner_timer.isActive() is False
 
 

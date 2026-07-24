@@ -24,6 +24,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -44,6 +46,7 @@ from cryodaq.gui.state.descriptor_store import (
     IdentityStatus,
 )
 from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.operator_snapshot import SnapshotMode
 from tests.e2e._zmq_harness import (
     ZmqHarness,
     allocate_pub_addr,
@@ -388,13 +391,10 @@ def test_t1_mixed_batch_exact_once_no_invented_identity(zmq_harness: ZmqHarness)
     assert overflow_status is None, f"CAPACITY_EXHAUSTED channel must not have a store entry; got {overflow_status}"
 
 
-def test_t1_mixed_batch_repeat_1(zmq_harness: ZmqHarness) -> None:  # noqa: F811
-    """Repeat of T1 mixed batch for determinism verification (run 2)."""
-    _run_t1_core(zmq_harness)  # noqa: F811
-
-
-def test_t1_mixed_batch_repeat_2(zmq_harness: ZmqHarness) -> None:  # noqa: F811
-    """Repeat of T1 mixed batch for determinism verification (run 3)."""
+@pytest.mark.parametrize("repeat", (2, 3), ids=("run-2", "run-3"))
+def test_t1_mixed_batch_repeat(zmq_harness: ZmqHarness, repeat: int) -> None:  # noqa: F811
+    """Repeat the T1 mixed batch with an independently constructed fixture."""
+    assert repeat in {2, 3}
     _run_t1_core(zmq_harness)  # noqa: F811
 
 
@@ -532,7 +532,11 @@ def test_t2_app_path_real_drain(zmq_harness: ZmqHarness) -> None:  # noqa: F811
     valid_env = _encode_envelope(r)
 
     w, dispatch_calls = _recording_window()
-    snapshot_ingress = OperatorSnapshotIngressOwner(zmq_harness.bridge, parent=w)
+    snapshot_ingress = OperatorSnapshotIngressOwner(
+        zmq_harness.bridge,
+        expected_mode=SnapshotMode.LIVE,
+        parent=w,
+    )
     snapshot_ingress.start()
 
     # app.py `_tick` is a closure defined inside main() and cannot be imported or
@@ -719,11 +723,16 @@ def _is_bridge_start_call(node: ast.AST) -> bool:
 
 
 def _is_invalidate_call(node: ast.AST) -> bool:
-    """True if node is an ``…invalidate_descriptor_transport()`` call."""
+    """True for either transport- or producer-authority invalidation."""
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr in {"invalidate_descriptor_transport", "_invalidate_descriptor_transport"}
+        and node.func.attr
+        in {
+            "invalidate_descriptor_transport",
+            "_invalidate_descriptor_transport",
+            "_invalidate_engine_producer",
+        }
     )
 
 
@@ -785,17 +794,24 @@ def _enclosing_branch_body(target: ast.AST, blocks: list[list[ast.stmt]]) -> lis
 
 
 def _restart_starts_with_block_invalidates(source: str) -> list[tuple[int, list[int], bool]]:
-    """Return (start_line, invalidate_lines_in_same_branch, branch_has_shutdown).
+    """Return (start_line, invalidate_lines_in_restart_scope, scope_has_shutdown).
 
     For each ``bridge.start()`` we take its enclosing branch body (innermost
     directly-containing statement list) and then search that branch's ENTIRE subtree
-    for invalidate_descriptor_transport() and bridge.shutdown() calls.  Searching the
-    subtree (not just the direct statements) means a guarded call such as
+    for authority invalidation and bridge.shutdown() calls.  Searching the subtree
+    (not just the direct statements) means a guarded call such as
     ``if self._main_window is not None: self._main_window.invalidate_descriptor_transport()``
     still counts for a start() in the same branch — while a sibling ``elif`` branch,
     being a DIFFERENT body list, does not.  That is exactly the mutual-exclusion the
     reviewer requires: dropping the invalidate from one branch cannot be masked by an
     invalidate hoisted into a sibling branch.
+
+    A lifecycle method with exactly one direct ``bridge.start()`` may intentionally
+    split invalidate, old-owner settlement, and replacement start across consecutive
+    guarded ``try`` blocks.  If the start's innermost block has no preceding shutdown,
+    widen only that single-start method to its function body (without nested functions).
+    This models the fail-closed launcher shape without weakening multi-branch checks:
+    functions with sibling restart starts remain branch-scoped.
     """
     tree = ast.parse(source)
     blocks = _iter_stmt_blocks(tree)
@@ -817,6 +833,32 @@ def _restart_starts_with_block_invalidates(source: str) -> list[tuple[int, list[
                 continue  # do not descend into a nested function's body
             stack.extend(ast.iter_child_nodes(node))
 
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)]
+
+    def _enclosing_function(target: ast.AST) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        candidates = [
+            function
+            for function in functions
+            if function.lineno <= target.lineno <= (function.end_lineno or function.lineno)
+            and any(node is target for node in ast.walk(function))
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda function: (function.end_lineno or function.lineno) - function.lineno)
+
+    def _calls_in_scope(scope: list[ast.stmt]) -> tuple[list[int], list[int], int]:
+        invalidate_lines: list[int] = []
+        shutdown_lines: list[int] = []
+        start_count = 0
+        for inner in _subtree_of_block(scope):
+            if _is_invalidate_call(inner):
+                invalidate_lines.append(inner.lineno)
+            elif _is_bridge_shutdown_call(inner):
+                shutdown_lines.append(inner.lineno)
+            elif _is_bridge_start_call(inner):
+                start_count += 1
+        return invalidate_lines, shutdown_lines, start_count
+
     results: list[tuple[int, list[int], bool]] = []
     for node in ast.walk(tree):
         if not _is_bridge_start_call(node):
@@ -825,13 +867,15 @@ def _restart_starts_with_block_invalidates(source: str) -> list[tuple[int, list[
         if branch is None:
             results.append((node.lineno, [], False))
             continue
-        invalidate_lines: list[int] = []
-        shutdown_lines: list[int] = []
-        for inner in _subtree_of_block(branch):
-            if _is_invalidate_call(inner):
-                invalidate_lines.append(inner.lineno)
-            elif _is_bridge_shutdown_call(inner):
-                shutdown_lines.append(inner.lineno)
+        invalidate_lines, shutdown_lines, _ = _calls_in_scope(branch)
+        has_preceding_shutdown = any(line < node.lineno for line in shutdown_lines)
+        if not has_preceding_shutdown:
+            function = _enclosing_function(node)
+            if function is not None:
+                function_invalidates, function_shutdowns, function_start_count = _calls_in_scope(function.body)
+                if function_start_count == 1:
+                    invalidate_lines = function_invalidates
+                    shutdown_lines = function_shutdowns
         # A RESTART branch is one where a bridge.shutdown() PRECEDES the start()
         # (restart pattern: shutdown -> invalidate -> start).  A trailing shutdown
         # in an error/except path AFTER an initial start() (e.g. launcher.__init__'s
@@ -842,20 +886,19 @@ def _restart_starts_with_block_invalidates(source: str) -> list[tuple[int, list[
 
 
 def test_t3_static_all_five_invalidate_before_start() -> None:
-    """Static (BRANCH-aware, AST): every restart branch invalidates BEFORE start().
+    """Static (branch/single-lifecycle aware): every restart invalidates before start.
 
     The 5 restart sites are:
       app.py   (2): main()._tick is_healthy restart, main()._tick data_flow_stalled restart
-      launcher (3): _poll_bridge_data health watchdog, _poll_bridge_data cmd watchdog,
-                    _restart_engine
+      launcher (3): centralized watchdog bridge replacement, manual _restart_engine,
+                    scheduled _handle_engine_exit._do_restart
 
-    FIX-A: association is BRANCH-level (in-BLOCK), not function-level.  For every
-    ``bridge.start()`` we find its innermost statement block (the ``if``/``elif``/
-    ``else``/function body it physically lives in) and require an
-    ``invalidate_descriptor_transport()`` at a LOWER line IN THAT SAME BLOCK.  A
-    restart branch is identified by a sibling ``bridge.shutdown()`` in the same block
-    (restart pattern = shutdown -> invalidate -> start); an initial spawn block has a
-    start() but no shutdown() and is excluded.
+    FIX-A remains branch-level for functions with sibling restart starts.  A launcher
+    lifecycle with one direct start may split invalidate, exact old-owner settlement,
+    and start across consecutive guarded try blocks, so that method alone widens to its
+    function body.  Both transport invalidation and the stronger producer invalidation
+    count, but either must be at a lower line than start.  An initial spawn has no
+    preceding shutdown and remains excluded.
 
     Why this kills the reviewer's regression (proved by a synthetic mutation in
     test_t3_fix_a_branch_awareness_regression_guard): hoisting a DUPLICATE invalidate
@@ -866,7 +909,7 @@ def test_t3_static_all_five_invalidate_before_start() -> None:
 
     ROLE (FIX-E/FIX-F, honest coverage picture): this is a SECONDARY net, not the
     primary proof.  The PRIMARY proof is BEHAVIORAL and end-to-end over real sockets:
-      - all THREE launcher restart triggers are behaviorally proven —
+      - three launcher entry paths are behaviorally proven —
         test_t3_real_restart_via_poll_bridge_data (health/data-flow watchdog),
         test_t3_real_restart_via_command_watchdog (command watchdog), and
         test_t3_real_restart_via_restart_engine (_restart_engine).  Each proves a
@@ -876,6 +919,8 @@ def test_t3_static_all_five_invalidate_before_start() -> None:
         already invalidated then — a mutation moving invalidate after start() fails.
         Each also proves the full invalidate -> legacy-cannot-requalify ->
         fresh-descriptor-requalifies store contract.
+      - the scheduled crash-recovery _do_restart lifecycle is static-only here; it
+        shares the behaviorally exercised real _invalidate_engine_producer contract.
       - the app.py main()._tick restart branches (x2) are the SAME triggers in the
         standalone-GUI entry point; _tick is a closure inside main() that cannot be
         invoked without standing up the full GUI process, so they remain STATIC-ONLY,
@@ -895,9 +940,9 @@ def test_t3_static_all_five_invalidate_before_start() -> None:
 
 
 def _check_branch_level(source: str, label: str, expected_restart_branches: int) -> None:
-    """Assert every restart-branch bridge.start() has an in-branch invalidate before it.
+    """Assert every restart bridge.start() has an in-scope authority invalidate first.
 
-    Branch-level (in-BRANCH-subtree) association via
+    Branch/single-lifecycle association via
     _restart_starts_with_block_invalidates.  A restart branch = a branch where a
     bridge.shutdown() PRECEDES the start() (pattern: shutdown -> invalidate -> start).
     An initial-spawn start() (no preceding in-branch shutdown — e.g. app.main() body,
@@ -919,14 +964,14 @@ def _check_branch_level(source: str, label: str, expected_restart_branches: int)
         preceding = [iv for iv in block_invalidates if iv < start_line]
         assert preceding, (
             f"{label}: restart bridge.start() at line {start_line} has NO "
-            f"invalidate_descriptor_transport() before it IN THE SAME BRANCH "
-            f"(in-block invalidates: {block_invalidates}). "
-            "T5/FIX-A: a restart branch dropped its invalidation."
+            f"transport/producer authority invalidate call before it IN THE SAME RESTART SCOPE "
+            f"(in-scope invalidates: {block_invalidates}). "
+            "T5/FIX-A: a restart scope dropped its invalidation."
         )
 
     assert restart_branches == expected_restart_branches, (
         f"{label}: expected exactly {expected_restart_branches} restart branches "
-        f"(shutdown+invalidate+start); found {restart_branches}. "
+        f"(shutdown+authority-invalidate+start); found {restart_branches}. "
         "T5: a dropped restart branch changes this count."
     )
 
@@ -989,6 +1034,39 @@ def test_t3_fix_a_branch_awareness_regression_guard() -> None:
     )
     with pytest.raises(AssertionError, match="NO .*invalidate"):
         _check_branch_level(invalidate_after_start, "invalidate_after_start", expected_restart_branches=1)
+
+    # Producer invalidation is stronger than transport-only invalidation and is the
+    # current engine-turnover contract; it must still precede bridge.start().
+    producer_invalidate_before_start = (
+        "def _restart_engine(self):\n"
+        "    self._invalidate_engine_producer()\n"
+        "    try:\n"
+        "        self._bridge.shutdown()\n"
+        "    except Exception:\n"
+        "        return\n"
+        "    try:\n"
+        "        self._bridge.start()\n"
+        "    except Exception:\n"
+        "        return\n"
+    )
+    _check_branch_level(
+        producer_invalidate_before_start,
+        "producer_invalidate_before_start",
+        expected_restart_branches=1,
+    )
+
+    producer_invalidate_after_start = (
+        "def _restart_engine(self):\n"
+        "    self._bridge.shutdown()\n"
+        "    self._bridge.start()\n"
+        "    self._invalidate_engine_producer()\n"
+    )
+    with pytest.raises(AssertionError, match="NO .*invalidate"):
+        _check_branch_level(
+            producer_invalidate_after_start,
+            "producer_invalidate_after_start",
+            expected_restart_branches=1,
+        )
 
     # Initial spawn with a trailing except-path shutdown (launcher.__init__ shape) is
     # excluded (not a restart), and the one real restart branch is counted -> passes.
@@ -1084,7 +1162,7 @@ def test_t3_real_socket_invalidate_requalify_via_bridge(zmq_harness: ZmqHarness)
 # ---------------------------------------------------------------------------
 # T3 restart-path coverage — ACCURATE PICTURE (FIX-E, FIX-F):
 #
-# All THREE launcher restart triggers are PROVEN BEHAVIORALLY end-to-end over
+# Three launcher restart entry paths are PROVEN BEHAVIORALLY end-to-end over
 # real sockets. Each proves the FULL ordering contract, not merely that invalidate
 # ran: a wrapper around the REAL bridge.start() captures channel X's identity_status
 # at the INSTANT production invokes start(), and we assert X was ALREADY invalidated
@@ -1125,12 +1203,14 @@ def _run_real_restart_via_poll_bridge_data(
       - "health": is_healthy() forced False -> health/data-flow watchdog branch.
       - "command": is_healthy True + command_channel_stalled True -> cmd watchdog.
 
-    Both branches execute the REAL sequence: self._bridge.shutdown() ->
-    self._main_window.invalidate_descriptor_transport() -> self._bridge.start().
-    FIX-F: a wrapper around the REAL bridge.start captures X's identity_status at
-    start()-entry and asserts it was already invalidated then, proving invalidate ran
-    BEFORE start (not merely that it ran).
+    Both branches enter the REAL centralized replacement sequence: invalidate all
+    bridge-tied authority -> settle the old bridge exactly -> start and validate one
+    replacement incarnation.  FIX-F: a wrapper around the REAL bridge.start captures
+    descriptor and launcher-status authority at start entry and proves both were
+    invalidated before a replacement could be admitted.
     """
+    from unittest.mock import MagicMock
+
     from cryodaq.launcher import LauncherWindow
 
     _app()
@@ -1151,26 +1231,56 @@ def _run_real_restart_via_poll_bridge_data(
     assert len(dispatch_calls) == 1, f"Pre-restart must dispatch exactly once; got {len(dispatch_calls)}"
 
     restart_count_before = harness.bridge.restart_count()
+    watchdog_generation_before = 4
+    safety_generation_before = 7
+    annunciation_generation_before = 11
+    snapshot_ingress = MagicMock(name="snapshot_ingress")
 
     # (b) Minimal launcher namespace over the REAL harness bridge + REAL window.
     min_self = SimpleNamespace(
         _bridge=harness.bridge,
         _main_window=w,
         _reading_count=0,
-        _last_reading_time=0.0,
+        _last_reading_time=123.0,
+        _last_safety_state="running",
+        _last_alarm_count=2,
+        _safety_status_generation=safety_generation_before,
+        _annunciation_status_generation=annunciation_generation_before,
+        _safety_worker=None,
+        _annunciation_worker=None,
+        _snapshot_ingress=snapshot_ingress,
+        _soak_bridge_handshake=None,
         _last_health_watchdog_restart=float("-inf"),
         _last_cmd_watchdog_restart=float("-inf"),
+        _bridge_watchdog_generation=watchdog_generation_before,
+        _bridge_restart_fault=False,
+        _bridge_restart_hold=False,
+        _restart_pending=False,
+        _restart_giving_up=False,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=17,
+        _shutdown_requested=False,
+        _replay_source=None,
+        _show_engine_down_banner=MagicMock(name="_show_engine_down_banner"),
+        _data_timer=MagicMock(name="_data_timer"),
+        _health_timer=MagicMock(name="_health_timer"),
     )
     # Bind the real _on_reading_qt so any queued reading drained by the real
     # _poll_bridge_data loop routes through production code (not just the restart branch).
     min_self._on_reading_qt = LauncherWindow._on_reading_qt.__get__(min_self, LauncherWindow)
+    min_self._invalidate_launcher_status_authority = LauncherWindow._invalidate_launcher_status_authority.__get__(
+        min_self, LauncherWindow
+    )
     min_self._invalidate_descriptor_transport = LauncherWindow._invalidate_descriptor_transport.__get__(
         min_self, LauncherWindow
     )
 
     # (c) Force the chosen restart branch and call the REAL _poll_bridge_data once.
     if trigger == "health":
-        health_patch = patch.object(harness.bridge, "is_healthy", return_value=False)
+        # First probe selects the unhealthy branch; the second validates the freshly
+        # started incarnation.  A permanently-false mock would defeat the new
+        # fail-closed replacement validation rather than model a recovered bridge.
+        health_patch = patch.object(harness.bridge, "is_healthy", side_effect=(False, True))
         cmd_patch = patch.object(harness.bridge, "command_channel_stalled", return_value=False)
     elif trigger == "command":
         health_patch = patch.object(harness.bridge, "is_healthy", return_value=True)
@@ -1178,42 +1288,73 @@ def _run_real_restart_via_poll_bridge_data(
     else:  # pragma: no cover - guard
         raise ValueError(f"unknown trigger {trigger!r}")
 
-    # FIX-F: prove invalidate ran BEFORE start(), not merely that it ran. Wrap the
-    # REAL bridge.start so that at the INSTANT production invokes it we capture the
-    # store's identity_status for X, then delegate to the real start. A mutation that
-    # moved invalidate AFTER start() would capture AUTHORITATIVE here and fail.
+    # FIX-F: capture every authority cut at the instant production invokes REAL start.
     real_start = harness.bridge.start
     start_entry: dict[str, object] = {}
 
     def _wrapped_start(*a: object, **k: object) -> object:
-        start_entry["status_at_start"] = w._descriptor_store.identity_status(ch)
+        start_entry.update(
+            status_at_start=w._descriptor_store.identity_status(ch),
+            old_bridge_alive_at_start=harness.bridge.is_alive(),
+            watchdog_generation_at_start=min_self._bridge_watchdog_generation,
+            last_reading_time_at_start=min_self._last_reading_time,
+            safety_state_at_start=min_self._last_safety_state,
+            alarm_count_at_start=min_self._last_alarm_count,
+            safety_generation_at_start=min_self._safety_status_generation,
+            annunciation_generation_at_start=min_self._annunciation_status_generation,
+            snapshot_invalidations_at_start=snapshot_ingress.invalidate_transport.call_count,
+        )
         return real_start(*a, **k)
 
     with (
-        health_patch,
-        patch.object(harness.bridge, "data_flow_stalled", return_value=False),
-        cmd_patch,
-        patch.object(harness.bridge, "start", side_effect=_wrapped_start),
+        health_patch as health_probe,
+        patch.object(harness.bridge, "data_flow_stalled", return_value=False) as data_flow_probe,
+        cmd_patch as command_probe,
+        patch.object(harness.bridge, "start", side_effect=_wrapped_start) as start_probe,
     ):
-        # The real branch runs: bridge.shutdown() + window.invalidate_descriptor_transport()
-        # + bridge.start(). No pre-drained readings on this call.
         LauncherWindow._poll_bridge_data(min_self)
+    start_probe.assert_called_once_with()
+    assert health_probe.call_count == 2, "Trigger and replacement health must each be checked exactly once"
+    if trigger == "health":
+        data_flow_probe.assert_not_called()
+        command_probe.assert_not_called()
+    else:
+        data_flow_probe.assert_called_once_with()
+        command_probe.assert_called_once_with(timeout_s=10.0)
 
-    # (d) A real restart occurred and invalidation ran BEFORE start(): X is no
-    # longer AUTHORITATIVE immediately after the branch.
+    # (d) The centralized helper committed exactly one live replacement incarnation.
     assert harness.bridge.restart_count() == restart_count_before + 1, (
         "Real bridge restart (shutdown+start) must have occurred in the watchdog branch"
     )
-    # FIX-F: the wrapper actually ran, and at start() entry X was ALREADY invalidated.
+    assert harness.bridge.is_alive() is True
+    assert harness.bridge.is_healthy() is True
+    replacement_pid = harness.bridge.process_pid()
+    assert type(replacement_pid) is int and replacement_pid > 0
+    assert min_self._bridge_watchdog_generation == watchdog_generation_before + 1
+    assert min_self._bridge_restart_fault is False
+    assert min_self._bridge_restart_hold is False
+    min_self._show_engine_down_banner.assert_not_called()
+
+    # FIX-F: the old owner was settled and every bridge-tied authority was already
+    # retired at start entry.  Exact REFUSED is stronger than merely non-authoritative.
     assert "status_at_start" in start_entry, "bridge.start() was never invoked by the restart branch"
-    assert start_entry["status_at_start"] is not IdentityStatus.AUTHORITATIVE, (
+    assert start_entry["status_at_start"] is IdentityStatus.REFUSED, (
         "invalidate_descriptor_transport() must run BEFORE bridge.start(): at start() entry "
-        f"channel X was {start_entry['status_at_start']!r} (expected already-invalidated). "
+        f"channel X was {start_entry['status_at_start']!r} (expected REFUSED). "
         "A mutation moving invalidate after start() would leave X AUTHORITATIVE here."
     )
+    assert start_entry["old_bridge_alive_at_start"] is False
+    assert start_entry["watchdog_generation_at_start"] == watchdog_generation_before + 1
+    assert start_entry["last_reading_time_at_start"] == 0.0
+    assert start_entry["safety_state_at_start"] is None
+    assert start_entry["alarm_count_at_start"] is None
+    assert start_entry["safety_generation_at_start"] == safety_generation_before + 1
+    assert start_entry["annunciation_generation_at_start"] == annunciation_generation_before + 1
+    assert start_entry["snapshot_invalidations_at_start"] == 1
+    snapshot_ingress.invalidate_transport.assert_called_once_with()
     post_restart = w._descriptor_store.identity_status(ch)
-    assert post_restart is not IdentityStatus.AUTHORITATIVE, (
-        f"After the real restart, X must NOT be AUTHORITATIVE (invalidate ran before start); got {post_restart}"
+    assert post_restart is IdentityStatus.REFUSED, (
+        f"After the real restart, X must remain REFUSED until a fresh descriptor; got {post_restart}"
     )
     # FIX-C(1): the restart branch drained no readings — dispatch count unchanged.
     assert len(dispatch_calls) == 1, (
@@ -1230,8 +1371,8 @@ def _run_real_restart_via_poll_bridge_data(
         for q in ql2:
             w.dispatch_qualified_reading(q)
     post_legacy = w._descriptor_store.identity_status(ch)
-    assert post_legacy is not IdentityStatus.AUTHORITATIVE, (
-        f"Post-restart legacy-absent reading must NOT restore AUTHORITATIVE; got {post_legacy}"
+    assert post_legacy is IdentityStatus.REFUSED, (
+        f"Post-restart legacy-absent reading must preserve REFUSED; got {post_legacy}"
     )
     # FIX-C(1): exact count — the post-restart legacy-absent publish dispatches once.
     assert len(dispatch_calls) == 2, f"Post-restart legacy publish must bring total to 2; got {len(dispatch_calls)}"
@@ -1282,9 +1423,9 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
 
     Drives the REAL ``LauncherWindow._restart_engine`` bound to a minimal namespace.
     The bridge lifecycle is REAL — the production sequence
-        self._bridge.shutdown() -> self._stop_engine() -> time.sleep(1) ->
-        self._start_engine() -> self._main_window.invalidate_descriptor_transport()
-        -> self._bridge.start()
+        self._invalidate_engine_producer() -> self._stop_engine() ->
+        self._bridge.shutdown() -> time.sleep(1) -> self._start_engine() ->
+        self._bridge.start()
     runs against the REAL harness bridge and REAL MainWindowV2.
 
     STUBBED (and why): only the engine-subprocess + Qt-timer side is stubbed —
@@ -1320,12 +1461,34 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
     assert len(dispatch_calls) == 1, f"Pre-restart must dispatch exactly once; got {len(dispatch_calls)}"
 
     restart_count_before = zmq_harness.bridge.restart_count()
+    restart_generation_before = 8
+    safety_generation_before = 13
+    annunciation_generation_before = 17
+    old_engine_instance_id = "1" * 32
+    replacement_engine_instance_id = "2" * 32
+    snapshot_ingress = MagicMock(name="snapshot_ingress")
+    periodic_banner = MagicMock(name="periodic_status_banner")
 
     # (b) Minimal namespace: REAL bridge + REAL window; engine/timer bits stubbed.
     min_self = SimpleNamespace(
         _bridge=zmq_harness.bridge,  # REAL
         _main_window=w,  # REAL
-        # settable attrs _restart_engine assigns (values irrelevant, must exist)
+        _shutdown_requested=False,
+        _engine_unsettled_incarnation=None,
+        _restart_generation=restart_generation_before,
+        _engine_instance_id=old_engine_instance_id,
+        _last_reading_time=456.0,
+        _last_safety_state="running",
+        _last_alarm_count=3,
+        _safety_status_generation=safety_generation_before,
+        _annunciation_status_generation=annunciation_generation_before,
+        _safety_worker=None,
+        _annunciation_worker=None,
+        _snapshot_ingress=snapshot_ingress,
+        _assistant_periodic_requested=True,
+        _periodic_reporting_fault=True,
+        _periodic_status_banner=periodic_banner,
+        _replay_source=None,
         _restart_giving_up=True,
         _restart_attempts=3,
         _config_error_modal_shown=True,
@@ -1333,52 +1496,96 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
         _engine_external=True,
         # engine/timer bits: intentionally stubbed (see docstring)
         _clear_engine_down_banner=MagicMock(name="_clear_engine_down_banner"),
+        _show_engine_down_banner=MagicMock(name="_show_engine_down_banner"),
         _stop_engine=MagicMock(name="_stop_engine"),
         _start_engine=MagicMock(name="_start_engine"),
         _data_timer=MagicMock(name="_data_timer"),
         _health_timer=MagicMock(name="_health_timer"),
     )
-    min_self._invalidate_descriptor_transport = LauncherWindow._invalidate_descriptor_transport.__get__(
+    min_self._start_engine.side_effect = lambda: setattr(
+        min_self,
+        "_engine_instance_id",
+        replacement_engine_instance_id,
+    )
+    min_self._invalidate_launcher_status_authority = LauncherWindow._invalidate_launcher_status_authority.__get__(
         min_self, LauncherWindow
     )
+    min_self._reset_periodic_reporting_unknown = LauncherWindow._reset_periodic_reporting_unknown.__get__(
+        min_self, LauncherWindow
+    )
+    min_self._invalidate_engine_producer = LauncherWindow._invalidate_engine_producer.__get__(min_self, LauncherWindow)
 
     # (c) Invoke the REAL production _restart_engine bound to min_self.
-    # FIX-F: wrap the REAL bridge.start so that at the INSTANT production invokes it
-    # we capture X's identity_status, then delegate to the real start. This proves
-    # invalidate ran BEFORE start (not merely that it ran): a mutation moving
-    # invalidate after start() would capture AUTHORITATIVE here and fail.
+    # Capture the producer/status authority cut and replacement engine incarnation at
+    # the instant production attaches the real bridge.
     real_start = zmq_harness.bridge.start
     start_entry: dict[str, object] = {}
 
     def _wrapped_start(*a: object, **k: object) -> object:
-        start_entry["status_at_start"] = w._descriptor_store.identity_status(ch)
+        start_entry.update(
+            status_at_start=w._descriptor_store.identity_status(ch),
+            old_bridge_alive_at_start=zmq_harness.bridge.is_alive(),
+            restart_generation_at_start=min_self._restart_generation,
+            engine_instance_id_at_start=min_self._engine_instance_id,
+            last_reading_time_at_start=min_self._last_reading_time,
+            safety_state_at_start=min_self._last_safety_state,
+            alarm_count_at_start=min_self._last_alarm_count,
+            safety_generation_at_start=min_self._safety_status_generation,
+            annunciation_generation_at_start=min_self._annunciation_status_generation,
+            periodic_fault_at_start=min_self._periodic_reporting_fault,
+            snapshot_invalidations_at_start=snapshot_ingress.invalidate_producer.call_count,
+        )
         return real_start(*a, **k)
 
-    with patch.object(zmq_harness.bridge, "start", side_effect=_wrapped_start):
+    with patch.object(zmq_harness.bridge, "start", side_effect=_wrapped_start) as start_probe:
         LauncherWindow._restart_engine.__get__(min_self, LauncherWindow)()
+    start_probe.assert_called_once_with()
 
-    # (d) A REAL bridge restart happened via production _restart_engine, and
-    # invalidation ran BEFORE start(): X is no longer AUTHORITATIVE.
+    # (d) A REAL bridge restart committed only after old-owner settlement, producer
+    # invalidation, and a newly established engine incarnation.
     assert zmq_harness.bridge.restart_count() == restart_count_before + 1, (
         "Real bridge restart (shutdown+start) must have occurred via _restart_engine"
     )
-    # FIX-F: the wrapper actually ran, and at start() entry X was ALREADY invalidated.
+    assert zmq_harness.bridge.is_alive() is True
+    assert zmq_harness.bridge.is_healthy() is True
+    replacement_pid = zmq_harness.bridge.process_pid()
+    assert type(replacement_pid) is int and replacement_pid > 0
+    assert min_self._restart_generation == restart_generation_before + 1
+    assert min_self._engine_instance_id == replacement_engine_instance_id
+    assert min_self._restart_pending is False
+    assert min_self._restart_giving_up is False
+    assert min_self._engine_external is False
+    min_self._show_engine_down_banner.assert_not_called()
+
     assert "status_at_start" in start_entry, "bridge.start() was never invoked by _restart_engine"
-    assert start_entry["status_at_start"] is not IdentityStatus.AUTHORITATIVE, (
-        "invalidate_descriptor_transport() must run BEFORE bridge.start(): at start() entry "
-        f"channel X was {start_entry['status_at_start']!r} (expected already-invalidated). "
-        "A mutation moving invalidate after start() would leave X AUTHORITATIVE here."
+    assert start_entry["status_at_start"] is IdentityStatus.REFUSED, (
+        "_invalidate_engine_producer() must run BEFORE bridge.start(): at start entry "
+        f"channel X was {start_entry['status_at_start']!r} (expected REFUSED)."
     )
+    assert start_entry["old_bridge_alive_at_start"] is False
+    assert start_entry["restart_generation_at_start"] == restart_generation_before + 1
+    assert start_entry["engine_instance_id_at_start"] == replacement_engine_instance_id
+    assert start_entry["engine_instance_id_at_start"] != old_engine_instance_id
+    assert start_entry["last_reading_time_at_start"] == 0.0
+    assert start_entry["safety_state_at_start"] is None
+    assert start_entry["alarm_count_at_start"] is None
+    assert start_entry["safety_generation_at_start"] == safety_generation_before + 1
+    assert start_entry["annunciation_generation_at_start"] == annunciation_generation_before + 1
+    assert start_entry["periodic_fault_at_start"] is None
+    assert start_entry["snapshot_invalidations_at_start"] == 1
+    snapshot_ingress.invalidate_producer.assert_called_once_with()
+    periodic_banner.hide.assert_called_once_with()
     # Sanity: the stubbed engine/timer bits were actually exercised by production.
     min_self._stop_engine.assert_called_once()
     min_self._start_engine.assert_called_once()
+    min_self._clear_engine_down_banner.assert_called_once_with()
     min_self._data_timer.stop.assert_called_once()
     min_self._data_timer.start.assert_called_once()
     min_self._health_timer.stop.assert_called_once()
     min_self._health_timer.start.assert_called_once()
     post_restart = w._descriptor_store.identity_status(ch)
-    assert post_restart is not IdentityStatus.AUTHORITATIVE, (
-        f"After _restart_engine, X must NOT be AUTHORITATIVE (invalidate ran before start); got {post_restart}"
+    assert post_restart is IdentityStatus.REFUSED, (
+        f"After _restart_engine, X must remain REFUSED until a fresh descriptor; got {post_restart}"
     )
     assert len(dispatch_calls) == 1, f"_restart_engine must not dispatch any reading; got {len(dispatch_calls)}"
 
@@ -1392,8 +1599,8 @@ def test_t3_real_restart_via_restart_engine(zmq_harness: ZmqHarness) -> None:  #
         for q in ql2:
             w.dispatch_qualified_reading(q)
     post_legacy = w._descriptor_store.identity_status(ch)
-    assert post_legacy is not IdentityStatus.AUTHORITATIVE, (
-        f"Post-restart legacy-absent reading must NOT restore AUTHORITATIVE; got {post_legacy}"
+    assert post_legacy is IdentityStatus.REFUSED, (
+        f"Post-restart legacy-absent reading must preserve REFUSED; got {post_legacy}"
     )
     assert len(dispatch_calls) == 2, f"Post-restart legacy publish must bring total to 2; got {len(dispatch_calls)}"
 

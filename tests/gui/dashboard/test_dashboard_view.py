@@ -9,13 +9,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from datetime import UTC, datetime
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QFrame, QScrollArea
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.dashboard.dashboard_view import _PRESENTATION_INTERVAL_MS
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 from cryodaq.operator_snapshot import (
     AttentionQueue,
     AvailabilityTruth,
@@ -39,6 +40,28 @@ from cryodaq.operator_snapshot import (
     SupportBundleManifest,
     SupportBundleSummary,
 )
+
+
+@pytest.fixture(autouse=True)
+def _gui_worker_root_session(gui_worker_root_epoch):
+    """Isolate dashboard settings inside the shared GUI worker root."""
+
+    assert gui_worker_root_epoch is not None
+    settings = QSettings("FIAN", "CryoDAQ")
+    keys = ("dashboard/unresolved_operator_log_v1", "last_log_author")
+    saved = {key: (settings.contains(key), settings.value(key)) for key in keys}
+    settings.remove("dashboard/unresolved_operator_log_v1")
+    settings.setValue("last_log_author", "operator")
+    settings.sync()
+    try:
+        yield gui_worker_root_epoch
+    finally:
+        for key, (present, value) in saved.items():
+            if present:
+                settings.setValue(key, value)
+            else:
+                settings.remove(key)
+        settings.sync()
 
 
 class _DeferredSignal:
@@ -158,14 +181,22 @@ def _operator_snapshot(
 
 
 def _commit_result(context: dict, *, entry_id: int = 1) -> dict:
+    payload = context["payload"]
     entry = {
         "id": entry_id,
         "timestamp": "2026-07-19T08:00:00+00:00",
         "message": context["message"],
+        "experiment_id": context["experiment_id"],
+        "author": payload["author"],
+        "source": payload["source"],
+        "tags": list(payload["tags"]),
     }
     return {
         "ok": True,
         "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "proto": CLIENT_PROTOCOL_VERSION,
         "entry": entry,
         "commit_receipt": {
             "schema": "operator_log_commit_v1",
@@ -302,6 +333,42 @@ def test_authority_receipt_requires_explicit_lifecycle_and_exact_identity(app):
     assert view._authority_producer_id is None
     assert view._authority_revision is None
     assert view._sensor_grid._read_only is True
+
+
+def test_explicit_producer_retirement_allows_fast_successor_without_silence_timeout(app):
+    view = DashboardView(ChannelManager())
+    view.set_connected(True)
+    view.set_operator_snapshot(
+        _operator_snapshot(
+            experiment_id="exp-a",
+            revision=42,
+            producer_id="engine-a",
+        )
+    )
+    assert view._authority_valid is True
+    initial_generation = view._connection_generation
+
+    view.invalidate_operator_snapshot_producer()
+
+    assert view._connected is False
+    assert view._connection_generation == initial_generation + 1
+    assert view._authority_valid is False
+    assert view._authority_producer_id is None
+    assert view._authority_revision is None
+    assert view._sensor_grid._read_only is True
+
+    view.set_connected(True)
+    view.set_operator_snapshot(
+        _operator_snapshot(
+            experiment_id="exp-b",
+            revision=1,
+            producer_id="engine-b",
+        )
+    )
+    assert view._authority_valid is True
+    assert view._authority_producer_id == "engine-b"
+    assert view._authority_revision == 1
+    assert view._sensor_grid._read_only is False
 
 
 def test_dashboard_replay_cut_advances_highwater_and_cannot_restore_live_authority(app):
@@ -591,6 +658,7 @@ def test_dashboard_quick_log_requires_exact_commit_receipt(app, monkeypatch):
     assert worker.payload == context["payload"]
     assert worker.payload["cmd"] == "log_entry"
     assert worker.payload["experiment_id"] == "exp-log"
+    assert worker.payload["author"] == "operator"
     assert "experiment_unbound" not in worker.payload
     assert len(worker.payload["request_id"]) == 32
     assert view._quick_log._input.text() == "Проверить persistence-first"
@@ -652,6 +720,113 @@ def test_dashboard_quick_log_forged_receipt_keeps_draft_unknown(app, monkeypatch
     assert view._log_unresolved_context is context
 
 
+@pytest.mark.parametrize(
+    ("field", "forged"),
+    [
+        ("message", "forged message"),
+        ("experiment_id", "other-experiment"),
+        ("author", "other-author"),
+        ("source", "other-source"),
+        ("tags", ["forged"]),
+    ],
+)
+def test_dashboard_quick_log_receipt_binds_complete_submitted_payload(
+    app,
+    monkeypatch,
+    field,
+    forged,
+):
+    _install_deferred_worker(monkeypatch)
+    view = DashboardView(ChannelManager())
+    _settle_connection(view, experiment_id="exp-log")
+    assert view._quick_log is not None
+    draft = "Bind every persisted field"
+    view._quick_log._input.setText(draft)
+    view._quick_log._on_submit()
+    worker = _DeferredWorker.instances.pop(0)
+    context = view._log_submit_context
+    assert context is not None
+    result = _commit_result(context, entry_id=46)
+    result["entry"][field] = forged
+
+    worker.finish(result)
+
+    assert view._quick_log._input.text() == draft
+    assert view._quick_log._submission_state == "unknown"
+    assert view._log_unresolved_context is context
+
+
+def test_dashboard_admission_invalid_is_known_uncommitted() -> None:
+    from cryodaq.gui.dashboard.dashboard_view import _log_result_is_unknown
+
+    assert (
+        _log_result_is_unknown(
+            {
+                "ok": False,
+                "committed": False,
+                "error_code": "operator_log_admission_invalid",
+                "retry_safe": True,
+            }
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry_id", "timestamp"),
+    [
+        (True, "2026-07-19T08:00:00+00:00"),
+        (1.0, "2026-07-19T08:00:00+00:00"),
+        (1, "not-an-iso-timestamp"),
+    ],
+)
+def test_dashboard_rejects_type_confused_or_malformed_commit_evidence(entry_id, timestamp) -> None:
+    context = {
+        "request_id": "a" * 32,
+        "experiment_id": "exp-log",
+        "message": "exact message",
+        "payload": {
+            "author": "operator",
+            "source": "gui",
+            "tags": [],
+        },
+    }
+    result = _commit_result(context, entry_id=entry_id)
+    result["entry"]["timestamp"] = timestamp
+
+    assert DashboardView._log_commit_receipt_matches(result, context) is False
+
+
+@pytest.mark.parametrize("proto", [None, True, CLIENT_PROTOCOL_VERSION + 1, "2"])
+def test_dashboard_rejects_missing_or_type_confused_transport_protocol(proto: object) -> None:
+    context = {
+        "request_id": "a" * 32,
+        "experiment_id": "exp-log",
+        "message": "exact message",
+        "payload": {"author": "operator", "source": "gui", "tags": []},
+    }
+    result = _commit_result(context)
+    if proto is None:
+        result.pop("proto")
+    else:
+        result["proto"] = proto
+
+    assert DashboardView._log_commit_receipt_matches(result, context) is False
+
+
+def test_dashboard_rejects_extra_transport_success_field() -> None:
+    context = {
+        "request_id": "a" * 32,
+        "experiment_id": "exp-log",
+        "message": "exact message",
+        "payload": {"author": "operator", "source": "gui", "tags": []},
+    }
+    result = _commit_result(context)
+    result["unexpected"] = True
+
+    assert DashboardView._log_commit_receipt_matches(result, context) is False
+
+
 def test_dashboard_quick_log_accepts_exact_late_receipt_after_disconnect(app, monkeypatch):
     _install_deferred_worker(monkeypatch)
     view = DashboardView(ChannelManager())
@@ -707,7 +882,7 @@ def test_dashboard_no_active_experiment_submits_explicit_unbound_log(app, monkey
     view._quick_log._on_submit()
 
     worker = _DeferredWorker.instances.pop(0)
-    assert worker.payload["experiment_id"] is None
+    assert "experiment_id" not in worker.payload
     assert worker.payload["experiment_unbound"] is True
     assert worker.started is True
 

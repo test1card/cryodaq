@@ -78,27 +78,40 @@ def test_safety_strip_restored_on_reconnect() -> None:
         _stop_timers(w)
 
 
-def test_closeevent_stops_status_timer() -> None:
+def test_closeevent_delegates_status_timer_settlement_to_root(_isolate_shell_test: int) -> None:
     """closeEvent must stop the status timer so it can't fire into a
     half-destroyed window (and the QThread teardown stays bounded)."""
     from PySide6.QtGui import QCloseEvent
 
     _app()
-    w = MainWindowV2()
+    import cryodaq.gui.zmq_client as zmq_client
+
+    shutdown_requests = 0
+    w: MainWindowV2
+
+    def settle_from_root() -> None:
+        nonlocal shutdown_requests
+        shutdown_requests += 1
+        zmq_client.revoke_gui_command_worker_admission(_isolate_shell_test)
+        assert w.settle_owned_workers()
+
+    w = MainWindowV2(shutdown_request=settle_from_root)
     try:
         assert w._status_timer.isActive()
         w.closeEvent(QCloseEvent())
+        assert shutdown_requests == 1
         assert not w._status_timer.isActive(), "status timer must be stopped on close"
     finally:
         _stop_timers(w)
 
 
-def test_analytics_safety_reading_never_enables_mutation_authority() -> None:
+def test_analytics_safety_reading_never_enables_mutation_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     """READY-looking telemetry is display evidence, never command authority."""
     _app()
-    bridge = ZmqBridge()
-    assert bridge.bridge_instance_id is not None
-    window = MainWindowV2(bridge=bridge)
+    assert live_zmq_bridge.bridge_instance_id is not None
+    window = MainWindowV2(bridge=live_zmq_bridge)
     try:
         window._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-a"}}
         window._ensure_overlay("source")
@@ -120,7 +133,7 @@ def test_analytics_safety_reading_never_enables_mutation_authority() -> None:
                 metadata={
                     "state": "ready",
                     "reason": "",
-                    "bridge_instance_id": bridge.bridge_instance_id,
+                    "bridge_instance_id": live_zmq_bridge.bridge_instance_id,
                     "experiment_id": "exp-a",
                 },
             )
@@ -134,11 +147,12 @@ def test_analytics_safety_reading_never_enables_mutation_authority() -> None:
         _stop_timers(window)
 
 
-def test_disk_reading_is_presented_only_when_backend_metadata_is_exact() -> None:
+def test_disk_reading_is_presented_only_when_backend_metadata_is_exact(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    assert bridge.bridge_instance_id is not None
-    window = MainWindowV2(bridge=bridge)
+    assert live_zmq_bridge.bridge_instance_id is not None
+    window = MainWindowV2(bridge=live_zmq_bridge)
     try:
         reading = Reading(
             timestamp=datetime.now(UTC),
@@ -149,7 +163,7 @@ def test_disk_reading_is_presented_only_when_backend_metadata_is_exact() -> None
             metadata={
                 "source": "disk_monitor",
                 "operator_state": "caution",
-                "bridge_instance_id": bridge.bridge_instance_id,
+                "bridge_instance_id": live_zmq_bridge.bridge_instance_id,
             },
         )
         window._dispatch_reading(reading)
@@ -165,7 +179,7 @@ def test_disk_reading_is_presented_only_when_backend_metadata_is_exact() -> None
                 metadata={
                     "source": "untrusted",
                     "operator_state": "fault",
-                    "bridge_instance_id": bridge.bridge_instance_id,
+                    "bridge_instance_id": live_zmq_bridge.bridge_instance_id,
                 },
             )
         )
@@ -174,11 +188,12 @@ def test_disk_reading_is_presented_only_when_backend_metadata_is_exact() -> None
         _stop_timers(window)
 
 
-def test_disk_evidence_rejects_foreign_future_reordered_and_replaced_bridge_cuts() -> None:
+def test_disk_evidence_rejects_foreign_future_reordered_and_replaced_bridge_cuts(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    assert bridge.bridge_instance_id is not None
-    window = MainWindowV2(bridge=bridge)
+    assert live_zmq_bridge.bridge_instance_id is not None
+    window = MainWindowV2(bridge=live_zmq_bridge)
     try:
         now = datetime.now(UTC)
 
@@ -196,21 +211,29 @@ def test_disk_evidence_rejects_foreign_future_reordered_and_replaced_bridge_cuts
                 },
             )
 
-        window._dispatch_reading(disk(20.0, observed_at=now, bridge_id=bridge.bridge_instance_id))
+        window._dispatch_reading(disk(20.0, observed_at=now, bridge_id=live_zmq_bridge.bridge_instance_id))
         assert "20.0" in window._bottom_bar._disk_label.text()
         prior = window._bottom_bar._disk_label.text()
         window._dispatch_reading(disk(21.0, observed_at=now + timedelta(seconds=10), bridge_id="foreign"))
         window._dispatch_reading(
-            disk(22.0, observed_at=now + timedelta(seconds=20), bridge_id=bridge.bridge_instance_id)
+            disk(
+                22.0,
+                observed_at=now + timedelta(seconds=20),
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
         )
-        window._dispatch_reading(disk(23.0, observed_at=now, bridge_id=bridge.bridge_instance_id))
+        window._dispatch_reading(disk(23.0, observed_at=now, bridge_id=live_zmq_bridge.bridge_instance_id))
         assert window._bottom_bar._disk_label.text() == prior
 
-        bridge._bridge_instance_id = "f" * 32
+        live_zmq_bridge._bridge_instance_id = "f" * 32
         window._dispatch_reading(disk(24.0, observed_at=now + timedelta(seconds=1), bridge_id="old" * 8))
         assert "устарело" in window._bottom_bar._disk_label.text()
         window._dispatch_reading(
-            disk(25.0, observed_at=now + timedelta(seconds=2), bridge_id=bridge.bridge_instance_id)
+            disk(
+                25.0,
+                observed_at=now + timedelta(seconds=2),
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
         )
         assert "25.0" in window._bottom_bar._disk_label.text()
     finally:

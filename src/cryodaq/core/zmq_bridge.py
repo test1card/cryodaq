@@ -16,7 +16,8 @@ ceremony without changing the trust boundary.
 The accepted risk is bounded by these compensating controls:
 
 - **Loopback-only bind, wildcard-bind rejected.** PUB/REP default to
-  ``tcp://127.0.0.1:*`` (``DEFAULT_PUB_ADDR`` / ``DEFAULT_CMD_ADDR``), and
+  ``tcp://127.0.0.1:*`` (``DEFAULT_PUB_ADDR`` / ``DEFAULT_CMD_ADDR`` /
+  ``DEFAULT_SAFE_CMD_ADDR``), and
   ``_bind_with_retry`` calls ``_reject_wildcard_bind`` to raise ``ValueError``
   on any ``0.0.0.0`` / ``*`` / ``::`` address — the loopback bind is enforced,
   not merely the default. The kernel then refuses any off-host connection, so
@@ -62,6 +63,8 @@ import math
 import secrets
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import version as _pkg_version
 from typing import Any, Literal
@@ -71,12 +74,29 @@ import zmq
 import zmq.asyncio
 
 from cryodaq.channels.persistence import MAX_PERSISTED_ENVELOPE_BYTES
-from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, PublishedReading
-from cryodaq.core.command_authority import CommandClass, classify_engine_command
+from cryodaq.core.broker import (
+    PERSISTENCE_AUTHORITATIVE_METADATA_KEY,
+    PublishedReading,
+    RequiredPublication,
+)
+from cryodaq.core.command_authority import (
+    CommandClass,
+    classify_engine_command,
+    is_quarantine_bypass_safe_direction,
+)
+from cryodaq.core.command_reply_contract import (
+    COMMAND_REPLY_MAX_INTEGER_DIGITS,
+    COMMAND_REPLY_MAX_JSON_DEPTH,
+    COMMAND_REPLY_MAX_JSON_ITEMS,
+    COMMAND_REPLY_MAX_JSON_KEY_CHARS,
+    COMMAND_REPLY_MAX_WIRE_BYTES,
+    validate_command_reply_structure,
+)
 from cryodaq.core.descriptor_transport import (
     DescriptorQualifiedReading,
     qualify_reading_descriptor,
 )
+from cryodaq.core.zmq_endpoints import require_distinct_loopback_tcp_endpoints
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.operator_snapshot import OperatorSnapshot
 from cryodaq.operator_snapshot_transport import encode_operator_snapshot_frames
@@ -182,6 +202,7 @@ def _decode_command(raw: bytes | str) -> dict[str, Any]:
 
 DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_CMD_ADDR = "tcp://127.0.0.1:5556"
+DEFAULT_SAFE_CMD_ADDR = "tcp://127.0.0.1:5558"
 DEFAULT_TOPIC = b"readings"
 
 # B1 (agents/ process extraction): additive second topic on the SAME PUB
@@ -214,7 +235,9 @@ def _bounded_action_label(action: object) -> str:
 
     if type(action) is not str or not action:
         return "<invalid>"
-    return "".join(char if char.isascii() and (char.isalnum() or char in "._-") else "?" for char in action[:128])
+    if len(action) > 64 or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in action):
+        return "<invalid>"
+    return action
 
 
 def _post_dispatch_failure(
@@ -236,13 +259,88 @@ def _post_dispatch_failure(
     }
 
 
+_HANDLER_SETTLEMENT_FIELDS = frozenset(
+    {
+        "commit_state",
+        "delivery_state",
+        "outcome_unknown",
+    }
+)
+
+
+def _handler_reply_has_exact_terminal_settlement(reply: object) -> bool:
+    """Return whether a dispatched handler supplied coherent terminal proof."""
+
+    if type(reply) is not dict:
+        return False
+    try:
+        return (
+            reply.get("delivery_state") == "dispatched"
+            and reply.get("commit_state") in {"committed", "not_committed"}
+            and reply.get("outcome_unknown", False) is False
+        )
+    except Exception:
+        return False
+
+
+def _handler_reply_outcome_is_unknown(reply: object) -> bool:
+    """Recognize incoherent post-dispatch settlement evidence, fail closed.
+
+    Immediate handler completion remains backwards-compatible only when the
+    reply contains no settlement vocabulary at all. Once a handler supplies
+    any settlement field, it must prove the exact coherent tuple: dispatched,
+    committed/not-committed, and no unknown marker. Partial or contradictory
+    vocabulary cannot manufacture optimistic authority settlement.
+    """
+
+    if not isinstance(reply, dict):
+        return True
+    try:
+        if not any(field in reply for field in _HANDLER_SETTLEMENT_FIELDS):
+            return False
+    except Exception:
+        return True
+    return not _handler_reply_has_exact_terminal_settlement(reply)
+
+
+def _late_handler_reply_proves_terminal_settlement(reply: object) -> bool:
+    """Require exact terminal evidence before releasing a detached mutation."""
+
+    return _handler_reply_has_exact_terminal_settlement(reply)
+
+
+class _HandlerDispatchTrace:
+    """Task-local proof that the application handler actually started."""
+
+    __slots__ = ("command_class", "task")
+
+    def __init__(self) -> None:
+        self.task: asyncio.Task[Any] | None = None
+        self.command_class: CommandClass | None = None
+
+
+_HANDLER_DISPATCH_TRACE: ContextVar[_HandlerDispatchTrace | None] = ContextVar(
+    "cryodaq_handler_dispatch_trace",
+    default=None,
+)
+
+
 def encode_command_reply(reply: dict[str, Any]) -> bytes:
     """Serialize the one authoritative REP envelope used on the wire."""
     if type(reply) is not dict:
         raise TypeError("command reply must be an exact dict")
+    envelope = {**reply, "proto": PROTOCOL_VERSION}
+    validate_command_reply_structure(
+        envelope,
+        max_wire_bytes=MAX_COMMAND_REPLY_SIZE,
+        max_depth=COMMAND_REPLY_MAX_JSON_DEPTH,
+        max_items=COMMAND_REPLY_MAX_JSON_ITEMS,
+        max_key_chars=COMMAND_REPLY_MAX_JSON_KEY_CHARS,
+        max_integer_digits=COMMAND_REPLY_MAX_INTEGER_DIGITS,
+    )
     try:
         wire = json.dumps(
-            {**reply, "proto": PROTOCOL_VERSION},
+            envelope,
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
@@ -265,6 +363,14 @@ class PeriodicCommandReply(dict[str, Any]):
 def encode_periodic_command_reply(reply: dict[str, Any]) -> PeriodicCommandReply:
     """Encode one compact, sorted, finite H3 reply exactly once."""
     envelope = {**reply, "proto": PROTOCOL_VERSION}
+    validate_command_reply_structure(
+        envelope,
+        max_wire_bytes=MAX_COMMAND_REPLY_SIZE,
+        max_depth=COMMAND_REPLY_MAX_JSON_DEPTH,
+        max_items=COMMAND_REPLY_MAX_JSON_ITEMS,
+        max_key_chars=COMMAND_REPLY_MAX_JSON_KEY_CHARS,
+        max_integer_digits=COMMAND_REPLY_MAX_INTEGER_DIGITS,
+    )
     wire = json.dumps(
         envelope,
         sort_keys=True,
@@ -272,6 +378,8 @@ def encode_periodic_command_reply(reply: dict[str, Any]) -> PeriodicCommandReply
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+    if len(wire) > MAX_COMMAND_REPLY_SIZE:
+        raise ValueError("command reply exceeds maximum size")
     return PeriodicCommandReply(reply, wire)
 
 
@@ -290,7 +398,7 @@ _SERVER_LABELS = frozenset({"engine", "assistant"})
 # vs. real traffic so legitimate payloads are never clipped.
 MAX_CMD_MSG_SIZE = 256 * 1024  # 256 KiB — commands are tiny JSON objects
 MAX_DATA_MSG_SIZE = 2 * 1024 * 1024  # 2 MiB — one msgpack Reading, generous
-MAX_COMMAND_REPLY_SIZE = 4 * 1024 * 1024
+MAX_COMMAND_REPLY_SIZE = COMMAND_REPLY_MAX_WIRE_BYTES
 MAX_COMMAND_JSON_DEPTH = 16
 MAX_COMMAND_JSON_ITEMS = 2048
 MAX_COMMAND_JSON_KEY_CHARS = 256
@@ -336,6 +444,7 @@ _SLOW_COMMANDS: frozenset[str] = frozenset(
         # by the fast 2-second envelope during a slow USB transaction.
         "keithley_emergency_off",
         "keithley_stop",
+        "launcher_shutdown",
         # F34: GUI chat overlay routes through AssistantQueryAgent (Ollama
         # round-trip + audit log + adapter fanout). Fast 2 s envelope is
         # too tight; the helper's own asyncio.wait_for fires at 25 s,
@@ -592,7 +701,7 @@ class ZMQPublisher:
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._total_sent: int = 0
-        self._queue: asyncio.Queue[Reading] | None = None
+        self._queue: asyncio.Queue[Any] | None = None
         self._session_id: str | None = None
         self._sequence = 0
         self._publish_failure_count = 0
@@ -675,23 +784,31 @@ class ZMQPublisher:
                 ),
             )
 
-    async def _publish_loop(self, queue: asyncio.Queue[Reading]) -> None:
+    async def _publish_loop(self, queue: asyncio.Queue[Any]) -> None:
         while self._running:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=1.0)
             except TimeoutError:
                 continue
+            required = item if type(item) is RequiredPublication else None
             try:
                 # F35 D4: the zmq_publisher subscription opts in to
                 # DataBroker's descriptor-envelope companion, so this queue
                 # carries PublishedReading pairs instead of bare Reading.
-                if type(item) is PublishedReading:
+                if required is not None:
+                    await self._publish_reading(required.claim())
+                    required.acknowledge()
+                elif type(item) is PublishedReading:
                     await self._publish_reading(item.reading, descriptor_envelope=item.descriptor_envelope)
                 else:
                     await self._publish_reading(item)
             except asyncio.CancelledError:
+                if required is not None:
+                    required.reject()
                 raise
             except Exception:
+                if required is not None:
+                    required.reject()
                 logger.exception("Ошибка отправки ZMQ")
             finally:
                 queue.task_done()
@@ -772,7 +889,7 @@ class ZMQPublisher:
         self,
         *,
         task: asyncio.Task[None],
-        queue: asyncio.Queue[Reading],
+        queue: asyncio.Queue[Any],
     ) -> bool:
         return (
             self._running
@@ -886,7 +1003,7 @@ class ZMQPublisher:
             logger.exception("Periodic barrier failed")
             return self._barrier_error("barrier_unavailable")
 
-    async def start(self, queue: asyncio.Queue[Reading]) -> None:
+    async def start(self, queue: asyncio.Queue[Any]) -> None:
         if self._running or self._task is not None or self._socket is not None or self._ctx is not None:
             raise RuntimeError("ZMQPublisher is already started")
         self._queue = queue
@@ -950,6 +1067,19 @@ class ZMQPublisher:
                 and not isinstance(first_error, asyncio.CancelledError)
             ):
                 first_error = asyncio.CancelledError()
+
+        queue = self._queue
+        if queue is not None:
+            while True:
+                try:
+                    queued = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    if type(queued) is RequiredPublication:
+                        queued.reject()
+                finally:
+                    queue.task_done()
 
         async def _cleanup() -> None:
             cleanup_error: BaseException | None = None
@@ -1220,6 +1350,69 @@ class ZMQEventSubscriber:
         logger.info("ZMQEventSubscriber остановлен")
 
 
+class CommandAuthorityRegistry:
+    """Engine-scoped quarantine shared by every command REP endpoint.
+
+    A second REP socket is an independent transport lane, not an independent
+    mutation authority. Servers for one engine incarnation must therefore use
+    the same registry so uncertainty on either endpoint quarantines both.
+    """
+
+    def __init__(self) -> None:
+        self._uncertain_authority_tasks: set[asyncio.Task[Any]] = set()
+        self._uncertain_authority_latched = False
+
+    @property
+    def uncertain_tasks(self) -> set[asyncio.Task[Any]]:
+        return self._uncertain_authority_tasks
+
+    @property
+    def latched(self) -> bool:
+        return self._uncertain_authority_latched
+
+    @latched.setter
+    def latched(self, value: bool) -> None:
+        self._uncertain_authority_latched = bool(value)
+
+    def has_uncertain_authority(self) -> bool:
+        # A terminal task remains uncertain until its owning server observes
+        # and removes it. This closes the callback-scheduling race between two
+        # independent REP loops sharing the same engine authority.
+        return self._uncertain_authority_latched or bool(self._uncertain_authority_tasks)
+
+
+class ZMQCommandServerOwnershipConflict(RuntimeError):
+    """A start attempt proved the runtime was already owned before mutation."""
+
+
+@dataclass(frozen=True, slots=True)
+class ZMQCommandServerTerminalFailure:
+    """Sanitized proof that one REP owner cannot recover its serve loop."""
+
+    stage: Literal["loop_closed", "recovery_task_create_failed", "recovery_exhausted"]
+    failure_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class ZMQCommandIngressTerminalFailure:
+    """First terminal failure across the ordinary and safe REP owners."""
+
+    endpoint: Literal["safe", "ordinary"]
+    stage: Literal["loop_closed", "recovery_task_create_failed", "recovery_exhausted"]
+    failure_type: str
+
+
+class ZMQCommandIngressTerminalError(RuntimeError):
+    """One command-ingress endpoint lost its terminal runtime authority."""
+
+    def __init__(self, failure: ZMQCommandIngressTerminalFailure) -> None:
+        self.failure = failure
+        super().__init__(
+            "ZMQ command ingress terminated: "
+            f"endpoint={failure.endpoint}; stage={failure.stage}; failure={failure.failure_type}"
+        )
+
+
 class ZMQCommandServer:
     """REP-сокет: engine принимает JSON-команды от GUI.
 
@@ -1241,6 +1434,10 @@ class ZMQCommandServer:
         handler: Callable[[dict[str, Any]], Any] | None = None,
         handler_timeout_s: float | None = None,
         server_label: Literal["engine", "assistant"] = "engine",
+        reply_sent_callback: Callable[[dict[str, Any], dict[str, Any]], Any] | None = None,
+        authority_registry: CommandAuthorityRegistry | None = None,
+        accepted_actions: frozenset[str] | None = None,
+        accepted_command_predicate: Callable[[dict[str, Any]], bool] | None = None,
     ) -> None:
         if not isinstance(server_label, str) or server_label not in _SERVER_LABELS:
             allowed = ", ".join(sorted(_SERVER_LABELS))
@@ -1248,6 +1445,17 @@ class ZMQCommandServer:
         self._address = address
         self._handler = handler
         self._server_role = server_label
+        self._reply_sent_callback = reply_sent_callback
+        self._authority_registry = authority_registry if authority_registry is not None else CommandAuthorityRegistry()
+        if accepted_actions is not None and (
+            type(accepted_actions) is not frozenset
+            or any(type(action) is not str or not action for action in accepted_actions)
+        ):
+            raise ValueError("accepted_actions must be an exact frozenset of non-empty strings")
+        if accepted_command_predicate is not None and not callable(accepted_command_predicate):
+            raise TypeError("accepted_command_predicate must be callable")
+        self._accepted_actions = accepted_actions
+        self._accepted_command_predicate = accepted_command_predicate
         # IV.3 Finding 7: honour an explicit override (tests supply one
         # to exercise the timeout path without sleeping for 2 s), but
         # the production path uses the tiered ``_timeout_for(cmd)``
@@ -1258,13 +1466,131 @@ class ZMQCommandServer:
         self._task: asyncio.Task[None] | None = None
         self._restart_task: asyncio.Task[None] | None = None
         self._handler_tasks: set[asyncio.Task[Any]] = set()
-        self._uncertain_authority_tasks: set[asyncio.Task[Any]] = set()
+        self._handler_actions: dict[asyncio.Task[Any], str] = {}
+        # Backwards-compatible inspection surface. The set is intentionally
+        # shared when two servers receive the same authority registry.
+        self._uncertain_authority_tasks = self._authority_registry.uncertain_tasks
         self._running = False
         self._shutdown_requested = False
+        self._terminal_failure: ZMQCommandServerTerminalFailure | None = None
+        self._terminal_failure_event = asyncio.Event()
+        self._terminal_failure_notifier: Callable[[ZMQCommandServerTerminalFailure], None] | None = None
+
+    @property
+    def _uncertain_authority_latched(self) -> bool:
+        return self._authority_registry.latched
+
+    @_uncertain_authority_latched.setter
+    def _uncertain_authority_latched(self, value: bool) -> None:
+        self._authority_registry.latched = value
+
+    def _command_is_accepted(self, cmd: dict[str, Any]) -> bool:
+        actions = self._accepted_actions
+        if actions is not None:
+            action = cmd.get("cmd")
+            if type(action) is not str or action not in actions:
+                return False
+        predicate = self._accepted_command_predicate
+        if predicate is None:
+            return True
+        try:
+            return predicate(cmd) is True
+        except Exception:
+            return False
+
+    @property
+    def terminal_failure(self) -> ZMQCommandServerTerminalFailure | None:
+        """Return sticky sanitized terminal proof without consuming it."""
+
+        return self._terminal_failure
+
+    def terminal_failure_notifier_state_is_pristine(self) -> bool:
+        """Prove notifier ownership without changing the notifier slot."""
+
+        return self._terminal_failure_notifier is None
+
+    def bind_terminal_failure_notifier(
+        self,
+        notifier: Callable[[ZMQCommandServerTerminalFailure], None],
+    ) -> None:
+        """Bind the one composite lifecycle owner before this server starts."""
+
+        if not callable(notifier):
+            raise TypeError("terminal failure notifier must be callable")
+        if self._terminal_failure_notifier is not None and self._terminal_failure_notifier is not notifier:
+            raise RuntimeError("terminal failure notifier is already bound")
+        self._terminal_failure_notifier = notifier
+        failure = self._terminal_failure
+        if failure is not None:
+            notifier(failure)
+
+    def unbind_terminal_failure_notifier(
+        self,
+        notifier: Callable[[ZMQCommandServerTerminalFailure], None],
+    ) -> None:
+        """Undo an exact constructor-time binding without disturbing another owner."""
+
+        if not callable(notifier):
+            raise TypeError("terminal failure notifier must be callable")
+        current = self._terminal_failure_notifier
+        if current is notifier:
+            self._terminal_failure_notifier = None
+            return
+        if current is None:
+            return
+        raise RuntimeError("terminal failure notifier changed before constructor rollback")
+
+    async def wait_terminal_failure(self) -> ZMQCommandServerTerminalFailure:
+        """Wait for sticky terminal proof; waiter cancellation never clears it."""
+
+        failure = self._terminal_failure
+        if failure is None:
+            await self._terminal_failure_event.wait()
+            failure = self._terminal_failure
+        if failure is None:
+            raise RuntimeError("terminal failure event was set without terminal proof")
+        return failure
+
+    def _latch_terminal_failure(
+        self,
+        *,
+        stage: Literal["loop_closed", "recovery_task_create_failed", "recovery_exhausted"],
+        failure_type: str,
+    ) -> None:
+        """Freeze admission and publish the first sanitized terminal proof."""
+
+        if self._terminal_failure is not None:
+            return
+        sanitized_type = (
+            failure_type
+            if type(failure_type) is str
+            and 0 < len(failure_type) <= 64
+            and failure_type.isascii()
+            and all(char.isalnum() or char == "_" for char in failure_type)
+            else "Exception"
+        )
+        failure = ZMQCommandServerTerminalFailure(stage=stage, failure_type=sanitized_type)
+        self._terminal_failure = failure
+        # Close this endpoint even when it has no composite owner. The bound
+        # pair notifier below performs the observable safe-then-ordinary freeze
+        # exactly once, without a duplicate callback on the failed endpoint.
+        self._shutdown_requested = True
+        self._running = False
+        try:
+            notifier = self._terminal_failure_notifier
+            if notifier is not None:
+                notifier(failure)
+        except BaseException as exc:
+            logger.error(
+                "ZMQCommandServer terminal notifier failed: exception=%s",
+                type(exc).__name__,
+            )
+        finally:
+            self._terminal_failure_event.set()
 
     def _start_serve_task(self) -> None:
         """Spawn the command loop exactly once while the server is running."""
-        if not self._running or self._shutdown_requested:
+        if not self._running or self._shutdown_requested or self._terminal_failure is not None:
             return
         if self._task is not None and not self._task.done():
             return
@@ -1280,21 +1606,44 @@ class ZMQCommandServer:
     ) -> None:
         """Consume a detached handler result without exposing its payload."""
 
-        self._handler_tasks.discard(task)
-        self._uncertain_authority_tasks.discard(task)
-        if task.cancelled():
+        registered_action = self._handler_actions.get(task)
+        if registered_action is None:
             return
+        action = registered_action
+        was_uncertain = task in self._uncertain_authority_tasks
+        terminal_unknown = False
+        terminal_result: object = None
         try:
-            exc = task.exception()
+            if task.cancelled():
+                terminal_unknown = was_uncertain
+            else:
+                terminal_result = task.result()
+                if was_uncertain:
+                    terminal_unknown = not _late_handler_reply_proves_terminal_settlement(terminal_result)
+                    if not terminal_unknown:
+                        try:
+                            wire = self._encode_reply(terminal_result)
+                            decoded = json.loads(wire.decode("utf-8"))
+                            terminal_unknown = type(decoded) is not dict
+                        except Exception:
+                            terminal_unknown = True
         except asyncio.CancelledError:
-            return
-        if exc is not None:
+            terminal_unknown = was_uncertain
+        except BaseException as exc:
+            terminal_unknown = was_uncertain
             logger.error(
                 "ZMQ detached command handler failed: action=%s exception=%s",
                 action,
                 type(exc).__name__,
             )
-        else:
+        if terminal_unknown:
+            # Set the durable latch before releasing the task-set owner so the
+            # two shared REP endpoints never observe an authority gap.
+            self._uncertain_authority_latched = True
+        self._handler_tasks.discard(task)
+        self._uncertain_authority_tasks.discard(task)
+        self._handler_actions.pop(task, None)
+        if not terminal_unknown and terminal_result is not None:
             logger.warning(
                 "ZMQ detached command handler settled after reply: action=%s",
                 action,
@@ -1306,26 +1655,35 @@ class ZMQCommandServer:
         for task in tuple(self._handler_tasks):
             if not task.done():
                 continue
-            self._handler_tasks.discard(task)
-            self._uncertain_authority_tasks.discard(task)
-            if task.cancelled():
-                continue
-            try:
-                task.exception()
-            except asyncio.CancelledError:
-                pass
+            self._observe_handler_task(
+                task,
+                action=self._handler_actions.get(task, "unknown"),
+            )
 
     def _has_uncertain_authority_owner(self) -> bool:
         """Return whether a prior non-read handler can still change state."""
 
         self._prune_handler_tasks()
-        return any(not task.done() for task in self._uncertain_authority_tasks)
+        return self._authority_registry.has_uncertain_authority()
+
+    def _record_dispatched_unknown(self, trace: _HandlerDispatchTrace) -> None:
+        """Latch only a non-read application dispatch with no terminal proof."""
+
+        task = trace.task
+        if task is None or trace.command_class is CommandClass.READ:
+            return
+        if task in self._uncertain_authority_tasks:
+            # A timed-out task is a resolvable owner. Its late terminal reply
+            # decides whether quarantine can clear; do not make that temporary
+            # task-set owner permanently sticky here.
+            return
+        self._uncertain_authority_latched = True
 
     @staticmethod
-    def _is_exact_global_off(cmd: dict[str, Any]) -> bool:
-        """Recognize only the global, argument-free safe-direction envelope."""
+    def _is_exact_quarantine_safe_direction(cmd: dict[str, Any]) -> bool:
+        """Recognize only exact safe-direction envelopes during quarantine."""
 
-        return set(cmd) == {"cmd"} and cmd.get("cmd") == "keithley_emergency_off"
+        return is_quarantine_bypass_safe_direction(cmd)
 
     def _detach_handler_task(
         self,
@@ -1334,7 +1692,7 @@ class ZMQCommandServer:
         action: str,
         command_class: CommandClass,
     ) -> None:
-        """Cancel without waiting and quarantine uncertain command authority."""
+        """Detach a timed-out owner without releasing mutation authority."""
 
         if command_class is not CommandClass.READ:
             self._uncertain_authority_tasks.add(task)
@@ -1344,7 +1702,8 @@ class ZMQCommandServer:
                 action=label,
             )
         )
-        task.cancel()
+        if command_class is CommandClass.READ:
+            task.cancel()
 
     async def _settle_handler_tasks(self) -> None:
         """Cancel and terminally settle every detached command owner.
@@ -1359,23 +1718,159 @@ class ZMQCommandServer:
         if current in self._handler_tasks:
             raise RuntimeError("ZMQ command handler cannot synchronously stop its own server")
         for task in tasks:
-            task.cancel()
+            if task not in self._uncertain_authority_tasks:
+                task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+
+            async def _settle() -> None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            settlement = asyncio.create_task(_settle(), name="zmq-command-handler-settlement")
+            cancellation_seen = False
+            while not settlement.done():
+                try:
+                    await asyncio.shield(settlement)
+                except asyncio.CancelledError:
+                    cancellation_seen = True
+            settlement.result()
+            self._prune_handler_tasks()
+            if cancellation_seen:
+                raise asyncio.CancelledError
         self._prune_handler_tasks()
+
+    def _startup_state_is_pristine(self) -> bool:
+        """Return whether ``start`` can acquire a fresh runtime ownership set."""
+
+        self._prune_handler_tasks()
+        return (
+            not self._running
+            and self._ctx is None
+            and self._socket is None
+            and self._task is None
+            and self._restart_task is None
+            and not self._handler_tasks
+            and self._terminal_failure is None
+        )
+
+    def startup_state_is_pristine(self) -> bool:
+        """Expose a read-only ownership proof to a composite lifecycle owner."""
+
+        return self._startup_state_is_pristine()
+
+    async def _cleanup_owned_runtime(self) -> None:
+        """Settle owned resources, clearing only owners proven terminal."""
+
+        first_error: BaseException | None = None
+
+        def record(error: BaseException) -> None:
+            nonlocal first_error
+            if first_error is None:
+                first_error = error
+
+        for attribute in ("_task", "_restart_task"):
+            task = getattr(self, attribute)
+            if task is None:
+                continue
+            try:
+                task.cancel()
+                await task
+            except asyncio.CancelledError:
+                pass
+            except BaseException as exc:
+                record(exc)
+            finally:
+                if task.done() and getattr(self, attribute) is task:
+                    setattr(self, attribute, None)
+
+        handlers_settled = False
+        try:
+            await self._settle_handler_tasks()
+        except BaseException as exc:
+            record(exc)
+        else:
+            handlers_settled = True
+
+        # A handler that has not settled can still commit through the bound REP
+        # authority. Retain the complete transport owner set for an explicit
+        # retry instead of manufacturing a clean-looking partial shutdown.
+        if handlers_settled:
+            socket = self._socket
+            if socket is not None:
+                try:
+                    socket.close(linger=0)
+                except BaseException as exc:
+                    record(exc)
+                else:
+                    if self._socket is socket:
+                        self._socket = None
+
+            # ``Context.term`` may wait on a live socket. Only attempt it after
+            # socket settlement is proven; otherwise retain both exact owners.
+            context = self._ctx
+            if self._socket is None and context is not None:
+                try:
+                    context.term()
+                except BaseException as exc:
+                    record(exc)
+                else:
+                    if self._ctx is context:
+                        self._ctx = None
+
+        if first_error is not None:
+            raise first_error
+
+    async def _run_cleanup_resisting_cancellation(
+        self,
+        *,
+        task_name: str,
+    ) -> tuple[asyncio.CancelledError | None, BaseException | None]:
+        """Finish cleanup before returning caller cancellation or failure."""
+
+        cleanup_task = asyncio.create_task(
+            self._cleanup_owned_runtime(),
+            name=task_name,
+        )
+        caller_cancellation: asyncio.CancelledError | None = None
+        cleanup_error: BaseException | None = None
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError as exc:
+                caller_cancellation = exc
+            except BaseException as exc:
+                cleanup_error = exc
+                break
+        if cleanup_task.done() and cleanup_error is None:
+            try:
+                cleanup_task.result()
+            except BaseException as exc:
+                cleanup_error = exc
+        return caller_cancellation, cleanup_error
 
     async def _open_bound_socket(self) -> zmq.asyncio.Socket:
         """Create and bind a fresh REP socket with the full boundary policy."""
 
         if self._ctx is None:
             raise RuntimeError("ZMQ command context is not available")
+        if self._socket is not None:
+            raise RuntimeError("ZMQ command socket ownership is not pristine")
         socket = self._ctx.socket(zmq.REP)
-        socket.setsockopt(zmq.LINGER, 0)
-        socket.setsockopt(zmq.MAXMSGSIZE, MAX_CMD_MSG_SIZE)
+        self._socket = socket
         try:
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.setsockopt(zmq.MAXMSGSIZE, MAX_CMD_MSG_SIZE)
             await _bind_with_retry(socket, self._address)
-        except BaseException:
-            socket.close(linger=0)
+        except BaseException as acquisition_error:
+            try:
+                socket.close(linger=0)
+            except BaseException as close_error:
+                raise RuntimeError(
+                    "ZMQ command socket acquisition rollback failed: "
+                    f"acquisition={type(acquisition_error).__name__}; "
+                    f"close={type(close_error).__name__}"
+                ) from acquisition_error
+            if self._socket is socket:
+                self._socket = None
             raise
         return socket
 
@@ -1384,15 +1879,22 @@ class ZMQCommandServer:
 
         current = asyncio.current_task()
         try:
-            old_socket, self._socket = self._socket, None
+            if self._terminal_failure is not None:
+                return
+            old_socket = self._socket
             if old_socket is not None:
                 old_socket.close(linger=0)
+                if self._socket is old_socket:
+                    self._socket = None
             if self._shutdown_requested or not self._running:
                 return
-            self._socket = await self._open_bound_socket()
+            await self._open_bound_socket()
             if self._shutdown_requested or not self._running:
-                self._socket.close(linger=0)
-                self._socket = None
+                replacement = self._socket
+                if replacement is not None:
+                    replacement.close(linger=0)
+                    if self._socket is replacement:
+                        self._socket = None
                 return
             # Release recovery ownership before the replacement task can run.
             # If that task exits immediately, its done callback must be able to
@@ -1400,14 +1902,27 @@ class ZMQCommandServer:
             # almost-finished recovery task and leave the server ownerless.
             if self._restart_task is current:
                 self._restart_task = None
-            self._start_serve_task()
+            try:
+                self._start_serve_task()
+            except Exception as create_error:
+                logger.error(
+                    "ZMQCommandServer recovery serve-task creation failed: exception=%s",
+                    type(create_error).__name__,
+                )
+                self._latch_terminal_failure(
+                    stage="recovery_task_create_failed",
+                    failure_type=type(create_error).__name__,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._running = False
             logger.error(
                 "ZMQCommandServer socket recovery failed: exception=%s",
                 type(exc).__name__,
+            )
+            self._latch_terminal_failure(
+                stage="recovery_exhausted",
+                failure_type=type(exc).__name__,
             )
         finally:
             if self._restart_task is current:
@@ -1424,7 +1939,7 @@ class ZMQCommandServer:
             exc = None
 
         self._task = None
-        if self._shutdown_requested or not self._running:
+        if self._shutdown_requested or not self._running or self._terminal_failure is not None:
             return
 
         if exc is not None:
@@ -1438,12 +1953,28 @@ class ZMQCommandServer:
         loop = task.get_loop()
         if loop.is_closed():
             logger.error("ZMQCommandServer loop is closed; cannot restart serve loop")
+            self._latch_terminal_failure(
+                stage="loop_closed",
+                failure_type="RuntimeError",
+            )
             return
         if self._restart_task is None or self._restart_task.done():
-            self._restart_task = loop.create_task(
-                self._restart_after_unexpected_exit(),
-                name="zmq_cmd_server_recover",
-            )
+            recovery = self._restart_after_unexpected_exit()
+            try:
+                self._restart_task = loop.create_task(
+                    recovery,
+                    name="zmq_cmd_server_recover",
+                )
+            except Exception as create_error:
+                recovery.close()
+                logger.error(
+                    "ZMQCommandServer recovery task creation failed: exception=%s",
+                    type(create_error).__name__,
+                )
+                self._latch_terminal_failure(
+                    stage="recovery_task_create_failed",
+                    failure_type=type(create_error).__name__,
+                )
 
     async def _run_handler(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Execute the command handler with a bounded wall-clock timeout.
@@ -1456,19 +1987,6 @@ class ZMQCommandServer:
         timeout — the ``_handler_timeout`` marker so callers can tell
         the difference from a normal handler-reported error.
         """
-        # Answer discovery before application dispatch so it remains available
-        # even if no command handler is configured.
-        if isinstance(cmd, dict) and str(cmd.get("cmd", "")) == "protocol_version":
-            return {
-                "ok": True,
-                "proto": PROTOCOL_VERSION,
-                "server": self._server_label(),
-                "app_version": _APP_VERSION,
-            }
-
-        if self._handler is None:
-            return {"ok": False, "error": "no handler"}
-
         # IV.3 Finding 7 amend: _serve_loop forwards any valid JSON,
         # not only objects. A scalar or list payload (valid JSON, wrong
         # shape) previously raised AttributeError on cmd.get(...) and
@@ -1486,11 +2004,35 @@ class ZMQCommandServer:
                 "error": f"invalid payload: expected object, got {type(cmd).__name__}",
             }
 
+        if not self._command_is_accepted(cmd):
+            return {
+                "ok": False,
+                "error_code": "command_endpoint_action_rejected",
+                "error": "Command is not admitted by this endpoint.",
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": False,
+            }
+
+        # Answer discovery before application dispatch so it remains available
+        # even if no command handler is configured, but only when this endpoint
+        # explicitly admits the discovery action.
+        if cmd.get("cmd") == "protocol_version":
+            return {
+                "ok": True,
+                "proto": PROTOCOL_VERSION,
+                "server": self._server_label(),
+                "app_version": _APP_VERSION,
+            }
+
+        if self._handler is None:
+            return {"ok": False, "error": "no handler"}
+
         raw_action = cmd.get("cmd")
         action = _bounded_action_label(raw_action)
         command_class = classify_engine_command(raw_action)
         if self._has_uncertain_authority_owner() and not (
-            command_class is CommandClass.READ or self._is_exact_global_off(cmd)
+            command_class is CommandClass.READ or self._is_exact_quarantine_safe_direction(cmd)
         ):
             return {
                 "ok": False,
@@ -1514,7 +2056,12 @@ class ZMQCommandServer:
             _invoke(),
             name=f"zmq_command_handler:{action}",
         )
+        dispatch_trace = _HANDLER_DISPATCH_TRACE.get()
+        if dispatch_trace is not None and dispatch_trace.task is None:
+            dispatch_trace.task = handler_task
+            dispatch_trace.command_class = command_class
         self._handler_tasks.add(handler_task)
+        self._handler_actions[handler_task] = action
         try:
             done, _pending = await asyncio.wait({handler_task}, timeout=timeout)
         except asyncio.CancelledError:
@@ -1544,9 +2091,12 @@ class ZMQCommandServer:
             return reply
 
         self._handler_tasks.discard(handler_task)
+        self._handler_actions.pop(handler_task, None)
         try:
             result = handler_task.result()
         except TimeoutError:
+            if command_class is not CommandClass.READ:
+                self._uncertain_authority_latched = True
             logger.error(
                 "ZMQ command handler reported timeout: action=%s",
                 action,
@@ -1559,6 +2109,8 @@ class ZMQCommandServer:
             reply["_handler_timeout"] = True
             return reply
         except asyncio.CancelledError:
+            if command_class is not CommandClass.READ:
+                self._uncertain_authority_latched = True
             logger.error("ZMQ command handler cancelled itself: action=%s", action)
             return _post_dispatch_failure(
                 raw_action,
@@ -1566,6 +2118,8 @@ class ZMQCommandServer:
                 error="Command handler was cancelled; outcome may be unknown.",
             )
         except Exception as exc:
+            if command_class is not CommandClass.READ:
+                self._uncertain_authority_latched = True
             logger.error(
                 "ZMQ command handler failed: action=%s exception=%s",
                 action,
@@ -1578,7 +2132,11 @@ class ZMQCommandServer:
             )
 
         if isinstance(result, dict):
+            if command_class is not CommandClass.READ and _handler_reply_outcome_is_unknown(result):
+                self._uncertain_authority_latched = True
             return result
+        if command_class is not CommandClass.READ:
+            self._uncertain_authority_latched = True
         logger.error(
             "ZMQ command handler returned invalid type: action=%s result_type=%s",
             action,
@@ -1635,9 +2193,17 @@ class ZMQCommandServer:
                 )
                 raise
 
+            # ``freeze_admission`` is synchronous. It may run after poll/recv
+            # became ready but before this task resumed; never dispatch that
+            # already-received command after shutdown authority was frozen.
+            if self._shutdown_requested or not self._running:
+                return
+
             # Exactly one send attempt follows each successful recv. If that
             # attempt fails or is cancelled, the REP state is unknowable and
             # the task exits so its supervisor replaces the socket.
+            cmd: Any = None
+            dispatch_trace = _HandlerDispatchTrace()
             try:
                 cmd = _decode_command(raw)
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
@@ -1651,12 +2217,15 @@ class ZMQCommandServer:
                 }
                 raw_action: object = None
             else:
-                raw_action = cmd.get("cmd")
+                raw_action = cmd.get("cmd") if type(cmd) is dict else None
+                trace_token = _HANDLER_DISPATCH_TRACE.set(dispatch_trace)
                 try:
                     reply = await self._run_handler(cmd)
                 except asyncio.CancelledError:
+                    self._record_dispatched_unknown(dispatch_trace)
                     raise
                 except Exception as exc:
+                    self._record_dispatched_unknown(dispatch_trace)
                     logger.error(
                         "ZMQ command dispatch failed unexpectedly: action=%s exception=%s",
                         _bounded_action_label(raw_action),
@@ -1667,10 +2236,13 @@ class ZMQCommandServer:
                         error_code="command_dispatch_failed",
                         error="Command dispatch failed; outcome may be unknown.",
                     )
+                finally:
+                    _HANDLER_DISPATCH_TRACE.reset(trace_token)
 
             try:
                 wire = self._encode_reply(reply)
             except Exception as exc:
+                self._record_dispatched_unknown(dispatch_trace)
                 logger.error(
                     "ZMQ command reply serialization failed: action=%s exception=%s",
                     _bounded_action_label(raw_action),
@@ -1687,48 +2259,471 @@ class ZMQCommandServer:
                 except Exception:
                     wire = _SERIALIZATION_ERROR_WIRE
 
+            sent_reply: dict[str, Any] | None = None
+            try:
+                decoded_wire = json.loads(wire.decode("utf-8"))
+                if type(decoded_wire) is dict:
+                    sent_reply = decoded_wire
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                sent_reply = None
+            if sent_reply is None:
+                self._record_dispatched_unknown(dispatch_trace)
+
             try:
                 await socket.send(wire)
             except asyncio.CancelledError:
+                self._record_dispatched_unknown(dispatch_trace)
                 raise
             except Exception as exc:
+                self._record_dispatched_unknown(dispatch_trace)
                 logger.error(
                     "ZMQ command reply send failed: action=%s exception=%s",
                     _bounded_action_label(raw_action),
                     type(exc).__name__,
                 )
                 raise
+            callback = self._reply_sent_callback
+            if callback is not None and isinstance(cmd, dict) and sent_reply is not None:
+                try:
+                    callback_result = callback(cmd, sent_reply)
+                    if asyncio.iscoroutine(callback_result):
+                        await callback_result
+                except Exception as exc:
+                    logger.error(
+                        "ZMQ command post-reply callback failed: action=%s exception=%s",
+                        _bounded_action_label(raw_action),
+                        type(exc).__name__,
+                    )
+                    raise
 
     async def start(self) -> None:
-        self._ctx = zmq.asyncio.Context()
-        self._socket = await self._open_bound_socket()
-        self._running = True
+        if not self._startup_state_is_pristine():
+            raise ZMQCommandServerOwnershipConflict(
+                "ZMQCommandServer start state is not pristine; stop or retry failed cleanup before starting again"
+            )
+
         self._shutdown_requested = False
-        self._start_serve_task()
+        try:
+            context = zmq.asyncio.Context()
+            self._ctx = context
+            socket = await self._open_bound_socket()
+            if self._socket is None:
+                # Preserve compatibility with injected socket factories while
+                # making the returned owner explicit before admission opens.
+                self._socket = socket
+            elif self._socket is not socket:
+                raise RuntimeError("ZMQCommandServer socket owner changed during startup")
+            self._running = True
+            self._start_serve_task()
+        except BaseException as start_error:
+            self.freeze_admission()
+            _caller_cancellation, cleanup_error = await self._run_cleanup_resisting_cancellation(
+                task_name="zmq-command-server-startup-rollback",
+            )
+            if cleanup_error is not None:
+                raise RuntimeError(
+                    "ZMQCommandServer startup rollback incomplete: "
+                    f"start={type(start_error).__name__}; "
+                    f"cleanup={type(cleanup_error).__name__}"
+                ) from cleanup_error
+            raise
         logger.info("ZMQCommandServer запущен: %s", self._address)
 
-    async def stop(self) -> None:
+    def freeze_admission(self) -> None:
+        """Synchronously prevent any newly received command from dispatching."""
+
         self._shutdown_requested = True
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-        if self._restart_task:
-            self._restart_task.cancel()
-            try:
-                await self._restart_task
-            except asyncio.CancelledError:
-                pass
-            self._restart_task = None
-        await self._settle_handler_tasks()
-        if self._socket:
-            self._socket.close(linger=0)
-            self._socket = None
-        if self._ctx:
-            self._ctx.term()
-            self._ctx = None
+
+    async def stop(self) -> None:
+        self.freeze_admission()
+        caller_cancellation, cleanup_error = await self._run_cleanup_resisting_cancellation(
+            task_name="zmq-command-server-cleanup",
+        )
+        if cleanup_error is not None:
+            raise cleanup_error
         logger.info("ZMQCommandServer остановлен")
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
+
+class ZMQCommandIngressPair:
+    """One lifecycle owner for ordinary and dedicated-safe REP endpoints."""
+
+    _OWNER_ORDER = ("safe", "ordinary")
+
+    def __init__(self, *, ordinary: Any, safe: Any) -> None:
+        if ordinary is safe:
+            raise ValueError("ordinary and safe command ingress owners must be distinct")
+        missing = object()
+        ordinary_registry = getattr(ordinary, "_authority_registry", missing)
+        safe_registry = getattr(safe, "_authority_registry", missing)
+        if (ordinary_registry is not missing or safe_registry is not missing) and (
+            ordinary_registry is missing or safe_registry is missing or ordinary_registry is not safe_registry
+        ):
+            raise ValueError("ordinary and safe command ingress must share one authority registry")
+        ordinary_address = getattr(ordinary, "_address", missing)
+        safe_address = getattr(safe, "_address", missing)
+        if ordinary_address is not missing or safe_address is not missing:
+            if ordinary_address is missing or safe_address is missing:
+                raise ValueError("ordinary and safe production ingress must both expose endpoint identity")
+            require_distinct_loopback_tcp_endpoints(
+                ordinary_command=ordinary_address,
+                safe_command=safe_address,
+            )
+
+        self._ordinary = ordinary
+        self._safe = safe
+        self._owned_labels: set[str] = set()
+        self._starting = False
+        self._stop_task: asyncio.Task[None] | None = None
+        self._terminal_failure: ZMQCommandIngressTerminalFailure | None = None
+        self._terminal_failure_event = asyncio.Event()
+        self._terminal_failure_notifiers: dict[
+            str,
+            Callable[[ZMQCommandServerTerminalFailure], None],
+        ] = {
+            "safe": lambda failure: self._on_child_terminal_failure("safe", failure),
+            "ordinary": lambda failure: self._on_child_terminal_failure("ordinary", failure),
+        }
+
+        existing_failures = {
+            label: getattr(self._owner(label), "terminal_failure", None) for label in self._OWNER_ORDER
+        }
+        failed_labels = [label for label in self._OWNER_ORDER if existing_failures[label] is not None]
+        if failed_labels:
+            raise ZMQCommandServerOwnershipConflict(
+                "ZMQ command ingress child is terminal before pair ownership: " + ",".join(failed_labels)
+            )
+
+        binders = {
+            label: getattr(self._owner(label), "bind_terminal_failure_notifier", None) for label in self._OWNER_ORDER
+        }
+        production_children = ordinary_registry is not missing
+        if production_children:
+            self._require_production_children_constructor_pristine()
+        if any(binder is not None for binder in binders.values()):
+            if any(not callable(binder) for binder in binders.values()):
+                raise ValueError("ordinary and safe ingress must both expose terminal failure notification")
+            pristine_probes = {
+                label: getattr(
+                    self._owner(label),
+                    "terminal_failure_notifier_state_is_pristine",
+                    None,
+                )
+                for label in self._OWNER_ORDER
+            }
+            if any(not callable(probe) for probe in pristine_probes.values()):
+                raise RuntimeError("ordinary and safe ingress must both expose terminal notifier pristine-state proof")
+            unbinders = {
+                label: getattr(
+                    self._owner(label),
+                    "unbind_terminal_failure_notifier",
+                    None,
+                )
+                for label in self._OWNER_ORDER
+            }
+            if any(not callable(unbinder) for unbinder in unbinders.values()):
+                raise RuntimeError("ordinary and safe ingress must both expose exact terminal notifier rollback")
+            self._require_notifier_slots_constructor_pristine(pristine_probes)
+            attempted_labels: list[str] = []
+            try:
+                for label in self._OWNER_ORDER:
+                    binder = binders[label]
+                    assert callable(binder)
+                    attempted_labels.append(label)
+                    binder(self._terminal_failure_notifiers[label])
+                newly_failed_labels = [
+                    label
+                    for label in self._OWNER_ORDER
+                    if getattr(self._owner(label), "terminal_failure", None) is not None
+                ]
+                if newly_failed_labels or self._terminal_failure is not None:
+                    raise ZMQCommandServerOwnershipConflict(
+                        "ZMQ command ingress child became terminal during pair ownership: "
+                        + ",".join(newly_failed_labels)
+                    )
+            except BaseException as bind_error:
+                rollback_errors: list[tuple[str, BaseException]] = []
+                for label in reversed(attempted_labels):
+                    unbinder = unbinders[label]
+                    assert callable(unbinder)
+                    try:
+                        unbind_result = unbinder(self._terminal_failure_notifiers[label])
+                        if unbind_result is not None:
+                            raise RuntimeError(f"ZMQ command ingress {label} terminal notifier unbind was not exact")
+                    except BaseException as exc:
+                        rollback_errors.append((label, exc))
+                for label in attempted_labels:
+                    probe = pristine_probes[label]
+                    assert callable(probe)
+                    try:
+                        pristine = probe()
+                    except BaseException as exc:
+                        rollback_errors.append((label, exc))
+                        continue
+                    if pristine is not True:
+                        rollback_errors.append(
+                            (
+                                label,
+                                RuntimeError(f"ZMQ command ingress {label} terminal notifier remains owned"),
+                            )
+                        )
+                if rollback_errors:
+                    rollback_labels = ",".join(label for label, _error in rollback_errors)
+                    first_rollback_error = rollback_errors[0][1]
+                    raise RuntimeError(
+                        "ZMQ command ingress notifier binding rollback incomplete; ownership remains in HOLD: "
+                        f"bind={type(bind_error).__name__}; "
+                        f"rollback={type(first_rollback_error).__name__}; "
+                        f"owners={rollback_labels}"
+                    ) from first_rollback_error
+                raise
+
+    def _owner(self, label: str) -> Any:
+        return self._safe if label == "safe" else self._ordinary
+
+    @property
+    def terminal_failure(self) -> ZMQCommandIngressTerminalFailure | None:
+        """Return the first sticky endpoint failure without consuming it."""
+
+        return self._terminal_failure
+
+    def _require_production_children_constructor_pristine(self) -> None:
+        """Prove both production runtimes before binding either child."""
+
+        for label in self._OWNER_ORDER:
+            owner = self._owner(label)
+            probe = getattr(owner, "startup_state_is_pristine", None)
+            if not callable(probe):
+                raise RuntimeError(f"ZMQ command ingress {label} startup_state_is_pristine proof is not callable")
+            try:
+                pristine = probe()
+            except BaseException as exc:
+                raise RuntimeError(f"ZMQ command ingress {label} startup_state_is_pristine proof failed") from exc
+            if pristine is not True:
+                raise ZMQCommandServerOwnershipConflict(
+                    f"ZMQ command ingress {label} runtime is already owned outside this pair"
+                )
+
+    def _require_notifier_slots_constructor_pristine(
+        self,
+        probes: dict[str, Callable[[], Any]],
+    ) -> None:
+        """Preflight both notifier slots before either child is mutated."""
+
+        proof_errors: list[tuple[str, BaseException]] = []
+        conflicts: list[str] = []
+        for label in self._OWNER_ORDER:
+            probe = probes[label]
+            try:
+                pristine = probe()
+            except BaseException as exc:
+                proof_errors.append((label, exc))
+                continue
+            if pristine is not True:
+                conflicts.append(label)
+        if proof_errors:
+            label, error = proof_errors[0]
+            raise RuntimeError(f"ZMQ command ingress {label} terminal notifier pristine-state proof failed") from error
+        if conflicts:
+            raise ZMQCommandServerOwnershipConflict(
+                "ZMQ command ingress terminal notifier is already owned outside this pair: " + ",".join(conflicts)
+            )
+
+    def _on_child_terminal_failure(
+        self,
+        label: str,
+        failure: ZMQCommandServerTerminalFailure,
+    ) -> None:
+        """Synchronously close both admissions before waking runtime owners."""
+
+        if self._terminal_failure is not None:
+            return
+        endpoint: Literal["safe", "ordinary"] = "safe" if label == "safe" else "ordinary"
+        self._terminal_failure = ZMQCommandIngressTerminalFailure(
+            endpoint=endpoint,
+            stage=failure.stage,
+            failure_type=failure.failure_type,
+        )
+        try:
+            # Only pair-owned children may be frozen. During safe-first startup
+            # this deliberately excludes the not-yet-owned ordinary endpoint;
+            # require_healthy() prevents it from ever being started afterward.
+            freeze_error = self._freeze_labels(set(self._owned_labels))
+            if freeze_error is not None:
+                logger.error(
+                    "ZMQ command ingress terminal freeze failed: endpoint=%s exception=%s",
+                    endpoint,
+                    type(freeze_error).__name__,
+                )
+        finally:
+            self._terminal_failure_event.set()
+
+    async def wait_terminal_failure(self) -> ZMQCommandIngressTerminalFailure:
+        """Wait for sticky pair failure; cancellation cannot consume the latch."""
+
+        failure = self._terminal_failure
+        if failure is None:
+            await self._terminal_failure_event.wait()
+            failure = self._terminal_failure
+        if failure is None:
+            raise RuntimeError("terminal failure event was set without terminal proof")
+        return failure
+
+    def require_healthy(self) -> None:
+        """Reject readiness or restart after either endpoint became terminal."""
+
+        failure = self._terminal_failure
+        if failure is not None:
+            raise ZMQCommandIngressTerminalError(failure)
+
+    def _require_children_pristine(self) -> None:
+        """Reject known foreign runtime owners before claiming either child."""
+
+        for label in self._OWNER_ORDER:
+            owner = self._owner(label)
+            probe = getattr(owner, "startup_state_is_pristine", None)
+            if probe is None:
+                # Minimal injected owners use the typed start-conflict contract
+                # below. Production ZMQCommandServer owners expose the proof.
+                continue
+            if not callable(probe):
+                raise RuntimeError(f"ZMQ command ingress {label} pristine-state proof is not callable")
+            try:
+                pristine = probe()
+            except BaseException as exc:
+                raise RuntimeError(f"ZMQ command ingress {label} pristine-state proof failed") from exc
+            if pristine is not True:
+                raise ZMQCommandServerOwnershipConflict(
+                    f"ZMQ command ingress {label} runtime is already owned outside this pair"
+                )
+
+    def _freeze_labels(self, labels: set[str]) -> BaseException | None:
+        first_error: BaseException | None = None
+        for label in self._OWNER_ORDER:
+            if label not in labels:
+                continue
+            try:
+                self._owner(label).freeze_admission()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        return first_error
+
+    def freeze_admission(self) -> None:
+        """Synchronously freeze safe and ordinary admission, in that order."""
+
+        first_error = self._freeze_labels(set(self._OWNER_ORDER))
+        if first_error is not None:
+            raise first_error
+
+    async def _stop_owned_once(self) -> None:
+        labels = tuple(label for label in self._OWNER_ORDER if label in self._owned_labels)
+        if not labels:
+            return
+
+        async def stop_one(label: str) -> None:
+            await self._owner(label).stop()
+
+        tasks = {
+            label: asyncio.create_task(
+                stop_one(label),
+                name=f"zmq-command-ingress-{label}-stop",
+            )
+            for label in labels
+        }
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        first_error: BaseException | None = None
+        for label, result in zip(tasks, results, strict=True):
+            if isinstance(result, BaseException):
+                if first_error is None:
+                    first_error = result
+                continue
+            self._owned_labels.discard(label)
+        if first_error is not None:
+            raise first_error
+
+    async def _settle_owned_resisting_cancellation(
+        self,
+    ) -> tuple[asyncio.CancelledError | None, BaseException | None]:
+        stop_task = self._stop_task
+        if stop_task is None:
+            stop_task = asyncio.create_task(
+                self._stop_owned_once(),
+                name="zmq-command-ingress-pair-stop",
+            )
+            self._stop_task = stop_task
+
+        caller_cancellation: asyncio.CancelledError | None = None
+        cleanup_error: BaseException | None = None
+        while not stop_task.done():
+            try:
+                await asyncio.shield(stop_task)
+            except asyncio.CancelledError as exc:
+                caller_cancellation = exc
+            except BaseException as exc:
+                cleanup_error = exc
+                break
+        if stop_task.done() and cleanup_error is None:
+            try:
+                stop_task.result()
+            except BaseException as exc:
+                cleanup_error = exc
+        if self._stop_task is stop_task and stop_task.done():
+            self._stop_task = None
+        return caller_cancellation, cleanup_error
+
+    async def start(self) -> None:
+        """Start safe to completion before opening ordinary admission."""
+
+        if self._starting or self._owned_labels or self._stop_task is not None or self._terminal_failure is not None:
+            raise RuntimeError("ZMQ command ingress pair start requires pristine ownership")
+        # Prove both production children are free before claiming either one;
+        # otherwise rollback could stop a pre-existing foreign runtime.
+        self._require_children_pristine()
+        self._starting = True
+        try:
+            for label in self._OWNER_ORDER:
+                # A start call that raises may still have acquired resources;
+                # claim it before invocation so rollback cannot lose the owner.
+                self._owned_labels.add(label)
+                try:
+                    await self._owner(label).start()
+                except ZMQCommandServerOwnershipConflict:
+                    # This typed failure is emitted before the owner's start
+                    # mutates anything. It therefore proves the runtime is
+                    # foreign; rollback must never freeze or stop it.
+                    self._owned_labels.discard(label)
+                    raise
+                self.require_healthy()
+        except BaseException as start_error:
+            freeze_error = self._freeze_labels(set(self._owned_labels))
+            _caller_cancellation, cleanup_error = await self._settle_owned_resisting_cancellation()
+            if cleanup_error is not None or freeze_error is not None:
+                rollback_error = cleanup_error if cleanup_error is not None else freeze_error
+                assert rollback_error is not None
+                raise RuntimeError(
+                    "ZMQ command ingress pair startup rollback incomplete: "
+                    f"start={type(start_error).__name__}; "
+                    f"rollback={type(rollback_error).__name__}"
+                ) from rollback_error
+            raise
+        finally:
+            self._starting = False
+
+    async def stop(self) -> None:
+        """Freeze and concurrently settle both endpoints exactly once."""
+
+        if self._starting:
+            raise RuntimeError("ZMQ command ingress pair cannot stop during start")
+        if not self._owned_labels and self._stop_task is None:
+            return
+        freeze_error = self._freeze_labels(set(self._owned_labels))
+        caller_cancellation, cleanup_error = await self._settle_owned_resisting_cancellation()
+        if cleanup_error is not None:
+            raise cleanup_error
+        if freeze_error is not None:
+            raise freeze_error
+        if caller_cancellation is not None:
+            raise caller_cancellation

@@ -175,16 +175,32 @@ def release_lock_exact(
     race created by unlinking before the incumbent descriptor is closed.
     """
 
-    lock_path = _lock_path(lock_name, lock_dir)
-    opened = os.fstat(fd)
+    validation_failure: BaseException | None = None
     try:
+        lock_path = _lock_path(lock_name, lock_dir)
+        opened = os.fstat(fd)
         path_info = lock_path.lstat()
-    except OSError:
-        path_info = None
-    if path_info is not None and (
-        stat.S_ISLNK(path_info.st_mode)
-        or not stat.S_ISREG(path_info.st_mode)
-        or not os.path.samestat(opened, path_info)
-    ):
-        logger.warning("Lock path identity changed before exact release: %s", lock_path)
-    os.close(fd)
+        if (
+            stat.S_ISLNK(path_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or not os.path.samestat(opened, path_info)
+        ):
+            validation_failure = RuntimeError(f"lock path identity changed before exact release: {lock_path}")
+    except BaseException as exc:
+        validation_failure = exc
+
+    close_failure: BaseException | None = None
+    try:
+        os.close(fd)
+    except BaseException as exc:
+        close_failure = exc
+
+    if validation_failure is not None and close_failure is not None:
+        raise BaseExceptionGroup(
+            "lock identity validation and descriptor close both failed",
+            (validation_failure, close_failure),
+        ) from None
+    if close_failure is not None:
+        raise close_failure
+    if validation_failure is not None:
+        raise validation_failure

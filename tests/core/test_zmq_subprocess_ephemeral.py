@@ -12,14 +12,22 @@ from __future__ import annotations
 
 import json
 import queue as stdlib_queue
+import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+_TEST_PUB_ADDR = "tcp://127.0.0.1:61000"
+_TEST_CMD_ADDR = "tcp://127.0.0.1:61001"
+_TEST_SAFE_CMD_ADDR = "tcp://127.0.0.1:61002"
 
-def _make_mock_context(sockets: list[MagicMock]):
+
+def _make_mock_context(
+    sockets: list[MagicMock],
+    reply_payloads: list[str] | None = None,
+):
     """Build a zmq.Context replacement that hands out tracked sockets.
 
     Every ``ctx.socket(zmq.REQ)`` (or any socket type — the
@@ -37,6 +45,9 @@ def _make_mock_context(sockets: list[MagicMock]):
         # side_effect on the returned mock.
         sock.send_string.return_value = None
         sock.recv_string.return_value = '{"ok": true}'
+        reply_index = len(sockets) - 1
+        if reply_payloads is not None and 0 <= reply_index < len(reply_payloads):
+            sock.recv_string.return_value = reply_payloads[reply_index]
         sockets.append(sock)
         return sock
 
@@ -48,6 +59,8 @@ def _run_cmd_forward(
     cmds: list[dict],
     *,
     sockets: list[MagicMock],
+    reply_payloads: list[str] | None = None,
+    safe_cmds: list[dict] | None = None,
     timeout_s: float = 5.0,
 ) -> tuple[list[dict], list[dict]]:
     """Drive ``zmq_bridge_main`` in this thread until all ``cmds`` are
@@ -61,7 +74,9 @@ def _run_cmd_forward(
     """
     data_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
+    safe_cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
+    safe_reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     shutdown = threading.Event()
 
     # Seed cmd_q with the whole batch up-front, then run the loop in a
@@ -69,6 +84,8 @@ def _run_cmd_forward(
     # lets the loop exit cleanly.
     for cmd in cmds:
         cmd_q.put(cmd)
+    for cmd in safe_cmds or []:
+        safe_cmd_q.put(cmd)
 
     # Import inside the helper so the zmq import happens under the patch.
     with patch.dict("sys.modules"):
@@ -89,6 +106,7 @@ def _run_cmd_forward(
             "LINGER",
             "RCVTIMEO",
             "SNDTIMEO",
+            "MAXMSGSIZE",
             "REQ",
             "SUB",
             "TCP_KEEPALIVE",
@@ -99,19 +117,22 @@ def _run_cmd_forward(
             "REQ_CORRELATE",
         ):
             setattr(fake_zmq, attr, attr)
-        fake_zmq.Context.return_value = _make_mock_context(sockets)
+        fake_zmq.Context.return_value = _make_mock_context(sockets, reply_payloads)
         sys.modules["zmq"] = fake_zmq
 
         from cryodaq.core import zmq_subprocess
 
         def _run():
             zmq_subprocess.zmq_bridge_main(
-                "tcp://127.0.0.1:0",
-                "tcp://127.0.0.1:0",
+                _TEST_PUB_ADDR,
+                _TEST_CMD_ADDR,
                 data_q,
                 cmd_q,
                 reply_q,
                 shutdown,
+                safe_cmd_queue=safe_cmd_q if safe_cmds is not None else None,
+                safe_cmd_addr=(zmq_subprocess.DEFAULT_SAFE_CMD_ADDR if safe_cmds is not None else _TEST_SAFE_CMD_ADDR),
+                safe_reply_queue=safe_reply_q if safe_cmds is not None else None,
             )
 
         thread = threading.Thread(target=_run, daemon=True)
@@ -120,11 +141,20 @@ def _run_cmd_forward(
         # Wait for all expected replies to arrive, then signal shutdown.
         replies: list[dict] = []
         deadline = time.monotonic() + timeout_s
-        while len(replies) < len(cmds) and time.monotonic() < deadline:
-            try:
-                replies.append(reply_q.get(timeout=0.1))
-            except stdlib_queue.Empty:
-                continue
+        expected_replies = len(cmds) + len(safe_cmds or [])
+        while len(replies) < expected_replies and time.monotonic() < deadline:
+            progressed = False
+            for output_queue in (
+                reply_q,
+                *((safe_reply_q,) if safe_cmds is not None else ()),
+            ):
+                try:
+                    replies.append(output_queue.get_nowait())
+                except stdlib_queue.Empty:
+                    continue
+                progressed = True
+            if not progressed:
+                time.sleep(0.001)
 
         shutdown.set()
         thread.join(timeout=timeout_s)
@@ -177,6 +207,560 @@ def test_cmd_forward_closes_socket_after_success(_sockets):
     req_socket.close.assert_called()
 
 
+def test_dual_forwarders_preserve_lane_fifo_generation_and_endpoint_isolation(_sockets) -> None:
+    from cryodaq.core.zmq_subprocess import DEFAULT_SAFE_CMD_ADDR
+
+    ordinary = [
+        {"cmd": "safety_status", "_rid": "ordinary-1", "_bridge_generation": 7},
+        {"cmd": "protocol_version", "_rid": "ordinary-2", "_bridge_generation": 7},
+    ]
+    safe = [
+        {"cmd": "keithley_emergency_off", "_rid": "safe-1", "_bridge_generation": 7},
+        {
+            "cmd": "launcher_shutdown",
+            "engine_instance_id": "a" * 32,
+            "request_id": "b" * 32,
+            "shutdown_capability": "c" * 64,
+            "_rid": "safe-2",
+            "_bridge_generation": 7,
+        },
+    ]
+
+    replies, _control = _run_cmd_forward(
+        ordinary,
+        safe_cmds=safe,
+        sockets=_sockets,
+    )
+
+    ordinary_replies = [reply for reply in replies if reply["_rid"].startswith("ordinary-")]
+    safe_replies = [reply for reply in replies if reply["_rid"].startswith("safe-")]
+    assert [reply["_rid"] for reply in ordinary_replies] == ["ordinary-1", "ordinary-2"]
+    assert [reply["_rid"] for reply in safe_replies] == ["safe-1", "safe-2"]
+    assert all(reply["_bridge_generation"] == 7 for reply in replies)
+
+    requests = [socket for socket in _sockets if socket.send_string.called]
+    ordinary_requests = [socket for socket in requests if socket.connect.call_args.args[0] == _TEST_CMD_ADDR]
+    safe_requests = [socket for socket in requests if socket.connect.call_args.args[0] == DEFAULT_SAFE_CMD_ADDR]
+    ordinary_wire = [json.loads(socket.send_string.call_args.args[0]) for socket in ordinary_requests]
+    safe_wire = [json.loads(socket.send_string.call_args.args[0]) for socket in safe_requests]
+    assert ordinary_wire == [{"cmd": "safety_status"}, {"cmd": "protocol_version"}]
+    assert safe_wire == [
+        {"cmd": "keithley_emergency_off"},
+        {
+            "cmd": "launcher_shutdown",
+            "engine_instance_id": "a" * 32,
+            "request_id": "b" * 32,
+            "shutdown_capability": "c" * 64,
+        },
+    ]
+    wire_commands = ordinary_wire + safe_wire
+    assert all("_rid" not in command and "_bridge_generation" not in command for command in wire_commands)
+
+
+@pytest.mark.parametrize(
+    "safe_command",
+    [
+        {"cmd": "keithley_emergency_off"},
+        {"cmd": "keithley_emergency_off", "channel": "smua"},
+        {
+            "cmd": "launcher_shutdown",
+            "engine_instance_id": "a" * 32,
+            "request_id": "b" * 32,
+            "shutdown_capability": "c" * 64,
+        },
+    ],
+    ids=["global-off", "targeted-off", "launcher-shutdown"],
+)
+def test_preemptive_safe_forwarder_replies_while_ordinary_req_is_blocked(
+    safe_command: dict[str, str],
+) -> None:
+    from cryodaq.core import zmq_subprocess
+
+    ordinary_addr = "tcp://127.0.0.1:61001"
+    safe_addr = "tcp://127.0.0.1:61002"
+    data_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
+    cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+    safe_cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+    reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+    safe_reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+    shutdown = threading.Event()
+    ordinary_entered = threading.Event()
+    ordinary_release = threading.Event()
+    safe_entered = threading.Event()
+    request_sockets: list[object] = []
+    socket_lock = threading.Lock()
+
+    class _FakeZMQError(Exception):
+        pass
+
+    class _SubSocket:
+        def setsockopt(self, *_args) -> None:
+            return None
+
+        def connect(self, _addr: str) -> None:
+            return None
+
+        def subscribe(self, _topic: bytes) -> None:
+            return None
+
+        def recv_multipart(self):
+            raise _FakeZMQError
+
+        def close(self, *, linger: int = 0) -> None:
+            del linger
+
+    class _ReqSocket:
+        def __init__(self) -> None:
+            self.address: str | None = None
+            self.closed = False
+
+        def setsockopt(self, *_args) -> None:
+            return None
+
+        def connect(self, addr: str) -> None:
+            self.address = addr
+
+        def send_string(self, _wire: str) -> None:
+            return None
+
+        def recv_string(self) -> str:
+            if self.address == ordinary_addr:
+                ordinary_entered.set()
+                if not ordinary_release.wait(3.0):
+                    raise AssertionError("ordinary request was never released")
+                return '{"ok":true,"lane":"ordinary"}'
+            if self.address == safe_addr:
+                safe_entered.set()
+                return '{"ok":true,"lane":"safe"}'
+            raise AssertionError(f"unexpected request address: {self.address}")
+
+        def close(self, *, linger: int = 0) -> None:
+            del linger
+            self.closed = True
+
+    class _Context:
+        def socket(self, socket_type):  # noqa: ANN001
+            if socket_type == fake_zmq.SUB:
+                return _SubSocket()
+            assert socket_type == fake_zmq.REQ
+            socket = _ReqSocket()
+            with socket_lock:
+                request_sockets.append(socket)
+            return socket
+
+        def term(self) -> None:
+            return None
+
+    fake_zmq = MagicMock(name="zmq_module")
+    fake_zmq.ZMQError = _FakeZMQError
+    fake_zmq.Again = _FakeZMQError
+    for attr in (
+        "LINGER",
+        "RCVTIMEO",
+        "SNDTIMEO",
+        "MAXMSGSIZE",
+        "REQ",
+        "SUB",
+        "TCP_KEEPALIVE",
+        "TCP_KEEPALIVE_IDLE",
+        "TCP_KEEPALIVE_INTVL",
+        "TCP_KEEPALIVE_CNT",
+    ):
+        setattr(fake_zmq, attr, attr)
+    fake_zmq.Context.return_value = _Context()
+    cmd_q.put({"cmd": "safety_status", "_rid": "ordinary", "_bridge_generation": 9})
+
+    def _run() -> None:
+        zmq_subprocess.zmq_bridge_main(
+            _TEST_PUB_ADDR,
+            ordinary_addr,
+            data_q,
+            cmd_q,
+            reply_q,
+            shutdown,
+            safe_cmd_queue=safe_cmd_q,
+            safe_cmd_addr=safe_addr,
+            safe_reply_queue=safe_reply_q,
+        )
+
+    with patch.dict(sys.modules, {"zmq": fake_zmq}):
+        owner = threading.Thread(target=_run, daemon=True)
+        owner.start()
+        assert ordinary_entered.wait(1.0)
+        safe_cmd_q.put({**safe_command, "_rid": "safe", "_bridge_generation": 9})
+        safe_reply = safe_reply_q.get(timeout=1.0)
+        assert safe_entered.is_set()
+        assert ordinary_release.is_set() is False
+        assert safe_reply == {
+            "ok": True,
+            "lane": "safe",
+            "_rid": "safe",
+            "_bridge_generation": 9,
+        }
+        with pytest.raises(stdlib_queue.Empty):
+            reply_q.get_nowait()
+        ordinary_release.set()
+        ordinary_reply = reply_q.get(timeout=1.0)
+        assert ordinary_reply["lane"] == "ordinary"
+        shutdown.set()
+        owner.join(5.0)
+
+    assert not owner.is_alive()
+    assert {socket.address for socket in request_sockets} == {ordinary_addr, safe_addr}
+    assert all(socket.closed for socket in request_sockets)
+
+
+@pytest.mark.parametrize("failure_mode", ["socket_factory", "reply_publish"])
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_safe_forwarder_failure_is_subprocess_fatal(failure_mode: str) -> None:
+    from cryodaq.core import zmq_subprocess
+    from cryodaq.core.safe_command_ipc import create_safe_command_ipc
+
+    data_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
+    cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+    reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=10)
+    shutdown = threading.Event()
+    failure_entered = threading.Event()
+    safe_ipc = create_safe_command_ipc(2) if failure_mode == "reply_publish" else None
+    safe_cmd_q: object = safe_ipc.child_command_receiver if safe_ipc is not None else stdlib_queue.Queue(maxsize=10)
+    safe_reply_q: object = safe_ipc.child_reply_sender if safe_ipc is not None else stdlib_queue.Queue(maxsize=10)
+
+    class _FakeZMQError(Exception):
+        pass
+
+    class _SubSocket:
+        def setsockopt(self, *_args) -> None:
+            return None
+
+        def connect(self, _addr: str) -> None:
+            return None
+
+        def subscribe(self, _topic: bytes) -> None:
+            return None
+
+        def recv_multipart(self):
+            raise _FakeZMQError
+
+        def close(self, *, linger: int = 0) -> None:
+            del linger
+
+    class _ReqSocket:
+        def setsockopt(self, *_args) -> None:
+            return None
+
+        def connect(self, _addr: str) -> None:
+            return None
+
+        def send_string(self, _wire: str) -> None:
+            return None
+
+        def recv_string(self) -> str:
+            return '{"ok":true}'
+
+        def close(self, *, linger: int = 0) -> None:
+            del linger
+
+    class _Context:
+        def socket(self, socket_type):  # noqa: ANN001
+            if socket_type == fake_zmq.SUB:
+                return _SubSocket()
+            assert socket_type == fake_zmq.REQ
+            if failure_mode == "socket_factory" and threading.current_thread().name == "zmq-safe-cmd-forward":
+                failure_entered.set()
+                raise RuntimeError("safe socket factory failed")
+            return _ReqSocket()
+
+        def term(self) -> None:
+            return None
+
+    fake_zmq = MagicMock(name="zmq_module")
+    fake_zmq.ZMQError = _FakeZMQError
+    fake_zmq.Again = _FakeZMQError
+    for attr in (
+        "LINGER",
+        "RCVTIMEO",
+        "SNDTIMEO",
+        "MAXMSGSIZE",
+        "REQ",
+        "SUB",
+        "TCP_KEEPALIVE",
+        "TCP_KEEPALIVE_IDLE",
+        "TCP_KEEPALIVE_INTVL",
+        "TCP_KEEPALIVE_CNT",
+    ):
+        setattr(fake_zmq, attr, attr)
+    fake_zmq.Context.return_value = _Context()
+    safe_command = {"cmd": "keithley_emergency_off", "_rid": "safe", "_bridge_generation": 4}
+    if safe_ipc is None:
+        safe_cmd_q.put(safe_command)  # type: ignore[attr-defined]
+    else:
+        safe_ipc.parent_reply_receiver.close()
+        safe_ipc.parent_command_sender.put_nowait(safe_command)
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            zmq_subprocess.zmq_bridge_main(
+                _TEST_PUB_ADDR,
+                _TEST_CMD_ADDR,
+                data_q,
+                cmd_q,
+                reply_q,
+                shutdown,
+                safe_cmd_queue=safe_cmd_q,
+                safe_cmd_addr="tcp://127.0.0.1:61002",
+                safe_reply_queue=safe_reply_q,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        with patch.dict(sys.modules, {"zmq": fake_zmq}):
+            owner = threading.Thread(target=_run, name="bridge-owner", daemon=True)
+            owner.start()
+            if failure_mode == "socket_factory":
+                assert failure_entered.wait(1.0)
+            owner.join(1.0)
+            exited_from_lane_failure = not owner.is_alive()
+            if owner.is_alive():
+                shutdown.set()
+                owner.join(5.0)
+    finally:
+        if safe_ipc is not None:
+            for endpoint in (
+                safe_ipc.parent_command_sender,
+                safe_ipc.child_command_receiver,
+                safe_ipc.parent_reply_receiver,
+                safe_ipc.child_reply_sender,
+            ):
+                endpoint.close()
+
+    assert exited_from_lane_failure is True
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+
+
+def test_req_reply_size_cap_is_installed_before_connect(_sockets) -> None:
+    from cryodaq.core.zmq_subprocess import COMMAND_REPLY_MAX_WIRE_BYTES
+
+    replies, _control = _run_cmd_forward(
+        [{"cmd": "safety_status", "_rid": "cap"}],
+        sockets=_sockets,
+    )
+
+    assert replies == [{"ok": True, "_rid": "cap"}]
+    request = _sockets[1]
+    calls = request.method_calls
+    cap_index = next(
+        index
+        for index, item in enumerate(calls)
+        if item[0] == "setsockopt" and item.args[1] == COMMAND_REPLY_MAX_WIRE_BYTES
+    )
+    connect_index = next(index for index, item in enumerate(calls) if item[0] == "connect")
+    assert cap_index < connect_index
+
+
+@pytest.mark.parametrize(
+    "invalid_reply",
+    ["42", "[]", '{"ok": true, "ok": false}', '{"value": NaN}', "not-json"],
+)
+def test_invalid_reply_is_correlated_and_next_command_still_succeeds(
+    _sockets,
+    invalid_reply: str,
+) -> None:
+    commands = [
+        {"cmd": "safety_status", "_rid": "invalid-reply"},
+        {"cmd": "safety_status", "_rid": "valid-follow-up"},
+    ]
+
+    replies, _control = _run_cmd_forward(
+        commands,
+        sockets=_sockets,
+        reply_payloads=[invalid_reply, '{"ok": true}'],
+    )
+
+    assert replies == [
+        {
+            "ok": False,
+            "error_code": "command_reply_invalid",
+            "error": "Engine command reply is invalid.",
+            "delivery_state": "unknown",
+            "commit_state": "unknown",
+            "retry_safe": False,
+            "_rid": "invalid-reply",
+        },
+        {"ok": True, "_rid": "valid-follow-up"},
+    ]
+    assert len(_sockets) == 3
+    _sockets[1].close.assert_called_once()
+    _sockets[2].close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("boundary", "invalid_reply"),
+    [
+        ("depth", '{"value":' + ("[" * 33) + "0" + ("]" * 33) + "}"),
+        ("integer_digits", '{"value":' + ("9" * 129) + "}"),
+        ("key_chars", '{"' + ("k" * 257) + '":0}'),
+    ],
+    ids=["depth", "integer-digits", "key-chars"],
+)
+def test_bounded_invalid_reply_is_correlated_and_valid_follow_up_survives(
+    _sockets,
+    boundary: str,
+    invalid_reply: str,
+) -> None:
+    replies, _control = _run_cmd_forward(
+        [
+            {"cmd": "safety_status", "_rid": boundary},
+            {"cmd": "safety_status", "_rid": "follow-up"},
+        ],
+        sockets=_sockets,
+        reply_payloads=[invalid_reply, '{"ok": true}'],
+    )
+
+    assert replies[0]["error_code"] == "command_reply_invalid"
+    assert replies[0]["_rid"] == boundary
+    assert replies[0]["delivery_state"] == "unknown"
+    assert replies[0]["commit_state"] == "unknown"
+    assert replies[0]["retry_safe"] is False
+    assert replies[1] == {"ok": True, "_rid": "follow-up"}
+    assert len(_sockets) == 3
+
+
+@pytest.mark.parametrize("boundary", ["wire_bytes", "items"])
+def test_reply_bounds_use_live_contract_constants_and_preserve_follow_up(
+    _sockets,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    from cryodaq.core import zmq_subprocess
+
+    if boundary == "wire_bytes":
+        invalid_reply = '{"value":"' + ("x" * zmq_subprocess.COMMAND_REPLY_MAX_WIRE_BYTES) + '"}'
+    else:
+        monkeypatch.setattr(zmq_subprocess, "COMMAND_REPLY_MAX_JSON_ITEMS", 4)
+        invalid_reply = '{"value":[0,0,0,0]}'
+
+    replies, _control = _run_cmd_forward(
+        [
+            {"cmd": "safety_status", "_rid": boundary},
+            {"cmd": "safety_status", "_rid": "follow-up"},
+        ],
+        sockets=_sockets,
+        reply_payloads=[invalid_reply, '{"ok": true}'],
+    )
+
+    assert replies[0]["error_code"] == "command_reply_invalid"
+    assert replies[0]["_rid"] == boundary
+    assert replies[1] == {"ok": True, "_rid": "follow-up"}
+
+
+@pytest.mark.parametrize("point_count", [3600, 5000, 50_000])
+def test_every_server_valid_normal_history_reply_is_subprocess_decodable(point_count: int) -> None:
+    from cryodaq.core.zmq_bridge import ZMQCommandServer
+    from cryodaq.core.zmq_subprocess import COMMAND_REPLY_MAX_WIRE_BYTES, _decode_command_reply
+
+    reply = {
+        "ok": True,
+        "data": {"T1": [[float(index), float(index)] for index in range(point_count)]},
+    }
+    wire_bytes = ZMQCommandServer()._encode_reply(reply)
+    wire = wire_bytes.decode("utf-8")
+
+    assert len(wire_bytes) <= COMMAND_REPLY_MAX_WIRE_BYTES
+    assert json.loads(wire).get("error_code") != "command_reply_serialization_failed"
+    assert _decode_command_reply(wire) == {**reply, "proto": 2}
+
+
+def test_production_history_maximum_fits_wire_with_worst_case_finite_points() -> None:
+    from cryodaq.core.command_reply_contract import (
+        COMMAND_REPLY_HISTORY_MAX_ROWS,
+        COMMAND_REPLY_MAX_JSON_KEY_CHARS,
+    )
+    from cryodaq.core.zmq_bridge import encode_command_reply
+    from cryodaq.core.zmq_subprocess import COMMAND_REPLY_MAX_WIRE_BYTES, _decode_command_reply
+
+    worst_finite = [-sys.float_info.max, sys.float_info.max]
+    channel_count = 64
+    per_channel, remainder = divmod(COMMAND_REPLY_HISTORY_MAX_ROWS, channel_count)
+    reply = {
+        "ok": True,
+        "data": {
+            ("\x1f" * (COMMAND_REPLY_MAX_JSON_KEY_CHARS - 2)) + f"{index:02x}": [
+                worst_finite[:] for _ in range(per_channel + (1 if index < remainder else 0))
+            ]
+            for index in range(channel_count)
+        },
+    }
+
+    wire = encode_command_reply(reply)
+
+    assert len(wire) <= COMMAND_REPLY_MAX_WIRE_BYTES
+    assert _decode_command_reply(wire.decode("utf-8")) == {**reply, "proto": 2}
+
+
+def test_history_shaped_reply_rejects_exact_production_max_plus_one() -> None:
+    from cryodaq.core.command_reply_contract import COMMAND_REPLY_HISTORY_MAX_ROWS
+    from cryodaq.core.zmq_bridge import encode_command_reply
+
+    reply = {
+        "ok": True,
+        "data": {
+            "T1": [[0.0, 0.0] for _ in range(COMMAND_REPLY_HISTORY_MAX_ROWS + 1)],
+        },
+    }
+
+    with pytest.raises(ValueError, match="history contains too many rows"):
+        encode_command_reply(reply)
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["depth", "integer_digits", "key_chars"],
+    ids=["depth", "integer-digits", "key-chars"],
+)
+def test_normal_periodic_encoders_and_subprocess_decoder_share_structural_rejections(
+    boundary: str,
+) -> None:
+    from cryodaq.core.zmq_bridge import encode_command_reply, encode_periodic_command_reply
+    from cryodaq.core.zmq_subprocess import _decode_command_reply
+
+    if boundary == "depth":
+        value: object = 0
+        for _ in range(33):
+            value = [value]
+        invalid_reply: dict[str, object] = {"value": value}
+    elif boundary == "integer_digits":
+        invalid_reply = {"value": 10**128}
+    else:
+        invalid_reply = {"k" * 257: 0}
+
+    with pytest.raises(ValueError, match="command reply"):
+        encode_command_reply(invalid_reply)
+    with pytest.raises(ValueError, match="command reply"):
+        encode_periodic_command_reply(invalid_reply)
+    with pytest.raises(ValueError, match="command reply"):
+        _decode_command_reply(json.dumps(invalid_reply, separators=(",", ":")))
+
+
+def test_normal_periodic_encoders_and_subprocess_decoder_share_item_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.core import zmq_bridge, zmq_subprocess
+
+    monkeypatch.setattr(zmq_bridge, "COMMAND_REPLY_MAX_JSON_ITEMS", 4)
+    monkeypatch.setattr(zmq_subprocess, "COMMAND_REPLY_MAX_JSON_ITEMS", 4)
+    invalid_reply = {"value": [0, 0, 0]}
+
+    with pytest.raises(ValueError, match="too many items"):
+        zmq_bridge.encode_command_reply(invalid_reply)
+    with pytest.raises(ValueError, match="too many items"):
+        zmq_bridge.encode_periodic_command_reply(invalid_reply)
+    with pytest.raises(ValueError, match="too many items"):
+        zmq_subprocess._decode_command_reply(json.dumps(invalid_reply))
+
+
 def test_assistant_protocol_discovery_routes_and_normalizes_command(_sockets):
     """The GUI-facing alias reaches assistant REP as the standard wire command."""
     commands = [{"cmd": "assistant.protocol_version", "_rid": "version-1"}]
@@ -188,6 +772,28 @@ def test_assistant_protocol_discovery_routes_and_normalizes_command(_sockets):
     request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
     wire_payload = request.send_string.call_args.args[0]
     assert json.loads(wire_payload) == {"cmd": "protocol_version"}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"cmd": "assistant.query", "query": "status", "chat_id": 17},
+        {"cmd": "rag.search", "query": "pump", "limit": 5},
+    ],
+)
+def test_assistant_reads_route_only_to_assistant_endpoint(_sockets, command):
+    request_id = f"{command['cmd']}-1"
+
+    replies, _control = _run_cmd_forward(
+        [{**command, "_rid": request_id}],
+        sockets=_sockets,
+    )
+
+    assert replies == [{"ok": True, "_rid": request_id}]
+    assert len(_sockets) == 2
+    request = _sockets[1]
+    request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
+    assert json.loads(request.send_string.call_args.args[0]) == command
 
 
 @pytest.mark.parametrize("action", ["rag.rebuild_index", "rag.rebuild_status"])
@@ -284,8 +890,8 @@ def test_cmd_forward_closes_socket_after_zmq_error(_sockets):
             # side_effect after the socket is created by hooking into
             # the Context.socket factory once more.
             zmq_subprocess.zmq_bridge_main(
-                "tcp://127.0.0.1:0",
-                "tcp://127.0.0.1:0",
+                _TEST_PUB_ADDR,
+                _TEST_CMD_ADDR,
                 data_q,
                 cmd_q,
                 reply_q,
@@ -364,18 +970,19 @@ def test_cmd_timeout_emits_structured_message(_sockets):
         def _factory(*args, **kwargs):
             sock = original_side_effect(*args, **kwargs)
             if len(_sockets) == 2:
-                sock.recv_string.side_effect = _FakeZMQError("Resource temporarily unavailable")
+                sock.recv_string.side_effect = _FakeZMQError("failure\r\nsecret=TOP-SECRET-DO-NOT-LEAK")
             return sock
 
         fake_zmq.Context.return_value.socket.side_effect = _factory
 
-        cmd_q.put({"cmd": "safety_status", "_rid": "r1"})
+        secret = "TOP-SECRET-DO-NOT-LEAK"
+        cmd_q.put({"cmd": f"safety_status\r\n{secret}", "_rid": "r1"})
 
         thread = threading.Thread(
             target=zmq_subprocess.zmq_bridge_main,
             args=(
-                "tcp://127.0.0.1:0",
-                "tcp://127.0.0.1:0",
+                _TEST_PUB_ADDR,
+                _TEST_CMD_ADDR,
                 data_q,
                 cmd_q,
                 reply_q,
@@ -388,9 +995,10 @@ def test_cmd_timeout_emits_structured_message(_sockets):
         # Wait for the reply to land (proves cmd_forward ran through
         # the ZMQError branch) before draining data_queue.
         deadline = time.monotonic() + 5.0
+        public_reply = None
         while time.monotonic() < deadline:
             try:
-                reply_q.get(timeout=0.1)
+                public_reply = reply_q.get(timeout=0.1)
                 break
             except stdlib_queue.Empty:
                 continue
@@ -410,10 +1018,14 @@ def test_cmd_timeout_emits_structured_message(_sockets):
 
     assert len(cmd_timeouts) == 1, f"expected exactly one cmd_timeout envelope, got {len(cmd_timeouts)}"
     envelope = cmd_timeouts[0]
-    assert envelope["cmd"] == "safety_status"
+    assert envelope["cmd"] == "<invalid>"
     assert isinstance(envelope["ts"], float)
     assert "REP timeout" in envelope["message"]
-    assert "safety_status" in envelope["message"]
+    assert "\r" not in envelope["message"] and "\n" not in envelope["message"]
+    assert secret not in envelope["message"]
+    assert public_reply is not None
+    assert public_reply["error_code"] == "command_endpoint_unavailable"
+    assert secret not in json.dumps(public_reply)
 
 
 def test_cmd_forward_no_req_relaxed_no_tcp_keepalive(_sockets):
@@ -499,8 +1111,8 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
         thread = threading.Thread(
             target=zmq_subprocess.zmq_bridge_main,
             args=(
-                "tcp://127.0.0.1:0",
-                "tcp://127.0.0.1:0",
+                _TEST_PUB_ADDR,
+                _TEST_CMD_ADDR,
                 data_q,
                 cmd_q,
                 reply_q,

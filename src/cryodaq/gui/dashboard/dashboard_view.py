@@ -12,7 +12,7 @@ import logging
 import uuid
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import QFrame, QLabel, QLayout, QScrollArea, QVBoxLayout, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
@@ -25,6 +25,12 @@ from cryodaq.gui.dashboard.phase_aware_widget import PhaseAwareWidget
 from cryodaq.gui.dashboard.pressure_plot_widget import PressurePlotWidget
 from cryodaq.gui.dashboard.quick_log_block import QuickLogBlock
 from cryodaq.gui.dashboard.temp_plot_widget import TempPlotWidget
+from cryodaq.gui.shell.overlays.operator_log_panel import (
+    bounded_operator_log_identity,
+    decode_operator_log_unresolved,
+    encode_operator_log_unresolved,
+    operator_log_commit_receipt_matches,
+)
 from cryodaq.gui.state.descriptor_store import IdentityStatus
 from cryodaq.operator_snapshot import (
     OperatorPresentationState,
@@ -40,6 +46,7 @@ _PRESENTATION_INTERVAL_MS = 500  # DESIGN: RULE-DATA-002 — at most 2 Hz
 _LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
 _LOG_READ_SCOPE_SCHEMA = "operator_log_read_scope_v1"
 _EXPERIMENT_COMMIT_SCHEMA = "experiment_command_commit_v1"
+_DASHBOARD_UNRESOLVED_SETTINGS_KEY = "dashboard/unresolved_operator_log_v1"
 _KNOWN_UNCOMMITTED_LOG_ERRORS = frozenset(
     {
         "mutation_protocol_incompatible",
@@ -47,7 +54,8 @@ _KNOWN_UNCOMMITTED_LOG_ERRORS = frozenset(
         "operator_log_scope_invalid",
         "stale_experiment_command",
         "operator_log_message_invalid",
-        "operator_log_persistence_failed",
+        "operator_log_admission_invalid",
+        "engine_shutting_down",
         "idempotency_key_conflict",
         "operator_log_busy",
     }
@@ -57,13 +65,17 @@ _KNOWN_UNCOMMITTED_LOG_ERRORS = frozenset(
 def _log_result_is_unknown(result: object) -> bool:
     """Return whether a reply cannot prove commit or non-commit."""
 
-    if not isinstance(result, dict):
+    if type(result) is not dict:
         return True
     if result.get("_handler_timeout") or result.get("_unknown"):
         return True
     if result.get("committed") is True:
         return False
-    return not (result.get("ok") is False and result.get("error_code") in _KNOWN_UNCOMMITTED_LOG_ERRORS)
+    return not (
+        result.get("ok") is False
+        and result.get("committed") is False
+        and result.get("error_code") in _KNOWN_UNCOMMITTED_LOG_ERRORS
+    )
 
 
 # Zone definitions: (objectName, label_or_None, stretch)
@@ -86,6 +98,7 @@ class DashboardView(QScrollArea):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._settings = QSettings("FIAN", "CryoDAQ")
         self._channel_mgr = channel_manager
         self._buffer_store = ChannelBufferStore()
         self._temp_plot: TempPlotWidget | None = None
@@ -111,6 +124,15 @@ class DashboardView(QScrollArea):
         self._log_poll_context: dict[str, Any] | None = None
         self._log_poll_pending = False
         self._build_ui()
+        restored = decode_operator_log_unresolved(self._settings.value(_DASHBOARD_UNRESOLVED_SETTINGS_KEY, ""))
+        if restored is not None:
+            self._log_unresolved_context = restored
+            if self._quick_log is not None:
+                self._quick_log._input.setText(restored["message"])
+                self._quick_log.set_submission_state(
+                    "unknown",
+                    "A prior quick-log request requires reconciliation with the same request key.",
+                )
         self._update_mutation_authority()
         self._wire_x_link()
         self._start_refresh_timer()
@@ -295,6 +317,23 @@ class DashboardView(QScrollArea):
             self._poll_log_entries()
             self._start_phase_reconciliation()
 
+    def invalidate_operator_snapshot_producer(self) -> None:
+        """Retire the dashboard's producer anchor before engine replacement."""
+
+        if self._connected:
+            # Producer replacement is a connection-generation cut for every
+            # in-flight dashboard mutation, even when the successor bridge
+            # becomes healthy before the ordinary silence timer expires.
+            self.set_connected(False)
+            return
+        self._connection_generation += 1
+        self._authority_valid = False
+        self._authority_experiment_id = None
+        self._authority_producer_id = None
+        self._authority_revision = None
+        self._authority_snapshot = None
+        self._update_mutation_authority()
+
     def _update_mutation_authority(self) -> None:
         mutable = self._connected and not self._read_only and self._authority_valid
         if self._phase_widget is not None:
@@ -466,7 +505,7 @@ class DashboardView(QScrollArea):
 
     @staticmethod
     def _phase_result_is_unknown(result: object) -> bool:
-        if not isinstance(result, dict):
+        if type(result) is not dict:
             return True
         if result.get("committed") is True or result.get("_handler_timeout") or result.get("_unknown"):
             return True
@@ -651,17 +690,26 @@ class DashboardView(QScrollArea):
             return
 
         request_id = uuid.uuid4().hex
+        author = bounded_operator_log_identity(self._settings.value("last_log_author", ""))
+        if author is None:
+            if self._quick_log is not None:
+                self._quick_log.set_submission_state(
+                    "error",
+                    "Set a bounded operator identity in the operator journal before using quick log.",
+                )
+            return
         payload = {
             "cmd": "log_entry",
             "request_id": request_id,
             "message": message,
-            "author": "",
+            "author": author,
             "source": "dashboard",
             "tags": [],
-            "experiment_id": experiment_id,
         }
         if experiment_id is None:
             payload["experiment_unbound"] = True
+        else:
+            payload["experiment_id"] = experiment_id
         self._start_log_submit(
             {
                 "payload": payload,
@@ -676,9 +724,19 @@ class DashboardView(QScrollArea):
             self._read_only
             or not self._connected
             or not self._authority_valid
-            or context.get("experiment_id") != self._authority_experiment_id
+            or (
+                context is not self._log_unresolved_context
+                and context.get("experiment_id") != self._authority_experiment_id
+            )
             or self._log_submit_worker is not None
         ):
+            return
+        if not self._persist_unresolved_log(context):
+            if self._quick_log is not None:
+                self._quick_log.set_submission_state(
+                    "error",
+                    "The stable retry key could not be persisted; the entry was not sent.",
+                )
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
@@ -700,20 +758,7 @@ class DashboardView(QScrollArea):
 
     @staticmethod
     def _log_commit_receipt_matches(result: object, context: dict[str, Any]) -> bool:
-        if not isinstance(result, dict) or result.get("committed") is not True:
-            return False
-        receipt = result.get("commit_receipt")
-        entry = result.get("entry")
-        return (
-            isinstance(receipt, dict)
-            and isinstance(entry, dict)
-            and receipt.get("schema") == _LOG_COMMIT_SCHEMA
-            and receipt.get("request_id") == context.get("request_id")
-            and receipt.get("experiment_id") == context.get("experiment_id")
-            and receipt.get("committed") is True
-            and receipt.get("entry_id") is not None
-            and receipt.get("entry_id") == entry.get("id")
-        )
+        return operator_log_commit_receipt_matches(result, context)
 
     def _on_log_entry_result(
         self,
@@ -736,6 +781,7 @@ class DashboardView(QScrollArea):
         if self._log_commit_receipt_matches(result, expected):
             if self._log_unresolved_context is expected:
                 self._log_unresolved_context = None
+            self._clear_persisted_unresolved_log()
             if self._quick_log is not None:
                 self._quick_log.confirm_submission(str(expected.get("message", "")))
             if self._connected:
@@ -753,10 +799,25 @@ class DashboardView(QScrollArea):
 
         if self._log_unresolved_context is expected:
             self._log_unresolved_context = None
+        self._clear_persisted_unresolved_log()
         if self._quick_log is not None:
-            error = str(result.get("error", "Engine подтвердил, что запись не сохранена"))
-            self._quick_log.set_submission_state("error", error)
-        logger.warning("log_entry not committed: %s", result.get("error"))
+            self._quick_log.set_submission_state("error", "Engine proved that the quick-log entry was not committed.")
+        raw_error_code = result.get("error_code")
+        error_code = raw_error_code if type(raw_error_code) is str and len(raw_error_code) <= 64 else "invalid"
+        logger.warning("dashboard log_entry not committed: error_code=%s", error_code)
+
+    def _persist_unresolved_log(self, context: dict[str, Any]) -> bool:
+        try:
+            encoded = encode_operator_log_unresolved(context)
+            self._settings.setValue(_DASHBOARD_UNRESOLVED_SETTINGS_KEY, encoded)
+            self._settings.sync()
+            return self._settings.status() == QSettings.Status.NoError
+        except (TypeError, ValueError):
+            return False
+
+    def _clear_persisted_unresolved_log(self) -> None:
+        self._settings.remove(_DASHBOARD_UNRESOLVED_SETTINGS_KEY)
+        self._settings.sync()
 
     def _poll_log_entries(self) -> None:
         """Fetch latest log entries for QuickLogBlock."""

@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from tools.check_python_compile import compile_python_tree
+from tools.ci_guard_execution import (
+    RECEIPT_PREFIX,
+    GuardExecutionError,
+    active_guard_specs,
+    canonical_receipt,
+    current_guard_platform,
+    empty_guard_receipt,
+)
+from tools.ci_guard_execution import (
+    suite_for_node as _guard_suite_for_node,
+)
 
 _PYTEST = (
     sys.executable,
@@ -23,6 +36,21 @@ _PYTEST = (
     "no:cacheprovider",
 )
 _TAIL = ("--tb=short", "-v", "--timeout=120", "--timeout-method=thread")
+_RECEIPT_FIELDS = frozenset({"payload", "sha256"})
+_PAYLOAD_FIELDS = frozenset(
+    {
+        "concrete_nodes",
+        "deselected_nodes",
+        "expected_guards",
+        "expected_guard_platforms",
+        "platform",
+        "result",
+        "schema_version",
+        "suite",
+        "violations",
+        "warnings",
+    }
+)
 ACTIVE_CHECKOUT_REMAINING_FILES = (
     "tests/docs/test_docs_freshness.py",
     "tests/test_claudemd_index.py",
@@ -79,21 +107,24 @@ _SELECTIONS: dict[str, tuple[tuple[str, ...], ...]] = {
 
 
 def suite_for_node(node: str) -> str:
-    """Return the one default matrix suite that owns an exact pytest node."""
+    """Preserve the candidate-runner partition lookup API."""
 
-    path = node.split("::", 1)[0]
-    if path.startswith(("tests/core/", "tests/health/", "tests/engine_wiring/")):
-        return "core"
-    if path.startswith("tests/gui/"):
-        return "gui"
-    if path.startswith(("tests/agents/", "tests/periodic/", "tests/reporting/", "tests/notifications/")):
-        return "agents"
-    if not path.startswith("tests/"):
-        raise ValueError(f"candidate guard is not a pytest node: {node}")
-    return "remaining"
+    return _guard_suite_for_node(node)
 
 
-def _suite_commands(suite: str, *, root: Path, basetemp: Path | None) -> tuple[tuple[str, ...], ...]:
+def _write_response_file(path: Path, arguments: tuple[str, ...]) -> None:
+    if any("\n" in argument or "\r" in argument for argument in arguments):
+        raise ValueError("pytest response-file arguments must each occupy exactly one line")
+    path.write_text("".join(f"{argument}\n" for argument in arguments), encoding="utf-8", newline="\n")
+
+
+def _suite_commands(
+    suite: str,
+    *,
+    root: Path,
+    basetemp: Path | None,
+    active_nodes: tuple[str, ...] = (),
+) -> tuple[tuple[str, ...], ...]:
     selections = _SELECTIONS.get(suite)
     if selections is None:
         raise ValueError(f"unknown candidate suite: {suite}")
@@ -111,10 +142,187 @@ def _suite_commands(suite: str, *, root: Path, basetemp: Path | None) -> tuple[t
     else:
         raise ValueError("candidate pytest basetemp must be outside the exported tree")
     resolved_base.mkdir(parents=True, exist_ok=True)
+    ordinary_response: tuple[str, ...] = ()
+    if active_nodes:
+        deselect_file = resolved_base / f"{suite}-ordinary-deselect-active-guards.args"
+        deselect_arguments = tuple(argument for node in active_nodes for argument in ("--deselect", node))
+        _write_response_file(deselect_file, deselect_arguments)
+        ordinary_response = (f"@{deselect_file}",)
     return tuple(
-        _PYTEST + ("--basetemp", str(resolved_base / f"{suite}-{index}")) + selection + _TAIL
+        _PYTEST + ("--basetemp", str(resolved_base / f"{suite}-{index}")) + selection + ordinary_response + _TAIL
         for index, selection in enumerate(selections, start=1)
     )
+
+
+def _strict_guard_command(
+    suite: str,
+    *,
+    active_nodes: tuple[str, ...],
+    basetemp: Path,
+) -> tuple[str, ...] | None:
+    """Build the Windows-safe exact active-guard command for one suite."""
+
+    if not active_nodes:
+        return None
+    argsfile = basetemp / f"{suite}-active-guards.args"
+    _write_response_file(argsfile, active_nodes)
+    return (
+        _PYTEST
+        + (
+            "-p",
+            "tools.ci_guard_execution",
+            "--cryodaq-active-guard-suite",
+            suite,
+            "-W",
+            "error",
+            "--basetemp",
+            str(basetemp / f"{suite}-active-guards"),
+            f"@{argsfile}",
+        )
+        + _TAIL
+    )
+
+
+def _validate_strict_guard_receipt(
+    output: str,
+    *,
+    suite: str,
+    expected: tuple[str, ...],
+    expected_platforms: dict[str, str | None],
+    platform: str,
+) -> None:
+    lines = [line[len(RECEIPT_PREFIX) :] for line in output.splitlines() if line.startswith(RECEIPT_PREFIX)]
+    if len(lines) != 1:
+        raise GuardExecutionError(f"strict guard execution emitted {len(lines)} receipts instead of one")
+    raw = lines[0]
+    try:
+        envelope = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise GuardExecutionError(f"strict guard receipt is not canonical JSON: {exc}") from exc
+    if not isinstance(envelope, dict) or set(envelope) != _RECEIPT_FIELDS:
+        raise GuardExecutionError("strict guard receipt envelope shape is not exact")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict) or set(payload) != _PAYLOAD_FIELDS:
+        raise GuardExecutionError("strict guard receipt payload shape is not exact")
+    if raw != canonical_receipt(payload):
+        raise GuardExecutionError("strict guard receipt digest or canonical encoding is invalid")
+    if payload.get("schema_version") != 3 or payload.get("suite") != suite or payload.get("platform") != platform:
+        raise GuardExecutionError("strict guard receipt schema or suite is misbound")
+    if payload.get("expected_guards") != list(expected):
+        raise GuardExecutionError("strict guard receipt does not bind the exact expected guard set")
+    if payload.get("expected_guard_platforms") != expected_platforms:
+        raise GuardExecutionError("strict guard receipt does not bind exact guard platforms")
+    if payload.get("result") != "passed":
+        raise GuardExecutionError("strict guard receipt reports failure")
+    for field in ("deselected_nodes", "violations", "warnings"):
+        if payload.get(field) != []:
+            raise GuardExecutionError(f"strict guard receipt retains {field}")
+    concrete = payload.get("concrete_nodes")
+    if not isinstance(concrete, list) or not concrete:
+        raise GuardExecutionError("strict guard receipt has no concrete executed nodes")
+    expected_set = set(expected)
+    bound: set[str] = set()
+    nodeids: set[str] = set()
+    for item in concrete:
+        if not isinstance(item, dict) or set(item) != {"guards", "markers", "nodeid", "phases", "was_xfail"}:
+            raise GuardExecutionError("strict guard concrete-node shape is not exact")
+        guards = item.get("guards")
+        nodeid = item.get("nodeid")
+        phases = item.get("phases")
+        if (
+            not isinstance(guards, list)
+            or not guards
+            or any(guard not in expected_set for guard in guards)
+            or not isinstance(nodeid, str)
+            or nodeid in nodeids
+        ):
+            raise GuardExecutionError("strict guard concrete-node identity is invalid")
+        markers = item.get("markers")
+        if not isinstance(markers, list) or item.get("was_xfail") is not False:
+            raise GuardExecutionError("strict guard concrete node marker receipt is invalid")
+        scopes = {expected_platforms[guard] for guard in guards}
+        if len(scopes) != 1:
+            raise GuardExecutionError("strict guard concrete node has conflicting platform scopes")
+        scope = scopes.pop()
+        skipif_count = 0
+        normalized: list[dict[str, Any]] = []
+        for marker in markers:
+            if not isinstance(marker, dict):
+                raise GuardExecutionError("strict guard marker receipt is not an exact mapping")
+            if marker.get("name") == "filterwarnings":
+                if set(marker) != {"name", "filters"}:
+                    raise GuardExecutionError("strict guard warning-filter receipt shape is invalid")
+                filters = marker.get("filters")
+                if (
+                    not isinstance(filters, list)
+                    or not filters
+                    or any(not isinstance(value, str) or value.split(":", 1)[0].strip() != "error" for value in filters)
+                ):
+                    raise GuardExecutionError("strict guard warning filter is suppressive or malformed")
+            elif marker.get("name") == "skipif":
+                if set(marker) != {"name", "condition", "reason", "target_platform"}:
+                    raise GuardExecutionError("strict guard skipif receipt shape is invalid")
+                if (
+                    scope is None
+                    or scope != platform
+                    or marker.get("target_platform") != scope
+                    or marker.get("condition") is not False
+                    or not isinstance(marker.get("reason"), str)
+                    or not marker["reason"].strip()
+                ):
+                    raise GuardExecutionError("strict guard skipif is not false on its bound platform")
+                skipif_count += 1
+            else:
+                raise GuardExecutionError("strict guard marker receipt contains an unknown marker")
+            normalized.append(marker)
+        normalized.sort(key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")))
+        if markers != normalized:
+            raise GuardExecutionError("strict guard marker receipt is not canonically ordered")
+        if (scope is None and skipif_count != 0) or (scope is not None and skipif_count != 1):
+            raise GuardExecutionError("strict guard skipif count does not match its platform scope")
+        if phases != {phase: ["passed"] for phase in ("setup", "call", "teardown")}:
+            raise GuardExecutionError("strict guard concrete node lacks exactly one passing phase receipt")
+        if not any(nodeid == guard or nodeid.startswith(f"{guard}[") for guard in guards):
+            raise GuardExecutionError("strict guard concrete node is not bound to its declared guard")
+        nodeids.add(nodeid)
+        bound.update(guards)
+    if bound != expected_set:
+        raise GuardExecutionError("strict guard receipt omits an expected guard")
+
+
+def _command_environment(*, basetemp: Path, suite: str, index: int) -> dict[str, str]:
+    root = basetemp.parent / "command-state" / suite / str(index)
+    runtime = root / "runtime"
+    temp = root / "tmp"
+    cache = root / "cache"
+    pycache = root / "pycache"
+    for path in (runtime, temp, cache, pycache):
+        path.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "COVERAGE_FILE": str(cache / ".coverage"),
+            "CRYODAQ_STATE_ROOT": str(runtime),
+            "MPLCONFIGDIR": str(cache / "matplotlib"),
+            "NUMBA_CACHE_DIR": str(cache / "numba"),
+            "PYTHONPYCACHEPREFIX": str(pycache),
+            "TEMP": str(temp),
+            "TMP": str(temp),
+            "TMPDIR": str(temp),
+            "XDG_CACHE_HOME": str(cache / "xdg"),
+        }
+    )
+    return environment
+
+
+def _relay_strict_output(completed: subprocess.CompletedProcess[str]) -> str:
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    if stdout:
+        print(stdout, end="" if stdout.endswith("\n") else "\n", flush=True)
+    if stderr:
+        print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr, flush=True)
+    return stdout + stderr
 
 
 def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
@@ -124,11 +332,65 @@ def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
         print(f"candidate-suite={suite} compile-failure={exc}", file=sys.stderr, flush=True)
         return 1
     print(f"candidate-suite={suite} compiled-sources={len(manifest)}", flush=True)
-    commands = _suite_commands(suite, root=root, basetemp=basetemp)
+    try:
+        platform = current_guard_platform()
+        active_specs = active_guard_specs(root, suite, platform=platform)
+        active_nodes = tuple(spec.node for spec in active_specs)
+        active_platforms = {spec.node: spec.platform for spec in active_specs}
+        commands = _suite_commands(
+            suite,
+            root=root,
+            basetemp=basetemp,
+            active_nodes=active_nodes,
+        )
+        raw_guard_basetemp = str(basetemp) if basetemp is not None else os.environ["CRYODAQ_CANDIDATE_PYTEST_BASETEMP"]
+        guard_basetemp = Path(raw_guard_basetemp).resolve(strict=False)
+        guard_command = _strict_guard_command(
+            suite,
+            active_nodes=active_nodes,
+            basetemp=guard_basetemp,
+        )
+    except (KeyError, OSError, UnicodeError, ValueError) as exc:
+        print(f"candidate-suite={suite} guard-setup-failure={exc}", file=sys.stderr, flush=True)
+        return 1
+    if guard_command is None:
+        print(f"{RECEIPT_PREFIX}{empty_guard_receipt(suite, platform=platform)}", flush=True)
+    all_commands: tuple[tuple[tuple[str, ...], bool], ...]
+    if guard_command is None:
+        all_commands = tuple((command, False) for command in commands)
+    else:
+        all_commands = ((guard_command, True),) + tuple((command, False) for command in commands)
     failures: list[tuple[int, int]] = []
-    for index, command in enumerate(commands, start=1):
-        print(f"candidate-suite={suite} command={index}/{len(commands)}", flush=True)
-        completed = subprocess.run(command, cwd=root, check=False)
+    for index, (command, is_strict) in enumerate(all_commands, start=1):
+        print(f"candidate-suite={suite} command={index}/{len(all_commands)}", flush=True)
+        environment = _command_environment(basetemp=guard_basetemp, suite=suite, index=index)
+        if is_strict:
+            completed: subprocess.CompletedProcess[Any] = subprocess.run(
+                command,
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            output = _relay_strict_output(completed)
+            if completed.returncode == 0:
+                try:
+                    _validate_strict_guard_receipt(
+                        output,
+                        suite=suite,
+                        expected=active_nodes,
+                        expected_platforms=active_platforms,
+                        platform=platform,
+                    )
+                except (GuardExecutionError, TypeError, ValueError) as exc:
+                    print(f"candidate-suite={suite} invalid-guard-receipt={exc}", file=sys.stderr, flush=True)
+                    failures.append((index, 1))
+                    continue
+        else:
+            completed = subprocess.run(command, cwd=root, env=environment, check=False)
         if completed.returncode != 0:
             failures.append((index, completed.returncode))
     if failures:

@@ -21,8 +21,9 @@ from cryodaq.channels.descriptors import (
     ChannelSafetyClass,
 )
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
+from cryodaq.core.zmq_bridge import PROTOCOL_VERSION
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.gui.app import _drain_bridge_readings, _shutdown_gui_runtime
+from cryodaq.gui.app import _drain_bridge_readings, _GuiRuntimeOwners
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.state.descriptor_store import IdentityStatus, TransportState
 from cryodaq.launcher import LauncherWindow
@@ -138,12 +139,27 @@ def test_transport_invalidation_marks_existing_identity_disconnected() -> None:
     qualified = _qualified(_reading())
     with patch.object(window, "_dispatch_reading"):
         window.dispatch_qualified_reading(qualified)
+    annunciation = window._annunciation_controller
+    assert annunciation.accept_status(
+        {
+            "ok": True,
+            "proto": PROTOCOL_VERSION,
+            "engine_instance_id": "a" * 32,
+            "snapshot_revision": 7,
+            "activations": [],
+        }
+    )
+    assert annunciation.status_state == "known"
+    assert not annunciation.audible
 
     window.invalidate_descriptor_transport()
 
     view = window._descriptor_store.view(qualified.reading.channel)
     assert view is not None
     assert view.transport_state is TransportState.DISCONNECTED
+    assert annunciation.status_state == "unknown"
+    assert annunciation.audible
+    annunciation._beep_timer.stop()
 
 
 def test_app_drain_preserves_mixed_batch_order_and_drops_malformed() -> None:
@@ -190,7 +206,9 @@ def test_launcher_drain_calls_production_method_and_exact_type_guard() -> None:
     assert launcher._reading_count == 2
 
 
-def test_standalone_shutdown_stops_timer_before_invalidation_and_no_late_drain() -> None:
+def test_standalone_shutdown_stops_timer_before_invalidation_and_no_late_drain(
+    _isolate_shell_test,
+) -> None:
     qualified = _qualified(_reading())
     bridge = MagicMock()
     bridge.poll_readings_with_descriptor.return_value = [qualified]
@@ -210,14 +228,38 @@ def test_standalone_shutdown_stops_timer_before_invalidation_and_no_late_drain()
 
     timer = _Timer()
     snapshot = MagicMock()
-    snapshot.stop.side_effect = lambda: calls.append("snapshot.stop")
+    snapshot.active = True
+
+    def stop_snapshot() -> None:
+        calls.append("snapshot.stop")
+        snapshot.active = False
+
+    snapshot.stop.side_effect = stop_snapshot
     window.invalidate_descriptor_transport.side_effect = lambda: calls.append("invalidate")
+    window.settle_owned_workers.side_effect = lambda: calls.append("window.settle") or True
+    bridge.shutdown.side_effect = lambda: calls.append("bridge.shutdown")
+    bridge.close.side_effect = lambda: calls.append("bridge.close")
+    owners = _GuiRuntimeOwners()
+    owners.worker_session_epoch = _isolate_shell_test
+    owners.timer = timer
+    owners.window = window
+    owners.snapshot_ingress = snapshot
+    owners.bridge = bridge
 
     timer.fire()
     window.dispatch_qualified_reading.reset_mock()
-    with patch("cryodaq.gui.app.shutdown", side_effect=lambda: calls.append("shutdown")):
-        _shutdown_gui_runtime(timer, snapshot, window)
+    with patch("cryodaq.gui.app.set_bridge", side_effect=lambda value: calls.append(f"set_bridge:{value}")):
+        owners.begin_shutdown()
+        assert owners.settle() is True
     timer.fire()
 
-    assert calls == ["timer.stop", "invalidate", "snapshot.stop", "shutdown"]
+    assert calls == [
+        "timer.stop",
+        "invalidate",
+        "window.settle",
+        "snapshot.stop",
+        "bridge.shutdown",
+        "bridge.close",
+        "set_bridge:None",
+    ]
     window.dispatch_qualified_reading.assert_not_called()

@@ -300,6 +300,32 @@ def _capability_response(token: str = "token-1") -> dict:
     }
 
 
+def _published_log_result(command: dict, *, entry_id: int = 1) -> dict:
+    entry = {
+        "id": entry_id,
+        "timestamp": "2026-07-23T00:00:00+00:00",
+        "experiment_id": command["experiment_id"],
+        "author": command["author"],
+        "source": command["source"],
+        "message": command["message"],
+        "tags": list(command.get("tags", [])),
+    }
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "entry": entry,
+        "commit_receipt": {
+            "schema": "operator_log_commit_v1",
+            "request_id": command["request_id"],
+            "entry_id": entry_id,
+            "experiment_id": command["experiment_id"],
+            "committed": True,
+        },
+    }
+
+
 async def test_cmd_status_formats_message() -> None:
     bot = _make_bot()
     await bot._handle_message(_tg_msg("/status"))
@@ -312,7 +338,7 @@ async def test_cmd_log_writes_entry() -> None:
     async def dispatch(command: dict) -> dict:
         if command == {"cmd": "mutation_capabilities"}:
             return _capability_response()
-        return {"ok": True}
+        return _published_log_result(command)
 
     handler = AsyncMock(side_effect=dispatch)
     bot = _make_bot(command_handler=handler)
@@ -341,6 +367,30 @@ async def test_cmd_log_writes_entry() -> None:
     assert cmd["capability_token"] == "token-1"
     bot._send.assert_called_once()
     assert "✅" in bot._send.call_args[0][1]
+
+
+@pytest.mark.parametrize("corruption", ["missing_publication", "wrong_request", "wrong_author", "extra_key"])
+async def test_cmd_log_never_accepts_incomplete_or_misbound_success(corruption: str) -> None:
+    async def dispatch(command: dict) -> dict:
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response()
+        result = _published_log_result(command)
+        if corruption == "missing_publication":
+            result.pop("publication_state")
+        elif corruption == "wrong_request":
+            result["commit_receipt"]["request_id"] = "f" * 32
+        elif corruption == "wrong_author":
+            result["entry"]["author"] = "forged"
+        else:
+            result["unexpected"] = True
+        return result
+
+    bot = _make_bot(command_handler=AsyncMock(side_effect=dispatch))
+    await bot._handle_message(_tg_msg("/log exp-1 exact"))
+
+    reply = bot._send.await_args.args[1]
+    assert "✅" not in reply
+    assert "Подробности" in reply
 
 
 async def test_query_agent_missing_reply_has_no_english_terms() -> None:
@@ -378,7 +428,10 @@ async def test_cmd_log_empty_text_returns_error() -> None:
     bot = _make_bot()
     await bot._handle_message(_tg_msg("/log"))
     bot._send.assert_called_once()
-    assert "experiment_id" in bot._send.call_args[0][1]
+    reply = bot._send.call_args[0][1]
+    assert reply == "❌ Укажите experiment_id и текст: /log &lt;experiment_id&gt; &lt;текст&gt;"
+    assert reply.encode("utf-8").decode("utf-8") == reply
+    assert "\ufffd" not in reply
 
 
 async def test_cmd_phase_advances() -> None:

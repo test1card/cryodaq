@@ -21,7 +21,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
-from cryodaq.gui.shell.main_window_v2 import MainWindowV2, _map_safety_state
+from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.operator_snapshot import (
@@ -93,18 +93,29 @@ def _source_state_reading(channel: str, state: str) -> Reading:
     )
 
 
-def _typed_ready_snapshot(*, revision: int = 42) -> OperatorSnapshot:
+def _typed_ready_snapshot(
+    *,
+    revision: int = 42,
+    mode: SnapshotMode = SnapshotMode.LIVE,
+) -> OperatorSnapshot:
     observed = datetime.now(UTC) - timedelta(seconds=1)
-    cut = SnapshotCut(revision, observed, observed, "engine-v1", SnapshotMode.LIVE, "exp-1", "engine-v1")
-    status = SummaryStatus(OperatorPresentationState.OK, 1.0, 0.0, ("authoritative",), "Подтверждено")
+    cut = SnapshotCut(revision, observed, observed, "engine-v1", mode, "exp-1", "engine-v1")
+    state = OperatorPresentationState.OK if mode is SnapshotMode.LIVE else OperatorPresentationState.CAUTION
+    status = SummaryStatus(state, 1.0, 0.0, ("authoritative",), "Подтверждено")
     manifest = SupportBundleManifest(
         "bundle-42",
         cut.received_at,
         (SupportBundleEntry("status/status.json", 123, "a" * 64),),
     )
+    readiness = ReadinessTruth.READY if mode is SnapshotMode.LIVE else ReadinessTruth.UNKNOWN
+    lifecycle = SafetyLifecycle.READY if mode is SnapshotMode.LIVE else SafetyLifecycle.UNKNOWN
+    recording = RecordingTruth.RECORDING if mode is SnapshotMode.LIVE else RecordingTruth.REPLAY_ONLY
+    recording_session_id = "rec-1" if mode is SnapshotMode.LIVE else None
+    availability = AvailabilityTruth.AVAILABLE if mode is SnapshotMode.LIVE else AvailabilityTruth.UNKNOWN
+    support_manifest = manifest if mode is SnapshotMode.LIVE else None
     return OperatorSnapshot(
         cut,
-        ReadinessSummary(cut, status, ReadinessTruth.READY, (), SafetyLifecycle.READY),
+        ReadinessSummary(cut, status, readiness, (), lifecycle),
         PlantHealthSummary(
             cut,
             status,
@@ -122,54 +133,13 @@ def _typed_ready_snapshot(*, revision: int = 42) -> OperatorSnapshot:
             "exp-1",
             "Эксперимент",
             "cooldown",
-            RecordingTruth.RECORDING,
-            "rec-1",
+            recording,
+            recording_session_id,
         ),
-        DataIntegritySummary(cut, status, 42, 41, 0, 0, AvailabilityTruth.AVAILABLE),
+        DataIntegritySummary(cut, status, 42, 41, 0, 0, availability),
         CooldownHistorySummary(cut, status, (CooldownSample(0, 300),), None, ()),
-        SupportBundleSummary(cut, status, AvailabilityTruth.AVAILABLE, manifest),
+        SupportBundleSummary(cut, status, availability, support_manifest),
     )
-
-
-# ----------------------------------------------------------------------
-# Pure helper tests — no Qt needed
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "state, reason, expected",
-    [
-        ("ready", "any", (True, "")),
-        ("run_permitted", "", (True, "")),
-        ("running", "", (True, "")),
-        ("safe_off", "system stop", (False, "system stop")),
-        ("fault_latched", "", (False, "fault_latched")),
-        ("unknown_state", "", (False, "unknown_state")),
-        (None, "", (False, "unknown")),
-    ],
-)
-def test_map_safety_state_cases(state, reason, expected):
-    assert _map_safety_state(state, reason) == expected
-
-
-def test_map_safety_state_truncates_long_reason():
-    long_reason = "x" * 200
-    ready, text = _map_safety_state("safe_off", long_reason)
-    assert ready is False
-    # 120 chars preserved + ellipsis character.
-    assert text == "x" * 120 + "…"
-
-
-def test_map_safety_state_empty_reason_falls_back_to_state():
-    ready, text = _map_safety_state("fault_latched", "")
-    assert ready is False
-    assert text == "fault_latched"
-
-
-def test_map_safety_state_whitespace_reason_falls_back():
-    ready, text = _map_safety_state("safe_off", "   \t  ")
-    assert ready is False
-    assert text == "safe_off"
 
 
 # ----------------------------------------------------------------------
@@ -267,12 +237,49 @@ def test_exact_internal_source_state_event_updates_real_panel():
         _stop_timers(w)
 
 
-def test_ready_analytics_is_display_only_before_typed_authority():
+@pytest.mark.parametrize(
+    "invalid_bridge_id",
+    [
+        "A" * 32,
+        "g" * 32,
+        "a" * 31,
+        "a" * 33,
+        "a" * 31 + "\n",
+        b"a" * 32,
+        True,
+        None,
+    ],
+)
+def test_noncanonical_bridge_identity_cannot_bind_typed_safety_authority(
+    invalid_bridge_id: object,
+) -> None:
     _app()
     bridge = ZmqBridge()
+    bridge._bridge_instance_id = invalid_bridge_id
     w = MainWindowV2(bridge=bridge)
     try:
-        assert bridge.bridge_instance_id is not None
+        w._ensure_overlay("source")
+        assert w._current_bridge_instance_id() is None
+
+        w._apply_operator_snapshot_safety(_typed_ready_snapshot())
+
+        assert not w._typed_safety_ready
+        assert w._accepted_safety_bridge_instance_id is None
+        assert w._keithley_panel is not None
+        assert not w._keithley_panel._safety_ready
+        assert not w._keithley_panel._smua_block._start_btn.isEnabled()
+        assert not w._keithley_panel._start_both_btn.isEnabled()
+    finally:
+        _stop_timers(w)
+
+
+def test_ready_analytics_is_display_only_before_typed_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
         w._ensure_overlay("source")
         w._last_reading_time = time.monotonic()
@@ -282,7 +289,7 @@ def test_ready_analytics_is_display_only_before_typed_authority():
         w._dispatch_reading(
             _safety_reading(
                 "ready",
-                bridge_id=bridge.bridge_instance_id,
+                bridge_id=live_zmq_bridge.bridge_instance_id,
             )
         )
 
@@ -295,12 +302,13 @@ def test_ready_analytics_is_display_only_before_typed_authority():
         _stop_timers(w)
 
 
-def test_ready_analytics_after_negative_cannot_restore_authority() -> None:
+def test_ready_analytics_after_negative_cannot_restore_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    w = MainWindowV2(bridge=bridge)
+    w = MainWindowV2(bridge=live_zmq_bridge)
     try:
-        assert bridge.bridge_instance_id is not None
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._ensure_overlay("source")
         w._last_reading_time = time.monotonic()
         w._tick_status()
@@ -312,14 +320,14 @@ def test_ready_analytics_after_negative_cannot_restore_authority() -> None:
                 "fault_latched",
                 "negative evidence",
                 observed_at=observed,
-                bridge_id=bridge.bridge_instance_id,
+                bridge_id=live_zmq_bridge.bridge_instance_id,
             )
         )
         w._dispatch_reading(
             _safety_reading(
                 "ready",
                 observed_at=observed + timedelta(milliseconds=500),
-                bridge_id=bridge.bridge_instance_id,
+                bridge_id=live_zmq_bridge.bridge_instance_id,
             )
         )
 
@@ -329,18 +337,19 @@ def test_ready_analytics_after_negative_cannot_restore_authority() -> None:
         _stop_timers(w)
 
 
-def test_bridge_and_experiment_changes_never_create_telemetry_authority() -> None:
+def test_bridge_and_experiment_changes_never_create_telemetry_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    w = MainWindowV2(bridge=bridge)
+    w = MainWindowV2(bridge=live_zmq_bridge)
     try:
-        assert bridge.bridge_instance_id is not None
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-a"}}
         w._ensure_overlay("source")
-        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        w._dispatch_reading(_safety_reading("ready", bridge_id=live_zmq_bridge.bridge_instance_id))
         assert w._keithley_panel._safety_ready is False
 
-        bridge._bridge_instance_id = "f" * 32
+        live_zmq_bridge._bridge_instance_id = "f" * 32
         w._on_experiment_status_received(
             {
                 "active_experiment": {"experiment_id": "exp-b"},
@@ -349,7 +358,7 @@ def test_bridge_and_experiment_changes_never_create_telemetry_authority() -> Non
         )
         w._last_reading_time = time.monotonic()
         w._tick_status()
-        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        w._dispatch_reading(_safety_reading("ready", bridge_id=live_zmq_bridge.bridge_instance_id))
 
         assert w._keithley_panel._safety_ready is False
         assert w._accepted_safety_bridge_instance_id is None
@@ -358,13 +367,14 @@ def test_bridge_and_experiment_changes_never_create_telemetry_authority() -> Non
         _stop_timers(w)
 
 
-def test_negative_analytics_revokes_typed_ready() -> None:
+def test_negative_analytics_revokes_typed_ready(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    w = MainWindowV2(bridge=bridge)
+    w = MainWindowV2(bridge=live_zmq_bridge)
     store = OperatorSnapshotStore()
     try:
-        assert bridge.bridge_instance_id is not None
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
         w._ensure_overlay("source")
         w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
@@ -374,7 +384,7 @@ def test_negative_analytics_revokes_typed_ready() -> None:
             _safety_reading(
                 "fault_latched",
                 "negative telemetry",
-                bridge_id=bridge.bridge_instance_id,
+                bridge_id=live_zmq_bridge.bridge_instance_id,
             )
         )
 
@@ -384,13 +394,83 @@ def test_negative_analytics_revokes_typed_ready() -> None:
         _stop_timers(w)
 
 
-def test_same_cut_and_analytics_ready_cannot_restore_but_newer_typed_cut_can() -> None:
+@pytest.mark.parametrize("state_name", ["run_permitted", "running"])
+def test_active_analytics_lifecycle_revokes_typed_ready(
+    state_name: str,
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    """Active-source telemetry is blocking evidence, never READY authority."""
+
     _app()
-    bridge = ZmqBridge()
-    w = MainWindowV2(bridge=bridge)
+    w = MainWindowV2(bridge=live_zmq_bridge)
     store = OperatorSnapshotStore()
     try:
-        assert bridge.bridge_instance_id is not None
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._ensure_overlay("source")
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
+        assert w._keithley_panel._safety_ready is True
+
+        w._dispatch_reading(
+            _safety_reading(
+                state_name,
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
+        )
+
+        assert w._last_safety_state == state_name
+        assert w._typed_safety_ready is False
+        assert w._accepted_safety_bridge_instance_id is None
+        assert w._accepted_safety_experiment_id is None
+        assert w._keithley_panel._safety_ready is False
+        assert w._current_keithley_safety_gate()[0] is False
+    finally:
+        _stop_timers(w)
+
+
+@pytest.mark.parametrize(
+    ("replay_mode", "expected_mode", "opposite_mode"),
+    [
+        (False, SnapshotMode.LIVE, SnapshotMode.REPLAY),
+        (True, SnapshotMode.REPLAY, SnapshotMode.LIVE),
+    ],
+)
+def test_main_window_never_renders_or_authorizes_opposite_runtime_domain(
+    replay_mode: bool,
+    expected_mode: SnapshotMode,
+    opposite_mode: SnapshotMode,
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge, replay_mode=replay_mode)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        expected = _typed_ready_snapshot(revision=42, mode=expected_mode)
+        w.render_operator_snapshot(expected)
+        rendered = w._operator_display.snapshot
+        assert rendered is expected
+
+        opposite = _typed_ready_snapshot(revision=999, mode=opposite_mode)
+        w.render_operator_snapshot(opposite)
+
+        assert w._operator_display.snapshot is rendered
+        assert w._overview_panel._authority_valid is False
+        assert w._typed_safety_ready is False
+        assert w._accepted_safety_bridge_instance_id is None
+        assert w._current_keithley_safety_gate()[0] is False
+    finally:
+        _stop_timers(w)
+
+
+def test_same_cut_and_analytics_ready_cannot_restore_but_newer_typed_cut_can(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
         w._ensure_overlay("source")
         original = store.accept_snapshot(_typed_ready_snapshot(revision=42))
@@ -401,13 +481,13 @@ def test_same_cut_and_analytics_ready_cannot_restore_but_newer_typed_cut_can() -
             _safety_reading(
                 "fault_latched",
                 "negative telemetry",
-                bridge_id=bridge.bridge_instance_id,
+                bridge_id=live_zmq_bridge.bridge_instance_id,
             )
         )
         assert w._keithley_panel._safety_ready is False
 
         w.render_operator_snapshot(original)
-        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        w._dispatch_reading(_safety_reading("ready", bridge_id=live_zmq_bridge.bridge_instance_id))
         assert w._keithley_panel._safety_ready is False
 
         newer = store.accept_snapshot(_typed_ready_snapshot(revision=43))
@@ -417,19 +497,20 @@ def test_same_cut_and_analytics_ready_cannot_restore_but_newer_typed_cut_can() -
         _stop_timers(w)
 
 
-def test_foreign_ready_destroys_prior_legacy_replay_binding() -> None:
+def test_foreign_ready_destroys_prior_legacy_replay_binding(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    w = MainWindowV2(bridge=bridge)
+    w = MainWindowV2(bridge=live_zmq_bridge)
     try:
-        assert bridge.bridge_instance_id is not None
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._ensure_overlay("source")
         observed = datetime.now(UTC) - timedelta(seconds=1)
         w._dispatch_reading(
             _safety_reading(
                 "fault_latched",
                 observed_at=observed,
-                bridge_id=bridge.bridge_instance_id,
+                bridge_id=live_zmq_bridge.bridge_instance_id,
             )
         )
         w._dispatch_reading(
@@ -447,13 +528,14 @@ def test_foreign_ready_destroys_prior_legacy_replay_binding() -> None:
         _stop_timers(w)
 
 
-def test_typed_snapshot_staleness_revokes_gate_and_legacy_ready_cannot_resurrect_it() -> None:
+def test_typed_snapshot_staleness_revokes_gate_and_legacy_ready_cannot_resurrect_it(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    w = MainWindowV2(bridge=bridge)
+    w = MainWindowV2(bridge=live_zmq_bridge)
     store = OperatorSnapshotStore()
     try:
-        assert bridge.bridge_instance_id is not None
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
         w._ensure_overlay("source")
         ready = store.accept_snapshot(_typed_ready_snapshot())
@@ -467,23 +549,24 @@ def test_typed_snapshot_staleness_revokes_gate_and_legacy_ready_cannot_resurrect
         w._apply_operator_snapshot_safety(stale)
         assert w._keithley_panel._safety_ready is False
 
-        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        w._dispatch_reading(_safety_reading("ready", bridge_id=live_zmq_bridge.bridge_instance_id))
         assert w._keithley_panel._safety_ready is False
         assert w._last_safety_state == SafetyLifecycle.UNKNOWN.value
     finally:
         _stop_timers(w)
 
 
-def test_malformed_typed_snapshot_permanently_disables_legacy_ready_fallback() -> None:
+def test_malformed_typed_snapshot_permanently_disables_legacy_ready_fallback(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
     _app()
-    bridge = ZmqBridge()
-    w = MainWindowV2(bridge=bridge)
+    w = MainWindowV2(bridge=live_zmq_bridge)
     try:
-        assert bridge.bridge_instance_id is not None
+        assert live_zmq_bridge.bridge_instance_id is not None
         w._ensure_overlay("source")
 
         w._apply_operator_snapshot_safety(object())
-        w._dispatch_reading(_safety_reading("ready", bridge_id=bridge.bridge_instance_id))
+        w._dispatch_reading(_safety_reading("ready", bridge_id=live_zmq_bridge.bridge_instance_id))
 
         assert w._typed_safety_authority_seen is True
         assert w._keithley_panel._safety_ready is False

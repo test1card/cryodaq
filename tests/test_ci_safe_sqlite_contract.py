@@ -30,7 +30,7 @@ def test_main_ci_binds_h4_alias_to_the_running_linux_interpreter_fail_closed() -
     text = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
     install = text.index("- name: Install dependencies")
     binding = text.index("- name: Bind H4 reviewed interpreter alias (Linux)")
-    first_test = text.index("- name: Run app-palette tests (isolated)")
+    first_test = text.index("- name: Run exact exported candidate suite")
 
     assert install < binding < first_test
     assert "if: runner.os == 'Linux'" in text[binding:first_test]

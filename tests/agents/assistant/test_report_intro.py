@@ -247,12 +247,13 @@ def test_report_intro_rejects_redirects_and_nonliteral_loopback(
         ),
     )
 
-    with pytest.raises(urllib.error.HTTPError, match="302"):
+    with pytest.raises(urllib.error.HTTPError, match="302") as raised:
         _call_ollama_sync(
             "prompt",
             "system",
             IntroConfig(enabled=True, base_url="http://127.0.0.1:11434"),
         )
+    raised.value.close()
     assert len(opened) == 1
 
     opened.clear()

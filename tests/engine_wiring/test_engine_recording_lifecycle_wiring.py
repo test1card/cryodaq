@@ -11,6 +11,7 @@ from cryodaq.core.scheduler import ReviewedSourceSettlementIncomplete
 from cryodaq.engine import (
     EngineCommandContext,
     _feed_recording_experiment_lifecycle,
+    _rollback_scheduler_startup,
     _run_engine,
     _seed_recording_lifecycle,
     _start_scheduler_with_recording_feed,
@@ -105,13 +106,16 @@ async def test_feed_fault_cannot_roll_back_a_successful_command(caplog: pytest.L
         phase=None,
     )
     feed = MagicMock()
-    feed.experiment_active.side_effect = RuntimeError("feed fault")
+    secret = "feed fault\r\nTOP-SECRET"
+    feed.experiment_active.side_effect = RuntimeError(secret)
     result = {"ok": True, "experiment": {"experiment_id": "exp-2"}}
 
     _feed_recording_experiment_lifecycle(_context(manager, feed), "experiment_update", result)
 
     assert result == {"ok": True, "experiment": {"experiment_id": "exp-2"}}
-    assert "feed fault" in caplog.text
+    assert "Recording lifecycle feed unavailable: action=experiment_update exception=RuntimeError" in caplog.text
+    assert secret not in caplog.text
+    assert "TOP-SECRET" not in caplog.text
 
 
 async def test_boot_seed_preserves_active_or_inactive_manager_truth() -> None:
@@ -164,7 +168,8 @@ async def test_persistence_feed_failure_cannot_block_scheduler_start(caplog: pyt
     scheduler = MagicMock()
     scheduler.start = AsyncMock()
     feed = MagicMock()
-    feed.persistence_started.side_effect = RuntimeError("dark feed failed")
+    secret = "dark feed failed\r\nTOP-SECRET"
+    feed.persistence_started.side_effect = RuntimeError(secret)
 
     sequence = await _start_scheduler_with_recording_feed(scheduler, feed, 0)
 
@@ -172,7 +177,9 @@ async def test_persistence_feed_failure_cannot_block_scheduler_start(caplog: pyt
     scheduler.start.assert_awaited_once_with()
     feed.acquisition_running.assert_called_once()
     feed.persistence_ambiguous.assert_called_once_with()
-    assert "dark feed failed" in caplog.text
+    assert "Recording persistence feed unavailable: phase=before_scheduler_start exception=RuntimeError" in caplog.text
+    assert secret not in caplog.text
+    assert "TOP-SECRET" not in caplog.text
 
 
 async def test_stop_callbacks_are_isolated_and_acquisition_failure_is_terminalized() -> None:
@@ -289,14 +296,15 @@ def test_production_wiring_uses_direct_persistence_observation_without_publicati
     assert "persistence_freshness_s=persistence_freshness_s" in source
     assert "persistence_commit_observer=recording_lifecycle_feed.persistence_committed" in source
     assert "_start_scheduler_with_recording_feed(" in source
-    assert "_stop_scheduler_with_recording_feed(" in source
+    assert "_rollback_scheduler_startup" in source
+    assert "_stop_scheduler_with_recording_feed(" in inspect.getsource(_rollback_scheduler_startup)
     assert "reviewed_source_connect_begin=safety_manager.begin_reviewed_source_connect" in source
     assert "reviewed_source_connect_complete=safety_manager.complete_reviewed_source_connect" in source
     assert "reviewed_source_uncertain=safety_manager.mark_reviewed_source_uncertain" in source
     assert "reviewed_source_connect_abandon=safety_manager.abandon_reviewed_source_connect" in source
     assert "reviewed_source_disconnect=safety_manager.disconnect_reviewed_source" in source
-    assert source.index("await stop_safety_manager_with_hold(safety_manager, logger)") < source.index(
-        "_stop_scheduler_with_recording_feed("
+    assert source.index("await teardown_sequence.settle_ingress_off()") < source.index(
+        "shutdown_layers: list[_EngineShutdownLayer] = ["
     )
     assert "await safety_manager.stop()" not in source
 

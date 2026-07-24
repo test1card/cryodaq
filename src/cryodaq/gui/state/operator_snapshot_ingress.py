@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
-from cryodaq.operator_snapshot import OperatorSnapshot
+from cryodaq.operator_snapshot import OperatorSnapshot, SnapshotMode
 
 _DEFAULT_STALE_AFTER_S = 10.0
 _HEALTH_POLL_INTERVAL_S = 0.5
@@ -28,6 +29,7 @@ class OperatorSnapshotIngressOwner(QObject):
         self,
         bridge: Any,
         *,
+        expected_mode: SnapshotMode,
         stale_after_s: float = _DEFAULT_STALE_AFTER_S,
         parent: QObject | None = None,
     ) -> None:
@@ -38,8 +40,11 @@ class OperatorSnapshotIngressOwner(QObject):
             raise TypeError("bridge must expose snapshot_flow_age_s")
         if not callable(getattr(bridge, "is_alive", None)):
             raise TypeError("bridge must expose is_alive")
+        if type(expected_mode) is not SnapshotMode:
+            raise TypeError("expected_mode must be an exact SnapshotMode")
         self._stale_after_s = _positive_number(stale_after_s, field="stale_after_s")
         self._bridge = bridge
+        self._expected_mode = expected_mode
         self._store = OperatorSnapshotStore()
         self._active = False
         self._epoch = 0
@@ -164,7 +169,11 @@ class OperatorSnapshotIngressOwner(QObject):
         previous_revision = previous.cut.revision if previous is not None else -1
         batch_identity: tuple[str, str, object] | None = None
         for item in candidate:
-            if type(item) is not OperatorSnapshot or item.cut.revision < previous_revision:
+            if (
+                type(item) is not OperatorSnapshot
+                or item.cut.mode is not self._expected_mode
+                or item.cut.revision < previous_revision
+            ):
                 self._reject_snapshot_batch()
                 return
             identity = (item.cut.producer_id, item.cut.experiment_id, item.cut.mode)
@@ -188,7 +197,7 @@ class OperatorSnapshotIngressOwner(QObject):
         self._require_owner_thread()
         if not self._active or epoch != self._epoch:
             return False
-        if type(candidate) is not OperatorSnapshot:
+        if type(candidate) is not OperatorSnapshot or candidate.cut.mode is not self._expected_mode:
             self._reject_snapshot_batch()
             return False
         if self._last_accepted_snapshot is not None:
@@ -278,9 +287,17 @@ class OperatorSnapshotIngressOwner(QObject):
             raise RuntimeError("operator snapshot store mutation requires its GUI thread")
 
 
-def start_operator_snapshot_ingress(bridge: Any, window: Any) -> OperatorSnapshotIngressOwner:
+def start_operator_snapshot_ingress(
+    bridge: Any,
+    window: Any,
+    *,
+    expected_mode: SnapshotMode,
+    anchor: Callable[[OperatorSnapshotIngressOwner], None] | None = None,
+) -> OperatorSnapshotIngressOwner:
     """Compose the one GUI-thread snapshot owner used by either launch root."""
-    owner = OperatorSnapshotIngressOwner(bridge, parent=window)
+    owner = OperatorSnapshotIngressOwner(bridge, expected_mode=expected_mode, parent=window)
+    if anchor is not None:
+        anchor(owner)
     owner.snapshot_changed.connect(window.render_operator_snapshot)
     owner.start()
     return owner

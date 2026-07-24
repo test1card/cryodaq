@@ -263,6 +263,7 @@ async def test_get_data_dir_uses_env_var(tmp_path: Path, monkeypatch: pytest.Mon
         reason="cryodaq.paths module not yet implemented (P1-04)",
     )
 
+    monkeypatch.delenv("CRYODAQ_STATE_ROOT", raising=False)
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
     importlib.reload(cryodaq_paths)
 

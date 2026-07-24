@@ -54,9 +54,18 @@ class AnnunciationRegistry:
     """Project authoritative alarm/fault truth into exact sound activations."""
 
     def __init__(self, *, engine_instance_id: str | None = None) -> None:
-        self.engine_instance_id = engine_instance_id or secrets.token_hex(16)
+        if engine_instance_id is None:
+            engine_instance_id = secrets.token_hex(16)
+        if (
+            type(engine_instance_id) is not str
+            or len(engine_instance_id) != 32
+            or any(char not in "0123456789abcdef" for char in engine_instance_id)
+        ):
+            raise ValueError("engine_instance_id must be exactly 32 lowercase hexadecimal characters")
+        self.engine_instance_id = engine_instance_id
         self._sequence = 0
         self._snapshot_revision = 0
+        self._initialized = False
         self._active: dict[tuple[str, str], _Record] = {}
 
     def sync(self, alarm_active: Mapping[str, Any], safety_status: Mapping[str, Any]) -> None:
@@ -137,7 +146,15 @@ class AnnunciationRegistry:
                 current.acknowledged = acknowledged
             next_active[key] = current
 
-        if next_active != self._active:
+        if not self._initialized:
+            # Revision zero means that no complete projection has ever been
+            # accepted. A valid empty projection is still authoritative and
+            # must therefore establish revision one.
+            self._initialized = True
+            self._sequence = sequence
+            self._active = next_active
+            self._snapshot_revision = 1
+        elif next_active != self._active:
             self._sequence = sequence
             self._active = next_active
             self._snapshot_revision += 1
