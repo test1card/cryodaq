@@ -133,7 +133,11 @@ Charts (pyqtgraph PlotWidget inside ChartTile):
 
 ## Chrome at constrained viewports
 
-At minimum 1280px width, TopWatchBar's 4 vitals + mode badge fit comfortably. At < 1280px (unsupported but handled gracefully):
+The BottomStatusBar has deterministic 1280px geometry coverage at protocol
+maxima: visible strings are bounded and complete values/provenance remain in
+tooltip and accessible detail. Target-Windows Qt visual acceptance remains
+open. At narrower logical widths or elevated DPI (outside the validated
+baseline but handled truthfully):
 
 - Chrome preserves its safety/status meaning and may use a documented compact
   label, but never an unlabeled status icon.
