@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager, SafetyState
@@ -16,6 +19,39 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     _issue_registry_runtime_binding,
 )
+
+_ROOT = Path(__file__).parents[2]
+
+
+def _write_complete_safety_config(tmp_path: Path, mutate=None) -> Path:
+    document = yaml.safe_load((_ROOT / "config" / "safety.yaml").read_text(encoding="utf-8"))
+    if mutate is not None:
+        mutate(document)
+    path = tmp_path / "safety.yaml"
+    path.write_text(
+        yaml.safe_dump(document, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_exact_temperature_binding_install_is_atomic_and_pre_start_only() -> None:
+    manager = SafetyManager(SafetyBroker())
+    manager._config.critical_channels = [re.compile("^\u042211$"), re.compile("^\u042212$")]
+    before = [pattern.pattern for pattern in manager._config.critical_channels]
+    with pytest.raises(SafetyConfigError, match="T11 and T12"):
+        manager.install_exact_temperature_bindings({"\u042211": "\u042211 raw"})
+    assert [pattern.pattern for pattern in manager._config.critical_channels] == before
+    manager.install_exact_temperature_bindings(
+        {
+            "\u042211": "\u042211 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 1",
+            "\u042212": "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2",
+        }
+    )
+    assert [pattern.pattern for pattern in manager._config.critical_channels] == [
+        "^\u042211\\ \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a\\ 1$",
+        "^\u042212\\ \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a\\ 2$",
+    ]
 
 
 def _mock_keithley():
@@ -114,6 +150,45 @@ async def test_ready_to_running():
         result = await mgr.request_run(0.5, 40.0, 1.0)
         assert result["ok"] is True
         assert mgr.state == SafetyState.RUNNING
+    finally:
+        await mgr.stop()
+
+
+async def test_startup_blocker_prevents_run_but_preserves_off_and_diagnostics():
+    broker = SafetyBroker()
+    mgr = SafetyManager(broker, mock=True)
+    mgr.install_startup_blocker(
+        "predictor_unavailable",
+        "Reviewed predictor unavailable",
+        "Install reviewed digest and restart",
+    )
+    before_start = mgr.snapshot_operator_safety()
+    assert before_start.readiness.value != "READY"
+    assert "predictor_unavailable" in [blocker.code for blocker in before_start.blockers]
+    assert mgr.get_status()["startup_blockers"] == ["predictor_unavailable"]
+
+    await mgr.start()
+    try:
+        await _feed(broker, "Т1 Криостат верх", 4.5)
+        await asyncio.sleep(1.5)
+        result = await mgr.request_run(0.5, 40.0, 1.0)
+        assert result["ok"] is False
+        assert "predictor_unavailable" in result["error"]
+        assert mgr.state is not SafetyState.RUNNING
+        off_result = await mgr.emergency_off()
+        assert off_result["ok"] is True
+        snapshot = mgr.snapshot_operator_safety()
+        assert snapshot.readiness.value != "READY"
+        assert any(blocker.code == "predictor_unavailable" for blocker in snapshot.blockers)
+    finally:
+        await mgr.stop()
+
+
+async def test_startup_blocker_authority_is_immutable_after_start():
+    mgr, _broker = await _make_manager()
+    try:
+        with pytest.raises(SafetyConfigError, match="cannot change after manager startup"):
+            mgr.install_startup_blocker("late", "late blocker", "restart")
     finally:
         await mgr.stop()
 
@@ -550,104 +625,83 @@ def test_load_config_fails_on_missing_file(tmp_path):
 
 
 def test_load_config_fails_on_empty_critical_channels(tmp_path):
-    """C.2 regression: empty critical_channels must be startup-fatal."""
-    cfg = tmp_path / "safety.yaml"
-    cfg.write_text("critical_channels: []\nstale_timeout_s: 10.0\n")
-    sm = SafetyManager(SafetyBroker(), mock=True)
+    cfg = _write_complete_safety_config(
+        tmp_path,
+        lambda document: document.__setitem__("critical_channels", []),
+    )
     with pytest.raises(SafetyConfigError, match="no critical_channels"):
-        sm.load_config(cfg)
+        SafetyManager(SafetyBroker(), mock=True).load_config(cfg)
 
 
-def test_load_config_fails_on_all_invalid_regex(tmp_path):
-    """C.2 regression: all-invalid regex must be startup-fatal."""
-    cfg = tmp_path / "safety.yaml"
-    cfg.write_text("critical_channels:\n  - '[invalid(regex'\nstale_timeout_s: 10.0\n")
-    sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(SafetyConfigError, match="invalid.*regex"):
-        sm.load_config(cfg)
-
-
-def test_load_config_succeeds_with_valid_config(tmp_path):
-    """Positive case: valid config loads correctly."""
-    cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\n  - 'Т7 .*'\nstale_timeout_s: 10.0\nheartbeat_timeout_s: 15.0\n",
-        encoding="utf-8",
+def test_load_config_fails_on_invalid_regex(tmp_path):
+    cfg = _write_complete_safety_config(
+        tmp_path,
+        lambda document: document.__setitem__("critical_channels", ["[invalid(regex"]),
     )
-    sm = SafetyManager(SafetyBroker(), mock=True)
-    sm.load_config(cfg)
-    assert len(sm._config.critical_channels) == 2
-    # Verify actual pattern strings loaded correctly
-    pattern_strings = [p.pattern for p in sm._config.critical_channels]
-    assert "Т1 .*" in pattern_strings, f"Expected 'Т1 .*' in patterns, got {pattern_strings}"
-    assert "Т7 .*" in pattern_strings, f"Expected 'Т7 .*' in patterns, got {pattern_strings}"
-    # Verify numeric timeout values were parsed (not just defaulted)
-    assert sm._config.stale_timeout_s == 10.0, f"stale_timeout_s must be 10.0, got {sm._config.stale_timeout_s}"
-    assert sm._config.heartbeat_timeout_s == 15.0, (
-        f"heartbeat_timeout_s must be 15.0, got {sm._config.heartbeat_timeout_s}"
-    )
+    with pytest.raises(SafetyConfigError, match="invalid regex"):
+        SafetyManager(SafetyBroker(), mock=True).load_config(cfg)
+
+
+def test_load_config_succeeds_with_complete_exact_config(tmp_path):
+    cfg = _write_complete_safety_config(tmp_path)
+    manager = SafetyManager(SafetyBroker(), mock=True)
+    manager.load_config(cfg)
+    assert len(manager._config.critical_channels) == 2
+    assert manager._config.stale_timeout_s == 10.0
+    assert manager._config.heartbeat_timeout_s == 15.0
+    with pytest.raises(SafetyConfigError, match="immutable"):
+        manager.load_config(cfg)
 
 
 def test_safety_config_error_is_runtime_error_subclass():
-    """A.4.1: SafetyConfigError must be catchable as RuntimeError."""
-    err = SafetyConfigError("test message")
-    assert isinstance(err, RuntimeError)
-    assert isinstance(err, SafetyConfigError)
-    assert str(err) == "test message"
+    error = SafetyConfigError("test message")
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "test message"
 
 
-def test_load_config_fails_on_non_list_critical_channels(tmp_path):
-    """A.4.1 residual: critical_channels: 123 (not a list) must raise SafetyConfigError."""
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda d: d.__setitem__("critical_channels", 123), "must be a list"),
+        (lambda d: d.__setitem__("critical_channels", [123]), "trimmed string"),
+        (lambda d: d.__setitem__("stale_timeout_s", "10"), "must be a number"),
+        (lambda d: d.__setitem__("stale_timeout_s", float("nan")), "must be finite"),
+        (lambda d: d.__setitem__("heartbeat_timeout_s", float("inf")), "must be finite"),
+        (lambda d: d.__setitem__("max_safety_backlog", True), "integer"),
+        (lambda d: d.__setitem__("max_safety_backlog", 0), "integer"),
+        (lambda d: d.__setitem__("require_keithley_for_run", 1), "boolean"),
+        (lambda d: d.__setitem__("source_limits", "invalid"), "must be a mapping"),
+        (lambda d: d["source_limits"].__setitem__("max_power_w", [1]), "must be a number"),
+        (lambda d: d.__setitem__("unknown", 1), "schema mismatch"),
+        (lambda d: d.pop("recovery"), "schema mismatch"),
+    ],
+)
+def test_load_config_rejects_adversarial_exact_schema(tmp_path, mutation, message):
+    cfg = _write_complete_safety_config(tmp_path, mutation)
+    manager = SafetyManager(SafetyBroker(), mock=True)
+    before = manager._config
+    with pytest.raises(SafetyConfigError, match=message):
+        manager.load_config(cfg)
+    assert manager._config is before
+    assert manager._config_loaded is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "critical_channels: &patterns ['^T11$']\ncritical_channels: *patterns\n",
+        "critical_channels: ['^T11$']\ncritical_channels: ['^T12$']\n",
+    ],
+)
+def test_load_config_rejects_alias_anchor_and_duplicate_without_mutation(tmp_path, payload):
     cfg = tmp_path / "safety.yaml"
-    cfg.write_text("critical_channels: 123\n")
-    sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(SafetyConfigError, match="must be a list"):
-        sm.load_config(cfg)
-
-
-def test_load_config_fails_on_non_string_pattern(tmp_path):
-    """A.4.1 residual: critical_channels: [123] (non-string) must raise SafetyConfigError."""
-    cfg = tmp_path / "safety.yaml"
-    cfg.write_text("critical_channels:\n  - 123\n")
-    sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(SafetyConfigError, match="invalid.*regex"):
-        sm.load_config(cfg)
-
-
-def test_load_config_fails_on_non_numeric_timeout(tmp_path):
-    """A.4.1 residual: non-numeric stale_timeout_s must raise SafetyConfigError."""
-    cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\nstale_timeout_s: 'not_a_number'\n",
-        encoding="utf-8",
-    )
-    sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(SafetyConfigError, match="invalid config value"):
-        sm.load_config(cfg)
-
-
-def test_load_config_fails_on_non_dict_source_limits(tmp_path):
-    """A.4.1 residual: non-mapping source_limits must raise SafetyConfigError."""
-    cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\nsource_limits: 'not_a_dict'\n",
-        encoding="utf-8",
-    )
-    sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(SafetyConfigError, match="invalid config value"):
-        sm.load_config(cfg)
-
-
-def test_load_config_fails_on_non_numeric_source_limit_value(tmp_path):
-    """A.4.1 residual: non-numeric source limit must raise SafetyConfigError."""
-    cfg = tmp_path / "safety.yaml"
-    cfg.write_text(
-        "critical_channels:\n  - 'Т1 .*'\nsource_limits:\n  max_power_w: [1, 2, 3]\n",
-        encoding="utf-8",
-    )
-    sm = SafetyManager(SafetyBroker(), mock=True)
-    with pytest.raises(SafetyConfigError, match="invalid config value"):
-        sm.load_config(cfg)
+    cfg.write_text(payload, encoding="utf-8")
+    manager = SafetyManager(SafetyBroker(), mock=True)
+    before = manager._config
+    with pytest.raises(SafetyConfigError):
+        manager.load_config(cfg)
+    assert manager._config is before
+    assert manager._config_loaded is False
 
 
 async def test_fault_writes_machine_event_to_operator_log():

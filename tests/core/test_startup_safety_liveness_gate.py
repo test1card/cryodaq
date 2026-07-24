@@ -19,7 +19,7 @@ exercises the startup gate that consumes the same proven logic.
 
 from __future__ import annotations
 
-import logging
+import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +28,16 @@ import pytest
 import yaml
 
 import cryodaq.engine as engine
-from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
+from cryodaq.core.housekeeping import (
+    HousekeepingConfigError,
+    load_critical_channels_from_alarms_v3,
+    resolve_canonical_temperature_labels,
+    resolve_protected_channel_bindings,
+)
+from cryodaq.core.physical_alarms_config import (
+    PhysicalAlarmsConfigError,
+    load_production_physical_alarms_config,
+)
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.core.safety_pattern_liveness import (
@@ -56,6 +65,9 @@ def _real_catalog():
 def _real_safety_manager() -> SafetyManager:
     sm = SafetyManager(SafetyBroker())
     sm.load_config(_SAFETY_PATH)
+    sm.install_exact_temperature_bindings(
+        resolve_canonical_temperature_labels(_real_catalog(), {"\u042211", "\u042212"})
+    )
     return sm
 
 
@@ -64,10 +76,13 @@ def _real_alarms_v3_patterns() -> set[str]:
 
 
 def _real_merged_patterns() -> set[str]:
-    return {
-        *engine.load_protected_channel_patterns(_INTERLOCKS_PATH),
-        *_real_alarms_v3_patterns(),
-    }
+    return resolve_protected_channel_bindings(
+        _real_catalog(),
+        {
+            *engine.load_protected_channel_patterns(_INTERLOCKS_PATH),
+            *_real_alarms_v3_patterns(),
+        },
+    )
 
 
 def _manifest(*, instrument_id: str, emitted_channel: str, channel_id: str) -> dict:
@@ -141,6 +156,12 @@ def _install_engine_startup_harness(
         def load_config(self, path: Path) -> None:
             observed["safety_path"] = path
 
+        def install_exact_temperature_bindings(self, bindings: dict[str, str]) -> None:
+            observed["installed_temperature_bindings"] = dict(bindings)
+
+        def install_startup_blocker(self, code: str, message: str, remediation: str) -> None:
+            observed["startup_blocker"] = (code, message, remediation)
+
     class _Writer:
         def __init__(self, _data_dir: Path, *, channel_catalog: object) -> None:
             observed["writer_called"] = True
@@ -153,8 +174,35 @@ def _install_engine_startup_harness(
     monkeypatch.setattr(engine, "SafetyManager", _SafetyManager)
     monkeypatch.setattr(engine, "load_housekeeping_config", lambda _path: {})
     monkeypatch.setattr(engine, "load_protected_channel_patterns", lambda _path: legacy_patterns)
-    monkeypatch.setattr(engine, "load_critical_channels_from_alarms_v3", lambda _path: v3_patterns)
+    monkeypatch.setattr(
+        engine,
+        "load_alarm_config_authority",
+        lambda _path: SimpleNamespace(
+            critical_channel_patterns=frozenset(v3_patterns),
+            engine_config=SimpleNamespace(rate_window_s=120.0, rate_min_points=60),
+            alarms=(),
+        ),
+    )
     monkeypatch.setattr(engine, "SQLiteWriter", _Writer)
+    monkeypatch.setattr(
+        engine,
+        "load_production_physical_alarms_config",
+        lambda *_args, **_kwargs: (
+            {"predictor_model_path": str(tmp_path / "missing-reviewed-model.json")},
+            {},
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "resolve_canonical_temperature_labels",
+        lambda *_args, **_kwargs: {"\u042211": "local T11", "\u042212": "local T12"},
+    )
+    monkeypatch.setattr(
+        engine,
+        "resolve_protected_channel_bindings",
+        lambda _catalog, patterns: set(patterns),
+    )
     return observed
 
 
@@ -172,57 +220,166 @@ def test_real_v3_patterns_validate_cleanly_before_legacy_union() -> None:
     )
 
 
-def test_actual_runtime_union_reports_all_dead_legacy_throttle_patterns() -> None:
-    """The validator checks the same legacy-plus-v3 union as AdaptiveThrottle."""
-    with pytest.raises(SafetyPatternLivenessError) as exc_info:
-        validate_safety_pattern_liveness(
-            descriptor_catalog=_real_catalog(),
-            interlocks_config_path=_INTERLOCKS_PATH,
-            safety_manager=_real_safety_manager(),
-            adaptive_throttle_patterns=_real_merged_patterns(),
-        )
-
-    message = str(exc_info.value)
-    assert "Т[1-8]$" in message
-    assert "Т(9|10|11|12)$" in message
-    assert "Т12$" in message
-    assert "AdaptiveThrottle protected patterns" in message
+def test_actual_runtime_union_is_exact_and_live() -> None:
+    patterns = _real_merged_patterns()
+    assert "^\u042211\\ \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a\\ 1$" in patterns
+    assert "^\u042212\\ \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a\\ 2$" in patterns
+    validate_safety_pattern_liveness(
+        descriptor_catalog=_real_catalog(),
+        interlocks_config_path=_INTERLOCKS_PATH,
+        safety_manager=_real_safety_manager(),
+        adaptive_throttle_patterns=patterns,
+    )
 
 
-async def test_run_engine_uses_local_replacement_logs_liveness_and_continues(
+def test_safety_tests_and_production_have_no_hidden_legacy_definitions() -> None:
+    root = Path(__file__).parents[2]
+    paths = [
+        root / "tests/core/test_safety_manager.py",
+        root / "tests/core/test_physical_alarm_exactness.py",
+        root / "tests/core/test_safety_pattern_liveness.py",
+        root / "tests/core/test_startup_safety_liveness_gate.py",
+        root / "tests/test_engine_config_error.py",
+        root / "src/cryodaq/core/physical_alarms_config.py",
+        root / "src/cryodaq/core/housekeeping.py",
+    ]
+    forbidden: list[str] = []
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                node.name.startswith("_legacy_test")
+                or node.name.startswith("disabled_test")
+                or node.name.startswith("_disabled_test")
+                or node.name.startswith("test_disabled_")
+                or node.name.startswith("_legacy_")
+            ):
+                forbidden.append(f"{path.name}:{node.lineno}:{node.name}")
+    assert forbidden == []
+
+
+def _install_invalid_physical_document(config_dir: Path, case: str) -> None:
+    path = config_dir / "physical_alarms.yaml"
+    if case == "missing":
+        return
+    if case == "duplicate":
+        path.write_text("cooldown: {}\ncooldown: {}\nvacuum: {}\nlandmarks: {}\n", encoding="utf-8")
+        return
+    if case == "alias":
+        path.write_text("cooldown: &same {}\nvacuum: *same\nlandmarks: {}\n", encoding="utf-8")
+        return
+    if case == "oversized":
+        path.write_text("#" + ("x" * (64 * 1024)), encoding="utf-8")
+        return
+    if case == "nonregular":
+        path.mkdir()
+        return
+    document = yaml.safe_load((_CONFIG_DIR / "physical_alarms.yaml").read_text(encoding="utf-8"))
+    if case == "type":
+        document["cooldown"]["enabled"] = "true"
+    elif case == "unicode":
+        document["landmarks"]["\u042211"]["aliases"].append("bad\u200dformat")
+    elif case == "traversal":
+        document["cooldown"]["predictor_model_path"] = "../outside/predictor_model.json"
+    else:
+        raise AssertionError(f"unknown invalid physical case {case}")
+    path.write_text(
+        yaml.safe_dump(document, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "duplicate", "alias", "type", "unicode", "oversized", "nonregular", "traversal"],
+)
+async def test_run_engine_invalid_physical_document_fails_before_binding_or_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    case: str,
 ) -> None:
-    """Production wiring selects local authority, passes the union, and warns."""
-    legacy = ["legacy-only$"]
-    v3 = {"v3-only"}
     observed = _install_engine_startup_harness(
         tmp_path,
         monkeypatch,
-        legacy_patterns=legacy,
-        v3_patterns=v3,
+        legacy_patterns=[],
+        v3_patterns=set(),
+    )
+    _install_invalid_physical_document(tmp_path / "config", case)
+    monkeypatch.setattr(
+        engine,
+        "load_production_physical_alarms_config",
+        load_production_physical_alarms_config,
+    )
+    with pytest.raises(PhysicalAlarmsConfigError):
+        await engine._run_engine(mock=True)
+    assert observed["writer_called"] is False
+    assert "installed_temperature_bindings" not in observed
+
+
+async def test_run_engine_ambiguous_descriptor_binding_fails_before_install_or_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=[],
+        v3_patterns=set(),
     )
 
-    def _dead_validator(**kwargs) -> None:
-        observed["validator_kwargs"] = kwargs
-        raise SafetyPatternLivenessError("synthetic local dead pattern")
+    def _ambiguous(*_args, **_kwargs):
+        raise HousekeepingConfigError("ambiguous T11 binding")
+
+    monkeypatch.setattr(engine, "resolve_canonical_temperature_labels", _ambiguous)
+    with pytest.raises(HousekeepingConfigError, match="ambiguous T11"):
+        await engine._run_engine(mock=True)
+    assert observed["writer_called"] is False
+    assert "installed_temperature_bindings" not in observed
+
+
+async def test_run_engine_dead_liveness_fails_before_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=["legacy-only$"],
+        v3_patterns={"v3-only"},
+    )
+
+    def _dead_validator(**_kwargs) -> None:
+        raise SafetyPatternLivenessError("synthetic dead pattern")
 
     monkeypatch.setattr(engine, "validate_safety_pattern_liveness", _dead_validator)
-    caplog.set_level(logging.CRITICAL, logger="cryodaq.engine")
-
-    with pytest.raises(_StopAtWriter):
+    with pytest.raises(SafetyPatternLivenessError, match="synthetic dead pattern"):
         await engine._run_engine(mock=True)
+    assert observed["writer_called"] is False
+    assert observed["installed_temperature_bindings"] == {
+        "\u042211": "local T11",
+        "\u042212": "local T12",
+    }
 
-    kwargs = observed["validator_kwargs"]
-    selected_catalog = kwargs["descriptor_catalog"]
-    assert set(selected_catalog._bindings) == {("probe", "local emitted")}
-    assert ("base", "base emitted") not in selected_catalog._bindings
-    assert set(kwargs["adaptive_throttle_patterns"]) == {"legacy-only$", "v3-only"}
-    assert observed["writer_called"] is True
-    assert observed["writer_catalog"] is selected_catalog
-    assert "TEMPORARY LAB BUILD" in caplog.text
-    assert "synthetic local dead pattern" in caplog.text
+
+async def test_run_engine_missing_physical_config_fails_before_binding_or_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=[],
+        v3_patterns=set(),
+    )
+    monkeypatch.setattr(
+        engine,
+        "load_production_physical_alarms_config",
+        load_production_physical_alarms_config,
+    )
+    with pytest.raises(PhysicalAlarmsConfigError):
+        await engine._run_engine(mock=True)
+    assert observed["writer_called"] is False
+    assert "installed_temperature_bindings" not in observed
 
 
 async def test_run_engine_does_not_catch_unrelated_validator_exception(
@@ -358,8 +515,11 @@ def test_non_default_yaml_keithley_pattern_uses_effective_runtime_field(tmp_path
     interlocks_path = tmp_path / "interlocks.yaml"
     interlocks_path.write_text("interlocks: []\n", encoding="utf-8")
     safety_path = tmp_path / "safety.yaml"
+    safety_document = yaml.safe_load(_SAFETY_PATH.read_text(encoding="utf-8"))
+    safety_document["critical_channels"] = ["^source heartbeat$"]
+    safety_document["keithley_channels"] = ["^custom keithley heartbeat$"]
     safety_path.write_text(
-        'critical_channels:\n  - "^source heartbeat$"\nkeithley_channels:\n  - "^custom keithley heartbeat$"\n',
+        yaml.safe_dump(safety_document, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
     safety_manager = SafetyManager(SafetyBroker())

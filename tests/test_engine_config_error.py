@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 
 def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
     """Engine main() must catch yaml.YAMLError and sys.exit(2) so launcher
@@ -16,9 +18,7 @@ def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
     (tmp_path / "logs").mkdir()
 
     # Bad YAML for instruments.yaml — unbalanced bracket
-    (config_dir / "instruments.yaml").write_text(
-        "instruments:\n  - type: [unbalanced\n", encoding="utf-8"
-    )
+    (config_dir / "instruments.yaml").write_text("instruments:\n  - type: [unbalanced\n", encoding="utf-8")
     # Provide minimal stubs for the other files engine looks for so the
     # YAML error is the first thing that fails.
     (config_dir / "safety.yaml").write_text(
@@ -46,12 +46,69 @@ def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
         timeout=60,
     )
 
-    assert result.returncode == 2, (
-        f"Expected exit 2, got {result.returncode}\nstderr: {result.stderr[-2000:]}"
-    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}\nstderr: {result.stderr[-2000:]}"
 
 
 def test_engine_exit_code_constant_exposed():
     from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
 
     assert ENGINE_CONFIG_ERROR_EXIT_CODE == 2
+
+
+@pytest.mark.parametrize(
+    ("error_type", "label"),
+    [
+        ("physical", "physical alarms"),
+        ("liveness", "safety pattern liveness"),
+    ],
+)
+def test_main_maps_safety_authority_failures_to_redacted_exit_2(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error_type: str,
+    label: str,
+) -> None:
+    import cryodaq.engine as engine
+    import cryodaq.logging_setup as logging_setup
+
+    secret_path = "C:/secret/operator/config.yaml"
+    exception = (
+        engine.PhysicalAlarmsConfigError(secret_path)
+        if error_type == "physical"
+        else engine.SafetyPatternLivenessError(secret_path)
+    )
+
+    async def _fail(*, mock: bool) -> None:
+        del mock
+        raise exception
+
+    monkeypatch.setattr(engine, "_run_engine", _fail)
+    monkeypatch.setattr(engine, "_acquire_engine_lock", lambda: None)
+    monkeypatch.setattr(engine, "_release_engine_lock", lambda _fd: None)
+    monkeypatch.setattr(logging_setup, "setup_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["cryodaq-engine", "--mock"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        engine.main()
+
+    assert exit_info.value.code == engine.ENGINE_CONFIG_ERROR_EXIT_CODE
+    assert label in caplog.text
+    assert secret_path not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_vacuum_guard_construction_failure_becomes_config_error(monkeypatch) -> None:
+    import cryodaq.engine as engine
+
+    def _fail(**_kwargs):
+        raise ValueError("invalid vacuum authority")
+
+    monkeypatch.setattr(engine, "VacuumGuard", _fail)
+    with pytest.raises(engine.PhysicalAlarmsConfigError, match="vacuum guard construction"):
+        engine._construct_vacuum_guard_or_config_error(
+            cfg={},
+            state_tracker=object(),
+            alarm_state_mgr=object(),
+            event_bus=object(),
+            safety_manager=object(),
+        )

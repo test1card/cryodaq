@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import shutil
+import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,20 +28,15 @@ def load_housekeeping_config(config_path: Path) -> dict[str, Any]:
     """Load housekeeping.yaml. Raises HousekeepingConfigError on failure."""
     if not config_path.exists():
         raise HousekeepingConfigError(
-            f"housekeeping.yaml not found at {config_path} — refusing to start "
-            f"without housekeeping configuration"
+            f"housekeeping.yaml not found at {config_path} — refusing to start without housekeeping configuration"
         )
     try:
         with config_path.open(encoding="utf-8") as handle:
             raw = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
-        raise HousekeepingConfigError(
-            f"housekeeping.yaml at {config_path}: YAML parse error — {exc}"
-        ) from exc
+        raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: YAML parse error — {exc}") from exc
     if not isinstance(raw, dict):
-        raise HousekeepingConfigError(
-            f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
-        )
+        raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}")
     return raw
 
 
@@ -208,8 +205,7 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
             channels = groups.get(group_name)
             if not channels:
                 logger.warning(
-                    "alarms_v3 references unknown channel_group %r — "
-                    "no channels protected for this reference",
+                    "alarms_v3 references unknown channel_group %r — no channels protected for this reference",
                     group_name,
                 )
                 continue
@@ -221,6 +217,94 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
     return patterns
 
 
+def _non_observational_bindings_by_canonical(descriptor_catalog: Any) -> dict[str, list[str]]:
+    bindings = getattr(descriptor_catalog, "_bindings", None)
+    if not isinstance(bindings, Mapping):
+        raise HousekeepingConfigError("selected descriptor authority has no exact binding mapping")
+    resolved: dict[str, list[str]] = {}
+    for key, canonical in bindings.items():
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or not all(isinstance(part, str) for part in key)
+            or not isinstance(canonical, str)
+        ):
+            raise HousekeepingConfigError("selected descriptor authority contains a malformed binding")
+        emitted = key[1]
+        if canonical.endswith(".raw") or emitted.endswith("_raw"):
+            continue
+        if (
+            not emitted
+            or emitted != emitted.strip()
+            or unicodedata.normalize("NFC", emitted) != emitted
+            or any(unicodedata.category(character) in {"Cc", "Cf"} for character in emitted)
+        ):
+            raise HousekeepingConfigError(f"invalid emitted safety label {emitted!r}")
+        resolved.setdefault(canonical, []).append(emitted)
+    return resolved
+
+
+def resolve_canonical_temperature_labels(
+    descriptor_catalog: Any,
+    canonical_ids: set[str],
+) -> dict[str, str]:
+    if not canonical_ids or not all(isinstance(item, str) and item for item in canonical_ids):
+        raise HousekeepingConfigError("canonical safety identities must be a non-empty string set")
+    available = _non_observational_bindings_by_canonical(descriptor_catalog)
+    resolved: dict[str, str] = {}
+    for canonical in sorted(canonical_ids):
+        candidates = sorted(available.get(canonical, []))
+        if len(candidates) != 1:
+            raise HousekeepingConfigError(
+                f"canonical safety identity {canonical!r} must resolve to exactly one emitted label; got {candidates!r}"
+            )
+        resolved[canonical] = candidates[0]
+    if len(set(resolved.values())) != len(resolved):
+        raise HousekeepingConfigError("canonical safety identities resolve to an ambiguous emitted label")
+    return resolved
+
+
+def resolve_canonical_temperature_bindings(descriptor_catalog: Any, canonical_ids: set[str]) -> set[str]:
+    labels = resolve_canonical_temperature_labels(descriptor_catalog, canonical_ids)
+    return {rf"^{re.escape(emitted)}$" for emitted in labels.values()}
+
+
+def resolve_protected_channel_bindings(
+    descriptor_catalog: Any,
+    patterns: set[str] | list[str],
+) -> set[str]:
+    available = _non_observational_bindings_by_canonical(descriptor_catalog)
+    direct_broker_exact = {re.escape("system/disk_free_gb")}
+    resolved: set[str] = set()
+    for source in patterns:
+        if not isinstance(source, str) or not source:
+            raise HousekeepingConfigError("protected channel patterns must be non-empty strings")
+        try:
+            compiled = re.compile(source)
+        except re.error as exc:
+            raise HousekeepingConfigError(f"invalid protected channel pattern {source!r}: {exc}") from exc
+        # DiskMonitor publishes this exact synthetic channel directly to the
+        # DataBroker and never crosses the descriptor/scheduler plane.
+        if source in direct_broker_exact:
+            resolved.add(source)
+            continue
+        emitted_matches: set[str] = set()
+        for canonical, candidates in available.items():
+            if compiled.search(canonical) or any(compiled.search(emitted) for emitted in candidates):
+                if len(candidates) != 1:
+                    raise HousekeepingConfigError(
+                        f"protected identity {canonical!r} has ambiguous emitted labels {candidates!r}"
+                    )
+                emitted_matches.add(candidates[0])
+        if emitted_matches:
+            resolved.update(rf"^{re.escape(emitted)}$" for emitted in emitted_matches)
+        else:
+            raise HousekeepingConfigError(
+                f"protected channel pattern {source!r} has no exact selected descriptor binding"
+            )
+    return resolved
+
+
 @dataclass
 class _ThrottleState:
     last_seen_value: float
@@ -230,9 +314,7 @@ class _ThrottleState:
 
 
 class AdaptiveThrottle:
-    def __init__(
-        self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None
-    ) -> None:
+    def __init__(self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", False))
         self._include = [re.compile(str(item)) for item in cfg.get("include_patterns", [])]
@@ -243,9 +325,7 @@ class AdaptiveThrottle:
         self._transition_holdoff_s = float(cfg.get("transition_holdoff_s", 30.0))
         delta_cfg = cfg.get("absolute_delta", {})
         self._default_delta = float(delta_cfg.get("default", 0.05))
-        self._delta_by_unit = {
-            str(key): float(value) for key, value in delta_cfg.items() if key != "default"
-        }
+        self._delta_by_unit = {str(key): float(value) for key, value in delta_cfg.items() if key != "default"}
         self._state: dict[str, _ThrottleState] = {}
         self._active_alarm_count = 0
         self._transition_until: datetime | None = None
@@ -261,16 +341,12 @@ class AdaptiveThrottle:
             self._active_alarm_count = max(0, int(round(reading.value)))
             return
         if channel.startswith("analytics/keithley_channel_state/"):
-            self._transition_until = reading.timestamp + timedelta(
-                seconds=self._transition_holdoff_s
-            )
+            self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
             return
         if channel == "analytics/safety_state":
             state = str(reading.metadata.get("state", "")).lower()
             if state != "running":
-                self._transition_until = reading.timestamp + timedelta(
-                    seconds=self._transition_holdoff_s
-                )
+                self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
 
     def filter_for_archive(self, readings: list[Reading]) -> list[Reading]:
         if not self.enabled:

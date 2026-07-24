@@ -49,6 +49,31 @@ _SUBSCRIPTION_NAME = "interlock_engine"
 # (секция nonusable_escalation), читаются fail-closed (строгие типы).
 _DEFAULT_NONUSABLE_MIN_DURATION_S = 10.0
 _DEFAULT_NONUSABLE_MIN_SAMPLES = 5
+_MAX_CONFIG_BYTES = 1_048_576
+
+
+class _StrictConfigLoader(yaml.SafeLoader):
+    def compose_node(self, parent, index):
+        event = self.peek_event()
+        if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) is not None:
+            raise yaml.YAMLError("YAML anchors and aliases are forbidden")
+        return super().compose_node(parent, index)
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.YAMLError(f"duplicate YAML key {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictConfigLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 class InterlockState(Enum):
@@ -100,15 +125,13 @@ class InterlockCondition:
     def __post_init__(self) -> None:
         if self.comparison not in (">", "<"):
             raise ValueError(
-                f"Блокировка '{self.name}': недопустимый оператор сравнения "
-                f"'{self.comparison}'. Допустимы: '>' и '<'."
+                f"Блокировка '{self.name}': недопустимый оператор сравнения '{self.comparison}'. Допустимы: '>' и '<'."
             )
         try:
             self._pattern = re.compile(self.channel_pattern)
         except re.error as exc:
             raise ValueError(
-                f"Блокировка '{self.name}': некорректный channel_pattern "
-                f"'{self.channel_pattern}': {exc}"
+                f"Блокировка '{self.name}': некорректный channel_pattern '{self.channel_pattern}': {exc}"
             ) from exc
 
     def matches_channel(self, channel: str) -> bool:
@@ -285,55 +308,108 @@ class InterlockEngine:
                 f"interlock engine without interlock configuration"
             )
 
+        if config_path.is_symlink():
+            raise InterlockConfigError("interlocks.yaml must not be a symbolic link")
         try:
-            with config_path.open(encoding="utf-8") as fh:
-                raw: dict[str, Any] = yaml.safe_load(fh)
+            payload = config_path.read_bytes()
+            if len(payload) > _MAX_CONFIG_BYTES:
+                raise InterlockConfigError("interlocks.yaml exceeds the bounded size limit")
+            raw: dict[str, Any] = yaml.load(payload.decode("utf-8"), Loader=_StrictConfigLoader)
+        except (OSError, UnicodeError) as exc:
+            raise InterlockConfigError(f"interlocks.yaml could not be read as UTF-8: {type(exc).__name__}") from exc
         except yaml.YAMLError as exc:
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: YAML parse error — {exc}"
-            ) from exc
+            raise InterlockConfigError(f"interlocks.yaml at {config_path}: YAML parse error — {exc}") from exc
 
         if not isinstance(raw, dict):
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
-            )
+            raise InterlockConfigError(f"interlocks.yaml at {config_path}: expected mapping, got {type(raw).__name__}")
 
-        entries = raw.get("interlocks", [])
+        unknown_top = set(raw) - {"interlocks", "nonusable_escalation"}
+        if unknown_top:
+            raise InterlockConfigError(
+                "interlocks.yaml contains unknown top-level keys: " + ", ".join(sorted(map(str, unknown_top)))
+            )
+        if "interlocks" not in raw:
+            raise InterlockConfigError("interlocks.yaml requires an 'interlocks' list")
+        entries = raw["interlocks"]
         if not isinstance(entries, list):
             raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: 'interlocks' must be a list, "
-                f"got {type(entries).__name__}"
+                f"interlocks.yaml at {config_path}: 'interlocks' must be a list, got {type(entries).__name__}"
             )
 
-        loaded = 0
-        for entry in entries:
+        parsed: list[InterlockCondition] = []
+        parsed_names: set[str] = set()
+        expected_entry_keys = {
+            "name",
+            "description",
+            "channel_pattern",
+            "threshold",
+            "comparison",
+            "action",
+            "cooldown_s",
+        }
+        for index, entry in enumerate(entries):
             try:
+                if not isinstance(entry, dict):
+                    raise TypeError("entry must be a mapping")
+                keys = set(entry)
+                missing = expected_entry_keys - keys
+                unknown = keys - expected_entry_keys
+                if missing or unknown:
+                    raise ValueError(
+                        f"entry[{index}] schema mismatch (missing={sorted(missing)}, unknown={sorted(unknown)})"
+                    )
+                for key in ("name", "description", "channel_pattern", "comparison", "action"):
+                    if not isinstance(entry[key], str) or not entry[key]:
+                        raise TypeError(f"entry[{index}].{key} must be a non-empty string")
+                threshold = entry["threshold"]
+                cooldown_s = entry["cooldown_s"]
+                if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                    raise TypeError(f"entry[{index}].threshold must be numeric")
+                if not math.isfinite(threshold):
+                    raise ValueError(f"entry[{index}].threshold must be finite")
+                if isinstance(cooldown_s, bool) or not isinstance(cooldown_s, (int, float)):
+                    raise TypeError(f"entry[{index}].cooldown_s must be numeric")
+                if not math.isfinite(cooldown_s) or cooldown_s < 0:
+                    raise ValueError(f"entry[{index}].cooldown_s must be finite and >= 0")
                 condition = InterlockCondition(
                     name=entry["name"],
                     description=entry["description"],
                     channel_pattern=entry["channel_pattern"],
-                    threshold=float(entry["threshold"]),
+                    threshold=float(threshold),
                     comparison=entry["comparison"],
                     action=entry["action"],
-                    cooldown_s=float(entry.get("cooldown_s", 0.0)),
+                    cooldown_s=float(cooldown_s),
                 )
-                self.add_condition(condition)
-                loaded += 1
+                if condition.name in parsed_names or condition.name in self._interlocks:
+                    raise ValueError(f"duplicate interlock name {condition.name!r}")
+                if condition.action not in self._actions:
+                    raise ValueError(f"unknown action {condition.action!r}")
+                parsed_names.add(condition.name)
+                parsed.append(condition)
             except (KeyError, ValueError, TypeError, re.error) as exc:
                 raise InterlockConfigError(
-                    f"interlocks.yaml at {config_path}: invalid interlock entry — "
-                    f"{type(exc).__name__}: {exc}"
+                    f"interlocks.yaml at {config_path}: invalid interlock entry — {type(exc).__name__}: {exc}"
                 ) from exc
 
-        self._load_nonusable_escalation(raw, config_path)
+        min_duration_s, min_samples = self._parse_nonusable_escalation(raw, config_path)
+
+        # Install only after the entire document has parsed and validated.  A
+        # failed reload therefore leaves the previous authority byte-for-byte
+        # equivalent at the semantic state boundary.
+        installed = dict(self._interlocks)
+        for condition in parsed:
+            installed[condition.name] = _InterlockRecord(condition=condition)
+        self._interlocks = installed
+        self._nonusable_min_duration_s = min_duration_s
+        self._nonusable_min_samples = min_samples
 
         logger.info(
             "Конфигурация блокировок загружена из '%s': %d блокировок.",
             config_path,
-            loaded,
+            len(parsed),
         )
 
-    def _load_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> None:
+    def _parse_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> tuple[float, int]:
         """Parse the optional P2-5 ``nonusable_escalation`` block fail-closed.
 
         Absent → keep defaults (10 s / 5 samples). Present but malformed →
@@ -341,28 +417,32 @@ class InterlockEngine:
         """
         block = raw.get("nonusable_escalation")
         if block is None:
-            return
+            return (_DEFAULT_NONUSABLE_MIN_DURATION_S, _DEFAULT_NONUSABLE_MIN_SAMPLES)
         if not isinstance(block, dict):
             raise InterlockConfigError(
                 f"interlocks.yaml at {config_path}: 'nonusable_escalation' must be a "
                 f"mapping, got {type(block).__name__}"
             )
-        try:
-            min_duration_s = float(block.get("min_duration_s", _DEFAULT_NONUSABLE_MIN_DURATION_S))
-            min_samples = int(block.get("min_samples", _DEFAULT_NONUSABLE_MIN_SAMPLES))
-        except (ValueError, TypeError) as exc:
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: invalid nonusable_escalation value — "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        if not math.isfinite(min_duration_s) or min_duration_s <= 0 or min_samples <= 0:
+        expected_keys = {"min_duration_s", "min_samples"}
+        if set(block) != expected_keys:
+            raise InterlockConfigError(f"interlocks.yaml at {config_path}: nonusable_escalation schema mismatch")
+        min_duration_s = block["min_duration_s"]
+        min_samples = block["min_samples"]
+        if (
+            isinstance(min_duration_s, bool)
+            or not isinstance(min_duration_s, (int, float))
+            or not math.isfinite(min_duration_s)
+            or min_duration_s <= 0
+            or isinstance(min_samples, bool)
+            or type(min_samples) is not int
+            or min_samples <= 0
+        ):
             raise InterlockConfigError(
                 f"interlocks.yaml at {config_path}: nonusable_escalation requires "
                 f"positive finite min_duration_s and positive min_samples "
                 f"(got min_duration_s={min_duration_s}, min_samples={min_samples})"
             )
-        self._nonusable_min_duration_s = min_duration_s
-        self._nonusable_min_samples = min_samples
+        return float(min_duration_s), min_samples
 
     def add_condition(self, condition: InterlockCondition) -> None:
         """Добавить блокировку программно.
@@ -388,8 +468,7 @@ class InterlockEngine:
             )
         self._interlocks[condition.name] = _InterlockRecord(condition=condition)
         logger.info(
-            "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | "
-            "действие: '%s' | кулдаун: %.1f с.",
+            "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | действие: '%s' | кулдаун: %.1f с.",
             condition.name,
             condition.channel_pattern,
             condition.comparison,
@@ -466,8 +545,7 @@ class InterlockEngine:
         matching = [
             record
             for record in self._interlocks.values()
-            if record.state == InterlockState.ARMED
-            and record.condition.matches_channel(reading.channel)
+            if record.state == InterlockState.ARMED and record.condition.matches_channel(reading.channel)
         ]
 
         # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на
@@ -480,9 +558,7 @@ class InterlockEngine:
         if matching:
             if reading.is_usable():
                 self._nonusable_windows.pop(reading.channel, None)
-            elif math.isinf(reading.value) and any(
-                record.condition.is_triggered(reading.value) for record in matching
-            ):
+            elif math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
                 # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
                 # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
                 # -inf (pegged LOW) satisfies any below-threshold ('<') interlock.
@@ -513,8 +589,7 @@ class InterlockEngine:
                 in_cooldown = (
                     condition.cooldown_s > 0
                     and record.last_trip_time is not None
-                    and (datetime.now(UTC) - record.last_trip_time).total_seconds()
-                    < condition.cooldown_s
+                    and (datetime.now(UTC) - record.last_trip_time).total_seconds() < condition.cooldown_s
                 )
                 await self._trip(record, reading, suppress_notification=in_cooldown)
 
@@ -549,9 +624,7 @@ class InterlockEngine:
         )
         if self._alarm_publisher is not None:
             try:
-                self._alarm_publisher.publish_diagnostic_alarm(
-                    reading.channel, "critical", span_s
-                )
+                self._alarm_publisher.publish_diagnostic_alarm(reading.channel, "critical", span_s)
             except Exception as exc:
                 logger.error(
                     "Interlock: alarm-v2 publish failed for '%s': %s",

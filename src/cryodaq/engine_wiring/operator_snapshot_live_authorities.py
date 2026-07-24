@@ -165,6 +165,7 @@ class LiveSafetyReadinessAuthority:
                 token=token,
                 availability=AuthorityAvailability.AVAILABLE,
                 readiness=snapshot.readiness,
+                lifecycle=snapshot.lifecycle,
                 verified_off=snapshot.verified_off,
                 blockers=blockers,
                 plant_health=plant,

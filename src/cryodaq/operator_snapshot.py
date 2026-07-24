@@ -1,7 +1,7 @@
 """Backend-owned immutable F36 operator snapshot protocol.
 
 This neutral module deliberately contains no GUI objects, transport calls, or
-commands. Engine/replay producers and GUI consumers share its strict v1 codec.
+commands. Engine/replay producers and GUI consumers share its strict v2 codec.
 """
 
 from __future__ import annotations
@@ -43,6 +43,18 @@ class ReadinessTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SafetyLifecycle(StrEnum):
+    """Exact owner lifecycle carried alongside readiness, never inferred."""
+
+    SAFE_OFF = "safe_off"
+    READY = "ready"
+    RUN_PERMITTED = "run_permitted"
+    RUNNING = "running"
+    FAULT_LATCHED = "fault_latched"
+    MANUAL_RECOVERY = "manual_recovery"
+    UNKNOWN = "unknown"
+
+
 class RecordingTruth(StrEnum):
     RECORDING = "recording"
     NOT_RECORDING = "not_recording"
@@ -56,7 +68,7 @@ class AvailabilityTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
-# V1 resource budgets. Collection limits derive from the public fleet target of
+# V2 resource budgets. Collection limits derive from the public fleet target of
 # 100 devices / 2,000 channels. The 8 MiB wire cap is frozen with measured
 # worst-case headroom in tests; evidence is rejected, never silently truncated.
 MAX_FLEET_DEVICES = 100
@@ -92,7 +104,7 @@ STATE_PRECEDENCE = MappingProxyType(
 
 
 class OperatorSnapshotProtocolError(ValueError):
-    """Closed receiver-boundary failure for invalid or excessive v1 data."""
+    """Closed receiver-boundary failure for invalid or excessive v2 data."""
 
 
 __all__ = [
@@ -129,6 +141,7 @@ __all__ = [
     "ReadinessSummary",
     "ReadinessTruth",
     "RecordingTruth",
+    "SafetyLifecycle",
     "SnapshotCut",
     "SnapshotMode",
     "SummaryStatus",
@@ -583,11 +596,14 @@ class ReadinessSummary(_OperatorSummary):
 
     readiness: ReadinessTruth
     blockers: tuple[ReadinessBlocker, ...]
+    lifecycle: SafetyLifecycle
 
     def __post_init__(self) -> None:
         super(ReadinessSummary, self).__post_init__()
-        if not isinstance(self.readiness, ReadinessTruth):
-            raise TypeError("readiness must be a ReadinessTruth")
+        if type(self.readiness) is not ReadinessTruth:
+            raise TypeError("readiness must be an exact ReadinessTruth")
+        if type(self.lifecycle) is not SafetyLifecycle:
+            raise TypeError("lifecycle must be an exact SafetyLifecycle")
         _typed_tuple(self.blockers, ReadinessBlocker, field_name="blockers")
         _bounded_tuple(self.blockers, field_name="blockers", limit=MAX_CHANNELS)
         _unique(tuple(item.code for item in self.blockers), field_name="blocker codes")
@@ -615,6 +631,22 @@ class ReadinessSummary(_OperatorSummary):
                 required = _max_state(tuple(item.state for item in self.blockers))
                 if not _state_at_least(self.state, required):
                     raise ValueError("readiness state must cover its most severe blocker")
+        # Readiness and lifecycle are one coherent authority claim. Transport
+        # degradation revokes both; presentation code must never retain an
+        # optimistic last-known lifecycle after current readiness is lost.
+        if self.readiness is ReadinessTruth.READY and self.lifecycle is not SafetyLifecycle.READY:
+            raise ValueError("READY readiness requires READY safety lifecycle")
+        if self.readiness is ReadinessTruth.UNKNOWN and self.lifecycle is not SafetyLifecycle.UNKNOWN:
+            raise ValueError("UNKNOWN readiness requires UNKNOWN safety lifecycle")
+        if self.transport_reason_codes and (
+            self.readiness is not ReadinessTruth.UNKNOWN or self.lifecycle is not SafetyLifecycle.UNKNOWN
+        ):
+            raise ValueError("transport-degraded readiness and lifecycle must both be UNKNOWN")
+        if self.readiness is ReadinessTruth.BLOCKED and self.lifecycle in {
+            SafetyLifecycle.READY,
+            SafetyLifecycle.UNKNOWN,
+        }:
+            raise ValueError("BLOCKED readiness requires a non-ready safety lifecycle")
 
 
 @dataclass(frozen=True, slots=True)
@@ -888,11 +920,11 @@ class OperatorSnapshot:
 
 
 _SCHEMA = "cryodaq.operator-snapshot"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def encode_operator_snapshot(snapshot: OperatorSnapshot) -> dict[str, Any]:
-    """Return the strict v1 JSON-compatible envelope for ``snapshot``."""
+    """Return the strict v2 JSON-compatible envelope for ``snapshot``."""
 
     if not isinstance(snapshot, OperatorSnapshot):
         raise TypeError("snapshot must be an OperatorSnapshot")
@@ -916,7 +948,7 @@ def dump_operator_snapshot(snapshot: OperatorSnapshot) -> str:
 
 
 def load_operator_snapshot(payload: str) -> OperatorSnapshot:
-    """Parse and validate one strict v1 JSON envelope."""
+    """Parse and validate one strict v2 JSON envelope."""
 
     if not isinstance(payload, str):
         raise TypeError("payload must be a string")
@@ -1017,6 +1049,7 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             "snapshot.readiness.blockers",
             MAX_CHANNELS,
         ),
+        _enum(SafetyLifecycle, item["lifecycle"], "snapshot.readiness.lifecycle"),
     )
     (status, item) = status_and("plant_health")
     plant_health = PlantHealthSummary(
@@ -1303,7 +1336,7 @@ def _datetime(value: Any, path: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"{path} must be an ISO-8601 timestamp") from exc
     if _format_datetime(parsed) != raw:
-        raise ValueError(f"{path} is not the canonical v1 UTC timestamp")
+        raise ValueError(f"{path} is not the canonical v2 UTC timestamp")
     return parsed
 
 

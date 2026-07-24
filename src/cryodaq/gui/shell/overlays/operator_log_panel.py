@@ -718,7 +718,7 @@ class OperatorLogPanel(QWidget):
     # ------------------------------------------------------------------
 
     def on_reading(self, reading: Reading) -> None:
-        if reading.channel != _LOG_ENTRY_CHANNEL:
+        if reading.channel != _LOG_ENTRY_CHANNEL or not self._connected or self._read_only:
             return
         self.refresh_entries()
 

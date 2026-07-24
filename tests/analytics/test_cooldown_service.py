@@ -18,6 +18,8 @@ async event-loop does not need to wait more than a few hundred milliseconds.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -64,6 +66,44 @@ def _reading(channel: str, value: float, ts: datetime | None = None) -> Reading:
         unit="K",
         status=ChannelStatus.OK,
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_ingest_writes_candidate_without_mutating_active_authority(
+    tmp_path: Path,
+) -> None:
+    """A completed run may propose a candidate but cannot activate it in-process."""
+    from cryodaq.analytics.cooldown_service import CooldownService
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    active_path = model_dir / "predictor_model.json"
+    active_payload = b'{"reviewed":"active"}'
+    active_path.write_bytes(active_payload)
+    active_digest = hashlib.sha256(active_payload).hexdigest()
+    candidate_path = model_dir / "predictor_model.candidate.json"
+    active_model = object()
+    cfg = _make_config(tmp_path, auto_ingest=True, min_cooldown_hours=1.0)
+    service = CooldownService(
+        DataBroker(),
+        cfg,
+        model_dir,
+        predictor_model=active_model,
+        predictor_digest_sha256=active_digest,
+        candidate_model_path=candidate_path,
+    )
+    service._baseline_cfg = {"enabled": False}
+    service._buffer.extend([(0.0, 295.0, 295.0), (12.0, 5.0, 80.0)])
+
+    await service._on_cooldown_end()
+
+    assert service._model is active_model
+    assert service._predictor_digest_sha256 == active_digest
+    assert active_path.read_bytes() == active_payload
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    assert candidate["activation"] == "review_digest_then_restart"
+    assert candidate["base_model_sha256"] == active_digest
+    assert candidate["duration_hours"] == 12.0
 
 
 def _cooldown_readings(
@@ -225,12 +265,8 @@ async def test_cooldown_detection_start(tmp_path: Path):
     try:
         # Publish 2 minutes of synthetic cooling at -15 K/h
         # With dt=10s and start_confirm=0.005 min ≈ 0.3s, just a few readings suffice
-        readings_cold = _cooldown_readings(
-            n=30, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold"
-        )
-        readings_warm = _cooldown_readings(
-            n=30, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm"
-        )
+        readings_cold = _cooldown_readings(n=30, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold")
+        readings_warm = _cooldown_readings(n=30, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm")
 
         for r_c, r_w in zip(readings_cold, readings_warm):
             await broker.publish(r_c)
@@ -247,9 +283,7 @@ async def test_cooldown_detection_start(tmp_path: Path):
                 break
             await asyncio.sleep(0.02)
 
-        assert service._detector.phase.value == "cooling", (
-            f"Expected cooling, got {service._detector.phase.value}"
-        )
+        assert service._detector.phase.value == "cooling", f"Expected cooling, got {service._detector.phase.value}"
     finally:
         await service.stop()
 
@@ -280,9 +314,7 @@ async def test_idle_when_stable_temperature(tmp_path: Path):
                 break  # unexpected transition — fail below
             await asyncio.sleep(0.02)
 
-        assert service._detector.phase.value == "idle", (
-            f"Expected idle, got {service._detector.phase.value}"
-        )
+        assert service._detector.phase.value == "idle", f"Expected idle, got {service._detector.phase.value}"
     finally:
         await service.stop()
 
@@ -292,9 +324,7 @@ async def test_idle_when_stable_temperature(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-async def test_predict_publishes_derived_metric(
-    tmp_path: Path, model_in_tmp: Path, synthetic_curves: list[dict]
-):
+async def test_predict_publishes_derived_metric(tmp_path: Path, model_in_tmp: Path, synthetic_curves: list[dict]):
     """After cooldown starts, predict() must publish a DerivedMetric to the broker.
 
     The metric must have plugin_id='cooldown_predictor' and appear on channel
@@ -324,17 +354,23 @@ async def test_predict_publishes_derived_metric(
         filter_fn=lambda r: r.channel.startswith("analytics/cooldown_predictor"),
     )
 
-    service = CooldownService(broker, cfg, model_in_tmp)
+    from cryodaq.analytics.cooldown_predictor import load_predictor_model_authority
+
+    authority = load_predictor_model_authority(model_in_tmp / "predictor_model.json")
+    assert authority.available
+    service = CooldownService(
+        broker,
+        cfg,
+        model_in_tmp,
+        predictor_model=authority.model,
+        predictor_digest_sha256=authority.digest_sha256,
+    )
     await service.start()
 
     try:
         # Publish sustained cooling to trigger COOLING state and first prediction
-        readings_cold = _cooldown_readings(
-            n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold"
-        )
-        readings_warm = _cooldown_readings(
-            n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm"
-        )
+        readings_cold = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold")
+        readings_warm = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm")
         for r_c, r_w in zip(readings_cold, readings_warm):
             await broker.publish(r_c)
             await broker.publish(r_w)
@@ -389,16 +425,22 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
         filter_fn=lambda r: r.channel.startswith("analytics/cooldown_predictor"),
     )
 
-    service = CooldownService(broker, cfg, model_in_tmp)
+    from cryodaq.analytics.cooldown_predictor import load_predictor_model_authority
+
+    authority = load_predictor_model_authority(model_in_tmp / "predictor_model.json")
+    assert authority.available
+    service = CooldownService(
+        broker,
+        cfg,
+        model_in_tmp,
+        predictor_model=authority.model,
+        predictor_digest_sha256=authority.digest_sha256,
+    )
     await service.start()
 
     try:
-        readings_cold = _cooldown_readings(
-            n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold"
-        )
-        readings_warm = _cooldown_readings(
-            n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm"
-        )
+        readings_cold = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold")
+        readings_warm = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm")
         for r_c, r_w in zip(readings_cold, readings_warm):
             await broker.publish(r_c)
             await broker.publish(r_w)
@@ -419,9 +461,7 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
 
         # This fixture is early cooldown (60 readings at -15 K/h from 295 K)
         # — progress must be well below 0.98, not nearly done.
-        assert meta["progress"] < 0.98, (
-            f"Expected early-cooldown progress < 0.98, got {meta['progress']}"
-        )
+        assert meta["progress"] < 0.98, f"Expected early-cooldown progress < 0.98, got {meta['progress']}"
 
         # Trajectory for GUI must be present unconditionally at early cooldown
         assert "future_t" in meta, "Missing future_t trajectory in metadata"
@@ -440,6 +480,7 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
 
         # All values must be finite
         import math as _math
+
         for i, v in enumerate(future_t):
             assert _math.isfinite(v), f"future_t[{i}] = {v} is not finite"
         for i, v in enumerate(future_T):
@@ -496,12 +537,8 @@ async def test_service_does_not_predict_without_model(tmp_path: Path):
         # Publish cooling readings on BOTH channels so the consume loop
         # populates _last_T_cold and _last_T_warm — this ensures the
         # "no prediction" is due to the missing MODEL, not missing sensor data.
-        readings_cold = _cooldown_readings(
-            n=30, T_start=295.0, rate_K_per_h=-15.0, channel="T_cold"
-        )
-        readings_warm = _cooldown_readings(
-            n=30, T_start=295.0, rate_K_per_h=-8.0, channel="T_warm"
-        )
+        readings_cold = _cooldown_readings(n=30, T_start=295.0, rate_K_per_h=-15.0, channel="T_cold")
+        readings_warm = _cooldown_readings(n=30, T_start=295.0, rate_K_per_h=-8.0, channel="T_warm")
         for r_c, r_w in zip(readings_cold, readings_warm):
             await broker.publish(r_c)
             await broker.publish(r_w)
@@ -510,10 +547,7 @@ async def test_service_does_not_predict_without_model(tmp_path: Path):
         # Drain the consume queue so T_cold/T_warm are populated
         deadline = asyncio.get_event_loop().time() + 2.0
         while asyncio.get_event_loop().time() < deadline:
-            if (
-                service._last_T_cold is not None
-                and service._last_T_warm is not None
-            ):
+            if service._last_T_cold is not None and service._last_T_warm is not None:
                 break
             await asyncio.sleep(0.01)
         assert service._last_T_cold is not None, "T_cold never reached consume loop"
@@ -577,8 +611,7 @@ async def test_cooldown_detector_transition_to_cooling(tmp_path: Path):
             break
 
     assert reached_cooling, (
-        f"Detector never reached COOLING after sustained -15 K/h. "
-        f"Final phase: {detector.phase.value}"
+        f"Detector never reached COOLING after sustained -15 K/h. Final phase: {detector.phase.value}"
     )
 
 
@@ -602,6 +635,4 @@ async def test_cooldown_detector_stays_idle_on_warming(tmp_path: Path):
         T = 4.0 + 2.0 * (i * 10.0 / 3600.0)
         detector.update(t, T)
 
-    assert detector.phase.value == "idle", (
-        f"Detector should stay IDLE during warming. Phase: {detector.phase.value}"
-    )
+    assert detector.phase.value == "idle", f"Detector should stay IDLE during warming. Phase: {detector.phase.value}"

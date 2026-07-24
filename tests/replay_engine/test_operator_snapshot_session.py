@@ -17,6 +17,7 @@ from cryodaq.operator_snapshot import (
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotMode,
 )
 from cryodaq.operator_snapshot_transport import decode_operator_snapshot_frames
@@ -71,12 +72,20 @@ def test_conservative_complete_replay_cut_never_claims_live_authority() -> None:
     assert all(summary.cut is snapshot.cut for summary in snapshot.summaries())
     assert all(summary.state is not OperatorPresentationState.OK for summary in snapshot.summaries())
     assert snapshot.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
     assert snapshot.experiment.recording is RecordingTruth.REPLAY_ONLY
     assert snapshot.data_integrity.storage is AvailabilityTruth.UNKNOWN
     assert snapshot.support_bundle.availability is AvailabilityTruth.UNKNOWN
     assert snapshot.attention.reason_codes == ("attention_authority_unavailable",)
     assert snapshot.infrastructure.reason_codes == ("infrastructure_authority_unavailable",)
     assert snapshot.support_bundle.reason_codes == ("support_authority_unavailable",)
+    assert snapshot.cut.source.startswith("replay/operator-v2/")
+
+
+def test_replay_provenance_has_no_stale_v1_schema_marker() -> None:
+    source = Path("src/cryodaq/replay_engine/operator_snapshot_session.py").read_text(encoding="utf-8")
+    assert "replay/operator-v1" not in source
+    assert 'f"replay/operator-v2/' in source
 
 
 class _Socket:

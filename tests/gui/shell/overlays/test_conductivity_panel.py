@@ -121,11 +121,7 @@ def test_panel_header_cyrillic_uppercase(app):
     from PySide6.QtWidgets import QLabel
 
     panel = ConductivityPanel()
-    titles = [
-        label.text()
-        for label in panel.findChildren(QLabel)
-        if label.text().startswith("ТЕПЛОПРОВОДНОСТЬ")
-    ]
+    titles = [label.text() for label in panel.findChildren(QLabel) if label.text().startswith("ТЕПЛОПРОВОДНОСТЬ")]
     assert "ТЕПЛОПРОВОДНОСТЬ" in titles
 
 
@@ -133,10 +129,7 @@ def test_table_has_eleven_columns(app):
     panel = ConductivityPanel()
     assert panel._table.columnCount() == 11
     # Assert exact R/G column headers (not just count)
-    headers = [
-        panel._table.horizontalHeaderItem(c).text()
-        for c in range(panel._table.columnCount())
-    ]
+    headers = [panel._table.horizontalHeaderItem(c).text() for c in range(panel._table.columnCount())]
     assert "R (К/Вт)" in headers, f"Missing 'R (К/Вт)' header; got {headers}"
     assert "G (Вт/К)" in headers, f"Missing 'G (Вт/К)' header; got {headers}"
 
@@ -405,9 +398,7 @@ def test_auto_start_rejects_short_chain(app, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
 
     warnings: list = []
-    monkeypatch.setattr(
-        QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a) or 0)
-    )
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a) or 0))
     # Drive via real button click to verify button→handler wiring.
     panel._auto_start_btn.click()
     assert warnings, "Expected QMessageBox.warning to fire"
@@ -698,8 +689,7 @@ def test_connection_drop_mid_sweep_preserves_stop_button(app, monkeypatch):
     panel.set_connected(False)
 
     assert panel._auto_stop_btn.isEnabled() is True, (
-        "Stop button must stay enabled during stabilizing even if "
-        "engine disconnects — operator must be able to abort."
+        "Stop button must stay enabled during stabilizing even if engine disconnects — operator must be able to abort."
     )
     assert panel._auto_start_btn.isEnabled() is False
 
@@ -712,12 +702,8 @@ def test_connection_drop_mid_sweep_preserves_stop_button(app, monkeypatch):
     assert dispatched == [{"cmd": "keithley_stop", "channel": "smua"}], (
         f"Stop after disconnect must dispatch keithley_stop on smua, got: {dispatched}"
     )
-    assert panel._auto_state == "idle", (
-        f"State must be idle after Stop, got: {panel._auto_state!r}"
-    )
-    assert not panel._auto_timer.isActive(), (
-        "Auto timer must be stopped after operator Stop"
-    )
+    assert panel._auto_state == "idle", f"State must be idle after Stop, got: {panel._auto_state!r}"
+    assert not panel._auto_timer.isActive(), "Auto timer must be stopped after operator Stop"
     assert panel._auto_stop_btn.isEnabled() is False
     # Start re-enables only if connected; connection is down so must stay disabled.
     assert panel._auto_start_btn.isEnabled() is False
@@ -991,3 +977,28 @@ def test_prediction_stack_synced_via_refresh_tick_too(app):
     panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
     assert panel._indicator_stack.currentIndex() == 0
+
+
+def test_replay_read_only_blocks_every_auto_sweep_worker_path(app, monkeypatch):
+    panel = ConductivityPanel()
+    panel.set_connected(True)
+    panel.set_read_only(True)
+
+    def forbidden_worker(*_args, **_kwargs):
+        raise AssertionError("replay attempted to construct a command worker")
+
+    monkeypatch.setattr(
+        "cryodaq.gui.shell.overlays.conductivity_panel.ZmqCommandWorker",
+        forbidden_worker,
+    )
+    panel._send_auto_cmd({"cmd": "forbidden"})
+    panel._on_auto_start()
+    panel._on_auto_stop()
+    panel._auto_tick()
+    panel._auto_complete()
+
+    assert panel._read_only is True
+    assert panel._auto_timer.isActive() is False
+    assert panel._auto_start_btn.isEnabled() is False
+    assert panel._auto_stop_btn.isEnabled() is False
+    assert panel._auto_workers == []

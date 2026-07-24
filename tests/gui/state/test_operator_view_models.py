@@ -28,6 +28,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -81,7 +82,7 @@ def _snapshot(
         revision=42,
         observed_at=observed_at,
         received_at=observed_at + timedelta(seconds=1),
-        source="engine/operator-snapshot-v1",
+        source="engine/operator-snapshot-v2",
         mode=mode,
     )
     effective_state = (
@@ -136,27 +137,34 @@ def _snapshot(
         if current
         else AvailabilityTruth.UNKNOWN
     )
+    readiness = (
+        ReadinessTruth.UNKNOWN
+        if mode is SnapshotMode.REPLAY
+        else ReadinessTruth.BLOCKED
+        if urgent
+        else (
+            ReadinessTruth.UNKNOWN
+            if effective_state
+            in {
+                OperatorPresentationState.STALE,
+                OperatorPresentationState.DISCONNECTED,
+            }
+            else ReadinessTruth.READY
+        )
+    )
+    lifecycle = {
+        ReadinessTruth.READY: SafetyLifecycle.READY,
+        ReadinessTruth.BLOCKED: SafetyLifecycle.FAULT_LATCHED,
+        ReadinessTruth.UNKNOWN: SafetyLifecycle.UNKNOWN,
+    }[readiness]
     return OperatorSnapshot(
         cut=cut,
         readiness=ReadinessSummary(
             cut,
             status,
-            (
-                ReadinessTruth.UNKNOWN
-                if mode is SnapshotMode.REPLAY
-                else ReadinessTruth.BLOCKED
-                if urgent
-                else (
-                    ReadinessTruth.UNKNOWN
-                    if effective_state
-                    in {
-                        OperatorPresentationState.STALE,
-                        OperatorPresentationState.DISCONNECTED,
-                    }
-                    else ReadinessTruth.READY
-                )
-            ),
+            readiness,
             () if blocker is None else (blocker,),
+            lifecycle,
         ),
         plant_health=PlantHealthSummary(
             cut,
@@ -262,7 +270,7 @@ def test_each_summary_exposes_provenance_independent_ages_reason_revision_and_ti
     for summary in snapshot.summaries():
         assert summary.revision == 42
         assert summary.observed_at == snapshot.cut.observed_at
-        assert summary.provenance == "engine/operator-snapshot-v1"
+        assert summary.provenance == "engine/operator-snapshot-v2"
         assert summary.source_age_s == 1.0
         assert summary.transport_age_s == 0.25
         assert summary.reason_codes == ("authoritative_snapshot",)
@@ -283,7 +291,13 @@ def test_snapshot_rejects_mixed_revision_or_provenance_cut() -> None:
     with pytest.raises(ValueError, match="same snapshot cut"):
         OperatorSnapshot(
             cut=snapshot.cut,
-            readiness=ReadinessSummary(other_cut, snapshot.readiness.status, ReadinessTruth.READY, ()),
+            readiness=ReadinessSummary(
+                other_cut,
+                snapshot.readiness.status,
+                ReadinessTruth.READY,
+                (),
+                SafetyLifecycle.READY,
+            ),
             plant_health=snapshot.plant_health,
             infrastructure=snapshot.infrastructure,
             attention=snapshot.attention,
@@ -307,6 +321,10 @@ def test_disconnected_transport_is_idempotent_and_does_not_change_cut() -> None:
     snapshot = _snapshot(state=OperatorPresentationState.OK)
     first = apply_transport_freshness(snapshot, connected=False, transport_age_s=8, stale_after_s=5)
     second = apply_transport_freshness(first, connected=False, transport_age_s=8, stale_after_s=5)
+
+    assert first.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert first.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+    assert second.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
     assert first.cut == snapshot.cut
     assert second == first
@@ -408,6 +426,7 @@ def test_transport_degrades_nested_blockers_and_attention_with_explicit_cue(
             status=nested_status,
             readiness=ReadinessTruth.BLOCKED,
             blockers=(blocker,),
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
         ),
         attention=replace(snapshot.attention, status=nested_status, items=(attention,)),
     )
@@ -677,6 +696,7 @@ def test_raw_backend_state_survives_full_same_cut_transport_matrix(
     assert all(summary.transport_reason_codes == ("snapshot_stale",) for summary in connected_stale.summaries())
     assert all(summary.transport_reason_codes == () for summary in connected_fresh_same_cut.summaries())
     assert connected_fresh_same_cut.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert connected_fresh_same_cut.readiness.lifecycle is SafetyLifecycle.UNKNOWN
     assert connected_fresh_same_cut.experiment.recording is RecordingTruth.UNKNOWN
     assert connected_fresh_same_cut.data_integrity.storage is AvailabilityTruth.UNKNOWN
     assert connected_fresh_same_cut.support_bundle.availability is AvailabilityTruth.UNKNOWN
@@ -703,6 +723,7 @@ def test_newer_raw_cut_alone_restores_current_authority_after_same_cut_degradati
     assert store.cut.revision == 43
     assert {summary.state for summary in store.summaries()} == {OperatorPresentationState.OK}
     assert store.readiness.readiness is ReadinessTruth.READY
+    assert store.readiness.lifecycle is SafetyLifecycle.READY
     assert store.experiment.recording is RecordingTruth.RECORDING
     assert store.data_integrity.storage is AvailabilityTruth.AVAILABLE
     assert store.support_bundle.availability is AvailabilityTruth.AVAILABLE
@@ -1164,6 +1185,7 @@ def test_same_cut_connected_fresh_clears_transport_cue_but_not_invalidated_autho
     assert all(summary.transport_reason_codes == () for summary in recovered.summaries())
     assert all(summary.reason_codes == backend_reasons for summary in recovered.summaries())
     assert recovered.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert recovered.readiness.lifecycle is SafetyLifecycle.UNKNOWN
     assert recovered.experiment.recording is RecordingTruth.UNKNOWN
     assert recovered.data_integrity.storage is AvailabilityTruth.UNKNOWN
     assert recovered.support_bundle.availability is AvailabilityTruth.UNKNOWN
@@ -1241,7 +1263,7 @@ def test_codec_live_and_replay_round_trip_is_strict_and_json_compatible() -> Non
     [
         lambda value: value.update(extra=True),
         lambda value: value.update(version=True),
-        lambda value: value.update(version=2),
+        lambda value: value.update(version=1),
         lambda value: value["snapshot"]["cut"].update(extra="x"),
         lambda value: value["snapshot"]["cut"].update(mode="future"),
         lambda value: value["snapshot"]["cut"].update(revision=True),

@@ -6,8 +6,11 @@ import asyncio
 import inspect
 import logging
 import math
+import os
 import re
+import stat
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -39,6 +42,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_EVENTS = 500
 _CHECK_INTERVAL_S = 1.0
+_MAX_SAFETY_CONFIG_BYTES = 64 * 1024
+_MAX_SAFETY_CONFIG_NODES = 1_024
+_MAX_SAFETY_CONFIG_DEPTH = 16
+_MAX_SAFETY_CONFIG_STRING_CHARS = 4_096
+_MAX_SAFETY_CONFIG_LIST_ITEMS = 128
 
 
 class SafetyConfigError(RuntimeError):
@@ -90,6 +98,270 @@ class _ReviewedSourceGeneration:
     """Opaque SafetyManager-owned identity for one source connection attempt."""
 
     __slots__ = ()
+
+
+class _BoundedUniqueSafetyLoader(yaml.SafeLoader):
+    """Small, duplicate-free YAML loader for the safety authority."""
+
+    def __init__(self, stream: str):
+        super().__init__(stream)
+        self._node_count = 0
+        self._node_depth = 0
+
+    def compose_node(self, parent: yaml.Node | None, index: object) -> yaml.Node:
+        event = self.peek_event()
+        if isinstance(event, yaml.events.AliasEvent) or getattr(event, "anchor", None) is not None:
+            raise SafetyConfigError("safety configuration does not permit YAML aliases or anchors")
+        self._node_count += 1
+        if self._node_count > _MAX_SAFETY_CONFIG_NODES:
+            raise SafetyConfigError("safety configuration exceeds the YAML node limit")
+        self._node_depth += 1
+        try:
+            if self._node_depth > _MAX_SAFETY_CONFIG_DEPTH:
+                raise SafetyConfigError("safety configuration exceeds the YAML depth limit")
+            return super().compose_node(parent, index)
+        finally:
+            self._node_depth -= 1
+
+
+def _construct_unique_safety_mapping(
+    loader: yaml.SafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if not isinstance(key, str):
+            raise SafetyConfigError("safety configuration keys must be strings")
+        if key in mapping:
+            raise SafetyConfigError(f"safety configuration contains duplicate key {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_BoundedUniqueSafetyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_safety_mapping,
+)
+
+
+def _stable_safety_file_snapshot(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _is_reparse_point(metadata: os.stat_result) -> bool:
+    return bool(getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _read_bounded_safety_document(path: Path) -> str:
+    try:
+        before = path.lstat()
+    except FileNotFoundError as exc:
+        raise SafetyConfigError("safety.yaml not found; refusing to start without safety authority") from exc
+    except OSError as exc:
+        raise SafetyConfigError("safety configuration metadata is unavailable") from exc
+    if path.is_symlink() or _is_reparse_point(before) or not stat.S_ISREG(before.st_mode):
+        raise SafetyConfigError("safety configuration must be a regular non-link file")
+    if before.st_size > _MAX_SAFETY_CONFIG_BYTES:
+        raise SafetyConfigError("safety configuration exceeds the byte limit")
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse_point(opened)
+            or not os.path.samestat(before, opened)
+            or (before.st_size, before.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns)
+        ):
+            raise SafetyConfigError("safety configuration changed while opening")
+        payload = bytearray()
+        while len(payload) <= _MAX_SAFETY_CONFIG_BYTES:
+            size = min(8_192, _MAX_SAFETY_CONFIG_BYTES + 1 - len(payload))
+            chunk = os.read(descriptor, size)
+            if not chunk:
+                break
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if _stable_safety_file_snapshot(after) != _stable_safety_file_snapshot(opened):
+            raise SafetyConfigError("safety configuration changed while reading")
+        if len(payload) != after.st_size or len(payload) > _MAX_SAFETY_CONFIG_BYTES:
+            raise SafetyConfigError("safety configuration changed size while reading")
+        after_path = path.lstat()
+        if (
+            path.is_symlink()
+            or _is_reparse_point(after_path)
+            or not stat.S_ISREG(after_path.st_mode)
+            or not os.path.samestat(after_path, after)
+            or (after_path.st_size, after_path.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+        ):
+            raise SafetyConfigError("safety configuration path changed while reading")
+    except SafetyConfigError:
+        raise
+    except OSError as exc:
+        raise SafetyConfigError("safety configuration cannot be read") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        return bytes(payload).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SafetyConfigError("safety configuration is not valid UTF-8") from exc
+
+
+def _validate_safety_text(value: Any, location: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise SafetyConfigError(f"{location} must be a non-empty trimmed string")
+    if len(value) > _MAX_SAFETY_CONFIG_STRING_CHARS:
+        raise SafetyConfigError(f"{location} exceeds the string length limit")
+    if unicodedata.normalize("NFC", value) != value:
+        raise SafetyConfigError(f"{location} must use Unicode NFC")
+    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in value):
+        raise SafetyConfigError(f"{location} contains forbidden control characters")
+    return value
+
+
+def _require_exact_safety_map(raw: Any, expected: set[str], location: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise SafetyConfigError(f"{location} must be a mapping")
+    missing = sorted(expected - set(raw))
+    unknown = sorted(set(raw) - expected)
+    if missing or unknown:
+        raise SafetyConfigError(f"{location} schema mismatch (missing={missing!r}, unknown={unknown!r})")
+    return raw
+
+
+def _require_safety_number(
+    value: Any,
+    location: str,
+    *,
+    minimum: float,
+    maximum: float,
+    allow_zero: bool = False,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SafetyConfigError(f"{location} must be a number")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise SafetyConfigError(f"{location} must be finite")
+    lower_ok = normalized >= minimum if allow_zero else normalized > minimum
+    if not lower_ok or normalized > maximum:
+        raise SafetyConfigError(f"{location} is outside its reviewed range")
+    return normalized
+
+
+def _compile_safety_patterns(values: Any, location: str) -> list[re.Pattern[str]]:
+    if not isinstance(values, list):
+        raise SafetyConfigError(f"{location} must be a list")
+    if not values:
+        raise SafetyConfigError(f"safety configuration has no {location}")
+    if len(values) > _MAX_SAFETY_CONFIG_LIST_ITEMS:
+        raise SafetyConfigError(f"{location} exceeds the item limit")
+    compiled: list[re.Pattern[str]] = []
+    for value in values:
+        pattern = _validate_safety_text(value, location)
+        try:
+            compiled.append(re.compile(pattern))
+        except re.error as exc:
+            raise SafetyConfigError(f"{location} contains an invalid regex") from exc
+    return compiled
+
+
+def _parse_safety_config(path: Path) -> tuple[SafetyConfig, list[re.Pattern[str]]]:
+    text = _read_bounded_safety_document(path)
+    try:
+        raw = yaml.load(text, Loader=_BoundedUniqueSafetyLoader)
+    except SafetyConfigError:
+        raise
+    except (yaml.YAMLError, ValueError, TypeError, RecursionError) as exc:
+        raise SafetyConfigError("safety configuration YAML is invalid") from exc
+    top = _require_exact_safety_map(
+        raw,
+        {
+            "critical_channels",
+            "stale_timeout_s",
+            "heartbeat_timeout_s",
+            "max_safety_backlog",
+            "require_keithley_for_run",
+            "rate_limits",
+            "recovery",
+            "source_limits",
+            "keithley_channels",
+            "scheduler_drain_timeout_s",
+        },
+        "safety configuration",
+    )
+    rate_limits = _require_exact_safety_map(
+        top["rate_limits"],
+        {"max_dT_dt_K_per_min"},
+        "rate_limits",
+    )
+    recovery = _require_exact_safety_map(
+        top["recovery"],
+        {"require_reason", "cooldown_before_rearm_s"},
+        "recovery",
+    )
+    source_limits = _require_exact_safety_map(
+        top["source_limits"],
+        {"max_power_w", "max_voltage_v", "max_current_a"},
+        "source_limits",
+    )
+    if type(top["require_keithley_for_run"]) is not bool:
+        raise SafetyConfigError("require_keithley_for_run must be a boolean")
+    if type(recovery["require_reason"]) is not bool:
+        raise SafetyConfigError("recovery.require_reason must be a boolean")
+    backlog = top["max_safety_backlog"]
+    if type(backlog) is not int or not 0 < backlog <= 1_000_000:
+        raise SafetyConfigError("max_safety_backlog must be an integer > 0 and <= 1000000")
+    critical_patterns = _compile_safety_patterns(top["critical_channels"], "critical_channels")
+    keithley_patterns = _compile_safety_patterns(top["keithley_channels"], "keithley_channels")
+    config = SafetyConfig(
+        critical_channels=critical_patterns,
+        stale_timeout_s=_require_safety_number(top["stale_timeout_s"], "stale_timeout_s", minimum=0, maximum=86_400),
+        heartbeat_timeout_s=_require_safety_number(
+            top["heartbeat_timeout_s"], "heartbeat_timeout_s", minimum=0, maximum=86_400
+        ),
+        max_safety_backlog=backlog,
+        require_keithley_for_run=top["require_keithley_for_run"],
+        max_dT_dt_K_per_min=_require_safety_number(
+            rate_limits["max_dT_dt_K_per_min"],
+            "rate_limits.max_dT_dt_K_per_min",
+            minimum=0,
+            maximum=1_000_000,
+        ),
+        require_reason=recovery["require_reason"],
+        cooldown_before_rearm_s=_require_safety_number(
+            recovery["cooldown_before_rearm_s"],
+            "recovery.cooldown_before_rearm_s",
+            minimum=0,
+            maximum=604_800,
+            allow_zero=True,
+        ),
+        max_power_w=_require_safety_number(
+            source_limits["max_power_w"], "source_limits.max_power_w", minimum=0, maximum=1_000_000
+        ),
+        max_voltage_v=_require_safety_number(
+            source_limits["max_voltage_v"], "source_limits.max_voltage_v", minimum=0, maximum=1_000_000
+        ),
+        max_current_a=_require_safety_number(
+            source_limits["max_current_a"], "source_limits.max_current_a", minimum=0, maximum=100_000
+        ),
+        keithley_channel_patterns=[pattern.pattern for pattern in keithley_patterns],
+        scheduler_drain_timeout_s=_require_safety_number(
+            top["scheduler_drain_timeout_s"],
+            "scheduler_drain_timeout_s",
+            minimum=0,
+            maximum=3_600,
+        ),
+    )
+    return config, keithley_patterns
 
 
 async def _settle_shielded_hardware_task(
@@ -158,6 +430,8 @@ class SafetyManager:
         self._fault_log_callback = fault_log_callback
         self._state = SafetyState.SAFE_OFF
         self._config = SafetyConfig()
+        self._config_loaded = False
+        self._startup_blockers: dict[str, SafetyBlocker] = {}
         self._events: deque[SafetyEvent] = deque(maxlen=_MAX_EVENTS)
         self._fault_reason = ""
         self._fault_time = 0.0
@@ -254,72 +528,65 @@ class SafetyManager:
         self._broker.set_overflow_callback(lambda: self._fault("SafetyBroker overflow - data lost"))
 
     def load_config(self, path: Path) -> None:
-        if not path.exists():
-            raise SafetyConfigError(
-                f"safety.yaml not found at {path} — refusing to start SafetyManager without safety configuration"
-            )
-
-        with path.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh) or {}
-
-        if not isinstance(raw, dict):
-            raise SafetyConfigError(f"safety.yaml at {path} is malformed (expected mapping, got {type(raw).__name__})")
-
-        raw_patterns = raw.get("critical_channels", [])
-        if not isinstance(raw_patterns, list):
-            raise SafetyConfigError(
-                f"safety.yaml at {path}: critical_channels must be a list, got {type(raw_patterns).__name__}"
-            )
-        if not raw_patterns:
-            raise SafetyConfigError(
-                f"safety.yaml at {path} has no critical_channels defined — "
-                f"refusing to start SafetyManager without critical channel monitoring"
-            )
-
-        patterns: list[re.Pattern[str]] = []
-        errors: list[str] = []
-        for pattern in raw_patterns:
-            if not isinstance(pattern, str):
-                errors.append(f"  - {pattern!r}: expected string, got {type(pattern).__name__}")
-                continue
-            try:
-                patterns.append(re.compile(pattern))
-            except re.error as exc:
-                errors.append(f"  - {pattern!r}: {exc}")
-
-        if errors:
-            raise SafetyConfigError(f"safety.yaml at {path} has invalid critical_channels regex:\n" + "\n".join(errors))
-
-        if not patterns:
-            raise SafetyConfigError(f"safety.yaml at {path} produced no valid critical_channels")
-
+        if self._config_loaded:
+            raise SafetyConfigError("safety configuration is immutable after its first successful load")
+        if self._queue is not None or self._collect_task is not None or self._monitor_task is not None:
+            raise SafetyConfigError("safety configuration cannot load after manager startup")
+        config, keithley_patterns = _parse_safety_config(path)
+        self._config = config
+        self._keithley_patterns = keithley_patterns
+        self._config_loaded = True
         logger.info(
-            "SafetyManager config: %d critical channel patterns from %s",
-            len(patterns),
-            path,
+            "SafetyManager config: %d exact critical channel patterns",
+            len(config.critical_channels),
         )
+        self._refresh_operator_safety_snapshot()
 
-        try:
-            src_limits = raw.get("source_limits", {})
-            self._config = SafetyConfig(
-                critical_channels=patterns,
-                stale_timeout_s=float(raw.get("stale_timeout_s", 10.0)),
-                heartbeat_timeout_s=float(raw.get("heartbeat_timeout_s", 15.0)),
-                max_safety_backlog=int(raw.get("max_safety_backlog", 100)),
-                require_keithley_for_run=bool(raw.get("require_keithley_for_run", True)),
-                max_dT_dt_K_per_min=float(raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0)),
-                require_reason=bool(raw.get("recovery", {}).get("require_reason", True)),
-                cooldown_before_rearm_s=float(raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0)),
-                max_power_w=float(src_limits.get("max_power_w", 5.0)),
-                max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
-                max_current_a=float(src_limits.get("max_current_a", 1.0)),
-                scheduler_drain_timeout_s=float(raw.get("scheduler_drain_timeout_s", 5.0)),
-            )
-            self._keithley_patterns = [re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])]
-        except (ValueError, TypeError, KeyError, AttributeError) as exc:
-            raise SafetyConfigError(
-                f"safety.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}"
-            ) from exc
+    def install_exact_temperature_bindings(self, bindings: dict[str, str]) -> None:
+        if self._queue is not None or self._collect_task is not None or self._monitor_task is not None:
+            raise SafetyConfigError("critical temperature bindings cannot change after manager startup")
+        canonical_ids = ("\u042211", "\u042212")
+        if set(bindings) != set(canonical_ids):
+            raise SafetyConfigError("exact bindings must contain canonical T11 and T12 only")
+        configured = {pattern.pattern for pattern in self._config.critical_channels}
+        expected_config = {rf"^{re.escape(canonical)}$" for canonical in canonical_ids}
+        if configured != expected_config:
+            raise SafetyConfigError("safety.yaml critical_channels must contain exactly anchored canonical T11 and T12")
+        labels: list[str] = []
+        for canonical in canonical_ids:
+            emitted = bindings[canonical]
+            if (
+                not isinstance(emitted, str)
+                or not emitted
+                or emitted != emitted.strip()
+                or unicodedata.normalize("NFC", emitted) != emitted
+                or any(unicodedata.category(character) in {"Cc", "Cf"} for character in emitted)
+            ):
+                raise SafetyConfigError(f"invalid emitted label for canonical {canonical}")
+            labels.append(emitted)
+        if len(set(labels)) != len(labels):
+            raise SafetyConfigError("canonical T11 and T12 resolve to the same emitted label")
+        compiled = [re.compile(rf"^{re.escape(emitted)}$") for emitted in labels]
+        self._config.critical_channels = compiled
+        self._refresh_operator_safety_snapshot()
+
+    def install_startup_blocker(self, code: str, message: str, remediation: str) -> None:
+        if self._queue is not None or self._collect_task is not None or self._monitor_task is not None:
+            raise SafetyConfigError("startup blockers cannot change after manager startup")
+        for location, value in (
+            ("startup blocker code", code),
+            ("startup blocker message", message),
+            ("startup blocker remediation", remediation),
+        ):
+            _validate_safety_text(value, location)
+        if code in self._startup_blockers:
+            raise SafetyConfigError(f"duplicate startup blocker {code!r}")
+        self._startup_blockers[code] = SafetyBlocker(
+            code,
+            OperatorPresentationState.FAULT,
+            message,
+            remediation,
+        )
         self._refresh_operator_safety_snapshot()
 
     async def start(self) -> None:
@@ -1479,6 +1746,18 @@ class SafetyManager:
         if critical_blocker is not None:
             blockers.append(critical_blocker)
 
+        for code in sorted(self._startup_blockers):
+            blocker = self._startup_blockers[code]
+            plant.append(
+                PlantHealthFact(
+                    code,
+                    "Startup safety dependency",
+                    OperatorPresentationState.FAULT,
+                    code,
+                )
+            )
+            blockers.append(blocker)
+
         if self._persistence_fault_active:
             plant.append(
                 PlantHealthFact(
@@ -1583,6 +1862,7 @@ class SafetyManager:
             "fault_activated_at": self._fault_activated_at,
             "recovery_reason": self._recovery_reason,
             "channels_tracked": len(self._latest),
+            "startup_blockers": sorted(self._startup_blockers),
             "keithley_connected": self._keithley is not None and getattr(self._keithley, "connected", False),
             "active_channels": sorted(self._active_sources),
             "mock": self._mock,
@@ -1920,6 +2200,10 @@ class SafetyManager:
 
     def _check_preconditions(self) -> tuple[bool, str]:
         now = time.monotonic()
+
+        if self._startup_blockers:
+            blocker = self._startup_blockers[sorted(self._startup_blockers)[0]]
+            return False, f"Startup safety blocker {blocker.code}: {blocker.operator_text}"
 
         if self._keithley is not None and getattr(self._keithley, "watchdog_trip_pending", False) is True:
             return False, (

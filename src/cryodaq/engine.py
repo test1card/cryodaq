@@ -35,7 +35,7 @@ from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
-from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
+from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config_authority
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
 from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
@@ -55,16 +55,17 @@ from cryodaq.core.housekeeping import (
     AdaptiveThrottle,
     HousekeepingConfigError,
     HousekeepingService,
-    load_critical_channels_from_alarms_v3,
     load_housekeeping_config,
     load_protected_channel_patterns,
+    resolve_canonical_temperature_labels,
+    resolve_protected_channel_bindings,
 )
 from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
 from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.path_jail import resolve_within
 from cryodaq.core.physical_alarms_config import (
-    load_channel_landmarks,
-    load_physical_alarms_config,
+    PhysicalAlarmsConfigError,
+    load_production_physical_alarms_config,
 )
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
@@ -2879,6 +2880,26 @@ def _zmq_publisher_drop_count(broker: DataBroker) -> int:
     return int(broker.stats["zmq_publisher"]["dropped"])
 
 
+def _construct_vacuum_guard_or_config_error(
+    *,
+    cfg: dict[str, Any],
+    state_tracker: Any,
+    alarm_state_mgr: Any,
+    event_bus: Any,
+    safety_manager: Any,
+) -> VacuumGuard:
+    try:
+        return VacuumGuard(
+            cfg=cfg,
+            state_tracker=state_tracker,
+            alarm_state_mgr=alarm_state_mgr,
+            event_bus=event_bus,
+            safety_manager=safety_manager,
+        )
+    except Exception as exc:
+        raise PhysicalAlarmsConfigError("vacuum guard construction failed") from exc
+
+
 async def _run_engine(*, mock: bool = False) -> None:
     """Инициализировать и запустить все подсистемы engine."""
     start_ts = time.monotonic()
@@ -2889,6 +2910,19 @@ async def _run_engine(*, mock: bool = False) -> None:
     interlocks_cfg = _engine_config_path("interlocks")
     housekeeping_cfg = _engine_config_path("housekeeping")
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
+
+    # Parse the physical safety authority before constructing any driver or
+    # other runtime owner. Descriptor-dependent binding happens later.
+    _phys_alarms_yaml = _CONFIG_DIR / "physical_alarms.yaml"
+    _cooldown_cfg, _vacuum_cfg, _landmarks = load_production_physical_alarms_config(
+        _phys_alarms_yaml,
+        trusted_config_root=_CONFIG_DIR,
+        project_root=_PROJECT_ROOT,
+    )
+    from cryodaq.analytics.cooldown_predictor import load_predictor_model_authority
+
+    _predictor_authority = load_predictor_model_authority(Path(_cooldown_cfg["predictor_model_path"]))
+    _alarm_authority = load_alarm_config_authority(_CONFIG_DIR / "alarms_v3.yaml")
 
     # --- Создать основные компоненты ---
     broker = DataBroker()
@@ -2932,20 +2966,37 @@ async def _run_engine(*, mock: bool = False) -> None:
         data_broker=broker,
     )
     safety_manager.load_config(safety_cfg)
+    if not _predictor_authority.available:
+        safety_manager.install_startup_blocker(
+            "cooldown_predictor_unavailable",
+            "The reviewed cooldown predictor model is unavailable",
+            "Install a reviewed model digest and restart the engine",
+        )
 
     # F35: descriptor identity is mandatory production startup authority.
     # A machine-local instrument configuration requires a complete local
     # descriptor replacement; it never falls back to the tracked base.
     live_descriptor_catalog = await _load_live_descriptor_authority(instruments_cfg, driver_load)
 
+    _temperature_labels = resolve_canonical_temperature_labels(
+        live_descriptor_catalog,
+        {"\u042211", "\u042212"},
+    )
+    safety_manager.install_exact_temperature_bindings(_temperature_labels)
+    get_channel_manager().set_landmarks(_landmarks)
+
     housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
     # Merge legacy interlocks.yaml protection patterns with the modern
     # alarms_v3.yaml critical channels. Without this the throttle thins
     # critical channels even though alarms_v3 marks them CRITICAL.
     legacy_patterns = load_protected_channel_patterns(interlocks_cfg)
-    alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
-    v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
-    merged_patterns = list({*legacy_patterns, *v3_patterns})
+    v3_patterns = _alarm_authority.critical_channel_patterns
+    merged_patterns = sorted(
+        resolve_protected_channel_bindings(
+            live_descriptor_catalog,
+            {*legacy_patterns, *v3_patterns},
+        )
+    )
     logger.info(
         "Adaptive-throttle protection: %d legacy + %d v3 = %d unique patterns",
         len(legacy_patterns),
@@ -2957,27 +3008,13 @@ async def _run_engine(*, mock: bool = False) -> None:
         protected_patterns=merged_patterns,
     )
 
-    # F-1 startup diagnostic: a dead CRITICAL/safety pattern silently disarms
-    # its runtime consumer. Validate the exact protected-pattern union supplied
-    # to AdaptiveThrottle against the SELECTED descriptor manifest, before any
-    # broker subscriber, writer, scheduler, or acquisition exists. TEMPORARY
-    # no-brick policy for the lab build: catch only this diagnostic exception,
-    # log it at CRITICAL, and continue until the exact lab-local manifest has
-    # been validated and recorded. Then remove this catch to enable the
-    # exception's intended fail-closed exit-2 behavior.
-    try:
-        validate_safety_pattern_liveness(
-            descriptor_catalog=live_descriptor_catalog,
-            interlocks_config_path=interlocks_cfg,
-            safety_manager=safety_manager,
-            adaptive_throttle_patterns=merged_patterns,
-        )
-    except SafetyPatternLivenessError as exc:
-        logger.critical(
-            "TEMPORARY LAB BUILD: startup safety-pattern liveness failed; "
-            "continuing boot until the selected lab manifest is validated:\n%s",
-            exc,
-        )
+    # Every selected safety-bearing pattern must resolve before any owner starts.
+    validate_safety_pattern_liveness(
+        descriptor_catalog=live_descriptor_catalog,
+        interlocks_config_path=interlocks_cfg,
+        safety_manager=safety_manager,
+        adaptive_throttle_patterns=merged_patterns,
+    )
 
     # SQLite — persistence-first: writer создаётся ДО scheduler
     writer = SQLiteWriter(_DATA_DIR, channel_catalog=live_descriptor_catalog)
@@ -3126,8 +3163,8 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.warning(_leak_warn)
 
     # --- Alarm Engine v2 ---
-    _alarms_v3_cfg = _CONFIG_DIR / "alarms_v3.yaml"
-    _alarm_v2_engine_cfg, _alarm_v2_configs = load_alarm_config(_alarms_v3_cfg)
+    _alarm_v2_engine_cfg = _alarm_authority.engine_config
+    _alarm_v2_configs = list(_alarm_authority.alarms)
     _alarm_v2_state_tracker = ChannelStateTracker(
         stale_timeout_s=30.0,
         fault_window_s=300.0,
@@ -3160,61 +3197,38 @@ async def _run_engine(*, mock: bool = False) -> None:
 
     # --- Physical alarms (F-X v3): CooldownAlarm + VacuumGuard ---
     _phys_alarms_yaml = _CONFIG_DIR / "physical_alarms.yaml"
-    _cooldown_cfg, _vacuum_cfg = load_physical_alarms_config(_phys_alarms_yaml)
-
-    # F-ChannelLandmarks: install hardware-pinned landmark map (Т11/Т12 with
-    # operator-phrasing aliases) on the shared ChannelManager. The query
-    # agent's IntentClassifier reads it via channel_manager.get_landmarks()
-    # to resolve phrases like "азотная плита" to the correct channel even
-    # when an experiment-level alias has drifted onto another channel.
-    try:
-        _landmarks = load_channel_landmarks(_phys_alarms_yaml)
-        get_channel_manager().set_landmarks(_landmarks)
-        if _landmarks:
-            logger.info(
-                "ChannelLandmarks: загружены для каналов %s",
-                ", ".join(sorted(_landmarks)),
-            )
-    except Exception as exc:
-        logger.warning("ChannelLandmarks: ошибка загрузки — %s", exc, exc_info=True)
-
-    # Resolve model path relative to project root (not process cwd)
-    _model_path_str = _cooldown_cfg.get("predictor_model_path", "model/predictor_model.json")
-    if not Path(_model_path_str).is_absolute():
-        _cooldown_cfg["predictor_model_path"] = str(_PROJECT_ROOT / _model_path_str)
 
     _cooldown_alarm: CooldownAlarm | None = None
-    if _cooldown_cfg.get("enabled", True):
-        _cooldown_alarm = CooldownAlarm(
-            cfg=_cooldown_cfg,
-            state_tracker=_alarm_v2_state_tracker,
-            alarm_state_mgr=alarm_v2_state_mgr,
-            event_bus=event_bus,
-            # v0.55.12 — wire SafetyManager so CooldownAlarm CRITICAL
-            # latches the safety FSM.
-            safety_manager=safety_manager,
-        )
+    if _cooldown_cfg["enabled"]:
+        try:
+            _cooldown_alarm = CooldownAlarm(
+                cfg=_cooldown_cfg,
+                state_tracker=_alarm_v2_state_tracker,
+                alarm_state_mgr=alarm_v2_state_mgr,
+                event_bus=event_bus,
+                safety_manager=safety_manager,
+                predictor_model=_predictor_authority.model,
+            )
+        except Exception as exc:
+            raise PhysicalAlarmsConfigError("cooldown alarm construction failed") from exc
         logger.info("CooldownAlarm: инициализирован (DISARMED по умолчанию)")
     else:
         logger.info("CooldownAlarm: отключён в конфиге")
 
     _vacuum_guard: VacuumGuard | None = None
-    if _vacuum_cfg.get("enabled", True):
-        try:
-            _vacuum_guard = VacuumGuard(
-                cfg=_vacuum_cfg,
-                state_tracker=_alarm_v2_state_tracker,
-                alarm_state_mgr=alarm_v2_state_mgr,
-                event_bus=event_bus,
-                # Opt-in (external safety review, HIGH): wire SafetyManager so a
-                # FIRED vacuum guard latches a fault, not just an alarm. Strict
-                # bool, fail-closed like the wdog gate — pass the handle only on
-                # an explicit `escalate_to_safety: true`; default keeps None
-                # (alarm-only, byte-identical to prior behavior).
-                safety_manager=(safety_manager if _vacuum_cfg.get("escalate_to_safety") is True else None),
-            )
-        except Exception as exc:
-            logger.warning("VacuumGuard: ошибка инициализации, отключён — %s", exc)
+    if _vacuum_cfg["enabled"]:
+        _vacuum_guard = _construct_vacuum_guard_or_config_error(
+            cfg=_vacuum_cfg,
+            state_tracker=_alarm_v2_state_tracker,
+            alarm_state_mgr=alarm_v2_state_mgr,
+            event_bus=event_bus,
+            # Opt-in (external safety review, HIGH): wire SafetyManager so a
+            # FIRED vacuum guard latches a fault, not just an alarm. Strict
+            # bool, fail-closed like the wdog gate — pass the handle only on
+            # an explicit `escalate_to_safety: true`; default keeps None
+            # (alarm-only, byte-identical to prior behavior).
+            safety_manager=(safety_manager if _vacuum_cfg["escalate_to_safety"] else None),
+        )
     else:
         logger.info("VacuumGuard: отключён в конфиге")
 
@@ -3354,6 +3368,11 @@ async def _run_engine(*, mock: bool = False) -> None:
                     broker=broker,
                     config=_cd_cfg,
                     model_dir=_PROJECT_ROOT / _cd_cfg.get("model_dir", "data/cooldown_model"),
+                    predictor_model=_predictor_authority.model,
+                    predictor_digest_sha256=_predictor_authority.digest_sha256,
+                    candidate_model_path=Path(_cooldown_cfg["predictor_model_path"]).with_name(
+                        "predictor_model.candidate.json"
+                    ),
                     # A1: cooldown-end push event on the engine EventBus.
                     event_bus=event_bus,
                     # A2: read-only history reader for ultimate_vacuum enrichment.
@@ -4043,7 +4062,6 @@ ENGINE_CONFIG_ERROR_EXIT_CODE = 2
 def main() -> None:
     """Точка входа cryodaq-engine."""
     import argparse
-    import traceback
 
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")
     parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
@@ -4080,20 +4098,12 @@ def main() -> None:
             # Phase 2b H.3: a YAML parse error during startup is
             # unrecoverable by retry — exit with a distinct code so the
             # launcher refuses to spin in a tight restart loop.
-            logger.critical(
-                "CONFIG ERROR (YAML parse): %s\n%s",
-                exc,
-                traceback.format_exc(),
-            )
+            logger.critical("CONFIG ERROR (YAML parse): %s", type(exc).__name__)
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except FileNotFoundError as exc:
             # Missing required config file at startup is also a config
             # error: same exit code.
-            logger.critical(
-                "CONFIG ERROR (file not found): %s\n%s",
-                exc,
-                traceback.format_exc(),
-            )
+            logger.critical("CONFIG ERROR (file not found): %s", type(exc).__name__)
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except (
             SafetyConfigError,
@@ -4103,8 +4113,12 @@ def main() -> None:
             ChannelConfigError,
             ChannelDescriptorStorageError,
             DriverRegistryError,
+            PhysicalAlarmsConfigError,
+            SafetyPatternLivenessError,
         ) as exc:
             labels = (
+                (PhysicalAlarmsConfigError, "physical alarms"),
+                (SafetyPatternLivenessError, "safety pattern liveness"),
                 (SafetyConfigError, "safety"),
                 (AlarmConfigError, "alarm"),
                 (InterlockConfigError, "interlock"),
@@ -4117,12 +4131,7 @@ def main() -> None:
                 (label for error_type, label in labels if isinstance(exc, error_type)),
                 "config",
             )
-            logger.critical(
-                "CONFIG ERROR (%s config): %s\n%s",
-                label,
-                exc,
-                traceback.format_exc(),
-            )
+            logger.critical("CONFIG ERROR (%s config): %s", label, type(exc).__name__)
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
     finally:
         _release_engine_lock(lock_fd)

@@ -178,7 +178,7 @@ class OperatorSnapshotComposer:
         self._support = support
         self._revision_allocator = revision_allocator
         self._clock = clock
-        self._source = f"engine/operator-snapshot-v1/{leadership_id}"
+        self._source = f"engine/operator-snapshot-v2/{leadership_id}"
         self._generation = 0
         self._owner = object()
         self._compose_lock = asyncio.Lock()
@@ -296,6 +296,7 @@ class OperatorSnapshotComposer:
             _status(readiness_state, source_age, readiness_reasons, "Backend readiness authority"),
             receipts.safety.readiness,
             blockers,
+            receipts.safety.lifecycle,
         )
 
         plant_items = tuple(

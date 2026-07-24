@@ -68,6 +68,7 @@ def test_authoritative_live_safety_transition_enables_then_revokes_source() -> N
     _app()
     window = MainWindowV2()
     try:
+        window._dispatch_reading(_reading())
         window._dispatch_reading(_reading("analytics/safety_state", state="ready"))
         window._ensure_overlay("source")
         panel = window._keithley_panel
@@ -90,6 +91,7 @@ def test_replay_recent_readings_leave_every_mutating_panel_read_only(monkeypatch
         assert window._top_bar._mode_badge.text() == "REPLAY"
         window._top_bar._update_mode_badge("experiment", {"app_mode": "experiment"})
         assert window._top_bar._app_mode == "replay"
+        window._dispatch_reading(_reading())
         window._dispatch_reading(_reading("analytics/safety_state", state="ready"))
         for route in ("source", "experiment", "alarms", "log"):
             window._on_tool_clicked(route)
@@ -121,6 +123,10 @@ def test_replay_recent_readings_leave_every_mutating_panel_read_only(monkeypatch
         assert dashboard._phase_widget._jump_combo.isEnabled() is False
         assert dashboard._quick_log._input.isEnabled() is False
         assert dashboard._quick_log._send_btn.isEnabled() is False
+        window._ensure_overlay("conductivity")
+        window._ensure_overlay("calibration")
+        assert window._conductivity_panel._read_only is True
+        assert window._calibration_panel._read_only is True
 
         def forbidden_worker(*_args, **_kwargs):
             raise AssertionError("read-only replay attempted to construct a command worker")

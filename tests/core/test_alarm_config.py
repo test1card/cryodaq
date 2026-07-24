@@ -49,6 +49,7 @@ global_alarms:
     check: outside_range
     range: [1.0, 350.0]
     level: CRITICAL
+    message: "sensor out of range"
     notify: [gui, telegram]
 
   data_stale:
@@ -56,6 +57,7 @@ global_alarms:
     channel: T12
     timeout_s: 30
     level: WARNING
+    message: "data stale"
     notify: [gui]
 
 phase_alarms:
@@ -66,6 +68,7 @@ phase_alarms:
       check: rate_below
       threshold: -5.0
       level: WARNING
+      message: "cooling rate"
       notify: [gui, telegram]
 
   measurement:
@@ -76,6 +79,7 @@ phase_alarms:
       setpoint_source: T12_setpoint
       threshold: 0.5
       level: WARNING
+      message: "detector drift"
       notify: []
 """
 
@@ -190,6 +194,7 @@ global_alarms:
         check: above
         threshold: 1.0e-3
     level: CRITICAL
+    message: "vacuum cold"
     notify: [gui]
 """
     p = _write_yaml(tmp_path, content)
@@ -212,9 +217,7 @@ def _make_mgr(phase: str | None = "cooldown", started_ago_s: float = 3700.0):
     mgr.get_current_phase.return_value = phase
     if phase:
         dt = datetime.now(UTC) - timedelta(seconds=started_ago_s)
-        mgr.get_phase_history.return_value = [
-            {"phase": phase, "started_at": dt.isoformat(), "ended_at": None}
-        ]
+        mgr.get_phase_history.return_value = [{"phase": phase, "started_at": dt.isoformat(), "ended_at": None}]
         mgr.get_active_experiment.return_value = MagicMock()
     else:
         mgr.get_phase_history.return_value = []
@@ -306,3 +309,31 @@ def test_none_path_with_no_default_raises_with_clear_message(monkeypatch) -> Non
     msg = str(exc_info.value)
     assert "None" not in msg, f"Error contains literal 'None': {msg}"
     assert "no path provided" in msg.lower() or "no default" in msg.lower()
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda text: text + "\nunknown_top: true\n",
+        lambda text: text.replace("channel_group: calibrated", "channel_group: missing", 1),
+        lambda text: text.replace("threshold: -5.0", "threshold: true", 1),
+        lambda text: text + "\nengine:\n  poll_interval_s: 1\n",
+    ],
+)
+def test_alarm_config_rejects_unknown_reference_type_and_duplicate_key(tmp_path: Path, mutator) -> None:
+    path = _write_yaml(tmp_path, mutator(textwrap.dedent(MINIMAL_YAML)))
+    with pytest.raises(AlarmConfigError):
+        load_alarm_config(path)
+
+
+def test_alarm_config_rejects_yaml_anchor(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+        channel_groups: &groups
+          sensors: [T1]
+        global_alarms: {}
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="YAML parse error"):
+        load_alarm_config(path)

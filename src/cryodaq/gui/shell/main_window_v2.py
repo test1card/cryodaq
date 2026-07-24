@@ -38,6 +38,7 @@ from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
+from cryodaq.gui.shell.annunciation_controller import AnnunciationController
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
@@ -67,6 +68,8 @@ logger = logging.getLogger(__name__)
 
 _SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
 _SAFETY_REASON_MAX_CHARS = 120
+_SAFETY_PUBLICATION_TIMEOUT_S = 30.0
+_VALID_SAFETY_STATES = frozenset({"safe_off", "ready", "run_permitted", "running", "fault_latched", "manual_recovery"})
 
 
 def _is_manifest_cold_stage_descriptor(descriptor: ChannelDescriptorV1) -> bool:
@@ -133,6 +136,7 @@ class MainWindowV2(QMainWindow):
         self._rate_count = 0
         self._last_rate_time = time.monotonic()
         self._last_reading_time = 0.0
+        self._last_safety_reading_time = 0.0
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
 
@@ -178,6 +182,7 @@ class MainWindowV2(QMainWindow):
         self._overview_panel = DashboardView(self._channel_mgr)
         self._overview_panel.setParent(self)
         self._overview_panel.set_read_only(self._replay_mode)
+        self._overview_panel.set_connected(False)
         self._operator_display = OperatorDisplay()
         self._alarm_panel = AlarmPanel()
         self._alarm_panel.set_read_only(self._replay_mode)
@@ -214,6 +219,9 @@ class MainWindowV2(QMainWindow):
         self._top_bar.set_replay_mode(self._replay_mode)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
+        # The only in-shell owner of engine annunciation sound.  Launcher
+        # process-death sound remains deliberately separate.
+        self._annunciation_controller = AnnunciationController(self)
         self._overlay = OverlayContainer()
 
         self._overlay.register("home", self._overview_panel)
@@ -314,20 +322,28 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
-        if name in {"source", "experiment", "log"}:
+        if name in {"conductivity", "calibration"}:
+            widget.set_read_only(self._replay_mode)
+        if name in {"source", "experiment", "log", "multiline"}:
             widget.set_read_only(self._replay_mode)
         # II.6 post-review: replay cached connection + safety state into
         # the Keithley overlay on first construction. Without this the
-        # overlay stays in its default (disconnected, safety_ready=True)
+        # overlay stays in its fail-closed default (disconnected, safety_ready=False)
         # until the next _tick_status / safety_state event arrives.
         if name == "source":
             derived_connected = False
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
-            if self._last_safety_state is not None:
+            if derived_connected and self._last_safety_state is not None and self._safety_is_current():
                 ready, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
                 widget.set_safety_ready(ready, reason_text)
+            elif self._last_safety_state is not None:
+                _, reason_text = _map_safety_state(self._last_safety_state, self._last_safety_reason)
+                widget.set_safety_ready(
+                    False,
+                    f"Last-known Safety {self._last_safety_state}: {reason_text}; stale or disconnected",
+                )
             else:
                 widget.set_safety_ready(
                     False,
@@ -521,15 +537,36 @@ class MainWindowV2(QMainWindow):
         """
         self._descriptor_store.invalidate_transport()
 
+    @staticmethod
+    def _is_authoritative_measurement_reading(reading: Reading) -> bool:
+        channel = reading.channel
+        short_channel = channel.split(" ", 1)[0]
+        is_temperature = (
+            len(short_channel) > 1
+            and short_channel[0] in {"T", "Т"}
+            and short_channel[1:].isdigit()
+            and reading.unit == "K"
+        )
+        is_pressure = channel.endswith("/pressure")
+        is_keithley = channel.casefold().startswith("keithley")
+        return is_temperature or is_pressure or is_keithley
+
+    def _safety_is_current(self, now: float | None = None) -> bool:
+        if self._last_safety_reading_time <= 0.0:
+            return False
+        current = time.monotonic() if now is None else now
+        return current - self._last_safety_reading_time < _SAFETY_PUBLICATION_TIMEOUT_S
+
     @Slot(object)
     def _dispatch_reading(
         self,
         reading: Reading,
         dashboard_identity: IdentityStatus = IdentityStatus.LEGACY_ABSENT,
     ) -> None:
-        self._reading_count += 1
-        self._rate_count += 1
-        self._last_reading_time = time.monotonic()
+        if self._is_authoritative_measurement_reading(reading):
+            self._reading_count += 1
+            self._rate_count += 1
+            self._last_reading_time = time.monotonic()
 
         channel = reading.channel
 
@@ -539,6 +576,14 @@ class MainWindowV2(QMainWindow):
             self._top_bar.on_reading(reading)
         except Exception:
             logger.warning("TopWatchBar reading dispatch failed", exc_info=True)
+
+        if channel == "system/disk_free_gb":
+            self._bottom_bar.set_disk_evidence(
+                reading.value,
+                source_time=reading.timestamp,
+                source=reading.metadata.get("source", ""),
+                state=reading.metadata.get("operator_state", ""),
+            )
 
         # Lazy sinks — only route if the panel has been opened at least once
         # B.8.0.2: route log entries to overlay for live timeline
@@ -565,6 +610,12 @@ class MainWindowV2(QMainWindow):
             self._adapt_reading_to_analytics(reading)
             if self._operator_log_panel is not None:
                 self._operator_log_panel.on_reading(reading)
+            if channel == "analytics/safety_state":
+                state_name = reading.metadata.get("state")
+                if state_name not in _VALID_SAFETY_STATES:
+                    logger.warning("Ignoring malformed safety-state publication: %r", state_name)
+                    return
+                self._last_safety_reading_time = time.monotonic()
             if channel == "analytics/safety_state":
                 state_name = reading.metadata.get("state")
                 reason = reading.metadata.get("reason", "") or ""
@@ -766,6 +817,7 @@ class MainWindowV2(QMainWindow):
         connected = silence < 3.0
         # Engine state derives from data flow — single source of truth
         self._top_bar.set_engine_state(connected)
+        self._overview_panel.set_connected(connected)
         if connected:
             elapsed = now - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
@@ -780,18 +832,31 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Нет данных")
             else:
                 self._bottom_bar.set_connected(False, "Engine потерян")
-            # Engine data flow lost — the last-known safety state is no longer
-            # trustworthy. The GUI must not present a stale runtime state as
-            # current (runtime invariant: GUI is not the source of truth for runtime
-            # state); a stale green "running" while the engine is gone is
-            # dangerous. Blank the safety strip and force the Keithley overlay
-            # to not-ready. Idempotent: only acts on the transition.
+            # Engine data flow lost — retain the last known state as evidence,
+            # but visibly revoke its current-truth claim and force controls
+            # not-ready. The GUI never erases operator evidence into a quiet
+            # blank or presents a stale runtime state as current.
             if self._last_safety_state is not None:
-                self._last_safety_state = None
-                self._last_safety_reason = ""
-                self._bottom_bar.set_safety_state(None)
+                self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
                 if self._keithley_panel is not None:
                     self._keithley_panel.set_safety_ready(False, "Engine потерян — состояние безопасности неизвестно")
+        safety_current = connected and self._safety_is_current(now)
+        if self._last_safety_state is None:
+            self._bottom_bar.set_safety_state(None)
+            if self._keithley_panel is not None:
+                self._keithley_panel.set_safety_ready(False, "No authoritative Safety publication")
+        elif not safety_current:
+            self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
+            if self._keithley_panel is not None:
+                self._keithley_panel.set_safety_ready(False, "Safety publication is stale or disconnected")
+        else:
+            self._bottom_bar.set_safety_state(self._last_safety_state)
+            if self._keithley_panel is not None:
+                ready, reason_text = _map_safety_state(
+                    self._last_safety_state,
+                    self._last_safety_reason,
+                )
+                self._keithley_panel.set_safety_ready(ready, reason_text)
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:

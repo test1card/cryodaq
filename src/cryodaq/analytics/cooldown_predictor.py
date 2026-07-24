@@ -20,8 +20,12 @@ Physics:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import stat
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,12 +57,18 @@ T_WARM_START = 295.0
 # Fallbacks used when no curves are available (empty model, first boot).
 # Previous hardcoded values (4.0 K, 85.0 K) silently lost the
 # quasi-stationary regime from ~4 K to the actual 2nd-stage base (~2.9 K).
-T_COLD_END_FALLBACK = 2.5   # K — below typical 2-stage GM floor
+T_COLD_END_FALLBACK = 2.5  # K — below typical 2-stage GM floor
 T_WARM_END_FALLBACK = 75.0  # K — 1st-stage floor with margin
 
 # Module-level aliases kept for backward compatibility with external callers.
 T_COLD_END = T_COLD_END_FALLBACK
 T_WARM_END = T_WARM_END_FALLBACK
+MAX_ACTIVE_MODEL_BYTES = 16 * 1024 * 1024
+MAX_MODEL_CURVES = 4096
+MAX_CURVE_SAMPLES = 1_000_000
+MAX_MODEL_TEXT_CHARS = 256
+MAX_MODEL_DURATION_HOURS = 10_000.0
+MAX_MODEL_TEMPERATURE_K = 1_000.0
 
 # Adaptive rate-based weighting
 RATE_WINDOW_H = 1.5  # compute avg cooling rate over first 1.5h
@@ -152,6 +162,19 @@ class EnsembleModel:
     T_warm_end: float = T_WARM_END_FALLBACK
 
 
+@dataclass(frozen=True, slots=True)
+class PredictorModelAuthority:
+    status: str
+    reason_code: str
+    digest_sha256: str | None
+    schema_version: str | None
+    model: EnsembleModel | None
+
+    @property
+    def available(self) -> bool:
+        return self.status == "AVAILABLE" and self.model is not None
+
+
 # ============================================================================
 # Loading
 # ============================================================================
@@ -235,11 +258,7 @@ def compute_progress(
 def _derive_floors(curves: list[ReferenceCurve]) -> tuple[float, float]:
     """Derive T_cold_end and T_warm_end from observed minima across reference curves."""
     cold_mins = [float(np.nanmin(rc.T_cold)) for rc in curves if len(rc.T_cold) > 0]
-    warm_mins = [
-        float(np.nanmin(rc.T_warm))
-        for rc in curves
-        if len(rc.T_warm) > 0 and not np.all(np.isnan(rc.T_warm))
-    ]
+    warm_mins = [float(np.nanmin(rc.T_warm)) for rc in curves if len(rc.T_warm) > 0 and not np.all(np.isnan(rc.T_warm))]
 
     T_cold_end = max(1.0, min(cold_mins) - 0.5) if cold_mins else T_COLD_END_FALLBACK
     T_warm_end = max(50.0, min(warm_mins) - 2.0) if warm_mins else T_WARM_END_FALLBACK
@@ -296,18 +315,14 @@ def prepare_curve(
     rc.progress = np.maximum.accumulate(rc.progress)
 
     # p(t)
-    rc._p_of_t = interp1d(
-        rc.t_hours, rc.progress, kind="linear", bounds_error=False, fill_value=(0.0, 1.0)
-    )
+    rc._p_of_t = interp1d(rc.t_hours, rc.progress, kind="linear", bounds_error=False, fill_value=(0.0, 1.0))
 
     # t(p), Tc(p), Tw(p) -- need unique progress values
     _, unique_idx = np.unique(rc.progress, return_index=True)
     if len(unique_idx) >= 2:
         p_u = rc.progress[unique_idx]
         t_u = rc.t_hours[unique_idx]
-        rc._t_of_p = interp1d(
-            p_u, t_u, kind="linear", bounds_error=False, fill_value=(t_u[0], t_u[-1])
-        )
+        rc._t_of_p = interp1d(p_u, t_u, kind="linear", bounds_error=False, fill_value=(t_u[0], t_u[-1]))
         rc._Tc_of_p = interp1d(
             p_u,
             Tc[unique_idx],
@@ -411,9 +426,7 @@ def build_ensemble(
     t_sorted = t_mean[valid][t_sorted_idx]
     p_sorted = p_grid[valid][t_sorted_idx]
     _, u_idx = np.unique(t_sorted, return_index=True)
-    _p_of_t = interp1d(
-        t_sorted[u_idx], p_sorted[u_idx], kind="linear", bounds_error=False, fill_value=(0.0, 1.0)
-    )
+    _p_of_t = interp1d(t_sorted[u_idx], p_sorted[u_idx], kind="linear", bounds_error=False, fill_value=(0.0, 1.0))
 
     durations = [rc.duration_hours for rc in curves]
 
@@ -493,9 +506,7 @@ def predict(
     )
 
     # Compute rate statistics for outlier detection (warm only; see below)
-    ref_rates_warm = np.array(
-        [rc.initial_rate_warm for rc in model.curves if rc.initial_rate_warm != 0.0]
-    )
+    ref_rates_warm = np.array([rc.initial_rate_warm for rc in model.curves if rc.initial_rate_warm != 0.0])
 
     rate_warm_mean = float(np.mean(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 0.0
     rate_warm_std = float(np.std(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 999.0
@@ -709,24 +720,16 @@ def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[Valida
         for qi in range(i_s, i_e, step):
             t_el = held.t_hours[qi]
             Tc = held.T_cold[qi]
-            Tw = (
-                held.T_warm[qi]
-                if qi < len(held.T_warm) and not np.isnan(held.T_warm[qi])
-                else 200.0
-            )
+            Tw = held.T_warm[qi] if qi < len(held.T_warm) and not np.isnan(held.T_warm[qi]) else 200.0
 
             # Adaptive rate: compute from held-out history up to this point
             rate_c, rate_w = None, None
             if t_el >= RATE_MIN_HISTORY_H:
                 hist_mask = held.t_hours[: qi + 1] <= RATE_WINDOW_H
                 if np.sum(hist_mask) >= 10:
-                    rate_c = _compute_initial_rate(
-                        held.t_hours[: qi + 1], held.T_cold[: qi + 1], RATE_WINDOW_H
-                    )
+                    rate_c = _compute_initial_rate(held.t_hours[: qi + 1], held.T_cold[: qi + 1], RATE_WINDOW_H)
                     if not np.all(np.isnan(held.T_warm[: qi + 1])):
-                        rate_w = _compute_initial_rate(
-                            held.t_hours[: qi + 1], held.T_warm[: qi + 1], RATE_WINDOW_H
-                        )
+                        rate_w = _compute_initial_rate(held.t_hours[: qi + 1], held.T_warm[: qi + 1], RATE_WINDOW_H)
                     if rate_c == 0.0:
                         rate_c = None
                     if rate_w is not None and rate_w == 0.0:
@@ -879,9 +882,7 @@ def plot_ensemble(model: EnsembleModel, output: Path):
     ax6 = fig.add_subplot(gs[2, 1])
     durs = [rc.duration_hours for rc in model.curves]
     ax6.hist(durs, bins=max(3, len(durs) // 2), edgecolor="black", alpha=0.7, color="steelblue")
-    ax6.axvline(
-        model.duration_mean, color="red", ls="--", label=f"Mean: {model.duration_mean:.1f}h"
-    )
+    ax6.axvline(model.duration_mean, color="red", ls="--", label=f"Mean: {model.duration_mean:.1f}h")
     ax6.set_xlabel("Duration, h")
     ax6.set_ylabel("Count")
     ax6.set_title(f"Duration (n={model.n_curves})")
@@ -933,9 +934,7 @@ def plot_prediction(model, pred, T_cold_now, T_warm_now, t_elapsed, output):
 
     t_end = t_elapsed + pred.t_remaining_hours
     ci = pred.t_remaining_high_68 - pred.t_remaining_hours
-    axes[0].axvline(
-        t_end, color="green", ls="--", alpha=0.7, label=f"ETA: {t_end:.1f}h (+/-{ci:.1f}h)"
-    )
+    axes[0].axvline(t_end, color="green", ls="--", alpha=0.7, label=f"ETA: {t_end:.1f}h (+/-{ci:.1f}h)")
     axes[1].axvline(t_end, color="green", ls="--", alpha=0.7)
 
     axes[0].set_ylabel("T_cold, K")
@@ -1092,8 +1091,7 @@ def save_model(model: EnsembleModel, output_dir: Path):
     logger.info("Модель сохранена: %s (%.0f KB)", out, out.stat().st_size / 1024)
 
 
-def load_model(model_dir: Path) -> EnsembleModel:
-    d = json.loads((model_dir / "predictor_model.json").read_text(encoding="utf-8"))
+def _model_from_document(d: dict) -> EnsembleModel:
     raw_curves = []
     for cd in d["curves"]:
         rc = ReferenceCurve(
@@ -1110,6 +1108,442 @@ def load_model(model_dir: Path) -> EnsembleModel:
         )
         raw_curves.append(rc)
     return build_model_from_curves(raw_curves)
+
+
+_AUTHORITATIVE_MODEL_KEYS = frozenset(
+    {
+        "version",
+        "n_curves",
+        "T_cold_end",
+        "T_warm_end",
+        "duration_mean",
+        "duration_std",
+        "p_grid",
+        "t_mean",
+        "t_std",
+        "Tc_mean",
+        "Tc_std",
+        "Tw_mean",
+        "Tw_std",
+        "curves",
+    }
+)
+_AUTHORITATIVE_CURVE_KEYS = frozenset(
+    {
+        "name",
+        "date",
+        "duration_hours",
+        "phase1_hours",
+        "phase2_hours",
+        "T_cold_final",
+        "T_warm_final",
+        "t_hours",
+        "T_cold",
+        "T_warm",
+    }
+)
+_MODEL_VECTOR_NAMES = (
+    "p_grid",
+    "t_mean",
+    "t_std",
+    "Tc_mean",
+    "Tc_std",
+    "Tw_mean",
+    "Tw_std",
+)
+_MODEL_MATRIX_NAMES = ("t_matrix", "Tc_matrix", "Tw_matrix")
+
+
+class _AuthoritativeModelAdmissionError(ValueError):
+    pass
+
+
+def _strict_json_mapping(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _AuthoritativeModelAdmissionError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise _AuthoritativeModelAdmissionError("non-finite JSON constant")
+
+
+def _is_plain_real(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _finite_real(value: Any, *, minimum: float, maximum: float) -> float:
+    if not _is_plain_real(value):
+        raise _AuthoritativeModelAdmissionError("numeric field has invalid type")
+    number = float(value)
+    if not math.isfinite(number) or not minimum <= number <= maximum:
+        raise _AuthoritativeModelAdmissionError("numeric field is outside bounds")
+    return number
+
+
+def _bounded_model_text(value: Any, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or len(value) > MAX_MODEL_TEXT_CHARS:
+        raise _AuthoritativeModelAdmissionError("text field has invalid type or size")
+    if not allow_empty and not value:
+        raise _AuthoritativeModelAdmissionError("text field is empty")
+    if unicodedata.normalize("NFC", value) != value or any(
+        unicodedata.category(character) in {"Cc", "Cf"} for character in value
+    ):
+        raise _AuthoritativeModelAdmissionError("text field is not canonical")
+    return value
+
+
+def _finite_real_list(
+    value: Any,
+    *,
+    exact_length: int | None = None,
+    minimum_length: int = 0,
+    maximum_length: int = MAX_CURVE_SAMPLES,
+    minimum: float,
+    maximum: float,
+) -> np.ndarray:
+    if not isinstance(value, list):
+        raise _AuthoritativeModelAdmissionError("numeric vector must be a list")
+    length = len(value)
+    if exact_length is not None and length != exact_length:
+        raise _AuthoritativeModelAdmissionError("numeric vector has invalid shape")
+    if not minimum_length <= length <= maximum_length:
+        raise _AuthoritativeModelAdmissionError("numeric vector has invalid size")
+    if any(not _is_plain_real(item) for item in value):
+        raise _AuthoritativeModelAdmissionError("numeric vector contains invalid type")
+    array = np.asarray(value, dtype=float)
+    if array.ndim != 1 or not np.all(np.isfinite(array)):
+        raise _AuthoritativeModelAdmissionError("numeric vector contains non-finite value")
+    if np.any(array < minimum) or np.any(array > maximum):
+        raise _AuthoritativeModelAdmissionError("numeric vector is outside bounds")
+    return array
+
+
+def _validated_authoritative_curves(document: dict[str, Any]) -> list[ReferenceCurve]:
+    if set(document) != _AUTHORITATIVE_MODEL_KEYS or document["version"] != "2.0":
+        raise _AuthoritativeModelAdmissionError("model schema is unsupported")
+    declared = document["n_curves"]
+    if type(declared) is not int or not 1 <= declared <= MAX_MODEL_CURVES:
+        raise _AuthoritativeModelAdmissionError("declared curve count is invalid")
+    curves = document["curves"]
+    if not isinstance(curves, list) or len(curves) != declared:
+        raise _AuthoritativeModelAdmissionError("declared curve count does not match artifact")
+
+    _finite_real(
+        document["T_cold_end"],
+        minimum=0.0,
+        maximum=MAX_MODEL_TEMPERATURE_K,
+    )
+    _finite_real(
+        document["T_warm_end"],
+        minimum=0.0,
+        maximum=MAX_MODEL_TEMPERATURE_K,
+    )
+    _finite_real(
+        document["duration_mean"],
+        minimum=0.0,
+        maximum=MAX_MODEL_DURATION_HOURS,
+    )
+    _finite_real(
+        document["duration_std"],
+        minimum=0.0,
+        maximum=MAX_MODEL_DURATION_HOURS,
+    )
+    derived_bounds = {
+        "p_grid": (0.0, 1.0),
+        "t_mean": (0.0, MAX_MODEL_DURATION_HOURS),
+        "t_std": (0.0, MAX_MODEL_DURATION_HOURS),
+        "Tc_mean": (0.0, MAX_MODEL_TEMPERATURE_K),
+        "Tc_std": (0.0, MAX_MODEL_TEMPERATURE_K),
+        "Tw_mean": (0.0, MAX_MODEL_TEMPERATURE_K),
+        "Tw_std": (0.0, MAX_MODEL_TEMPERATURE_K),
+    }
+    saved_vectors: dict[str, np.ndarray] = {}
+    for name, (minimum, maximum) in derived_bounds.items():
+        saved_vectors[name] = _finite_real_list(
+            document[name],
+            exact_length=N_PROGRESS_GRID,
+            minimum=minimum,
+            maximum=maximum,
+        )
+    if not np.all(np.diff(saved_vectors["p_grid"]) > 0):
+        raise _AuthoritativeModelAdmissionError("saved progress grid is not strictly increasing")
+
+    raw_curves: list[ReferenceCurve] = []
+    for curve in curves:
+        if not isinstance(curve, dict) or set(curve) != _AUTHORITATIVE_CURVE_KEYS:
+            raise _AuthoritativeModelAdmissionError("curve schema is invalid")
+        name = _bounded_model_text(curve["name"])
+        date = _bounded_model_text(curve["date"], allow_empty=True)
+        duration = _finite_real(
+            curve["duration_hours"],
+            minimum=0.0,
+            maximum=MAX_MODEL_DURATION_HOURS,
+        )
+        if duration <= 0:
+            raise _AuthoritativeModelAdmissionError("curve duration must be positive")
+        phase1 = _finite_real(
+            curve["phase1_hours"],
+            minimum=0.0,
+            maximum=duration,
+        )
+        phase2 = _finite_real(
+            curve["phase2_hours"],
+            minimum=0.0,
+            maximum=duration,
+        )
+        cold_final = _finite_real(
+            curve["T_cold_final"],
+            minimum=0.0,
+            maximum=MAX_MODEL_TEMPERATURE_K,
+        )
+        warm_final = _finite_real(
+            curve["T_warm_final"],
+            minimum=0.0,
+            maximum=MAX_MODEL_TEMPERATURE_K,
+        )
+        t_hours = _finite_real_list(
+            curve["t_hours"],
+            minimum_length=MIN_SAMPLES,
+            minimum=0.0,
+            maximum=MAX_MODEL_DURATION_HOURS,
+        )
+        sample_count = len(t_hours)
+        cold = _finite_real_list(
+            curve["T_cold"],
+            exact_length=sample_count,
+            minimum=0.0,
+            maximum=MAX_MODEL_TEMPERATURE_K,
+        )
+        warm = _finite_real_list(
+            curve["T_warm"],
+            exact_length=sample_count,
+            minimum=0.0,
+            maximum=MAX_MODEL_TEMPERATURE_K,
+        )
+        if not np.all(np.diff(t_hours) > 0):
+            raise _AuthoritativeModelAdmissionError("curve time is not strictly increasing")
+        if cold[0] < 100.0:
+            raise _AuthoritativeModelAdmissionError("curve starts outside predictor range")
+        raw_curves.append(
+            ReferenceCurve(
+                name=name,
+                date=date,
+                t_hours=t_hours,
+                T_cold=cold,
+                T_warm=warm,
+                duration_hours=duration,
+                phase1_hours=phase1,
+                phase2_hours=phase2,
+                T_cold_final=cold_final,
+                T_warm_final=warm_final,
+            )
+        )
+    return raw_curves
+
+
+def _validate_authoritative_model(
+    model: EnsembleModel,
+    document: dict[str, Any],
+    raw_count: int,
+) -> None:
+    declared = document["n_curves"]
+    if type(model.n_curves) is not int or model.n_curves != declared or len(model.curves) != raw_count:
+        raise _AuthoritativeModelAdmissionError("prepared curve count does not match declaration")
+    for name in _MODEL_VECTOR_NAMES:
+        value = getattr(model, name, None)
+        if not isinstance(value, np.ndarray) or value.shape != (N_PROGRESS_GRID,) or not np.all(np.isfinite(value)):
+            raise _AuthoritativeModelAdmissionError("derived model vector is invalid")
+        saved = np.asarray(document[name], dtype=float)
+        if not np.allclose(value, saved, rtol=1e-12, atol=1e-12):
+            raise _AuthoritativeModelAdmissionError("saved model vector is inconsistent")
+    for name in _MODEL_MATRIX_NAMES:
+        value = getattr(model, name, None)
+        if not isinstance(value, np.ndarray) or value.shape != (declared, N_PROGRESS_GRID):
+            raise _AuthoritativeModelAdmissionError("derived model matrix has invalid shape")
+        if not np.all(np.isfinite(value)):
+            raise _AuthoritativeModelAdmissionError("derived model matrix contains non-finite value")
+    if not np.all(np.diff(model.p_grid) > 0) or np.any(model.p_grid < 0) or np.any(model.p_grid > 1):
+        raise _AuthoritativeModelAdmissionError("derived progress grid is invalid")
+    scalar_bounds = {
+        "duration_mean": (0.0, MAX_MODEL_DURATION_HOURS),
+        "duration_std": (0.0, MAX_MODEL_DURATION_HOURS),
+        "T_cold_end": (0.0, MAX_MODEL_TEMPERATURE_K),
+        "T_warm_end": (0.0, MAX_MODEL_TEMPERATURE_K),
+    }
+    for name, (minimum, maximum) in scalar_bounds.items():
+        value = _finite_real(getattr(model, name, None), minimum=minimum, maximum=maximum)
+        if not math.isclose(value, float(document[name]), rel_tol=1e-12, abs_tol=1e-12):
+            raise _AuthoritativeModelAdmissionError("saved model scalar is inconsistent")
+    if model.duration_mean <= 0:
+        raise _AuthoritativeModelAdmissionError("derived model duration is invalid")
+    for curve in model.curves:
+        length = len(curve.t_hours)
+        if length < MIN_SAMPLES or not (
+            curve.T_cold.shape
+            == curve.T_warm.shape
+            == curve.T_cold_smooth.shape
+            == curve.T_warm_smooth.shape
+            == curve.progress.shape
+            == curve.t_hours.shape
+        ):
+            raise _AuthoritativeModelAdmissionError("prepared curve shape is invalid")
+        arrays = (
+            curve.t_hours,
+            curve.T_cold,
+            curve.T_warm,
+            curve.T_cold_smooth,
+            curve.T_warm_smooth,
+            curve.progress,
+        )
+        if any(not np.all(np.isfinite(array)) for array in arrays):
+            raise _AuthoritativeModelAdmissionError("prepared curve contains non-finite value")
+        if not np.all(np.diff(curve.t_hours) > 0):
+            raise _AuthoritativeModelAdmissionError("prepared curve time is invalid")
+        if any(
+            owner is None or not callable(owner)
+            for owner in (curve._p_of_t, curve._t_of_p, curve._Tc_of_p, curve._Tw_of_p)
+        ):
+            raise _AuthoritativeModelAdmissionError("prepared curve interpolation is unavailable")
+    if any(owner is None or not callable(owner) for owner in (model._t_of_p_mean, model._p_of_t_mean)):
+        raise _AuthoritativeModelAdmissionError("model interpolation is unavailable")
+
+
+def load_model(model_dir: Path) -> EnsembleModel:
+    document = json.loads((model_dir / "predictor_model.json").read_text(encoding="utf-8"))
+    return _model_from_document(document)
+
+
+def _model_file_snapshot(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _model_reparse_point(metadata: os.stat_result) -> bool:
+    return bool(getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _unavailable_model(reason_code: str) -> PredictorModelAuthority:
+    return PredictorModelAuthority(
+        status="UNAVAILABLE",
+        reason_code=reason_code,
+        digest_sha256=None,
+        schema_version=None,
+        model=None,
+    )
+
+
+def _freeze_active_model(model: EnsembleModel) -> None:
+    arrays = (
+        "p_grid",
+        "t_matrix",
+        "Tc_matrix",
+        "Tw_matrix",
+        "t_mean",
+        "t_std",
+        "Tc_mean",
+        "Tc_std",
+        "Tw_mean",
+        "Tw_std",
+    )
+    for name in arrays:
+        value = getattr(model, name)
+        value.setflags(write=False)
+    for curve in model.curves:
+        for name in ("t_hours", "T_cold", "T_warm", "T_cold_smooth", "T_warm_smooth", "progress"):
+            value = getattr(curve, name, None)
+            if isinstance(value, np.ndarray):
+                value.setflags(write=False)
+
+
+def load_predictor_model_authority(model_file: Path) -> PredictorModelAuthority:
+    try:
+        before = model_file.lstat()
+    except FileNotFoundError:
+        return _unavailable_model("predictor_model_missing")
+    except OSError:
+        return _unavailable_model("predictor_model_metadata_unavailable")
+    if (
+        model_file.is_symlink()
+        or _model_reparse_point(before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > MAX_ACTIVE_MODEL_BYTES
+    ):
+        return _unavailable_model("predictor_model_unsafe_file")
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(model_file, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _model_reparse_point(opened)
+            or not os.path.samestat(before, opened)
+            or (before.st_size, before.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns)
+        ):
+            return _unavailable_model("predictor_model_changed_while_opening")
+        payload = bytearray()
+        while len(payload) <= MAX_ACTIVE_MODEL_BYTES:
+            size = min(65_536, MAX_ACTIVE_MODEL_BYTES + 1 - len(payload))
+            chunk = os.read(descriptor, size)
+            if not chunk:
+                break
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            _model_file_snapshot(after) != _model_file_snapshot(opened)
+            or len(payload) != after.st_size
+            or len(payload) > MAX_ACTIVE_MODEL_BYTES
+        ):
+            return _unavailable_model("predictor_model_changed_while_reading")
+        after_path = model_file.lstat()
+        if (
+            model_file.is_symlink()
+            or _model_reparse_point(after_path)
+            or not stat.S_ISREG(after_path.st_mode)
+            or not os.path.samestat(after_path, after)
+            or (after_path.st_size, after_path.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+        ):
+            return _unavailable_model("predictor_model_path_changed")
+    except OSError:
+        return _unavailable_model("predictor_model_read_failed")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        text = bytes(payload).decode("utf-8")
+        document = json.loads(
+            text,
+            object_pairs_hook=_strict_json_mapping,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, _AuthoritativeModelAdmissionError):
+        return _unavailable_model("predictor_model_content_invalid")
+    if not isinstance(document, dict):
+        return _unavailable_model("predictor_model_schema_invalid")
+    try:
+        raw_curves = _validated_authoritative_curves(document)
+        model = build_model_from_curves(raw_curves)
+        _validate_authoritative_model(model, document, len(raw_curves))
+        _freeze_active_model(model)
+    except _AuthoritativeModelAdmissionError:
+        return _unavailable_model("predictor_model_schema_invalid")
+    except Exception:
+        return _unavailable_model("predictor_model_derived_invalid")
+    return PredictorModelAuthority(
+        status="AVAILABLE",
+        reason_code="predictor_model_loaded",
+        digest_sha256=hashlib.sha256(payload).hexdigest(),
+        schema_version="2.0",
+        model=model,
+    )
 
 
 # ============================================================================

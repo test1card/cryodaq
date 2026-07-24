@@ -87,6 +87,7 @@ async def test_disk_monitor_publishes_reading(tmp_path: Path) -> None:
     assert r.channel == "system/disk_free_gb"
     assert r.unit == "GB"
     assert r.value > 0, "disk free should be > 0"
+    assert r.metadata == {"source": "disk_monitor", "operator_state": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +148,7 @@ async def test_disk_monitor_warning_threshold(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_disk_monitor_critical_threshold(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_disk_monitor_critical_threshold(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """When free space is below 2 GB, a CRITICAL log message must be emitted."""
     broker = DataBroker()
     await broker.subscribe("test_sub", maxsize=100)
@@ -169,3 +168,38 @@ async def test_disk_monitor_critical_threshold(
 
     critical_messages = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
     assert len(critical_messages) > 0, "Expected at least one CRITICAL log when disk free < 2 GB"
+
+
+@pytest.mark.parametrize(
+    ("free_gb", "warning_gb", "critical_gb", "visible", "state"),
+    [
+        (1.96, 10.0, 2.0, 2.0, "fault"),
+        (9.96, 10.0, 2.0, 10.0, "caution"),
+        (10.04, 20.0, 12.0, 10.0, "fault"),
+    ],
+)
+async def test_operator_state_uses_raw_value_and_configured_thresholds(
+    tmp_path: Path,
+    free_gb: float,
+    warning_gb: float,
+    critical_gb: float,
+    visible: float,
+    state: str,
+) -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("test_sub", maxsize=1)
+    monitor = DiskMonitor(
+        tmp_path,
+        broker,
+        warning_gb=warning_gb,
+        critical_gb=critical_gb,
+    )
+    with patch(
+        "cryodaq.core.disk_monitor.shutil.disk_usage",
+        return_value=_mock_usage(free_gb),
+    ):
+        await monitor._check_once()
+
+    reading = await asyncio.wait_for(queue.get(), timeout=1.0)
+    assert reading.value == visible
+    assert reading.metadata["operator_state"] == state

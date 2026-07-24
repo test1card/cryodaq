@@ -7,14 +7,14 @@
 # Regex — если канал не обновляется в течение stale_timeout_s → FAULT.
 #
 # Architect rule (2026-05-07): только positionally-fixed reference
-# каналы gate the safety FSM. T11 (1-я ступень, ~40K floor) и T12
-# (2-я ступень, холодная точка, ~3K floor) — единственные каналы,
+# каналы gate the safety FSM. T11 (азотная/1-я ступень, ~40K floor) и T12
+# (холодная/2-я ступень, холодная точка, ~3K floor) — единственные каналы,
 # физически закреплённые между экспериментами. Другие T-каналы —
 # mobile per-experiment, использование их как critical_channels
 # создаёт ложные fault'ы при перестановке датчиков.
 critical_channels:
-  - "Т11 .*"    # 1-я ступень GM-cooler (positionally fixed)
-  - "Т12 .*"    # 2-я ступень, холодная точка (positionally fixed)
+  - "^Т11$"     # canonical identity; startup resolves the one exact raw binding
+  - "^Т12$"     # canonical identity; startup resolves the one exact raw binding
 
 # Через сколько секунд без обновления критический канал считается устаревшим
 stale_timeout_s: 10.0

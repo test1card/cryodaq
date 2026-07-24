@@ -29,6 +29,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -48,7 +49,7 @@ def qapp() -> QApplication:
 def _snapshot(
     revision: int,
     *,
-    source: str = "engine/operator-snapshot-v1/source-a",
+    source: str = "engine/operator-snapshot-v2/source-a",
     mode: SnapshotMode = SnapshotMode.LIVE,
     observed_at: datetime = NOW,
     received_at: datetime | None = None,
@@ -64,6 +65,7 @@ def _snapshot(
             status,
             ReadinessTruth.UNKNOWN,
             (),
+            SafetyLifecycle.UNKNOWN,
         ),
         PlantHealthSummary(cut, status, ()),
         InfrastructureNodeHealth(cut, status, ()),
@@ -185,6 +187,8 @@ def test_new_cut_and_stale_transport_emit_once_as_one_atomic_presentation(qapp) 
     assert emitted[0].cut.revision == 1
     assert all(summary.transport_age_s >= 6 for summary in emitted[0].summaries())
     assert all(summary.transport_reason_codes == ("snapshot_stale",) for summary in emitted[0].summaries())
+    assert emitted[0].readiness.readiness is ReadinessTruth.UNKNOWN
+    assert emitted[0].readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
 
 def test_two_queued_cuts_coalesce_to_one_newest_qualified_revision(qapp) -> None:
@@ -259,11 +263,15 @@ def test_stale_and_disconnected_health_are_snapshot_only_and_never_restart(qapp)
     assert owner.snapshot is not None
     assert {summary.state for summary in owner.snapshot.summaries()} == {OperatorPresentationState.CAUTION}
     assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("snapshot_stale",)}
+    assert owner.snapshot.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
     bridge.alive = False
     owner._apply_transport(owner._epoch)
     assert owner.snapshot is not None
     assert {summary.transport_reason_codes for summary in owner.snapshot.summaries()} == {("transport_disconnected",)}
+    assert owner.snapshot.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert owner.snapshot.readiness.lifecycle is SafetyLifecycle.UNKNOWN
 
 
 def test_nonmonotonic_or_wrong_type_candidate_rejects_and_fails_closed(qapp) -> None:

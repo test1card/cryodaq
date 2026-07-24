@@ -156,16 +156,22 @@ def test_lazy_open_replays_current_experiment():
 # ----------------------------------------------------------------------
 
 
-def test_operator_log_entry_reading_triggers_refresh_on_overlay():
+def test_operator_log_entry_does_not_forge_connection_or_refresh_on_overlay():
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("log")
         workers_before = len(w._operator_log_panel._workers)
         w._dispatch_reading(_log_entry_reading())
-        # Rendered effect: dispatch triggers refresh_entries() which spawns a
-        # ZmqCommandWorker for log_get. The worker list must have grown.
-        assert len(w._operator_log_panel._workers) > workers_before
+        # Analytics/support traffic is not measurement freshness or engine
+        # presence authority. A log entry may update the view only after a
+        # separately established live connection; it cannot spawn a poll by
+        # itself.
+        assert len(w._operator_log_panel._workers) == workers_before
+        assert w._last_reading_time == 0.0
+        w._tick_status()
+        assert w._overview_panel._connected is False
+        assert w._operator_log_panel._submit_btn.isEnabled() is False
     finally:
         _stop_timers(w)
 
@@ -190,6 +196,28 @@ def test_unrelated_analytics_reading_does_not_crash():
         )
         # No refresh spawned for unrelated reading.
         assert len(w._operator_log_panel._workers) == workers_before
+    finally:
+        _stop_timers(w)
+
+
+def test_arbitrary_generic_reading_cannot_establish_connection_authority():
+    _app()
+    w = MainWindowV2()
+    try:
+        w._dispatch_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="support",
+                channel="unclassified/support_heartbeat",
+                value=1.0,
+                unit="",
+                metadata={},
+            )
+        )
+        w._tick_status()
+
+        assert w._last_reading_time == 0.0
+        assert w._overview_panel._connected is False
     finally:
         _stop_timers(w)
 

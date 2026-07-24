@@ -35,6 +35,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -131,7 +132,7 @@ class ReplayOperatorSnapshotSession:
 
     @property
     def source(self) -> str:
-        return f"replay/operator-v1/{self._fingerprint[:32]}/{self._nonce}/{self._epoch:016x}"
+        return f"replay/operator-v2/{self._fingerprint[:32]}/{self._nonce}/{self._epoch:016x}"
 
     def begin_seek_epoch(self) -> str:
         """Start an explicit source epoch without resetting global revision."""
@@ -269,6 +270,7 @@ def _build_replay_snapshot(
             status("replay_readiness_unavailable", "Replay cannot authorize readiness"),
             ReadinessTruth.UNKNOWN,
             (),
+            SafetyLifecycle.UNKNOWN,
         ),
         PlantHealthSummary(
             cut,

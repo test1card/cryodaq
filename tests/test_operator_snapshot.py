@@ -1,4 +1,5 @@
 import ast
+import inspect
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -39,6 +40,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -74,6 +76,7 @@ def _snapshot(*, mode: SnapshotMode = SnapshotMode.LIVE) -> OperatorSnapshot:
             summary_status,
             ReadinessTruth.UNKNOWN if mode is SnapshotMode.REPLAY else ReadinessTruth.READY,
             (),
+            SafetyLifecycle.UNKNOWN if mode is SnapshotMode.REPLAY else SafetyLifecycle.READY,
         ),
         PlantHealthSummary(cut, summary_status, (PlantHealthItem("plant", "Установка", summary_status.state, ()),)),
         InfrastructureNodeHealth(
@@ -128,6 +131,7 @@ def _transport_degraded_envelope(reason: str = "transport_disconnected") -> dict
         snapshot[key]["status"]["transport_age_s"] = 8.0
         snapshot[key]["status"]["transport_reason_codes"] = [reason]
     snapshot["readiness"]["readiness"] = "unknown"
+    snapshot["readiness"]["lifecycle"] = "unknown"
     snapshot["experiment"]["recording"] = "unknown"
     snapshot["experiment"]["recording_session_id"] = None
     snapshot["data_integrity"]["storage"] = "unknown"
@@ -147,6 +151,7 @@ def test_replay_cut_is_observation_only_and_cannot_claim_live_summary_authority(
 
     assert replay.authority_boundary == "observation_only"
     assert replay.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert replay.readiness.lifecycle is SafetyLifecycle.UNKNOWN
     assert replay.experiment.recording is RecordingTruth.REPLAY_ONLY
     assert replay.data_integrity.storage is AvailabilityTruth.UNKNOWN
     assert replay.support_bundle.availability is AvailabilityTruth.UNKNOWN
@@ -162,6 +167,7 @@ def test_replay_cut_is_observation_only_and_cannot_claim_live_summary_authority(
         replay.readiness,
         readiness=ReadinessTruth.BLOCKED,
         blockers=(historical_blocker,),
+        lifecycle=SafetyLifecycle.FAULT_LATCHED,
     )
     with pytest.raises(ValueError, match="replay readiness must remain UNKNOWN"):
         OperatorSnapshot(replay.cut, blocked, *replay.summaries()[1:])
@@ -213,11 +219,21 @@ def test_false_green_and_aggregate_contradictions_are_unrepresentable() -> None:
     warning = ReadinessBlocker("vacuum", OperatorPresentationState.WARNING, "Вакуум", "Проверка")
 
     with pytest.raises(ValueError, match="BLOCKED requires"):
-        replace(snapshot.readiness, readiness=ReadinessTruth.BLOCKED, blockers=())
+        replace(
+            snapshot.readiness,
+            readiness=ReadinessTruth.BLOCKED,
+            blockers=(),
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
+        )
     with pytest.raises(ValueError, match="most severe blocker"):
-        replace(snapshot.readiness, readiness=ReadinessTruth.BLOCKED, blockers=(warning,))
+        replace(
+            snapshot.readiness,
+            readiness=ReadinessTruth.BLOCKED,
+            blockers=(warning,),
+            lifecycle=SafetyLifecycle.FAULT_LATCHED,
+        )
     with pytest.raises(ValueError, match="UNKNOWN readiness"):
-        replace(snapshot.readiness, readiness=ReadinessTruth.UNKNOWN)
+        replace(snapshot.readiness, readiness=ReadinessTruth.UNKNOWN, lifecycle=SafetyLifecycle.UNKNOWN)
     with pytest.raises(ValueError, match="most severe item"):
         replace(
             snapshot.attention,
@@ -287,6 +303,7 @@ def test_unknown_readiness_cannot_hide_urgent_blocker(
             status=replace(snapshot.readiness.status, state=OperatorPresentationState.STALE),
             readiness=ReadinessTruth.UNKNOWN,
             blockers=(blocker,),
+            lifecycle=SafetyLifecycle.UNKNOWN,
         )
 
     accepted = replace(
@@ -294,6 +311,7 @@ def test_unknown_readiness_cannot_hide_urgent_blocker(
         status=replace(snapshot.readiness.status, state=blocker_state),
         readiness=ReadinessTruth.UNKNOWN,
         blockers=(blocker,),
+        lifecycle=SafetyLifecycle.UNKNOWN,
     )
     assert accepted.state is blocker_state
 
@@ -555,6 +573,7 @@ def test_identity_time_series_attention_and_path_invariants() -> None:
 def test_codec_round_trip_is_byte_canonical_for_live_and_replay() -> None:
     for mode in SnapshotMode:
         snapshot = _snapshot(mode=mode)
+        assert encode_operator_snapshot(snapshot)["version"] == 2
         wire = dump_operator_snapshot(snapshot)
         restored = load_operator_snapshot(wire)
 
@@ -584,13 +603,69 @@ def test_codec_rejects_noncanonical_utc_spellings(alternate: str) -> None:
 
 def test_loader_rejects_duplicate_keys_at_outer_and_nested_depth() -> None:
     wire = dump_operator_snapshot(_snapshot())
-    outer = wire.replace('"version":1', '"version":2,"version":1', 1)
+    outer = wire.replace('"version":2', '"version":1,"version":2', 1)
     nested = wire.replace('"revision":42', '"revision":41,"revision":42', 1)
 
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):
         load_operator_snapshot(outer)
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):
         load_operator_snapshot(nested)
+
+
+def test_live_readiness_lifecycle_is_exact_and_transport_loss_revokes_current_lifecycle() -> None:
+    snapshot = _snapshot()
+    assert snapshot.readiness.lifecycle is SafetyLifecycle.READY
+
+    envelope = _transport_degraded_envelope()
+    degraded = decode_operator_snapshot(envelope)
+    assert degraded.readiness.readiness is ReadinessTruth.UNKNOWN
+    assert degraded.readiness.lifecycle is SafetyLifecycle.UNKNOWN
+
+    optimistic = _transport_degraded_envelope()
+    optimistic["snapshot"]["readiness"]["lifecycle"] = "ready"
+    with pytest.raises(ValueError, match="UNKNOWN readiness requires UNKNOWN safety lifecycle"):
+        decode_operator_snapshot(optimistic)
+
+    with pytest.raises(ValueError, match="READY readiness requires READY safety lifecycle"):
+        replace(snapshot.readiness, lifecycle=SafetyLifecycle.FAULT_LATCHED)
+
+    with pytest.raises(TypeError, match="exact SafetyLifecycle"):
+        replace(snapshot.readiness, lifecycle="ready")  # type: ignore[arg-type]
+
+    malformed = encode_operator_snapshot(snapshot)
+    malformed["snapshot"]["readiness"]["lifecycle"] = "operator_guess"
+    with pytest.raises(ValueError, match="snapshot.readiness.lifecycle"):
+        decode_operator_snapshot(malformed)
+
+    missing = encode_operator_snapshot(snapshot)
+    del missing["snapshot"]["readiness"]["lifecycle"]
+    with pytest.raises(ValueError, match="snapshot.readiness"):
+        decode_operator_snapshot(missing)
+
+
+def test_readiness_lifecycle_is_a_required_explicit_constructor_input() -> None:
+    parameter = inspect.signature(ReadinessSummary).parameters["lifecycle"]
+    assert parameter.default is inspect.Parameter.empty
+
+    tree = ast.parse(Path("src/cryodaq/operator_snapshot.py").read_text(encoding="utf-8"))
+    readiness = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ReadinessSummary")
+    lifecycle = next(
+        node
+        for node in readiness.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "lifecycle"
+    )
+    assert lifecycle.value is None
+
+
+def test_codec_v2_is_canonical_and_v1_is_explicitly_unsupported() -> None:
+    snapshot = _snapshot()
+    envelope = encode_operator_snapshot(snapshot)
+
+    assert envelope["version"] == 2
+    assert decode_operator_snapshot(envelope) == snapshot
+    envelope["version"] = 1
+    with pytest.raises(ValueError, match="envelope.version is unsupported"):
+        decode_operator_snapshot(envelope)
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
@@ -809,8 +884,9 @@ def test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap() -> None:
         readiness=replace(
             snapshot.readiness,
             status=max_status,
-            readiness=ReadinessTruth.BLOCKED,
+            readiness=ReadinessTruth.UNKNOWN,
             blockers=blockers,
+            lifecycle=SafetyLifecycle.UNKNOWN,
         ),
         plant_health=replace(snapshot.plant_health, status=max_status, subsystems=plant),
         infrastructure=replace(snapshot.infrastructure, status=max_status, nodes=nodes),

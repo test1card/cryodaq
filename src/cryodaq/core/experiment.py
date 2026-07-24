@@ -6,7 +6,9 @@ import csv
 import json
 import logging
 import os
+import re
 import shutil
+import stat
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -28,6 +30,36 @@ from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
+
+_EXPERIMENT_ID_PATTERN = re.compile(r"[0-9a-f]{32}", re.ASCII)
+_EXPERIMENT_ID_ALLOCATION_ATTEMPTS = 32
+
+
+class ExperimentIdentityError(ValueError):
+    """An experiment identity or its persisted binding is not canonical."""
+
+
+def _validate_experiment_id(raw: object, *, field: str = "experiment_id") -> str:
+    if type(raw) is not str or _EXPERIMENT_ID_PATTERN.fullmatch(raw) is None:
+        raise ExperimentIdentityError(f"{field} must be exactly 32 lowercase hexadecimal characters.")
+    return raw
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    """Return true for POSIX links and Windows junction/reparse objects."""
+
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if is_junction is not None and is_junction():
+            return True
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
 
 SCHEMA_EXPERIMENTS = """
 CREATE TABLE IF NOT EXISTS experiments (
@@ -293,9 +325,7 @@ class RunRecord:
             finished_at=_parse_time(payload.get("finished_at")),
             parameters=dict(payload.get("parameters") or {}),
             result_summary=dict(payload.get("result_summary") or {}),
-            artifact_paths=tuple(
-                str(item).strip() for item in payload.get("artifact_paths", []) if str(item).strip()
-            ),
+            artifact_paths=tuple(str(item).strip() for item in payload.get("artifact_paths", []) if str(item).strip()),
             experiment_context=dict(payload.get("experiment_context") or {}),
         )
 
@@ -362,6 +392,167 @@ class ExperimentManager:
             self._operator_phase = self.get_current_phase()
         self._refresh_operator_snapshot(force=True)
 
+    def _trusted_artifacts_root(self, *, create: bool) -> Path:
+        """Resolve the one non-reparse root trusted to own experiment artifacts."""
+
+        if create:
+            self._data_dir.mkdir(parents=True, exist_ok=True)
+        if not self._data_dir.exists():
+            return self._data_dir.resolve() / "experiments"
+        if not self._data_dir.is_dir() or _is_link_or_reparse(self._data_dir):
+            raise ExperimentIdentityError("Experiment data root must be a regular directory.")
+        data_root = self._data_dir.resolve(strict=True)
+        expected_root = data_root / "experiments"
+        artifacts_path = self._artifacts_dir
+        if os.path.lexists(artifacts_path):
+            if not artifacts_path.is_dir() or _is_link_or_reparse(artifacts_path):
+                raise ExperimentIdentityError("Experiment artifacts root must be a regular non-reparse directory.")
+            resolved_root = artifacts_path.resolve(strict=True)
+            if resolved_root != expected_root:
+                raise ExperimentIdentityError("Experiment artifacts root escaped the data root.")
+            return resolved_root
+        if create:
+            os.mkdir(expected_root)
+            resolved_root = expected_root.resolve(strict=True)
+            if resolved_root != expected_root or _is_link_or_reparse(expected_root):
+                raise ExperimentIdentityError("Experiment artifacts root is not trusted.")
+            return resolved_root
+        return expected_root
+
+    def _checked_artifact_dir(self, experiment_id: object, *, must_exist: bool) -> Path:
+        canonical_id = _validate_experiment_id(experiment_id)
+        root = self._trusted_artifacts_root(create=False)
+        candidate = root / canonical_id
+        if os.path.lexists(candidate):
+            if not candidate.is_dir() or _is_link_or_reparse(candidate):
+                raise ExperimentIdentityError("Experiment artifact directory must be a regular non-reparse directory.")
+            resolved = candidate.resolve(strict=True)
+            if resolved.parent != root:
+                raise ExperimentIdentityError("Experiment artifact directory escaped its trusted root.")
+            return resolved
+        if must_exist:
+            raise ExperimentIdentityError(f"Experiment artifact directory does not exist for {canonical_id}.")
+        return candidate
+
+    def _reserve_experiment_identity(self) -> tuple[str, Path]:
+        root = self._trusted_artifacts_root(create=True)
+        for _attempt in range(_EXPERIMENT_ID_ALLOCATION_ATTEMPTS):
+            experiment_id = _validate_experiment_id(uuid.uuid4().hex, field="generated experiment_id")
+            artifact_dir = root / experiment_id
+            try:
+                os.mkdir(artifact_dir)
+            except FileExistsError:
+                if _is_link_or_reparse(artifact_dir):
+                    raise ExperimentIdentityError("Experiment identity collision resolved to a reparse object.")
+                continue
+            try:
+                if _is_link_or_reparse(artifact_dir):
+                    raise ExperimentIdentityError("Reserved experiment directory became a reparse point.")
+                resolved = artifact_dir.resolve(strict=True)
+                if resolved.parent != root or resolved.name != experiment_id:
+                    raise ExperimentIdentityError("Reserved experiment directory escaped its trusted root.")
+            except Exception:
+                os.rmdir(artifact_dir)
+                raise
+            return experiment_id, resolved
+        raise RuntimeError(
+            f"Could not reserve a unique experiment identity after {_EXPERIMENT_ID_ALLOCATION_ATTEMPTS} attempts."
+        )
+
+    def _validate_info_identity_paths(self, info: ExperimentInfo) -> tuple[Path, Path]:
+        experiment_id = _validate_experiment_id(info.experiment_id)
+        artifact_dir = self._checked_artifact_dir(experiment_id, must_exist=True)
+        metadata_path = artifact_dir / "metadata.json"
+        if info.artifact_dir is not None and Path(info.artifact_dir).resolve() != artifact_dir:
+            raise ExperimentIdentityError("Experiment artifact path does not match its identity.")
+        if info.metadata_path is not None and Path(info.metadata_path).resolve() != metadata_path:
+            raise ExperimentIdentityError("Experiment metadata path does not match its identity.")
+        return artifact_dir, metadata_path
+
+    def _restore_creation_state(self, previous_state_bytes: bytes | None) -> None:
+        self._active = None
+        self._operator_phase = None
+        self._state = ExperimentState(app_mode=self._state.app_mode, active_experiment_id=None)
+        if os.path.lexists(self._state_path) and _is_link_or_reparse(self._state_path):
+            raise ExperimentIdentityError("Experiment state path became a reparse point.")
+        if previous_state_bytes is None:
+            if self._state_path.exists():
+                self._state_path.unlink()
+        else:
+            from cryodaq.core.atomic_write import atomic_write_bytes
+
+            atomic_write_bytes(self._state_path, previous_state_bytes)
+        self._refresh_operator_snapshot()
+
+    def _remove_experiment_row(self, info: ExperimentInfo) -> None:
+        db_path = self._db_path_for_day(info.start_time)
+        if not db_path.exists():
+            return
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'experiments';"
+            ).fetchone()
+            if table is None:
+                return
+            conn.execute("DELETE FROM experiments WHERE experiment_id = ?;", (info.experiment_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _remove_reserved_artifact_dir(self, experiment_id: str, artifact_dir: Path) -> None:
+        checked = self._checked_artifact_dir(experiment_id, must_exist=True)
+        if checked != artifact_dir:
+            raise ExperimentIdentityError("Refusing to remove a replaced experiment reservation.")
+        shutil.rmtree(checked)
+
+    def _rollback_new_experiment(
+        self,
+        info: ExperimentInfo,
+        artifact_dir: Path,
+        previous_state_bytes: bytes | None,
+    ) -> None:
+        errors: list[Exception] = []
+        for cleanup in (
+            lambda: self._restore_creation_state(previous_state_bytes),
+            lambda: self._remove_experiment_row(info),
+        ):
+            try:
+                cleanup()
+            except Exception as exc:
+                errors.append(exc)
+        try:
+            self._remove_reserved_artifact_dir(info.experiment_id, artifact_dir)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            errors.append(exc)
+        if errors:
+            raise RuntimeError("Experiment creation rollback did not settle completely.") from errors[0]
+
+    def _persist_new_experiment(self, info: ExperimentInfo, *, make_active: bool) -> ExperimentInfo:
+        artifact_dir, _metadata_path = self._validate_info_identity_paths(info)
+        previous_state_bytes: bytes | None = None
+        state_snapshot_captured = False
+        try:
+            if os.path.lexists(self._state_path) and _is_link_or_reparse(self._state_path):
+                raise ExperimentIdentityError("Experiment state path must not be a link or reparse point.")
+            previous_state_bytes = self._state_path.read_bytes() if self._state_path.exists() else None
+            state_snapshot_captured = True
+            self._write_start(info)
+            if info.end_time is not None:
+                self._write_end(info)
+            self._write_artifact(info)
+            if make_active:
+                self._set_active(info)
+        except BaseException:
+            if state_snapshot_captured:
+                self._rollback_new_experiment(info, artifact_dir, previous_state_bytes)
+            else:
+                self._remove_reserved_artifact_dir(info.experiment_id, artifact_dir)
+            raise
+        return info
+
     @property
     def active_experiment(self) -> ExperimentInfo | None:
         return self._active
@@ -407,9 +598,7 @@ class ExperimentManager:
             "current_phase": self.get_current_phase(),
             "phase_started_at": phase_started_at,
             "phases": self.get_phase_history(),
-            "run_records": [
-                record.to_payload() for record in self.list_run_records(active_only=True)
-            ],
+            "run_records": [record.to_payload() for record in self.list_run_records(active_only=True)],
             "templates": [template.to_payload() for template in self.get_templates()],
         }
 
@@ -434,9 +623,7 @@ class ExperimentManager:
     def set_app_mode(self, mode: AppMode | str) -> AppMode:
         next_mode = self._normalize_app_mode(mode)
         if next_mode is AppMode.DEBUG and self._active is not None:
-            raise RuntimeError(
-                "Нельзя переключиться в режим отладки, пока карточка эксперимента активна."
-            )
+            raise RuntimeError("Нельзя переключиться в режим отладки, пока карточка эксперимента активна.")
         if next_mode == self._state.app_mode:
             return self._state.app_mode
         self._state = ExperimentState(
@@ -466,48 +653,36 @@ class ExperimentManager:
 
             end_dt = end_dt + timedelta(days=1)
         entries: list[ArchiveEntry] = []
-        data_root = self._data_dir.resolve()
-        if self._artifacts_dir.is_symlink():
-            logger.warning(
-                "Ignoring symlinked experiments archive root: %s", self._artifacts_dir
-            )
+        try:
+            resolved_artifacts = self._trusted_artifacts_root(create=False)
+        except ExperimentIdentityError as exc:
+            logger.warning("Ignoring unsafe experiments archive root: %s", exc)
             return entries
-        resolved_artifacts = self._artifacts_dir.resolve()
-        if (
-            resolved_artifacts != data_root
-            and data_root not in resolved_artifacts.parents
-        ):
-            logger.warning("Ignoring experiments archive root outside data directory")
-            return entries
-        if not self._artifacts_dir.exists():
+        if not resolved_artifacts.exists():
             return entries
 
-        for metadata_path in sorted(self._artifacts_dir.glob("*/metadata.json")):
+        for metadata_path in sorted(resolved_artifacts.glob("*/metadata.json")):
             try:
-                archive_root = self._artifacts_dir.resolve()
+                archive_root = resolved_artifacts
+                directory_id = _validate_experiment_id(metadata_path.parent.name, field="experiment directory name")
                 resolved_metadata = metadata_path.resolve()
                 if (
-                    metadata_path.is_symlink()
-                    or metadata_path.parent.is_symlink()
+                    _is_link_or_reparse(metadata_path)
+                    or _is_link_or_reparse(metadata_path.parent)
                     or archive_root not in resolved_metadata.parents
                 ):
                     raise ValueError("archive metadata escapes experiments root")
                 payload = json.loads(metadata_path.read_text(encoding="utf-8"))
                 experiment = payload.get("experiment", {})
+                payload_id = _validate_experiment_id(experiment.get("experiment_id"), field="metadata experiment_id")
+                if payload_id != directory_id:
+                    raise ExperimentIdentityError("Metadata experiment_id does not match its directory identity.")
                 template = payload.get("template", {})
-                run_records = tuple(
-                    dict(item) for item in payload.get("run_records", []) if isinstance(item, dict)
-                )
+                run_records = tuple(dict(item) for item in payload.get("run_records", []) if isinstance(item, dict))
                 artifact_index = tuple(
-                    dict(item)
-                    for item in payload.get("artifact_index", [])
-                    if isinstance(item, dict)
+                    dict(item) for item in payload.get("artifact_index", []) if isinstance(item, dict)
                 )
-                result_tables = tuple(
-                    dict(item)
-                    for item in payload.get("result_tables", [])
-                    if isinstance(item, dict)
-                )
+                result_tables = tuple(dict(item) for item in payload.get("result_tables", []) if isinstance(item, dict))
                 artifact_dir = metadata_path.parent
                 manifest = None
                 report_paths = None
@@ -519,9 +694,7 @@ class ExperimentManager:
                     report_paths = resolve_report_paths(artifact_dir)
                     manifest = load_current_manifest(artifact_dir)
                 except (OSError, ReportContractError) as exc:
-                    logger.warning(
-                        "Ignoring unsafe report manifest %s: %s", artifact_dir, exc
-                    )
+                    logger.warning("Ignoring unsafe report manifest %s: %s", artifact_dir, exc)
                     if pointer_present:
                         report_authority = "invalid"
                 if pointer_present and manifest is None:
@@ -536,11 +709,7 @@ class ExperimentManager:
                     report = manifest["report"]
                     manifest_docx = artifact_dir / report["docx_path"]
                     docx_path = manifest_docx if manifest_docx.is_file() else None
-                    pdf_path = (
-                        artifact_dir / report["pdf_path"]
-                        if report["pdf_path"] is not None
-                        else None
-                    )
+                    pdf_path = artifact_dir / report["pdf_path"] if report["pdf_path"] is not None else None
                 elif not pointer_present and report_paths is not None:
                     docx_path = None
                     pdf_path = None
@@ -602,17 +771,13 @@ class ExperimentManager:
                     and report_authority != "invalid"
                 )
                 force_context = (
-                    report_force_context(state, manifest)
-                    if report_force_required and state is not None
-                    else None
+                    report_force_context(state, manifest) if report_force_required and state is not None else None
                 )
                 entry = ArchiveEntry(
-                    experiment_id=_clean_text(experiment.get("experiment_id")),
+                    experiment_id=payload_id,
                     title=_clean_text(experiment.get("title") or experiment.get("name")),
                     template_id=_clean_text(experiment.get("template_id") or template.get("id")),
-                    template_name=_clean_text(
-                        template.get("name") or experiment.get("template_id")
-                    ),
+                    template_name=_clean_text(template.get("name") or experiment.get("template_id")),
                     operator=_clean_text(experiment.get("operator")),
                     sample=_clean_text(experiment.get("sample")),
                     status=_clean_text(experiment.get("status")),
@@ -620,12 +785,8 @@ class ExperimentManager:
                     end_time=_parse_time(experiment.get("end_time")),
                     artifact_dir=artifact_dir,
                     metadata_path=metadata_path,
-                    docx_path=docx_path
-                    if docx_path is not None and docx_path.exists()
-                    else None,
-                    pdf_path=pdf_path
-                    if pdf_path is not None and pdf_path.exists()
-                    else None,
+                    docx_path=docx_path if docx_path is not None and docx_path.exists() else None,
+                    pdf_path=pdf_path if pdf_path is not None and pdf_path.exists() else None,
                     report_enabled=bool(experiment.get("report_enabled", True)),
                     report_present=(docx_path is not None and docx_path.exists())
                     or (pdf_path is not None and pdf_path.exists()),
@@ -640,9 +801,7 @@ class ExperimentManager:
                         else None
                     ),
                     report_error_text=(
-                        _report_error_display(state["error_code"], state["error_text"])
-                        if state is not None
-                        else ""
+                        _report_error_display(state["error_code"], state["error_text"]) if state is not None else ""
                     ),
                     report_force_required=report_force_required,
                     report_force_context=force_context,
@@ -688,9 +847,7 @@ class ExperimentManager:
         return entries
 
     def get_archive_item(self, experiment_id: str) -> ArchiveEntry | None:
-        experiment_id = _clean_text(experiment_id)
-        if not experiment_id:
-            raise ValueError("experiment_id is required.")
+        experiment_id = _validate_experiment_id(experiment_id)
         for entry in self.list_archive_entries(descending=True):
             if entry.experiment_id == experiment_id:
                 return entry
@@ -716,10 +873,10 @@ class ExperimentManager:
         active = self._active
         if active is None:
             return None
+        if experiment_id is not None:
+            experiment_id = _validate_experiment_id(experiment_id)
         if experiment_id is not None and experiment_id != active.experiment_id:
-            raise ValueError(
-                f"experiment_id '{experiment_id}' does not match active '{active.experiment_id}'."
-            )
+            raise ValueError(f"experiment_id '{experiment_id}' does not match active '{active.experiment_id}'.")
         started_dt = _parse_time(started_at)
         if started_dt is None:
             raise ValueError("started_at is required for run record attachment.")
@@ -736,9 +893,7 @@ class ExperimentManager:
             finished_at=finished_dt,
             parameters=dict(parameters or {}),
             result_summary=dict(result_summary or {}),
-            artifact_paths=tuple(
-                str(item).strip() for item in (artifact_paths or []) if str(item).strip()
-            ),
+            artifact_paths=tuple(str(item).strip() for item in (artifact_paths or []) if str(item).strip()),
             experiment_context={
                 "experiment_id": active.experiment_id,
                 "title": active.title,
@@ -750,9 +905,7 @@ class ExperimentManager:
         )
         payload = self._read_metadata_payload(active.experiment_id)
         existing_records = [
-            RunRecord.from_payload(item)
-            for item in payload.get("run_records", [])
-            if isinstance(item, dict)
+            RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)
         ]
         updated_records: list[RunRecord] = []
         replaced = False
@@ -779,12 +932,9 @@ class ExperimentManager:
             experiment_id = self._active.experiment_id
         if not experiment_id:
             return []
+        experiment_id = _validate_experiment_id(experiment_id)
         payload = self._read_metadata_payload(experiment_id)
-        records = [
-            RunRecord.from_payload(item)
-            for item in payload.get("run_records", [])
-            if isinstance(item, dict)
-        ]
+        records = [RunRecord.from_payload(item) for item in payload.get("run_records", []) if isinstance(item, dict)]
         records.sort(key=lambda item: item.started_at, reverse=True)
         return records
 
@@ -810,7 +960,6 @@ class ExperimentManager:
             )
 
         template = self.get_template(template_id)
-        experiment_id = uuid.uuid4().hex[:12]
         now = _parse_time(start_time) or datetime.now(UTC)
         config_snapshot = self._read_config_snapshot()
         normalized_custom_fields = _normalize_custom_fields(custom_fields)
@@ -820,9 +969,8 @@ class ExperimentManager:
         # can turn off the auto-report for a one-off run without
         # editing the template YAML. None (default) keeps the
         # template's configured value.
-        effective_report_enabled = (
-            template.report_enabled if report_enabled is None else bool(report_enabled)
-        )
+        effective_report_enabled = template.report_enabled if report_enabled is None else bool(report_enabled)
+        experiment_id, artifact_dir = self._reserve_experiment_identity()
 
         info = ExperimentInfo(
             experiment_id=experiment_id,
@@ -841,15 +989,12 @@ class ExperimentManager:
             custom_fields=normalized_custom_fields,
             report_enabled=effective_report_enabled,
             sections=template.sections,
-            artifact_dir=self._artifact_dir(experiment_id),
-            metadata_path=self._metadata_path(experiment_id),
+            artifact_dir=artifact_dir,
+            metadata_path=artifact_dir / "metadata.json",
             retroactive=False,
         )
 
-        self._write_start(info)
-        self._write_artifact(info)
-        self._set_active(info)
-        return info
+        return self._persist_new_experiment(info, make_active=True)
 
     def start_experiment(
         self,
@@ -898,9 +1043,8 @@ class ExperimentManager:
         Writes photo file + JSON sidecar atomically. Appends artifact_index entry
         to metadata.json. Returns dict with filename, path, metadata.
         """
-        artifact_dir = self._artifact_dir(experiment_id)
-        if not artifact_dir.exists():
-            raise ValueError(f"Experiment artifact dir not found: {artifact_dir}")
+        experiment_id = _validate_experiment_id(experiment_id)
+        artifact_dir = self._checked_artifact_dir(experiment_id, must_exist=True)
 
         composition_dir = artifact_dir / "composition"
         composition_dir.mkdir(parents=True, exist_ok=True)
@@ -946,9 +1090,7 @@ class ExperimentManager:
             "phase_at_upload": phase_at_upload,
             "channels_mentioned": list(channels_mentioned or []),
         }
-        atomic_write_text(
-            sidecar_path, json.dumps(sidecar_meta, ensure_ascii=False, indent=2)
-        )
+        atomic_write_text(sidecar_path, json.dumps(sidecar_meta, ensure_ascii=False, indent=2))
 
         artifact_entry: dict[str, Any] = {
             "artifact_id": f"composition_photo:operator:{filename}",
@@ -969,10 +1111,9 @@ class ExperimentManager:
 
         return {"filename": filename, "path": str(photo_path), "metadata": sidecar_meta}
 
-    def _append_composition_photo_to_metadata(
-        self, experiment_id: str, entry: dict[str, Any]
-    ) -> None:
+    def _append_composition_photo_to_metadata(self, experiment_id: str, entry: dict[str, Any]) -> None:
         """Atomically append a composition_photo entry to artifact_index in metadata.json."""
+        experiment_id = _validate_experiment_id(experiment_id)
         metadata_path = self._metadata_path(experiment_id)
         from cryodaq.core.atomic_write import atomic_write_text
 
@@ -980,9 +1121,7 @@ class ExperimentManager:
         artifact_index: list[dict[str, Any]] = list(payload.get("artifact_index", []))
         artifact_index.append(entry)
         payload["artifact_index"] = artifact_index
-        atomic_write_text(
-            metadata_path, json.dumps(payload, ensure_ascii=False, indent=2)
-        )
+        atomic_write_text(metadata_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def update_experiment(
         self,
@@ -1149,7 +1288,8 @@ class ExperimentManager:
             raise ValueError("Retroactive experiment end_time must be after start_time.")
 
         template = self.get_template(template_id)
-        experiment_id = uuid.uuid4().hex[:12]
+        config_snapshot = self._read_config_snapshot()
+        experiment_id, artifact_dir = self._reserve_experiment_identity()
         info = ExperimentInfo(
             experiment_id=experiment_id,
             name=title,
@@ -1163,29 +1303,26 @@ class ExperimentManager:
             start_time=start_dt,
             end_time=end_dt,
             status=ExperimentStatus.COMPLETED,
-            config_snapshot=self._read_config_snapshot(),
+            config_snapshot=config_snapshot,
             custom_fields=_normalize_custom_fields(custom_fields),
             report_enabled=template.report_enabled,
             sections=template.sections,
-            artifact_dir=self._artifact_dir(experiment_id),
-            metadata_path=self._metadata_path(experiment_id),
+            artifact_dir=artifact_dir,
+            metadata_path=artifact_dir / "metadata.json",
             retroactive=True,
         )
 
-        self._write_start(info)
-        self._write_end(info)
-        self._write_artifact(info)
-        return info
+        return self._persist_new_experiment(info, make_active=False)
 
     def _require_experiment_mode(self) -> None:
         if self.app_mode is not AppMode.EXPERIMENT:
-            raise RuntimeError(
-                "Experiment lifecycle commands are only available in experiment mode."
-            )
+            raise RuntimeError("Experiment lifecycle commands are only available in experiment mode.")
 
     def _require_active(self, experiment_id: str | None = None) -> ExperimentInfo:
         if self._active is None:
             raise RuntimeError("No active experiment to operate on.")
+        if experiment_id is not None:
+            experiment_id = _validate_experiment_id(experiment_id)
         if experiment_id is not None and experiment_id != self._active.experiment_id:
             raise ValueError(
                 f"experiment_id '{experiment_id}' does not match active '{self._active.experiment_id}'."  # noqa: E501
@@ -1201,6 +1338,7 @@ class ExperimentManager:
         return AppMode(value)
 
     def _set_active(self, info: ExperimentInfo) -> None:
+        self._validate_info_identity_paths(info)
         if self._active is None or self._active.experiment_id != info.experiment_id:
             self._operator_phase = None
         self._active = info
@@ -1249,11 +1387,18 @@ class ExperimentManager:
         app_mode = AppMode.EXPERIMENT
         if self._state_path.exists():
             try:
+                if _is_link_or_reparse(self._state_path):
+                    raise ExperimentIdentityError("Experiment state path must not be a link or reparse point.")
                 payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-                app_mode = self._normalize_app_mode(
-                    payload.get("app_mode", AppMode.EXPERIMENT.value)
+                app_mode = self._normalize_app_mode(payload.get("app_mode", AppMode.EXPERIMENT.value))
+                raw_active_id = payload.get("active_experiment_id")
+                active_experiment_id = (
+                    None
+                    if raw_active_id is None
+                    else _validate_experiment_id(raw_active_id, field="state active_experiment_id")
                 )
-                active_experiment_id = _clean_text(payload.get("active_experiment_id")) or None
+            except ExperimentIdentityError:
+                raise
             except Exception as exc:
                 logger.warning("Failed to load experiment state %s: %s", self._state_path, exc)
         self._state = ExperimentState(app_mode=app_mode, active_experiment_id=active_experiment_id)
@@ -1265,6 +1410,8 @@ class ExperimentManager:
                 self._clear_active()
 
     def _write_state(self) -> None:
+        if self._state.active_experiment_id is not None:
+            _validate_experiment_id(self._state.active_experiment_id, field="state active_experiment_id")
         self._data_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema_version": 1,
@@ -1276,13 +1423,17 @@ class ExperimentManager:
         atomic_write_text(self._state_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def _read_experiment_from_metadata(self, experiment_id: str) -> ExperimentInfo | None:
+        experiment_id = _validate_experiment_id(experiment_id)
         metadata_path = self._metadata_path(experiment_id)
         if not metadata_path.exists():
             return None
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
         experiment = payload.get("experiment", {})
+        payload_id = _validate_experiment_id(experiment.get("experiment_id"), field="metadata experiment_id")
+        if payload_id != experiment_id:
+            raise ExperimentIdentityError("State, directory, and metadata experiment identities do not match.")
         return ExperimentInfo(
-            experiment_id=_clean_text(experiment.get("experiment_id")),
+            experiment_id=payload_id,
             name=_clean_text(experiment.get("name")),
             title=_clean_text(experiment.get("title") or experiment.get("name")),
             template_id=_clean_text(experiment.get("template_id")) or "custom",
@@ -1293,15 +1444,11 @@ class ExperimentManager:
             notes=_clean_text(experiment.get("notes")),
             start_time=_parse_time(experiment.get("start_time")) or datetime.now(UTC),
             end_time=_parse_time(experiment.get("end_time")),
-            status=ExperimentStatus(
-                _clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value
-            ),
+            status=ExperimentStatus(_clean_text(experiment.get("status")) or ExperimentStatus.RUNNING.value),
             config_snapshot=dict(experiment.get("config_snapshot") or {}),
             custom_fields=_normalize_custom_fields(experiment.get("custom_fields")),
             report_enabled=bool(experiment.get("report_enabled", True)),
-            sections=tuple(
-                str(item) for item in experiment.get("sections", []) if str(item).strip()
-            ),
+            sections=tuple(str(item) for item in experiment.get("sections", []) if str(item).strip()),
             artifact_dir=self._artifact_dir(experiment_id),
             metadata_path=metadata_path,
             retroactive=bool(experiment.get("retroactive", False)),
@@ -1337,9 +1484,7 @@ class ExperimentManager:
                 name=name,
                 sections=sections,
                 report_enabled=bool(raw.get("report_enabled", True)),
-                report_sections=tuple(
-                    str(item) for item in raw.get("report_sections", []) if str(item).strip()
-                ),
+                report_sections=tuple(str(item) for item in raw.get("report_sections", []) if str(item).strip()),
                 custom_fields=custom_fields,
             )
         if "custom" not in templates:
@@ -1353,7 +1498,7 @@ class ExperimentManager:
         return templates
 
     def _artifact_dir(self, experiment_id: str) -> Path:
-        return self._artifacts_dir / experiment_id
+        return self._checked_artifact_dir(experiment_id, must_exist=False)
 
     def _metadata_path(self, experiment_id: str) -> Path:
         return self._artifact_dir(experiment_id) / "metadata.json"
@@ -1393,6 +1538,7 @@ class ExperimentManager:
         return conn
 
     def _write_start(self, info: ExperimentInfo) -> None:
+        artifact_dir, metadata_path = self._validate_info_identity_paths(info)
         conn = self._get_connection(info.start_time)
         try:
             conn.execute(
@@ -1417,8 +1563,8 @@ class ExperimentManager:
                     info.notes,
                     json.dumps(info.custom_fields, ensure_ascii=False),
                     1 if info.report_enabled else 0,
-                    str(info.artifact_dir or ""),
-                    str(info.metadata_path or ""),
+                    str(artifact_dir),
+                    str(metadata_path),
                     json.dumps(list(info.sections), ensure_ascii=False),
                     1 if info.retroactive else 0,
                 ),
@@ -1428,6 +1574,7 @@ class ExperimentManager:
             conn.close()
 
     def _write_end(self, info: ExperimentInfo) -> None:
+        artifact_dir, metadata_path = self._validate_info_identity_paths(info)
         conn = self._get_connection(info.start_time)
         try:
             conn.execute(
@@ -1447,13 +1594,15 @@ class ExperimentManager:
                     json.dumps(info.custom_fields, ensure_ascii=False),
                     1 if info.report_enabled else 0,
                     info.template_id,
-                    str(info.artifact_dir or ""),
-                    str(info.metadata_path or ""),
+                    str(artifact_dir),
+                    str(metadata_path),
                     json.dumps(list(info.sections), ensure_ascii=False),
                     1 if info.retroactive else 0,
                     info.experiment_id,
                 ),
             )
+            if conn.total_changes != 1:
+                raise ExperimentIdentityError("Experiment database row does not match the requested identity.")
             conn.commit()
         finally:
             conn.close()
@@ -1467,9 +1616,7 @@ class ExperimentManager:
         result_tables: list[dict[str, Any]] | None = None,
         summary_metadata: dict[str, Any] | None = None,
     ) -> None:
-        artifact_dir = info.artifact_dir or self._artifact_dir(info.experiment_id)
-        metadata_path = info.metadata_path or self._metadata_path(info.experiment_id)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir, metadata_path = self._validate_info_identity_paths(info)
         template = self.get_template(info.template_id)
         existing_payload = self._read_metadata_payload(info.experiment_id)
         payload = {
@@ -1510,17 +1657,13 @@ class ExperimentManager:
             "artifact_index": [
                 dict(item)
                 for item in (
-                    artifact_index
-                    if artifact_index is not None
-                    else list(existing_payload.get("artifact_index", []))
+                    artifact_index if artifact_index is not None else list(existing_payload.get("artifact_index", []))
                 )
             ],
             "result_tables": [
                 dict(item)
                 for item in (
-                    result_tables
-                    if result_tables is not None
-                    else list(existing_payload.get("result_tables", []))
+                    result_tables if result_tables is not None else list(existing_payload.get("result_tables", []))
                 )
             ],
             "summary_metadata": dict(
@@ -1587,17 +1730,29 @@ class ExperimentManager:
         return payload.get("phases", [])
 
     def _read_metadata_payload(self, experiment_id: str) -> dict[str, Any]:
+        experiment_id = _validate_experiment_id(experiment_id)
         metadata_path = self._metadata_path(experiment_id)
         if not metadata_path.exists():
             return {}
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
+        if _is_link_or_reparse(metadata_path):
+            raise ExperimentIdentityError("Experiment metadata must not be a link or reparse point.")
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ExperimentIdentityError("Experiment metadata root must be an object.")
+        experiment = payload.get("experiment")
+        if not isinstance(experiment, dict):
+            raise ExperimentIdentityError("Experiment metadata is missing its identity payload.")
+        payload_id = _validate_experiment_id(experiment.get("experiment_id"), field="metadata experiment_id")
+        if payload_id != experiment_id or metadata_path.parent.name != experiment_id:
+            raise ExperimentIdentityError("Requested, directory, and metadata experiment identities do not match.")
+        return payload
 
     def _build_archive_snapshot(
         self,
         info: ExperimentInfo,
         run_records: list[RunRecord],
     ) -> dict[str, Any]:
-        artifact_dir = info.artifact_dir or self._artifact_dir(info.experiment_id)
+        artifact_dir, _metadata_path = self._validate_info_identity_paths(info)
         archive_root = artifact_dir / "archive"
         plots_dir = archive_root / "plots"
         tables_dir = archive_root / "tables"
@@ -1739,8 +1894,7 @@ class ExperimentManager:
             readings,
             artifact_index,
             channel_filter=lambda item: (
-                "pressure" in str(item["channel"]).lower()
-                or str(item["unit"]).lower() in {"mbar", "pa"}
+                "pressure" in str(item["channel"]).lower() or str(item["unit"]).lower() in {"mbar", "pa"}
             ),
             role="pressure",
             title="Pressure",
@@ -1801,9 +1955,7 @@ class ExperimentManager:
                     for row in conn.execute(query, params).fetchall():
                         rows.append(
                             {
-                                "timestamp": datetime.fromtimestamp(
-                                    float(row["timestamp"]), tz=UTC
-                                ),
+                                "timestamp": datetime.fromtimestamp(float(row["timestamp"]), tz=UTC),
                                 "instrument_id": str(row["instrument_id"] or ""),
                                 "channel": str(row["channel"] or ""),
                                 "value": decode(float(row["value"]), str(row["status"] or "")),
@@ -1985,9 +2137,7 @@ class ExperimentManager:
             writer = csv.writer(handle)
             writer.writerow(["temperature_k", "conductance_wk", "resistance_kw"])
             for item in rows:
-                writer.writerow(
-                    [item["temperature_k"], item["conductance_wk"], item["resistance_kw"]]
-                )
+                writer.writerow([item["temperature_k"], item["conductance_wk"], item["resistance_kw"]])
 
     def _maybe_write_channel_plot(
         self,
@@ -2030,13 +2180,9 @@ class ExperimentManager:
             plt.figure(figsize=(8, 3.5))
             series: dict[str, list[tuple[datetime, float]]] = {}
             for item in readings:
-                series.setdefault(str(item["channel"]), []).append(
-                    (item["timestamp"], float(item["value"]))
-                )
+                series.setdefault(str(item["channel"]), []).append((item["timestamp"], float(item["value"])))
             for channel, values in sorted(series.items()):
-                plt.plot(
-                    [stamp for stamp, _ in values], [value for _, value in values], label=channel
-                )
+                plt.plot([stamp for stamp, _ in values], [value for _, value in values], label=channel)
             plt.title(title)
             plt.ylabel(y_label)
             if len(series) <= 6:

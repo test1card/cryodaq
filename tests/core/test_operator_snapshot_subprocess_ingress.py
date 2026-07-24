@@ -44,6 +44,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -55,7 +56,7 @@ from cryodaq.operator_snapshot_transport import (
 )
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
-SOURCE = "engine/operator-snapshot-v1/0123456789abcdef0123456789abcdef"
+SOURCE = "engine/operator-snapshot-v2/0123456789abcdef0123456789abcdef"
 
 
 def _snapshot(
@@ -74,7 +75,7 @@ def _snapshot(
     )
     return OperatorSnapshot(
         cut,
-        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, ()),
+        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, (), SafetyLifecycle.UNKNOWN),
         PlantHealthSummary(cut, status, ()),
         InfrastructureNodeHealth(cut, status, ()),
         AttentionQueue(cut, status, ()),
@@ -204,10 +205,11 @@ def test_broken_full_queue_fails_bounded_without_advancing_order_authority() -> 
     with pytest.raises(SnapshotIngressQueueError, match="did not settle"):
         ingress.accept_frames(encode_operator_snapshot_frames(_snapshot(1)))
     assert broken.puts == 8
-
-    replacement: queue.Queue[OperatorSnapshot] = queue.Queue(maxsize=2)
-    ingress._queue = replacement
-    assert ingress.accept_frames(encode_operator_snapshot_frames(_snapshot(1))).snapshot.cut.revision == 1
+    assert ingress._last_revision == 0
+    assert ingress._last_received_at is None
+    with pytest.raises(SnapshotIngressQueueError, match="did not settle"):
+        ingress.accept_frames(encode_operator_snapshot_frames(_snapshot(1)))
+    assert broken.puts == 16
 
 
 @pytest.mark.parametrize(
@@ -559,13 +561,16 @@ def test_restart_cleanup_failure_cannot_resurrect_old_snapshot_queue(monkeypatch
     old_queue = bridge._snapshot_queue
     old_queue.put(_snapshot(4), timeout=1)
     bridge._last_snapshot_time = time.monotonic()
-    bridge._reply_consumer = BrokenReplyThread()
+    broken = BrokenReplyThread()
+    bridge._reply_consumer = broken
 
     with pytest.raises(RuntimeError, match="reply cleanup failed"):
         bridge.start()
 
     assert bridge._snapshot_queue is not old_queue
     assert bridge.poll_operator_snapshots() == []
+    assert bridge._reply_consumer is broken
+    assert bridge._last_snapshot_time == 0.0
     assert bridge.snapshot_flow_age_s() is None
 
 
@@ -586,7 +591,7 @@ def test_ingress_foundation_has_no_control_remediation_shell_or_store_authority(
     ]
     imports: set[str] = set()
     for path in paths:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         imports.update(
             node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
         )

@@ -26,6 +26,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -37,7 +38,7 @@ from cryodaq.operator_snapshot_transport import (
 )
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
-SOURCE = "engine/operator-snapshot-v1/0123456789abcdef0123456789abcdef"
+SOURCE = "engine/operator-snapshot-v2/0123456789abcdef0123456789abcdef"
 
 
 def _snapshot(
@@ -57,7 +58,7 @@ def _snapshot(
     )
     return OperatorSnapshot(
         cut,
-        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, ()),
+        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, (), SafetyLifecycle.UNKNOWN),
         PlantHealthSummary(cut, status, ()),
         InfrastructureNodeHealth(cut, status, ()),
         AttentionQueue(cut, status, ()),
@@ -278,7 +279,7 @@ async def test_leadership_revision_and_received_at_regressions_fail_closed() -> 
     monotonic = _Clock()
     snapshots = [
         _snapshot(2),
-        _snapshot(3, source="engine/operator-snapshot-v1/ffffffffffffffffffffffffffffffff"),
+        _snapshot(3, source="engine/operator-snapshot-v2/ffffffffffffffffffffffffffffffff"),
         _snapshot(2),
         _snapshot(4, received_at=NOW),
     ]

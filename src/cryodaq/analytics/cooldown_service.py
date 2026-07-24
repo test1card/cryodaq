@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import deque
 from datetime import UTC, datetime
@@ -26,8 +27,6 @@ from cryodaq.analytics.cooldown_predictor import (
     EnsembleModel,
     PredictionResult,
     compute_rate_from_history,
-    ingest_from_raw_arrays,
-    load_model,
     predict,
 )
 from cryodaq.analytics.steady_state import SteadyStatePredictor
@@ -191,6 +190,9 @@ class CooldownService:
         *,
         event_bus: EventBus | None = None,
         reader: Any | None = None,
+        predictor_model: EnsembleModel | None = None,
+        predictor_digest_sha256: str | None = None,
+        candidate_model_path: Path | None = None,
     ) -> None:
         self._broker = broker
         self._config = config
@@ -223,8 +225,9 @@ class CooldownService:
         self._buffer: deque[tuple[float, float, float]] = deque(maxlen=100_000)
         self._cooldown_wall_start: float | None = None
 
-        # Model
-        self._model: EnsembleModel | None = None
+        self._model = predictor_model
+        self._predictor_digest_sha256 = predictor_digest_sha256
+        self._candidate_model_path = candidate_model_path or (model_dir / "predictor_model.candidate.json")
 
         # Queue & tasks
         self._queue: asyncio.Queue | None = None
@@ -273,9 +276,7 @@ class CooldownService:
         """Return last computed prediction metadata, or None if not yet predicted."""
         return self._last_prediction
 
-    def expected_value(
-        self, channel: str, ts_monotonic: float
-    ) -> tuple[float, float] | None:
+    def expected_value(self, channel: str, ts_monotonic: float) -> tuple[float, float] | None:
         """Interpolate expected (T, sigma) at ``ts_monotonic`` for the given channel.
 
         Returns ``None`` if any precondition is unmet:
@@ -351,25 +352,14 @@ class CooldownService:
             filter_fn=_filter,
         )
 
-        # Load model (in executor, may be slow)
-        loop = asyncio.get_running_loop()
-        try:
-            model_file = self._model_dir / "predictor_model.json"
-            if model_file.exists():
-                self._model = await loop.run_in_executor(None, load_model, self._model_dir)
-                logger.info(
-                    "Модель охлаждения загружена: %d кривых, %.1f +/- %.1f ч",
-                    self._model.n_curves,
-                    self._model.duration_mean,
-                    self._model.duration_std,
-                )
-            else:
-                logger.warning(
-                    "Файл модели не найден: %s — прогнозирование недоступно",
-                    model_file,
-                )
-        except Exception as exc:
-            logger.error("Ошибка загрузки модели охлаждения: %s", exc)
+        if self._model is None:
+            logger.warning("Cooldown predictor authority is UNAVAILABLE")
+        else:
+            logger.info(
+                "Cooldown predictor active: curves=%d digest=%s",
+                self._model.n_curves,
+                self._predictor_digest_sha256 or "unbound-test-model",
+            )
 
         self._running = True
         self._consume_task = asyncio.create_task(
@@ -480,11 +470,7 @@ class CooldownService:
         # at high replay speeds → predictor falls back to uniform weights
         # and emits trajectories anchored at "now" instead of the
         # accelerated timeline.
-        if (
-            self._cooldown_wall_start is not None
-            and cooldown_active
-            and self._last_reading_ts is not None
-        ):
+        if self._cooldown_wall_start is not None and cooldown_active and self._last_reading_ts is not None:
             t_elapsed = (self._last_reading_ts - self._cooldown_wall_start) / 3600.0
         else:
             t_elapsed = 0.0
@@ -573,6 +559,27 @@ class CooldownService:
             pred.phase,
         )
 
+    def _write_ingest_candidate(
+        self,
+        t_hours: np.ndarray,
+        T_cold: np.ndarray,
+        T_warm: np.ndarray,
+    ) -> Path:
+        document = {
+            "schema": "cryodaq.cooldown-predictor-candidate.v1",
+            "activation": "review_digest_then_restart",
+            "base_model_sha256": self._predictor_digest_sha256,
+            "duration_hours": float(t_hours[-1]),
+            "t_hours": t_hours.tolist(),
+            "T_cold": T_cold.tolist(),
+            "T_warm": T_warm.tolist(),
+        }
+        self._candidate_model_path.write_text(
+            json.dumps(document, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        return self._candidate_model_path
+
     async def _on_cooldown_end(self) -> None:
         """Обработка завершения цикла охлаждения: auto-ingest."""
         if not self._buffer:
@@ -603,22 +610,22 @@ class CooldownService:
             else:
                 loop = asyncio.get_running_loop()
                 try:
-                    ok, msg, new_model = await loop.run_in_executor(
+                    candidate_path = await loop.run_in_executor(
                         None,
-                        lambda: ingest_from_raw_arrays(
-                            self._model_dir,
-                            t_hours,
-                            T_cold,
-                            T_warm,
-                        ),
+                        self._write_ingest_candidate,
+                        t_hours,
+                        T_cold,
+                        T_warm,
                     )
-                    if ok and new_model is not None:
-                        self._model = new_model
-                        logger.info("Модель обновлена: %s", msg)
-                    else:
-                        logger.warning("Auto-ingest отклонён: %s", msg)
+                    logger.info(
+                        "Cooldown predictor candidate written for review: %s",
+                        candidate_path.name,
+                    )
                 except Exception as exc:
-                    logger.error("Ошибка auto-ingest: %s", exc)
+                    logger.error(
+                        "Cooldown predictor candidate write failed: %s",
+                        type(exc).__name__,
+                    )
 
         # Task 8a: persist a cooldown fingerprint BEFORE clearing the buffer.
         # Flag-guarded, off hot-path, and never allowed to break cooldown-end
@@ -645,9 +652,7 @@ class CooldownService:
         # downstream consumers (event log, assistant, a future GUI badge
         # bridge) learn of completion without polling. Fires regardless of
         # the fingerprint feature flag; must never break cooldown end.
-        await self._publish_cooldown_end_event(
-            duration_h, float(T_cold[-1]), fingerprint_id
-        )
+        await self._publish_cooldown_end_event(duration_h, float(T_cold[-1]), fingerprint_id)
 
         # Reset for next cycle
         self._buffer.clear()

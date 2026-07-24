@@ -92,6 +92,7 @@ def test_panel_constructs_and_exposes_three_modes(app):
     assert panel._stack.currentWidget() is panel._setup_widget
     # Section title rendered inside the setup widget.
     from PySide6.QtWidgets import QLabel
+
     texts = [lbl.text() for lbl in panel._setup_widget.findChildren(QLabel)]
     assert any("Параметры калибровки" in t for t in texts)
     # Start button present.
@@ -109,11 +110,7 @@ def test_panel_header_cyrillic_uppercase(app):
     from PySide6.QtWidgets import QLabel
 
     panel = CalibrationPanel()
-    titles = [
-        label.text()
-        for label in panel.findChildren(QLabel)
-        if label.text().startswith("КАЛИБРОВКА")
-    ]
+    titles = [label.text() for label in panel.findChildren(QLabel) if label.text().startswith("КАЛИБРОВКА")]
     assert "КАЛИБРОВКА ДАТЧИКОВ" in titles
 
 
@@ -137,9 +134,7 @@ def test_setup_reference_combo_populated(app):
 def test_setup_target_checkboxes_default_checked(app):
     panel = CalibrationPanel()
     # Must have checkbox keys (from real instruments.yaml).
-    assert len(panel._setup_widget._target_checkboxes) >= 1, (
-        "No target checkboxes — instruments.yaml not loaded"
-    )
+    assert len(panel._setup_widget._target_checkboxes) >= 1, "No target checkboxes — instruments.yaml not loaded"
     for key, cb in panel._setup_widget._target_checkboxes.items():
         assert cb.isChecked() is True, f"Checkbox {key!r} not checked by default"
 
@@ -287,6 +282,7 @@ def test_coverage_bar_empty_bins_paints_nothing(app):
     bar.show()
     bar.set_coverage([])
     from PySide6.QtWidgets import QApplication
+
     QApplication.processEvents()
     # Empty bins: no segments painted (early-return in paintEvent).
     assert bar._bins == []
@@ -420,9 +416,7 @@ def test_export_json_dispatches_json_path(app, monkeypatch, tmp_path):
     panel.set_connected(True)
     panel._results_widget.set_channels(["Т5"])
     out = tmp_path / "Т5.json"
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "JSON (*.json)"))
-    )
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "JSON (*.json)")))
     _StubWorker.dispatched = []
     panel._results_widget._export_json_btn.click()
     export_cmds = [c for c in _StubWorker.dispatched if c.get("cmd") == "calibration_curve_export"]
@@ -533,6 +527,39 @@ def test_reconnect_reenables_controls(app):
     # start gated by channel presence.
     assert panel._setup_widget._import_340_btn.isEnabled() is True
     assert panel._results_widget._export_cof_btn.isEnabled() is True
+
+
+def test_replay_read_only_blocks_all_calibration_worker_entry_points(app, monkeypatch):
+    panel = CalibrationPanel()
+    panel.set_read_only(True)
+    panel.set_connected(True)
+
+    def forbidden_worker(*_args, **_kwargs):
+        raise AssertionError("replay attempted to construct a command worker")
+
+    monkeypatch.setattr(
+        "cryodaq.gui.shell.overlays.calibration_panel.ZmqCommandWorker",
+        forbidden_worker,
+    )
+    panel._setup_widget._on_start_clicked()
+    panel._setup_widget._on_import_clicked("*.json")
+    panel._setup_widget.refresh_curves()
+    panel._results_widget._on_channel_changed("Т1")
+    panel._results_widget._on_export_clicked("json", "*.json")
+    panel._results_widget._on_apply_clicked()
+    panel._check_mode()
+    panel._on_start_requested("Т1", ["Т2"])
+    panel._on_runtime_apply_requested({"channel_key": "Т1", "sensor_id": "Т1"})
+    panel._dispatch_channel_policy("Т1", "Т1", "on")
+
+    assert panel._read_only is True
+    assert panel._connected is False
+    assert panel._mode_timer.isActive() is False
+    assert panel._setup_widget._import_340_btn.isEnabled() is False
+    assert panel._results_widget._export_cof_btn.isEnabled() is False
+    assert panel._setup_widget._workers == []
+    assert panel._results_widget._workers == []
+    assert panel._apply_workers == []
 
 
 # ----------------------------------------------------------------------

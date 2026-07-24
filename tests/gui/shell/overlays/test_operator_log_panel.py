@@ -100,9 +100,7 @@ def test_panel_title_uses_cyrillic_uppercase(app):
     # Title label is the first QLabel with the Cyrillic "ЖУРНАЛ" prefix.
     from PySide6.QtWidgets import QLabel
 
-    titles = [
-        label.text() for label in panel.findChildren(QLabel) if label.text().startswith("ЖУРНАЛ")
-    ]
+    titles = [label.text() for label in panel.findChildren(QLabel) if label.text().startswith("ЖУРНАЛ")]
     assert "ЖУРНАЛ ОПЕРАТОРА" in titles
 
 
@@ -149,9 +147,7 @@ def test_submit_emits_entry_submitted_signal(app):
     panel._author_edit.setText("Владимир")
     panel._tags_edit.setText("shift, handover")
     seen: list[tuple[str, str, list[str], bool]] = []
-    panel.entry_submitted.connect(
-        lambda msg, author, tags, bind: seen.append((msg, author, tags, bind))
-    )
+    panel.entry_submitted.connect(lambda msg, author, tags, bind: seen.append((msg, author, tags, bind)))
     panel._submit_btn.click()
     assert seen == [("Закрыл клапан", "Владимир", ["shift", "handover"], True)]
 
@@ -531,6 +527,7 @@ def test_on_reading_triggers_refresh_on_operator_log_entry(app, monkeypatch):
     monkeypatch.setattr(_mod, "ZmqCommandWorker", _WorkerWithSignal)
 
     panel = OperatorLogPanel()
+    panel.set_connected(True)
     panel._on_chip_selected(_FILTER_CHIP_ALL)
 
     called = {"refresh": 0}

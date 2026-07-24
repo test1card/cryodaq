@@ -274,6 +274,7 @@ class _SetupWidget(QWidget):
         self._all_channels: list[str] = []
         self._target_checkboxes: dict[str, QCheckBox] = {}
         self._workers: list[ZmqCommandWorker] = []
+        self._read_only = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -304,9 +305,7 @@ class _SetupWidget(QWidget):
         ref_row.setSpacing(theme.SPACE_2)
         ref_cap = QLabel("Опорный канал:")
         ref_cap.setFont(_label_font())
-        ref_cap.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        ref_cap.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         ref_row.addWidget(ref_cap)
 
         self._reference_combo = QComboBox()
@@ -351,9 +350,7 @@ class _SetupWidget(QWidget):
 
         note = QLabel("Опорный канал автоматически исключается из целевых.")
         note.setFont(_label_font())
-        note.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        note.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(note)
 
         self._start_btn = QPushButton("Начать калибровочный прогон")
@@ -410,9 +407,7 @@ class _SetupWidget(QWidget):
         layout.addWidget(title)
 
         self._curves_table = QTableWidget(0, 5)
-        self._curves_table.setHorizontalHeaderLabels(
-            ["Датчик", "Curve ID", "Зон", "RMSE", "Источник"]
-        )
+        self._curves_table.setHorizontalHeaderLabels(["Датчик", "Curve ID", "Зон", "RMSE", "Источник"])
         self._curves_table.verticalHeader().setVisible(False)
         self._curves_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._curves_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -441,6 +436,8 @@ class _SetupWidget(QWidget):
     # -----------------------------------------------------------------
 
     def _on_start_clicked(self) -> None:
+        if self._read_only:
+            return
         ref = self._reference_combo.currentText()
         if not ref or ref == "Нет LakeShore каналов":
             self.start_requested.emit("", [])
@@ -449,14 +446,12 @@ class _SetupWidget(QWidget):
         self.start_requested.emit(ref, targets)
 
     def _on_import_clicked(self, file_filter: str) -> None:
-        path_str, _ = QFileDialog.getOpenFileName(
-            self, "Импорт калибровочной кривой", "", file_filter
-        )
+        if self._read_only:
+            return
+        path_str, _ = QFileDialog.getOpenFileName(self, "Импорт калибровочной кривой", "", file_filter)
         if not path_str:
             return
-        worker = ZmqCommandWorker(
-            {"cmd": "calibration_curve_import", "path": path_str}, parent=self
-        )
+        worker = ZmqCommandWorker({"cmd": "calibration_curve_import", "path": path_str}, parent=self)
         worker.finished.connect(self._on_import_result)
         self._workers.append(worker)
         worker.start()
@@ -471,6 +466,8 @@ class _SetupWidget(QWidget):
 
     def refresh_curves(self) -> None:
         """Dispatch calibration_curve_list; populate table on result."""
+        if self._read_only:
+            return
         worker = ZmqCommandWorker({"cmd": "calibration_curve_list"}, parent=self)
         worker.finished.connect(self._on_curves_list_result)
         self._workers.append(worker)
@@ -498,13 +495,9 @@ class _SetupWidget(QWidget):
         self._curves_table.setRowCount(len(curves))
         for row, curve in enumerate(curves):
             self._curves_table.setItem(row, 0, _cell(str(curve.get("sensor_id", ""))))
-            self._curves_table.setItem(
-                row, 1, _cell(str(curve.get("curve_id", "")), mono_font=True)
-            )
+            self._curves_table.setItem(row, 1, _cell(str(curve.get("curve_id", "")), mono_font=True))
             metrics = curve.get("metrics", {}) or {}
-            self._curves_table.setItem(
-                row, 2, _cell(str(metrics.get("zone_count", "—")), mono_font=True)
-            )
+            self._curves_table.setItem(row, 2, _cell(str(metrics.get("zone_count", "—")), mono_font=True))
             rmse = metrics.get("rmse_k")
             rmse_text = f"{rmse:.4f}" if isinstance(rmse, (int, float)) else "—"
             self._curves_table.setItem(row, 3, _cell(rmse_text, mono_font=True))
@@ -512,9 +505,15 @@ class _SetupWidget(QWidget):
 
     def set_engine_enabled(self, enabled: bool) -> None:
         """Gate engine-dependent controls on connection state."""
+        enabled = enabled and not self._read_only
         self._start_btn.setEnabled(enabled and bool(self._all_channels))
         self._import_340_btn.setEnabled(enabled)
         self._import_json_btn.setEnabled(enabled)
+
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
+        if self._read_only:
+            self.set_engine_enabled(False)
 
 
 # ---------------------------------------------------------------------------
@@ -538,14 +537,10 @@ class _AcquisitionWidget(QWidget):
         root.addWidget(self._build_coverage_card())
         root.addWidget(self._build_live_card(), stretch=1)
 
-        note = QLabel(
-            "Запись идёт автоматически. Дождитесь полного cooldown, затем завершите эксперимент."
-        )
+        note = QLabel("Запись идёт автоматически. Дождитесь полного cooldown, затем завершите эксперимент.")
         note.setFont(_label_font())
         note.setWordWrap(True)
-        note.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        note.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         root.addWidget(note)
 
     def _build_stats_card(self) -> QWidget:
@@ -596,9 +591,7 @@ class _AcquisitionWidget(QWidget):
 
         legend = QLabel("dense (>10 pts/K)   medium (3-10 pts/K)   sparse (<3 pts/K)   empty")
         legend.setFont(_label_font())
-        legend.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        legend.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(legend)
         return card
 
@@ -629,9 +622,7 @@ class _AcquisitionWidget(QWidget):
     def _make_caption_label(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setFont(_label_font())
-        lbl.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        lbl.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         return lbl
 
     @staticmethod
@@ -680,6 +671,7 @@ class _ResultsWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._workers: list[ZmqCommandWorker] = []
+        self._read_only = False
         self._current_sensor_id: str = ""
         self._build_ui()
 
@@ -705,9 +697,7 @@ class _ResultsWidget(QWidget):
 
         cap = QLabel("Канал:")
         cap.setFont(_label_font())
-        cap.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        cap.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(cap)
 
         self._channel_combo = QComboBox()
@@ -789,11 +779,7 @@ class _ResultsWidget(QWidget):
             (self._export_csv_btn, "table_path", "CSV (*.csv)"),
         ):
             _style_button(btn, "neutral")
-            btn.clicked.connect(
-                lambda _checked=False, fk=format_key, ff=file_filter: self._on_export_clicked(
-                    fk, ff
-                )
-            )
+            btn.clicked.connect(lambda _checked=False, fk=format_key, ff=file_filter: self._on_export_clicked(fk, ff))
             btn_row.addWidget(btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -822,9 +808,7 @@ class _ResultsWidget(QWidget):
         policy_row.setSpacing(theme.SPACE_2)
         policy_cap = QLabel("Политика канала:")
         policy_cap.setFont(_label_font())
-        policy_cap.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        policy_cap.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         policy_row.addWidget(policy_cap)
 
         self._policy_combo = QComboBox()
@@ -843,9 +827,7 @@ class _ResultsWidget(QWidget):
         # Δ before/after placeholder — Phase III polish.
         self._delta_label = QLabel("")
         self._delta_label.setFont(_label_font())
-        self._delta_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._delta_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         self._delta_label.setVisible(False)
         layout.addWidget(self._delta_label)
         return card
@@ -855,15 +837,15 @@ class _ResultsWidget(QWidget):
     # -----------------------------------------------------------------
 
     def _on_channel_changed(self, channel: str) -> None:
+        if self._read_only:
+            return
         channel = channel.strip()
         if not channel:
             return
         sensor_id = _strip_instrument_prefix(channel)
         self._current_sensor_id = sensor_id
         self.metrics_requested.emit(sensor_id)
-        worker = ZmqCommandWorker(
-            {"cmd": "calibration_curve_get", "sensor_id": sensor_id}, parent=self
-        )
+        worker = ZmqCommandWorker({"cmd": "calibration_curve_get", "sensor_id": sensor_id}, parent=self)
         worker.finished.connect(self._on_metrics_result)
         self._workers.append(worker)
         worker.start()
@@ -890,12 +872,12 @@ class _ResultsWidget(QWidget):
         self._max_error_label.setText(f"{maxe:.4f} K" if isinstance(maxe, (int, float)) else "—")
 
     def _on_export_clicked(self, format_key: str, file_filter: str) -> None:
+        if self._read_only:
+            return
         if not self._current_sensor_id:
             self.export_requested.emit("", format_key, "")
             return
-        path_str, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт калибровочной кривой", "", file_filter
-        )
+        path_str, _ = QFileDialog.getSaveFileName(self, "Экспорт калибровочной кривой", "", file_filter)
         if not path_str:
             return
         self.export_requested.emit(self._current_sensor_id, format_key, path_str)
@@ -918,6 +900,8 @@ class _ResultsWidget(QWidget):
         _ResultsWidget._last_export_result = result
 
     def _on_apply_clicked(self) -> None:
+        if self._read_only:
+            return
         if not self._current_sensor_id:
             self.runtime_apply_requested.emit({"error": "no_channel"})
             return
@@ -945,11 +929,17 @@ class _ResultsWidget(QWidget):
         Export buttons stay clickable (they need a file dialog first);
         the worker gate prevents the command from firing without
         connection via the shell's auto-pause path."""
+        enabled = enabled and not self._read_only
         self._export_cof_btn.setEnabled(enabled)
         self._export_340_btn.setEnabled(enabled)
         self._export_json_btn.setEnabled(enabled)
         self._export_csv_btn.setEnabled(enabled)
         self._apply_btn.setEnabled(enabled)
+
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
+        if self._read_only:
+            self.set_engine_enabled(False)
 
 
 # ---------------------------------------------------------------------------
@@ -968,6 +958,7 @@ class CalibrationPanel(QWidget):
         super().__init__(parent)
         self._instruments_config = instruments_config
         self._connected: bool = False
+        self._read_only = False
         self._current_mode: str = "setup"
         self._mode_worker: ZmqCommandWorker | None = None
         self._apply_workers: list[ZmqCommandWorker] = []
@@ -1031,10 +1022,7 @@ class CalibrationPanel(QWidget):
 
         title = QLabel("КАЛИБРОВКА ДАТЧИКОВ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -1044,9 +1032,7 @@ class CalibrationPanel(QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("calibrationBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._banner_label.setVisible(False)
         return self._banner_label
 
@@ -1056,6 +1042,8 @@ class CalibrationPanel(QWidget):
 
     @Slot()
     def _check_mode(self) -> None:
+        if self._read_only:
+            return
         if self._mode_worker is not None and self._mode_worker.isRunning():
             return
         if not self._connected:
@@ -1068,6 +1056,8 @@ class CalibrationPanel(QWidget):
     @Slot(dict)
     def _on_mode_result(self, result: dict) -> None:
         self._mode_worker = None
+        if self._read_only:
+            return
         if not result.get("ok"):
             return
         if result.get("active"):
@@ -1099,6 +1089,8 @@ class CalibrationPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_start_requested(self, reference: str, targets: list) -> None:
+        if self._read_only:
+            return
         if not reference:
             self.show_warning("Выберите опорный канал.")
             return
@@ -1135,6 +1127,8 @@ class CalibrationPanel(QWidget):
             self.show_error(str(result.get("error", "Не удалось начать прогон.")))
 
     def _on_import_result(self, result: dict) -> None:
+        if self._read_only:
+            return
         if not result.get("ok"):
             self.show_error(str(result.get("error", "Не удалось импортировать кривую.")))
             return
@@ -1167,6 +1161,8 @@ class CalibrationPanel(QWidget):
             self.show_error(str(result.get("error", "Не удалось экспортировать кривую.")))
 
     def _on_runtime_apply_requested(self, payload: dict) -> None:
+        if self._read_only:
+            return
         if payload.get("error") == "no_channel":
             self.show_error("Выберите канал перед применением.")
             return
@@ -1188,17 +1184,15 @@ class CalibrationPanel(QWidget):
                 },
                 parent=self,
             )
-            worker.finished.connect(
-                lambda result: self._after_global_set(result, sensor_id, channel_key, policy)
-            )
+            worker.finished.connect(lambda result: self._after_global_set(result, sensor_id, channel_key, policy))
             self._apply_workers.append(worker)
             worker.start()
         else:
             self._dispatch_channel_policy(sensor_id, channel_key, policy)
 
-    def _after_global_set(
-        self, result: dict, sensor_id: str, channel_key: str, policy: str
-    ) -> None:
+    def _after_global_set(self, result: dict, sensor_id: str, channel_key: str, policy: str) -> None:
+        if self._read_only:
+            return
         self._apply_workers = [w for w in self._apply_workers if w.isRunning()]
         if not result.get("ok"):
             self.show_error(str(result.get("error", "Не удалось установить глобальный режим.")))
@@ -1206,6 +1200,8 @@ class CalibrationPanel(QWidget):
         self._dispatch_channel_policy(sensor_id, channel_key, policy)
 
     def _dispatch_channel_policy(self, sensor_id: str, channel_key: str, policy: str) -> None:
+        if self._read_only:
+            return
         # Look up curve_id for this channel so set_channel_policy has the
         # linkage; runs asynchronously, then fires the policy command.
         lookup_worker = ZmqCommandWorker(
@@ -1218,9 +1214,9 @@ class CalibrationPanel(QWidget):
         self._apply_workers.append(lookup_worker)
         lookup_worker.start()
 
-    def _after_lookup_for_policy(
-        self, result: dict, sensor_id: str, channel_key: str, policy: str
-    ) -> None:
+    def _after_lookup_for_policy(self, result: dict, sensor_id: str, channel_key: str, policy: str) -> None:
+        if self._read_only:
+            return
         self._apply_workers = [w for w in self._apply_workers if w.isRunning()]
         curve_id = ""
         if result.get("ok"):
@@ -1270,6 +1266,7 @@ class CalibrationPanel(QWidget):
             self._acquisition_widget.append_live_reading(ch, value)
 
     def set_connected(self, connected: bool) -> None:
+        connected = bool(connected) and not self._read_only
         if connected == self._connected:
             return
         self._connected = connected
@@ -1283,6 +1280,14 @@ class CalibrationPanel(QWidget):
         else:
             self._mode_timer.stop()
             self.show_error("Нет связи с engine")
+
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
+        self._setup_widget.set_read_only(self._read_only)
+        self._results_widget.set_read_only(self._read_only)
+        if self._read_only:
+            self._connected = False
+            self._mode_timer.stop()
 
     def get_current_mode(self) -> str:
         return self._current_mode

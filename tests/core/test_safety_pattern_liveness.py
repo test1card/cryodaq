@@ -62,7 +62,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
+from cryodaq.core.housekeeping import (
+    load_critical_channels_from_alarms_v3,
+    resolve_canonical_temperature_labels,
+)
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
@@ -120,6 +123,8 @@ def _load_safety_patterns() -> tuple[list[re.Pattern[str]], list[re.Pattern[str]
     # critical_channels regexes and rejects an empty/invalid set.
     sm = SafetyManager(SafetyBroker())
     sm.load_config(_SAFETY_PATH)
+    catalog = load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
+    sm.install_exact_temperature_bindings(resolve_canonical_temperature_labels(catalog, {"\u042211", "\u042212"}))
     critical = list(sm._config.critical_channels)
     keithley = [re.compile(p) for p in sm._config.keithley_channel_patterns]
     return critical, keithley

@@ -38,6 +38,7 @@ from cryodaq.operator_snapshot import (
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotMode,
 )
 from cryodaq.storage.operator_snapshot_revision import OperatorSnapshotRevisionAllocator, SnapshotRevision
@@ -86,6 +87,7 @@ def _safety(cut: CommonCut) -> SafetyReadinessReceipt:
     return SafetyReadinessReceipt(
         **_base(cut),
         readiness=ReadinessTruth.READY,
+        lifecycle=SafetyLifecycle.READY,
         verified_off=True,
         plant_health=(PlantHealthEvidence("storage", "Storage", OperatorPresentationState.OK, "storage_ok"),),
     )
@@ -195,7 +197,7 @@ async def test_complete_snapshot_has_one_cut_eight_detached_summaries_and_stable
     second = await composer.compose(NOW + timedelta(seconds=1))
 
     assert first.cut.revision == 41
-    assert first.cut.source == second.cut.source == f"engine/operator-snapshot-v1/{LEADERSHIP}"
+    assert first.cut.source == second.cut.source == f"engine/operator-snapshot-v2/{LEADERSHIP}"
     assert composer.mode is first.cut.mode is second.cut.mode is SnapshotMode.LIVE
     assert len(first.summaries()) == 8
     assert all(summary.cut is first.cut for summary in first.summaries())
@@ -208,6 +210,14 @@ async def test_complete_snapshot_has_one_cut_eight_detached_summaries_and_stable
     assert first.attention.items[0].state is OperatorPresentationState.WARNING
     assert first.support_bundle.manifest is not None
     assert first.support_bundle.manifest.entries[0].path == "logs/engine.txt"
+
+
+def test_production_provenance_is_v2_while_internal_common_cut_stays_v1() -> None:
+    source = Path("src/cryodaq/engine_wiring/operator_snapshot_composer.py").read_text(encoding="utf-8")
+    assert "engine/operator-snapshot-v1" not in source
+    assert 'f"engine/operator-snapshot-v2/{leadership_id}"' in source
+    assert 'f"cut-v1:{generation}:{digest}"' in source
+    assert "cut-v2:" not in source
 
 
 @pytest.mark.asyncio
@@ -309,6 +319,7 @@ async def test_validation_failure_does_not_allocate_for_mismatch_unavailable_fut
             token=source.token,
             availability=source.availability,
             readiness=source.readiness,
+            lifecycle=source.lifecycle,
             verified_off=source.verified_off,
             blockers=source.blockers,
             plant_health=source.plant_health,
@@ -324,7 +335,9 @@ async def test_ready_without_verified_off_and_unreviewed_optional_unavailable_re
     allocator = _Allocator([SnapshotRevision(1, NOW)])
 
     def unsafe_ready(cut: CommonCut) -> SafetyReadinessReceipt:
-        return SafetyReadinessReceipt(**_base(cut), readiness=ReadinessTruth.READY, verified_off=False)
+        return SafetyReadinessReceipt(
+            **_base(cut), readiness=ReadinessTruth.READY, lifecycle=SafetyLifecycle.READY, verified_off=False
+        )
 
     with pytest.raises(ValueError, match="verified-OFF"):
         await _composer(allocator, safety=unsafe_ready).compose(NOW)

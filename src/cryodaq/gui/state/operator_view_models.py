@@ -22,6 +22,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotMode,
     SupportBundleSummary,
     _OperatorSummary,
@@ -218,6 +219,7 @@ def _degrade_snapshot(
         }
         if isinstance(summary, ReadinessSummary):
             changes["readiness"] = ReadinessTruth.UNKNOWN
+            changes["lifecycle"] = SafetyLifecycle.UNKNOWN
             changes["blockers"] = tuple(
                 replace(
                     item,
@@ -338,6 +340,7 @@ def _recover_snapshot(raw: OperatorSnapshot, age_s: float) -> OperatorSnapshot:
         }
         if isinstance(summary, ReadinessSummary):
             changes["readiness"] = ReadinessTruth.UNKNOWN
+            changes["lifecycle"] = SafetyLifecycle.UNKNOWN
             changes["blockers"] = tuple(
                 replace(
                     item,

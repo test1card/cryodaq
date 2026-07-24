@@ -53,6 +53,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotMode,
     SupportBundleSummary,
 )
@@ -587,12 +588,25 @@ def _state_text(state: OperatorPresentationState) -> str:
 
 def _readiness_facts(summary: ReadinessSummary) -> str:
     verdict = {
-        ReadinessTruth.READY: "ГОТОВО — только по текущему серверному разрешению",
+        ReadinessTruth.READY: (
+            "ГОТОВО — точное текущее состояние владельца Safety на сервере; не разрешение на запуск"
+        ),
         ReadinessTruth.BLOCKED: "ЗАПУСК ЗАБЛОКИРОВАН",
         ReadinessTruth.UNKNOWN: "ГОТОВНОСТЬ НЕИЗВЕСТНА",
     }[summary.readiness]
+    lifecycle = {
+        SafetyLifecycle.SAFE_OFF: "Safety: SAFE OFF",
+        SafetyLifecycle.READY: (
+            "Safety: ГОТОВО — точное текущее состояние владельца Safety на сервере; не разрешение на запуск"
+        ),
+        SafetyLifecycle.RUN_PERMITTED: "Safety: РАЗРЕШЁН ЗАПУСК",
+        SafetyLifecycle.RUNNING: "Safety: В РАБОТЕ",
+        SafetyLifecycle.FAULT_LATCHED: "Safety: ОШИБКА ЗАФИКСИРОВАНА",
+        SafetyLifecycle.MANUAL_RECOVERY: "Safety: РУЧНОЕ ВОССТАНОВЛЕНИЕ",
+        SafetyLifecycle.UNKNOWN: "Safety: СОСТОЯНИЕ НЕИЗВЕСТНО",
+    }[summary.lifecycle]
     blockers = list(summary.blockers[:TOP_DETAIL_LIMIT])
-    lines = [verdict]
+    lines = [verdict, lifecycle]
     lines.extend(f"• {item.operator_text} · нужно: {item.required_evidence}" for item in blockers)
     if len(summary.blockers) > len(blockers):
         lines.append(f"• Ещё причин: {len(summary.blockers) - len(blockers)}")

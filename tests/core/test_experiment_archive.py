@@ -342,8 +342,10 @@ def test_finalize_order_has_no_renderer_step(
     assert events == ["metadata", "archive", "parquet", "clear"]
 
 
-async def test_archive_normalizes_none_text_fields(manager: ExperimentManager) -> None:
-    artifact_dir = manager.data_dir / "experiments" / "exp-bad"
+async def test_archive_rejects_noncanonical_or_missing_payload_identity(
+    manager: ExperimentManager,
+) -> None:
+    artifact_dir = manager.data_dir / "experiments" / ("b" * 32)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     (artifact_dir / "metadata.json").write_text(
         json.dumps(
@@ -367,16 +369,7 @@ async def test_archive_normalizes_none_text_fields(manager: ExperimentManager) -
         encoding="utf-8",
     )
 
-    entry = manager.list_archive_entries()[0]
-
-    assert entry.experiment_id == ""
-    assert entry.title == ""
-    assert entry.template_id == ""
-    assert entry.template_name == ""
-    assert entry.operator == ""
-    assert entry.sample == ""
-    assert entry.status == ""
-    assert entry.notes == ""
+    assert manager.list_archive_entries() == []
 
 
 async def test_archive_rejects_symlinked_experiment_escape(
@@ -387,11 +380,12 @@ async def test_archive_rejects_symlinked_experiment_escape(
     reports = outside / "reports"
     reports.mkdir(parents=True)
     (reports / "report_editable.docx").write_bytes(b"outside")
+    experiment_id = "e" * 32
     (outside / "metadata.json").write_text(
         json.dumps(
             {
                 "experiment": {
-                    "experiment_id": "evil",
+                    "experiment_id": experiment_id,
                     "status": "COMPLETED",
                     "start_time": "2026-03-16T10:00:00+00:00",
                 },
@@ -402,9 +396,9 @@ async def test_archive_rejects_symlinked_experiment_escape(
     )
     experiments = tmp_path / "experiments"
     experiments.mkdir(exist_ok=True)
-    (experiments / "evil").symlink_to(outside, target_is_directory=True)
+    (experiments / experiment_id).symlink_to(outside, target_is_directory=True)
 
-    assert all(entry.experiment_id != "evil" for entry in manager.list_archive_entries())
+    assert all(entry.experiment_id != experiment_id for entry in manager.list_archive_entries())
 
 
 async def test_archive_rejects_symlinked_experiments_root(
@@ -412,7 +406,8 @@ async def test_archive_rejects_symlinked_experiments_root(
     tmp_path: Path,
 ) -> None:
     outside = tmp_path / "outside-experiments-root"
-    experiment = outside / "evil"
+    experiment_id = "e" * 32
+    experiment = outside / experiment_id
     reports = experiment / "reports"
     reports.mkdir(parents=True)
     (reports / "report_editable.docx").write_bytes(b"outside")
@@ -420,7 +415,7 @@ async def test_archive_rejects_symlinked_experiments_root(
         json.dumps(
             {
                 "experiment": {
-                    "experiment_id": "evil",
+                    "experiment_id": experiment_id,
                     "status": "COMPLETED",
                     "start_time": "2026-03-16T10:00:00+00:00",
                 },

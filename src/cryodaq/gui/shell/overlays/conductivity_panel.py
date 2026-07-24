@@ -104,11 +104,7 @@ _POWER_CHANNELS: tuple[str, ...] = (
 def _get_temperature_channels() -> list[tuple[str, str]]:
     """List visible T-prefixed channels as (id, display_name) tuples."""
     mgr = get_channel_manager()
-    return [
-        (ch_id, mgr.get_display_name(ch_id))
-        for ch_id in mgr.get_all_visible()
-        if ch_id.startswith("Т")
-    ]
+    return [(ch_id, mgr.get_display_name(ch_id)) for ch_id in mgr.get_all_visible() if ch_id.startswith("Т")]
 
 
 def _pct_color(pct: float) -> str:
@@ -239,6 +235,7 @@ class ConductivityPanel(QWidget):
         self._auto_step_start: float = 0.0
         self._auto_results: list[dict] = []
         self._auto_workers: list[ZmqCommandWorker] = []
+        self._read_only = False
 
         self._all_channels = _get_temperature_channels()
         get_channel_manager().on_change(self._on_channels_changed)
@@ -302,10 +299,7 @@ class ConductivityPanel(QWidget):
         layout.setSpacing(theme.SPACE_2)
         title = QLabel("ТЕПЛОПРОВОДНОСТЬ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -315,9 +309,7 @@ class ConductivityPanel(QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("conductivityBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._banner_label.setVisible(False)
         return self._banner_label
 
@@ -336,9 +328,7 @@ class ConductivityPanel(QWidget):
 
         src_cap = QLabel("Источник P:")
         src_cap.setFont(_label_font())
-        src_cap.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        src_cap.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(src_cap)
 
         self._power_combo = QComboBox()
@@ -387,9 +377,7 @@ class ConductivityPanel(QWidget):
 
         caption = QLabel("Цепочка датчиков")
         caption.setFont(_label_font())
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(caption)
 
         # v0.55.2 A3: 2-column grid keeps the channel list compact so the
@@ -461,9 +449,7 @@ class ConductivityPanel(QWidget):
         self._steady_banner_label.setFont(_label_font())
         self._steady_banner_label.setObjectName("steadyBanner")
         self._steady_banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._steady_banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._steady_banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._steady_banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._set_steady_banner("", None)
         layout.addWidget(self._steady_banner_label)
@@ -507,9 +493,7 @@ class ConductivityPanel(QWidget):
 
         self._power_label = QLabel("P = ожидание данных")
         self._power_label.setFont(_mono_value_font())
-        self._power_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-        )
+        self._power_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         indicator_row.addWidget(self._power_label)
         indicator_row.addStretch()
 
@@ -588,13 +572,9 @@ class ConductivityPanel(QWidget):
         layout.addWidget(self._plot, stretch=1)
 
         # Empty state overlay (anchored over the plot widget)
-        self._empty_label = QLabel(
-            "Нет данных. Выберите датчики и запустите эксперимент.", self._plot
-        )
+        self._empty_label = QLabel("Нет данных. Выберите датчики и запустите эксперимент.", self._plot)
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._empty_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         self._empty_label.setGeometry(0, 0, 400, 80)
         return card
 
@@ -656,9 +636,7 @@ class ConductivityPanel(QWidget):
 
         self._power_preview = QLabel("")
         self._power_preview.setFont(_label_font())
-        self._power_preview.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._power_preview.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         self._power_preview.setWordWrap(True)
         grid.addWidget(self._power_preview, 1, 0, 1, 6)
 
@@ -741,9 +719,7 @@ class ConductivityPanel(QWidget):
     def _caption(text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(_label_font())
-        label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         return label
 
     # ------------------------------------------------------------------
@@ -1020,30 +996,20 @@ class ConductivityPanel(QWidget):
         total_G_pred = P / (total_r_pred * P) if total_r_pred != 0 and P != 0 else float("nan")
 
         self._table.setItem(total_row, 0, _cell("ИТОГО"))
-        self._table.setItem(
-            total_row, 1, _cell(f"{t_first:.4f}" if math.isfinite(t_first) else "—")
-        )
+        self._table.setItem(total_row, 1, _cell(f"{t_first:.4f}" if math.isfinite(t_first) else "—"))
         self._table.setItem(total_row, 2, _cell(f"{t_last:.4f}" if math.isfinite(t_last) else "—"))
-        self._table.setItem(
-            total_row, 3, _cell(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—")
-        )
+        self._table.setItem(total_row, 3, _cell(f"{total_dt:.4f}" if math.isfinite(total_dt) else "—"))
         self._table.setItem(
             total_row,
             4,
             _cell(f"{total_r:.4g}" if math.isfinite(total_r) and total_r != 0 else "—"),
         )
-        self._table.setItem(
-            total_row, 5, _cell(f"{total_G:.4g}" if math.isfinite(total_G) else "—")
-        )
+        self._table.setItem(total_row, 5, _cell(f"{total_G:.4g}" if math.isfinite(total_G) else "—"))
         self._table.setItem(total_row, 6, _cell(""))
         self._table.setItem(total_row, 7, _cell(""))
         self._table.setItem(total_row, 8, _cell(""))
-        self._table.setItem(
-            total_row, 9, _cell(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—")
-        )
-        self._table.setItem(
-            total_row, 10, _cell(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—")
-        )
+        self._table.setItem(total_row, 9, _cell(f"{total_r_pred:.4g}" if total_r_pred != 0 else "—"))
+        self._table.setItem(total_row, 10, _cell(f"{total_G_pred:.4g}" if math.isfinite(total_G_pred) else "—"))
 
         bold_font = _mono_cell_font()
         bold_font.setBold(True)
@@ -1081,8 +1047,7 @@ class ConductivityPanel(QWidget):
         self._steady_banner_label.setText(text)
         if not text or color is None:
             self._steady_banner_label.setStyleSheet(
-                f"#steadyBanner {{ background: transparent; border: none;"
-                f" color: {theme.MUTED_FOREGROUND}; }}"
+                f"#steadyBanner {{ background: transparent; border: none; color: {theme.MUTED_FOREGROUND}; }}"
             )
             return
         self._steady_banner_label.setStyleSheet(
@@ -1144,9 +1109,7 @@ class ConductivityPanel(QWidget):
             self._stability_label.setText(f"Нестабильно (dT/dt = {max_rate:.3f} К/мин)")
             color = theme.STATUS_WARNING
         self._stability_label.setStyleSheet(
-            f"color: {color};"
-            f" background: transparent; border: none;"
-            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+            f"color: {color}; background: transparent; border: none; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
         )
 
     def _update_plot(self) -> None:
@@ -1188,6 +1151,8 @@ class ConductivityPanel(QWidget):
         self._power_preview.setText("Список мощностей: " + text)
 
     def _send_auto_cmd(self, cmd: dict) -> None:
+        if self._read_only:
+            return
         worker = ZmqCommandWorker(cmd, parent=self)
         worker.finished.connect(self._on_auto_cmd_result)
         self._auto_workers.append(worker)
@@ -1201,6 +1166,8 @@ class ConductivityPanel(QWidget):
 
     @Slot()
     def _on_auto_start(self) -> None:
+        if self._read_only:
+            return
         if len(self._chain) < 2:
             QMessageBox.warning(self, "Ошибка", "Выберите минимум 2 датчика в цепочке.")
             return
@@ -1235,6 +1202,8 @@ class ConductivityPanel(QWidget):
 
     @Slot()
     def _on_auto_stop(self) -> None:
+        if self._read_only:
+            return
         self._auto_state = "idle"
         self._auto_timer.stop()
         self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
@@ -1247,6 +1216,8 @@ class ConductivityPanel(QWidget):
 
     @Slot()
     def _auto_tick(self) -> None:
+        if self._read_only:
+            return
         if self._auto_state != "stabilizing":
             return
         elapsed = time.monotonic() - self._auto_step_start
@@ -1272,9 +1243,7 @@ class ConductivityPanel(QWidget):
 
         settled_str = " / ".join(f"{s:.0f}%" for s in settled_values[:4])
         self._auto_status_label.setText(
-            f"Шаг {step_idx + 1}/{step_total} — "
-            f"P = {P:.4g} Вт — {elapsed:.0f} с — "
-            f"стабил.: {settled_str}"
+            f"Шаг {step_idx + 1}/{step_total} — P = {P:.4g} Вт — {elapsed:.0f} с — стабил.: {settled_str}"
         )
 
         if is_stable:
@@ -1337,6 +1306,8 @@ class ConductivityPanel(QWidget):
         )
 
     def _auto_complete(self) -> None:
+        if self._read_only:
+            return
         self._auto_state = "done"
         self._auto_timer.stop()
         self._send_auto_cmd({"cmd": "keithley_stop", "channel": self._smu_channel()})
@@ -1349,10 +1320,7 @@ class ConductivityPanel(QWidget):
         if self._auto_results:
             summary_lines = ["Автоизмерение завершено:\n"]
             for i, pt in enumerate(self._auto_results, 1):
-                summary_lines.append(
-                    f"{i}. P={pt['P']:.4g} Вт, dT={pt['dT']:.4f} К, "
-                    f"R={pt['R']:.4g}, G={pt['G']:.4g}"
-                )
+                summary_lines.append(f"{i}. P={pt['P']:.4g} Вт, dT={pt['dT']:.4f} К, R={pt['R']:.4g}, G={pt['G']:.4g}")
             QMessageBox.information(self, "Автоизмерение", "\n".join(summary_lines))
         self.auto_sweep_completed.emit(n)
 
@@ -1476,9 +1444,7 @@ class ConductivityPanel(QWidget):
         if len(self._chain) < 2:
             self.show_warning("Выберите минимум 2 датчика в цепочке.")
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт теплопроводности", "", "CSV файлы (*.csv)"
-        )
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт теплопроводности", "", "CSV файлы (*.csv)")
         if not path:
             return
         out = Path(path)
@@ -1554,13 +1520,20 @@ class ConductivityPanel(QWidget):
         else:
             self.clear_message()
 
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
+        if self._read_only:
+            self._auto_timer.stop()
+            self._auto_state = "idle"
+        self._update_control_enablement()
+
     def _update_control_enablement(self) -> None:
         # Auto-sweep Start gated on connection. Stop stays enabled while
         # stabilizing so operator can always abort. Chain selection +
         # CSV export stay enabled regardless (local work).
-        start_ok = self._connected and self._auto_state != "stabilizing"
+        start_ok = self._connected and not self._read_only and self._auto_state != "stabilizing"
         self._auto_start_btn.setEnabled(start_ok)
-        self._auto_stop_btn.setEnabled(self._auto_state == "stabilizing")
+        self._auto_stop_btn.setEnabled(not self._read_only and self._auto_state == "stabilizing")
 
     def get_auto_state(self) -> str:
         """Public accessor for the auto-sweep FSM state.

@@ -38,6 +38,30 @@ def test_dashboard_presentation_tick_is_bounded_to_two_hz(app):
     assert view._refresh_timer.interval() == _PRESENTATION_INTERVAL_MS
 
 
+def test_dashboard_cold_start_is_disconnected_and_mutations_are_disabled(app):
+    view = DashboardView(ChannelManager())
+
+    assert view._connected is False
+    assert view._log_poll_timer.isActive() is False
+    assert view._phase_widget._create_btn.isEnabled() is False
+    assert view._quick_log._input.isEnabled() is False
+    assert view._quick_log._send_btn.isEnabled() is False
+
+
+def test_dashboard_live_connection_enables_mutations_and_polling(app, monkeypatch):
+    view = DashboardView(ChannelManager())
+    polls: list[bool] = []
+    monkeypatch.setattr(view, "_poll_log_entries", lambda: polls.append(True))
+
+    view.set_connected(True)
+
+    assert view._log_poll_timer.isActive() is True
+    assert view._phase_widget._create_btn.isEnabled() is True
+    assert view._quick_log._input.isEnabled() is True
+    assert view._quick_log._send_btn.isEnabled() is True
+    assert polls == [True]
+
+
 def test_dashboard_view_has_five_zones(app):
     """All five placeholder zones are present with expected object names."""
     mgr = ChannelManager()
@@ -207,6 +231,8 @@ def test_dashboard_live_config_signals_still_persist(app, monkeypatch):
     saved: list[bool] = []
     monkeypatch.setattr(mgr, "save", lambda: saved.append(True))
     view = DashboardView(mgr)
+    monkeypatch.setattr(view, "_poll_log_entries", lambda: None)
+    view.set_connected(True)
 
     view._sensor_grid.rename_requested.emit("Т1", "Новое")
     view._sensor_grid.hide_requested.emit("Т1")

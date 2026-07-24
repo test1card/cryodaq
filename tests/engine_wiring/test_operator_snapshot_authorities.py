@@ -44,6 +44,7 @@ from cryodaq.operator_snapshot import (
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
 )
 
 NOW = datetime(2026, 7, 12, 0, 0, tzinfo=UTC)
@@ -154,6 +155,7 @@ def test_safety_receipt_is_typed_bounded_and_fail_closed_when_unavailable() -> N
     receipt = SafetyReadinessReceipt(
         **_base(),
         readiness=ReadinessTruth.BLOCKED,
+        lifecycle=SafetyLifecycle.FAULT_LATCHED,
         verified_off=True,
         blockers=(blocker,),
         plant_health=(subsystem,),
@@ -162,7 +164,9 @@ def test_safety_receipt_is_typed_bounded_and_fail_closed_when_unavailable() -> N
     assert receipt.verified_off is True
 
     with pytest.raises(ValueError, match="requires at least one"):
-        SafetyReadinessReceipt(**_base(), readiness=ReadinessTruth.BLOCKED, verified_off=True)
+        SafetyReadinessReceipt(
+            **_base(), readiness=ReadinessTruth.BLOCKED, lifecycle=SafetyLifecycle.FAULT_LATCHED, verified_off=True
+        )
     with pytest.raises(ValueError, match="unknown/empty"):
         SafetyReadinessReceipt(
             **_unavailable_base(reason="safety_not_sampled"),

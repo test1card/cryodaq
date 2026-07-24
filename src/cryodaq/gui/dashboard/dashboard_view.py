@@ -56,11 +56,14 @@ class DashboardView(QScrollArea):
         self._phase_widget: PhaseAwareWidget | None = None
         self._quick_log: QuickLogBlock | None = None
         self._read_only = False
+        self._connected = False
+        self._latest_experiment_status: dict | None = None
         self._log_submit_worker = None
         self._log_poll_worker = None
         self._build_ui()
         self._wire_x_link()
         self._start_refresh_timer()
+        self._apply_mutation_gate()
 
     def _build_ui(self) -> None:
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -159,7 +162,6 @@ class DashboardView(QScrollArea):
         self._log_poll_timer = QTimer(self)
         self._log_poll_timer.setInterval(10000)
         self._log_poll_timer.timeout.connect(self._poll_log_entries)
-        self._log_poll_timer.start()
 
     def _refresh_plots(self) -> None:
         if self._temp_plot is not None:
@@ -196,26 +198,43 @@ class DashboardView(QScrollArea):
         # B.5.5: route analytics readings to phase widget
         if channel.startswith("analytics/") and self._phase_widget is not None:
             self._phase_widget.on_reading(reading)
-            if self._read_only:
-                self.set_read_only(True)
+            self._apply_mutation_gate()
 
     def set_read_only(self, read_only: bool) -> None:
         """Keep dashboard evidence visible while removing replay mutations."""
 
         self._read_only = bool(read_only)
-        if self._phase_widget is not None:
-            for widget in (
-                self._phase_widget._create_btn,
-                self._phase_widget._back_btn,
-                self._phase_widget._forward_btn,
-                self._phase_widget._jump_combo,
-            ):
-                widget.setEnabled(not self._read_only)
+        self._apply_mutation_gate()
+        self._update_log_polling()
+
+    def set_connected(self, connected: bool) -> None:
+        self._connected = bool(connected)
+        self._apply_mutation_gate()
+        self._update_log_polling()
+
+    def _apply_mutation_gate(self) -> None:
+        enabled = self._connected and not self._read_only
+        phase = self._phase_widget
+        if enabled and phase is not None and self._latest_experiment_status is not None:
+            phase.on_status_update(self._latest_experiment_status)
+        if phase is not None and not enabled:
+            for widget in (phase._create_btn, phase._back_btn, phase._forward_btn, phase._jump_combo):
+                widget.setEnabled(False)
+        elif phase is not None and self._latest_experiment_status is None:
+            phase._create_btn.setEnabled(True)
         if self._quick_log is not None:
-            self._quick_log._input.setEnabled(not self._read_only)
-            self._quick_log._send_btn.setEnabled(not self._read_only)
+            self._quick_log._input.setEnabled(enabled)
+            self._quick_log._send_btn.setEnabled(enabled)
         if self._sensor_grid is not None:
-            self._sensor_grid.set_read_only(self._read_only)
+            self._sensor_grid.set_read_only(not enabled)
+
+    def _update_log_polling(self) -> None:
+        if self._connected and not self._read_only:
+            if not self._log_poll_timer.isActive():
+                self._log_poll_timer.start()
+                self._poll_log_entries()
+            return
+        self._log_poll_timer.stop()
 
     # ------------------------------------------------------------------
     # Sensor grid signal handlers
@@ -223,14 +242,14 @@ class DashboardView(QScrollArea):
 
     def _on_rename_requested(self, channel_id: str, new_name: str) -> None:
         """Operator renamed a channel via inline rename or context menu."""
-        if self._read_only:
+        if self._read_only or not self._connected:
             return
         self._channel_mgr.set_name(channel_id, new_name)
         self._channel_mgr.save()
 
     def _on_hide_requested(self, channel_id: str) -> None:
         """Operator wants to hide a channel from the dashboard."""
-        if self._read_only:
+        if self._read_only or not self._connected:
             return
         self._channel_mgr.set_visible(channel_id, False)
         self._channel_mgr.save()
@@ -249,7 +268,7 @@ class DashboardView(QScrollArea):
 
     def _on_phase_transition_requested(self, phase: str) -> None:
         """Forward phase transition request to engine via ZMQ."""
-        if self._read_only:
+        if self._read_only or not self._connected:
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
@@ -271,10 +290,10 @@ class DashboardView(QScrollArea):
 
     def on_experiment_status(self, status: dict) -> None:
         """Forward experiment_status response to phase widget."""
+        self._latest_experiment_status = dict(status)
         if self._phase_widget is not None:
             self._phase_widget.on_status_update(status)
-            if self._read_only:
-                self.set_read_only(True)
+            self._apply_mutation_gate()
 
     # ------------------------------------------------------------------
     # Quick log handlers (B.7)
@@ -282,7 +301,7 @@ class DashboardView(QScrollArea):
 
     def _on_log_entry_submitted(self, message: str) -> None:
         """Send log entry via ZMQ and refresh visible entries."""
-        if self._read_only:
+        if self._read_only or not self._connected:
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
@@ -302,6 +321,8 @@ class DashboardView(QScrollArea):
 
     def _poll_log_entries(self) -> None:
         """Fetch latest log entries for QuickLogBlock."""
+        if self._read_only or not self._connected:
+            return
         if self._log_poll_worker is not None and not self._log_poll_worker.isFinished():
             return  # previous poll still in flight
         from cryodaq.gui.zmq_client import ZmqCommandWorker

@@ -12,6 +12,7 @@ WATCHDOG → DISARMED via operator disarm() or experiment.finalized notification
 All data reads are fresh per tick from ChannelStateTracker (LATE BINDING).
 Graceful degradation: model absent → arm() returns False, alarm stays DISARMED.
 """
+
 from __future__ import annotations
 
 import collections
@@ -20,7 +21,6 @@ import logging
 import math
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -37,12 +37,12 @@ _RATE_MIN_HISTORY_H = 0.5  # minimum elapsed hours before deviation logic activa
 
 class CooldownState(enum.Enum):
     DISARMED = "DISARMED"
-    ARMED = "ARMED"               # collecting baseline (< RATE_MIN_HISTORY_H elapsed)
-    WATCHING = "WATCHING"         # evaluating trajectory
-    FIRED = "FIRED"               # trajectory alarm active
-    AUTO_DISARMED = "AUTO_DISARMED"   # cooldown complete; momentary if watchdog_enabled
-    WATCHDOG = "WATCHDOG"         # monitoring T_cold post-cooldown
-    WATCHDOG_FIRED = "WATCHDOG_FIRED" # warming detected
+    ARMED = "ARMED"  # collecting baseline (< RATE_MIN_HISTORY_H elapsed)
+    WATCHING = "WATCHING"  # evaluating trajectory
+    FIRED = "FIRED"  # trajectory alarm active
+    AUTO_DISARMED = "AUTO_DISARMED"  # cooldown complete; momentary if watchdog_enabled
+    WATCHDOG = "WATCHDOG"  # monitoring T_cold post-cooldown
+    WATCHDOG_FIRED = "WATCHDOG_FIRED"  # warming detected
 
 
 class CooldownAlarm:
@@ -62,6 +62,7 @@ class CooldownAlarm:
         event_bus: EventBus,
         steady_state_predictor: Any = None,
         safety_manager: Any = None,
+        predictor_model: Any = None,
     ) -> None:
         self._state_tracker = state_tracker
         self._alarm_state_mgr = alarm_state_mgr
@@ -105,9 +106,6 @@ class CooldownAlarm:
         _eval_interval_s: float = float(cfg.get("eval_interval_s", 30.0))
         self._watchdog_required_ticks: int = max(1, math.ceil(_watchdog_sustained_s / _eval_interval_s))
 
-        model_path_str = cfg.get("predictor_model_path", "data/cooldown_model/predictor_model.json")
-        self._model_dir = Path(model_path_str).parent
-
         # v0.55.12 — cold-start auto-detect (audit SCOPE 1 finding 1.5).
         # On engine restart with the cryostat already cold, auto_arm fires,
         # arm() succeeds, and the very first tick triggers AUTO_DISARMED
@@ -115,13 +113,11 @@ class CooldownAlarm:
         # terminal state with watchdog default off. Skip arm() when the
         # cold channel is already in [base, base + cold_start_skip_margin_K]
         # AND (if available) SteadyStatePredictor reports quasi-steady.
-        self._cold_start_skip_margin_K: float = float(
-            cfg.get("cold_start_skip_margin_K", 5.0)
-        )
+        self._cold_start_skip_margin_K: float = float(cfg.get("cold_start_skip_margin_K", 5.0))
         self._cold_start_skipped: bool = False
 
         self._state = CooldownState.DISARMED
-        self._model = None               # EnsembleModel — loaded on arm()
+        self._model = predictor_model
         self._t_armed: float | None = None
         self._sustained_count: int = 0
         self._watchdog_sustained_count: int = 0
@@ -136,9 +132,7 @@ class CooldownAlarm:
         self._cycle_generation: int = 0
 
         # Circular buffer of (wall_time, eta_h) for slip computation
-        self._eta_history: collections.deque = collections.deque(
-            maxlen=int(self._eta_slip_window_min * 2 + 10)
-        )
+        self._eta_history: collections.deque = collections.deque(maxlen=int(self._eta_slip_window_min * 2 + 10))
 
     @property
     def state(self) -> CooldownState:
@@ -201,9 +195,7 @@ class CooldownAlarm:
         # gas-desorption drift / late-evening recovery shouldn't count.
         if self._steady_state_predictor is not None:
             try:
-                ss_pred = self._steady_state_predictor.get_prediction(
-                    self._cold_ch
-                )
+                ss_pred = self._steady_state_predictor.get_prediction(self._cold_ch)
             except Exception:
                 return False
             if ss_pred is None or not getattr(ss_pred, "is_quasi_steady", False):
@@ -220,15 +212,10 @@ class CooldownAlarm:
         if self._is_cold_start():
             cold_state = self._state_tracker.get(self._cold_ch)
             warm_state = self._state_tracker.get(self._warm_ch)
-            cold_str = (
-                f"{cold_state.value:.2f}" if cold_state is not None else "?"
-            )
-            warm_str = (
-                f"{warm_state.value:.2f}" if warm_state is not None else "?"
-            )
+            cold_str = f"{cold_state.value:.2f}" if cold_state is not None else "?"
+            warm_str = f"{warm_state.value:.2f}" if warm_state is not None else "?"
             logger.info(
-                "CooldownAlarm: cold-start detected (T_cold=%s K, T_warm=%s K, "
-                "base=[%.1f, %.1f]) — skipping auto-arm",
+                "CooldownAlarm: cold-start detected (T_cold=%s K, T_warm=%s K, base=[%.1f, %.1f]) — skipping auto-arm",
                 cold_str,
                 warm_str,
                 self._base_temp_K,
@@ -251,25 +238,9 @@ class CooldownAlarm:
             self._state = CooldownState.DISARMED
             logger.info("CooldownAlarm: сброс для нового цикла захолаживания")
 
-        # Lazy model load
         if self._model is None:
-            model_file = self._model_dir / "predictor_model.json"
-            if not model_file.exists():
-                logger.warning(
-                    "CooldownAlarm: модель %s не найдена — запустите cryodaq-cooldown build",
-                    model_file,
-                )
-                return False
-            try:
-                from cryodaq.analytics.cooldown_predictor import load_model
-                self._model = load_model(self._model_dir)
-                logger.info(
-                    "CooldownAlarm: модель загружена (%d кривых, %.1f ч среднее)",
-                    self._model.n_curves, self._model.duration_mean,
-                )
-            except Exception as exc:
-                logger.warning("CooldownAlarm: ошибка загрузки модели: %s", exc)
-                return False
+            logger.error("CooldownAlarm: reviewed predictor authority is UNAVAILABLE")
+            return False
 
         self._t_armed = time.monotonic()
         self._sustained_count = 0
@@ -375,8 +346,7 @@ class CooldownAlarm:
         # --- Auto-disarm check ---
         auto_disarm_base = self._base_temp_K + self._base_epsilon_K
         if T_cold <= auto_disarm_base or (
-            self._current_progress is not None
-            and self._current_progress >= self._auto_disarm_progress
+            self._current_progress is not None and self._current_progress >= self._auto_disarm_progress
         ):
             self._state = CooldownState.AUTO_DISARMED
             transition = self._alarm_state_mgr.process(ALARM_ID, None, {})
@@ -433,9 +403,21 @@ class CooldownAlarm:
         # --- Predictor evaluation ---
         try:
             from cryodaq.analytics.cooldown_predictor import predict as _predict
+
             pred = _predict(self._model, T_cold, T_warm, t_elapsed=t_elapsed_h)
         except Exception as exc:
-            logger.warning("CooldownAlarm: ошибка предиктора: %s", exc)
+            logger.critical("CooldownAlarm: runtime predictor failure: %s", type(exc).__name__)
+            if self._safety_manager is not None:
+                try:
+                    await self._safety_manager.latch_fault(
+                        reason="Cooldown predictor runtime failure",
+                        source="cooldown_predictor",
+                    )
+                except Exception as latch_exc:
+                    logger.critical(
+                        "CooldownAlarm: predictor fault latch failed: %s",
+                        type(latch_exc).__name__,
+                    )
             return
 
         p_actual = pred.progress
@@ -472,10 +454,7 @@ class CooldownAlarm:
             eta_slip_h = eta_h - (eta_1h_ago - self._eta_slip_window_min / 60.0)
 
         # --- Fire condition ---
-        in_deviation = (
-            deviation > self._k_p * sigma_p
-            and T_cold > auto_disarm_base
-        )
+        in_deviation = deviation > self._k_p * sigma_p and T_cold > auto_disarm_base
 
         if in_deviation:
             self._sustained_count += 1
@@ -488,9 +467,7 @@ class CooldownAlarm:
         if self._sustained_count >= self._sustained_min:
             slip_msg = ""
             if eta_slip_h is not None and eta_slip_h > self._eta_slip_threshold_h:
-                slip_msg = (
-                    f" ETA сдвинулась на +{eta_slip_h:.1f} ч за последний час."
-                )
+                slip_msg = f" ETA сдвинулась на +{eta_slip_h:.1f} ч за последний час."
             event: AlarmEvent | None = AlarmEvent(
                 alarm_id=ALARM_ID,
                 level="CRITICAL",
@@ -498,8 +475,7 @@ class CooldownAlarm:
                     f"Захолаживание не идёт по плану. "
                     f"Прогресс {p_actual:.0%} вместо ожидаемых {p_expected:.0%} "
                     f"(отклонение {deviation / max(sigma_p, 0.01):.1f}σ). "
-                    f"{self._cold_ch} = {T_cold:.1f} K."
-                    + slip_msg
+                    f"{self._cold_ch} = {T_cold:.1f} K." + slip_msg
                 ),
                 triggered_at=time.time(),
                 channels=[self._cold_ch, self._warm_ch],
@@ -528,9 +504,7 @@ class CooldownAlarm:
             )
             return None
 
-        transition = self._alarm_state_mgr.process(
-            ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
-        )
+        transition = self._alarm_state_mgr.process(ALARM_ID, event, {"sustained_s": None, "hysteresis": None})
 
         # v0.55.12 — escalate CRITICAL to SafetyManager via the public
         # latch_fault() entry point (audit SCOPE 1 finding 1.1).
@@ -601,12 +575,11 @@ class CooldownAlarm:
         else:
             event = None
 
-        return self._alarm_state_mgr.process(
-            WATCHDOG_ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
-        )
+        return self._alarm_state_mgr.process(WATCHDOG_ALARM_ID, event, {"sustained_s": None, "hysteresis": None})
 
     async def _publish_state_event(self) -> None:
         from cryodaq.core.event_bus import EngineEvent
+
         try:
             await self._event_bus.publish(
                 EngineEvent(

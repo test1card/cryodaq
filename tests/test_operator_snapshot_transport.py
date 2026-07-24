@@ -20,6 +20,7 @@ from cryodaq.operator_snapshot import (
     ReadinessSummary,
     ReadinessTruth,
     RecordingTruth,
+    SafetyLifecycle,
     SnapshotCut,
     SnapshotMode,
     SummaryStatus,
@@ -41,13 +42,13 @@ def _snapshot() -> OperatorSnapshot:
         42,
         observed,
         observed + timedelta(seconds=1),
-        "engine/operator-snapshot-v1/test",
+        "engine/operator-snapshot-v2/test",
         SnapshotMode.LIVE,
     )
     status = SummaryStatus(OperatorPresentationState.CAUTION, 0.5, 0.0, ("authority_pending",), "Ожидание")
     return OperatorSnapshot(
         cut,
-        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, ()),
+        ReadinessSummary(cut, status, ReadinessTruth.UNKNOWN, (), SafetyLifecycle.UNKNOWN),
         PlantHealthSummary(cut, status, ()),
         InfrastructureNodeHealth(cut, status, ()),
         AttentionQueue(cut, status, ()),
@@ -150,7 +151,7 @@ def test_decoder_rejects_invalid_utf8_before_protocol_decode(monkeypatch: pytest
         lambda wire: wire[:-1] + b',"schema":"cryodaq.operator-snapshot"}',
         lambda wire: wire.replace(b'"source_age_s":0.5', b'"source_age_s":NaN', 1),
         lambda wire: wire + b" trailing",
-        lambda wire: wire.replace(b'"version":1', b'"version":1,"unknown":true', 1),
+        lambda wire: wire.replace(b'"version":2', b'"version":2,"unknown":true', 1),
     ],
     ids=("duplicate-key", "nonfinite", "trailing", "unknown-field"),
 )
