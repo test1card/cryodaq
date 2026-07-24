@@ -1,0 +1,24 @@
+{
+  "artifacts": [
+    {
+      "path": "report_editable.docx",
+      "sha256": "d7cbbb688b2e506c022e95cef8c4f629a29b9b36a6e50324e70dff466dbb95af",
+      "size": 8
+    }
+  ],
+  "created_at": 1783998519.3476527,
+  "experiment_id": "test_manifest_resolver_never_f0",
+  "generation_id": "generation-token-0001",
+  "report": {
+    "assets_dir": "reports/generations/generation-token-0001/assets",
+    "docx_path": "reports/generations/generation-token-0001/report_editable.docx",
+    "pdf_path": null,
+    "reason": "",
+    "sections": [
+      "title_page"
+    ],
+    "skipped": false
+  },
+  "schema": 1,
+  "source_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+}

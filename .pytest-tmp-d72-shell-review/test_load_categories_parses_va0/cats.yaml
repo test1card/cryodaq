@@ -1,0 +1,5 @@
+categories:
+  - id: x
+    label: 'X'
+    query: 'q'
+    limit: 3

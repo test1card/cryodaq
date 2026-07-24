@@ -1,0 +1,7 @@
+categories:
+  - id: ok
+    label: 'OK'
+    query: 'q'
+  - just a string
+  - id: missing_query
+    label: 'broken'
