@@ -1,0 +1,8 @@
+channels:
+  "\u0422_test":
+    alarm_band:
+      all_phases:
+      - not
+      - numeric
+    name: Test
+    thermal_zone: cold_4k

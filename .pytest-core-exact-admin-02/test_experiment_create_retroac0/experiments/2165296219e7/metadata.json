@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "2165296219e7",
+    "name": "Retro cooldown",
+    "title": "Retro cooldown",
+    "template_id": "cooldown_test",
+    "operator": "Petrov",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-03-14T08:00:00+00:00",
+    "end_time": "2026-03-14T10:00:00+00:00",
+    "status": "COMPLETED",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "name": "k1",
+          "resource": "MOCK",
+          "type": "keithley_2604b"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "cooldown_path"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_create_retroac0\\experiments\\2165296219e7",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_create_retroac0\\experiments\\2165296219e7\\metadata.json",
+    "retroactive": true
+  },
+  "template": {
+    "id": "cooldown_test",
+    "name": "Cooldown Test",
+    "sections": [
+      "setup",
+      "cooldown_path"
+    ],
+    "report_enabled": true,
+    "report_sections": [],
+    "custom_fields": [
+      {
+        "id": "target_temperature",
+        "label": "Target Temperature",
+        "default": ""
+      }
+    ]
+  },
+  "data_range": {
+    "start_time": "2026-03-14T08:00:00+00:00",
+    "end_time": "2026-03-14T10:00:00+00:00",
+    "daily_db_files": [
+      "data_2026-03-14.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_create_retroac0\\experiments\\2165296219e7",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_create_retroac0\\experiments\\2165296219e7\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

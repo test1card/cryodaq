@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "artifact_index": [
+    {
+      "artifact_id": "table:measured_values:measured_values.csv",
+      "category": "table",
+      "role": "measured_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\archive\\tables\\measured_values.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "table:setpoint_values:setpoint_values.csv",
+      "category": "table",
+      "role": "setpoint_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\archive\\tables\\setpoint_values.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "table:run_results:run_results.csv",
+      "category": "table",
+      "role": "run_results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\archive\\tables\\run_results.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "summary:summary_metadata:summary_metadata.json",
+      "category": "summary",
+      "role": "summary_metadata",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\archive\\summaries\\summary_metadata.json",
+      "summary": {
+        "experiment_id": "6e4cdad724e5",
+        "title": "Checkout",
+        "sample": "",
+        "operator": "Sidorov",
+        "status": "COMPLETED",
+        "run_record_count": 0,
+        "artifact_count": 3,
+        "result_table_count": 3,
+        "measured_value_rows": 0,
+        "setpoint_rows": 0,
+        "run_result_rows": 0,
+        "conductivity_rows": 0
+      }
+    }
+  ],
+  "result_tables": [
+    {
+      "table_id": "measured_values",
+      "title": "Measured values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\archive\\tables\\measured_values.csv",
+      "row_count": 0
+    },
+    {
+      "table_id": "setpoint_values",
+      "title": "Setpoint values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\archive\\tables\\setpoint_values.csv",
+      "row_count": 0
+    },
+    {
+      "table_id": "run_results",
+      "title": "Run results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\archive\\tables\\run_results.csv",
+      "row_count": 0
+    }
+  ],
+  "summary_metadata": {
+    "experiment_id": "6e4cdad724e5",
+    "title": "Checkout",
+    "sample": "",
+    "operator": "Sidorov",
+    "status": "COMPLETED",
+    "run_record_count": 0,
+    "artifact_count": 3,
+    "result_table_count": 3,
+    "measured_value_rows": 0,
+    "setpoint_rows": 0,
+    "run_result_rows": 0,
+    "conductivity_rows": 0
+  },
+  "experiment": {
+    "experiment_id": "6e4cdad724e5",
+    "name": "Checkout",
+    "title": "Checkout",
+    "template_id": "debug_checkout",
+    "operator": "Sidorov",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T18:43:58.272785+00:00",
+    "end_time": "2026-07-18T18:43:58.301577+00:00",
+    "status": "COMPLETED",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": false,
+    "sections": [
+      "setup",
+      "checks"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "debug_checkout",
+    "name": "Debug Checkout",
+    "sections": [
+      "setup",
+      "checks"
+    ],
+    "report_enabled": false,
+    "report_sections": [],
+    "custom_fields": [
+      {
+        "id": "issue_ticket",
+        "label": "Issue Ticket",
+        "default": ""
+      }
+    ]
+  },
+  "data_range": {
+    "start_time": "2026-07-18T18:43:58.272785+00:00",
+    "end_time": "2026-07-18T18:43:58.301577+00:00",
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_report_disabled_template_0\\experiments\\6e4cdad724e5\\metadata.json"
+  },
+  "run_records": []
+}

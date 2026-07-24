@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "84acd5ad7bb3",
+    "name": "Ordered finalize",
+    "title": "Ordered finalize",
+    "template_id": "thermal_conductivity",
+    "operator": "Sidorov",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-03-16T10:00:00+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "name": "k1",
+          "resource": "MOCK",
+          "type": "keithley_2604b"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_finalize_order_has_no_ren0\\experiments\\84acd5ad7bb3",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_finalize_order_has_no_ren0\\experiments\\84acd5ad7bb3\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "thermal_conductivity",
+    "name": "Thermal Conductivity",
+    "sections": [
+      "setup"
+    ],
+    "report_enabled": true,
+    "report_sections": [
+      "title_page"
+    ],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-03-16T10:00:00+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-03-16.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_finalize_order_has_no_ren0\\experiments\\84acd5ad7bb3",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_finalize_order_has_no_ren0\\experiments\\84acd5ad7bb3\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

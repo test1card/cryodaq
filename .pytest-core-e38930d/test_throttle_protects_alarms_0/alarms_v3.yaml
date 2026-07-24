@@ -1,0 +1,4 @@
+global_alarms:
+  t11_high:
+    channel: Т11
+    level: CRITICAL

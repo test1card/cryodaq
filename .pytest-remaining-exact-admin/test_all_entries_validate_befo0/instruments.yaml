@@ -1,0 +1,7 @@
+instruments:
+- name: valid-first
+  resource: COM3
+  type: thyracont_vsp63d
+- name: invalid-second
+  resource: USB::1
+  type: unknown_source

@@ -1,0 +1,9 @@
+
+landmarks:
+  Т11:
+    role: warm_stage
+    physical: "1-я ступень"
+    aliases:
+      - "  Азотная Плита  "
+      - "T Warm"
+      - "WARM CHANNEL"

@@ -1,0 +1,7 @@
+
+global_alarms:
+  cooling_stall:
+    alarm_type: rate
+    channel: T11
+    check: rate_below
+    level: WARNING

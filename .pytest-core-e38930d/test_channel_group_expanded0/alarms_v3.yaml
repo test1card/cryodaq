@@ -1,0 +1,50 @@
+
+engine:
+  poll_interval_s: 0.5
+  rate_window_s: 60
+  rate_min_points: 30
+  setpoints:
+    T12_setpoint:
+      source: experiment_metadata
+      default: 4.2
+      unit: K
+
+channel_groups:
+  calibrated: [T11, T12]
+  all_temp: [T1, T2, T11, T12]
+
+global_alarms:
+  sensor_range:
+    alarm_type: threshold
+    channel_group: calibrated
+    check: outside_range
+    range: [1.0, 350.0]
+    level: CRITICAL
+    notify: [gui, telegram]
+
+  data_stale:
+    alarm_type: stale
+    channel: T12
+    timeout_s: 30
+    level: WARNING
+    notify: [gui]
+
+phase_alarms:
+  cooldown:
+    excessive_cooling:
+      alarm_type: rate
+      channels: [T11, T12]
+      check: rate_below
+      threshold: -5.0
+      level: WARNING
+      notify: [gui, telegram]
+
+  measurement:
+    detector_drift:
+      alarm_type: threshold
+      channel: T12
+      check: deviation_from_setpoint
+      setpoint_source: T12_setpoint
+      threshold: 0.5
+      level: WARNING
+      notify: []

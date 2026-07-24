@@ -1,0 +1,15 @@
+{
+  "experiment_id": "2840fa02f79a",
+  "title": "Replay session",
+  "sample": "",
+  "operator": "replay",
+  "status": "active",
+  "start_time": "2026-07-18T18:45:18.293677+00:00",
+  "end_time": null,
+  "description": "",
+  "notes": "",
+  "is_replay": true,
+  "phase": "preparation",
+  "phase_started_at": "2026-07-18T18:45:18.294467+00:00",
+  "phases": []
+}

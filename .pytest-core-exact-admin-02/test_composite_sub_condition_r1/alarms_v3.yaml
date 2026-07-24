@@ -1,0 +1,12 @@
+
+global_alarms:
+  plateau_check:
+    alarm_type: composite
+    operator: AND
+    conditions:
+      - channel: T11
+        check: rate_near_zero
+      - channel: T11
+        check: below
+        threshold: 10.0
+    level: INFO

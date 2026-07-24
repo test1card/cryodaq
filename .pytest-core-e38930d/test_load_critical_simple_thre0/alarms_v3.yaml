@@ -1,0 +1,9 @@
+global_alarms:
+  info_only:
+    alarm_type: threshold
+    channel: Т20
+    level: INFO
+  p1_high:
+    alarm_type: threshold
+    channel: P1
+    level: CRITICAL

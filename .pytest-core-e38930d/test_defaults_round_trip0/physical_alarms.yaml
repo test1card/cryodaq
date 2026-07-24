@@ -1,0 +1,31 @@
+cooldown:
+  auto_arm: true
+  auto_disarm_progress: 0.95
+  base_epsilon_K: 1.0
+  base_temp_K: 5.0
+  cold_channel: "\u042212"
+  cold_start_skip_margin_K: 5.0
+  enabled: true
+  eta_slip_message_threshold_h: 0.5
+  eta_slip_window_min: 60
+  eval_interval_s: 30
+  k_p: 2.5
+  predictor_model_path: data/cooldown_model/predictor_model.json
+  sustained_min: 5
+  warm_channel: "\u042211"
+  watchdog_enabled: false
+  watchdog_level: WARNING
+  watchdog_margin_K: 1.0
+  watchdog_sustained_s: 300.0
+vacuum:
+  arm_threshold_K: 260.0
+  clear_pressure_mbar: 0.001
+  disarm_threshold_K: 270.0
+  enabled: true
+  escalate_to_safety: false
+  eval_interval_s: 30
+  fire_pressure_mbar: 0.01
+  pressure_channel: VSP63D_1/pressure
+  reference_temp_channel: "\u042212"
+  severity: CRITICAL
+  sustained_s: 30

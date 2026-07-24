@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "artifact_index": [
+    {
+      "artifact_id": "table:measured_values:measured_values.csv",
+      "category": "table",
+      "role": "measured_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\archive\\tables\\measured_values.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "table:setpoint_values:setpoint_values.csv",
+      "category": "table",
+      "role": "setpoint_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\archive\\tables\\setpoint_values.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "table:run_results:run_results.csv",
+      "category": "table",
+      "role": "run_results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\archive\\tables\\run_results.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "summary:summary_metadata:summary_metadata.json",
+      "category": "summary",
+      "role": "summary_metadata",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\archive\\summaries\\summary_metadata.json",
+      "summary": {
+        "experiment_id": "4ddf181dcdc5",
+        "title": "Thermal",
+        "sample": "Cu",
+        "operator": "Ivanov",
+        "status": "COMPLETED",
+        "run_record_count": 0,
+        "artifact_count": 3,
+        "result_table_count": 3,
+        "measured_value_rows": 0,
+        "setpoint_rows": 0,
+        "run_result_rows": 0,
+        "conductivity_rows": 0
+      }
+    }
+  ],
+  "result_tables": [
+    {
+      "table_id": "measured_values",
+      "title": "Measured values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\archive\\tables\\measured_values.csv",
+      "row_count": 0
+    },
+    {
+      "table_id": "setpoint_values",
+      "title": "Setpoint values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\archive\\tables\\setpoint_values.csv",
+      "row_count": 0
+    },
+    {
+      "table_id": "run_results",
+      "title": "Run results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\archive\\tables\\run_results.csv",
+      "row_count": 0
+    }
+  ],
+  "summary_metadata": {
+    "experiment_id": "4ddf181dcdc5",
+    "title": "Thermal",
+    "sample": "Cu",
+    "operator": "Ivanov",
+    "status": "COMPLETED",
+    "run_record_count": 0,
+    "artifact_count": 3,
+    "result_table_count": 3,
+    "measured_value_rows": 0,
+    "setpoint_rows": 0,
+    "run_result_rows": 0,
+    "conductivity_rows": 0
+  },
+  "experiment": {
+    "experiment_id": "4ddf181dcdc5",
+    "name": "Thermal",
+    "title": "Thermal",
+    "template_id": "thermal_conductivity",
+    "operator": "Ivanov",
+    "cryostat": "",
+    "sample": "Cu",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-03-16T10:00:00+00:00",
+    "end_time": "2026-03-16T11:00:00+00:00",
+    "status": "COMPLETED",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "name": "k1",
+          "resource": "MOCK",
+          "type": "keithley_2604b"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "thermal_conductivity",
+    "name": "Thermal Conductivity",
+    "sections": [
+      "setup"
+    ],
+    "report_enabled": true,
+    "report_sections": [
+      "title_page"
+    ],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-03-16T10:00:00+00:00",
+    "end_time": "2026-03-16T11:00:00+00:00",
+    "daily_db_files": [
+      "data_2026-03-16.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_filters_and_sorts0\\experiments\\4ddf181dcdc5\\metadata.json"
+  },
+  "run_records": []
+}

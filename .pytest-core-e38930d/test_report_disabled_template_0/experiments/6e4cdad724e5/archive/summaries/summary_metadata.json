@@ -1,0 +1,14 @@
+{
+  "experiment_id": "6e4cdad724e5",
+  "title": "Checkout",
+  "sample": "",
+  "operator": "Sidorov",
+  "status": "COMPLETED",
+  "run_record_count": 0,
+  "artifact_count": 3,
+  "result_table_count": 3,
+  "measured_value_rows": 0,
+  "setpoint_rows": 0,
+  "run_result_rows": 0,
+  "conductivity_rows": 0
+}

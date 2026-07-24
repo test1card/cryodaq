@@ -1,0 +1,12 @@
+chamber:
+  leak_rate:
+    default_sample_window_s: 300
+  volume_l: 12.5
+instruments:
+- channels:
+  - 5
+  - 6
+  host: 192.168.1.50
+  name: MultiLine_1
+  port: 2001
+  type: etalon_multiline

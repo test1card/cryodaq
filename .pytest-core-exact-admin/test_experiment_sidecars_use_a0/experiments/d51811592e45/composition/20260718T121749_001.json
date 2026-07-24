@@ -1,0 +1,17 @@
+{
+  "filename": "20260718T121749_001.jpg",
+  "telegram_file_id": "",
+  "telegram_username": "testuser",
+  "caption": "test caption",
+  "uploaded_at": "2026-07-18T12:17:49.862482+00:00",
+  "file_size_bytes": 645,
+  "dimensions": {
+    "width": 32,
+    "height": 32
+  },
+  "mime_type": "image/jpeg",
+  "experiment_id": "d51811592e45",
+  "experiment_title": "AtomicTest",
+  "phase_at_upload": null,
+  "channels_mentioned": []
+}

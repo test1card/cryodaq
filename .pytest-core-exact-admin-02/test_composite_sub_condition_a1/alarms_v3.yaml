@@ -1,0 +1,12 @@
+
+global_alarms:
+  pressure_check:
+    alarm_type: composite
+    operator: AND
+    conditions:
+      - channel: P1
+        check: above
+      - channel: T11
+        check: below
+        threshold: 200.0
+    level: WARNING

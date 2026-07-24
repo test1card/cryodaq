@@ -1,0 +1,3 @@
+critical_channels:
+  - 'Т1 .*'
+stale_timeout_s: 'not_a_number'

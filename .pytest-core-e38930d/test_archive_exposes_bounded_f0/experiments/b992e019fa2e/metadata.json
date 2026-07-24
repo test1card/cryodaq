@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "b992e019fa2e",
+    "name": "Poisoned report",
+    "title": "Poisoned report",
+    "template_id": "cooldown_test",
+    "operator": "Operator",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-03-16T10:00:00+00:00",
+    "end_time": "2026-03-16T11:00:00+00:00",
+    "status": "COMPLETED",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "name": "k1",
+          "resource": "MOCK",
+          "type": "keithley_2604b"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_exposes_bounded_f0\\experiments\\b992e019fa2e",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_exposes_bounded_f0\\experiments\\b992e019fa2e\\metadata.json",
+    "retroactive": true
+  },
+  "template": {
+    "id": "cooldown_test",
+    "name": "Cooldown Test",
+    "sections": [
+      "setup"
+    ],
+    "report_enabled": true,
+    "report_sections": [
+      "title_page"
+    ],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-03-16T10:00:00+00:00",
+    "end_time": "2026-03-16T11:00:00+00:00",
+    "daily_db_files": [
+      "data_2026-03-16.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_exposes_bounded_f0\\experiments\\b992e019fa2e",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_archive_exposes_bounded_f0\\experiments\\b992e019fa2e\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

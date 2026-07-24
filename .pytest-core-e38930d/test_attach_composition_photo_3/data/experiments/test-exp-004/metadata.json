@@ -1,0 +1,40 @@
+{
+  "artifact_index": [
+    {
+      "artifact_id": "composition_photo:operator:20260718T184402_001.jpg",
+      "category": "composition_photo",
+      "role": "operator_upload",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_attach_composition_photo_3\\data\\experiments\\test-exp-004\\composition\\20260718T184402_001.jpg",
+      "summary": {
+        "uploaded_at": "2026-07-18T18:44:02.182818+00:00",
+        "telegram_username": "",
+        "caption": "first",
+        "file_size_bytes": 676,
+        "dimensions": {
+          "width": 64,
+          "height": 48
+        },
+        "phase_at_upload": null,
+        "channels_mentioned": []
+      }
+    },
+    {
+      "artifact_id": "composition_photo:operator:20260718T184402_002.jpg",
+      "category": "composition_photo",
+      "role": "operator_upload",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_attach_composition_photo_3\\data\\experiments\\test-exp-004\\composition\\20260718T184402_002.jpg",
+      "summary": {
+        "uploaded_at": "2026-07-18T18:44:02.194641+00:00",
+        "telegram_username": "",
+        "caption": "second",
+        "file_size_bytes": 676,
+        "dimensions": {
+          "width": 64,
+          "height": 48
+        },
+        "phase_at_upload": null,
+        "channels_mentioned": []
+      }
+    }
+  ]
+}

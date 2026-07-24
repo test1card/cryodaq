@@ -1,0 +1,39 @@
+schema_version: 1
+generated_at: '2026-07-18T12:17:43.257748+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-lookup-2
+  curve_id: 48f2cae235ee
+  fit_timestamp: '2026-07-18T12:17:43.244189+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\curves\sensor-lookup-2\48f2cae235ee\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\curves\sensor-lookup-2\48f2cae235ee\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\curves\sensor-lookup-2\48f2cae235ee\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\exports\sensor-lookup-2\48f2cae235ee\curve.340
+  source_session_ids: []
+- sensor_id: sensor-lookup
+  curve_id: fc030b1e4edc
+  fit_timestamp: '2026-07-18T12:17:43.231904+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\curves\sensor-lookup\fc030b1e4edc\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\curves\sensor-lookup\fc030b1e4edc\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\curves\sensor-lookup\fc030b1e4edc\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_curve_list_an0\calibration\exports\sensor-lookup\fc030b1e4edc\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: sensor-lookup
+  curve_id: fc030b1e4edc
+  channel_key: LS218:CH2
+  updated_at: '2026-07-18T12:17:43.253143+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit
+- sensor_id: sensor-lookup-2
+  curve_id: 48f2cae235ee
+  channel_key: LS218:CH3
+  updated_at: '2026-07-18T12:17:43.257558+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

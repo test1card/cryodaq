@@ -1,0 +1,7 @@
+
+global_alarms:
+  excessive_cooling:
+    alarm_type: rate
+    channels: [T11, T12]
+    check: rate_above
+    level: WARNING

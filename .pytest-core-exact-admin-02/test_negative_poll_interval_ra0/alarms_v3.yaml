@@ -1,0 +1,4 @@
+
+engine:
+  poll_interval_s: -1.0
+global_alarms: {}

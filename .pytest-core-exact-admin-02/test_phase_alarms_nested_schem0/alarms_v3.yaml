@@ -1,0 +1,14 @@
+phase_alarms:
+  cooldown:
+    rate_kill:
+      channels:
+      - Т11
+      - Т12
+      level: CRITICAL
+  measurement:
+    detector_loss:
+      channel: Т12
+      level: CRITICAL
+    minor_drift:
+      channel: Т13
+      level: INFO

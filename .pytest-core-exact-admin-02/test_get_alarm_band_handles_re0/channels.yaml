@@ -1,0 +1,7 @@
+channels:
+  "\u0422_test":
+    alarm_band:
+      all_phases:
+      - 310.0
+      - 285.0
+    name: Test

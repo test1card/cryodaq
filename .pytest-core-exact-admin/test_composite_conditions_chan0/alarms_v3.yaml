@@ -1,0 +1,17 @@
+
+channel_groups:
+  sensors: [T11, T12]
+
+global_alarms:
+  vac_cold:
+    alarm_type: composite
+    operator: AND
+    conditions:
+      - channel_group: sensors
+        check: any_below
+        threshold: 200
+      - channel: P1
+        check: above
+        threshold: 1.0e-3
+    level: CRITICAL
+    notify: [gui]

@@ -1,0 +1,34 @@
+{
+  "experiment_id": "899017482078",
+  "title": "T",
+  "sample": "S",
+  "operator": "o",
+  "status": "active",
+  "start_time": "2026-05-07T10:00:00+00:00",
+  "end_time": null,
+  "description": "",
+  "notes": "",
+  "is_replay": true,
+  "phase": "warmup",
+  "phase_started_at": "2026-07-18T18:45:18.178556+00:00",
+  "phases": [
+    {
+      "phase": "preparation",
+      "started_at": "2026-07-18T18:45:18.173333+00:00",
+      "ended_at": "2026-07-18T18:45:18.175047+00:00",
+      "operator": "operator"
+    },
+    {
+      "phase": "cooldown",
+      "started_at": "2026-07-18T18:45:18.175047+00:00",
+      "ended_at": "2026-07-18T18:45:18.176432+00:00",
+      "operator": "operator"
+    },
+    {
+      "phase": "measurement",
+      "started_at": "2026-07-18T18:45:18.176432+00:00",
+      "ended_at": "2026-07-18T18:45:18.178556+00:00",
+      "operator": "operator"
+    }
+  ]
+}

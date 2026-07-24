@@ -1,0 +1,24 @@
+schema_version: 1
+generated_at: '2026-07-18T18:44:01.136567+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-001
+  curve_id: d4b860f1b83b
+  fit_timestamp: '2026-07-18T18:44:01.112938+00:00'
+  raw_unit: ohm
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_calibration_store_fit_rou0\curves\sensor-001\d4b860f1b83b\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_calibration_store_fit_rou0\curves\sensor-001\d4b860f1b83b\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_calibration_store_fit_rou0\curves\sensor-001\d4b860f1b83b\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_calibration_store_fit_rou0\exports\sensor-001\d4b860f1b83b\curve.340
+  source_session_ids:
+  - sess-001
+assignments:
+- sensor_id: sensor-001
+  curve_id: d4b860f1b83b
+  channel_key: sensor-001
+  updated_at: '2026-07-18T18:44:01.117956+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

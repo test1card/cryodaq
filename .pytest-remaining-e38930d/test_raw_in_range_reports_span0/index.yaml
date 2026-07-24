@@ -1,0 +1,23 @@
+schema_version: 1
+generated_at: '2026-07-18T18:44:11.427904+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-span
+  curve_id: span-check
+  fit_timestamp: '2026-01-01T00:00:00+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_raw_in_range_reports_span0\curves\sensor-span\span-check\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_raw_in_range_reports_span0\curves\sensor-span\span-check\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_raw_in_range_reports_span0\curves\sensor-span\span-check\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_raw_in_range_reports_span0\exports\sensor-span\span-check\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: sensor-span
+  curve_id: span-check
+  channel_key: sensor-span
+  updated_at: '2026-07-18T18:44:11.427685+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

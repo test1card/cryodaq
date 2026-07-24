@@ -1,0 +1,3 @@
+critical_channels:
+  - 'Т1 .*'
+source_limits: 'not_a_dict'

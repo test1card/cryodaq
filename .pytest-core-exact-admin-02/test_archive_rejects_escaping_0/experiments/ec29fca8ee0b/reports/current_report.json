@@ -1,0 +1,1 @@
+{"schema": 1, "experiment_id": "ec29fca8ee0b", "generation_id": "generation-token-0001", "source_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "created_at": 1.0, "report": {"docx_path": "../../outside.docx", "pdf_path": null, "assets_dir": "../../outside-assets", "sections": [], "skipped": false, "reason": ""}, "artifacts": []}

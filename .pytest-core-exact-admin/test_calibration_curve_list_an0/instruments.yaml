@@ -1,0 +1,4 @@
+instruments:
+- name: ls218s
+  resource: MOCK
+  type: lakeshore_218s

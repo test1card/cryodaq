@@ -1,0 +1,17 @@
+{
+  "filename": "20260718T184402_001.jpg",
+  "telegram_file_id": "",
+  "telegram_username": "",
+  "caption": "first",
+  "uploaded_at": "2026-07-18T18:44:02.182818+00:00",
+  "file_size_bytes": 676,
+  "dimensions": {
+    "width": 64,
+    "height": 48
+  },
+  "mime_type": "image/jpeg",
+  "experiment_id": "test-exp-004",
+  "experiment_title": "",
+  "phase_at_upload": null,
+  "channels_mentioned": []
+}

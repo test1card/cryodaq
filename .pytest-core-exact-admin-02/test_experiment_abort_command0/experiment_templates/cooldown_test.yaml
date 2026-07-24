@@ -1,0 +1,9 @@
+custom_fields:
+- id: target_temperature
+  label: Target Temperature
+id: cooldown_test
+name: Cooldown Test
+report_enabled: true
+sections:
+- setup
+- cooldown_path

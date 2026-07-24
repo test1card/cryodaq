@@ -1,0 +1,7 @@
+id: custom
+name: Custom
+sections:
+  - setup
+report_enabled: false
+report_sections: []
+custom_fields: []

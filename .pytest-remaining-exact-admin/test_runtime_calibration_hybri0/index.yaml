@@ -1,0 +1,39 @@
+schema_version: 1
+generated_at: '2026-07-18T12:18:07.751639+00:00'
+runtime:
+  global_mode: 'on'
+  updated_at: '2026-07-18T12:18:07.751480+00:00'
+curves:
+- sensor_id: ls218s:CH1
+  curve_id: test-curve-ch1-f2
+  fit_timestamp: '2026-01-01T00:00:00+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\curves\ls218s_CH1\test-curve-ch1-f2\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\curves\ls218s_CH1\test-curve-ch1-f2\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\curves\ls218s_CH1\test-curve-ch1-f2\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\exports\ls218s_CH1\test-curve-ch1-f2\curve.340
+  source_session_ids: []
+- sensor_id: ls218s:CH2
+  curve_id: test-curve-ch2-f2
+  fit_timestamp: '2026-01-01T00:00:00+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\curves\ls218s_CH2\test-curve-ch2-f2\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\curves\ls218s_CH2\test-curve-ch2-f2\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\curves\ls218s_CH2\test-curve-ch2-f2\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_runtime_calibration_hybri0\exports\ls218s_CH2\test-curve-ch2-f2\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: ls218s:CH1
+  curve_id: test-curve-ch1-f2
+  channel_key: ls218s:CH1
+  updated_at: '2026-07-18T12:18:07.741490+00:00'
+  runtime_apply_ready: true
+  reading_mode_policy: 'on'
+- sensor_id: ls218s:CH2
+  curve_id: test-curve-ch2-f2
+  channel_key: ls218s:CH2
+  updated_at: '2026-07-18T12:18:07.747009+00:00'
+  runtime_apply_ready: true
+  reading_mode_policy: 'off'

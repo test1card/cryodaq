@@ -1,0 +1,23 @@
+schema_version: 1
+generated_at: '2026-07-18T12:17:57.343526+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-cof-04
+  curve_id: 0d2853e829a5
+  fit_timestamp: '2026-07-18T12:17:57.334443+00:00'
+  raw_unit: ohm
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_export_curve_cof_metadata0\curves\sensor-cof-04\0d2853e829a5\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_export_curve_cof_metadata0\curves\sensor-cof-04\0d2853e829a5\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_export_curve_cof_metadata0\curves\sensor-cof-04\0d2853e829a5\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_export_curve_cof_metadata0\exports\sensor-cof-04\0d2853e829a5\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: sensor-cof-04
+  curve_id: 0d2853e829a5
+  channel_key: sensor-cof-04
+  updated_at: '2026-07-18T12:17:57.337513+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

@@ -1,0 +1,7 @@
+interlocks:
+  - name: dead_interlock_never_matches
+    description: synthetic dead ref
+    channel_pattern: "__DEAD_INTERLOCK_CHANNEL__$"
+    threshold: 1.0
+    comparison: ">"
+    action: "emergency_off"

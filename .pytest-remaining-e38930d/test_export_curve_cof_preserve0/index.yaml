@@ -1,0 +1,23 @@
+schema_version: 1
+generated_at: '2026-07-18T18:44:10.486877+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-cof-02
+  curve_id: 94ea7c1d206b
+  fit_timestamp: '2026-07-18T18:44:10.477254+00:00'
+  raw_unit: V
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_export_curve_cof_preserve0\curves\sensor-cof-02\94ea7c1d206b\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_export_curve_cof_preserve0\curves\sensor-cof-02\94ea7c1d206b\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_export_curve_cof_preserve0\curves\sensor-cof-02\94ea7c1d206b\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-e38930d\test_export_curve_cof_preserve0\exports\sensor-cof-02\94ea7c1d206b\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: sensor-cof-02
+  curve_id: 94ea7c1d206b
+  channel_key: sensor-cof-02
+  updated_at: '2026-07-18T18:44:10.481217+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

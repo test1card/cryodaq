@@ -1,0 +1,4 @@
+agent:
+  enabled: true
+reporting:
+  automatic_enabled: false

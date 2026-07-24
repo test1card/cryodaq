@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "1e6f99d31682",
+    "name": "Cooldown",
+    "title": "Cooldown",
+    "template_id": "custom",
+    "operator": "Petrov",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T12:21:20.537044+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_log_entry_command_uses_ac0\\experiments\\1e6f99d31682",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_log_entry_command_uses_ac0\\experiments\\1e6f99d31682\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "report_enabled": true,
+    "report_sections": [],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:21:20.537044+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_log_entry_command_uses_ac0\\experiments\\1e6f99d31682",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_log_entry_command_uses_ac0\\experiments\\1e6f99d31682\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

@@ -1,0 +1,4 @@
+critical_channels:
+  - "^source heartbeat$"
+keithley_channels:
+  - "^custom keithley heartbeat$"

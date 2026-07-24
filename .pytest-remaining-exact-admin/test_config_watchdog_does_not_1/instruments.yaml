@@ -1,0 +1,9 @@
+keithley:
+  watchdog:
+    mode: "best_effort"
+    timeout_s: 4.0
+instruments:
+  - type: keithley_2604b
+    name: k2604
+    resource: USB0::FAKE
+    poll_interval_s: 2.0

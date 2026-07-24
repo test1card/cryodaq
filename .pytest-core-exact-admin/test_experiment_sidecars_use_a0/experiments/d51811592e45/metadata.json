@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "d51811592e45",
+    "name": "AtomicTest",
+    "title": "AtomicTest",
+    "template_id": "custom",
+    "operator": "Op",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T12:17:49.833219+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_experiment_sidecars_use_a0\\experiments\\d51811592e45",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_experiment_sidecars_use_a0\\experiments\\d51811592e45\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "report_enabled": true,
+    "report_sections": [
+      "title_page",
+      "operator_log_section",
+      "config_section"
+    ],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:17:49.833219+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_experiment_sidecars_use_a0\\experiments\\d51811592e45",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_experiment_sidecars_use_a0\\experiments\\d51811592e45\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [
+    {
+      "artifact_id": "composition_photo:operator:20260718T121749_001.jpg",
+      "category": "composition_photo",
+      "role": "operator_upload",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_experiment_sidecars_use_a0\\experiments\\d51811592e45\\composition\\20260718T121749_001.jpg",
+      "summary": {
+        "uploaded_at": "2026-07-18T12:17:49.862482+00:00",
+        "telegram_username": "testuser",
+        "caption": "test caption",
+        "file_size_bytes": 645,
+        "dimensions": {
+          "width": 32,
+          "height": 32
+        },
+        "phase_at_upload": null,
+        "channels_mentioned": []
+      }
+    }
+  ],
+  "result_tables": [],
+  "summary_metadata": {}
+}

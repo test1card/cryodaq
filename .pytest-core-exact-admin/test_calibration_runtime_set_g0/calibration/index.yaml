@@ -1,0 +1,23 @@
+schema_version: 1
+generated_at: '2026-07-18T12:17:43.285756+00:00'
+runtime:
+  global_mode: 'on'
+  updated_at: '2026-07-18T12:17:43.282384+00:00'
+curves:
+- sensor_id: LS218_1:CH2
+  curve_id: 7e21b91fec9e
+  fit_timestamp: '2026-07-18T12:17:43.270395+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_runtime_set_g0\calibration\curves\LS218_1_CH2\7e21b91fec9e\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_runtime_set_g0\calibration\curves\LS218_1_CH2\7e21b91fec9e\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_runtime_set_g0\calibration\curves\LS218_1_CH2\7e21b91fec9e\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin\test_calibration_runtime_set_g0\calibration\exports\LS218_1_CH2\7e21b91fec9e\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: LS218_1:CH2
+  curve_id: 7e21b91fec9e
+  channel_key: LS218_1:CH2
+  updated_at: '2026-07-18T12:17:43.285583+00:00'
+  runtime_apply_ready: true
+  reading_mode_policy: 'on'

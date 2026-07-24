@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "d7515abbce94",
+    "name": "Run A",
+    "title": "Run A",
+    "template_id": "custom",
+    "operator": "Sidorov",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T18:44:28.064559+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_log_get_current_experimen0\\experiments\\d7515abbce94",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_log_get_current_experimen0\\experiments\\d7515abbce94\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "report_enabled": true,
+    "report_sections": [],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-18T18:44:28.064559+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_log_get_current_experimen0\\experiments\\d7515abbce94",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_log_get_current_experimen0\\experiments\\d7515abbce94\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

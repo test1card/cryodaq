@@ -1,0 +1,8 @@
+interlocks:
+- action: emergency_off
+  channel_pattern: "\u04221 .*"
+  comparison: '>'
+  cooldown_s: 10.0
+  description: test
+  name: test_lock
+  threshold: 350.0

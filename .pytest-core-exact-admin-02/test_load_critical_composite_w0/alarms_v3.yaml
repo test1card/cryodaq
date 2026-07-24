@@ -1,0 +1,12 @@
+global_alarms:
+  vacuum_loss_cold:
+    alarm_type: composite
+    conditions:
+    - channels:
+      - Т11
+      - Т12
+      check: any_below
+    - channel: P1
+      check: above
+    level: CRITICAL
+    operator: AND

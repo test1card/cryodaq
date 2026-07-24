@@ -1,0 +1,12 @@
+custom_fields:
+- id: sample_id
+  label: Sample ID
+- id: heater_geometry
+  label: Heater Geometry
+id: thermal_conductivity
+name: Thermal Conductivity
+report_enabled: true
+sections:
+- setup
+- sample
+- operator_log

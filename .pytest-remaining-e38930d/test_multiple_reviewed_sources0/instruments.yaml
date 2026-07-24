@@ -1,0 +1,7 @@
+instruments:
+- name: source-a
+  resource: USB::1
+  type: keithley_2604b
+- name: source-b
+  resource: USB::2
+  type: keithley_2604b

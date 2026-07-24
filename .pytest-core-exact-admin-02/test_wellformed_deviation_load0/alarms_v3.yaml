@@ -1,0 +1,14 @@
+
+engine:
+  setpoints:
+    T12_setpoint:
+      source: experiment_metadata
+      default: 4.2
+global_alarms:
+  drift:
+    alarm_type: threshold
+    channel: T12
+    check: deviation_from_setpoint
+    setpoint_source: T12_setpoint
+    threshold: 0.5
+    level: WARNING

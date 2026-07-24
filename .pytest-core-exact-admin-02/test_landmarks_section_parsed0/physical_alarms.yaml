@@ -1,0 +1,13 @@
+
+landmarks:
+  Т11:
+    role: warm_stage
+    physical: "1-я ступень GM-cooler, ~40K"
+    aliases:
+      - "азотная плита"
+      - "плита"
+  Т12:
+    role: cold_stage
+    physical: "2-я ступень GM-cooler"
+    aliases:
+      - "холодная точка"

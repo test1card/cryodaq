@@ -1,0 +1,1 @@
+{"schema_version": 1, "curve_id": "aaa-new", "sensor_id": "sensor-hi3-noassign", "fit_timestamp": "2026-03-01T00:00:00+00:00", "raw_unit": "ohm", "sensor_kind": "generic", "source_session_ids": [], "zones": [{"raw_min": 0.0, "raw_max": 10.0, "order": 0, "coefficients": [200.0], "rmse_k": 0.0, "max_abs_error_k": 0.0, "point_count": 6}], "metrics": {}, "metadata": {}}

@@ -1,0 +1,12 @@
+channel_groups:
+  all_temp:
+  - Т1
+  - Т2
+  - Т3
+  calibrated:
+  - Т11
+  - Т12
+interlocks:
+  overheat_cryostat:
+    action: emergency_off
+    channel_group: all_temp

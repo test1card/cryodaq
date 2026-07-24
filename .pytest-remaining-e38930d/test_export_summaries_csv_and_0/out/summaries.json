@@ -1,0 +1,34 @@
+[
+  {
+    "experiment_id": "exp-a",
+    "start_time": "2026-01-01T00:00:00+00:00",
+    "status": "COMPLETED",
+    "n_points_cold": 400,
+    "n_points_warm": 400,
+    "duration_h": 20.0,
+    "t_to_77K_h": 15.037593985001246,
+    "t_77K_to_4K_h": 4.912280701663759,
+    "max_cooling_rate_cold_k_per_h": 14.850000039978738,
+    "max_cooling_rate_warm_k_per_h": 10.500000028267777,
+    "initial_cooldown_rate_k_per_h": -14.850000000327842,
+    "steady_state_t_cold_k": 10.071428571428592,
+    "steady_state_t_warm_k": 95.00000000000003,
+    "steady_state_dT_k": 84.92857142857143
+  },
+  {
+    "experiment_id": "exp-b",
+    "start_time": "2026-01-31T00:00:00+00:00",
+    "status": "COMPLETED",
+    "n_points_cold": 400,
+    "n_points_warm": 400,
+    "duration_h": 20.0,
+    "t_to_77K_h": 15.037593985001246,
+    "t_77K_to_4K_h": 4.912280701663759,
+    "max_cooling_rate_cold_k_per_h": 14.850000039978738,
+    "max_cooling_rate_warm_k_per_h": 10.500000028267777,
+    "initial_cooldown_rate_k_per_h": -14.850000000327842,
+    "steady_state_t_cold_k": 10.071428571428592,
+    "steady_state_t_warm_k": 95.00000000000003,
+    "steady_state_dT_k": 84.92857142857143
+  }
+]

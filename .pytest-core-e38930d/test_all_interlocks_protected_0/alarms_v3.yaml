@@ -1,0 +1,7 @@
+interlocks:
+  kill_one:
+    action: emergency_off
+    channel: Т12
+  stop_one:
+    action: stop_source
+    channel: smua_power

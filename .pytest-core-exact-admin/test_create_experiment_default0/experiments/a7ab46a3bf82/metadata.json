@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "a7ab46a3bf82",
+    "name": "Default path",
+    "title": "Default path",
+    "template_id": "thermal_conductivity",
+    "operator": "Vladimir",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T12:17:47.986750+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "sample",
+      "operator_log"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_create_experiment_default0\\experiments\\a7ab46a3bf82",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_create_experiment_default0\\experiments\\a7ab46a3bf82\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "thermal_conductivity",
+    "name": "Thermal Conductivity",
+    "sections": [
+      "setup",
+      "sample",
+      "operator_log"
+    ],
+    "report_enabled": true,
+    "report_sections": [],
+    "custom_fields": [
+      {
+        "id": "sample_id",
+        "label": "Sample ID",
+        "default": ""
+      },
+      {
+        "id": "heater_geometry",
+        "label": "Heater Geometry",
+        "default": ""
+      }
+    ]
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:17:47.986750+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_create_experiment_default0\\experiments\\a7ab46a3bf82",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_create_experiment_default0\\experiments\\a7ab46a3bf82\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

@@ -1,0 +1,17 @@
+{
+  "artifacts": {},
+  "attempt_count": 5,
+  "error_code": "render_failed",
+  "error_text": "failed",
+  "experiment_id": "446a93832949",
+  "finished_at": 1784377070.5040648,
+  "generation_id": "generation-token-0001",
+  "max_attempts": 5,
+  "not_before": 1784377070.5039854,
+  "owner_token": "owner-token-valid-0001",
+  "schema": 1,
+  "source_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "started_at": 1784377070.5039854,
+  "status": "FAILED",
+  "updated_at": 1784377070.5040648
+}

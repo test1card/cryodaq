@@ -1,0 +1,23 @@
+schema_version: 1
+generated_at: '2026-07-18T12:17:57.411019+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-hi3
+  curve_id: aaa-old
+  fit_timestamp: '2026-01-01T00:00:00+00:00'
+  raw_unit: ohm
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_load_curves_restores_pers0\curves\sensor-hi3\aaa-old\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_load_curves_restores_pers0\curves\sensor-hi3\aaa-old\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_load_curves_restores_pers0\curves\sensor-hi3\aaa-old\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_load_curves_restores_pers0\exports\sensor-hi3\aaa-old\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: sensor-hi3
+  curve_id: aaa-old
+  channel_key: sensor-hi3
+  updated_at: '2026-07-18T12:17:57.391932+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

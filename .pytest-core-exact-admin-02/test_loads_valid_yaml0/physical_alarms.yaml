@@ -1,0 +1,8 @@
+
+cooldown:
+  enabled: true
+  k_p: 3.0
+  cold_channel: "Т12"
+vacuum:
+  enabled: true
+  fire_pressure_mbar: 5.0e-3

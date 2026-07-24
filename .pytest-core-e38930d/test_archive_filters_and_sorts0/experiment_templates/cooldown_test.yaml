@@ -1,0 +1,7 @@
+id: cooldown_test
+name: Cooldown Test
+report_enabled: true
+report_sections:
+- title_page
+sections:
+- setup

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "5dc77abe34ae",
+    "name": "Test",
+    "title": "Test",
+    "template_id": "custom",
+    "operator": "op",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T12:20:44.409607+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": {}
+    },
+    "custom_fields": {},
+    "report_enabled": false,
+    "sections": [
+      "setup"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_status_payload_includes_p0\\data\\experiments\\5dc77abe34ae",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_status_payload_includes_p0\\data\\experiments\\5dc77abe34ae\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup"
+    ],
+    "report_enabled": false,
+    "report_sections": [],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:20:44.409607+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_status_payload_includes_p0\\data\\experiments\\5dc77abe34ae",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_status_payload_includes_p0\\data\\experiments\\5dc77abe34ae\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {},
+  "phases": [
+    {
+      "phase": "vacuum",
+      "started_at": "2026-07-18T12:20:44.450823+00:00",
+      "ended_at": null,
+      "operator": "op"
+    }
+  ],
+  "current_phase": "vacuum"
+}

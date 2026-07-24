@@ -1,0 +1,19 @@
+{
+  "last_experiment": {
+    "template_id": "t",
+    "operator": "Иванов",
+    "sample": "S",
+    "cryostat": "C",
+    "description": "",
+    "custom_fields": {}
+  },
+  "operator_history": [
+    "Иванов"
+  ],
+  "sample_history": [
+    "S"
+  ],
+  "cryostat_history": [
+    "C"
+  ]
+}

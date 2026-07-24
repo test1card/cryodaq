@@ -1,0 +1,5 @@
+critical_channels:
+  - 'Т1 .*'
+  - 'Т7 .*'
+stale_timeout_s: 10.0
+heartbeat_timeout_s: 15.0

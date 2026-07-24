@@ -1,0 +1,11 @@
+telegram:
+  bot_token: '123456:abcdefghijklmnopqrstuvwxyzABCDE'
+  chat_id: -100123
+  timeout_s: 10
+  verify_ssl: true
+  send_cleared: true
+periodic_report:
+  enabled: false
+  report_interval_s: 3600
+commands:
+  enabled: false

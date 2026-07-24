@@ -1,0 +1,6 @@
+telegram:
+  bot_token: '123456:abcdefghijklmnopqrstuvwxyz'
+  chat_id: -100123
+periodic_report:
+  enabled: true
+  report_interval_s: 60

@@ -1,0 +1,7 @@
+channel_groups:
+  calibrated:
+  - Т11
+interlocks:
+  missing_group:
+    action: emergency_off
+    channel_group: nonexistent

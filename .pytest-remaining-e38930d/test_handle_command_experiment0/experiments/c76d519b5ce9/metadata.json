@@ -1,0 +1,15 @@
+{
+  "experiment_id": "c76d519b5ce9",
+  "title": "T2",
+  "sample": "S",
+  "operator": "o",
+  "status": "active",
+  "start_time": "2026-05-07T10:00:00+00:00",
+  "end_time": null,
+  "description": "",
+  "notes": "",
+  "is_replay": true,
+  "phase": "preparation",
+  "phase_started_at": "2026-07-18T18:45:18.284326+00:00",
+  "phases": []
+}

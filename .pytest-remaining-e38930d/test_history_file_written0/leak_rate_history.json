@@ -1,0 +1,15 @@
+{
+  "measurements": [
+    {
+      "started_at": "2026-04-29T10:00:00+00:00",
+      "duration_s": 90.0,
+      "initial_pressure_mbar": 1e-05,
+      "final_pressure_mbar": 1.9e-05,
+      "dpdt_mbar_per_s": 1e-07,
+      "chamber_volume_l": 50.0,
+      "leak_rate_mbar_l_per_s": 4.9999999999999996e-06,
+      "fit_quality_r2": 1.0,
+      "samples_n": 11
+    }
+  ]
+}

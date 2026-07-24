@@ -1,0 +1,14 @@
+{
+  "experiment_id": "78de52036f68",
+  "title": "Thermal archive",
+  "sample": "Cu-archive",
+  "operator": "Operator",
+  "status": "COMPLETED",
+  "run_record_count": 1,
+  "artifact_count": 10,
+  "result_table_count": 4,
+  "measured_value_rows": 3,
+  "setpoint_rows": 2,
+  "run_result_rows": 1,
+  "conductivity_rows": 2
+}

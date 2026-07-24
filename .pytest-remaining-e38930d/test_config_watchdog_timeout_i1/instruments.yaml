@@ -1,0 +1,8 @@
+keithley:
+  watchdog:
+    mode: best_effort
+    timeout_s: "5"
+instruments:
+  - type: keithley_2604b
+    name: k2604
+    resource: USB0::FAKE

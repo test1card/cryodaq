@@ -1,0 +1,7 @@
+
+engine:
+  setpoints:
+    bad:
+      source: constant
+      default: .nan
+global_alarms: {}

@@ -1,0 +1,8 @@
+cooldown:
+  enabled: true
+  cold_channel: 'Т11'
+  warm_channel: 'Т12'
+  k_p: 2.5
+  predictor_model_path: 'model/predictor_model.json'
+vacuum:
+  enabled: true

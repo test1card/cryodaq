@@ -1,0 +1,4 @@
+channels:
+  "\u0422_test":
+    alarm_band: not a dict
+    name: Test

@@ -1,0 +1,11 @@
+
+global_alarms:
+  steady_state_check:
+    alarm_type: rate
+    channel: T11
+    check: rate_near_zero
+    additional_condition:
+      channel: T12
+      check: above
+      threshold: 10.0
+    level: WARNING

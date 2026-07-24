@@ -1,0 +1,4 @@
+instruments:
+- name: k1
+  resource: MOCK
+  type: keithley_2604b

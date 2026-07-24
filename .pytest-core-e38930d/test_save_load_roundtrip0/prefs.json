@@ -1,0 +1,21 @@
+{
+  "last_experiment": {
+    "template_id": "thermal_conductivity",
+    "operator": "Фоменко В.Н.",
+    "sample": "УУКМ-3",
+    "cryostat": "Криостат-1",
+    "description": "Тест",
+    "custom_fields": {
+      "reference_channel": "T1"
+    }
+  },
+  "operator_history": [
+    "Фоменко В.Н."
+  ],
+  "sample_history": [
+    "УУКМ-3"
+  ],
+  "cryostat_history": [
+    "Криостат-1"
+  ]
+}

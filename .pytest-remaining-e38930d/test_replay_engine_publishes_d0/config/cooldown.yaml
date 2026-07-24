@@ -1,0 +1,15 @@
+cooldown:
+  enabled: true
+  channel_cold: "Т7 Детектор"
+  channel_warm: "Т5 Экран 77К"
+  model_dir: "C:/tmp/cryodaq-ci-5276da0-01/.pytest-remaining-e38930d/test_replay_engine_publishes_d0/cooldown_model"
+  predict_interval_s: 0.05
+  rate_window_h: 0.01
+  auto_ingest: false
+  min_cooldown_hours: 0.001
+  detect:
+    start_rate_threshold: -5.0
+    start_confirm_minutes: 0.005
+    end_T_cold_threshold: 6.0
+    end_rate_threshold: 0.1
+    end_confirm_minutes: 0.01

@@ -1,0 +1,3 @@
+critical_channels:
+  - '[invalid(regex'
+stale_timeout_s: 10.0

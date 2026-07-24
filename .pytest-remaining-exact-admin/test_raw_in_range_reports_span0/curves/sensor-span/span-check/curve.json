@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "curve_id": "span-check",
+  "sensor_id": "sensor-span",
+  "fit_timestamp": "2026-01-01T00:00:00+00:00",
+  "raw_unit": "sensor_unit",
+  "sensor_kind": "generic",
+  "source_session_ids": [],
+  "zones": [
+    {
+      "raw_min": 10.0,
+      "raw_max": 50.0,
+      "order": 1,
+      "coefficients": [
+        100.0,
+        -20.0
+      ],
+      "rmse_k": 0.0,
+      "max_abs_error_k": 0.0,
+      "point_count": 2
+    },
+    {
+      "raw_min": 50.0,
+      "raw_max": 90.0,
+      "order": 1,
+      "coefficients": [
+        60.0,
+        -20.0
+      ],
+      "rmse_k": 0.0,
+      "max_abs_error_k": 0.0,
+      "point_count": 2
+    }
+  ],
+  "metrics": {},
+  "metadata": {}
+}

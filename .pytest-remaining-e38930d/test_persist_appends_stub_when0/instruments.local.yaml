@@ -1,0 +1,6 @@
+instruments:
+- type: etalon_multiline
+  name: MultiLine_42
+  channels:
+  - 5
+  - 10

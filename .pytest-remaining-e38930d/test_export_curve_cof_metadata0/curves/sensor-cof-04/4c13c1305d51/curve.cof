@@ -1,0 +1,25 @@
+# CryoDAQ calibration curve export .cof
+# sensor_id: sensor-cof-04
+# curve_id: 4c13c1305d51
+# raw_unit: ohm
+# fit_timestamp: 2026-07-18T18:44:11.384075+00:00
+# format: Chebyshev T_n(x); raw clipped to [raw_min, raw_max], then x = 2*(clipped - raw_min)/(raw_max - raw_min) - 1
+# zone_count: 2
+
+[zone 1]
+raw_min: 6.7425210084
+raw_max: 39.5136842105
+order: 5
+coefficients: 81.1066125803, -73.7204935462, 38.0069404831, -18.4472450106, 0.886446936536, -7.83226144318
+# rmse_k: 8.76976e-14
+# max_abs_error_k: 1.56319e-13
+# point_count: 6
+
+[zone 2]
+raw_min: 50.024
+raw_max: 68.1898181818
+order: 3
+coefficients: 7.69163392847, -3.97702162062, 0.308366071527, -0.0229783793756
+# rmse_k: 5.97461e-15
+# max_abs_error_k: 8.88178e-15
+# point_count: 4

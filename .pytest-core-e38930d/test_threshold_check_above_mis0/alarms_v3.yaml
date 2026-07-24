@@ -1,0 +1,7 @@
+
+global_alarms:
+  over_power:
+    alarm_type: threshold
+    channel: smua_power
+    check: above
+    level: CRITICAL

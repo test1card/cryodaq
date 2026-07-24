@@ -1,0 +1,7 @@
+chamber:
+  volume_l: 12.5
+instruments:
+- channels:
+  - 1
+  name: MultiLine_1
+  type: etalon_multiline

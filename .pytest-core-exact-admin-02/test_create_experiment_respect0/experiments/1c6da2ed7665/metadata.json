@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "1c6da2ed7665",
+    "name": "Override enable",
+    "title": "Override enable",
+    "template_id": "debug_checkout",
+    "operator": "Vladimir",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T12:20:50.456314+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "checks"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_create_experiment_respect0\\experiments\\1c6da2ed7665",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_create_experiment_respect0\\experiments\\1c6da2ed7665\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "debug_checkout",
+    "name": "Debug Checkout",
+    "sections": [
+      "setup",
+      "checks"
+    ],
+    "report_enabled": false,
+    "report_sections": [],
+    "custom_fields": [
+      {
+        "id": "issue_ticket",
+        "label": "Issue Ticket",
+        "default": ""
+      }
+    ]
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:20:50.456314+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_create_experiment_respect0\\experiments\\1c6da2ed7665",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_create_experiment_respect0\\experiments\\1c6da2ed7665\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

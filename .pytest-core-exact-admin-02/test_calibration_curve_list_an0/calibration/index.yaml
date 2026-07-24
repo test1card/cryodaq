@@ -1,0 +1,39 @@
+schema_version: 1
+generated_at: '2026-07-18T12:20:45.697939+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-lookup-2
+  curve_id: c491e28376a8
+  fit_timestamp: '2026-07-18T12:20:45.684128+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\curves\sensor-lookup-2\c491e28376a8\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\curves\sensor-lookup-2\c491e28376a8\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\curves\sensor-lookup-2\c491e28376a8\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\exports\sensor-lookup-2\c491e28376a8\curve.340
+  source_session_ids: []
+- sensor_id: sensor-lookup
+  curve_id: 5f2d0a39bf0e
+  fit_timestamp: '2026-07-18T12:20:45.671613+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\curves\sensor-lookup\5f2d0a39bf0e\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\curves\sensor-lookup\5f2d0a39bf0e\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\curves\sensor-lookup\5f2d0a39bf0e\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-core-exact-admin-02\test_calibration_curve_list_an0\calibration\exports\sensor-lookup\5f2d0a39bf0e\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: sensor-lookup
+  curve_id: 5f2d0a39bf0e
+  channel_key: LS218:CH2
+  updated_at: '2026-07-18T12:20:45.693114+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit
+- sensor_id: sensor-lookup-2
+  curve_id: c491e28376a8
+  channel_key: LS218:CH3
+  updated_at: '2026-07-18T12:20:45.697680+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

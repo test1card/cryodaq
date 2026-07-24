@@ -1,0 +1,7 @@
+
+global_alarms:
+  stable_temp:
+    alarm_type: rate
+    channel: T11
+    check: rate_near_zero
+    level: INFO

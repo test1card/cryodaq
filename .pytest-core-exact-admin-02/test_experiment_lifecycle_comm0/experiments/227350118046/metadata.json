@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "artifact_index": [
+    {
+      "artifact_id": "table:measured_values:measured_values.csv",
+      "category": "table",
+      "role": "measured_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\archive\\tables\\measured_values.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "table:setpoint_values:setpoint_values.csv",
+      "category": "table",
+      "role": "setpoint_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\archive\\tables\\setpoint_values.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "table:run_results:run_results.csv",
+      "category": "table",
+      "role": "run_results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\archive\\tables\\run_results.csv",
+      "summary": {
+        "rows": 0
+      }
+    },
+    {
+      "artifact_id": "summary:summary_metadata:summary_metadata.json",
+      "category": "summary",
+      "role": "summary_metadata",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\archive\\summaries\\summary_metadata.json",
+      "summary": {
+        "experiment_id": "227350118046",
+        "title": "Cooldown 18",
+        "sample": "Cu-02",
+        "operator": "Petrov",
+        "status": "COMPLETED",
+        "run_record_count": 0,
+        "artifact_count": 3,
+        "result_table_count": 3,
+        "measured_value_rows": 0,
+        "setpoint_rows": 0,
+        "run_result_rows": 0,
+        "conductivity_rows": 0
+      }
+    }
+  ],
+  "result_tables": [
+    {
+      "table_id": "measured_values",
+      "title": "Measured values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\archive\\tables\\measured_values.csv",
+      "row_count": 0
+    },
+    {
+      "table_id": "setpoint_values",
+      "title": "Setpoint values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\archive\\tables\\setpoint_values.csv",
+      "row_count": 0
+    },
+    {
+      "table_id": "run_results",
+      "title": "Run results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\archive\\tables\\run_results.csv",
+      "row_count": 0
+    }
+  ],
+  "summary_metadata": {
+    "experiment_id": "227350118046",
+    "title": "Cooldown 18",
+    "sample": "Cu-02",
+    "operator": "Petrov",
+    "status": "COMPLETED",
+    "run_record_count": 0,
+    "artifact_count": 3,
+    "result_table_count": 3,
+    "measured_value_rows": 0,
+    "setpoint_rows": 0,
+    "run_result_rows": 0,
+    "conductivity_rows": 0
+  },
+  "experiment": {
+    "experiment_id": "227350118046",
+    "name": "Cooldown 18",
+    "title": "Cooldown 18",
+    "template_id": "cooldown_test",
+    "operator": "Petrov",
+    "cryostat": "",
+    "sample": "Cu-02",
+    "description": "Initial",
+    "notes": "Stabilized",
+    "start_time": "2026-07-18T12:20:53.939038+00:00",
+    "end_time": "2026-07-18T12:20:54.004987+00:00",
+    "status": "COMPLETED",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "name": "k1",
+          "resource": "MOCK",
+          "type": "keithley_2604b"
+        }
+      ]
+    },
+    "custom_fields": {
+      "target_temperature": "3.8 K"
+    },
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "cooldown_path"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "cooldown_test",
+    "name": "Cooldown Test",
+    "sections": [
+      "setup",
+      "cooldown_path"
+    ],
+    "report_enabled": true,
+    "report_sections": [],
+    "custom_fields": [
+      {
+        "id": "target_temperature",
+        "label": "Target Temperature",
+        "default": ""
+      }
+    ]
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:20:53.939038+00:00",
+    "end_time": "2026-07-18T12:20:54.004987+00:00",
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_experiment_lifecycle_comm0\\experiments\\227350118046\\metadata.json"
+  },
+  "run_records": []
+}

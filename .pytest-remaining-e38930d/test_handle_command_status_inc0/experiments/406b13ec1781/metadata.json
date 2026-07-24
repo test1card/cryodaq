@@ -1,0 +1,22 @@
+{
+  "experiment_id": "406b13ec1781",
+  "title": "T",
+  "sample": "S",
+  "operator": "o",
+  "status": "active",
+  "start_time": "2026-05-07T10:00:00+00:00",
+  "end_time": null,
+  "description": "",
+  "notes": "",
+  "is_replay": true,
+  "phase": "cooldown",
+  "phase_started_at": "2026-07-18T18:45:18.273899+00:00",
+  "phases": [
+    {
+      "phase": "preparation",
+      "started_at": "2026-07-18T18:45:18.270639+00:00",
+      "ended_at": "2026-07-18T18:45:18.273899+00:00",
+      "operator": "operator"
+    }
+  ]
+}

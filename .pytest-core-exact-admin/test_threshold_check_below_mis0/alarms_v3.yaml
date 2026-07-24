@@ -1,0 +1,7 @@
+
+global_alarms:
+  low_disk:
+    alarm_type: threshold
+    channel: system_disk_gb
+    check: below
+    level: WARNING

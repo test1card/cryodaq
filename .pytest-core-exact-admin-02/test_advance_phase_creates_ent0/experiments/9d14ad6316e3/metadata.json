@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "9d14ad6316e3",
+    "name": "PhaseTest",
+    "title": "PhaseTest",
+    "template_id": "custom",
+    "operator": "Op1",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T12:20:52.265236+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_advance_phase_creates_ent0\\experiments\\9d14ad6316e3",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_advance_phase_creates_ent0\\experiments\\9d14ad6316e3\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "report_enabled": true,
+    "report_sections": [
+      "title_page",
+      "operator_log_section",
+      "config_section"
+    ],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:20:52.265236+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_advance_phase_creates_ent0\\experiments\\9d14ad6316e3",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_advance_phase_creates_ent0\\experiments\\9d14ad6316e3\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {},
+  "phases": [
+    {
+      "phase": "cooldown",
+      "started_at": "2026-07-18T12:20:52.300002+00:00",
+      "ended_at": null,
+      "operator": "Op1"
+    }
+  ],
+  "current_phase": "cooldown"
+}

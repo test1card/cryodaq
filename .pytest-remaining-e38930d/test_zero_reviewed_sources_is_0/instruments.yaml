@@ -1,0 +1,4 @@
+instruments:
+- name: vacuum
+  resource: COM3
+  type: thyracont_vsp63d

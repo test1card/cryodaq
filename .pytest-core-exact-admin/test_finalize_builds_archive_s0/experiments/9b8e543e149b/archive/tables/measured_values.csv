@@ -1,0 +1,4 @@
+timestamp,instrument_id,channel,value,unit,status
+2026-03-16T12:01:00+00:00,k1,K1/smua/power,1.5,W,ok
+2026-03-16T12:01:00+00:00,k1,P_MAIN/pressure,0.00022,mbar,ok
+2026-03-16T12:01:00+00:00,k1,T_STAGE,4.2,K,ok

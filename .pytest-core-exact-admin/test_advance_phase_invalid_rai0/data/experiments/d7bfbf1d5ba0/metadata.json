@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "d7bfbf1d5ba0",
+    "name": "Test",
+    "title": "Test",
+    "template_id": "custom",
+    "operator": "op",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-18T12:17:42.189041+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": {}
+    },
+    "custom_fields": {},
+    "report_enabled": false,
+    "sections": [
+      "setup"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_advance_phase_invalid_rai0\\data\\experiments\\d7bfbf1d5ba0",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_advance_phase_invalid_rai0\\data\\experiments\\d7bfbf1d5ba0\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup"
+    ],
+    "report_enabled": false,
+    "report_sections": [],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-18T12:17:42.189041+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_advance_phase_invalid_rai0\\data\\experiments\\d7bfbf1d5ba0",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin\\test_advance_phase_invalid_rai0\\data\\experiments\\d7bfbf1d5ba0\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

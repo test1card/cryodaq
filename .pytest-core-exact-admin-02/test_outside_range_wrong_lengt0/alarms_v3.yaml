@@ -1,0 +1,8 @@
+
+global_alarms:
+  sensor_range:
+    alarm_type: threshold
+    channel: T11
+    check: outside_range
+    range: [1.0]
+    level: CRITICAL

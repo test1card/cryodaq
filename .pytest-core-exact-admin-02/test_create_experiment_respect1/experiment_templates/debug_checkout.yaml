@@ -1,0 +1,9 @@
+custom_fields:
+- id: issue_ticket
+  label: Issue Ticket
+id: debug_checkout
+name: Debug Checkout
+report_enabled: false
+sections:
+- setup
+- checks

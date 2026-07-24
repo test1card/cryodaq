@@ -1,0 +1,19 @@
+schema_version: 1
+descriptors:
+- schema_version: 1
+  channel_id: local.1
+  instrument_id: probe
+  source_key: input.1.temperature
+  quantity: temperature
+  unit: K
+  role: primary_measurement
+  safety_class: observational
+  display_group: test
+  display_name: Test channel
+  visible_by_default: true
+  display_order: 1
+  descriptor_revision: 1
+bindings:
+- instrument_id: probe
+  emitted_channel: local emitted
+  channel_id: local.1

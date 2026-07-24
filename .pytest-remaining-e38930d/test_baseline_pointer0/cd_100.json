@@ -1,0 +1,10 @@
+{
+  "fingerprint_id": "cd_100",
+  "cooldown_start_ts": 100.0,
+  "duration_h": 10.0,
+  "T_cold_final": 4.0,
+  "time_to_base_h": 10.0,
+  "time_to_50K_h": 8.5,
+  "ultimate_vacuum_mbar": null,
+  "n_points": 21
+}

@@ -1,0 +1,23 @@
+schema_version: 1
+generated_at: '2026-07-18T12:17:50.780120+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: sensor-api
+  curve_id: 5ecdda6e7dd9
+  fit_timestamp: '2026-07-18T12:17:50.776892+00:00'
+  raw_unit: V
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_t_from_v_matches_evaluate0\curves\sensor-api\5ecdda6e7dd9\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_t_from_v_matches_evaluate0\curves\sensor-api\5ecdda6e7dd9\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_t_from_v_matches_evaluate0\curves\sensor-api\5ecdda6e7dd9\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_t_from_v_matches_evaluate0\exports\sensor-api\5ecdda6e7dd9\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: sensor-api
+  curve_id: 5ecdda6e7dd9
+  channel_key: sensor-api
+  updated_at: '2026-07-18T12:17:50.779966+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

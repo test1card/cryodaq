@@ -1,0 +1,23 @@
+schema_version: 1
+generated_at: '2026-07-18T12:17:57.891386+00:00'
+runtime:
+  global_mode: 'off'
+  updated_at: ''
+curves:
+- sensor_id: Т2_cal
+  curve_id: 494d73d1693f
+  fit_timestamp: '2026-07-18T12:17:57.887765+00:00'
+  raw_unit: sensor_unit
+  sensor_kind: generic
+  curve_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_fit_end_to_end0\cal\curves\Т2_cal\494d73d1693f\curve.json
+  table_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_fit_end_to_end0\cal\curves\Т2_cal\494d73d1693f\curve_table.csv
+  curve_cof_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_fit_end_to_end0\cal\curves\Т2_cal\494d73d1693f\curve.cof
+  curve_340_path: C:\tmp\cryodaq-ci-5276da0-01\.pytest-remaining-exact-admin\test_fit_end_to_end0\cal\exports\Т2_cal\494d73d1693f\curve.340
+  source_session_ids: []
+assignments:
+- sensor_id: Т2_cal
+  curve_id: 494d73d1693f
+  channel_key: Т2_cal
+  updated_at: '2026-07-18T12:17:57.891198+00:00'
+  runtime_apply_ready: false
+  reading_mode_policy: inherit

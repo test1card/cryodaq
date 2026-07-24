@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "curve_id": "f447d4736359",
+  "sensor_id": "sensor-003B",
+  "fit_timestamp": "2026-07-18T12:17:54.102896+00:00",
+  "raw_unit": "V",
+  "sensor_kind": "generic",
+  "source_session_ids": [],
+  "zones": [
+    {
+      "raw_min": 0.854681516,
+      "raw_max": 1.44406686,
+      "order": 12,
+      "coefficients": [
+        157.1711246154039,
+        -114.6350408753906,
+        20.202193316148886,
+        -4.9094296038376735,
+        -5.546236278703025,
+        3.973526329741805,
+        0.7566220004940989,
+        -2.3875223682804574,
+        0.7466309539850329,
+        1.197021827871565,
+        -1.0094702214777702,
+        -0.025363232466729838,
+        0.7770446579941167
+      ],
+      "rmse_k": 0.6907076861213234,
+      "max_abs_error_k": 4.199841125012682,
+      "point_count": 138
+    },
+    {
+      "raw_min": 1.20307338,
+      "raw_max": 1.46821151,
+      "order": 10,
+      "coefficients": [
+        -477152327769.634,
+        705303817721.7125,
+        -156798652216.17886,
+        -300186350188.8398,
+        444080000265.87573,
+        -340621320944.44507,
+        174725839962.88547,
+        -62285157573.71704,
+        14993345154.84025,
+        -2210989014.748876,
+        151794649.43645984
+      ],
+      "rmse_k": 0.006102535649920285,
+      "max_abs_error_k": 0.015887390624996556,
+      "point_count": 12
+    },
+    {
+      "raw_min": 1.47172927,
+      "raw_max": 1.62203373,
+      "order": 10,
+      "coefficients": [
+        20.30035862650295,
+        -20.62981962536818,
+        4.915277980202896,
+        -0.5758818266740285,
+        -0.046008165263979856,
+        0.07204900737981566,
+        -0.059379366311487124,
+        0.048197373705051956,
+        -0.04292688410372809,
+        0.02596711649864456,
+        -0.028291518689438973
+      ],
+      "rmse_k": 4.622199166798273e-07,
+      "max_abs_error_k": 1.2222805985118157e-06,
+      "point_count": 50
+    }
+  ],
+  "metrics": {
+    "sample_count": 200,
+    "input_sample_count": 200,
+    "downsampled_sample_count": 200,
+    "downsampling_applied": false,
+    "zone_count": 3,
+    "rmse_k": 5.283292374241403,
+    "max_abs_error_k": 74.27515450998666,
+    "raw_min": 0.854681516,
+    "raw_max": 1.62203373,
+    "temperature_min_k": 3.97954292,
+    "temperature_max_k": 290.000536,
+    "zone_detection": "dV/dT",
+    "order_selection": "cross_validation",
+    "cv_order_candidates": [
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "target_rmse_k": 0.05,
+    "sensitivity_min": -129.9362088502789,
+    "sensitivity_max": 0.44351846348944723
+  },
+  "metadata": {
+    "import_format": "340",
+    "import_source_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-remaining-exact-admin\\test_export_340_uses_200_break0\\source\\exports\\sensor-003\\1486edf56d5c\\curve.340",
+    "channel_key": "LS218:CH3",
+    "preprocessing": {
+      "downsample_target": 5000,
+      "input_sample_count": 200,
+      "output_sample_count": 200
+    }
+  }
+}

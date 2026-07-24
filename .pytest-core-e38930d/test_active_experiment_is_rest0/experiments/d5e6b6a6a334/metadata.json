@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {},
+  "experiment": {
+    "experiment_id": "d5e6b6a6a334",
+    "name": "Lambda run",
+    "title": "Lambda run",
+    "template_id": "thermal_conductivity",
+    "operator": "Ivanov",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "Updated note",
+    "start_time": "2026-07-18T18:43:58.039898+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {
+      "sample_id": "S-42"
+    },
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "sample",
+      "operator_log"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_active_experiment_is_rest0\\experiments\\d5e6b6a6a334",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_active_experiment_is_rest0\\experiments\\d5e6b6a6a334\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "thermal_conductivity",
+    "name": "Thermal Conductivity",
+    "sections": [
+      "setup",
+      "sample",
+      "operator_log"
+    ],
+    "report_enabled": true,
+    "report_sections": [],
+    "custom_fields": [
+      {
+        "id": "sample_id",
+        "label": "Sample ID",
+        "default": ""
+      },
+      {
+        "id": "heater_geometry",
+        "label": "Heater Geometry",
+        "default": ""
+      }
+    ]
+  },
+  "data_range": {
+    "start_time": "2026-07-18T18:43:58.039898+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-18.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_active_experiment_is_rest0\\experiments\\d5e6b6a6a334",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-e38930d\\test_active_experiment_is_rest0\\experiments\\d5e6b6a6a334\\metadata.json"
+  },
+  "run_records": []
+}

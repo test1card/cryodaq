@@ -1,0 +1,6 @@
+instruments:
+- type: etalon_multiline
+  name: MultiLine_test
+  channels:
+  - 10
+  - 20

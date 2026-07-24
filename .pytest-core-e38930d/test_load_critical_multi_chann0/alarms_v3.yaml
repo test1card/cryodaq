@@ -1,0 +1,7 @@
+global_alarms:
+  rate_critical:
+    alarm_type: rate
+    channels:
+    - Т11
+    - Т12
+    level: CRITICAL

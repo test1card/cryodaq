@@ -1,0 +1,7 @@
+
+landmarks:
+  Т11:
+    role: warm_stage
+    physical: "1-я ступень"
+    aliases: ["азотная плита"]
+  Т12: "broken_string_entry"

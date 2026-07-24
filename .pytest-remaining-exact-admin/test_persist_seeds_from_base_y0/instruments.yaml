@@ -1,0 +1,13 @@
+instruments:
+- channels:
+  - 1
+  - 2
+  name: LS_1
+  type: lakeshore_218s
+- channels:
+  - 1
+  - 2
+  - 3
+  - 4
+  name: MultiLine_1
+  type: etalon_multiline

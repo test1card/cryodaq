@@ -1,0 +1,4 @@
+global_alarms:
+  warn_only:
+    channel: Т20
+    level: WARNING

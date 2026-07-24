@@ -1,0 +1,7 @@
+id: thermal_conductivity
+name: Thermal Conductivity
+report_enabled: true
+report_sections:
+- title_page
+sections:
+- setup

@@ -1,0 +1,6 @@
+
+cooldown:
+  k_p: "not_a_float"
+  sustained_min: 5
+vacuum:
+  enabled: true

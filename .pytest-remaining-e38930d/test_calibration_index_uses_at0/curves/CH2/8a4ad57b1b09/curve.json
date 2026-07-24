@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "curve_id": "8a4ad57b1b09",
+  "sensor_id": "CH2",
+  "fit_timestamp": "2026-07-18T18:44:08.553908+00:00",
+  "raw_unit": "sensor_unit",
+  "sensor_kind": "generic",
+  "source_session_ids": [],
+  "zones": [
+    {
+      "raw_min": 6.7425210084033615,
+      "raw_max": 68.18981818181818,
+      "order": 9,
+      "coefficients": [
+        53.980441332557746,
+        -76.30375976784124,
+        41.26611957773589,
+        -22.078067330238994,
+        12.197980021956678,
+        -6.707558186384187,
+        3.519551782031624,
+        -2.0089658370206775,
+        1.035907285718206,
+        -0.9016488785149409
+      ],
+      "rmse_k": 9.793511336614233e-14,
+      "max_abs_error_k": 1.4921397450962104e-13,
+      "point_count": 10
+    }
+  ],
+  "metrics": {
+    "sample_count": 10,
+    "input_sample_count": 10,
+    "downsampled_sample_count": 10,
+    "downsampling_applied": false,
+    "zone_count": 1,
+    "rmse_k": 1.2117305912081963e-13,
+    "max_abs_error_k": 1.9895196601282805e-13,
+    "raw_min": 6.7425210084033615,
+    "raw_max": 68.18981818181818,
+    "temperature_min_k": 4.0,
+    "temperature_max_k": 220.0,
+    "zone_detection": "dV/dT",
+    "order_selection": "cross_validation",
+    "cv_order_candidates": [
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "target_rmse_k": 0.05,
+    "sensitivity_min": -2.838909090909091,
+    "sensitivity_max": -0.03788937347090735
+  },
+  "metadata": {
+    "preprocessing": {
+      "downsample_target": 5000,
+      "input_sample_count": 10,
+      "output_sample_count": 10
+    }
+  }
+}

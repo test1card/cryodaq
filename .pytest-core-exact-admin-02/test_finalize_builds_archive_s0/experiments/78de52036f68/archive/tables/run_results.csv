@@ -1,0 +1,2 @@
+run_record_id,source_tab,source_module,run_type,status,started_at,finished_at,artifact_count,result_summary_json
+78de52036f68:autosweep-001,autosweep,autosweep_panel,autosweep,COMPLETED,2026-03-16T12:00:00+00:00,2026-03-16T12:02:00+00:00,2,"{""point_count"": 2, ""avg_temperature_k"": 4.6}"

@@ -1,0 +1,15 @@
+{
+  "files": [
+    {
+      "original_name": "data_2026-03-20.db",
+      "archive_path": "year=2026/month=03/data_2026-03-20.parquet",
+      "rotated_at": "2026-07-18T18:45:17.967063+00:00",
+      "row_count": 2,
+      "size_bytes_original": 69632,
+      "size_bytes_archive": 2098,
+      "checksum_md5": "3c99a763be4def04c0db33c7c9cddaa2",
+      "source_md5": "5ddaf848525ef0e3a072f76c3d8c6a4b",
+      "source_md5_kind": "logical_iterdump_v1"
+    }
+  ]
+}

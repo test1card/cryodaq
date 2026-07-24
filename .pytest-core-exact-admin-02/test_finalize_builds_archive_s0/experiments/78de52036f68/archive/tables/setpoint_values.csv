@@ -1,0 +1,3 @@
+run_record_id,source_tab,run_type,parameter,value
+78de52036f68:autosweep-001,autosweep,autosweep,power_end_w,1.0
+78de52036f68:autosweep-001,autosweep,autosweep,power_start_w,0.1

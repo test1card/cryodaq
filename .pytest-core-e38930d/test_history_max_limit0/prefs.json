@@ -1,0 +1,38 @@
+{
+  "last_experiment": {
+    "template_id": "t",
+    "operator": "Operator-24",
+    "sample": "S",
+    "cryostat": "C",
+    "description": "",
+    "custom_fields": {}
+  },
+  "operator_history": [
+    "Operator-24",
+    "Operator-23",
+    "Operator-22",
+    "Operator-21",
+    "Operator-20",
+    "Operator-19",
+    "Operator-18",
+    "Operator-17",
+    "Operator-16",
+    "Operator-15",
+    "Operator-14",
+    "Operator-13",
+    "Operator-12",
+    "Operator-11",
+    "Operator-10",
+    "Operator-09",
+    "Operator-08",
+    "Operator-07",
+    "Operator-06",
+    "Operator-05"
+  ],
+  "sample_history": [
+    "S"
+  ],
+  "cryostat_history": [
+    "C"
+  ]
+}

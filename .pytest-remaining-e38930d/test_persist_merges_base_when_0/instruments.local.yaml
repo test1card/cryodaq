@@ -1,0 +1,16 @@
+instruments:
+- channels:
+  - 1
+  - 2
+  - 3
+  name: LS_1
+  type: lakeshore_218s
+- channels:
+  - 10
+  - 11
+  - 12
+  host: 192.168.1.50
+  mode: averaged
+  name: MultiLine_1
+  port: 2001
+  type: etalon_multiline

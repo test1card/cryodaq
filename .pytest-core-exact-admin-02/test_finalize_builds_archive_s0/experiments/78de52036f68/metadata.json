@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "artifact_index": [
+    {
+      "artifact_id": "run_artifact:autosweep:autosweep_result.csv",
+      "category": "run_artifact",
+      "role": "autosweep",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\runs\\autosweep\\autosweep-001\\autosweep_result.csv",
+      "summary": {
+        "run_record_id": "78de52036f68:autosweep-001",
+        "source_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\autosweep_result.csv",
+        "materialized": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\runs\\autosweep\\autosweep-001\\autosweep_result.csv",
+        "linked": true
+      }
+    },
+    {
+      "artifact_id": "run_artifact:autosweep:autosweep_result.png",
+      "category": "run_artifact",
+      "role": "autosweep",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\runs\\autosweep\\autosweep-001\\autosweep_result.png",
+      "summary": {
+        "run_record_id": "78de52036f68:autosweep-001",
+        "source_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\autosweep_result.png",
+        "materialized": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\runs\\autosweep\\autosweep-001\\autosweep_result.png",
+        "linked": true
+      }
+    },
+    {
+      "artifact_id": "table:measured_values:measured_values.csv",
+      "category": "table",
+      "role": "measured_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\measured_values.csv",
+      "summary": {
+        "rows": 3
+      }
+    },
+    {
+      "artifact_id": "table:setpoint_values:setpoint_values.csv",
+      "category": "table",
+      "role": "setpoint_values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\setpoint_values.csv",
+      "summary": {
+        "rows": 2
+      }
+    },
+    {
+      "artifact_id": "table:run_results:run_results.csv",
+      "category": "table",
+      "role": "run_results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\run_results.csv",
+      "summary": {
+        "rows": 1
+      }
+    },
+    {
+      "artifact_id": "table:conductivity_vs_temperature:conductivity_vs_temperature.csv",
+      "category": "table",
+      "role": "conductivity_vs_temperature",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\conductivity_vs_temperature.csv",
+      "summary": {
+        "rows": 2
+      }
+    },
+    {
+      "artifact_id": "plot:conductivity_vs_temperature:conductivity_vs_temperature.png",
+      "category": "plot",
+      "role": "conductivity_vs_temperature",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\plots\\conductivity_vs_temperature.png",
+      "summary": {
+        "points": 2
+      }
+    },
+    {
+      "artifact_id": "plot:temperature_overview:temperature_overview.png",
+      "category": "plot",
+      "role": "temperature_overview",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\plots\\temperature_overview.png",
+      "summary": {
+        "points": 1
+      }
+    },
+    {
+      "artifact_id": "plot:thermal_power:thermal_power.png",
+      "category": "plot",
+      "role": "thermal_power",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\plots\\thermal_power.png",
+      "summary": {
+        "points": 1
+      }
+    },
+    {
+      "artifact_id": "plot:pressure:pressure.png",
+      "category": "plot",
+      "role": "pressure",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\plots\\pressure.png",
+      "summary": {
+        "points": 1
+      }
+    },
+    {
+      "artifact_id": "summary:summary_metadata:summary_metadata.json",
+      "category": "summary",
+      "role": "summary_metadata",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\summaries\\summary_metadata.json",
+      "summary": {
+        "experiment_id": "78de52036f68",
+        "title": "Thermal archive",
+        "sample": "Cu-archive",
+        "operator": "Operator",
+        "status": "COMPLETED",
+        "run_record_count": 1,
+        "artifact_count": 10,
+        "result_table_count": 4,
+        "measured_value_rows": 3,
+        "setpoint_rows": 2,
+        "run_result_rows": 1,
+        "conductivity_rows": 2
+      }
+    }
+  ],
+  "result_tables": [
+    {
+      "table_id": "measured_values",
+      "title": "Measured values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\measured_values.csv",
+      "row_count": 3
+    },
+    {
+      "table_id": "setpoint_values",
+      "title": "Setpoint values",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\setpoint_values.csv",
+      "row_count": 2
+    },
+    {
+      "table_id": "run_results",
+      "title": "Run results",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\run_results.csv",
+      "row_count": 1
+    },
+    {
+      "table_id": "conductivity_vs_temperature",
+      "title": "Conductivity vs temperature",
+      "path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\tables\\conductivity_vs_temperature.csv",
+      "row_count": 2
+    }
+  ],
+  "summary_metadata": {
+    "experiment_id": "78de52036f68",
+    "title": "Thermal archive",
+    "sample": "Cu-archive",
+    "operator": "Operator",
+    "status": "COMPLETED",
+    "run_record_count": 1,
+    "artifact_count": 10,
+    "result_table_count": 4,
+    "measured_value_rows": 3,
+    "setpoint_rows": 2,
+    "run_result_rows": 1,
+    "conductivity_rows": 2
+  },
+  "experiment": {
+    "experiment_id": "78de52036f68",
+    "name": "Thermal archive",
+    "title": "Thermal archive",
+    "template_id": "thermal_conductivity",
+    "operator": "Operator",
+    "cryostat": "",
+    "sample": "Cu-archive",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-03-16T12:00:00+00:00",
+    "end_time": "2026-03-16T12:05:00+00:00",
+    "status": "COMPLETED",
+    "config_snapshot": {
+      "instruments": [
+        {
+          "channels": [
+            "CH1",
+            "CH2"
+          ],
+          "name": "ls218s_1",
+          "resource": "GPIB0::12::INSTR",
+          "type": "lakeshore_218s"
+        }
+      ]
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "sample",
+      "operator_log"
+    ],
+    "artifact_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "thermal_conductivity",
+    "name": "Thermal Conductivity",
+    "sections": [
+      "setup",
+      "sample",
+      "operator_log"
+    ],
+    "report_enabled": true,
+    "report_sections": [],
+    "custom_fields": [
+      {
+        "id": "sample_id",
+        "label": "Sample ID",
+        "default": ""
+      },
+      {
+        "id": "heater_geometry",
+        "label": "Heater Geometry",
+        "default": ""
+      }
+    ]
+  },
+  "data_range": {
+    "start_time": "2026-03-16T12:00:00+00:00",
+    "end_time": "2026-03-16T12:05:00+00:00",
+    "daily_db_files": [
+      "data_2026-03-16.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68",
+    "metadata_path": "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\metadata.json"
+  },
+  "run_records": [
+    {
+      "record_id": "78de52036f68:autosweep-001",
+      "source_run_id": "autosweep-001",
+      "source_tab": "autosweep",
+      "source_module": "autosweep_panel",
+      "run_type": "autosweep",
+      "status": "COMPLETED",
+      "started_at": "2026-03-16T12:00:00+00:00",
+      "finished_at": "2026-03-16T12:02:00+00:00",
+      "parameters": {
+        "power_start_w": 0.1,
+        "power_end_w": 1.0
+      },
+      "result_summary": {
+        "point_count": 2,
+        "avg_temperature_k": 4.6
+      },
+      "artifact_paths": [
+        "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\runs\\autosweep\\autosweep-001\\autosweep_result.csv",
+        "C:\\tmp\\cryodaq-ci-5276da0-01\\.pytest-core-exact-admin-02\\test_finalize_builds_archive_s0\\experiments\\78de52036f68\\archive\\runs\\autosweep\\autosweep-001\\autosweep_result.png"
+      ],
+      "experiment_context": {
+        "experiment_id": "78de52036f68",
+        "title": "Thermal archive",
+        "sample": "Cu-archive",
+        "operator": "Operator",
+        "template_id": "thermal_conductivity",
+        "cryostat": ""
+      }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+global_alarms:
+  vacuum_stall_critical:
+    additional_condition:
+      channel: P3
+      check: above
+      threshold: 1.0e-05
+    alarm_type: rate
+    channel: P2
+    level: CRITICAL

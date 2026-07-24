@@ -1,0 +1,7 @@
+keithley:
+  watchdog:
+    mode: bogus
+instruments:
+  - type: keithley_2604b
+    name: k2604
+    resource: USB0::FAKE

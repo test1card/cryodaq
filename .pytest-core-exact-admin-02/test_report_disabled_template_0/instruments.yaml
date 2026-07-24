@@ -1,0 +1,7 @@
+instruments:
+- channels:
+  - CH1
+  - CH2
+  name: ls218s_1
+  resource: GPIB0::12::INSTR
+  type: lakeshore_218s

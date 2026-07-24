@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "curve_id": "112211cd7011",
+  "sensor_id": "Т2_cal",
+  "fit_timestamp": "2026-07-18T12:17:58.126869+00:00",
+  "raw_unit": "sensor_unit",
+  "sensor_kind": "generic",
+  "source_session_ids": [],
+  "zones": [
+    {
+      "raw_min": 5.0,
+      "raw_max": 86.0,
+      "order": 12,
+      "coefficients": [
+        35.60191749226807,
+        -27.370382292331932,
+        10.506388635912986,
+        -4.061953689517887,
+        1.5454627151425386,
+        -0.6107191649098954,
+        0.21806928069574874,
+        -0.05693913673913641,
+        0.04114558523600133,
+        -0.02563142101127937,
+        0.0028347110559213077,
+        0.0009880796531872198,
+        0.0010302267766047883
+      ],
+      "rmse_k": 0.0004206578959549601,
+      "max_abs_error_k": 0.0013753864341623512,
+      "point_count": 81
+    },
+    {
+      "raw_min": 86.5,
+      "raw_max": 89.0,
+      "order": 2,
+      "coefficients": [
+        15.525499301655168,
+        -0.1861514004174008,
+        0.0019073744033476176
+      ],
+      "rmse_k": 7.466335823924489e-15,
+      "max_abs_error_k": 1.0658141036401503e-14,
+      "point_count": 3
+    },
+    {
+      "raw_min": 89.5,
+      "raw_max": 104.5,
+      "order": 12,
+      "coefficients": [
+        14.33123850007419,
+        -0.9123095329993159,
+        0.020034635845496557,
+        -0.006274387243141846,
+        0.0006517009949442228,
+        0.00015215158736483,
+        -1.1885946588345423e-05,
+        -2.1048026545966244e-06,
+        1.2202705599268833e-07,
+        1.6665108314789576e-08,
+        -7.718316970802277e-10,
+        -8.696637809513195e-11,
+        3.0566351327301674e-12
+      ],
+      "rmse_k": 4.201625309842127e-14,
+      "max_abs_error_k": 1.0302869668521453e-13,
+      "point_count": 15
+    }
+  ],
+  "metrics": {
+    "sample_count": 99,
+    "input_sample_count": 99,
+    "downsampled_sample_count": 99,
+    "downsampling_applied": false,
+    "zone_count": 3,
+    "rmse_k": 0.0003804993834497269,
+    "max_abs_error_k": 0.0013753864341623512,
+    "raw_min": 5.0,
+    "raw_max": 104.5,
+    "temperature_min_k": 13.43347921534675,
+    "temperature_max_k": 80.0420735492404,
+    "zone_detection": "dV/dT",
+    "order_selection": "cross_validation",
+    "cv_order_candidates": [
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "target_rmse_k": 0.5,
+    "sensitivity_min": -8.569844776640991,
+    "sensitivity_max": -0.26904425311817476
+  },
+  "metadata": {
+    "preprocessing": {
+      "downsample_target": 5000,
+      "input_sample_count": 99,
+      "output_sample_count": 99
+    }
+  }
+}

@@ -1,0 +1,8 @@
+
+global_alarms:
+  drift:
+    alarm_type: threshold
+    channel: T12
+    check: deviation_from_setpoint
+    threshold: 0.5
+    level: WARNING
