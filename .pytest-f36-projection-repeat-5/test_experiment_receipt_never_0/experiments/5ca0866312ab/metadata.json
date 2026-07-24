@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "5ca0866312ab",
+    "name": "Cooldown",
+    "title": "Cooldown",
+    "template_id": "custom",
+    "operator": "operator",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-14T02:01:03.448612+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": []
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "artifact_dir": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-5\\test_experiment_receipt_never_0\\experiments\\5ca0866312ab",
+    "metadata_path": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-5\\test_experiment_receipt_never_0\\experiments\\5ca0866312ab\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "report_enabled": true,
+    "report_sections": [
+      "title_page",
+      "operator_log_section",
+      "config_section"
+    ],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-14T02:01:03.448612+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-14.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-5\\test_experiment_receipt_never_0\\experiments\\5ca0866312ab",
+    "metadata_path": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-5\\test_experiment_receipt_never_0\\experiments\\5ca0866312ab\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {}
+}

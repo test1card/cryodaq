@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "experiment_id": "d9eaf4902bdf",
+    "name": "Cooldown",
+    "title": "Cooldown",
+    "template_id": "custom",
+    "operator": "operator",
+    "cryostat": "",
+    "sample": "",
+    "description": "",
+    "notes": "",
+    "start_time": "2026-07-14T02:01:14.837012+00:00",
+    "end_time": null,
+    "status": "RUNNING",
+    "config_snapshot": {
+      "instruments": []
+    },
+    "custom_fields": {},
+    "report_enabled": true,
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "artifact_dir": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-19\\test_active_experiment_identit0\\experiments\\d9eaf4902bdf",
+    "metadata_path": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-19\\test_active_experiment_identit0\\experiments\\d9eaf4902bdf\\metadata.json",
+    "retroactive": false
+  },
+  "template": {
+    "id": "custom",
+    "name": "Custom",
+    "sections": [
+      "setup",
+      "notes"
+    ],
+    "report_enabled": true,
+    "report_sections": [
+      "title_page",
+      "operator_log_section",
+      "config_section"
+    ],
+    "custom_fields": []
+  },
+  "data_range": {
+    "start_time": "2026-07-14T02:01:14.837012+00:00",
+    "end_time": null,
+    "daily_db_files": [
+      "data_2026-07-14.db"
+    ]
+  },
+  "artifacts": {
+    "root_dir": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-19\\test_active_experiment_identit0\\experiments\\d9eaf4902bdf",
+    "metadata_path": "C:\\Users\\3fall\\Projects\\cryodaq\\.worktrees\\codex-f36-projections\\.pytest-f36-projection-repeat-19\\test_active_experiment_identit0\\experiments\\d9eaf4902bdf\\metadata.json"
+  },
+  "run_records": [],
+  "artifact_index": [],
+  "result_tables": [],
+  "summary_metadata": {},
+  "phases": [
+    {
+      "phase": "cooldown",
+      "started_at": "2026-07-14T02:01:14.875773+00:00",
+      "ended_at": null,
+      "operator": ""
+    }
+  ],
+  "current_phase": "cooldown"
+}
