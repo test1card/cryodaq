@@ -1,34 +1,10 @@
 """Bridge watchdog restart-storm regression tests.
 
-Reproduces the defect an external reviewer found statically in
-``gui/app.py``'s per-tick bridge watchdog: whenever ``bridge.is_healthy()``
-is False, the watchdog called ``bridge.shutdown()`` + ``bridge.start()``
-unconditionally, every tick, with no cap on consecutive failures and no
-``try/except`` around ``start()`` (which raises on persistent failure per
-``gui/zmq_client.py``). After a failed start the bridge is neither alive nor
-healthy, so the next tick repeats the whole spawn-and-rollback cycle
-forever (4 mp.Queues + a safe-IPC bundle + a process spawn, per tick).
-
-The fix, ``gui.app._BridgeWatchdog``, mirrors
-``LauncherWindow._latch_bridge_watchdog_hold`` /
-``_replace_bridge_from_watchdog`` in ``launcher.py``: bound the number of
-consecutive restart failures and latch HOLD once the bound is hit, never
-retrying again, and never reporting the latched bridge as healthy.
-
-This ``50 ticks, 50 calls`` figure is static analysis of the parent commit
-``526c2f24``'s ``gui/app.py``, not an observed failing run. That parent had
-no module-level watchdog -- the per-tick restart path was a nested ``_tick()``
-closure defined inside ``main()`` (it closes over ``main()``'s locals, so it
-cannot be imported or unit-tested in isolation). Read straight off that nested
-``_tick``: when ``bridge.is_healthy()`` is False it calls ``bridge.shutdown()``
-+ ``bridge.start()`` and returns, with no cap on consecutive failures and no
-``try/except`` around ``start()`` -- so a dead bridge would be
-spawn-and-rollbacked once per tick for as long as ``main()``'s QTimer fires.
-There is no reproducible 50-for-50 red to rerun against the committed parent;
-the regression guard is
-``test_bridge_watchdog_restart_attempts_are_bounded_when_start_always_fails``
-below, run against the current module-level ``_BridgeWatchdog`` (bound by
-``_BRIDGE_RESTART_ATTEMPT_LIMIT``).
+``_BridgeWatchdog`` latches after repeated ``start()`` exceptions, while a
+non-raising start that never regains engine health is retried on a monotonic
+60-second cooldown. The latter preserves automatic recovery after an engine
+restart without allowing a spawnable-but-disconnected engine to churn bridge
+processes on every GUI tick.
 """
 
 from __future__ import annotations
@@ -45,6 +21,19 @@ def _make_dead_bridge(*, start_error: Exception | None) -> MagicMock:
     if start_error is not None:
         bridge.start.side_effect = start_error
     return bridge
+
+
+class _FakeMonotonic:
+    """Wall-clock-independent monotonic source for watchdog cooldown tests."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def test_bridge_watchdog_restart_attempts_are_bounded_when_start_always_fails() -> None:
@@ -94,6 +83,29 @@ def test_bridge_watchdog_recovers_on_second_attempt() -> None:
     assert watchdog.latched is False
 
     # Healthy now -- a further tick must not restart again.
+    watchdog.tick(bridge=bridge, window=window, snapshot_ingress=snapshot_ingress)
+    assert bridge.start.call_count == 2
+
+
+def test_bridge_watchdog_does_not_respawn_a_spawnable_but_unhealthy_engine_every_tick() -> None:
+    """A non-raising start without a heartbeat is retried only after cooldown."""
+    bridge = _make_dead_bridge(start_error=None)
+    window = MagicMock()
+    snapshot_ingress = MagicMock()
+    clock = _FakeMonotonic()
+    watchdog = gui_app._BridgeWatchdog(monotonic=clock)
+
+    for _ in range(50):
+        watchdog.tick(bridge=bridge, window=window, snapshot_ingress=snapshot_ingress)
+
+    assert bridge.start.call_count == 1
+    assert watchdog.latched is False
+
+    clock.advance(gui_app._BRIDGE_SUCCESSFUL_RESTART_COOLDOWN_S - 1.0)
+    watchdog.tick(bridge=bridge, window=window, snapshot_ingress=snapshot_ingress)
+    assert bridge.start.call_count == 1
+
+    clock.advance(1.0)
     watchdog.tick(bridge=bridge, window=window, snapshot_ingress=snapshot_ingress)
     assert bridge.start.call_count == 2
 

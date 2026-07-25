@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
+from collections.abc import Callable
 
 import qdarktheme
 from PySide6.QtCore import QTimer
@@ -547,28 +549,30 @@ def _drain_bridge_readings(bridge: ZmqBridge, window: MainWindow) -> None:
         window.dispatch_qualified_reading(qualified)
 
 
-# Bound consecutive failed bridge-restart attempts before latching HOLD.
-# Mirrors LauncherWindow._latch_bridge_watchdog_hold / _replace_bridge_from_
-# watchdog in launcher.py, which never lets a bridge that fails to settle
-# keep spawning fresh mp.Queues + a safe-IPC bundle + a subprocess forever.
+# Latch repeated start exceptions, and pace non-raising restarts that have not
+# yet restored engine health. The latter is deliberately a cooldown rather
+# than a latch so a restarted engine can reconnect without restarting the GUI.
 _BRIDGE_RESTART_ATTEMPT_LIMIT = 5
+_BRIDGE_SUCCESSFUL_RESTART_COOLDOWN_S = 60.0
 
 
 class _BridgeWatchdog:
-    """Bound bridge-restart retries with a settlement latch.
+    """Bound bridge restart resource churn without disabling recovery.
 
-    ``bridge.start()`` raises on persistent failure (``gui/zmq_client.py``),
-    and after a failed start the bridge is neither alive nor healthy. A
-    naive per-tick watchdog therefore re-runs the whole spawn-and-rollback
-    cycle every single tick, forever. This tracks consecutive restart
-    failures and, once ``_BRIDGE_RESTART_ATTEMPT_LIMIT`` is reached, latches
-    HOLD: no further ``shutdown()``/``start()`` calls are made, and
-    :meth:`is_healthy` fails closed regardless of what the bridge itself
-    reports, so a latched bridge can never be mistaken for a live one.
+    A ``bridge.start()`` exception counts toward
+    ``_BRIDGE_RESTART_ATTEMPT_LIMIT``; reaching the limit latches HOLD and
+    :meth:`is_healthy` then fails closed. A non-raising ``start()`` only
+    means its subprocess launched, not that the engine has connected. Such
+    restarts are therefore retried no more often than
+    ``_BRIDGE_SUCCESSFUL_RESTART_COOLDOWN_S`` by a monotonic clock. The
+    cooldown bounds spawn-and-rollback churn while allowing an engine that
+    comes back later to reconnect automatically.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, monotonic: Callable[[], float] = time.monotonic) -> None:
         self._consecutive_failures = 0
+        self._monotonic = monotonic
+        self._next_restart_at: float | None = None
         self.latched = False
 
     def is_healthy(self, bridge: ZmqBridge) -> bool:
@@ -588,6 +592,8 @@ class _BridgeWatchdog:
         if self.latched:
             return
         if not self.is_healthy(bridge):
+            if not self._restart_is_due():
+                return
             snapshot_ingress.invalidate_transport()
             window.invalidate_descriptor_transport()
             if bridge.is_alive():
@@ -598,10 +604,16 @@ class _BridgeWatchdog:
                 self._restart(bridge, shutdown_first=False)
             return
         if bridge.data_flow_stalled():
+            if not self._restart_is_due():
+                return
             snapshot_ingress.invalidate_transport()
             window.invalidate_descriptor_transport()
             logger.warning("ZMQ bridge not healthy (no readings), restarting...")
             self._restart(bridge, shutdown_first=True)
+
+    def _restart_is_due(self) -> bool:
+        """Return whether a health-driven restart may allocate a new bridge."""
+        return self._next_restart_at is None or self._monotonic() >= self._next_restart_at
 
     def _restart(self, bridge: ZmqBridge, *, shutdown_first: bool) -> None:
         if shutdown_first:
@@ -628,6 +640,7 @@ class _BridgeWatchdog:
                 )
             return
         self._consecutive_failures = 0
+        self._next_restart_at = self._monotonic() + _BRIDGE_SUCCESSFUL_RESTART_COOLDOWN_S
 
 
 if __name__ == "__main__":
