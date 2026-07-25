@@ -112,7 +112,14 @@ jobs:
           # Reviewed debt boundary: everything changed after this commit must
           # be formatted.  Missing/squashed ancestry fails closed and requires
           # an explicit baseline migration instead of silently skipping files.
-          FORMAT_BASE=db8849b573309453f25bc42adbf4b55cd0ce400b
+          # MUST be reachable from the default branch. The previous value
+          # (db8849b573309453f25bc42adbf4b55cd0ce400b) existed only on the
+          # campaign branches it was authored on and was NOT an ancestor of
+          # master, so `git merge-base --is-ancestor` failed on every
+          # master-based PR: the step exited 1 before reaching ruff, which is
+          # why it produced no ruff output. A pinned baseline unreachable from
+          # the default branch is a permanent red, not a debt boundary.
+          FORMAT_BASE=f5d6434d20dffae62c9f03fbc12f68b03f48351b
           test "$(git cat-file -t "$FORMAT_BASE")" = commit
           git merge-base --is-ancestor "$FORMAT_BASE" HEAD
 
