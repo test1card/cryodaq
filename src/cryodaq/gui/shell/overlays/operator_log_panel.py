@@ -24,9 +24,12 @@ Out of scope (follow-ups):
 
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
@@ -47,7 +50,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.operator_log import normalize_operator_log_tags
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
-from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION, ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,31 @@ _DEFAULT_LIMIT = 50
 _SEARCH_DEBOUNCE_MS = 250
 _BANNER_AUTO_CLEAR_MS = 4000
 _LOG_ENTRY_CHANNEL = "analytics/operator_log_entry"
+_LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
+_LOG_READ_SCOPE_SCHEMA = "operator_log_read_scope_v1"
+_LOG_SUCCESS_KEYS = frozenset(
+    {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt", "proto"}
+)
+_LOG_ENTRY_KEYS = frozenset({"id", "timestamp", "experiment_id", "author", "source", "message", "tags"})
+_LOG_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
+_UNRESOLVED_SETTINGS_KEY = "operator_log/unresolved_submit_v1"
+_MAX_UNRESOLVED_BYTES = 64 * 1024
+_MAX_IDENTITY_BYTES = 4096
+_MAX_MESSAGE_BYTES = 1024 * 1024
+
+_KNOWN_UNCOMMITTED_LOG_ERRORS = frozenset(
+    {
+        "mutation_protocol_incompatible",
+        "operator_log_request_id_invalid",
+        "operator_log_scope_invalid",
+        "stale_experiment_command",
+        "operator_log_message_invalid",
+        "operator_log_admission_invalid",
+        "engine_shutting_down",
+        "idempotency_key_conflict",
+        "operator_log_busy",
+    }
+)
 
 _FILTER_CHIP_ALL = "all"
 _FILTER_CHIP_CURRENT = "current"
@@ -172,6 +200,216 @@ def _sort_entries(entries: Iterable[dict]) -> list[dict]:
     return sorted(entries, key=key, reverse=True)
 
 
+def _result_is_unknown(result: object) -> bool:
+    """Return whether a command reply cannot prove commit or non-commit.
+
+    Transport timeouts and malformed replies may arrive after the engine has
+    already committed the append.  They must never be presented as an ordinary
+    retryable failure.
+    """
+
+    if type(result) is not dict:
+        return True
+    if result.get("_handler_timeout") or result.get("_unknown"):
+        return True
+    if result.get("committed") is True:
+        return False
+    error_code = result.get("error_code")
+    return not (
+        result.get("ok") is False and result.get("committed") is False and error_code in _KNOWN_UNCOMMITTED_LOG_ERRORS
+    )
+
+
+def bounded_operator_log_identity(value: object) -> str | None:
+    """Return one bounded printable operator identity, never a role guess."""
+
+    if type(value) is not str:
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or not normalized.isprintable()
+        or len(normalized.encode("utf-8")) > _MAX_IDENTITY_BYTES
+        or normalized.casefold() in {"system", "auto", "machine"}
+    ):
+        return None
+    return normalized
+
+
+def _bounded_identity_line(value: object, *, fallback: str = "unavailable") -> str:
+    if type(value) is not str:
+        return fallback
+    normalized = " ".join(value.splitlines()).strip()
+    normalized = "".join(char if char.isprintable() else " " for char in normalized).strip()
+    if not normalized:
+        return fallback
+    encoded = normalized.encode("utf-8")
+    if len(encoded) <= _MAX_IDENTITY_BYTES:
+        return normalized
+    return encoded[:_MAX_IDENTITY_BYTES].decode("utf-8", errors="ignore").rstrip() or fallback
+
+
+def operator_log_commit_receipt_matches(result: object, context: dict[str, Any]) -> bool:
+    """Validate a complete published receipt against every submitted field."""
+
+    if type(result) is not dict or set(result) != _LOG_SUCCESS_KEYS:
+        return False
+    if (
+        result.get("ok") is not True
+        or result.get("committed") is not True
+        or result.get("retry_safe") is not False
+        or result.get("publication_state") != "published"
+        or type(result.get("proto")) is not int
+        or result.get("proto") != CLIENT_PROTOCOL_VERSION
+    ):
+        return False
+    receipt = result.get("commit_receipt")
+    entry = result.get("entry")
+    payload = context.get("payload")
+    if (
+        type(receipt) is not dict
+        or set(receipt) != _LOG_RECEIPT_KEYS
+        or type(entry) is not dict
+        or set(entry) != _LOG_ENTRY_KEYS
+        or type(payload) is not dict
+    ):
+        return False
+    entry_id = entry.get("id")
+    timestamp = entry.get("timestamp")
+    if type(entry_id) is not int or entry_id <= 0 or type(timestamp) is not str or len(timestamp) > 128:
+        return False
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0) or parsed.isoformat() != timestamp:
+        return False
+    request_id = context.get("request_id")
+    experiment_id = context.get("experiment_id")
+    expected_tags = payload.get("tags", [])
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+        or (experiment_id is not None and (type(experiment_id) is not str or not experiment_id))
+        or type(expected_tags) is not list
+        or any(type(tag) is not str for tag in expected_tags)
+    ):
+        return False
+    for field, limit in (("author", _MAX_IDENTITY_BYTES), ("source", _MAX_IDENTITY_BYTES)):
+        value = entry.get(field)
+        if type(value) is not str or not value or len(value.encode("utf-8")) > limit:
+            return False
+    message = entry.get("message")
+    tags = entry.get("tags")
+    if (
+        type(message) is not str
+        or not message
+        or len(message.encode("utf-8")) > _MAX_MESSAGE_BYTES
+        or type(tags) is not list
+        or any(type(tag) is not str or len(tag.encode("utf-8")) > _MAX_IDENTITY_BYTES for tag in tags)
+    ):
+        return False
+    return (
+        receipt.get("schema") == _LOG_COMMIT_SCHEMA
+        and receipt.get("request_id") == request_id
+        and receipt.get("experiment_id") == experiment_id
+        and receipt.get("committed") is True
+        and type(receipt.get("entry_id")) is int
+        and receipt.get("entry_id") == entry_id
+        and entry.get("experiment_id") == experiment_id
+        and entry.get("author") == payload.get("author")
+        and entry.get("source") == payload.get("source")
+        and entry.get("message") == payload.get("message")
+        and tags == expected_tags
+    )
+
+
+def encode_operator_log_unresolved(context: dict[str, Any]) -> str:
+    """Serialize only the bounded stable request fields needed for replay."""
+
+    payload = context.get("payload")
+    if type(payload) is not dict:
+        raise ValueError("operator-log unresolved payload is invalid")
+    allowed = {"cmd", "request_id", "message", "author", "source", "tags", "experiment_id", "experiment_unbound"}
+    if not set(payload).issubset(allowed) or payload.get("cmd") != "log_entry":
+        raise ValueError("operator-log unresolved payload schema is invalid")
+    request_id = context.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+        or payload.get("request_id") != request_id
+    ):
+        raise ValueError("operator-log unresolved request identity is invalid")
+    author = bounded_operator_log_identity(payload.get("author"))
+    source = payload.get("source")
+    message = payload.get("message")
+    tags = payload.get("tags", [])
+    tags_text = context.get("tags_text", ", ".join(tags) if type(tags) is list else "")
+    try:
+        normalized_tags = list(normalize_operator_log_tags(tags))
+    except ValueError:
+        normalized_tags = None
+    if (
+        author is None
+        or payload.get("author") != author
+        or type(source) is not str
+        or source not in {"gui", "dashboard"}
+        or len(source.encode("utf-8")) > _MAX_IDENTITY_BYTES
+        or type(message) is not str
+        or not message.strip()
+        or message != message.strip()
+        or len(message.encode("utf-8")) > _MAX_MESSAGE_BYTES
+        or type(tags) is not list
+        or normalized_tags != tags
+        or any(type(tag) is not str or len(tag.encode("utf-8")) > _MAX_IDENTITY_BYTES for tag in tags)
+        or type(tags_text) is not str
+        or len(tags_text.encode("utf-8")) > _MAX_UNRESOLVED_BYTES
+        or context.get("message") != message
+        or ("author" in context and context.get("author") != author)
+    ):
+        raise ValueError("operator-log unresolved fields are invalid")
+    experiment_id = context.get("experiment_id")
+    if experiment_id is None:
+        if payload.get("experiment_unbound") is not True or "experiment_id" in payload:
+            raise ValueError("operator-log unresolved unbound scope is invalid")
+    elif (
+        type(experiment_id) is not str
+        or not experiment_id
+        or not experiment_id.isprintable()
+        or len(experiment_id.encode("utf-8")) > _MAX_IDENTITY_BYTES
+        or payload.get("experiment_id") != experiment_id
+        or "experiment_unbound" in payload
+    ):
+        raise ValueError("operator-log unresolved bound scope is invalid")
+    stable = {
+        "payload": payload,
+        "request_id": request_id,
+        "experiment_id": experiment_id,
+        "message": message,
+        "author": author,
+        "tags_text": tags_text,
+    }
+    raw = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if len(raw.encode("utf-8")) > _MAX_UNRESOLVED_BYTES:
+        raise ValueError("operator-log unresolved record exceeds cap")
+    return raw
+
+
+def decode_operator_log_unresolved(raw: object) -> dict[str, Any] | None:
+    if type(raw) is not str or not raw or len(raw.encode("utf-8")) > _MAX_UNRESOLVED_BYTES:
+        return None
+    try:
+        decoded = json.loads(raw)
+        if type(decoded) is not dict:
+            return None
+        encode_operator_log_unresolved(decoded)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return decoded
+
+
 class OperatorLogPanel(QWidget):
     """Full operator journal overlay (Phase II.3)."""
 
@@ -182,12 +420,20 @@ class OperatorLogPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._connected: bool = False
+        self._read_only: bool = False
         self._current_experiment_id: str | None = None
         self._entries_all: list[dict] = []
         self._filtered_entries: list[dict] = []
         self._active_filter: str = _DEFAULT_FILTER
         self._limit: int = _DEFAULT_LIMIT
+        self._state_generation: int = 0
         self._inflight_refresh: ZmqCommandWorker | None = None
+        self._refresh_context: dict[str, Any] | None = None
+        self._refresh_pending: bool = False
+        self._refresh_sequence: int = 0
+        self._submit_worker: ZmqCommandWorker | None = None
+        self._submit_context: dict[str, Any] | None = None
+        self._unresolved_submit: dict[str, Any] | None = None
         self._workers: list[ZmqCommandWorker] = []
         self._filter_buttons: dict[str, QPushButton] = {}
 
@@ -208,6 +454,16 @@ class OperatorLogPanel(QWidget):
         self._search_debounce.timeout.connect(self._apply_filters)
 
         self._build_ui()
+        restored = decode_operator_log_unresolved(self._settings.value(_UNRESOLVED_SETTINGS_KEY, ""))
+        if restored is not None:
+            self._unresolved_submit = restored
+            self._message_edit.setPlainText(restored["message"])
+            self._author_edit.setText(restored["author"])
+            self._tags_edit.setText(str(restored.get("tags_text", "")))
+            self.show_unknown(
+                "Найдена незавершённая запись. После соединения с Engine "
+                "повторите тот же ключ через «Сверить сохранение»."
+            )
         # Initial state: composer disabled until shell pushes connected=True.
         self._update_composer_enablement()
         self.refresh_entries()
@@ -238,10 +494,7 @@ class OperatorLogPanel(QWidget):
         title_font = _title_font()
         title_font.setPixelSize(theme.FONT_SIZE_XL)
         title.setFont(title_font)
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -251,9 +504,8 @@ class OperatorLogPanel(QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("operatorLogBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._banner_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._banner_label.setVisible(False)
         return self._banner_label
 
@@ -274,9 +526,7 @@ class OperatorLogPanel(QWidget):
 
         caption = QLabel("Новая запись")
         caption.setFont(_label_font())
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(caption)
 
         fields_row = QHBoxLayout()
@@ -288,9 +538,9 @@ class OperatorLogPanel(QWidget):
         # v0.55.2 ds-012: 13 * SPACE_4 + SPACE_3 = 208 + 12 = 220 keeps the
         # cap on the spacing scale.
         self._author_edit.setMaximumWidth(13 * theme.SPACE_4 + theme.SPACE_3)
-        saved_author = self._settings.value("last_log_author", "")
-        if saved_author:
-            self._author_edit.setText(str(saved_author))
+        saved_author = bounded_operator_log_identity(self._settings.value("last_log_author", ""))
+        if saved_author is not None:
+            self._author_edit.setText(saved_author)
         _style_input(self._author_edit)
         fields_row.addWidget(self._author_edit)
         fields_row.addWidget(self._caption("Теги:"))
@@ -317,9 +567,7 @@ class OperatorLogPanel(QWidget):
         bottom_row.setContentsMargins(0, 0, 0, 0)
         bottom_row.setSpacing(theme.SPACE_2)
         self._bind_experiment_check = QCheckBox("Привязать к текущему эксперименту")
-        self._bind_experiment_check.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent;"
-        )
+        self._bind_experiment_check.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
         bottom_row.addWidget(self._bind_experiment_check)
         bottom_row.addStretch()
 
@@ -413,9 +661,7 @@ class OperatorLogPanel(QWidget):
         self._timeline_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._timeline_container.setStyleSheet("background-color: transparent;")
         self._timeline_layout = QVBoxLayout(self._timeline_container)
-        self._timeline_layout.setContentsMargins(
-            theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2
-        )
+        self._timeline_layout.setContentsMargins(theme.SPACE_2, theme.SPACE_2, theme.SPACE_2, theme.SPACE_2)
         self._timeline_layout.setSpacing(theme.SPACE_1)
         self._timeline_layout.addStretch()
 
@@ -426,9 +672,7 @@ class OperatorLogPanel(QWidget):
         self._empty_state_label.setFont(_body_font())
         self._empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_state_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_4}px;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_4}px;"
         )
         outer.addWidget(self._empty_state_label)
         self._empty_state_label.setVisible(False)
@@ -443,9 +687,7 @@ class OperatorLogPanel(QWidget):
 
         self._loaded_label = QLabel("")
         self._loaded_label.setFont(_label_font())
-        self._loaded_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._loaded_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(self._loaded_label)
         layout.addStretch()
 
@@ -463,9 +705,7 @@ class OperatorLogPanel(QWidget):
     def _caption(text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(_label_font())
-        label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         return label
 
     # ------------------------------------------------------------------
@@ -473,46 +713,165 @@ class OperatorLogPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_submit_clicked(self) -> None:
+        # The enabled state is presentation only.  Repeat the authority checks
+        # in the direct slot so keyboard/programmatic invocation cannot bypass
+        # a disconnect or replay transition.
+        if self._read_only or not self._connected or self._submit_worker is not None:
+            return
+        if self._unresolved_submit is not None:
+            # The engine idempotency key makes this an evidence lookup as well
+            # as a safe retry: identical content returns the cached receipt and
+            # different content is rejected.
+            self._start_submit(self._unresolved_submit)
+            return
         message = self._message_edit.toPlainText().strip()
         if not message:
             self.show_warning("Введите текст записи.")
             return
-        author = self._author_edit.text().strip()
+        author = bounded_operator_log_identity(self._author_edit.text())
+        if author is None:
+            self.show_error("Укажите допустимое имя оператора; запись не отправлена.")
+            return
         tags = list(normalize_operator_log_tags(self._tags_edit.text()))
         bind_experiment = self._bind_experiment_check.isChecked()
+        experiment_id = self._current_experiment_id if bind_experiment else None
+        if bind_experiment and experiment_id is None:
+            self.show_error("Нет точного идентификатора текущего эксперимента; запись не отправлена.")
+            return
         self.entry_submitted.emit(message, author, tags, bind_experiment)
 
         payload: dict = {
             "cmd": "log_entry",
+            "request_id": uuid.uuid4().hex,
             "message": message,
             "author": author,
             "source": "gui",
             "tags": tags,
-            "current_experiment": bind_experiment,
         }
+        if experiment_id is None:
+            payload["experiment_unbound"] = True
+        else:
+            payload["experiment_id"] = experiment_id
+        context: dict[str, Any] = {
+            "payload": payload,
+            "request_id": payload["request_id"],
+            "experiment_id": experiment_id,
+            "message": message,
+            "author": author,
+            "tags_text": self._tags_edit.text(),
+        }
+        self._start_submit(context)
+
+    def _start_submit(self, context: dict[str, Any]) -> None:
+        if self._read_only or not self._connected or self._submit_worker is not None:
+            return
+        if not self._persist_unresolved_submit(context):
+            self.show_error(
+                "Не удалось надёжно сохранить ключ повтора. Запись не отправлена.",
+                persistent=True,
+            )
+            return
+        context["attempt_generation"] = self._state_generation
+        self._submit_context = context
         self._submit_btn.setEnabled(False)
-        worker = ZmqCommandWorker(payload, parent=self)
-        worker.finished.connect(self._on_submit_result)
+        worker = ZmqCommandWorker(dict(context["payload"]), parent=self)
+        worker.finished.connect(
+            lambda result, expected=context, completed_worker=worker: self._on_submit_result(
+                result, expected, completed_worker
+            )
+        )
+        self._submit_worker = worker
         self._workers.append(worker)
+        self._update_composer_enablement()
         worker.start()
 
-    def _on_submit_result(self, result: dict) -> None:
-        self._submit_btn.setEnabled(self._connected)
-        self._workers = [w for w in self._workers if w.isRunning()]
-        if not result.get("ok", False):
-            error = result.get("error", "Не удалось сохранить запись.")
-            self.show_error(str(error))
+    @staticmethod
+    def _commit_receipt_matches(result: object, context: dict[str, Any]) -> bool:
+        return operator_log_commit_receipt_matches(result, context)
+
+    def _on_submit_result(
+        self,
+        result: dict,
+        context: dict[str, Any] | None = None,
+        worker: ZmqCommandWorker | None = None,
+    ) -> None:
+        expected = context or self._submit_context or self._unresolved_submit
+        if expected is None:
+            self.show_error("Получен ответ журнала без идентификатора операции.", persistent=True)
             return
-        self._settings.setValue("last_log_author", self._author_edit.text().strip())
-        self._message_edit.clear()
-        entry = result.get("entry")
-        if isinstance(entry, dict):
-            # Optimistic prepend: newer entries render first anyway.
-            self._entries_all = _sort_entries([*self._entries_all, entry])
-            self._apply_filters()
-        self.show_info("Запись сохранена.")
-        # Reconcile with server (picks up entries from other clients too).
-        self.refresh_entries()
+        if worker is not None and worker is not self._submit_worker:
+            return
+        if worker is not None:
+            self._submit_worker = None
+        if self._submit_context is expected:
+            self._submit_context = None
+        self._prune_workers()
+
+        if self._commit_receipt_matches(result, expected):
+            if self._unresolved_submit is expected:
+                self._unresolved_submit = None
+            self._clear_persisted_unresolved_submit()
+            self._settings.setValue("last_log_author", str(expected.get("author", "")))
+            if self._message_edit.toPlainText().strip() == expected.get("message"):
+                self._message_edit.clear()
+            if self._tags_edit.text() == expected.get("tags_text"):
+                self._tags_edit.clear()
+            if result.get("ok") is True:
+                self.show_info("Запись подтверждена журналом.")
+            else:
+                self.show_warning(
+                    "Запись сохранена, но публикация подтверждения требует сверки. Содержимое не потеряно.",
+                    persistent=True,
+                )
+            self._update_composer_enablement()
+            self.refresh_entries()
+            return
+
+        if (type(result) is dict and result.get("committed") is True) or _result_is_unknown(result):
+            self._mark_submit_unknown(
+                expected,
+                "Engine не подтвердил, сохранена ли запись. Текст сохранён; "
+                "нажмите «Сверить сохранение» после восстановления связи.",
+            )
+            return
+
+        if self._unresolved_submit is expected:
+            self._unresolved_submit = None
+        self._clear_persisted_unresolved_submit()
+        error_code = _bounded_identity_line(result.get("error_code"), fallback="unknown")
+        self.show_error("Engine proved that the operator-log entry was not committed.")
+        logger.warning("operator-log submission not committed: error_code=%s", error_code)
+        self._update_composer_enablement()
+
+    def _mark_submit_unknown(self, context: dict[str, Any], message: str) -> None:
+        self._unresolved_submit = context
+        if not self._persist_unresolved_submit(context):
+            logger.error("operator-log unresolved request persistence failed")
+        self.show_unknown(message)
+        self._update_composer_enablement()
+
+    def _persist_unresolved_submit(self, context: dict[str, Any]) -> bool:
+        try:
+            encoded = encode_operator_log_unresolved(context)
+            self._settings.setValue(_UNRESOLVED_SETTINGS_KEY, encoded)
+            self._settings.sync()
+            return self._settings.status() == QSettings.Status.NoError
+        except (TypeError, ValueError):
+            return False
+
+    def _clear_persisted_unresolved_submit(self) -> None:
+        self._settings.remove(_UNRESOLVED_SETTINGS_KEY)
+        self._settings.sync()
+
+    def _prune_workers(self) -> None:
+        remaining: list[ZmqCommandWorker] = []
+        for item in self._workers:
+            try:
+                if item.isRunning():
+                    remaining.append(item)
+            except (AttributeError, RuntimeError):
+                continue
+        self._workers = remaining
 
     # ------------------------------------------------------------------
     # Filters
@@ -547,27 +906,121 @@ class OperatorLogPanel(QWidget):
     # ------------------------------------------------------------------
 
     def refresh_entries(self) -> None:
+        if not self._connected:
+            return
+        if self._inflight_refresh is not None:
+            self._refresh_pending = True
+            return
+
         payload: dict = {"cmd": "log_get", "limit": self._limit}
+        experiment_id: str | None = None
         if self._active_filter == _FILTER_CHIP_CURRENT:
-            payload["current_experiment"] = True
+            experiment_id = self._current_experiment_id
+            if experiment_id is None:
+                self._entries_all = []
+                self._apply_filters()
+                self.show_warning("Нет активного эксперимента: текущий журнал пуст.")
+                return
+            payload.update(
+                {
+                    "log_scope": "experiment",
+                    "experiment_id": experiment_id,
+                }
+            )
+        else:
+            payload["log_scope"] = "all"
+
+        self._refresh_sequence += 1
+        context: dict[str, Any] = {
+            "sequence": self._refresh_sequence,
+            "generation": self._state_generation,
+            "filter": self._active_filter,
+            "log_scope": payload["log_scope"],
+            "experiment_id": experiment_id,
+        }
         worker = ZmqCommandWorker(payload, parent=self)
-        worker.finished.connect(self._on_refresh_result)
+        worker.finished.connect(
+            lambda result, expected=context, completed_worker=worker: self._on_refresh_result(
+                result, expected, completed_worker
+            )
+        )
         self._inflight_refresh = worker
+        self._refresh_context = context
         self._workers.append(worker)
         worker.start()
 
-    def _on_refresh_result(self, result: dict) -> None:
-        self._inflight_refresh = None
-        self._workers = [w for w in self._workers if w.isRunning()]
+    @staticmethod
+    def _scope_receipt_matches(result: object, context: dict[str, Any]) -> bool:
+        if not isinstance(result, dict):
+            return False
+        receipt = result.get("scope_receipt")
+        return (
+            isinstance(receipt, dict)
+            and receipt.get("schema") == _LOG_READ_SCOPE_SCHEMA
+            and receipt.get("log_scope") == context.get("log_scope")
+            and receipt.get("experiment_id") == context.get("experiment_id")
+        )
+
+    def _on_refresh_result(
+        self,
+        result: dict,
+        context: dict[str, Any] | None = None,
+        worker: ZmqCommandWorker | None = None,
+    ) -> None:
+        expected = context or self._refresh_context
+        if worker is not None and worker is not self._inflight_refresh:
+            return
+        if worker is not None:
+            self._inflight_refresh = None
+            self._refresh_context = None
+        self._prune_workers()
+        if expected is None:
+            self.show_error("Получен ответ журнала без области чтения.", persistent=True)
+            return
+
+        current_request = (
+            expected.get("generation") == self._state_generation
+            and self._connected
+            and expected.get("filter") == self._active_filter
+            and (
+                expected.get("log_scope") != "experiment"
+                or expected.get("experiment_id") == self._current_experiment_id
+            )
+        )
+        if not current_request:
+            self._finish_refresh_cycle()
+            return
         if not result.get("ok", False):
             error = result.get("error", "Не удалось загрузить журнал.")
-            self.show_error(str(error))
+            self.show_warning(f"Журнал не обновлён; показаны последние данные. {error}", persistent=True)
             # Keep existing timeline — don't wipe on failure.
+            self._finish_refresh_cycle()
             return
-        entries = list(result.get("entries", []))
+        if not self._scope_receipt_matches(result, expected):
+            self.show_warning(
+                "Engine вернул журнал без точного подтверждения области; показаны последние данные.",
+                persistent=True,
+            )
+            self._finish_refresh_cycle()
+            return
+        raw_entries = result.get("entries")
+        if not isinstance(raw_entries, list) or not all(isinstance(entry, dict) for entry in raw_entries):
+            self.show_warning("Engine вернул повреждённый журнал; показаны последние данные.", persistent=True)
+            self._finish_refresh_cycle()
+            return
+        entries = list(raw_entries)
         self._entries_all = _sort_entries(entries)
         self._apply_filters()
         self.entries_loaded.emit(len(self._entries_all))
+        if self._unresolved_submit is None:
+            self.clear_message()
+        self._finish_refresh_cycle()
+
+    def _finish_refresh_cycle(self) -> None:
+        if not self._refresh_pending:
+            return
+        self._refresh_pending = False
+        QTimer.singleShot(0, self.refresh_entries)
 
     def _on_load_more_clicked(self) -> None:
         self._limit += _LIMIT_STEP
@@ -611,9 +1064,7 @@ class OperatorLogPanel(QWidget):
             filtered.append(entry)
         self._filtered_entries = filtered
         self._render_timeline()
-        self._loaded_label.setText(
-            f"Загружено: {len(self._entries_all)} записей · отфильтровано: {len(filtered)}"
-        )
+        self._loaded_label.setText(f"Загружено: {len(self._entries_all)} записей · отфильтровано: {len(filtered)}")
 
     # ------------------------------------------------------------------
     # Render
@@ -681,19 +1132,21 @@ class OperatorLogPanel(QWidget):
         time_label.setFixedWidth(52)
         head_row.addWidget(time_label)
 
-        author_text = str(entry.get("author") or entry.get("source") or "system")
+        author_text = _bounded_identity_line(entry.get("author") or entry.get("source"))
         author_label = QLabel(author_text)
+        author_label.setTextFormat(Qt.TextFormat.PlainText)
         author_label.setFont(_label_font())
         author_label.setStyleSheet(
-            f"color: {primary_color};"
-            f" background: transparent; border: none;"
-            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+            f"color: {primary_color}; background: transparent; border: none; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
         )
         head_row.addWidget(author_label)
         head_row.addStretch()
         layout.addLayout(head_row)
 
-        message_label = QLabel(str(entry.get("message", "")))
+        raw_message = entry.get("message")
+        message_text = raw_message if type(raw_message) is str else ""
+        message_label = QLabel(message_text[:65536])
+        message_label.setTextFormat(Qt.TextFormat.PlainText)
         message_label.setFont(_body_font())
         message_label.setWordWrap(True)
         message_label.setStyleSheet(
@@ -706,10 +1159,10 @@ class OperatorLogPanel(QWidget):
         chips_row.setSpacing(theme.SPACE_1)
         experiment_id = entry.get("experiment_id")
         if experiment_id:
-            chips_row.addWidget(self._build_chip(f"experiment: {experiment_id}"))
+            chips_row.addWidget(self._build_chip(f"experiment: {_bounded_identity_line(experiment_id)}"))
         tags = entry.get("tags") or []
         for tag in tags:
-            chips_row.addWidget(self._build_chip(f"tag: {tag}"))
+            chips_row.addWidget(self._build_chip(f"tag: {_bounded_identity_line(tag)}"))
         chips_row.addStretch()
         if experiment_id or tags:
             layout.addLayout(chips_row)
@@ -719,6 +1172,7 @@ class OperatorLogPanel(QWidget):
 
     def _build_chip(self, text: str) -> QLabel:
         chip = QLabel(text)
+        chip.setTextFormat(Qt.TextFormat.PlainText)
         chip.setFont(_label_font())
         chip.setStyleSheet(
             f"QLabel {{"
@@ -741,19 +1195,59 @@ class OperatorLogPanel(QWidget):
         self.refresh_entries()
 
     def set_connected(self, connected: bool) -> None:
+        connected = bool(connected)
         if connected == self._connected:
             return
         self._connected = connected
+        self._state_generation += 1
+        if not connected and self._submit_context is not None:
+            self._mark_submit_unknown(
+                self._submit_context,
+                "Связь потеряна до подтверждения записи. Исход неизвестен; текст и ключ операции сохранены.",
+            )
         self._update_composer_enablement()
         if not connected:
-            self.show_error("Нет связи с engine")
+            if self._unresolved_submit is None:
+                self.show_error("Нет связи с engine; показаны последние данные журнала.", persistent=True)
         else:
-            self.clear_message()
+            if self._unresolved_submit is not None:
+                self.show_unknown(
+                    "Предыдущая запись имеет неизвестный исход. "
+                    "Нажмите «Сверить сохранение»; новый текст не отправляется.",
+                )
+            else:
+                self.clear_message()
+            self.refresh_entries()
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Keep the timeline searchable while disabling replay log writes."""
+
+        read_only = bool(read_only)
+        if read_only == self._read_only:
+            return
+        self._read_only = read_only
+        self._state_generation += 1
+        if read_only and self._submit_context is not None:
+            self._mark_submit_unknown(
+                self._submit_context,
+                "Режим изменился до подтверждения записи. Исход неизвестен; повторная мутация заблокирована.",
+            )
+        self._update_composer_enablement()
 
     def set_current_experiment(self, exp_id: str | None) -> None:
+        exp_id = str(exp_id) if exp_id is not None else None
+        if exp_id == self._current_experiment_id:
+            return
         self._current_experiment_id = exp_id
+        self._state_generation += 1
         has_active = exp_id is not None
-        self._bind_experiment_check.setEnabled(has_active)
+        self._bind_experiment_check.setEnabled(
+            has_active
+            and self._connected
+            and not self._read_only
+            and self._submit_worker is None
+            and self._unresolved_submit is None
+        )
         if not has_active:
             self._bind_experiment_check.setChecked(False)
         else:
@@ -761,12 +1255,25 @@ class OperatorLogPanel(QWidget):
         # The "current experiment" chip is only meaningful when there's
         # an active experiment. Keep it clickable regardless — server
         # returns empty list otherwise and that's a valid state.
+        if self._active_filter == _FILTER_CHIP_CURRENT:
+            self.refresh_entries()
 
     def _update_composer_enablement(self) -> None:
-        self._author_edit.setEnabled(self._connected)
-        self._tags_edit.setEnabled(self._connected)
-        self._message_edit.setEnabled(self._connected)
-        self._submit_btn.setEnabled(self._connected)
+        mutable = (
+            self._connected and not self._read_only and self._submit_worker is None and self._unresolved_submit is None
+        )
+        self._bind_experiment_check.setEnabled(mutable and self._current_experiment_id is not None)
+        self._author_edit.setEnabled(mutable)
+        self._tags_edit.setEnabled(mutable)
+        self._message_edit.setEnabled(mutable)
+        can_reconcile = (
+            self._connected
+            and not self._read_only
+            and self._submit_worker is None
+            and self._unresolved_submit is not None
+        )
+        self._submit_btn.setText("Сверить сохранение" if self._unresolved_submit is not None else "Сохранить")
+        self._submit_btn.setEnabled(mutable or can_reconcile)
 
     # ------------------------------------------------------------------
     # Banner
@@ -775,18 +1282,21 @@ class OperatorLogPanel(QWidget):
     def show_info(self, text: str) -> None:
         self._set_banner(text, theme.STATUS_INFO)
 
-    def show_warning(self, text: str) -> None:
-        self._set_banner(text, theme.STATUS_WARNING)
+    def show_warning(self, text: str, *, persistent: bool = False) -> None:
+        self._set_banner(text, theme.STATUS_CAUTION, persistent=persistent)
 
-    def show_error(self, text: str) -> None:
-        self._set_banner(text, theme.STATUS_FAULT)
+    def show_unknown(self, text: str) -> None:
+        self._set_banner(text, theme.STATUS_CAUTION, persistent=True)
+
+    def show_error(self, text: str, *, persistent: bool = False) -> None:
+        self._set_banner(text, theme.STATUS_FAULT, persistent=persistent)
 
     def clear_message(self) -> None:
         self._banner_label.setText("")
         self._banner_label.setVisible(False)
         self._banner_timer.stop()
 
-    def _set_banner(self, text: str, color: str) -> None:
+    def _set_banner(self, text: str, color: str, *, persistent: bool = False) -> None:
         self._banner_label.setText(text)
         self._banner_label.setStyleSheet(
             f"#operatorLogBanner {{"
@@ -797,4 +1307,7 @@ class OperatorLogPanel(QWidget):
             f"}}"
         )
         self._banner_label.setVisible(True)
-        self._banner_timer.start()
+        if persistent:
+            self._banner_timer.stop()
+        else:
+            self._banner_timer.start()

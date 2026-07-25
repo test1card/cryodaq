@@ -45,6 +45,12 @@ class _SyncCommandWorkerStub(QObject):
     def isRunning(self) -> bool:  # noqa: N802 (Qt API name)
         return False
 
+    def isFinished(self) -> bool:  # noqa: N802 (Qt API name)
+        return True
+
+    def requestInterruption(self) -> None:  # noqa: N802 (Qt API name)
+        return None
+
     def wait(self, _msecs: int = 0) -> bool:
         return True
 
@@ -61,3 +67,20 @@ def _stub_command_worker(monkeypatch):
 
     monkeypatch.setattr(zc, "ZmqCommandWorker", _SyncCommandWorkerStub)
     yield
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in QApplication.topLevelWidgets():
+        try:
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:
+            pass
+    for _ in range(5):
+        app.processEvents()
+    import gc
+
+    gc.collect()
+    app.processEvents()

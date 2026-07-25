@@ -13,11 +13,32 @@ from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QTimer
+import pytest
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operator_log_retry_state():
+    """A prior test's durable unknown write must not forge this fixture's state."""
+
+    settings = QSettings("FIAN", "CryoDAQ")
+    key = "operator_log/unresolved_submit_v1"
+    present = settings.contains(key)
+    value = settings.value(key)
+    settings.remove(key)
+    settings.sync()
+    try:
+        yield
+    finally:
+        if present:
+            settings.setValue(key, value)
+        else:
+            settings.remove(key)
+        settings.sync()
 
 
 def _app() -> QApplication:
@@ -156,16 +177,20 @@ def test_lazy_open_replays_current_experiment():
 # ----------------------------------------------------------------------
 
 
-def test_operator_log_entry_reading_triggers_refresh_on_overlay():
+def test_operator_log_entry_does_not_forge_connection_or_refresh_on_overlay():
     _app()
     w = MainWindowV2()
     try:
         w._ensure_overlay("log")
-        workers_before = len(w._operator_log_panel._workers)
+        last_measurement = w._last_reading_time
+        connected_before = w._operator_log_panel._connected
         w._dispatch_reading(_log_entry_reading())
-        # Rendered effect: dispatch triggers refresh_entries() which spawns a
-        # ZmqCommandWorker for log_get. The worker list must have grown.
-        assert len(w._operator_log_panel._workers) > workers_before
+        # Analytics/support traffic is not measurement freshness or engine
+        # presence authority. A log entry may update the view only after a
+        # separately established live connection; it cannot spawn a poll by
+        # itself.
+        assert w._last_reading_time == last_measurement
+        assert w._operator_log_panel._connected == connected_before
     finally:
         _stop_timers(w)
 

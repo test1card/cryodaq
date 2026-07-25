@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtCore import QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
@@ -28,9 +30,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.core.channel_manager import get_channel_manager
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
+from cryodaq.gui.shell.annunciation_controller import AnnunciationController
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
 from cryodaq.gui.shell.experiment_overlay import ExperimentOverlay
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
@@ -42,45 +52,95 @@ from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel
 from cryodaq.gui.shell.overlays.instruments_panel import InstrumentsPanel
 from cryodaq.gui.shell.overlays.keithley_panel import KeithleyPanel
 from cryodaq.gui.shell.overlays.knowledge_base_panel import KnowledgeBasePanel
-from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel
+from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel, is_manifest_multiline_descriptor
 from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
-from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.gui.shell.views.operator_display import OperatorDisplay
+from cryodaq.gui.state.descriptor_store import (
+    DescriptorStore,
+    DescriptorView,
+    IdentityStatus,
+    IngestResult,
+)
+from cryodaq.gui.zmq_client import (
+    ZmqBridge,
+    gui_command_worker_admission_open,
+    settle_registered_gui_command_workers,
+)
+from cryodaq.operator_snapshot import (
+    OperatorPresentationState,
+    OperatorSnapshot,
+    ReadinessTruth,
+    SafetyLifecycle,
+    SnapshotMode,
+)
 
 logger = logging.getLogger(__name__)
 
-_SAFETY_READY_STATES = frozenset({"ready", "run_permitted", "running"})
-_SAFETY_REASON_MAX_CHARS = 120
+_LEGACY_SAFETY_READY_STATES = frozenset({SafetyLifecycle.READY.value})
+_DISK_FUTURE_TOLERANCE_S = 5.0
+_DISK_MAX_SOURCE_AGE_S = 600.0
+_SAFETY_FUTURE_TOLERANCE_S = 5.0
+_SAFETY_MAX_SOURCE_AGE_S = 10.0
+_WORKER_SETTLE_MS = 1_500
+# settle_owned_workers() used to give every descendant QThread the full
+# _WORKER_SETTLE_MS on the Qt main thread, across up to 4 stabilization
+# passes with no wall-clock ceiling on the call as a whole — an independent
+# reviewer measured 18.12s of blocked main thread with 3 unresponsive
+# workers, which also silences the annunciation alarm's QTimer for the
+# duration. _SETTLE_CALL_BUDGET_MS bounds one call to roughly that; the
+# caller (_GuiRuntimeOwners in gui/app.py, and LauncherWindow._do_shutdown)
+# already retries on a ~1s QTimer, so an unfinished settlement here just
+# means "ask again next tick" instead of "block until it's done". The two
+# per-operation caps bound what a single Qt wait()/timeout_ms= call inside
+# one slice may cost; the downstream cap is smaller because
+# AnnunciationController.settle_for_shutdown and
+# settle_registered_gui_command_workers each loop over their own
+# worker/pass count using the timeout_ms verbatim on every iteration, so
+# their worst case is a multiple of it, not a single wait().
+_SETTLE_CALL_BUDGET_MS = 900
+# Per-operation caps only clamp a SINGLE wait() call's upper bound; the
+# overall ceiling for a genuinely-unresponsive worker is still
+# _SETTLE_CALL_BUDGET_MS, because _bounded_wait_ms derives its return value
+# from *remaining* budget, not a fixed addition — raising these caps gives a
+# real (but not-yet-finished) worker more realistic grace to settle within
+# one call without changing the worst-case bound for a worker that never
+# settles at all. 150/20ms measured too tight for a real ZmqCommandWorker
+# settling under load (regression:
+# test_actual_qt_command_worker_cancels_without_late_callback flaked under
+# parallel-lane contention), so both caps were raised with headroom.
+_SETTLE_OP_CAP_MS = 450
+_SETTLE_DOWNSTREAM_OP_CAP_MS = 150
 
 
-def _map_safety_state(state: str | None, reason: str) -> tuple[bool, str]:
-    """Translate engine safety state + reason into the Keithley overlay's
-    (ready, reason_text) gate input. Pure function; testable in isolation.
+def _bounded_wait_ms(deadline: float, *, cap_ms: int = _SETTLE_OP_CAP_MS) -> int:
+    """Milliseconds left before ``deadline``, capped at ``cap_ms``, floor 0.
 
-    - Ready states (``ready`` / ``run_permitted`` / ``running``) return
-      ``(True, "")`` — normal control allowed.
-    - Blocked states return ``(False, reason_or_state_name)``. The engine's
-      free-form reason text (e.g. ``"Interlock 'vacuum_lost' tripped: ..."``)
-      is preferred; falls back to the state name when no reason is published.
+    Never blocks by itself. Passed straight into Qt's ``wait(ms)`` or a
+    downstream ``timeout_ms=`` parameter so a single settle_owned_workers()
+    call cannot exceed its budget: once the deadline passes this returns 0,
+    turning every further wait into a non-blocking poll rather than skipping
+    the check outright.
     """
+    remaining_s = deadline - time.monotonic()
+    if remaining_s <= 0:
+        return 0
+    return min(cap_ms, int(remaining_s * 1000))
 
-    if state in _SAFETY_READY_STATES:
-        return True, ""
-    fallback = state if state else "unknown"
-    text = reason.strip()
-    if not text:
-        text = fallback
-    if len(text) > _SAFETY_REASON_MAX_CHARS:
-        logger.warning(
-            "Safety reason truncated from %d to %d chars: %s",
-            len(text),
-            _SAFETY_REASON_MAX_CHARS,
-            text[:_SAFETY_REASON_MAX_CHARS],
-        )
-        text = text[:_SAFETY_REASON_MAX_CHARS] + "…"
-    return False, text
+
+def _is_manifest_cold_stage_descriptor(descriptor: ChannelDescriptorV1) -> bool:
+    return (
+        descriptor.channel_id == "Т12"
+        and descriptor.instrument_id == "LS218_2"
+        and descriptor.source_key == "input.4.temperature"
+        and descriptor.quantity is ChannelQuantity.TEMPERATURE
+        and descriptor.unit == "K"
+        and descriptor.role is ChannelRole.PRIMARY_MEASUREMENT
+        and descriptor.safety_class is ChannelSafetyClass.SAFETY_CRITICAL_INPUT
+        and descriptor.display_group == "компрессор"
+    )
 
 
 class MainWindowV2(QMainWindow):
@@ -95,10 +155,26 @@ class MainWindowV2(QMainWindow):
         *,
         embedded: bool = False,
         subscriber: Any | None = None,
+        replay_mode: bool = False,
+        owner_anchor: Callable[[MainWindowV2], None] | None = None,
+        shutdown_request: Callable[[], Any] | None = None,
     ) -> None:
+        if type(replay_mode) is not bool:
+            raise TypeError("replay_mode must be an exact bool")
         super().__init__(parent)
+        self._shutting_down = False
+        # QThread-descendant inventory carried across settle_owned_workers()
+        # re-entries within one shutdown attempt (see _SETTLE_CALL_BUDGET_MS).
+        self._settle_seen_thread_ids: set[int] = set()
+        self._root_shutdown_request = shutdown_request
         self._bridge = bridge
         self._embedded = embedded
+        self._replay_mode = replay_mode
+        self._status_timer: QTimer | None = None
+        self._annunciation_controller: AnnunciationController | None = None
+        self._create_exp_worker: Any | None = None
+        if owner_anchor is not None:
+            owner_anchor(self)
         self._start_time = time.monotonic()
         self._reading_count = 0
         self._rate_count = 0
@@ -106,11 +182,22 @@ class MainWindowV2(QMainWindow):
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
+        self._last_safety_observed_at: datetime | None = None
+        self._accepted_safety_bridge_instance_id: str | None = None
+        self._accepted_safety_experiment_id: str | None = None
+        self._typed_safety_authority_seen = False
+        self._typed_safety_producer_id: str | None = None
+        self._typed_safety_revision: int | None = None
+        self._typed_safety_ready = False
+        self._last_disk_observed_at: datetime | None = None
+        self._accepted_disk_bridge_instance_id: str | None = None
 
         self.setWindowTitle("CryoDAQ")
         self.setMinimumSize(1280, 800)
 
         self._channel_mgr = get_channel_manager()
+        # D7.1b: descriptor identity store — GUI-thread-owned, lives for one session.
+        self._descriptor_store = DescriptorStore()
         self._build_ui()
         self._reading_received.connect(self._dispatch_reading)
 
@@ -142,12 +229,15 @@ class MainWindowV2(QMainWindow):
     }
 
     def _build_ui(self) -> None:
-        # Eager: dashboard (always visible) and AlarmPanel (feeds watch
-        # bar count). All other overlays are lazy via _OVERLAY_FACTORIES.
-        # DashboardView is the home surface (5-zone dashboard). The
-        # _overview_panel attribute name is retained for call-site stability.
+        # Eager: the comprehensive dashboard is the primary operator surface.
+        # The one-cut shift briefing remains available as an additive summary.
         self._overview_panel = DashboardView(self._channel_mgr)
-        self._alarm_panel = AlarmPanel()
+        self._overview_panel.setParent(self)
+        self._overview_panel.set_read_only(self._replay_mode)
+        self._overview_panel.set_connected(False)
+        self._operator_display = OperatorDisplay()
+        self._alarm_panel = AlarmPanel(live_authority=not self._replay_mode)
+        self._alarm_panel.set_read_only(self._replay_mode)
         # Lazy panel slots — populated on first overlay open
         self._experiment_overlay: ExperimentOverlay | None = None
         self._keithley_panel: KeithleyPanel | None = None
@@ -168,7 +258,7 @@ class MainWindowV2(QMainWindow):
         # opened after readings start arriving still gets a populated
         # table on the very first refresh, instead of needing a fresh
         # cycle from the engine to populate.
-        self._multiline_snapshot: dict[str, Reading] = {}
+        self._multiline_snapshot: dict[str, tuple[Reading, ChannelDescriptorV1]] = {}
         # Track active experiment ID to detect boundaries for cache invalidation.
         self._analytics_last_exp_id: str | None = None
         self._operator_log_panel: OperatorLogPanel | None = None
@@ -178,12 +268,19 @@ class MainWindowV2(QMainWindow):
 
         # Shell components
         self._top_bar = TopWatchBar(channel_manager=self._channel_mgr)
+        self._top_bar.set_replay_mode(self._replay_mode)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
+        # The only in-shell owner of engine annunciation sound.  Launcher
+        # process-death sound remains deliberately separate.
+        if not self._replay_mode:
+            self._annunciation_controller = AnnunciationController(self)
         self._overlay = OverlayContainer()
 
-        # Register dashboard immediately
         self._overlay.register("home", self._overview_panel)
+        # F36: the supplemental briefing consumes only complete immutable
+        # operator snapshots and remains navigation-only.
+        self._overlay.register("summary", self._operator_display)
         # AlarmPanel needs a stack page but is not visible by default
         self._overlay.register("alarms", self._alarm_panel)
         self._overlay.show_dashboard()
@@ -191,24 +288,21 @@ class MainWindowV2(QMainWindow):
 
         # Wire signals
         self._tool_rail.tool_clicked.connect(self._on_tool_clicked)
+        self._operator_display.route_requested.connect(self._on_tool_clicked)
         self._top_bar.experiment_clicked.connect(self._on_experiment_clicked)
         self._top_bar.alarms_clicked.connect(lambda: self._on_tool_clicked("alarms"))
 
-        # Forward alarm count from AlarmPanel directly to top bar
-        self._alarm_panel.v2_alarm_count_changed.connect(self._top_bar.set_alarm_count)
+        # AlarmPanel is the sole validated snapshot/count owner.
+        self._alarm_panel.v2_alarm_summary_changed.connect(self._top_bar.set_alarm_summary)
+        self._alarm_panel.v2_alarm_availability_changed.connect(self._top_bar.set_alarm_available)
 
         # B.5: forward experiment status from top bar to dashboard phase widget
         self._top_bar.experiment_status_received.connect(self._on_experiment_status_received)
         self._latest_experiment_status: dict | None = None
 
         # B.8: wire dashboard «+ Создать» button to new experiment dialog
-        if (
-            hasattr(self._overview_panel, "_phase_widget")
-            and self._overview_panel._phase_widget is not None
-        ):
-            self._overview_panel._phase_widget.create_experiment_requested.connect(
-                self._show_new_experiment_dialog
-            )
+        if hasattr(self._overview_panel, "_phase_widget") and self._overview_panel._phase_widget is not None:
+            self._overview_panel._phase_widget.create_experiment_requested.connect(self._show_new_experiment_dialog)
 
         # Compose layout
         central = QWidget()
@@ -232,8 +326,101 @@ class MainWindowV2(QMainWindow):
     # Tool rail handler
     # ------------------------------------------------------------------
 
+    @Slot(object)
+    def render_operator_snapshot(self, snapshot: object) -> None:
+        """Present one ingress-qualified cut through the POD transaction."""
+        if getattr(self, "_shutting_down", False):
+            return
+        if type(snapshot) is OperatorSnapshot:
+            expected_mode = SnapshotMode.REPLAY if self._replay_mode else SnapshotMode.LIVE
+            if snapshot.cut.mode is not expected_mode:
+                self._typed_safety_authority_seen = True
+                self._overview_panel.set_operator_snapshot(None)
+                self._invalidate_safety_authority(
+                    "Operator snapshot belongs to the opposite runtime domain",
+                    disconnected=True,
+                )
+                logger.error("Rejected operator snapshot from the opposite runtime domain")
+                return
+        # Actuator gating is the fail-closed edge of the transaction. Revoke
+        # it before any passive presentation sink is allowed to reject/raise.
+        self._apply_operator_snapshot_safety(snapshot)
+        self._operator_display.render(snapshot)
+        self._overview_panel.set_operator_snapshot(snapshot)
+
+    def _apply_operator_snapshot_safety(self, snapshot: object) -> None:
+        """Use only exact, current POD readiness as Keithley gate authority."""
+        # Once the typed POD path is present, legacy analytics remains
+        # observational forever for this window. A malformed typed delivery
+        # must fail closed, not silently reactivate the legacy fallback.
+        self._typed_safety_authority_seen = True
+        if type(snapshot) is not OperatorSnapshot:
+            self._invalidate_safety_authority("Некорректный снимок состояния Safety")
+            return
+        cut = snapshot.cut
+        readiness = snapshot.readiness
+        bridge_instance_id = self._current_bridge_instance_id()
+        producer_changed = self._typed_safety_producer_id not in (None, cut.producer_id)
+        if producer_changed:
+            self._typed_safety_revision = None
+            self._typed_safety_ready = False
+        if (
+            self._typed_safety_revision is not None
+            and cut.producer_id == self._typed_safety_producer_id
+            and cut.revision < self._typed_safety_revision
+        ):
+            self._invalidate_safety_authority("Safety snapshot revision regressed")
+            return
+        ready = (
+            bridge_instance_id is not None
+            and not self._replay_mode
+            and cut.mode is SnapshotMode.LIVE
+            and readiness.readiness is ReadinessTruth.READY
+            and readiness.lifecycle is SafetyLifecycle.READY
+            and readiness.status.state is OperatorPresentationState.OK
+            and not readiness.status.transport_reason_codes
+        )
+        if (
+            self._typed_safety_revision is not None
+            and cut.producer_id == self._typed_safety_producer_id
+            and cut.revision == self._typed_safety_revision
+            and ready
+            and not self._typed_safety_ready
+        ):
+            # A same-cut degraded state cannot recover authority. Only a newer
+            # coherent Safety-owner cut can re-enable controls.
+            return
+        self._typed_safety_producer_id = cut.producer_id
+        self._typed_safety_revision = cut.revision
+        self._typed_safety_ready = ready
+        self._accepted_safety_experiment_id = snapshot.experiment.experiment_id
+        self._accepted_safety_bridge_instance_id = bridge_instance_id
+        self._last_safety_state = readiness.lifecycle.value
+        self._last_safety_reason = readiness.status.operator_text
+        transport_stale = readiness.status.state in {
+            OperatorPresentationState.STALE,
+            OperatorPresentationState.DISCONNECTED,
+        }
+        self._bottom_bar.set_safety_state(self._last_safety_state, stale=transport_stale)
+        if self._keithley_panel is not None:
+            reason = "" if ready else "Состояние Safety устарело" if transport_stale else readiness.status.operator_text
+            self._keithley_panel.set_safety_ready(ready, reason)
+
     @Slot(str)
     def _on_tool_clicked(self, name: str) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        if not gui_command_worker_admission_open():
+            logger.warning("Shell route rejected because worker admission is closed")
+            return
+        if self._replay_mode and name in {
+            "new_experiment",
+            "restart_engine",
+            "settings",
+            "calibration",
+        }:
+            logger.warning("Replay mode rejected a mutating shell route")
+            return
         if name == "new_experiment":
             self._show_new_experiment_dialog()
             return
@@ -260,6 +447,9 @@ class MainWindowV2(QMainWindow):
 
     def _ensure_overlay(self, name: str) -> None:
         """Build the overlay panel and register it on first access."""
+        if not gui_command_worker_admission_open():
+            logger.warning("Overlay construction rejected because worker admission is closed")
+            return
         if name not in self._OVERLAY_FACTORIES:
             return
         attr, factory = self._OVERLAY_FACTORIES[name]
@@ -268,20 +458,19 @@ class MainWindowV2(QMainWindow):
         widget = factory(self)
         setattr(self, attr, widget)
         self._overlay.register(name, widget)
+        if name in {"source", "experiment", "log", "multiline"}:
+            widget.set_read_only(self._replay_mode)
         # II.6 post-review: replay cached connection + safety state into
         # the Keithley overlay on first construction. Without this the
-        # overlay stays in its default (disconnected, safety_ready=True)
+        # overlay stays in its fail-closed default (disconnected, safety_ready=False)
         # until the next _tick_status / safety_state event arrives.
         if name == "source":
             derived_connected = False
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
             widget.set_connected(derived_connected)
-            if self._last_safety_state is not None:
-                ready, reason_text = _map_safety_state(
-                    self._last_safety_state, self._last_safety_reason
-                )
-                widget.set_safety_ready(ready, reason_text)
+            ready, reason_text = self._current_keithley_safety_gate()
+            widget.set_safety_ready(ready, reason_text)
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -313,9 +502,8 @@ class MainWindowV2(QMainWindow):
             # v0.55.15 (audit SCOPE 5 finding 5.7) — replay every
             # cached MultiLine reading so the panel's table populates
             # immediately rather than waiting for the next engine cycle.
-            for ch, reading in self._multiline_snapshot.items():
-                if widget.channel_belongs_to_panel(ch):
-                    widget.on_reading(reading)
+            for reading, descriptor in self._multiline_snapshot.values():
+                widget.on_descriptor_reading(reading, descriptor)
         # v0.55.6: knowledge-base overlay only needs the chip-style
         # connected state for its embedded chat panel; no readings flow.
         if name == "knowledge_base":
@@ -413,88 +601,146 @@ class MainWindowV2(QMainWindow):
     # Reading dispatch — same routing as old MainWindow
     # ------------------------------------------------------------------
 
-    @Slot(object)
-    def _dispatch_reading(self, reading: Reading) -> None:
-        self._reading_count += 1
-        self._rate_count += 1
-        self._last_reading_time = time.monotonic()
+    def dispatch_qualified_reading(self, qualified: DescriptorQualifiedReading) -> None:
+        """Qualified-ingress entry point — D7.1b Option C.
 
+        Called synchronously on the GUI thread for every reading drained via
+        ``poll_readings_with_descriptor()``.  Atomically per reading:
+
+        1. Updates the descriptor store (authoritative / legacy_absent / refused).
+           Capacity-exhausted result is logged but never raises.
+        2. Delegates the bare reading to all legacy sinks exactly once via
+           ``_dispatch_reading()``.  No double dispatch.
+        """
+        if getattr(self, "_shutting_down", False):
+            return
+        if type(qualified) is not DescriptorQualifiedReading or type(qualified.reading) is not Reading:
+            logger.warning("malformed descriptor-qualified reading dropped")
+            return
+
+        view: DescriptorView | None = None
+        result: IngestResult | None = None
+        dashboard_identity = IdentityStatus.REFUSED
+        try:
+            result = self._descriptor_store.ingest(qualified)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Descriptor ingest failed; phase=qualified_dispatch exception=%s",
+                type(exc).__name__,
+            )
+        else:
+            if result is IngestResult.CAPACITY_EXHAUSTED:
+                logger.debug("DescriptorStore capacity exhausted; reading still dispatched")
+            else:
+                view = self._descriptor_store.view(qualified.reading.channel)
+                if view is not None:
+                    dashboard_identity = view.identity_status
+        self._dispatch_reading(qualified.reading, dashboard_identity)
+        if (
+            result is IngestResult.ACCEPTED
+            and qualified.descriptor is not None
+            and view is not None
+            and view.identity_status is IdentityStatus.AUTHORITATIVE
+        ):
+            self._dispatch_descriptor_reading(qualified.reading, view.descriptor)
+        if self._instrument_panel is not None:
+            self._instrument_panel.on_descriptor_reading(qualified.reading, view)
+
+    def invalidate_descriptor_transport(self) -> None:
+        """Advance the store generation after a bridge death/restart.
+
+        Call this whenever the bridge is known to have died or restarted so
+        that stale legacy-absent readings arriving in the new session cannot
+        silently restore authoritative identity status.
+        """
+        descriptor_store = getattr(self, "_descriptor_store", None)
+        if descriptor_store is not None:
+            descriptor_store.invalidate_transport()
+        annunciation_controller = getattr(self, "_annunciation_controller", None)
+        if annunciation_controller is not None:
+            annunciation_controller.invalidate_transport()
+        top_bar = getattr(self, "_top_bar", None)
+        if self._replay_mode and top_bar is not None:
+            top_bar.invalidate_replay_authority()
+
+    def invalidate_engine_producer(self) -> None:
+        """Retire every GUI consumer anchored to the outgoing engine."""
+
+        self.invalidate_descriptor_transport()
+        self._overview_panel.invalidate_operator_snapshot_producer()
+
+    def bind_replay_authority(
+        self,
+        *,
+        source: str,
+        speed: float,
+        session_id: str,
+        launcher_generation: int,
+        bridge_generation: int,
+    ) -> None:
+        """Publish one launcher-owned replay cut to the TopWatch status pin."""
+
+        if not self._replay_mode:
+            raise RuntimeError("cannot bind replay authority in live mode")
+        self._top_bar.bind_replay_authority(
+            source=source,
+            speed=speed,
+            session_id=session_id,
+            launcher_generation=launcher_generation,
+            bridge_generation=bridge_generation,
+        )
+
+    def invalidate_replay_authority(self) -> None:
+        """Revoke replay status authority before producer or bridge turnover."""
+
+        if self._replay_mode:
+            self._top_bar.invalidate_replay_authority()
+
+    @Slot(object)
+    def _dispatch_reading(
+        self,
+        reading: Reading,
+        dashboard_identity: IdentityStatus = IdentityStatus.LEGACY_ABSENT,
+    ) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         channel = reading.channel
+        # System, analytics, and support messages are informative but cannot
+        # establish measurement flow, engine presence, or mutation authority.
+        is_measurement = not channel.startswith(("system/", "analytics/", "support/"))
+        if is_measurement:
+            self._reading_count += 1
+            self._rate_count += 1
+            self._last_reading_time = time.monotonic()
 
         # Eager sinks
-        self._overview_panel.on_reading(reading)
+        self._overview_panel.on_reading(reading, dashboard_identity)
         try:
             self._top_bar.on_reading(reading)
-        except Exception:
-            logger.warning("TopWatchBar reading dispatch failed", exc_info=True)
-        self._alarm_panel.on_reading(reading)
+        except Exception as exc:
+            logger.warning(
+                "TopWatchBar dispatch failed; phase=reading_dispatch exception=%s",
+                type(exc).__name__,
+            )
+
+        if channel == "system/disk_free_gb":
+            self._dispatch_disk_evidence(reading)
 
         # Lazy sinks — only route if the panel has been opened at least once
         # B.8.0.2: route log entries to overlay for live timeline
         if channel == "analytics/operator_log_entry" and self._experiment_overlay is not None:
             self._experiment_overlay.on_reading(reading)
-        if reading.unit == "K" and self._calibration_panel is not None:
-            self._calibration_panel.on_reading(reading)
         if (
-            channel.startswith("\u0422")
-            and reading.unit == "K"
-            and self._conductivity_panel is not None
+            channel
+            in {
+                "analytics/keithley_channel_state/smua",
+                "analytics/keithley_channel_state/smub",
+            }
+            and self._keithley_panel is not None
         ):
-            self._conductivity_panel.on_reading(reading)
-        # v0.55.6 \u2014 Etalon MultiLine length + environment readings. Filter
-        # is intentionally pre-MultiLinePanel to avoid wasted slot calls
-        # on every \u0422* reading. The panel itself also filters internally,
-        # but doing it here keeps the dispatch hot path tight.
-        # v0.55.15 (audit SCOPE 5 finding 5.1) — record into the
-        # replay cache so a panel opened later sees the recent history,
-        # then forward to the live panel via its public scoping helper.
-        if "MultiLine" in channel:
-            self._multiline_snapshot[channel] = reading
-            if (
-                self._multiline_panel is not None
-                and self._multiline_panel.channel_belongs_to_panel(channel)
-            ):
-                self._multiline_panel.on_reading(reading)
-        # F3-Cycle2: route temperature readings to analytics view + shell cache.
-        # This is intentional parallel routing — calibration_panel and analytics_view
-        # are independent consumers: calibration uses readings for curve fitting;
-        # analytics uses them for TemperatureTrajectoryWidget live stream.
-        if reading.unit == "K":
-            self._analytics_temperature_snapshot[channel] = reading
-            if self._analytics_view is not None:
-                self._analytics_view.set_temperature_readings({channel: reading})
-            # F-MockPredictor: also route the canonical cold-stage channel
-            # through the cooldown widget's SteadyStatePredictor so the
-            # asymptote can render in IDLE / mock streams. CooldownData
-            # carries no actual_trajectory by contract — this is the live
-            # data feed.
-            short_id = channel.split(" ", 1)[0] if " " in channel else channel
-            if short_id == "Т12":
-                self._push_analytics("set_cold_temperature_reading", reading)
-        if (
-            "/smua/" in channel
-            or "/smub/" in channel
-            or channel.startswith("analytics/keithley_channel_state/")
-        ):
-            if self._keithley_panel is not None:
-                self._keithley_panel.on_reading(reading)
-            if channel.endswith("/power") and self._conductivity_panel is not None:
-                self._conductivity_panel.on_reading(reading)
-            # F4: accumulate Keithley power readings into analytics snapshot.
-            # Must guard on SMU sub-path explicitly — the outer condition also
-            # matches analytics/keithley_channel_state/* channels which lack
-            # the smua/smub segment KeithleyPowerWidget expects at parts[-2].
-            if (
-                ("/smua/" in channel or "/smub/" in channel)
-                and channel.split("/")[-1] in ("voltage", "current", "power")
-            ):
-                self._analytics_keithley_snapshot[channel] = reading
-                if self._analytics_view is not None:
-                    self._analytics_view.set_keithley_readings({channel: reading})
-        # F4: route pressure gauge readings to analytics view + shell cache.
-        # VSP63D publishes on channels ending with /pressure, unit мбар.
-        if reading.unit in ("мбар", "mbar") and channel.endswith("/pressure"):
-            self._push_analytics("set_pressure_reading", reading)
+            self._keithley_panel.on_reading(reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (B.5.5 F3)
@@ -508,18 +754,208 @@ class MainWindowV2(QMainWindow):
             if self._operator_log_panel is not None:
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
-                state_name = reading.metadata.get("state")
-                reason = reading.metadata.get("reason", "") or ""
-                self._last_safety_state = str(state_name) if state_name is not None else None
+                self._dispatch_safety_evidence(reading)
+
+    def _current_bridge_instance_id(self) -> str | None:
+        value = getattr(self._bridge, "bridge_instance_id", None)
+        if (
+            type(value) is not str
+            or len(value) != 32
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            return None
+        return value
+
+    def _dispatch_safety_evidence(self, reading: Reading) -> None:
+        """Present ordered legacy telemetry without outranking typed authority."""
+        if self._replay_mode:
+            self._last_safety_state = None
+            self._last_safety_reason = ""
+            self._invalidate_safety_authority(
+                "Режим replay — текущее состояние Safety неизвестно",
+                disconnected=True,
+            )
+            return
+        metadata = reading.metadata
+        if type(metadata) is not dict:
+            self._invalidate_safety_authority("Некорректное состояние Safety")
+            return
+        state_name = metadata.get("state")
+        if type(state_name) is not str or not state_name:
+            self._invalidate_safety_authority("Некорректное состояние Safety")
+            return
+        if (
+            type(reading.timestamp) is not datetime
+            or reading.timestamp.tzinfo is None
+            or reading.timestamp.utcoffset() is None
+        ):
+            self._invalidate_safety_authority("Время состояния Safety не подтверждено")
+            return
+        observed_at = reading.timestamp.astimezone(UTC)
+        wall_now = datetime.now(UTC)
+        if observed_at > wall_now + timedelta(seconds=_SAFETY_FUTURE_TOLERANCE_S):
+            self._invalidate_safety_authority("Состояние Safety получено из будущего")
+            return
+        if observed_at < wall_now - timedelta(seconds=_SAFETY_MAX_SOURCE_AGE_S):
+            self._invalidate_safety_authority("Состояние Safety устарело")
+            return
+        if self._last_safety_observed_at is not None and observed_at <= self._last_safety_observed_at:
+            if state_name not in _LEGACY_SAFETY_READY_STATES:
+                self._invalidate_safety_authority("Нарушен порядок состояния Safety")
+            return
+        reason = metadata.get("reason", "") or ""
+        if self._typed_safety_authority_seen:
+            # READY-looking analytics cannot overwrite the coherent typed cut.
+            # A negative observation is allowed to revoke it, and remains
+            # visible until a newer typed cut supplies recovery authority.
+            if state_name not in _LEGACY_SAFETY_READY_STATES:
+                self._last_safety_state = state_name
                 self._last_safety_reason = str(reason) if reason else ""
+                self._last_safety_observed_at = observed_at
                 self._bottom_bar.set_safety_state(self._last_safety_state)
-                if self._keithley_panel is not None:
-                    ready, reason_text = _map_safety_state(
-                        self._last_safety_state, self._last_safety_reason
-                    )
-                    self._keithley_panel.set_safety_ready(ready, reason_text)
-        if self._instrument_panel is not None:
-            self._instrument_panel.on_reading(reading)
+                self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
+            return
+
+        self._last_safety_state = state_name
+        self._last_safety_reason = str(reason) if reason else ""
+        self._last_safety_observed_at = observed_at
+        self._bottom_bar.set_safety_state(self._last_safety_state)
+
+        # Analytics is presentation telemetry, not command authority. It may
+        # revoke a previously accepted typed cut, but even a fresh, matching
+        # READY-looking packet cannot create bindings or restore mutation
+        # readiness. Recovery requires a newer coherent OperatorSnapshot.
+        if state_name not in _LEGACY_SAFETY_READY_STATES:
+            self._invalidate_safety_authority(self._last_safety_reason or "Safety state is not ready")
+        else:
+            self._accepted_safety_bridge_instance_id = None
+            self._accepted_safety_experiment_id = None
+            if self._keithley_panel is not None:
+                self._keithley_panel.set_safety_ready(
+                    False,
+                    "No authoritative Safety state",
+                )
+
+    def _current_keithley_safety_gate(self) -> tuple[bool, str]:
+        bridge_instance_id = self._current_bridge_instance_id()
+        binding_current = (
+            bridge_instance_id is not None
+            and self._accepted_safety_bridge_instance_id == bridge_instance_id
+            and (
+                self._latest_experiment_status is None
+                or self._accepted_safety_experiment_id == self._active_experiment_id()
+            )
+        )
+        if self._typed_safety_authority_seen and self._typed_safety_ready and binding_current:
+            return True, ""
+        if self._typed_safety_authority_seen:
+            return False, self._last_safety_reason or "Нет текущего состояния Safety"
+        return False, self._last_safety_reason or "Нет авторитетного состояния Safety"
+
+    def _invalidate_safety_authority(self, reason: str, *, disconnected: bool = False) -> None:
+        self._accepted_safety_bridge_instance_id = None
+        self._accepted_safety_experiment_id = None
+        self._typed_safety_ready = False
+        if self._last_safety_state is not None:
+            self._bottom_bar.set_safety_state(self._last_safety_state, stale=True)
+        elif disconnected:
+            self._bottom_bar.set_safety_state(None, stale=True)
+        if self._keithley_panel is not None:
+            self._keithley_panel.set_safety_ready(False, reason)
+
+    def _dispatch_disk_evidence(self, reading: Reading) -> None:
+        """Accept only current, ordered disk evidence from this bridge instance."""
+        bridge_instance_id = self._current_bridge_instance_id()
+        metadata = reading.metadata
+        if bridge_instance_id is None or type(metadata) is not dict:
+            return
+        if metadata.get("bridge_instance_id") != bridge_instance_id:
+            if self._accepted_disk_bridge_instance_id not in (None, bridge_instance_id):
+                self._last_disk_observed_at = None
+                self._accepted_disk_bridge_instance_id = None
+                self._bottom_bar.mark_disk_stale(disconnected=False)
+            return
+        if (
+            reading.instrument_id != "system"
+            or reading.unit != "GB"
+            or type(reading.timestamp) is not datetime
+            or reading.timestamp.tzinfo is None
+            or reading.timestamp.utcoffset() is None
+        ):
+            return
+        observed_at = reading.timestamp.astimezone(UTC)
+        now = datetime.now(UTC)
+        if observed_at > now + timedelta(seconds=_DISK_FUTURE_TOLERANCE_S):
+            return
+        if observed_at < now - timedelta(seconds=_DISK_MAX_SOURCE_AGE_S):
+            self._bottom_bar.mark_disk_stale(disconnected=False)
+            return
+        previous_instance = self._accepted_disk_bridge_instance_id
+        if previous_instance is not None and previous_instance != bridge_instance_id:
+            # A new bridge is a new authority. Never let prior-instance disk
+            # truth continue to look current while awaiting its first cut.
+            self._last_disk_observed_at = None
+            self._bottom_bar.mark_disk_stale(disconnected=False)
+        if self._last_disk_observed_at is not None and observed_at <= self._last_disk_observed_at:
+            return
+        if self._bottom_bar.set_disk_evidence(
+            reading.value,
+            source=metadata.get("source", ""),
+            state=metadata.get("operator_state", ""),
+        ):
+            self._last_disk_observed_at = observed_at
+            self._accepted_disk_bridge_instance_id = bridge_instance_id
+
+    def _dispatch_descriptor_reading(
+        self,
+        reading: Reading,
+        descriptor: ChannelDescriptorV1,
+    ) -> None:
+        """Route authoritative readings to metadata-selected specialist sinks.
+
+        Bare, legacy, refused, or capacity-exhausted readings never enter this
+        path. They remain visible through the eager generic sinks and the
+        descriptor-aware instrument panel, without acquiring control authority.
+        """
+        quantity = descriptor.quantity
+
+        if quantity is ChannelQuantity.RAW_SENSOR and self._calibration_panel is not None:
+            self._calibration_panel.on_reading(reading)
+
+        if quantity is ChannelQuantity.TEMPERATURE:
+            if self._conductivity_panel is not None:
+                self._conductivity_panel.on_reading(reading)
+            self._analytics_temperature_snapshot[descriptor.channel_id] = reading
+            if self._analytics_view is not None:
+                self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
+
+            if _is_manifest_cold_stage_descriptor(descriptor):
+                self._push_analytics("set_cold_temperature_reading", reading)
+        is_source_readback = (
+            descriptor.role is ChannelRole.SOURCE_READBACK
+            and descriptor.safety_class is ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK
+        )
+        if is_source_readback:
+            if self._keithley_panel is not None:
+                self._keithley_panel.on_reading(reading)
+            if quantity is ChannelQuantity.POWER and self._conductivity_panel is not None:
+                self._conductivity_panel.on_reading(reading)
+            if quantity in {
+                ChannelQuantity.VOLTAGE,
+                ChannelQuantity.CURRENT,
+                ChannelQuantity.POWER,
+            }:
+                self._analytics_keithley_snapshot[descriptor.channel_id] = reading
+                if self._analytics_view is not None:
+                    self._analytics_view.set_keithley_readings({descriptor.channel_id: reading})
+
+        if quantity is ChannelQuantity.PRESSURE:
+            self._push_analytics("set_pressure_reading", reading)
+
+        if is_manifest_multiline_descriptor(descriptor):
+            self._multiline_snapshot[descriptor.channel_id] = (reading, descriptor)
+            if self._multiline_panel is not None:
+                self._multiline_panel.on_descriptor_reading(reading, descriptor)
 
     # ------------------------------------------------------------------
     # Analytics channel adapter (B.8 follow-up)
@@ -544,6 +980,7 @@ class MainWindowV2(QMainWindow):
         elif channel.startswith("analytics/r_thermal"):
             # R_thermal live reading — forward metadata as RThermalData.
             from cryodaq.gui.shell.views.analytics_view import RThermalData
+
             meta = reading.metadata or {}
             history = meta.get("history") or []
             self._push_analytics(
@@ -625,13 +1062,10 @@ class MainWindowV2(QMainWindow):
         future_t_abs: list[float] = []
         if isinstance(future_t, list):
             import time as _time
+
             now_ts = _time.time()
             future_t_abs = [now_ts + float(h) * 3600.0 for h in future_t]
-        if (
-            future_t_abs
-            and isinstance(future_mean, list)
-            and len(future_t_abs) == len(future_mean)
-        ):
+        if future_t_abs and isinstance(future_mean, list) and len(future_t_abs) == len(future_mean):
             predicted = list(zip(future_t_abs, future_mean, strict=False))
         if (
             future_t_abs
@@ -658,11 +1092,53 @@ class MainWindowV2(QMainWindow):
 
     @Slot()
     def _tick_status(self) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         now = time.monotonic()
         silence = now - self._last_reading_time if self._last_reading_time > 0 else 999.0
         connected = silence < 3.0
+        wall_now = datetime.now(UTC)
+        current_bridge_instance_id = self._current_bridge_instance_id()
+        disk_marked_stale = False
+        if (
+            self._accepted_disk_bridge_instance_id is not None
+            and self._accepted_disk_bridge_instance_id != current_bridge_instance_id
+        ):
+            # Bridge replacement is an authority boundary: clear both halves
+            # of the accepted record before presenting the retained history.
+            self._accepted_disk_bridge_instance_id = None
+            self._last_disk_observed_at = None
+            self._bottom_bar.mark_disk_stale(disconnected=not connected)
+            disk_marked_stale = True
+        elif self._last_disk_observed_at is not None and self._last_disk_observed_at < wall_now - timedelta(
+            seconds=_DISK_MAX_SOURCE_AGE_S
+        ):
+            self._bottom_bar.mark_disk_stale(disconnected=not connected)
+            disk_marked_stale = True
+
+        safety_binding_changed = (
+            self._accepted_safety_bridge_instance_id is not None
+            and self._accepted_safety_bridge_instance_id != current_bridge_instance_id
+        )
+        safety_experiment_changed = (
+            self._accepted_safety_bridge_instance_id is not None
+            and self._latest_experiment_status is not None
+            and self._accepted_safety_experiment_id != self._active_experiment_id()
+        )
+        safety_source_expired = (
+            not self._typed_safety_authority_seen
+            and self._last_safety_observed_at is not None
+            and self._last_safety_observed_at < wall_now - timedelta(seconds=_SAFETY_MAX_SOURCE_AGE_S)
+        )
+        if safety_binding_changed:
+            self._invalidate_safety_authority("Поколение связи Safety изменилось")
+        elif safety_experiment_changed:
+            self._invalidate_safety_authority("Эксперимент Safety изменился")
+        elif safety_source_expired:
+            self._invalidate_safety_authority("Состояние Safety устарело")
         # Engine state derives from data flow — single source of truth
         self._top_bar.set_engine_state(connected)
+        self._overview_panel.set_connected(connected)
         if connected:
             elapsed = now - self._last_rate_time
             rate = self._rate_count / elapsed if elapsed > 0 else 0
@@ -677,20 +1153,17 @@ class MainWindowV2(QMainWindow):
                 self._bottom_bar.set_connected(False, "Нет данных")
             else:
                 self._bottom_bar.set_connected(False, "Engine потерян")
-            # Engine data flow lost — the last-known safety state is no longer
-            # trustworthy. The GUI must not present a stale runtime state as
-            # current (runtime invariant: GUI is not the source of truth for runtime
-            # state); a stale green "running" while the engine is gone is
-            # dangerous. Blank the safety strip and force the Keithley overlay
-            # to not-ready. Idempotent: only acts on the transition.
+            # Engine data flow lost — retain the last known state as evidence,
+            # but visibly revoke its current-truth claim and force controls
+            # not-ready. The GUI never erases operator evidence into a quiet
+            # blank or presents a stale runtime state as current.
             if self._last_safety_state is not None:
-                self._last_safety_state = None
-                self._last_safety_reason = ""
-                self._bottom_bar.set_safety_state(None)
-                if self._keithley_panel is not None:
-                    self._keithley_panel.set_safety_ready(
-                        False, "Engine потерян — состояние безопасности неизвестно"
-                    )
+                self._invalidate_safety_authority(
+                    "Engine потерян — состояние безопасности неизвестно",
+                    disconnected=True,
+                )
+            if not disk_marked_stale:
+                self._bottom_bar.mark_disk_stale(disconnected=True)
         # Mirror connection state onto Keithley overlay. Guard on lazy
         # construction — panel may not exist yet.
         if self._keithley_panel is not None:
@@ -719,24 +1192,201 @@ class MainWindowV2(QMainWindow):
         if self._experiment_overlay is not None:
             self._experiment_overlay.set_connected(connected)
 
-    def closeEvent(self, event):  # noqa: ANN001
+    def settle_owned_workers(self) -> bool:
         """Teardown: stop the status timer and join the experiment-create worker
         (the only ZmqCommandWorker this window owns directly) before the C++
         objects are destroyed, so we don't trip Qt's "QThread: Destroyed while
         thread is still running" on exit. Panel-owned workers self-clean via
-        their own ``_WorkerCleanupMixin.closeEvent``. Bounded + guarded so
-        teardown can never hang."""
+        their own ``_WorkerCleanupMixin.closeEvent``.
+
+        Bounded to roughly ``_SETTLE_CALL_BUDGET_MS`` of wall clock per call
+        — this is one bounded slice of a multi-call settlement, not the
+        whole thing. The caller already retries on a QTimer, so returning
+        False here just means "not settled yet, ask again"; it never means
+        an owner was abandoned. QThread-descendant stabilization tracking
+        (``_settle_seen_thread_ids``) persists across calls so a single
+        shutdown attempt still requires a genuinely stable, all-idle
+        inventory before reporting success — that check just now spans
+        several 1s-spaced calls instead of several passes inside one
+        blocking call."""
+        # The composition root must revoke its explicit worker session before
+        # inventory. A child widget has no authority to open or close the
+        # process-wide gate.
+        fresh_attempt = not getattr(self, "_shutting_down", False)
+        self._shutting_down = True
+        if fresh_attempt:
+            self._settle_seen_thread_ids = set()
+        deadline = time.monotonic() + _SETTLE_CALL_BUDGET_MS / 1000
         try:
-            self._status_timer.stop()
+            self.setEnabled(False)
         except RuntimeError:
             pass
+        try:
+            status_timer = getattr(self, "_status_timer", None)
+            if status_timer is not None:
+                status_timer.stop()
+        except RuntimeError:
+            pass
+        try:
+            timers = list(self.findChildren(QTimer))
+        except RuntimeError:
+            timers = []
+        for timer in timers:
+            try:
+                timer.stop()
+            except RuntimeError:
+                continue
+        for attr in (
+            "_keithley_panel",
+            "_operator_log_panel",
+            "_archive_panel",
+            "_conductivity_panel",
+            "_multiline_panel",
+            "_knowledge_base_panel",
+            "_calibration_panel",
+            "_instrument_panel",
+            "_experiment_overlay",
+            "_alarm_panel",
+        ):
+            panel = getattr(self, attr, None)
+            set_connected = getattr(panel, "set_connected", None)
+            if callable(set_connected):
+                try:
+                    set_connected(False)
+                except RuntimeError:
+                    pass
+        settlement_failures: list[str] = []
+        controller = getattr(self, "_annunciation_controller", None)
+        if controller is not None:
+            try:
+                timeout_ms = _bounded_wait_ms(deadline, cap_ms=_SETTLE_DOWNSTREAM_OP_CAP_MS)
+                if not controller.settle_for_shutdown(timeout_ms=timeout_ms):
+                    settlement_failures.append("annunciation controller workers did not settle")
+            except RuntimeError as exc:
+                logger.critical(
+                    "Annunciation controller shutdown could not establish worker settlement; exception=%s",
+                    type(exc).__name__,
+                )
+                settlement_failures.append("annunciation controller settlement unavailable")
         worker = getattr(self, "_create_exp_worker", None)
         if worker is not None:
             try:
                 if worker.isRunning():
-                    worker.wait(2000)
+                    worker.wait(_bounded_wait_ms(deadline))
+                if worker.isRunning():
+                    return False
+                self._create_exp_worker = None
             except RuntimeError:
                 pass
+        # Child overlays may own command workers independently of the
+        # annunciation controller. Snapshot the descendants first, then try
+        # every valid owner even if one wrapper is already deleting. A single
+        # RuntimeError must not prevent later workers from being joined.
+        # One inventory pass per call, budget-bounded, instead of up to 4
+        # full passes inside one blocking call. Stabilization requires
+        # ``not any_running`` and ``after_ids == current_ids`` — nothing
+        # left running, and the descendant set didn't change out from
+        # under us during the pass; a worker that spawns a helper thread
+        # while it exits fails the id-match. ``_settle_seen_thread_ids``
+        # accumulates ids across calls, but the ``after_ids.issubset(...)``
+        # check against it is currently vacuous: ``after_ids == current_ids``
+        # already guarantees it, since current_ids is unioned into the set
+        # being tested. It does not add a cross-call requirement today.
+        stable_inventory = False
+        try:
+            candidates = list(self.findChildren(QThread))
+        except RuntimeError:
+            settlement_failures.append("QThread descendant inventory unavailable")
+            candidates = None
+        if candidates is not None:
+            current_ids = {id(thread) for thread in candidates}
+            for index, thread in enumerate(candidates):
+                owner = f"QThread[{index}]"
+                try:
+                    if thread.isRunning():
+                        thread.requestInterruption()
+                        thread.quit()
+                        if not thread.wait(_bounded_wait_ms(deadline)):
+                            settlement_failures.append(f"{owner} did not settle")
+                            continue
+                    if thread.parent() is not self:
+                        thread.setParent(self)
+                except RuntimeError:
+                    settlement_failures.append(f"{owner} became invalid during shutdown")
+            try:
+                after = list(self.findChildren(QThread))
+            except RuntimeError:
+                settlement_failures.append("QThread descendant revalidation unavailable")
+                after = None
+            if after is not None:
+                after_ids = {id(thread) for thread in after}
+                try:
+                    any_running = any(thread.isRunning() for thread in after)
+                except RuntimeError:
+                    settlement_failures.append("QThread descendant changed during revalidation")
+                    any_running = True
+                if (
+                    not any_running
+                    and after_ids == current_ids
+                    and after_ids.issubset(self._settle_seen_thread_ids | current_ids)
+                ):
+                    stable_inventory = True
+                self._settle_seen_thread_ids |= current_ids
+        if not stable_inventory and not settlement_failures:
+            settlement_failures.append("QThread descendant inventory did not stabilize")
+        if settlement_failures:
+            logger.critical("GUI child QThread shutdown incomplete: %s", "; ".join(settlement_failures))
+            return False
+        if not settle_registered_gui_command_workers(
+            timeout_ms=_bounded_wait_ms(deadline, cap_ms=_SETTLE_DOWNSTREAM_OP_CAP_MS)
+        ):
+            logger.critical("Process-wide GUI command worker inventory did not settle")
+            return False
+        return True
+
+    def complete_root_shutdown(self) -> None:
+        """Release annunciation only after the root settles engine/transport."""
+
+        controller = getattr(self, "_annunciation_controller", None)
+        if controller is not None:
+            controller.complete_root_shutdown()
+
+    def closeEvent(self, event):  # noqa: ANN001
+        """Transfer a close request to the one composition-root owner.
+
+        Only reached when ``_root_shutdown_request`` is None — not a
+        production path today, since the composition root always supplies
+        one. Without it, a single click now gets one ``settle_owned_workers()``
+        slice (~``_SETTLE_CALL_BUDGET_MS``) instead of the old up to
+        4×``_WORKER_SETTLE_MS``; an unsettled attempt calls ``event.ignore()``
+        with nothing here scheduling a retry. That degrades to "click close
+        again", not a stuck window: Qt redelivers closeEvent on the next
+        click, and ``_settle_seen_thread_ids`` persists across attempts so
+        the next call resumes the same stabilization check rather than
+        starting over.
+        """
+        shutdown_request = self._root_shutdown_request
+        if shutdown_request is not None:
+            try:
+                shutdown_request()
+            except Exception as exc:
+                logger.critical(
+                    "GUI root shutdown request failed; exception=%s",
+                    type(exc).__name__,
+                )
+            event.ignore()
+            return
+        if gui_command_worker_admission_open():
+            event.ignore()
+            return
+        if not self.settle_owned_workers():
+            event.ignore()
+            return
+        try:
+            self.complete_root_shutdown()
+        except RuntimeError:
+            event.ignore()
+            return
         super().closeEvent(event)
 
     # ------------------------------------------------------------------
@@ -749,6 +1399,9 @@ class MainWindowV2(QMainWindow):
 
     def _on_experiment_status_received(self, status: dict) -> None:
         """Forward status to dashboard + overlay, cache for routing."""
+        if getattr(self, "_shutting_down", False):
+            return
+        previous_exp_id = self._active_experiment_id()
         self._latest_experiment_status = status
 
         # F4: invalidate experiment-scoped analytics snapshot on boundary.
@@ -757,6 +1410,12 @@ class MainWindowV2(QMainWindow):
         # so a newly-opened AnalyticsView does not replay stale data.
         active = status.get("active_experiment")
         new_exp_id = active.get("experiment_id") if isinstance(active, dict) else None
+        if (
+            self._accepted_safety_bridge_instance_id is not None
+            and new_exp_id != self._accepted_safety_experiment_id
+            and new_exp_id != previous_exp_id
+        ):
+            self._invalidate_safety_authority("Эксперимент Safety изменился")
         if new_exp_id != self._analytics_last_exp_id:
             self._analytics_snapshot.pop("set_cooldown", None)
             self._analytics_snapshot.pop("set_experiment_status", None)
@@ -798,16 +1457,27 @@ class MainWindowV2(QMainWindow):
 
     def _on_experiment_clicked(self) -> None:
         """TopWatchBar experiment label click — open overlay or dialog."""
+        if getattr(self, "_shutting_down", False):
+            return
         has_active = (
             self._latest_experiment_status is not None
             and self._latest_experiment_status.get("active_experiment") is not None
         )
-        if has_active:
+        if has_active or self._replay_mode:
             self._on_tool_clicked("experiment")
         else:
             self._show_new_experiment_dialog()
 
     def _show_new_experiment_dialog(self) -> None:
+
+        if getattr(self, "_shutting_down", False):
+            return
+        if not gui_command_worker_admission_open():
+            logger.warning("Experiment dialog rejected because worker admission is closed")
+            return
+        if self._replay_mode:
+            logger.warning("Replay mode rejected experiment creation dialog")
+            return
 
         templates = []
         if self._latest_experiment_status:
@@ -817,6 +1487,14 @@ class MainWindowV2(QMainWindow):
         dialog.exec()
 
     def _on_create_experiment(self, payload: dict) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        if not gui_command_worker_admission_open():
+            logger.warning("Experiment creation rejected because worker admission is closed")
+            return
+        if self._replay_mode:
+            logger.warning("Replay mode rejected experiment_create dispatch")
+            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         cmd = {"cmd": "experiment_create", **payload}
@@ -825,11 +1503,13 @@ class MainWindowV2(QMainWindow):
         self._create_exp_worker.start()
 
     def _on_create_exp_result(self, result: dict) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
         if not result.get("ok"):
-            logger.warning("experiment_create failed: %s", result.get("error"))
+            logger.warning("experiment_create failed")
             return
         # Status poll will pick up new experiment, dashboard updates automatically
-        logger.info("Experiment created: %s", result.get("experiment_id", "?"))
+        logger.info("Experiment created")
 
     # ------------------------------------------------------------------
     # Other tool actions
@@ -867,6 +1547,10 @@ class MainWindowV2(QMainWindow):
         message instead of attempting a restart.
         """
         from PySide6.QtWidgets import QMessageBox
+
+        if self._replay_mode:
+            logger.warning("Replay mode rejected Engine restart")
+            return
 
         reply = QMessageBox.question(
             self,

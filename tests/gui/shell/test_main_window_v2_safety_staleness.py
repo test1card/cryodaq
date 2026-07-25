@@ -1,7 +1,4 @@
-"""Regression: the bottom-bar safety strip must NOT show a stale runtime state
-after the engine dies. runtime invariant — the GUI is not the source of truth
-for runtime state; a stale green "running" while the engine is gone is dangerous.
-"""
+"""Regression: disconnect retains last safety evidence but revokes currency."""
 
 from __future__ import annotations
 
@@ -10,13 +7,14 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+from cryodaq.gui.zmq_client import ZmqBridge
 
 
 def _app() -> QApplication:
@@ -42,7 +40,7 @@ def _safety_reading(state: str) -> Reading:
     )
 
 
-def test_safety_strip_blanks_when_engine_lost() -> None:
+def test_safety_strip_retains_last_known_state_as_disconnected_when_engine_lost() -> None:
     _app()
     w = MainWindowV2()
     try:
@@ -55,9 +53,10 @@ def test_safety_strip_blanks_when_engine_lost() -> None:
         w._last_reading_time = time.monotonic() - 200.0
         w._tick_status()
 
-        # The safety strip must NOT keep showing the stale "running" state.
-        assert w._last_safety_state is None, "stale safety state must be cleared on engine loss"
-        assert w._bottom_bar._safety_label.text() == "● —"
+        assert w._last_safety_state == "running"
+        assert "running" in w._bottom_bar._safety_label.text()
+        assert "нет связи" in w._bottom_bar._safety_label.text()
+        assert "текущая связь" in w._bottom_bar._safety_label.accessibleDescription().lower()
     finally:
         _stop_timers(w)
 
@@ -69,7 +68,7 @@ def test_safety_strip_restored_on_reconnect() -> None:
         w._dispatch_reading(_safety_reading("running"))
         w._last_reading_time = time.monotonic() - 200.0
         w._tick_status()
-        assert w._last_safety_state is None
+        assert "нет связи" in w._bottom_bar._safety_label.text()
 
         # A fresh safety reading after reconnect restores the strip.
         w._dispatch_reading(_safety_reading("ready"))
@@ -79,16 +78,163 @@ def test_safety_strip_restored_on_reconnect() -> None:
         _stop_timers(w)
 
 
-def test_closeevent_stops_status_timer() -> None:
+def test_closeevent_delegates_status_timer_settlement_to_root(_isolate_shell_test: int) -> None:
     """closeEvent must stop the status timer so it can't fire into a
     half-destroyed window (and the QThread teardown stays bounded)."""
     from PySide6.QtGui import QCloseEvent
 
     _app()
-    w = MainWindowV2()
+    import cryodaq.gui.zmq_client as zmq_client
+
+    shutdown_requests = 0
+    w: MainWindowV2
+
+    def settle_from_root() -> None:
+        nonlocal shutdown_requests
+        shutdown_requests += 1
+        zmq_client.revoke_gui_command_worker_admission(_isolate_shell_test)
+        assert w.settle_owned_workers()
+
+    w = MainWindowV2(shutdown_request=settle_from_root)
     try:
         assert w._status_timer.isActive()
         w.closeEvent(QCloseEvent())
+        assert shutdown_requests == 1
         assert not w._status_timer.isActive(), "status timer must be stopped on close"
     finally:
         _stop_timers(w)
+
+
+def test_analytics_safety_reading_never_enables_mutation_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    """READY-looking telemetry is display evidence, never command authority."""
+    _app()
+    assert live_zmq_bridge.bridge_instance_id is not None
+    window = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        window._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-a"}}
+        window._ensure_overlay("source")
+        assert window._keithley_panel is not None
+
+        # Establish a genuinely connected presentation so disabled controls
+        # cannot be explained by an unrelated no-connection condition.
+        window._last_reading_time = time.monotonic()
+        window._tick_status()
+        assert window._keithley_panel._connected is True
+
+        window._dispatch_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="safety_manager",
+                channel="analytics/safety_state",
+                value=0.0,
+                unit="",
+                metadata={
+                    "state": "ready",
+                    "reason": "",
+                    "bridge_instance_id": live_zmq_bridge.bridge_instance_id,
+                    "experiment_id": "exp-a",
+                },
+            )
+        )
+
+        assert window._keithley_panel._connected is True
+        assert window._keithley_panel._safety_ready is False
+        assert window._keithley_panel._smua_block._start_btn.isEnabled() is False
+        assert window._keithley_panel._start_both_btn.isEnabled() is False
+    finally:
+        _stop_timers(window)
+
+
+def test_disk_reading_is_presented_only_when_backend_metadata_is_exact(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    assert live_zmq_bridge.bridge_instance_id is not None
+    window = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        reading = Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="system",
+            channel="system/disk_free_gb",
+            value=5.0,
+            unit="GB",
+            metadata={
+                "source": "disk_monitor",
+                "operator_state": "caution",
+                "bridge_instance_id": live_zmq_bridge.bridge_instance_id,
+            },
+        )
+        window._dispatch_reading(reading)
+        assert "5.0" in window._bottom_bar._disk_label.text()
+        prior = window._bottom_bar._disk_label.text()
+        window._dispatch_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="system",
+                channel="system/disk_free_gb",
+                value=1.0,
+                unit="GB",
+                metadata={
+                    "source": "untrusted",
+                    "operator_state": "fault",
+                    "bridge_instance_id": live_zmq_bridge.bridge_instance_id,
+                },
+            )
+        )
+        assert window._bottom_bar._disk_label.text() == prior
+    finally:
+        _stop_timers(window)
+
+
+def test_disk_evidence_rejects_foreign_future_reordered_and_replaced_bridge_cuts(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    assert live_zmq_bridge.bridge_instance_id is not None
+    window = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        now = datetime.now(UTC)
+
+        def disk(value: float, *, observed_at: datetime, bridge_id: str) -> Reading:
+            return Reading(
+                timestamp=observed_at,
+                instrument_id="system",
+                channel="system/disk_free_gb",
+                value=value,
+                unit="GB",
+                metadata={
+                    "source": "disk_monitor",
+                    "operator_state": "ok",
+                    "bridge_instance_id": bridge_id,
+                },
+            )
+
+        window._dispatch_reading(disk(20.0, observed_at=now, bridge_id=live_zmq_bridge.bridge_instance_id))
+        assert "20.0" in window._bottom_bar._disk_label.text()
+        prior = window._bottom_bar._disk_label.text()
+        window._dispatch_reading(disk(21.0, observed_at=now + timedelta(seconds=10), bridge_id="foreign"))
+        window._dispatch_reading(
+            disk(
+                22.0,
+                observed_at=now + timedelta(seconds=20),
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
+        )
+        window._dispatch_reading(disk(23.0, observed_at=now, bridge_id=live_zmq_bridge.bridge_instance_id))
+        assert window._bottom_bar._disk_label.text() == prior
+
+        live_zmq_bridge._bridge_instance_id = "f" * 32
+        window._dispatch_reading(disk(24.0, observed_at=now + timedelta(seconds=1), bridge_id="old" * 8))
+        assert "устарело" in window._bottom_bar._disk_label.text()
+        window._dispatch_reading(
+            disk(
+                25.0,
+                observed_at=now + timedelta(seconds=2),
+                bridge_id=live_zmq_bridge.bridge_instance_id,
+            )
+        )
+        assert "25.0" in window._bottom_bar._disk_label.text()
+    finally:
+        _stop_timers(window)

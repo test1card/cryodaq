@@ -14,6 +14,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 
@@ -50,6 +57,31 @@ def _power_reading(value: float) -> Reading:
         unit="W",
         metadata={},
     )
+
+
+def _dispatch_described(
+    w: MainWindowV2,
+    reading: Reading,
+    quantity: ChannelQuantity,
+    *,
+    source: bool = False,
+) -> None:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=reading.channel,
+        instrument_id=reading.instrument_id,
+        source_key="test.conductivity",
+        quantity=quantity,
+        unit=reading.unit,
+        role=ChannelRole.SOURCE_READBACK if source else ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=(ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK if source else ChannelSafetyClass.OBSERVATIONAL),
+        display_group="test",
+        display_name="Test conductivity channel",
+        visible_by_default=True,
+        display_order=0,
+        descriptor_revision=1,
+    )
+    w.dispatch_qualified_reading(DescriptorQualifiedReading(reading=reading, descriptor=descriptor))
 
 
 # ----------------------------------------------------------------------
@@ -106,16 +138,14 @@ def test_temperature_reading_reaches_overlay():
             cb = QCheckBox(ch)
             panel._checkboxes[ch] = cb
             panel._ch_layout.addWidget(cb, 0, col)
-            cb.stateChanged.connect(
-                lambda state, _ch=ch: panel._on_check(_ch, state)
-            )
+            cb.stateChanged.connect(lambda state, _ch=ch: panel._on_check(_ch, state))
             cb.setChecked(True)
 
         QCoreApplication.processEvents()
 
         # Dispatch both readings through the shell.
-        w._dispatch_reading(_temp_reading("Т1", 77.3))
-        w._dispatch_reading(_temp_reading("Т2", 4.2))
+        _dispatch_described(w, _temp_reading("Т1", 77.3), ChannelQuantity.TEMPERATURE)
+        _dispatch_described(w, _temp_reading("Т2", 4.2), ChannelQuantity.TEMPERATURE)
         QCoreApplication.processEvents()
 
         # Assert stored values (feeds table on next _refresh tick).
@@ -133,12 +163,8 @@ def test_temperature_reading_reaches_overlay():
         t_cold_item = table.item(0, 2)
         assert t_hot_item is not None, "t_hot cell (col 1) is None after _refresh()"
         assert t_cold_item is not None, "t_cold cell (col 2) is None after _refresh()"
-        assert t_hot_item.text() == f"{77.3:.4f}", (
-            f"t_hot cell text wrong: {t_hot_item.text()!r}"
-        )
-        assert t_cold_item.text() == f"{4.2:.4f}", (
-            f"t_cold cell text wrong: {t_cold_item.text()!r}"
-        )
+        assert t_hot_item.text() == f"{77.3:.4f}", f"t_hot cell text wrong: {t_hot_item.text()!r}"
+        assert t_cold_item.text() == f"{4.2:.4f}", f"t_cold cell text wrong: {t_cold_item.text()!r}"
     finally:
         _stop_timers(w)
 
@@ -148,7 +174,7 @@ def test_power_reading_reaches_overlay():
     w = MainWindowV2()
     try:
         w._ensure_overlay("conductivity")
-        w._dispatch_reading(_power_reading(0.037))
+        _dispatch_described(w, _power_reading(0.037), ChannelQuantity.POWER, source=True)
         from PySide6.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()

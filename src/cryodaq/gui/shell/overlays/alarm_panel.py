@@ -1,29 +1,21 @@
-"""AlarmPanel — Phase II.4 dual-engine alarm overlay (K1-critical).
+"""AlarmPanel — phase-aware alarm overlay (K1-critical).
 
-Supersedes ``src/cryodaq/gui/widgets/alarm_panel.py``. Preserves both
-alarm engines:
-
-- **v1 (threshold-based):** rows fed via ``on_reading(reading)`` filter
-  on ``metadata["alarm_name"]``. Engine is the legacy ``AlarmEngine``.
-- **v2 (YAML-driven, phase-aware):** table populated via 3 s polling
-  of ``alarm_v2_status``. Engine is ``AlarmEngine v2``.
+The table is populated via 3 s polling of ``alarm_v2_status``. Exact
+engine-instance and activation identity is required for acknowledgement.
 
 Replaces legacy emoji severity icons with an in-module
 ``SeverityChip`` widget using DS status tokens. Preserves the
-``v2_alarm_count_changed = Signal(int)`` signature — consumed by the
-launcher tray icon via ``MainWindowV2._top_bar.set_alarm_count``.
+Validated summary and availability signals feed the persistent top watch bar;
+this panel is their sole snapshot owner.
 
 K1-critical: operator uses this overlay to acknowledge safety alarms.
-Fail-OPEN: disconnect keeps rows visible (stale data is better than
-hidden alarms); engine errors keep last-known state (no table wipe).
+Fail-visible evidence, fail-closed authority: disconnect and engine errors keep
+last-known rows visible but revoke acknowledgement and current-status claims.
 
 Public API (host push points):
-- ``on_reading(reading)`` — v1 reading sink; filters by
-  ``metadata["alarm_name"]``.
-- ``set_connected(bool)`` — gates acknowledge buttons; pauses v2 polling.
+- ``set_connected(bool)`` — gates acknowledge buttons; pauses polling.
 - ``update_v2_status(payload)`` — public path for host or tests.
-- ``get_active_v1_count() / get_active_v2_count()`` — accessors for
-  future finalize guards.
+- ``get_active_v2_count()`` — attention-count accessor for validated summaries.
 """
 
 from __future__ import annotations
@@ -31,7 +23,6 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont
@@ -41,7 +32,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QStackedWidget,
@@ -51,53 +44,67 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cryodaq.drivers.base import Reading
+from cryodaq.core.alarm_ack_codec import (
+    deterministic_alarm_ack_request_id,
+    is_canonical_engine_instance_id,
+    validate_alarm_ack_wire_result,
+)
 from cryodaq.gui import theme
+from cryodaq.gui.presentation_severity import alarm_level_for_display
+from cryodaq.gui.shell.operator_components._visuals import plain_text_tooltip
+from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase
 from cryodaq.gui.utils.plural import ru_plural
-from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION, ZmqCommandWorker
 
 logger = logging.getLogger(__name__)
 
 _V2_POLL_INTERVAL_MS = 3000
+_MAX_PENDING_ACKS = 64
+_MAX_V2_ALARMS = 128
+_MAX_V2_CHANNELS = 64
+_MAX_V2_TEXT = 256
+_MAX_V2_MESSAGE = 4096
+_MAX_V2_HISTORY = 20
+_V2_STATUS_KEYS = frozenset({"ok", "engine_instance_id", "snapshot_revision", "active", "history", "proto"})
+_V2_ACTIVE_ROW_KEYS = frozenset(
+    {
+        "level",
+        "message",
+        "triggered_at",
+        "channels",
+        "acknowledged",
+        "acknowledged_at",
+        "acknowledged_by",
+        "activation_id",
+    }
+)
+_V2_LEVELS = frozenset({"INFO", "WARNING", "CRITICAL"})
 
 # Severity → DS status token. Safety semantics: hex values come from
-# the STATUS_* tokens, not hardcoded. CRITICAL→FAULT (red), WARNING→
-# WARNING (amber), INFO→INFO (blue).
+# the STATUS_* tokens, not hardcoded. Legacy WARNING and CAUTION share
+# one operator-visible caution presentation; source levels stay unchanged.
 _SEVERITY_TOKENS: dict[str, str] = {
     "CRITICAL": theme.STATUS_FAULT,
-    "WARNING": theme.STATUS_WARNING,
+    "CAUTION": theme.STATUS_CAUTION,
     "INFO": theme.STATUS_INFO,
+    "UNKNOWN": theme.STATUS_FAULT,
 }
 
 # Russian short labels for the severity chip. No emoji (RULE-COPY-005).
 _SEVERITY_LABELS: dict[str, str] = {
     "CRITICAL": "КРИТ",
-    "WARNING": "ПРЕД",
+    "CAUTION": "ВНИМ",
     "INFO": "ИНФО",
+    "UNKNOWN": "НЕИЗВ",
 }
 
 _SEVERITY_ORDER: dict[str, int] = {
     "CRITICAL": 0,
+    "UNKNOWN": 0,
     "WARNING": 1,
+    "CAUTION": 1,
     "INFO": 2,
 }
-
-_EVENT_TO_STATE: dict[str, str] = {
-    "activated": "active",
-    "acknowledged": "acknowledged",
-    "cleared": "cleared",
-}
-
-_V1_COLUMNS: tuple[str, ...] = (
-    "Уровень",
-    "Имя",
-    "Канал",
-    "Значение",
-    "Порог",
-    "Время",
-    "Срабат.",
-    "Действие",
-)
 
 _V2_COLUMNS: tuple[str, ...] = (
     "Уровень",
@@ -109,6 +116,69 @@ _V2_COLUMNS: tuple[str, ...] = (
 )
 
 _V2_MESSAGE_MAX_CHARS = 80
+
+
+def _valid_v2_text(value: object, *, max_chars: int = _MAX_V2_TEXT, allow_empty: bool = False) -> bool:
+    return bool(
+        type(value) is str
+        and (allow_empty or bool(value))
+        and len(value) <= max_chars
+        and (not value or value.isprintable())
+    )
+
+
+def _valid_v2_history(history: object) -> bool:
+    """Validate the bounded history union carried but not interpreted here."""
+
+    if type(history) is not list or len(history) > _MAX_V2_HISTORY:
+        return False
+    for row in history:
+        if type(row) is not dict:
+            return False
+        transition = row.get("transition")
+        if type(transition) is not str:
+            return False
+        if transition in {"TRIGGERED", "SEVERITY_UPGRADED"}:
+            expected_keys = {"alarm_id", "transition", "at", "level", "message"}
+        elif transition == "CLEARED":
+            expected_keys = {"alarm_id", "transition", "at", "level"}
+        elif transition == "ACKNOWLEDGED":
+            expected_keys = {"alarm_id", "transition", "at", "level", "operator", "reason"}
+            if "request_id" in row:
+                expected_keys.add("request_id")
+        else:
+            return False
+        timestamp = row.get("at")
+        if (
+            set(row) != expected_keys
+            or not _valid_v2_text(row.get("alarm_id"))
+            or not _valid_v2_text(row.get("level"))
+            or row.get("level") not in _V2_LEVELS
+            or type(timestamp) not in (int, float)
+            or not math.isfinite(float(timestamp))
+            or float(timestamp) < 0.0
+        ):
+            return False
+        if transition in {"TRIGGERED", "SEVERITY_UPGRADED"} and not _valid_v2_text(
+            row.get("message"), max_chars=_MAX_V2_MESSAGE
+        ):
+            return False
+        if transition == "ACKNOWLEDGED":
+            request_id = row.get("request_id")
+            if (
+                not _valid_v2_text(row.get("operator"), allow_empty=True)
+                or not _valid_v2_text(row.get("reason"), max_chars=_MAX_V2_MESSAGE, allow_empty=True)
+                or (
+                    request_id is not None
+                    and (
+                        type(request_id) is not str
+                        or len(request_id) != 32
+                        or any(char not in "0123456789abcdef" for char in request_id)
+                    )
+                )
+            ):
+                return False
+    return True
 
 
 def _label_font() -> QFont:
@@ -155,15 +225,6 @@ def _chip_font() -> QFont:
     return font
 
 
-def _fmt_metric(x: float) -> str:
-    """Format a value/threshold cell. A non-finite (NaN/Inf) reading — e.g. from
-    a faulted sensor — renders as "—" rather than "nan" or a misleading "0", so
-    the operator sees the value is unavailable, not a plausible measurement."""
-    if not math.isfinite(x):
-        return "—"
-    return f"{x:.4g}"
-
-
 def _elapsed_text(elapsed_s: float, *, unit: str = "с") -> str:
     """Format elapsed time with Russian buckets (s / мин / ч)."""
     if elapsed_s < 60:
@@ -177,9 +238,9 @@ class SeverityChip(QLabel):
     """Small pill-shaped severity indicator using DS status tokens.
 
     Replaces the legacy emoji icons per RULE-COPY-005. Color comes
-    from STATUS_FAULT / STATUS_WARNING / STATUS_INFO; text is a short
-    Russian uppercase label in MONO font. Reused by both v1 and v2
-    tables.
+    from STATUS_FAULT / STATUS_CAUTION / STATUS_INFO; legacy warning input is
+    normalized before token lookup, and text is a short
+    Russian uppercase label in MONO font, reused by alarm rows.
     """
 
     def __init__(
@@ -191,15 +252,16 @@ class SeverityChip(QLabel):
     ) -> None:
         super().__init__(parent)
         self._severity = severity.upper()
+        self._display_severity = alarm_level_for_display(severity)
         self._acknowledged = bool(acknowledged)
-        base_label = _SEVERITY_LABELS.get(self._severity, self._severity[:4])
+        base_label = _SEVERITY_LABELS[self._display_severity]
         if self._acknowledged:
             label = f"✓ {base_label}"
             bg_color = theme.SURFACE_MUTED
             fg_color = theme.MUTED_FOREGROUND
         else:
             label = base_label
-            bg_color = _SEVERITY_TOKENS.get(self._severity, theme.STATUS_INFO)
+            bg_color = _SEVERITY_TOKENS[self._display_severity]
             fg_color = theme.ON_PRIMARY
         self.setText(label)
         self.setFont(_chip_font())
@@ -220,13 +282,17 @@ class SeverityChip(QLabel):
     def severity(self) -> str:
         return self._severity
 
+    @property
+    def display_severity(self) -> str:
+        return self._display_severity
+
 
 def _make_ack_button(severity: str, label: str = "ПОДТВЕРДИТЬ") -> QPushButton:
     """Build an acknowledge button colored by severity. No hardcoded hex —
     the color comes from the DS status token for the severity.
     """
     btn = QPushButton(label)
-    color = _SEVERITY_TOKENS.get(severity.upper(), theme.STATUS_FAULT)
+    color = _SEVERITY_TOKENS[alarm_level_for_display(severity)]
     btn.setFont(_chip_font())
     btn.setStyleSheet(
         f"QPushButton {{"
@@ -245,20 +311,6 @@ def _make_ack_button(severity: str, label: str = "ПОДТВЕРДИТЬ") -> QP
     return btn
 
 
-@dataclass
-class _AlarmRow:
-    """Internal row state for v1 alarms."""
-
-    severity: str
-    name: str
-    channel: str
-    value: float
-    threshold: float
-    first_triggered: float
-    trigger_count: int
-    state: str  # "ok" | "active" | "acknowledged" | "cleared"
-
-
 def _card_qss(object_name: str) -> str:
     return (
         f"#{object_name} {{"
@@ -269,22 +321,38 @@ def _card_qss(object_name: str) -> str:
     )
 
 
-class AlarmPanel(QWidget):
-    """Dual-engine alarm overlay (Phase II.4, K1-critical)."""
+class AlarmPanel(OverlayPanelBase, QWidget):
+    """Single-authority phase-aware alarm overlay (K1-critical)."""
 
-    _reading_signal = Signal(object)
-    v2_alarm_count_changed = Signal(int)  # preserved for tray-icon consumer
+    v2_alarm_availability_changed = Signal(bool)
+    v2_alarm_summary_changed = Signal(int, str)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        live_authority: bool = True,
+    ) -> None:
+        if type(live_authority) is not bool:
+            raise TypeError("live_authority must be an exact bool")
+        super().__init__(parent)  # OverlayPanelBase: _connected, _workers
 
-        self._connected: bool = False
-        self._alarms: dict[str, _AlarmRow] = {}
         self._v2_alarms: dict[str, dict] = {}
-        self._workers: list[ZmqCommandWorker] = []
+        self._v2_engine_instance_id: str | None = None
+        self._v2_pending_engine_instance_id: str | None = None
+        self._v2_snapshot_revision: int = -1
+        self._v2_snapshot_authoritative: bool = False
         self._v2_poll_in_flight: bool = False
-        self._v1_ack_buttons: list[QPushButton] = []
+        self._connection_generation: int = 0
         self._v2_ack_buttons: list[QPushButton] = []
+        self._pending_ack_commands: dict[tuple[str, str], dict[str, str]] = {}
+        self._pending_ack_states: dict[tuple[str, str], str] = {}
+        self._pending_ack_in_flight: set[tuple[str, str]] = set()
+        self._read_only: bool = False
+        self._live_capable: bool = live_authority
+        self._live_authority: bool = live_authority
+        self._v2_poll_timer: QTimer | None = None
+        self._cooldown_poll_timer: QTimer | None = None
 
         self.setObjectName("alarmPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -300,16 +368,19 @@ class AlarmPanel(QWidget):
         self._cooldown_poll_in_flight: bool = False
 
         self._build_ui()
-        self._reading_signal.connect(self._handle_reading)
 
-        self._v2_poll_timer = QTimer(self)
-        self._v2_poll_timer.setInterval(_V2_POLL_INTERVAL_MS)
-        self._v2_poll_timer.timeout.connect(self._poll_v2_status)
-        # Polling starts only when shell pushes set_connected(True).
+        if self._live_capable:
+            self._v2_poll_timer = QTimer(self)
+            self._v2_poll_timer.setInterval(_V2_POLL_INTERVAL_MS)
+            self._v2_poll_timer.timeout.connect(self._poll_v2_status)
+            # Polling starts only when shell pushes set_connected(True).
 
-        self._cooldown_poll_timer = QTimer(self)
-        self._cooldown_poll_timer.setInterval(5000)
-        self._cooldown_poll_timer.timeout.connect(self._poll_cooldown_status)
+            self._cooldown_poll_timer = QTimer(self)
+            self._cooldown_poll_timer.setInterval(5000)
+            self._cooldown_poll_timer.timeout.connect(self._poll_cooldown_status)
+        else:
+            self._reject_v2_snapshot("live alarm authority unavailable")
+            self._update_cooldown_ui("UNAVAILABLE", None, None)
 
     # ------------------------------------------------------------------
     # UI
@@ -322,24 +393,19 @@ class AlarmPanel(QWidget):
 
         root.addWidget(self._build_header())
 
-        # IV.3 F2: body is a QStackedWidget. Page 0 is the unified
-        # "both lists empty" message — a single centered line rather
-        # than two cards rendering their own empty tables side-by-side.
-        # Page 1 is the existing two-card layout, preserved verbatim.
+        # Unavailable, authoritative-empty, and retained evidence share one stack.
         self._body_stack = QStackedWidget()
 
         self._body_empty_page = self._build_unified_empty_page()
         self._body_stack.addWidget(self._body_empty_page)
 
-        cards_page = QWidget()
-        cards_layout = QVBoxLayout(cards_page)
-        cards_layout.setContentsMargins(0, 0, 0, 0)
-        cards_layout.setSpacing(theme.SPACE_3)
-        cards_layout.addWidget(self._build_v1_card())
-        cards_layout.addWidget(self._build_v2_card(), stretch=1)
-        self._body_stack.addWidget(cards_page)
+        self._body_v2_page = self._build_v2_card()
+        self._body_stack.addWidget(self._body_v2_page)
 
-        self._body_stack.setCurrentWidget(self._body_empty_page)
+        self._body_unavailable_page = self._build_unavailable_page()
+        self._body_stack.addWidget(self._body_unavailable_page)
+
+        self._body_stack.setCurrentWidget(self._body_unavailable_page)
         root.addWidget(self._body_stack, stretch=1)
         root.addWidget(self._build_cooldown_control())
 
@@ -401,9 +467,7 @@ class AlarmPanel(QWidget):
         # IV.3 F2 amend: unified empty-state title uses MUTED_FOREGROUND
         # per the DS empty-state convention — a full-weight FOREGROUND
         # here competes visually with the actual alarm rows.
-        title.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        title.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(title)
 
         subtitle = QLabel("Система отслеживает все каналы автоматически.")
@@ -411,9 +475,35 @@ class AlarmPanel(QWidget):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" font-style: italic;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; font-style: italic;"
+        )
+        layout.addWidget(subtitle)
+
+        layout.addStretch(1)
+        return page
+
+    def _build_unavailable_page(self) -> QWidget:
+        """Render unknown alarm truth without claiming an empty active set."""
+
+        page = QWidget()
+        page.setObjectName("alarmUnavailable")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(theme.SPACE_5, theme.SPACE_5, theme.SPACE_5, theme.SPACE_5)
+        layout.setSpacing(theme.SPACE_2)
+        layout.addStretch(1)
+
+        title = QLabel("Данные тревог недоступны.")
+        title.setFont(_section_title_font())
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Нет полного авторитетного снимка текущих тревог.")
+        subtitle.setFont(_body_font())
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet(
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; font-style: italic;"
         )
         layout.addWidget(subtitle)
 
@@ -427,66 +517,21 @@ class AlarmPanel(QWidget):
         layout.setSpacing(theme.SPACE_2)
         title = QLabel("ТРЕВОГИ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         self._summary_label = QLabel("")
         self._summary_label.setFont(_label_font())
-        self._summary_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._summary_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         self._summary_label.setVisible(False)
         layout.addWidget(self._summary_label)
+        self._ack_settlement_button = QPushButton("")
+        self._ack_settlement_button.setObjectName("pendingAlarmAckSettlementButton")
+        self._ack_settlement_button.setFont(_label_font())
+        self._ack_settlement_button.setVisible(False)
+        self._ack_settlement_button.clicked.connect(self._retry_next_pending_ack)
+        layout.addWidget(self._ack_settlement_button)
         return header
-
-    def _build_v1_card(self) -> QWidget:
-        card = QFrame()
-        card.setObjectName("alarmV1Card")
-        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        card.setStyleSheet(_card_qss("alarmV1Card"))
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
-        layout.setSpacing(theme.SPACE_2)
-
-        title = QLabel("Пороговые тревоги")
-        title.setFont(_section_title_font())
-        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
-        layout.addWidget(title)
-
-        self._table = QTableWidget(0, len(_V1_COLUMNS))
-        self._table.setHorizontalHeaderLabels(list(_V1_COLUMNS))
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setAlternatingRowColors(False)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setFont(_body_font())
-        self._style_table(self._table)
-        header_v = self._table.horizontalHeader()
-        header_v.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        header_v.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header_v.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        header_v.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self._table)
-
-        # IV.3 F2: inline per-card empty hint. Rendered only when the
-        # body stack is on page 1 (i.e. the OTHER card has data); the
-        # unified empty page handles the both-empty state.
-        self._v1_empty_label = QLabel("Нет пороговых тревог")
-        self._v1_empty_label.setFont(_body_font())
-        self._v1_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._v1_empty_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_2}px;"
-            f" font-style: italic;"
-        )
-        self._v1_empty_label.setVisible(False)
-        layout.addWidget(self._v1_empty_label)
-
-        return card
 
     def _build_v2_card(self) -> QWidget:
         card = QFrame()
@@ -517,24 +562,6 @@ class AlarmPanel(QWidget):
         header_v2.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self._v2_table)
 
-        # IV.3 F2: inline per-card empty hint. Rendered only when the
-        # body stack is on page 1 (i.e. v1 has data but v2 doesn't);
-        # the unified empty page owns the both-empty case. This label
-        # replaces the old "Нет активных алармов. Система отслеживает
-        # все каналы автоматически." text which is now carried by the
-        # unified empty page.
-        self._v2_empty_label = QLabel("Нет фазо-зависимых тревог")
-        self._v2_empty_label.setFont(_body_font())
-        self._v2_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._v2_empty_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_2}px;"
-            f" font-style: italic;"
-        )
-        self._v2_empty_label.setVisible(False)
-        layout.addWidget(self._v2_empty_label)
-
         return card
 
     @staticmethod
@@ -560,23 +587,64 @@ class AlarmPanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def on_reading(self, reading: Reading) -> None:
-        """Thread-safe entry — marshals the reading to the GUI thread."""
-        self._reading_signal.emit(reading)
+    def _start_live_timers(self) -> None:
+        if not self._live_authority:
+            return
+        if self._v2_poll_timer is None or self._cooldown_poll_timer is None:
+            raise RuntimeError("live alarm timer capability is unavailable")
+        if not self._v2_poll_timer.isActive():
+            self._v2_poll_timer.start()
+        if not self._cooldown_poll_timer.isActive():
+            self._cooldown_poll_timer.start()
+
+    def _stop_live_timers(self) -> None:
+        for timer in (self._v2_poll_timer, self._cooldown_poll_timer):
+            if timer is not None:
+                timer.stop()
 
     def set_connected(self, connected: bool) -> None:
-        if connected == self._connected:
+        changed = super().set_connected(connected)
+        if not changed:
+            if not self._live_authority:
+                self._stop_live_timers()
             return
-        self._connected = connected
-        if connected:
-            if not self._v2_poll_timer.isActive():
-                self._v2_poll_timer.start()
-            if not self._cooldown_poll_timer.isActive():
-                self._cooldown_poll_timer.start()
+        self._connection_generation += 1
+        self._v2_poll_in_flight = False
+        self._cooldown_poll_in_flight = False
+        if self._connected and self._live_authority:
+            self._start_live_timers()
         else:
-            self._v2_poll_timer.stop()
-            self._cooldown_poll_timer.stop()
+            self._stop_live_timers()
+            self._v2_snapshot_authoritative = False
+            self.v2_alarm_availability_changed.emit(False)
+            self._update_body_stack_state()
         self._apply_ack_enabled()
+
+    def set_read_only(self, read_only: bool) -> None:
+        """Preserve alarm inspection while disabling replay acknowledgement."""
+
+        self._read_only = bool(read_only)
+        self._apply_ack_enabled()
+
+    def set_live_authority(self, enabled: bool) -> None:
+        """Enable live alarm I/O only for an exact live-runtime authority."""
+
+        if type(enabled) is not bool:
+            raise TypeError("live authority must be an exact bool")
+        if enabled and not self._live_capable:
+            raise RuntimeError("replay alarm panel cannot be promoted to live authority")
+        if enabled != self._live_authority:
+            self._live_authority = enabled
+            self._connection_generation += 1
+        self._v2_poll_in_flight = False
+        self._cooldown_poll_in_flight = False
+        if enabled and self._connected:
+            self._start_live_timers()
+            return
+        self._stop_live_timers()
+        if not enabled:
+            self._reject_v2_snapshot("live authority disabled")
+            self._update_cooldown_ui("UNAVAILABLE", None, None)
 
     def update_v2_status(self, payload: dict) -> None:
         """Update v2 alarm table from an ``alarm_v2_status`` payload.
@@ -584,130 +652,147 @@ class AlarmPanel(QWidget):
         Public path — host or tests can call directly without going
         through the 3 s poll.
         """
-        active = payload.get("active") or {}
-        if not isinstance(active, dict):
-            active = {}
-        self._v2_alarms = dict(active)
+        if not self._live_authority:
+            return
+        if type(payload) is not dict:
+            self._reject_v2_snapshot("ответ не является объектом")
+            return
+        engine_instance_id = payload.get("engine_instance_id")
+        snapshot_revision = payload.get("snapshot_revision")
+        identity_valid = (
+            set(payload) == _V2_STATUS_KEYS
+            and payload.get("ok") is True
+            and type(payload.get("proto")) is int
+            and payload.get("proto") == CLIENT_PROTOCOL_VERSION
+            and is_canonical_engine_instance_id(engine_instance_id)
+            and type(snapshot_revision) is int
+            and snapshot_revision >= 1
+            and _valid_v2_history(payload.get("history"))
+        )
+        active = payload.get("active")
+        validated_active: dict[str, dict] = {}
+        rows_valid = type(active) is dict and len(active) <= _MAX_V2_ALARMS
+        activation_ids: set[str] = set()
+        if rows_valid:
+            for alarm_id, info in active.items():
+                if not _valid_v2_text(alarm_id) or type(info) is not dict or set(info) != _V2_ACTIVE_ROW_KEYS:
+                    rows_valid = False
+                    break
+                level = info.get("level")
+                message = info.get("message")
+                channels = info.get("channels")
+                triggered_at = info.get("triggered_at")
+                acknowledged = info.get("acknowledged")
+                activation_id = info.get("activation_id")
+                acknowledged_by = info.get("acknowledged_by", "")
+                acknowledged_at = info.get("acknowledged_at")
+                if (
+                    type(level) is not str
+                    or level not in _V2_LEVELS
+                    or not _valid_v2_text(message, max_chars=_MAX_V2_MESSAGE)
+                    or type(channels) is not list
+                    or len(channels) > _MAX_V2_CHANNELS
+                    or any(not _valid_v2_text(channel) for channel in channels)
+                    or type(triggered_at) not in (int, float)
+                    or not math.isfinite(float(triggered_at))
+                    or float(triggered_at) < 0
+                    or type(acknowledged) is not bool
+                    or not _valid_v2_text(activation_id)
+                    or activation_id in activation_ids
+                    or not _valid_v2_text(acknowledged_by, allow_empty=True)
+                    or type(acknowledged_at) is not float
+                    or not math.isfinite(acknowledged_at)
+                    or (
+                        acknowledged
+                        and (
+                            acknowledged_at <= 0.0 or not _valid_v2_text(acknowledged_by) or not acknowledged_by.strip()
+                        )
+                    )
+                    or (
+                        not acknowledged
+                        and (
+                            acknowledged_at != 0.0 or math.copysign(1.0, acknowledged_at) < 0.0 or acknowledged_by != ""
+                        )
+                    )
+                ):
+                    rows_valid = False
+                    break
+                activation_ids.add(activation_id)
+                validated = dict(info)
+                validated["channels"] = list(channels)
+                validated_active[alarm_id] = validated
+        if not identity_valid or not rows_valid:
+            self._reject_v2_snapshot("неполная или некорректная идентификация")
+            return
+        accepted_engine_instance_id = self._v2_engine_instance_id
+        pending_engine_instance_id = self._v2_pending_engine_instance_id
+        if pending_engine_instance_id is not None:
+            if engine_instance_id == accepted_engine_instance_id:
+                self._reject_v2_snapshot("устаревшая инкарнация движка")
+                return
+            if engine_instance_id == pending_engine_instance_id and snapshot_revision == 0:
+                self._reject_v2_snapshot("ревизия нового движка ещё не установлена")
+                return
+        if (
+            accepted_engine_instance_id is not None
+            and engine_instance_id != accepted_engine_instance_id
+            and snapshot_revision == 0
+        ):
+            self._v2_pending_engine_instance_id = engine_instance_id
+            self._reject_v2_snapshot("ревизия нового движка ещё не установлена")
+            return
+        if engine_instance_id == self._v2_engine_instance_id:
+            if snapshot_revision < self._v2_snapshot_revision:
+                return
+            if snapshot_revision == self._v2_snapshot_revision and validated_active != self._v2_alarms:
+                self._reject_v2_snapshot("conflicting snapshot revision")
+                return
+        self._v2_pending_engine_instance_id = None
+        self._v2_engine_instance_id = engine_instance_id
+        self._v2_snapshot_revision = snapshot_revision
+        self._v2_snapshot_authoritative = True
+        self._v2_alarms = validated_active
         self._refresh_v2_table()
-        self.v2_alarm_count_changed.emit(len(self._v2_alarms))
+        self.v2_alarm_availability_changed.emit(True)
+        self.v2_alarm_summary_changed.emit(
+            self.get_active_v2_count(),
+            self._worst_attention_level(),
+        )
         self._refresh_summary()
 
-    def get_active_v1_count(self) -> int:
-        return sum(1 for row in self._alarms.values() if row.state == "active")
+    def _reject_v2_snapshot(self, reason: str) -> None:
+        """Retain last-known evidence but revoke authority from malformed data."""
+        self._v2_snapshot_authoritative = False
+        self.v2_alarm_availability_changed.emit(False)
+        self._update_body_stack_state()
+        self._apply_ack_enabled()
+        self._summary_label.setText(f"Данные тревог недоступны: {reason}")
+        self._summary_label.setToolTip("Показаны последние принятые данные; квитирование отключено.")
+        self._summary_label.setVisible(True)
 
     def get_active_v2_count(self) -> int:
-        return len(self._v2_alarms)
+        """Return alarms still demanding operator attention.
 
-    # ------------------------------------------------------------------
-    # v1 reading path
-    # ------------------------------------------------------------------
+        Acknowledgement transfers follow-up responsibility to the operator;
+        it does not remove the row or historical evidence from the panel.
+        """
+        return sum(1 for info in self._v2_alarms.values() if not bool(info.get("acknowledged", False)))
 
-    @Slot(object)
-    def _handle_reading(self, reading: Reading) -> None:
-        meta = reading.metadata or {}
-        alarm_name = meta.get("alarm_name")
-        if not alarm_name:
-            return
-        severity = str(meta.get("severity", "INFO")).upper()
-        event_type = str(meta.get("event_type", ""))
-        threshold_raw = meta.get("threshold", 0.0)
-        try:
-            threshold = float(threshold_raw)
-        except (TypeError, ValueError):
-            threshold = 0.0
-        try:
-            value = float(reading.value)
-        except (TypeError, ValueError):
-            value = 0.0
-        channel_display = str(meta.get("channel", reading.channel))
+    def _worst_attention_level(self) -> str:
+        """Return the worst unacknowledged presentation severity."""
 
-        if alarm_name in self._alarms:
-            row = self._alarms[alarm_name]
-            row.value = value
-            row.channel = channel_display
-            row.severity = severity or row.severity
-            if event_type == "activated":
-                row.trigger_count += 1
-            if event_type in _EVENT_TO_STATE:
-                row.state = _EVENT_TO_STATE[event_type]
-        else:
-            self._alarms[alarm_name] = _AlarmRow(
-                severity=severity,
-                name=alarm_name,
-                channel=channel_display,
-                value=value,
-                threshold=threshold,
-                first_triggered=time.monotonic(),
-                trigger_count=1 if event_type == "activated" else 0,
-                state=_EVENT_TO_STATE.get(event_type, "ok"),
-            )
-
-        self._refresh_table()
-        # IV.3 F2: body-stack state depends on both v1 and v2 counts;
-        # v1 changes through _handle_reading must also trigger the swap.
-        self._update_body_stack_state()
-        self._refresh_summary()
-
-    # ------------------------------------------------------------------
-    # v1 table render
-    # ------------------------------------------------------------------
-
-    def _refresh_table(self) -> None:
-        sorted_alarms = sorted(
-            self._alarms.values(),
-            key=lambda a: (_SEVERITY_ORDER.get(a.severity, 99), a.name),
+        rank = {"INFO": 1, "CAUTION": 2, "CRITICAL": 3, "UNKNOWN": 3}
+        levels = (
+            alarm_level_for_display(str(info.get("level", "")))
+            for info in self._v2_alarms.values()
+            if not bool(info.get("acknowledged", False))
         )
-        self._table.setRowCount(len(sorted_alarms))
-        self._v1_ack_buttons = []
-
-        mono = _mono_cell_font()
-
-        def _cell(text: str, *, mono_font: bool = False) -> QTableWidgetItem:
-            item = QTableWidgetItem(text)
-            if mono_font:
-                item.setFont(mono)
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            return item
-
-        for row_idx, alarm in enumerate(sorted_alarms):
-            # v0.55.4 A1 fix: v0.55.2 only patched the v2 path; the v1
-            # threshold-based table also has acknowledged state on
-            # `alarm.state == "acknowledged"`, so propagate the flag to
-            # SeverityChip and mute the data columns the same way.
-            acknowledged = alarm.state == "acknowledged"
-            chip = SeverityChip(alarm.severity, acknowledged=acknowledged)
-            self._table.setCellWidget(row_idx, 0, chip)
-            self._table.setItem(row_idx, 1, _cell(alarm.name))
-            self._table.setItem(row_idx, 2, _cell(alarm.channel))
-            self._table.setItem(row_idx, 3, _cell(_fmt_metric(alarm.value), mono_font=True))
-            self._table.setItem(row_idx, 4, _cell(_fmt_metric(alarm.threshold), mono_font=True))
-            elapsed = time.monotonic() - alarm.first_triggered
-            self._table.setItem(row_idx, 5, _cell(_elapsed_text(elapsed)))
-            self._table.setItem(row_idx, 6, _cell(str(alarm.trigger_count), mono_font=True))
-            if acknowledged:
-                muted = QColor(theme.MUTED_FOREGROUND)
-                for col in (1, 2, 3, 4, 5, 6):
-                    item = self._table.item(row_idx, col)
-                    if item is not None:
-                        item.setForeground(muted)
-            if alarm.state == "active":
-                btn = _make_ack_button(alarm.severity)
-                btn.clicked.connect(lambda _checked=False, name=alarm.name: self._acknowledge(name))
-                btn.setEnabled(self._connected)
-                self._v1_ack_buttons.append(btn)
-                self._table.setCellWidget(row_idx, 7, btn)
-            else:
-                state_label = {
-                    "ok": "Норма",
-                    "cleared": "Сброшена",
-                    "acknowledged": "Подтв.",
-                }.get(alarm.state, alarm.state)
-                self._table.setItem(row_idx, 7, _cell(state_label))
+        return max(levels, key=rank.__getitem__, default="NONE")
 
     def _refresh_v2_table(self) -> None:
         def _sort_key(kv: tuple[str, dict]) -> tuple[int, str]:
             level = str(kv[1].get("level", "INFO")).upper()
-            return (_SEVERITY_ORDER.get(level, 99), kv[0])
+            return (_SEVERITY_ORDER[alarm_level_for_display(level)], kv[0])
 
         sorted_items = sorted(self._v2_alarms.items(), key=_sort_key)
         self._v2_table.setRowCount(len(sorted_items))
@@ -724,7 +809,8 @@ class AlarmPanel(QWidget):
 
         for row_idx, (alarm_id, info) in enumerate(sorted_items):
             level = str(info.get("level", "INFO")).upper()
-            message = str(info.get("message", ""))
+            full_message = str(info.get("message", ""))
+            message = full_message
             if len(message) > _V2_MESSAGE_MAX_CHARS:
                 message = message[: _V2_MESSAGE_MAX_CHARS - 1] + "…"
             channels_raw = info.get("channels") or []
@@ -744,7 +830,9 @@ class AlarmPanel(QWidget):
             chip = SeverityChip(level, acknowledged=acknowledged)
             self._v2_table.setCellWidget(row_idx, 0, chip)
             self._v2_table.setItem(row_idx, 1, _cell(str(alarm_id), mono_font=True))
-            self._v2_table.setItem(row_idx, 2, _cell(message))
+            message_item = _cell(message)
+            message_item.setToolTip(plain_text_tooltip(full_message))
+            self._v2_table.setItem(row_idx, 2, message_item)
             self._v2_table.setItem(row_idx, 3, _cell(channels_text))
             self._v2_table.setItem(row_idx, 4, _cell(time_text))
             # IV.2 A.2 (v0.55.2): mute non-chip cells when alarm is
@@ -761,7 +849,7 @@ class AlarmPanel(QWidget):
             # IV.2 A.2: v2 rendering previously left the "ПОДТВЕРДИТЬ"
             # button in place even after the engine had recorded the
             # acknowledgement — operators perceived the action as having
-            # no effect and clicked repeatedly. Mirror the v1 branch:
+            # no effect and clicked repeatedly. Once acknowledged,
             # once engine reports acknowledged=True, replace the button
             # with a static label so it's clear the action landed.
             #
@@ -771,68 +859,102 @@ class AlarmPanel(QWidget):
             # it explicitly before each render.
             self._v2_table.removeCellWidget(row_idx, 5)
             self._v2_table.setItem(row_idx, 5, None)
-            if acknowledged:
+            activation_id = info.get("activation_id")
+            identity_available = (
+                self._v2_engine_instance_id is not None and type(activation_id) is str and bool(activation_id)
+            )
+            pending_key = (
+                (self._v2_engine_instance_id, activation_id)
+                if self._v2_engine_instance_id is not None and type(activation_id) is str
+                else None
+            )
+            pending_command = self._pending_ack_commands.get(pending_key) if pending_key is not None else None
+            if acknowledged and pending_command is None:
                 operator = str(info.get("acknowledged_by") or "").strip()
                 ack_text = "Подтв." if not operator else f"Подтв. ({operator})"
                 ack_item = _cell(ack_text)
                 ack_item.setForeground(QColor(theme.MUTED_FOREGROUND))
                 self._v2_table.setItem(row_idx, 5, ack_item)
             else:
-                btn = _make_ack_button(level, label="ПОДТВЕРДИТЬ")
-                btn.clicked.connect(lambda _checked=False, aid=alarm_id: self._acknowledge_v2(aid))
-                btn.setEnabled(self._connected)
+                retained_pending = pending_command is not None and pending_key is not None
+                if retained_pending:
+                    if pending_key in self._pending_ack_in_flight:
+                        label = "ОЖИДАНИЕ"
+                    elif self._pending_ack_states.get(pending_key) == "outcome_unknown":
+                        label = "ПОВТОРИТЬ"
+                    else:
+                        label = "ЗАВЕРШИТЬ"
+                else:
+                    label = "ПОДТВЕРДИТЬ"
+                btn = _make_ack_button(level, label=label)
+                btn.setProperty("activationIdentityAvailable", identity_available)
+                btn.setProperty("retainedPendingAck", retained_pending)
+                btn.setProperty("engineInstanceId", self._v2_engine_instance_id or "")
+                btn.setProperty("activationId", activation_id if type(activation_id) is str else "")
+                if not identity_available:
+                    btn.setToolTip("Квитирование недоступно: нет точной идентификации срабатывания")
+                elif retained_pending:
+                    btn.setToolTip(
+                        "Повторить точную сохранённую команду и завершить обязательную публикацию квитирования"
+                    )
+
+                if retained_pending:
+
+                    def _ack_exact(_checked=False, key=pending_key) -> None:
+                        self._retry_pending_ack(key)
+
+                else:
+
+                    def _ack_exact(
+                        _checked=False,
+                        aid=alarm_id,
+                        engine_id=self._v2_engine_instance_id,
+                        activation=activation_id,
+                    ) -> None:
+                        self._acknowledge_v2(aid, engine_id, activation)
+
+                btn.clicked.connect(_ack_exact)
                 self._v2_ack_buttons.append(btn)
                 self._v2_table.setCellWidget(row_idx, 5, btn)
 
-        # IV.3 F2: v2_empty_label visibility is now owned by
-        # _update_body_stack_state; don't toggle it here.
         self._update_body_stack_state()
+        self._apply_ack_enabled()
 
     def _update_body_stack_state(self) -> None:
-        """Swap the body stack between unified empty and two-card layout.
+        """Select unavailable, authoritative-empty, or retained evidence.
 
-        IV.3 F2: when both v1 and v2 are empty, show a single centered
-        "Нет активных тревог." message across the overlay body. When
-        at least one list has entries, show the two-card layout; the
-        card whose table has zero rows gets its inline
-        «Нет <...> тревог» hint so the operator can tell the empty
-        card from a broken one.
+        Empty truth is shown only after a complete authoritative live snapshot.
+        Before that, show explicit unavailability. Retained historical rows
+        remain visible even after their authority is revoked.
         """
-        v1_count = self.get_active_v1_count()
-        v2_count = len(self._v2_alarms)
-        both_empty = v1_count == 0 and v2_count == 0
-        target_idx = 0 if both_empty else 1
-        if self._body_stack.currentIndex() != target_idx:
-            self._body_stack.setCurrentIndex(target_idx)
-        # Inline per-card hint only when the OTHER card has data.
-        self._v1_empty_label.setVisible(not both_empty and v1_count == 0)
-        self._v2_empty_label.setVisible(not both_empty and v2_count == 0)
+        # Body visibility follows unresolved evidence rows, not the red
+        # attention count. Acknowledged rows remain inspectable; explicitly
+        # cleared/OK history may leave the active body.
+        if self._v2_alarms:
+            target = self._body_v2_page
+        elif self._live_authority and self._v2_snapshot_authoritative:
+            target = self._body_empty_page
+        else:
+            target = self._body_unavailable_page
+        if self._body_stack.currentWidget() is not target:
+            self._body_stack.setCurrentWidget(target)
 
     def _refresh_summary(self) -> None:
-        v1_active = self.get_active_v1_count()
-        v2_counts: dict[str, int] = {"CRITICAL": 0, "WARNING": 0, "INFO": 0}
+        v2_counts: dict[str, int] = {
+            "CRITICAL": 0,
+            "CAUTION": 0,
+            "INFO": 0,
+            "UNKNOWN": 0,
+        }
         for info in self._v2_alarms.values():
-            level = str(info.get("level", "INFO")).upper()
-            if level in v2_counts:
-                v2_counts[level] += 1
-        total_critical = (
-            sum(
-                1
-                for row in self._alarms.values()
-                if row.state == "active" and row.severity == "CRITICAL"
-            )
-            + v2_counts["CRITICAL"]
-        )
-        total_warning = (
-            sum(
-                1
-                for row in self._alarms.values()
-                if row.state == "active" and row.severity == "WARNING"
-            )
-            + v2_counts["WARNING"]
-        )
+            if bool(info.get("acknowledged", False)):
+                continue
+            level = alarm_level_for_display(str(info.get("level", "INFO")))
+            v2_counts[level] += 1
+        total_critical = v2_counts["CRITICAL"] + v2_counts["UNKNOWN"]
+        total_caution = v2_counts["CAUTION"]
 
-        if total_critical == 0 and total_warning == 0 and v1_active == 0:
+        if total_critical == 0 and total_caution == 0:
             self._summary_label.setText("")
             self._summary_label.setVisible(False)
             return
@@ -841,9 +963,9 @@ class AlarmPanel(QWidget):
         if total_critical:
             word = ru_plural(total_critical, "критический", "критических", "критических")
             parts.append(f"{total_critical} {word}")
-        if total_warning:
-            word = ru_plural(total_warning, "предупреждение", "предупреждения", "предупреждений")
-            parts.append(f"{total_warning} {word}")
+        if total_caution:
+            word = ru_plural(total_caution, "требует внимания", "требуют внимания", "требуют внимания")
+            parts.append(f"{total_caution} {word}")
         self._summary_label.setText(", ".join(parts))
         self._summary_label.setVisible(True)
 
@@ -851,41 +973,176 @@ class AlarmPanel(QWidget):
     # Acknowledge dispatch
     # ------------------------------------------------------------------
 
-    def _acknowledge(self, alarm_name: str) -> None:
-        worker = ZmqCommandWorker(
-            {"cmd": "alarm_acknowledge", "alarm_name": alarm_name}, parent=self
-        )
-        worker.finished.connect(lambda result, name=alarm_name: self._on_ack_result(result, name))
-        self._workers.append(worker)
-        worker.start()
+    @staticmethod
+    def _valid_ack_audit_text(value: object) -> bool:
+        return type(value) is str and bool(value.strip()) and len(value) <= 256 and value.isprintable()
 
-    def _on_ack_result(self, result: dict, alarm_name: str) -> None:
-        self._workers = [w for w in self._workers if w.isRunning()]
-        if result.get("ok"):
-            logger.info("Alarm '%s' acknowledged via engine", alarm_name)
-        else:
-            logger.warning(
-                "Alarm '%s' acknowledge failed: %s",
-                alarm_name,
-                result.get("error"),
+    def _refresh_pending_ack_affordance(self) -> None:
+        count = len(self._pending_ack_commands)
+        self._ack_settlement_button.setVisible(count > 0)
+        if count == 0:
+            self._ack_settlement_button.setText("")
+            self._ack_settlement_button.setToolTip("")
+            self._ack_settlement_button.setEnabled(False)
+            return
+        available = any(key not in self._pending_ack_in_flight for key in self._pending_ack_commands)
+        self._ack_settlement_button.setText(f"ЗАВЕРШИТЬ ПУБЛИКАЦИЮ ({count})")
+        self._ack_settlement_button.setToolTip(
+            f"Незавершённых квитирований: {count}. "
+            "Повторяется только точная сохранённая команда с тем же идентификатором запроса."
+        )
+        self._ack_settlement_button.setEnabled(
+            self._connected and self._live_authority and not self._read_only and available
+        )
+
+    def _retry_next_pending_ack(self) -> None:
+        for pending_key in sorted(self._pending_ack_commands):
+            if pending_key not in self._pending_ack_in_flight:
+                self._retry_pending_ack(pending_key)
+                return
+
+    def _retry_pending_ack(self, pending_key: tuple[str, str] | None) -> None:
+        if pending_key is None:
+            return
+        command = self._pending_ack_commands.get(pending_key)
+        if command is None:
+            self._refresh_pending_ack_affordance()
+            return
+        self._dispatch_pending_ack(command)
+
+    def _dispatch_pending_ack(self, command: dict[str, str]) -> None:
+        engine_instance_id = command.get("engine_instance_id")
+        activation_id = command.get("activation_id")
+        alarm_id = command.get("alarm_name")
+        if not all(type(value) is str and bool(value) for value in (engine_instance_id, activation_id, alarm_id)):
+            logger.error("Retained alarm acknowledgement identity is invalid")
+            return
+        pending_key = (engine_instance_id, activation_id)
+        if self._pending_ack_commands.get(pending_key) is not command:
+            logger.error("Retained alarm acknowledgement command identity changed")
+            return
+        if pending_key in self._pending_ack_in_flight:
+            return
+        if not self._connected or not self._live_authority or self._read_only:
+            self._apply_ack_enabled()
+            return
+
+        self._pending_ack_in_flight.add(pending_key)
+        self._pending_ack_states[pending_key] = "submitting"
+        self._apply_ack_enabled()
+        try:
+            worker = ZmqCommandWorker(command, parent=self)
+            self._register_worker(
+                worker,
+                lambda result, aid=alarm_id, cmd=command: self._on_ack_v2_result(result, aid, cmd),
+            )
+        except Exception as exc:
+            self._pending_ack_in_flight.discard(pending_key)
+            self._pending_ack_states[pending_key] = "outcome_unknown"
+            self._apply_ack_enabled()
+            logger.error(
+                "Alarm v2 '%s' acknowledgement worker failed to start: %s",
+                alarm_id,
+                type(exc).__name__,
             )
 
-    def _acknowledge_v2(self, alarm_id: str) -> None:
-        worker = ZmqCommandWorker({"cmd": "alarm_v2_ack", "alarm_name": alarm_id}, parent=self)
-        worker.finished.connect(lambda result, aid=alarm_id: self._on_ack_v2_result(result, aid))
-        self._workers.append(worker)
-        worker.start()
+    def _acknowledge_v2(
+        self,
+        alarm_id: str,
+        engine_instance_id: str | None = None,
+        activation_id: str | None = None,
+    ) -> None:
+        if not self._live_authority or self._read_only:
+            return
+        if not self._v2_snapshot_authoritative:
+            logger.warning("Alarm v2 '%s' acknowledgement blocked: snapshot unavailable", alarm_id)
+            return
+        if engine_instance_id is None and activation_id is None:
+            info = self._v2_alarms.get(alarm_id) or {}
+            engine_instance_id = self._v2_engine_instance_id
+            activation_id = info.get("activation_id")
+        if (
+            type(engine_instance_id) is not str
+            or not engine_instance_id
+            or type(activation_id) is not str
+            or not activation_id
+        ):
+            logger.warning("Alarm v2 '%s' acknowledgement blocked: activation identity unavailable", alarm_id)
+            return
+        pending_key = (engine_instance_id, activation_id)
+        command = self._pending_ack_commands.get(pending_key)
+        if command is None:
+            if len(self._pending_ack_commands) >= _MAX_PENDING_ACKS:
+                logger.error("Alarm acknowledgement lane is full; resolve retained outcomes before retry")
+                return
+            operator, accepted = QInputDialog.getText(
+                self,
+                "Подтверждение тревоги",
+                "Оператор:",
+                QLineEdit.EchoMode.Normal,
+            )
+            if not accepted or not self._valid_ack_audit_text(operator):
+                logger.warning("Alarm v2 '%s' acknowledgement blocked: operator identity invalid", alarm_id)
+                return
+            reason, accepted = QInputDialog.getText(
+                self,
+                "Подтверждение тревоги",
+                "Причина / комментарий:",
+                QLineEdit.EchoMode.Normal,
+            )
+            if not accepted or not self._valid_ack_audit_text(reason):
+                logger.warning("Alarm v2 '%s' acknowledgement blocked: reason invalid", alarm_id)
+                return
+            operator = operator.strip()
+            reason = reason.strip()
+            command = {
+                "cmd": "alarm_v2_ack",
+                "alarm_name": alarm_id,
+                "engine_instance_id": engine_instance_id,
+                "activation_id": activation_id,
+                "operator": operator,
+                "reason": reason,
+                "request_id": deterministic_alarm_ack_request_id(
+                    alarm_name=alarm_id,
+                    engine_instance_id=engine_instance_id,
+                    activation_id=activation_id,
+                    operator=operator,
+                    reason=reason,
+                ),
+            }
+            self._pending_ack_commands[pending_key] = command
+            self._pending_ack_states[pending_key] = "submitting"
+        self._dispatch_pending_ack(command)
 
-    def _on_ack_v2_result(self, result: dict, alarm_id: str) -> None:
-        self._workers = [w for w in self._workers if w.isRunning()]
-        if result.get("ok"):
+    def _on_ack_v2_result(self, result: object, alarm_id: str, command: dict[str, str]) -> None:
+        settlement = validate_alarm_ack_wire_result(
+            result,
+            command,
+            expected_proto=CLIENT_PROTOCOL_VERSION,
+        )
+        pending_key = (command["engine_instance_id"], command["activation_id"])
+        self._pending_ack_in_flight.discard(pending_key)
+        retained_is_exact = self._pending_ack_commands.get(pending_key) is command
+        if settlement == "published" and retained_is_exact:
+            self._pending_ack_commands.pop(pending_key, None)
+            self._pending_ack_states.pop(pending_key, None)
             logger.info("Alarm v2 '%s' acknowledged", alarm_id)
+        elif settlement == "pending" and retained_is_exact:
+            self._pending_ack_states[pending_key] = "pending"
+            logger.warning("Alarm v2 '%s' acknowledgement committed; publication remains pending", alarm_id)
+        elif settlement == "aborted" and retained_is_exact:
+            self._pending_ack_commands.pop(pending_key, None)
+            self._pending_ack_states.pop(pending_key, None)
+            logger.warning("Alarm v2 '%s' acknowledgement was terminally aborted", alarm_id)
         else:
+            if retained_is_exact:
+                self._pending_ack_states[pending_key] = "outcome_unknown"
             logger.warning(
                 "Alarm v2 '%s' acknowledge failed: %s",
                 alarm_id,
-                result.get("error"),
+                result.get("error") if type(result) is dict else "invalid response",
             )
+        self._refresh_v2_table()
 
     # ------------------------------------------------------------------
     # v2 polling
@@ -893,23 +1150,29 @@ class AlarmPanel(QWidget):
 
     @Slot()
     def _poll_v2_status(self) -> None:
-        if not self._connected:
+        if not self._live_authority or not self._connected:
             return
         if self._v2_poll_in_flight:
             return
         self._v2_poll_in_flight = True
+        generation = self._connection_generation
         worker = ZmqCommandWorker({"cmd": "alarm_v2_status"}, parent=self)
-        worker.finished.connect(self._on_poll_v2_result)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(
+            worker,
+            lambda result, generation=generation: self._on_poll_v2_result(
+                result,
+                generation,
+            ),
+        )
 
-    def _on_poll_v2_result(self, result: dict) -> None:
-        self._v2_poll_in_flight = False
-        self._workers = [w for w in self._workers if w.isRunning()]
-        if not isinstance(result, dict):
+    def _on_poll_v2_result(self, result: dict, generation: int) -> None:
+        if not self._live_authority or generation != self._connection_generation or not self._connected:
             return
-        if result.get("ok"):
-            self.update_v2_status(result)
+        self._v2_poll_in_flight = False
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            self._reject_v2_snapshot("engine status unavailable")
+            return
+        self.update_v2_status(result)
 
     # ------------------------------------------------------------------
     # Cooldown alarm control
@@ -917,17 +1180,25 @@ class AlarmPanel(QWidget):
 
     @Slot()
     def _poll_cooldown_status(self) -> None:
-        if not self._connected or self._cooldown_poll_in_flight:
+        if not self._live_authority or not self._connected or self._cooldown_poll_in_flight:
             return
         self._cooldown_poll_in_flight = True
+        generation = self._connection_generation
         worker = ZmqCommandWorker({"cmd": "cooldown_alarm.status"}, parent=self)
-        worker.finished.connect(self._on_cooldown_status)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(
+            worker,
+            lambda result, generation=generation: self._on_cooldown_status(
+                result,
+                generation=generation,
+            ),
+        )
 
-    def _on_cooldown_status(self, result: dict) -> None:
+    def _on_cooldown_status(self, result: dict, *, generation: int | None = None) -> None:
+        if not self._live_authority:
+            return
+        if generation is not None and (generation != self._connection_generation or not self._connected):
+            return
         self._cooldown_poll_in_flight = False
-        self._workers = [w for w in self._workers if w.isRunning()]
         if not isinstance(result, dict):
             return
         state = result.get("state", "UNAVAILABLE")
@@ -962,14 +1233,15 @@ class AlarmPanel(QWidget):
             "WATCHDOG_FIRED": "Предупреждение: холодная ступень нагревается",
             "UNAVAILABLE": "Недоступен",
         }
-        self._cooldown_status_lbl.setText(_STATE_LABELS.get(state, state))
+        self._cooldown_status_lbl.setText(_STATE_LABELS.get(state, f"Неизвестное состояние: {state}"))
         color = theme.MUTED_FOREGROUND
         if state in ("FIRED", "WATCHDOG_FIRED"):
             color = theme.STATUS_FAULT
         elif state in ("ARMED", "WATCHING", "WATCHDOG"):
             color = theme.ACCENT
         elif state == "AUTO_DISARMED":
-            color = theme.STATUS_OK
+            # Completion is phase evidence, not a safety-health verdict.
+            color = theme.ACCENT
         self._cooldown_status_lbl.setStyleSheet(f"color: {color};")
 
         # ETA + progress bar: shown for WATCHING/FIRED; hidden for WATCHDOG modes
@@ -1000,9 +1272,34 @@ class AlarmPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _apply_ack_enabled(self) -> None:
-        for btn in list(self._v1_ack_buttons) + list(self._v2_ack_buttons):
+        for btn in list(self._v2_ack_buttons):
             try:
-                btn.setEnabled(self._connected)
+                retained_pending = bool(btn.property("retainedPendingAck"))
+                if retained_pending:
+                    engine_instance_id = btn.property("engineInstanceId")
+                    activation_id = btn.property("activationId")
+                    pending_key = (engine_instance_id, activation_id)
+                    identity_available = bool(btn.property("activationIdentityAvailable"))
+                    command_available = (
+                        pending_key in self._pending_ack_commands and pending_key not in self._pending_ack_in_flight
+                    )
+                    btn.setEnabled(
+                        self._connected
+                        and self._live_authority
+                        and not self._read_only
+                        and identity_available
+                        and command_available
+                    )
+                else:
+                    identity_available = (
+                        self._v2_snapshot_authoritative
+                        and self._v2_engine_instance_id is not None
+                        and bool(btn.property("activationIdentityAvailable"))
+                    )
+                    btn.setEnabled(
+                        self._connected and self._live_authority and not self._read_only and identity_available
+                    )
             except RuntimeError:
                 # Button's C++ object already gone (row rebuilt) — prune.
                 continue
+        self._refresh_pending_ack_affordance()

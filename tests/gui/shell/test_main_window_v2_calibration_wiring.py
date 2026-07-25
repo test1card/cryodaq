@@ -17,6 +17,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 
@@ -53,6 +60,25 @@ def _raw_reading(channel: str, value: float) -> Reading:
         unit="sensor_unit",
         metadata={},
     )
+
+
+def _dispatch_described(w: MainWindowV2, reading: Reading, quantity: ChannelQuantity) -> None:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=reading.channel,
+        instrument_id=reading.instrument_id,
+        source_key="test.calibration",
+        quantity=quantity,
+        unit=reading.unit,
+        role=ChannelRole.REFERENCE_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="калибровка",
+        display_name="Test calibration channel",
+        visible_by_default=True,
+        display_order=0,
+        descriptor_revision=1,
+    )
+    w.dispatch_qualified_reading(DescriptorQualifiedReading(reading=reading, descriptor=descriptor))
 
 
 # ----------------------------------------------------------------------
@@ -103,13 +129,7 @@ def test_tick_sets_overlay_connected_false_when_stale():
 # ----------------------------------------------------------------------
 
 
-def test_k_reading_reaches_overlay():
-    """Shell dispatcher must call CalibrationPanel.on_reading for K-unit readings.
-
-    The overlay filters internally (_raw/sensor_unit only) and in SETUP mode
-    drops K readings — so _live_text stays empty — but the dispatch contract
-    is verified by spying the call.
-    """
+def test_temperature_descriptor_does_not_reach_calibration_raw_overlay():
     _app()
     w = MainWindowV2()
     try:
@@ -122,33 +142,14 @@ def test_k_reading_reaches_overlay():
             return original_on_reading(r)
 
         w._calibration_panel.on_reading = spy  # type: ignore[method-assign]
-        w._dispatch_reading(_k_reading("Т1", 77.3))
-        # Shell must have called on_reading exactly once.
-        assert len(received) == 1
-        assert received[0].channel == "Т1"
+        reading = _k_reading("Т1", 77.3)
+        _dispatch_described(w, reading, ChannelQuantity.TEMPERATURE)
+        assert received == []
     finally:
         _stop_timers(w)
 
 
-def test_calibration_raw_reading_routing_contract():
-    """Two distinct contracts on one hosted panel (one MainWindowV2 — keeps
-    QThread churn at baseline):
-
-    (A) SHELL contract — CURRENT behavior: MainWindowV2._dispatch_reading forwards
-        only ``unit == "K"`` readings to calibration (main_window_v2.py:438), so a
-        raw / ``sensor_unit`` reading dispatched through the shell does NOT reach
-        the panel's live acquisition feed.
-    (B) PANEL contract: CalibrationPanel.on_reading, called directly with a raw
-        reading in acquisition mode, DOES render it in the live feed.
-
-    DEFERRED-CALIB-ROUTING (architect): CalibrationPanel.on_reading is documented
-    (calibration_panel.py:10) to route ``_raw`` / ``sensor_unit`` readings to the
-    live feed, yet the shell never forwards them — acquisition stats instead
-    arrive via the ``calibration_acquisition_status`` poll (_on_mode_result).
-    Whether the shell SHOULD also forward sensor_unit readings to populate the
-    live raw-pair feed during acquisition is an open Calibration-v2 data-flow
-    question for the architect, NOT auto-patched here. (A) pins current behavior
-    so a future intentional change is visible."""
+def test_calibration_raw_descriptor_reaches_live_feed():
     from PySide6.QtCore import QCoreApplication
 
     _app()
@@ -157,17 +158,10 @@ def test_calibration_raw_reading_routing_contract():
         w._ensure_overlay("calibration")
         w._calibration_panel._on_mode_result({"ok": True, "active": True, "point_count": 0})
 
-        # (A) Shell forwards only unit=="K": a raw reading via the shell does not
-        #     reach the live feed.
-        w._dispatch_reading(_raw_reading("Т1_raw", 1234.5))
+        _dispatch_described(w, _raw_reading("Т1_raw", 1234.5), ChannelQuantity.RAW_SENSOR)
         QCoreApplication.processEvents()
         text_after_shell = w._calibration_panel._acquisition_widget._live_text.toPlainText()
-        assert "Т1_raw" not in text_after_shell
-
-        # (B) Panel-level: on_reading called directly with a raw reading renders it.
-        w._calibration_panel.on_reading(_raw_reading("Т2_raw", 2345.6))
-        text_after_panel = w._calibration_panel._acquisition_widget._live_text.toPlainText()
-        assert "Т2_raw" in text_after_panel
+        assert "Т1_raw" in text_after_shell
     finally:
         _stop_timers(w)
 

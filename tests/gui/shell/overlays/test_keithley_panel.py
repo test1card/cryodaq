@@ -26,6 +26,17 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+def _connect_authorized(panel: KeithleyPanel, *, source_state: str | None = "off") -> None:
+    """Model connection, Safety authority, and optional source-state evidence."""
+
+    panel.set_connected(True)
+    panel.set_safety_ready(True)
+    if source_state is not None:
+        for block in panel._blocks.values():
+            block.apply_state(source_state)
+    panel._update_both_buttons_enablement()
+
+
 def _process_events_until(condition, *, timeout_ms: int = 600) -> None:
     """Process Qt events until condition() returns True or timeout elapses.
 
@@ -199,7 +210,7 @@ def test_disconnected_disables_normal_controls_keeps_emergency(app):
 
 def test_connected_off_state_enables_spins_and_start(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     assert panel._smua_block._p_spin.isEnabled()
     assert panel._smua_block._start_btn.isEnabled()
     # Stop is meaningless when channel is already off.
@@ -215,7 +226,7 @@ def test_connected_off_state_enables_spins_and_start(app):
 
 def test_safety_not_ready_disables_controls_except_emergency(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel.set_safety_ready(False, reason="fault_latched: канал Т11")
     assert not panel._smua_block._start_btn.isEnabled()
     assert not panel._smua_block._p_spin.isEnabled()
@@ -230,7 +241,7 @@ def test_safety_not_ready_disables_controls_except_emergency(app):
 
 def test_safety_ready_restores_controls(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel.set_safety_ready(False, reason="blocked")
     panel.set_safety_ready(True)
     assert panel._smua_block._start_btn.isEnabled()
@@ -244,7 +255,7 @@ def test_safety_ready_restores_controls(app):
 
 def test_start_click_emits_signal_with_default_spin_values(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     seen: list[tuple[str, float, float, float]] = []
     panel.channel_start_requested.connect(lambda k, p, v, i: seen.append((k, p, v, i)))
     dispatched = _spy_dispatch(panel._smua_block)
@@ -264,7 +275,7 @@ def test_start_click_emits_signal_with_default_spin_values(app):
 
 def test_start_click_reflects_user_adjusted_spins(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel._smua_block._p_spin.setValue(1.234)
     panel._smua_block._v_spin.setValue(50.0)
     panel._smua_block._i_spin.setValue(0.5)
@@ -286,7 +297,7 @@ def test_start_click_reflects_user_adjusted_spins(app):
 
 def test_stop_click_emits_channel_signal(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel._smua_block.apply_state("on")
     seen: list[str] = []
     panel.channel_stop_requested.connect(seen.append)
@@ -304,15 +315,13 @@ def test_stop_click_emits_channel_signal(app):
 
 def test_emergency_requires_warning_confirmation(app, monkeypatch):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     seen: list[str] = []
     panel.channel_emergency_requested.connect(seen.append)
     dispatched = _spy_dispatch(panel._smua_block)
     try:
         # RULE-INTER-004: destructive action uses QMessageBox.warning (not .question).
-        monkeypatch.setattr(
-            QMessageBox, "warning", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
-        )
+        monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok))
         panel._smua_block._emergency_btn.click()
 
         assert seen == ["smua"]
@@ -325,7 +334,7 @@ def test_emergency_requires_warning_confirmation(app, monkeypatch):
 
 def test_emergency_cancel_suppresses_signal(app, monkeypatch):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     seen: list[str] = []
     panel.channel_emergency_requested.connect(seen.append)
     dispatched = _spy_dispatch(panel._smua_block)
@@ -413,7 +422,7 @@ def test_x_axis_has_time_label(app):
 
 def test_p_spin_debounces_to_single_signal_when_on(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel._smua_block.apply_state("on")
     seen: list[tuple[str, float]] = []
     panel.channel_target_updated.connect(lambda k, p: seen.append((k, p)))
@@ -438,7 +447,7 @@ def test_p_spin_debounces_to_single_signal_when_on(app):
 
 def test_limits_spin_debounces_to_single_signal_when_on(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel._smub_block.apply_state("on")
     seen: list[tuple[str, float, float]] = []
     panel.channel_limits_updated.connect(lambda k, v, i: seen.append((k, v, i)))
@@ -453,9 +462,7 @@ def test_limits_spin_debounces_to_single_signal_when_on(app):
 
         assert seen == [("smub", 42.0, 0.75)]
         # SAFETY: exact set_limits command with final spin values.
-        assert dispatched == [
-            {"cmd": "keithley_set_limits", "channel": "smub", "v_comp": 42.0, "i_comp": 0.75}
-        ]
+        assert dispatched == [{"cmd": "keithley_set_limits", "channel": "smub", "v_comp": 42.0, "i_comp": 0.75}]
         assert all(w.started for w in dispatched.workers), "ZmqCommandWorker.start() not called"
     finally:
         _restore_spy(panel._smub_block)
@@ -463,7 +470,7 @@ def test_limits_spin_debounces_to_single_signal_when_on(app):
 
 def test_p_spin_suppressed_when_channel_off(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     # Default state is "off".
     seen: list = []
     panel.channel_target_updated.connect(lambda *a: seen.append(a))
@@ -484,7 +491,7 @@ def test_p_spin_suppressed_when_channel_off(app):
 
 def test_p_spin_suppressed_when_channel_fault(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel._smua_block.apply_state("fault")
     seen: list = []
     panel.channel_target_updated.connect(lambda *a: seen.append(a))
@@ -509,7 +516,7 @@ def test_p_spin_suppressed_when_channel_fault(app):
 
 def test_start_ab_emits_panel_signal_and_shows_banner(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     count = {"n": 0}
     panel.both_channels_start_requested.connect(lambda: count.__setitem__("n", count["n"] + 1))
     dispatched_a = _spy_dispatch(panel._smua_block)
@@ -536,9 +543,10 @@ def test_start_ab_emits_panel_signal_and_shows_banner(app):
 
 def test_stop_ab_emits_panel_signal(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel._smua_block.apply_state("on")
     panel._smub_block.apply_state("on")
+    panel._update_both_buttons_enablement()
     count = {"n": 0}
     panel.both_channels_stop_requested.connect(lambda: count.__setitem__("n", count["n"] + 1))
     dispatched_a = _spy_dispatch(panel._smua_block)
@@ -559,7 +567,7 @@ def test_stop_ab_emits_panel_signal(app):
 
 def test_emergency_ab_single_dialog_then_emits(app, monkeypatch):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     calls = {"dialog": 0}
 
     def _fake_warning(*args, **kwargs):
@@ -568,9 +576,7 @@ def test_emergency_ab_single_dialog_then_emits(app, monkeypatch):
 
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(_fake_warning))
     emits = {"panel": 0, "per_channel": []}
-    panel.both_channels_emergency_requested.connect(
-        lambda: emits.__setitem__("panel", emits["panel"] + 1)
-    )
+    panel.both_channels_emergency_requested.connect(lambda: emits.__setitem__("panel", emits["panel"] + 1))
     panel.channel_emergency_requested.connect(lambda k: emits["per_channel"].append(k))
     dispatched_a = _spy_dispatch(panel._smua_block)
     dispatched_b = _spy_dispatch(panel._smub_block)
@@ -600,7 +606,7 @@ def test_emergency_ab_single_dialog_then_emits(app, monkeypatch):
 def test_teeth_wrong_channel_fails(app):
     """Assert that dispatching with wrong channel is detected by the spy."""
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     dispatched = _spy_dispatch(panel._smua_block)
     try:
         panel._smua_block._start_btn.click()
@@ -621,7 +627,7 @@ def test_teeth_wrong_channel_fails(app):
 def test_teeth_wrong_cmd_name_fails(app, monkeypatch):
     """Assert that a wrong cmd name is detected — proves stop test is real."""
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel._smua_block.apply_state("on")
     dispatched = _spy_dispatch(panel._smua_block)
     try:
@@ -650,10 +656,11 @@ def test_voltage_reading_updates_readout_label(app):
 
 def test_state_badge_on(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel.on_reading(_state_reading("smua", "on"))
     assert panel._smua_block._state_badge.text() == "ВКЛ"
-    assert theme.STATUS_OK in panel._smua_block._state_badge.styleSheet()
+    assert theme.ACCENT in panel._smua_block._state_badge.styleSheet()
+    assert theme.STATUS_OK not in panel._smua_block._state_badge.styleSheet()
     # Start disabled, stop enabled.
     assert not panel._smua_block._start_btn.isEnabled()
     assert panel._smua_block._stop_btn.isEnabled()
@@ -661,19 +668,30 @@ def test_state_badge_on(app):
 
 def test_state_badge_fault_draws_fault_border(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel.on_reading(_state_reading("smua", "fault"))
     assert panel._smua_block._state_badge.text() == "АВАРИЯ"
     assert theme.STATUS_FAULT in panel._smua_block._state_badge.styleSheet()
     assert f"3px solid {theme.STATUS_FAULT}" in panel._smua_block.styleSheet()
 
 
-def test_state_badge_off_default(app):
+def test_state_badge_unknown_default_is_fail_closed(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
-    assert panel._smua_block._state_badge.text() == "ВЫКЛ"
-    assert panel._smua_block._start_btn.isEnabled()
+    _connect_authorized(panel, source_state=None)
+    assert panel._smua_block._state_badge.text() == "НЕИЗВЕСТНО"
+    assert theme.STATUS_CAUTION in panel._smua_block._state_badge.styleSheet()
+    assert not panel._smua_block._start_btn.isEnabled()
     assert not panel._smua_block._stop_btn.isEnabled()
+
+
+def test_unrecognized_source_state_never_masquerades_as_off(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    panel._smua_block.apply_state("unexpected-new-state")
+    assert panel._smua_block._channel_state == "unknown"
+    assert panel._smua_block._state_badge.text().startswith("НЕИЗВЕСТНО")
+    assert "последнее: ВЫКЛ" in panel._smua_block._state_badge.text()
+    assert not panel._smua_block._start_btn.isEnabled()
 
 
 # ----------------------------------------------------------------------
@@ -683,7 +701,7 @@ def test_state_badge_off_default(app):
 
 def test_stale_styling_only_when_on(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel.on_reading(_state_reading("smua", "on"))
     panel.on_reading(_reading("Keithley_1/smua/voltage", 1.0, "V"))
     # Force the block's last_update_ts to be old enough to stale.
@@ -696,7 +714,7 @@ def test_stale_styling_only_when_on(app):
 
 def test_stale_not_applied_when_off(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     # Default state "off" — stale should not trigger regardless of last update age.
     panel.on_reading(_reading("Keithley_1/smua/voltage", 1.0, "V"))
     panel._smua_block._last_update_ts = time.time() - 30.0
@@ -708,7 +726,7 @@ def test_stale_not_applied_when_off(app):
 
 def test_state_transition_on_to_off_clears_stale(app):
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     panel.on_reading(_state_reading("smua", "on"))
     panel.on_reading(_reading("Keithley_1/smua/voltage", 1.0, "V"))
     panel._smua_block._last_update_ts = time.time() - 6.0
@@ -802,6 +820,36 @@ def test_banner_show_and_clear(app):
     assert panel._banner_label.text() == ""
 
 
+def test_command_unknown_outcome_is_visible_persistent_and_not_retryable(app):
+    panel = KeithleyPanel()
+    panel._smua_block.command_started.emit("smua", 7, "keithley_emergency_off")
+    assert "ожидается ответ Engine" in panel._banner_label.text()
+    assert not panel._banner_timer.isActive()
+
+    panel._smua_block.command_finished.emit("smua", 7, "keithley_emergency_off", "unknown", "тайм-аут ответа")
+    text = panel._banner_label.text()
+    assert "ИСХОД НЕИЗВЕСТЕН" in text
+    assert "тайм-аут ответа" in text
+    assert "Не повторяйте команду вслепую" in text
+    assert not panel._banner_timer.isActive(), "unknown outcomes must remain visible"
+    assert panel._banner_label.accessibleName() == text
+
+
+def test_new_command_replaces_latched_error_with_pending_then_success(app):
+    panel = KeithleyPanel()
+    block = panel._smua_block
+    block.command_started.emit("smua", 1, "keithley_start")
+    block.command_finished.emit("smua", 1, "keithley_start", "failed", "отказ")
+    assert panel._command_error_latched is True
+
+    block.command_started.emit("smua", 2, "keithley_start")
+    assert panel._command_error_latched is False
+    assert "ожидается ответ Engine" in panel._banner_label.text()
+    block.command_finished.emit("smua", 2, "keithley_start", "ok", "")
+    assert "Engine подтвердил выполнение" in panel._banner_label.text()
+    assert panel._banner_timer.isActive(), "ordinary success feedback may auto-clear"
+
+
 # ----------------------------------------------------------------------
 # Channel block internals
 # ----------------------------------------------------------------------
@@ -864,7 +912,7 @@ def test_connected_no_reading_shows_placeholder_and_refresh_is_safe(app):
     """Connected overlay with no readings yet: readouts show placeholder,
     refresh tick doesn't crash on empty buffers."""
     panel = KeithleyPanel()
-    panel.set_connected(True)
+    _connect_authorized(panel)
     for key in ("voltage", "current", "resistance", "power"):
         text = panel._smua_block._value_labels[key].text()
         # "— В" / "— А" / "— Ом" / "— Вт" placeholder.
@@ -906,10 +954,7 @@ def test_keithley_inputs_in_row_1(app):
     # child widgets with it ("C++ object already deleted").
     panel = KeithleyPanel()
     block = panel._smua_block
-    inputs_widgets = [
-        block._controls_inputs_row.itemAt(i).widget()
-        for i in range(block._controls_inputs_row.count())
-    ]
+    inputs_widgets = [block._controls_inputs_row.itemAt(i).widget() for i in range(block._controls_inputs_row.count())]
     assert block._p_spin in inputs_widgets
     assert block._v_spin in inputs_widgets
     assert block._i_spin in inputs_widgets
@@ -924,8 +969,7 @@ def test_keithley_actions_in_row_2(app):
     panel = KeithleyPanel()
     block = panel._smua_block
     actions_widgets = [
-        block._controls_actions_row.itemAt(i).widget()
-        for i in range(block._controls_actions_row.count())
+        block._controls_actions_row.itemAt(i).widget() for i in range(block._controls_actions_row.count())
     ]
     assert block._start_btn in actions_widgets
     assert block._stop_btn in actions_widgets
@@ -942,3 +986,220 @@ def test_keithley_spin_box_has_padding_right(app):
     block = panel._smua_block
     ss = block._p_spin.styleSheet()
     assert "padding-right" in ss
+
+
+def test_disconnect_shows_unknown_and_retains_last_confirmed_state(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    panel._smua_block.apply_state("on")
+    panel._smua_block.handle_reading("voltage", _reading("Keithley_1/smua/voltage", 12.5, "V"))
+    last_value = panel._smua_block._value_labels["voltage"].text()
+
+    panel.set_connected(False)
+
+    assert panel._smua_block._channel_state == "unknown"
+    assert "НЕИЗВЕСТНО" in panel._smua_block._state_badge.text()
+    assert "последнее: ВКЛ" in panel._smua_block._state_badge.text()
+    assert panel._smua_block._value_labels["voltage"].text() == last_value
+    assert not panel._smua_block._start_btn.isEnabled()
+    assert not panel._smua_block._stop_btn.isEnabled()
+
+
+def test_direct_start_handler_rejects_disconnected_dispatch(app):
+    panel = KeithleyPanel()
+    dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        assert panel._smua_block._on_start_clicked() is False
+        assert dispatched == []
+        assert dispatched.workers == []
+        assert "не отправлена" in panel._banner_label.text()
+    finally:
+        _restore_spy(panel._smua_block)
+
+
+def test_normal_command_is_single_flight_per_channel(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        assert panel._smua_block._on_start_clicked() is True
+        assert panel._smua_block._on_start_clicked() is False
+        assert len(dispatched) == 1
+        assert len(dispatched.workers) == 1
+        assert panel._smua_block._normal_pending_token == 1
+    finally:
+        _restore_spy(panel._smua_block)
+
+
+def test_emergency_can_supersede_pending_normal_command(app, monkeypatch):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda *args, **kwargs: QMessageBox.StandardButton.Ok),
+    )
+    dispatched = _spy_dispatch(panel._smua_block)
+    try:
+        assert panel._smua_block._on_start_clicked() is True
+        assert panel._smua_block._on_emergency_clicked() is True
+        assert [cmd["cmd"] for cmd in dispatched] == [
+            "keithley_start",
+            "keithley_emergency_off",
+        ]
+    finally:
+        _restore_spy(panel._smua_block)
+
+
+def test_timeout_blocks_normal_control_until_fresh_state_and_safety(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {
+        "cmd": "keithley_start",
+        "channel": "smua",
+        "p_target": 0.5,
+        "v_comp": 40.0,
+        "i_comp": 1.0,
+    }
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+        worker = dispatched.workers[0]
+        block._on_command_result(
+            1,
+            command,
+            {"ok": False, "_handler_timeout": True, "error": "Engine timed out"},
+            generation,
+            worker,
+        )
+
+        assert block._unknown_outcome_requires is not None
+        assert not block._start_btn.isEnabled()
+        assert "ИСХОД НЕИЗВЕСТЕН" in panel._banner_label.text()
+
+        block.apply_state("off")
+        assert not block._start_btn.isEnabled(), "fresh state alone is insufficient"
+        block.set_safety_ready(True)
+
+        assert block._unknown_outcome_requires is None
+        assert block._start_btn.isEnabled()
+        assert panel._unresolved_outcomes == {}
+    finally:
+        _restore_spy(block)
+
+
+def test_timeout_latch_surfaces_proactive_tooltip_on_blocked_controls(app):
+    """The unknown-outcome latch must be discoverable before the operator acts,
+    not only after a rejected command. Guard for the visibility gap: the
+    correct text was already computed by authorization_reason() but never
+    reached setToolTip()/setAccessibleDescription() on the blocked Start/Stop
+    controls until this fix."""
+
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {
+        "cmd": "keithley_start",
+        "channel": "smua",
+        "p_target": 0.5,
+        "v_comp": 40.0,
+        "i_comp": 1.0,
+    }
+    try:
+        # Before the latch: no unknown-outcome tooltip on either control.
+        assert block._start_btn.toolTip() == ""
+        assert block._stop_btn.toolTip() == ""
+
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+        worker = dispatched.workers[0]
+        block._on_command_result(
+            1,
+            command,
+            {"ok": False, "_handler_timeout": True, "error": "Engine timed out"},
+            generation,
+            worker,
+        )
+
+        assert block._unknown_outcome_requires is not None
+        expected_reason = "предыдущая команда имеет неизвестный исход; нужна свежая сверка state и Safety"
+        assert block.authorization_reason("keithley_start") == expected_reason
+        assert block._start_btn.toolTip() == expected_reason
+        assert block._start_btn.accessibleDescription() == expected_reason
+        assert block._stop_btn.toolTip() == expected_reason
+        assert block._stop_btn.accessibleDescription() == expected_reason
+
+        # Reconciliation clears the latch and must clear the proactive cue too.
+        block.apply_state("off")
+        block.set_safety_ready(True)
+
+        assert block._unknown_outcome_requires is None
+        assert block._start_btn.toolTip() == ""
+        assert block._start_btn.accessibleDescription() == ""
+        assert block._stop_btn.toolTip() == ""
+        assert block._stop_btn.accessibleDescription() == ""
+    finally:
+        _restore_spy(block)
+
+
+def test_pre_disconnect_reply_is_unknown_even_if_payload_says_ok(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {
+        "cmd": "keithley_start",
+        "channel": "smua",
+        "p_target": 0.5,
+        "v_comp": 40.0,
+        "i_comp": 1.0,
+    }
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+        worker = dispatched.workers[0]
+        panel.set_connected(False)
+        panel.set_connected(True)
+
+        block._on_command_result(1, command, {"ok": True}, generation, worker)
+
+        assert "ИСХОД НЕИЗВЕСТЕН" in panel._banner_label.text()
+        assert block._channel_state == "unknown"
+        assert not block._start_btn.isEnabled()
+    finally:
+        _restore_spy(block)
+
+
+def test_unknown_outcome_is_not_acknowledged_by_new_command_signal(app):
+    panel = KeithleyPanel()
+    block = panel._smua_block
+    block.command_started.emit("smua", 1, "keithley_start")
+    block.command_finished.emit("smua", 1, "keithley_start", "unknown", "тайм-аут")
+    unknown_text = panel._banner_label.text()
+
+    block.command_started.emit("smua", 2, "keithley_emergency_off")
+
+    assert panel._command_error_latched is True
+    assert panel._unresolved_outcomes == {"smua": "Запуск канала А"}
+    assert unknown_text != ""
+
+
+def test_disconnect_during_emergency_confirmation_dispatches_nothing(app, monkeypatch):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+    dispatched = _spy_dispatch(panel._smua_block)
+
+    def _disconnect_then_accept(*args, **kwargs):  # noqa: ANN002, ANN003
+        panel.set_connected(False)
+        return QMessageBox.StandardButton.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(_disconnect_then_accept))
+    try:
+        assert panel._smua_block._on_emergency_clicked() is False
+        assert dispatched == []
+        assert dispatched.workers == []
+    finally:
+        _restore_spy(panel._smua_block)

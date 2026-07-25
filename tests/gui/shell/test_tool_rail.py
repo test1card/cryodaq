@@ -36,13 +36,11 @@ def test_tool_rail_constructs() -> None:
         "instruments",
         "more",
     ]
-    assert list(rail._buttons.keys()) == expected_keys, (
-        f"Button order/keys mismatch: {list(rail._buttons.keys())}"
-    )
+    assert list(rail._buttons.keys()) == expected_keys, f"Button order/keys mismatch: {list(rail._buttons.keys())}"
     # Spot-check a few tooltips are set (exact strings from src).
     assert rail._buttons["knowledge_base"].toolTip() == "База знаний"
     assert rail._buttons["multiline"].toolTip() == "MultiLine"
-    assert rail._buttons["home"].toolTip() == "Дашборд"
+    assert rail._buttons["home"].toolTip() == "Дашборд (Ctrl+H)"
 
 
 def test_buttons_emit_tool_clicked_with_name() -> None:
@@ -67,21 +65,17 @@ def test_set_active_marks_one_button() -> None:
     rail.set_active("source")
     source_ss = rail._buttons["source"].styleSheet()
     home_ss = rail._buttons["home"].styleSheet()
-    assert _active_border in source_ss, (
-        f"Active button 'source' missing active border-left declaration: {source_ss!r}"
-    )
-    assert _inactive_border in home_ss, (
-        f"Inactive button 'home' must have transparent border-left: {home_ss!r}"
-    )
+    assert _active_border in source_ss, f"Active button 'source' missing active border-left declaration: {source_ss!r}"
+    assert _inactive_border in home_ss, f"Inactive button 'home' must have transparent border-left: {home_ss!r}"
     rail.set_active("home")
     source_ss2 = rail._buttons["source"].styleSheet()
     home_ss2 = rail._buttons["home"].styleSheet()
-    assert _active_border in home_ss2, (
-        f"Active button 'home' missing active border-left declaration: {home_ss2!r}"
-    )
-    assert _inactive_border in source_ss2, (
-        f"Inactive button 'source' must have transparent border-left: {source_ss2!r}"
-    )
+    assert _active_border in home_ss2, f"Active button 'home' missing active border-left declaration: {home_ss2!r}"
+    assert _inactive_border in source_ss2, f"Inactive button 'source' must have transparent border-left: {source_ss2!r}"
+
+    rail.set_active("summary")
+    assert _active_border in rail._buttons["more"].styleSheet()
+    assert _inactive_border in rail._buttons["home"].styleSheet()
 
 
 def test_rail_width_matches_design_token() -> None:
@@ -107,6 +101,7 @@ def test_mnemonic_shortcuts_defined_for_canonical_panels() -> None:
     _app()
     ToolRail()
     expected_map = {
+        "Ctrl+H": "home",
         "Ctrl+L": "log",
         "Ctrl+E": "experiment",
         "Ctrl+A": "analytics",
@@ -123,7 +118,7 @@ def test_mnemonic_shortcuts_defined_for_canonical_panels() -> None:
         )
 
 
-def test_mnemonic_shortcut_emits_tool_clicked() -> None:
+def test_home_mnemonic_shortcut_emits_tool_clicked() -> None:
     # A shortcut fire must go through the same tool_clicked channel as a
     # mouse click so the parent shell's single slot-activation handler
     # sees both paths identically.
@@ -133,15 +128,15 @@ def test_mnemonic_shortcut_emits_tool_clicked() -> None:
     rail = ToolRail()
     seen: list[str] = []
     rail.tool_clicked.connect(lambda name: seen.append(name))
-    # Find the QShortcut bound to Ctrl+L and activate it programmatically.
-    ctrl_l = QKeySequence("Ctrl+L")
+    # Find the QShortcut bound to Ctrl+H and activate it programmatically.
+    ctrl_h = QKeySequence("Ctrl+H")
     from PySide6.QtGui import QShortcut
 
     shortcuts = [c for c in rail.children() if isinstance(c, QShortcut)]
-    matches = [s for s in shortcuts if s.key() == ctrl_l]
-    assert matches, "Ctrl+L shortcut not registered on rail"
+    matches = [s for s in shortcuts if s.key() == ctrl_h]
+    assert matches, "Ctrl+H shortcut not registered on rail"
     matches[0].activated.emit()
-    assert seen == ["log"]
+    assert seen == ["home"]
 
 
 # ----------------------------------------------------------------------

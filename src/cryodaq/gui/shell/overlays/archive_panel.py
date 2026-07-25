@@ -28,12 +28,13 @@ Out of scope (follow-ups):
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QDate, QObject, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QDate, QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -43,8 +44,10 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
@@ -57,11 +60,21 @@ from PySide6.QtWidgets import (
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
-from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.gui.shell.overlays._base_panel import OverlayPanelBase
+from cryodaq.gui.zmq_client import (
+    ZmqCommandWorker,
+    capture_gui_worker_session_token,
+    gui_worker_delivery_is_current,
+    record_gui_worker_delivery_disposition,
+    start_gui_worker_with_ownership,
+)
+from cryodaq.report_state import ReportContractError, load_current_manifest
 
 logger = logging.getLogger(__name__)
 
 _BANNER_AUTO_CLEAR_MS = 4000
+_EXPORT_ERROR_CODE = "archive_export_failed"
+_EXPORT_KINDS = frozenset({"csv", "hdf5", "xlsx", "parquet"})
 
 # Text-view heights composed from SPACE_* tokens so RULE-SPACE-001 holds.
 # MD = three multi-line snippets (notes / runs / artifacts).
@@ -171,31 +184,81 @@ def _style_input(widget: QLineEdit | QPlainTextEdit | QComboBox | QDateEdit) -> 
     )
 
 
-def _report_candidate_paths(entry: dict[str, Any], key: str, *fallbacks: str) -> list[Path]:
-    paths: list[Path] = []
+def _safe_report_file(path: Path, experiment_root: Path | None) -> Path | None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        if experiment_root is None:
+            return path.resolve()
+        resolved_root = experiment_root.resolve()
+        if experiment_root.is_symlink() or not resolved_root.is_dir():
+            return None
+        resolved = path.resolve()
+        if resolved_root not in resolved.parents:
+            return None
+        return resolved
+    except OSError:
+        return None
+
+
+def _resolve_report_path(
+    entry: dict[str, Any],
+    key: str,
+    *legacy_names: str,
+) -> Path | None:
+    raw_root = str(entry.get("artifact_dir", "")).strip()
+    authority_present = "report_authority" in entry
+    authority = entry.get("report_authority")
+    if not raw_root:
+        primary = str(entry.get(key, "")).strip()
+        return _safe_report_file(Path(primary), None) if not authority_present and primary else None
+    root = Path(raw_root)
+    pointer = root / "reports" / "current_report.json"
+    if authority == "manifest":
+        generation_id = entry.get("report_generation_id")
+        if not isinstance(generation_id, str) or not generation_id:
+            return None
+        try:
+            manifest = load_current_manifest(root)
+        except (OSError, ReportContractError):
+            return None
+        if manifest is None or manifest["generation_id"] != generation_id:
+            return None
+        report = manifest["report"]
+        manifest_key = "pdf_path" if key == "pdf_path" else "docx_path"
+        relative = report[manifest_key]
+        if relative is None:
+            return None
+        return _safe_report_file(root / relative, root)
+    if authority == "invalid" or authority == "none":
+        return None
+    if authority == "legacy":
+        if os.path.lexists(pointer):
+            return None
+        for name in legacy_names:
+            candidate = _safe_report_file(root / "reports" / name, root)
+            if candidate is not None:
+                return candidate
+        return None
+    if authority_present:
+        # A present but unknown/wrong-type authority is not an old payload.
+        # Fail closed instead of treating attacker/corruption-controlled data
+        # as an explicit legacy path.
+        return None
+    # Old payload: preserve only the explicit safe path, never invent a
+    # canonical fixed-name fallback. A newly appeared pointer also wins.
+    if os.path.lexists(pointer):
+        return None
     primary = str(entry.get(key, "")).strip()
-    if primary:
-        paths.append(Path(primary))
-    artifact_dir = str(entry.get("artifact_dir", "")).strip()
-    if artifact_dir:
-        root = Path(artifact_dir) / "reports"
-        for name in fallbacks:
-            paths.append(root / name)
-    return paths
+    return _safe_report_file(Path(primary), root) if primary else None
 
 
 def resolve_pdf_path(entry: dict[str, Any]) -> Path | None:
-    for path in _report_candidate_paths(entry, "pdf_path", "report_raw.pdf", "report.pdf"):
-        if path.exists():
-            return path
-    return None
+    return _resolve_report_path(entry, "pdf_path", "report_raw.pdf", "report.pdf")
 
 
 def resolve_docx_path(entry: dict[str, Any]) -> Path | None:
-    for path in _report_candidate_paths(entry, "docx_path", "report_editable.docx", "report.docx"):
-        if path.exists():
-            return path
-    return None
+    return _resolve_report_path(entry, "docx_path", "report_editable.docx", "report.docx")
 
 
 def resolve_folder_path(entry: dict[str, Any]) -> Path | None:
@@ -257,9 +320,7 @@ def _format_artifacts(entry: dict[str, Any]) -> str:
             size_str = ""
             if path.exists():
                 size_kb = path.stat().st_size / 1024
-                size_str = (
-                    f" | {size_kb / 1024:.1f} MB" if size_kb > 1024 else f" | {size_kb:.0f} KB"
-                )
+                size_str = f" | {size_kb / 1024:.1f} MB" if size_kb > 1024 else f" | {size_kb:.0f} KB"
             lines.append(f"[ДАННЫЕ] | {fmt} | {row_count} строк | {ch_count} каналов{size_str}")
         elif role == "measured_values":
             lines.append(f"[ИЗМЕРЕНИЯ] | {summary.get('rows', '?')} строк | CSV")
@@ -284,9 +345,7 @@ def _format_results(entry: dict[str, Any]) -> str:
         for item in results
     ]
     if summary:
-        lines.append(
-            "summary | " + ", ".join(f"{key}={value}" for key, value in sorted(summary.items()))
-        )
+        lines.append("summary | " + ", ".join(f"{key}={value}" for key, value in sorted(summary.items())))
     return "\n".join(lines)
 
 
@@ -302,12 +361,16 @@ class _ExportWorker(QThread):
     The earlier QObject+moveToThread+deleteLater chain produced GC races
     that segfaulted inside ``QThread::started`` signal delivery.
 
-    ``result_ready(kind, count, error)`` is the completion signal. The
-    inherited ``finished()`` signal (no args) fires after run() returns,
-    which callers can use for lifecycle cleanup.
+    ``result_ready(kind, count, error_code)`` is emitted only by a private
+    GUI-thread trampoline while the captured root-session epoch remains
+    current. ``delivery_settled`` fires after the queued result was either
+    delivered or explicitly suppressed. The shared worker registry retains
+    the exact thread until both that disposition and thread termination.
     """
 
-    result_ready = Signal(str, int, str)  # kind, count, error_text
+    result_ready = Signal(str, int, str)  # kind, count, error_code
+    delivery_settled = Signal()
+    _result_pending = Signal(int, str, int, str)
 
     def __init__(
         self,
@@ -318,18 +381,64 @@ class _ExportWorker(QThread):
         super().__init__(parent)
         self._kind = kind
         self._runner = runner
+        self._session_epoch: int | None = None
+        self._result_pending.connect(
+            self._deliver_result_if_current,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def start(self, priority: QThread.Priority = QThread.Priority.InheritPriority) -> None:
+        """Atomically join the explicit root-owned GUI worker session."""
+
+        session_epoch = capture_gui_worker_session_token()
+        self._session_epoch = session_epoch
+        try:
+            start_gui_worker_with_ownership(self, session_epoch, priority)
+        except BaseException:
+            self._session_epoch = None
+            raise
 
     def run(self) -> None:
+        count = 0
+        error_code = ""
         try:
             count = int(self._runner())
-        except Exception as exc:  # noqa: BLE001 — broad catch acceptable at worker boundary
-            logger.exception("Export failed (%s)", self._kind)
-            self.result_ready.emit(self._kind, 0, str(exc))
-            return
-        self.result_ready.emit(self._kind, count, "")
+        except BaseException as exc:
+            exception_type = type(exc).__name__
+            if not exception_type.isascii() or not exception_type.isidentifier() or len(exception_type) > 64:
+                exception_type = "Exception"
+            kind = self._kind if self._kind in _EXPORT_KINDS else "unknown"
+            logger.error(
+                "Archive export failed; kind=%s exception=%s",
+                kind,
+                exception_type,
+            )
+            error_code = _EXPORT_ERROR_CODE
+        session_epoch = self._session_epoch
+        if session_epoch is not None:
+            self._result_pending.emit(session_epoch, self._kind, count, error_code)
+
+    @Slot(int, str, int, str)
+    def _deliver_result_if_current(
+        self,
+        session_epoch: int,
+        kind: str,
+        count: int,
+        error_code: str,
+    ) -> None:
+        """Deliver on the GUI thread or explicitly suppress a stale result."""
+
+        try:
+            if not self.isInterruptionRequested() and gui_worker_delivery_is_current(session_epoch):
+                self.result_ready.emit(kind, count, error_code)
+        finally:
+            try:
+                record_gui_worker_delivery_disposition(self)
+            finally:
+                self.delivery_settled.emit()
 
 
-class ArchivePanel(QWidget):
+class ArchivePanel(OverlayPanelBase, QWidget):
     """Experiment archive overlay (Phase II.2)."""
 
     entry_selected = Signal(dict)
@@ -337,10 +446,8 @@ class ArchivePanel(QWidget):
     export_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._connected: bool = False
+        super().__init__(parent)  # OverlayPanelBase: _connected, _workers
         self._entries: list[dict] = []
-        self._workers: list[ZmqCommandWorker] = []
         # Keep Python refs to export QThread workers alive while they run.
         # Qt ownership (parent=self) also guards; the list gives the slot
         # a way to prune finished workers on the next tick.
@@ -352,6 +459,7 @@ class ArchivePanel(QWidget):
         # resolving — two workers would race and the second could
         # overwrite the first's entries.
         self._refresh_in_flight: bool = False
+        self._pending_regenerate: dict[str, Any] | None = None
 
         self.setObjectName("archivePanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -406,10 +514,7 @@ class ArchivePanel(QWidget):
 
         title = QLabel("АРХИВ ЭКСПЕРИМЕНТОВ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         layout.addWidget(title)
         layout.addStretch()
         return header
@@ -419,9 +524,7 @@ class ArchivePanel(QWidget):
         self._banner_label.setFont(_label_font())
         self._banner_label.setObjectName("archiveBanner")
         self._banner_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._banner_label.setContentsMargins(
-            theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1
-        )
+        self._banner_label.setContentsMargins(theme.SPACE_3, theme.SPACE_1, theme.SPACE_3, theme.SPACE_1)
         self._banner_label.setVisible(False)
         return self._banner_label
 
@@ -556,9 +659,7 @@ class ArchivePanel(QWidget):
         self._empty_state_label.setFont(_body_font())
         self._empty_state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_state_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND};"
-            f" background: transparent; border: none;"
-            f" padding: {theme.SPACE_4}px;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_4}px;"
         )
         self._empty_state_label.setVisible(False)
         layout.addWidget(self._empty_state_label)
@@ -582,9 +683,7 @@ class ArchivePanel(QWidget):
         self._summary_label = QLabel("Эксперимент не выбран.")
         self._summary_label.setFont(_title_font())
         self._summary_label.setWordWrap(True)
-        self._summary_label.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-        )
+        self._summary_label.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(self._summary_label)
 
         metadata = QFrame()
@@ -675,9 +774,7 @@ class ArchivePanel(QWidget):
         cap.setFont(_label_font())
         # v0.55.2 ds-104: 3 * SPACE_6 = 96 — keeps the column on the scale.
         cap.setFixedWidth(3 * theme.SPACE_6)
-        cap.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        cap.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         row.addWidget(cap)
         value = QLabel("—")
         value.setFont(_body_font())
@@ -705,9 +802,7 @@ class ArchivePanel(QWidget):
 
         caption = QLabel("Экспортировать все данные из SQLite (полный временной ряд):")
         caption.setFont(_label_font())
-        caption.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        caption.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         layout.addWidget(caption)
 
         row = QHBoxLayout()
@@ -731,9 +826,7 @@ class ArchivePanel(QWidget):
         # bulk export.
         self._export_parquet_btn = QPushButton("Parquet...")
         _style_button(self._export_parquet_btn, "neutral")
-        self._export_parquet_btn.setToolTip(
-            "Экспорт всех SQLite данных в Parquet (Snappy compression)"
-        )
+        self._export_parquet_btn.setToolTip("Экспорт всех SQLite данных в Parquet (Snappy compression)")
         self._export_parquet_btn.clicked.connect(self._on_export_parquet_clicked)
         row.addWidget(self._export_parquet_btn)
         row.addStretch()
@@ -744,9 +837,7 @@ class ArchivePanel(QWidget):
     def _caption(text: str) -> QLabel:
         label = QLabel(text)
         label.setFont(_label_font())
-        label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         return label
 
     # ------------------------------------------------------------------
@@ -759,9 +850,7 @@ class ArchivePanel(QWidget):
         self._refresh_in_flight = True
         payload = self._build_list_payload()
         worker = ZmqCommandWorker(payload, parent=self)
-        worker.finished.connect(self._on_refresh_result)
-        self._workers.append(worker)
-        worker.start()
+        self._register_worker(worker, self._on_refresh_result)
 
     def _build_list_payload(self) -> dict:
         template_id = str(self._template_combo.currentData() or "").strip()
@@ -785,7 +874,6 @@ class ArchivePanel(QWidget):
         # Clear the in-flight flag BEFORE any branch so failure paths
         # don't leave the overlay locked out of future refreshes.
         self._refresh_in_flight = False
-        self._workers = [w for w in self._workers if w.isRunning()]
         if not result.get("ok", False):
             error = result.get("error", "Не удалось загрузить архив.")
             self.show_error(str(error))
@@ -812,14 +900,11 @@ class ArchivePanel(QWidget):
             self._set_cell(row, 4, str(entry.get("operator", "")))
             self._set_cell(row, 5, str(entry.get("sample", "")))
             self._set_cell(row, 6, str(entry.get("status", "")))
-            has_report = bool(entry.get("pdf_path") or entry.get("docx_path"))
+            has_report = bool(entry.get("report_present", False))
             report_text = "Да" if has_report else "—"
             self._set_cell(row, 7, report_text)
             artifacts = entry.get("artifact_index", []) or []
-            has_data = any(
-                isinstance(item, dict) and item.get("role") == "experiment_data"
-                for item in artifacts
-            )
+            has_data = any(isinstance(item, dict) and item.get("role") == "experiment_data" for item in artifacts)
             data_text = "Да" if has_data else "—"
             self._set_cell(row, 8, data_text)
         if self._table.rowCount() > 0:
@@ -863,20 +948,20 @@ class ArchivePanel(QWidget):
         self._summary_label.setText(
             f"{title}\nID: {entry.get('experiment_id', '')}\nСтатус: {entry.get('status', '—')}"
         )
-        self._template_label.setText(
-            str(entry.get("template_name", entry.get("template_id", ""))) or "—"
-        )
+        self._template_label.setText(str(entry.get("template_name", entry.get("template_id", ""))) or "—")
         self._operator_label.setText(str(entry.get("operator", "")) or "—")
         self._sample_label.setText(str(entry.get("sample", "")) or "—")
         self._date_label.setText(
-            f"{_format_datetime(entry.get('start_time'))} → "
-            f"{_format_datetime(entry.get('end_time'))}"
+            f"{_format_datetime(entry.get('start_time'))} → {_format_datetime(entry.get('end_time'))}"
         )
-        self._artifact_label.setText(
-            str(folder_path) if folder_path else "Папка артефактов не найдена"
-        )
-        if pdf_path or docx_path:
+        self._artifact_label.setText(str(folder_path) if folder_path else "Папка артефактов не найдена")
+        authority = entry.get("report_authority")
+        if authority == "invalid":
+            self._report_label.setText("Поколение отчёта по манифесту недоступно или повреждено")
+        elif pdf_path or docx_path:
             self._report_label.setText(f"PDF: {pdf_path or 'нет'}\nDOCX: {docx_path or 'нет'}")
+            if authority == "legacy":
+                self._report_label.setText(f"Устаревший отчёт\n{self._report_label.text()}")
         elif report_enabled:
             self._report_label.setText("Файлы отчёта отсутствуют")
         else:
@@ -897,7 +982,16 @@ class ArchivePanel(QWidget):
         self._open_folder_btn.setEnabled(folder_path is not None)
         self._open_pdf_btn.setEnabled(pdf_path is not None)
         self._open_docx_btn.setEnabled(docx_path is not None)
-        self._regenerate_btn.setEnabled(self._connected and report_enabled)
+        self._regenerate_btn.setEnabled(self._connected and report_enabled and self._pending_regenerate is None)
+        force_required = bool(entry.get("report_force_required"))
+        self._regenerate_btn.setText("Повторить принудительно" if force_required else "Перегенерировать")
+        if force_required:
+            attempt = entry.get("report_attempt_count")
+            maximum = entry.get("report_max_attempts")
+            error = str(entry.get("report_error_text") or "Лимит попыток исчерпан.")
+            self._report_label.setText(
+                f"{self._report_label.text()}\nТребуется явный повтор (попытки {attempt}/{maximum}): {error}"
+            )
 
     def _clear_details(self, summary: str = "Эксперимент не выбран.") -> None:
         self._summary_label.setText(summary)
@@ -916,6 +1010,7 @@ class ArchivePanel(QWidget):
         self._open_pdf_btn.setEnabled(False)
         self._open_docx_btn.setEnabled(False)
         self._regenerate_btn.setEnabled(False)
+        self._regenerate_btn.setText("Перегенерировать")
         self._archive_photos_widget.set_photos([])
 
     # ------------------------------------------------------------------
@@ -951,6 +1046,8 @@ class ArchivePanel(QWidget):
             self.show_warning("DOCX отсутствует или не открывается.")
 
     def _on_regenerate_clicked(self) -> None:
+        if not self._connected or self._pending_regenerate is not None:
+            return
         entry = self._selected_entry()
         if not entry:
             return
@@ -962,24 +1059,121 @@ class ArchivePanel(QWidget):
             self.show_error("Не удалось определить ID эксперимента.")
             return
         self.regenerate_requested.emit(experiment_id)
+        self._start_regenerate_request({"cmd": "experiment_generate_report", "experiment_id": experiment_id})
+
+    def _start_regenerate_request(self, payload: dict[str, Any]) -> None:
+        self._pending_regenerate = dict(payload)
         self._regenerate_btn.setEnabled(False)
         self.show_info("Генерация отчёта...")
-        worker = ZmqCommandWorker(
-            {"cmd": "experiment_generate_report", "experiment_id": experiment_id},
-            parent=self,
+        worker = ZmqCommandWorker(payload, parent=self)
+        self._register_worker(worker, self._on_regenerate_result)
+
+    @staticmethod
+    def _valid_force_operator(operator: str) -> bool:
+        return (
+            1 <= len(operator) <= 128
+            and operator == operator.strip()
+            and all(char.isprintable() and ord(char) != 127 for char in operator)
         )
-        worker.finished.connect(self._on_regenerate_result)
-        self._workers.append(worker)
-        worker.start()
+
+    def _confirm_force_retry(self, entry: dict[str, Any]) -> bool:
+        if not self._connected:
+            self.show_warning("Соединение потеряно. Принудительный повтор не отправлен.")
+            return False
+        experiment_id = str(entry.get("experiment_id", "")).strip()
+        context = entry.get("report_force_context")
+        if (
+            not isinstance(context, str)
+            or len(context) != 64
+            or any(char not in "0123456789abcdef" for char in context)
+        ):
+            self.show_error("Контекст принудительного повтора устарел. Обновите архив.")
+            self.refresh_archive()
+            return False
+        operator, accepted = QInputDialog.getText(
+            self,
+            "Принудительный повтор отчёта",
+            "Оператор, подтверждающий сброс лимита попыток:",
+            QLineEdit.EchoMode.Normal,
+            str(entry.get("operator", "")),
+        )
+        operator = operator.strip()
+        if not accepted:
+            return False
+        if not self._valid_force_operator(operator):
+            self.show_error("Имя оператора должно содержать 1–128 печатных символов.")
+            return False
+        answer = QMessageBox.warning(
+            self,
+            "Подтвердите принудительный повтор",
+            "Лимит попыток исчерпан. Будет создана новая попытка с неизменяемой "
+            "аудит-записью. Если она завершится ошибкой, предыдущий выбранный "
+            "отчёт останется доступен.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        if not self._connected:
+            self.show_warning("Соединение потеряно. Принудительный повтор не отправлен.")
+            return False
+        current = self._selected_entry()
+        if (
+            current is None
+            or str(current.get("experiment_id", "")).strip() != experiment_id
+            or current.get("report_force_context") != context
+        ):
+            self.show_warning("Выбранный отчёт изменился. Обновите архив и повторите действие.")
+            self.refresh_archive()
+            return False
+        self._start_regenerate_request(
+            {
+                "cmd": "experiment_generate_report",
+                "experiment_id": experiment_id,
+                "force": True,
+                "force_context": context,
+                "operator": operator,
+            }
+        )
+        return True
 
     def _on_regenerate_result(self, result: dict) -> None:
-        self._workers = [w for w in self._workers if w.isRunning()]
         entry = self._selected_entry()
         report_enabled = bool(entry.get("report_enabled", True)) if entry else True
-        self._regenerate_btn.setEnabled(self._connected and report_enabled)
+        # Keep the action disabled while this callback decides whether the
+        # completed ordinary request needs one confirmed force resubmission.
+        self._regenerate_btn.setEnabled(False)
         if not result.get("ok"):
+            code = str(result.get("error_code", ""))
+            request = self._pending_regenerate or {}
+            if code == "force_required" and request.get("force") is not True:
+                if not self._connected:
+                    self._pending_regenerate = None
+                    self.show_warning("Соединение потеряно. Подтверждение принудительного повтора отменено.")
+                    return
+                request_id = str(request.get("experiment_id", "")).strip()
+                selected_id = str(entry.get("experiment_id", "")).strip() if entry is not None else ""
+                if not request_id or selected_id != request_id:
+                    self._pending_regenerate = None
+                    self.show_warning("Выбор эксперимента изменился. Архив будет обновлён без повтора.")
+                    self.refresh_archive()
+                    return
+                if entry is not None and self._confirm_force_retry(entry):
+                    return
+                self._pending_regenerate = None
+                self._regenerate_btn.setEnabled(self._connected and report_enabled)
+                return
+            if code == "force_conflict":
+                self.show_warning("Отчёт или исходные данные изменились. Архив будет обновлён.")
+                self._pending_regenerate = None
+                self.refresh_archive()
+                return
+            self._pending_regenerate = None
+            self._update_control_enablement()
             self.show_error(str(result.get("error", "Не удалось сформировать отчёт.")))
             return
+        self._pending_regenerate = None
+        self._update_control_enablement()
         report = result.get("report") or {}
         if report.get("skipped"):
             self.show_warning(str(report.get("reason", "Формирование отчёта пропущено.")))
@@ -1039,9 +1233,7 @@ class ArchivePanel(QWidget):
 
     def _on_export_xlsx_clicked(self) -> None:
         self.export_requested.emit("xlsx")
-        path_str, _ = QFileDialog.getSaveFileName(
-            self, "Экспорт в Excel", "", "Excel файлы (*.xlsx)"
-        )
+        path_str, _ = QFileDialog.getSaveFileName(self, "Экспорт в Excel", "", "Excel файлы (*.xlsx)")
         if not path_str:
             return
         output = Path(path_str)
@@ -1109,22 +1301,29 @@ class ArchivePanel(QWidget):
 
         worker = _ExportWorker(kind, runner, parent=self)
 
-        def on_result(k: str, count: int, error: str, u: str = unit) -> None:
+        def on_result(k: str, count: int, error_code: str, u: str = unit) -> None:
             self._export_in_flight = False
             self._update_control_enablement()
-            if error:
-                self.show_error(f"Экспорт {k.upper()}: {error}")
+            if error_code:
+                self.show_error(f"Экспорт {k.upper()} не завершён.")
             else:
                 self.show_info(f"Экспорт {k.upper()} завершён: {count} {u}.")
 
         worker.result_ready.connect(on_result)
-        worker.finished.connect(lambda w=worker: self._prune_export_worker(w))
+        worker.delivery_settled.connect(lambda w=worker: self._prune_export_worker(w))
         self._export_workers.append(worker)
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError:
+            self._prune_export_worker(worker)
+            logger.warning("Archive export start refused; phase=worker_admission")
+            self.show_error("Экспорт не запущен: сеанс приложения завершается.")
 
     def _prune_export_worker(self, worker: _ExportWorker) -> None:
         if worker in self._export_workers:
             self._export_workers.remove(worker)
+        self._export_in_flight = bool(self._export_workers)
+        self._update_control_enablement()
 
     # ------------------------------------------------------------------
     # Public state pushers
@@ -1138,10 +1337,9 @@ class ArchivePanel(QWidget):
         _ = reading  # explicit silence
 
     def set_connected(self, connected: bool) -> None:
-        if connected == self._connected:
-            return
         was_connected = self._connected
-        self._connected = connected
+        if not super().set_connected(connected):
+            return
         self._update_control_enablement()
         # II.2 post-review: auto-refresh on the first transition to
         # connected when no entries have been loaded yet. The overlay
@@ -1157,7 +1355,10 @@ class ArchivePanel(QWidget):
         self._refresh_btn.setEnabled(self._connected)
         entry = self._selected_entry()
         report_enabled = bool(entry.get("report_enabled", True)) if entry else False
-        self._regenerate_btn.setEnabled(self._connected and report_enabled)
+        self._regenerate_btn.setEnabled(self._connected and report_enabled and self._pending_regenerate is None)
+        self._regenerate_btn.setText(
+            "Повторить принудительно" if entry and bool(entry.get("report_force_required")) else "Перегенерировать"
+        )
         export_ok = self._connected and not self._export_in_flight
         self._export_csv_btn.setEnabled(export_ok)
         self._export_hdf5_btn.setEnabled(export_ok)

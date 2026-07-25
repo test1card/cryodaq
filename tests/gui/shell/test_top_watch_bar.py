@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core.zmq_bridge import ZMQCommandServer
 from cryodaq.gui import theme
+from cryodaq.gui.shell import top_watch_bar as top_watch_bar_module
+from cryodaq.gui.shell.operator_components._visuals import safe_plain_text
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
 
 
 def _app() -> QApplication:
@@ -26,13 +36,8 @@ def test_top_watch_bar_constructs() -> None:
     assert bar._engine_label is not None
 
 
-def test_seed_visible_channels_marks_them_ok() -> None:
-    """v0.55.2 A5: seed _channel_last_seen so the counter doesn't show
-    "0/N норма • N ожидают" while waiting for the first ZMQ reading.
-    Real ChannelManager returns short IDs ("Т1") — the fake mirrors
-    that contract.
-    HIGH: assert rendered _channel_label text/color, not just private cache keys.
-    """
+def test_cold_start_channels_are_unavailable_until_real_reading() -> None:
+    """No startup cache entry may manufacture current/OK channel truth."""
     _app()
 
     class _FakeChannelMgr:
@@ -43,22 +48,12 @@ def test_seed_visible_channels_marks_them_ok() -> None:
     bar._fast_timer.stop()
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
-    # Two Т-channels seeded under their short IDs, the non-Т one ignored.
-    assert "Т1" in bar._channel_last_seen
-    assert "Т2" in bar._channel_last_seen
-    assert "Pressure" not in bar._channel_last_seen
-    # Rendered label: 2/2 норма, no "ожидают" text, OK color.
+    assert bar._channel_last_seen == {}
     bar._refresh_channels()
     label_text = bar._channel_label.text()
-    assert "2/2 норма" in label_text, (
-        f"Expected '2/2 норма' in channel label, got: {label_text!r}"
-    )
-    assert "ожидает" not in label_text, (
-        f"Unexpected 'ожидает' in channel label: {label_text!r}"
-    )
-    assert theme.STATUS_OK in bar._channel_label.styleSheet(), (
-        f"Channel label must use STATUS_OK color after seed, got: {bar._channel_label.styleSheet()!r}"
-    )
+    assert label_text == "◇ Нет текущих данных · 2 ожидают"
+    assert theme.STATUS_STALE in bar._channel_label.styleSheet()
+    assert "2 ожидают первого показания" in bar._channel_label.toolTip()
 
 
 def test_on_reading_stores_under_short_id() -> None:
@@ -101,12 +96,8 @@ def test_on_reading_stores_under_short_id() -> None:
     # Rendered summary reflects the reading — "1/1 норма", no "ожидают".
     bar._refresh_channels()
     label_text = bar._channel_label.text()
-    assert "1/1 норма" in label_text, (
-        f"Expected '1/1 норма' in channel summary, got: {label_text!r}"
-    )
-    assert "ожидает" not in label_text, (
-        f"Unexpected 'ожидает' after reading under short id: {label_text!r}"
-    )
+    assert "1/1 норма" in label_text, f"Expected '1/1 норма' in channel summary, got: {label_text!r}"
+    assert "ожидает" not in label_text, f"Unexpected 'ожидает' after reading under short id: {label_text!r}"
 
 
 def test_experiment_click_emits_signal() -> None:
@@ -157,7 +148,7 @@ def test_alarms_click_emits_signal() -> None:
     bar.hide()
 
 
-def test_set_alarm_count_updates_label() -> None:
+def test_set_alarm_summary_updates_label() -> None:
     # MED: assert exact text + stylesheet color, not just substring.
     # zero → "Тревоги: 0" + TEXT_MUTED; nonzero → "Тревоги: N <verb>" + STATUS_FAULT.
     _app()
@@ -166,21 +157,47 @@ def test_set_alarm_count_updates_label() -> None:
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
     bar._stale_timer.stop()
-    bar.set_alarm_count(0)
-    assert bar._alarms_label.text() == "Тревоги: 0", (
-        f"Zero alarms text wrong: {bar._alarms_label.text()!r}"
-    )
+    bar.set_alarm_summary(0, "NONE")
+    assert bar._alarms_label.text() == "Тревоги: 0", f"Zero alarms text wrong: {bar._alarms_label.text()!r}"
     assert theme.TEXT_MUTED in bar._alarms_label.styleSheet(), (
         f"Zero alarms must use TEXT_MUTED: {bar._alarms_label.styleSheet()!r}"
     )
-    bar.set_alarm_count(3)
+    bar.set_alarm_summary(3, "CRITICAL")
     # Text: "Тревоги: 3 активны" (3 → plural "активны")
-    assert bar._alarms_label.text() == "Тревоги: 3 активны", (
-        f"Three alarms text wrong: {bar._alarms_label.text()!r}"
-    )
+    assert bar._alarms_label.text() == "Тревоги: 3 активны", f"Three alarms text wrong: {bar._alarms_label.text()!r}"
     assert theme.STATUS_FAULT in bar._alarms_label.styleSheet(), (
         f"Nonzero alarms must use STATUS_FAULT: {bar._alarms_label.styleSheet()!r}"
     )
+
+
+@pytest.mark.parametrize(
+    ("level", "color"),
+    [
+        ("INFO", theme.STATUS_INFO),
+        ("CAUTION", theme.STATUS_CAUTION),
+        ("CRITICAL", theme.STATUS_FAULT),
+        ("UNKNOWN", theme.STATUS_FAULT),
+    ],
+)
+def test_alarm_summary_uses_worst_severity(level: str, color: str) -> None:
+    bar = _make_bar()
+    bar.set_alarm_summary(1, level)
+    assert bar._alarm_count == 1
+    assert (
+        bar._alarms_label.text()
+        == "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: 1 \u0430\u043a\u0442\u0438\u0432\u043d\u0430"
+    )
+    assert color in bar._alarms_label.styleSheet()
+
+
+def test_alarm_count_starts_and_returns_unavailable() -> None:
+    bar = _make_bar()
+    assert bar._alarm_count is None
+    assert "\u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445" in bar._alarms_label.text().lower()
+    bar.set_alarm_summary(2, "CAUTION")
+    bar.set_alarm_available(False)
+    assert bar._alarm_count is None
+    assert "\u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445" in bar._alarms_label.text().lower()
 
 
 # --- B.6 Mode badge tests ---
@@ -196,9 +213,75 @@ def _make_bar():
     return bar
 
 
-def test_mode_badge_hidden_when_no_status() -> None:
+def _dispose_bar(bar: TopWatchBar) -> None:
+    bar._fast_timer.stop()
+    bar._slow_timer.stop()
+    bar._channel_refresh_timer.stop()
+    bar._stale_timer.stop()
+    bar.close()
+    bar.deleteLater()
+    _app().processEvents()
+
+
+def _wire_from_handler(handler_payload: dict) -> dict:
+    assert "proto" not in handler_payload
+    wire_payload = json.loads(ZMQCommandServer(handler=None)._encode_reply(handler_payload))
+    assert wire_payload["proto"] == CLIENT_PROTOCOL_VERSION
+    return wire_payload
+
+
+def _live_experiment_handler_status(*, name: str = "test", phase: str = "preparation") -> dict:
+    return {
+        "ok": True,
+        "app_mode": "experiment",
+        "active_experiment": {
+            "experiment_id": "a" * 12,
+            "name": name,
+            "title": "Test experiment",
+            "template_id": "template-1",
+            "operator": "",
+            "cryostat": "",
+            "sample": "",
+            "description": "",
+            "notes": "",
+            "start_time": "2026-07-23T00:00:00+00:00",
+            "end_time": None,
+            "status": "RUNNING",
+            "config_snapshot": {},
+            "custom_fields": {},
+            "report_enabled": True,
+            "sections": [],
+            "artifact_dir": "",
+            "metadata_path": "",
+            "retroactive": False,
+        },
+        "current_phase": phase,
+        "phase_started_at": 0.0,
+        "phases": [
+            {
+                "phase": phase,
+                "started_at": "2026-07-23T00:00:00+00:00",
+                "ended_at": None,
+                "operator": "",
+            }
+        ],
+        "run_records": [],
+        "templates": [],
+    }
+
+
+def _live_experiment_status(*, name: str = "test", phase: str = "preparation") -> dict:
+    return _wire_from_handler(_live_experiment_handler_status(name=name, phase=phase))
+
+
+def test_mode_badge_keeps_unavailable_status_visible() -> None:
     bar = _make_bar()
-    assert bar._mode_badge.isHidden()
+    assert not bar._mode_badge.isHidden()
+    assert (
+        bar._mode_badge.text()
+        == "\u0420\u0435\u0436\u0438\u043c: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+    )
+    assert theme.MUTED_FOREGROUND in bar._mode_badge.styleSheet()
 
 
 def test_mode_badge_shows_experiment() -> None:
@@ -242,24 +325,31 @@ def test_mode_badge_uses_status_caution_for_debug() -> None:
     assert theme.SURFACE_ELEVATED in ss
 
 
-def test_mode_badge_hides_on_unknown_value() -> None:
+def test_mode_badge_shows_unknown_value_as_caution() -> None:
     bar = _make_bar()
     bar._update_mode_badge("experiment")
     assert not bar._mode_badge.isHidden()
     bar._update_mode_badge("invalid")
-    assert bar._mode_badge.isHidden()
+    assert not bar._mode_badge.isHidden()
+    assert (
+        bar._mode_badge.text()
+        == "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c"
+    )
+    assert theme.STATUS_CAUTION in bar._mode_badge.styleSheet()
 
 
 def test_mode_badge_updates_when_no_active_experiment() -> None:
     """Regression for B.6.1: badge must update on /status response
     even when there is no active experiment."""
     bar = _make_bar()
-    result = {
-        "ok": True,
-        "active_experiment": None,
-        "current_phase": None,
-        "app_mode": "debug",
-    }
+    result = _live_experiment_status()
+    result.update(
+        app_mode="debug",
+        active_experiment=None,
+        current_phase=None,
+        phase_started_at=None,
+        phases=[],
+    )
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
     assert "Отладка" in bar._mode_badge.text()
@@ -268,15 +358,271 @@ def test_mode_badge_updates_when_no_active_experiment() -> None:
 def test_mode_badge_updates_when_experiment_active() -> None:
     """Same path but with active experiment."""
     bar = _make_bar()
-    result = {
-        "ok": True,
-        "active_experiment": {"name": "test", "start_time": "2026-04-15T10:00:00+00:00"},
-        "current_phase": "preparation",
-        "app_mode": "experiment",
-    }
+    result = _live_experiment_status()
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
     assert "Эксперимент" in bar._mode_badge.text()
+
+
+def test_top_watch_accepts_live_experiment_manager_status_only_after_real_encoding(tmp_path) -> None:
+    from cryodaq.core.experiment import ExperimentManager
+
+    manager = ExperimentManager(
+        data_dir=tmp_path,
+        instruments_config=tmp_path / "instruments.yaml",
+    )
+    experiment_id = manager.start_experiment(
+        name="producer-backed live experiment",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    handler_payload = manager.get_status_payload()
+    assert "proto" not in handler_payload
+    wire_payload = _wire_from_handler(handler_payload)
+
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    bar.set_replay_mode(False)
+    try:
+        bar._on_experiment_result(wire_payload)
+
+        assert emitted == [wire_payload]
+        assert emitted[0]["active_experiment"]["experiment_id"] == experiment_id
+        assert bar._app_mode == "experiment"
+        assert "producer-backed live experiment" in bar._last_experiment_full_text
+    finally:
+        _dispose_bar(bar)
+
+
+@pytest.mark.parametrize("speed", [2.0, 0.0, 0.25, 1.5])
+def test_top_watch_rejects_replay_in_live_mode_then_accepts_exact_bound_replay(
+    tmp_path,
+    speed: float,
+) -> None:
+    from cryodaq.replay_engine.replay_experiment_stub import ReplayExperimentStub
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    engine = ReplayEngine.__new__(ReplayEngine)
+    engine._source_path = tmp_path / "producer-replay.sqlite"
+    engine._speed = speed
+    engine._launcher_session_id = "c" * 32
+    engine._phase = "preparation"
+    engine._exp_stub = ReplayExperimentStub(tmp_path)
+    active = engine._exp_stub.create_retroactive(
+        title="producer-backed replay experiment",
+        sample="sample-a",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    handler_payload = asyncio.run(engine._handle_command({"cmd": "experiment_status"}))
+    assert "proto" not in handler_payload
+    wire_payload = _wire_from_handler(handler_payload)
+
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    try:
+        bar.set_replay_mode(False)
+        live_label = bar._exp_label.text()
+        bar._on_experiment_result(wire_payload)
+        assert emitted == []
+        assert bar._exp_label.text() == live_label
+        assert "producer-backed replay experiment" not in bar._last_experiment_full_text
+
+        bar.set_replay_mode(True)
+        bar.bind_replay_authority(
+            source=str(engine._source_path),
+            speed=float(speed),
+            session_id=engine._launcher_session_id,
+            launcher_generation=7,
+            bridge_generation=3,
+        )
+        expected = bar._replay_authority
+        assert expected is not None
+        bar._on_experiment_result(wire_payload, expected)
+
+        assert emitted == [wire_payload]
+        assert emitted[0]["active_experiment"]["experiment_id"] == active["experiment_id"]
+        assert bar._app_mode == "replay"
+        assert "producer-backed replay experiment" in bar._last_experiment_full_text
+        assert "REPLAY" in bar._mode_badge.text()
+        if speed == 0.0:
+            assert "MAX" in bar._mode_badge.text()
+            assert "0x" not in bar._mode_badge.text()
+            tooltip = QTextDocument()
+            tooltip.setHtml(bar._mode_badge.toolTip())
+            assert "0x" not in tooltip.toPlainText()
+        else:
+            assert f"{speed:g}x" in bar._mode_badge.text()
+    finally:
+        _dispose_bar(bar)
+
+
+@pytest.mark.parametrize("speed", [0, -1.0, float("nan"), float("inf"), True, "2.0"])
+def test_replay_status_accepts_only_exact_finite_nonnegative_float_speed(tmp_path, speed: object) -> None:
+    from cryodaq.replay_engine.replay_experiment_stub import ReplayExperimentStub
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    engine = ReplayEngine.__new__(ReplayEngine)
+    engine._source_path = tmp_path / "producer-replay.sqlite"
+    engine._speed = 1.0
+    engine._launcher_session_id = "b" * 32
+    engine._phase = "preparation"
+    engine._exp_stub = ReplayExperimentStub(tmp_path)
+    engine._exp_stub.create_retroactive(
+        title="producer-backed replay experiment",
+        sample="sample-a",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    payload = _wire_from_handler(asyncio.run(engine._handle_command({"cmd": "experiment_status"})))
+    payload["replay_speed"] = speed
+
+    assert top_watch_bar_module.decode_experiment_status(payload) is None
+
+
+def test_replay_pin_rejects_live_status_before_emit_cache_or_render(tmp_path) -> None:
+    """A live cut cannot be cosmetically relabelled as replay provenance."""
+    from cryodaq.replay_engine.replay_experiment_stub import ReplayExperimentStub
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    bar.set_replay_mode(True)
+    initial_label = bar._exp_label.text()
+
+    live = _live_experiment_status(name="live cut must not cross replay pin")
+    bar._on_experiment_result(live)
+
+    assert emitted == []
+    assert bar._app_mode == "replay"
+    assert bar._exp_label.text() == initial_label
+    assert "live cut must not cross replay pin" not in bar._last_experiment_full_text
+    assert "REPLAY" in bar._mode_badge.text()
+
+    engine = ReplayEngine.__new__(ReplayEngine)
+    engine._source_path = tmp_path / "producer-replay.sqlite"
+    engine._speed = 1.0
+    engine._launcher_session_id = "b" * 32
+    engine._phase = "preparation"
+    engine._exp_stub = ReplayExperimentStub(tmp_path)
+    engine._exp_stub.create_retroactive(
+        title="verified replay cut",
+        sample="sample-a",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    replay = _wire_from_handler(asyncio.run(engine._handle_command({"cmd": "experiment_status"})))
+    try:
+        bar._on_experiment_result(replay)
+        assert emitted == []
+        assert "verified replay cut" not in bar._last_experiment_full_text
+
+        bar.bind_replay_authority(
+            source=str(engine._source_path),
+            speed=engine._speed,
+            session_id=engine._launcher_session_id,
+            launcher_generation=7,
+            bridge_generation=3,
+        )
+        expected = bar._replay_authority
+        assert expected is not None
+        bar._on_experiment_result(replay, expected)
+        assert emitted == [replay]
+        assert "verified replay cut" in bar._last_experiment_full_text
+    finally:
+        _dispose_bar(bar)
+
+
+def test_raw_experiment_handler_payload_without_transport_proto_is_not_authoritative() -> None:
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    accepted = _live_experiment_status(name="last-known experiment")
+    raw_handler_payload = _live_experiment_handler_status(name="unframed replacement")
+    assert "proto" not in raw_handler_payload
+    try:
+        bar._on_experiment_result(accepted)
+        last_known_text = bar._last_experiment_full_text
+        last_known_display = bar._exp_label.text()
+
+        bar._on_experiment_result(raw_handler_payload)
+
+        assert emitted == [accepted]
+        assert bar._last_experiment_full_text == last_known_text
+        assert bar._exp_label.text() == last_known_display
+        assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
+        assert bar._app_mode is None
+    finally:
+        _dispose_bar(bar)
+
+
+def test_experiment_status_decoder_retains_last_identity_but_revokes_invalid_authority() -> None:
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    valid = _live_experiment_status(name="known experiment")
+    bar._on_experiment_result(valid)
+    last_known_text = bar._exp_label.text()
+    last_known_full_text = bar._last_experiment_full_text
+
+    wrong_proto = copy.deepcopy(valid)
+    wrong_proto["proto"] = True
+    extra_key = copy.deepcopy(valid)
+    extra_key["unexpected"] = "optimistic compatibility data"
+    nonprintable_name = copy.deepcopy(valid)
+    nonprintable_name["active_experiment"]["name"] = "forged\nname"
+    unknown_phase = copy.deepcopy(valid)
+    unknown_phase["current_phase"] = "made_up_phase"
+    for invalid in ({"ok": True}, wrong_proto, extra_key, nonprintable_name, unknown_phase):
+        bar._on_experiment_result(invalid)
+        assert bar._exp_label.text() == last_known_text
+        assert bar._last_experiment_full_text == last_known_full_text
+        assert bar._exp_label.textFormat() == Qt.TextFormat.PlainText
+        assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        tooltip_text = document.toPlainText()
+        assert last_known_full_text in tooltip_text
+        assert "недоступен" in tooltip_text
+        assert bar._app_mode is None
+        assert "нет данных" in bar._mode_badge.text().lower()
+
+    assert emitted == [valid]
+
+
+def test_experiment_name_and_phase_are_plain_text_and_tooltip_markup_is_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bar = _make_bar()
+    bar._exp_label.setMaximumWidth(4096)
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    raw_name = '<b title="forged">A&B</b>'
+    raw_phase = "<i>phase</i>\u202e\n\t"
+    phase_key = "hostile_phase_fixture"
+    monkeypatch.setitem(top_watch_bar_module.PHASE_LABELS_RU, phase_key, raw_phase)
+    monkeypatch.setattr(top_watch_bar_module, "_fmt_elapsed", lambda _value: "")
+    payload = _live_experiment_status(name=raw_name, phase=phase_key)
+
+    bar._on_experiment_result(payload)
+
+    expected = safe_plain_text(f"\u25cf {raw_name} \u00b7 {raw_phase}")
+    tooltip = bar._exp_label.toolTip()
+    assert bar._exp_label.textFormat() == Qt.TextFormat.PlainText
+    assert bar._exp_label.text() == expected
+    assert tooltip.startswith("<qt>") and tooltip.endswith("</qt>")
+    assert "<b" not in tooltip and "<i>" not in tooltip
+    assert "&lt;b title=&quot;forged&quot;&gt;" in tooltip
+    assert "&lt;i&gt;phase&lt;/i&gt;" in tooltip
+    document = QTextDocument()
+    document.setHtml(tooltip)
+    assert document.toPlainText() == expected
+    assert emitted == [payload]
+    payload["active_experiment"]["name"] = "mutated after delivery"
+    assert emitted[0]["active_experiment"]["name"] == raw_name
 
 
 def test_mode_badge_updates_on_change() -> None:
@@ -292,12 +638,13 @@ def test_mode_badge_updates_on_change() -> None:
 # --- B.6.2 Clickable badge tests ---
 
 
-def test_mode_badge_click_does_nothing_when_hidden() -> None:
-    """Click on hidden badge (no mode known) should not trigger anything."""
+def test_mode_badge_click_does_nothing_when_mode_unavailable() -> None:
+    """Unavailable remains visible but cannot dispatch a mode command."""
     bar = _make_bar()
-    assert bar._mode_badge.isHidden()
-    bar._on_mode_badge_clicked()  # Should not raise, not show dialog
-    assert bar._mode_badge.isHidden()
+    initial_text = bar._mode_badge.text()
+    assert not bar._mode_badge.isHidden()
+    bar._on_mode_badge_clicked()
+    assert not bar._mode_badge.isHidden() and bar._mode_badge.text() == initial_text
 
 
 def test_mode_badge_stores_current_mode() -> None:
@@ -319,7 +666,11 @@ def test_mode_badge_stores_current_mode() -> None:
 
     bar._update_mode_badge(None)
     assert bar._app_mode is None
-    assert bar._mode_badge.isHidden()
+    assert not bar._mode_badge.isHidden()
+    assert (
+        bar._mode_badge.text()
+        == "\u0420\u0435\u0436\u0438\u043c: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
+    )
 
 
 def test_mode_badge_cursor_is_pointing_hand() -> None:

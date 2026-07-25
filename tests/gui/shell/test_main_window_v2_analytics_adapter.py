@@ -19,6 +19,13 @@ from datetime import UTC, datetime
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
 from cryodaq.gui.shell.views.analytics_view import (
@@ -56,6 +63,35 @@ def _make_reading(
     )
 
 
+def _dispatch_described(
+    w: MainWindowV2,
+    reading: Reading,
+    quantity: ChannelQuantity,
+    *,
+    display_name: str = "Test analytics channel",
+    source_key: str | None = None,
+    role: ChannelRole = ChannelRole.PRIMARY_MEASUREMENT,
+    safety_class: ChannelSafetyClass = ChannelSafetyClass.OBSERVATIONAL,
+    display_group: str = "test",
+) -> None:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=reading.channel,
+        instrument_id=reading.instrument_id,
+        source_key=source_key or f"test.{quantity.value}",
+        quantity=quantity,
+        unit=reading.unit,
+        role=role,
+        safety_class=safety_class,
+        display_group=display_group,
+        display_name=display_name,
+        visible_by_default=True,
+        display_order=0,
+        descriptor_revision=1,
+    )
+    w.dispatch_qualified_reading(DescriptorQualifiedReading(reading=reading, descriptor=descriptor))
+
+
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -89,6 +125,7 @@ def test_cooldown_eta_reading_populates_analytics_view():
     )
 
     import time as _time
+
     before_ts = _time.time()
     w._dispatch_reading(reading)
     after_ts = _time.time()
@@ -106,9 +143,7 @@ def test_cooldown_eta_reading_populates_analytics_view():
     # Predicted trajectory: 3 entries with hours [0.0, 3.0, 7.0] →
     # timestamps [now, now+3h, now+7h] paired with the temperature list.
     assert len(snap.predicted_trajectory) == 3
-    for (ts, _v), expected_hours in zip(
-        snap.predicted_trajectory, [0.0, 3.0, 7.0]
-    ):
+    for (ts, _v), expected_hours in zip(snap.predicted_trajectory, [0.0, 3.0, 7.0]):
         assert before_ts + expected_hours * 3600 - 1 <= ts <= after_ts + expected_hours * 3600 + 1
     assert [v for _, v in snap.predicted_trajectory] == [295.0, 150.0, 50.0]
     # CI trajectory: same time-axis treatment, with lower/upper order.
@@ -202,21 +237,16 @@ def test_unknown_analytics_channel_is_silently_dropped():
         "analytics/some_future_plugin/whatever",
     ):
         # Must not raise.
-        w._dispatch_reading(
-            _make_reading(channel, value=1.0, metadata={"state": "safe_off"})
-        )
+        w._dispatch_reading(_make_reading(channel, value=1.0, metadata={"state": "safe_off"}))
 
     # Panel's snapshot is untouched — adapter dropped all unknown readings.
-    assert w._analytics_view._last_cooldown is None, (
-        "set_cooldown must not be called for unknown analytics channels"
-    )
+    assert w._analytics_view._last_cooldown is None, "set_cooldown must not be called for unknown analytics channels"
     assert w._analytics_view._last_pressure_reading is None, (
         "set_pressure_reading must not be called for unknown analytics channels"
     )
     # No new setter keys added to the snapshot.
     assert w._analytics_snapshot == snapshot_before, (
-        f"Snapshot changed after unknown channels: "
-        f"new keys = {set(w._analytics_snapshot) - set(snapshot_before)}"
+        f"Snapshot changed after unknown channels: new keys = {set(w._analytics_snapshot) - set(snapshot_before)}"
     )
 
 
@@ -291,9 +321,7 @@ def test_experiment_status_propagates_phase_to_analytics():
     try:
         # Force analytics lazy factory before the status tick.
         w._ensure_overlay("analytics")
-        w._on_experiment_status_received(
-            {"active_experiment": {}, "current_phase": "vacuum"}
-        )
+        w._on_experiment_status_received({"active_experiment": {}, "current_phase": "vacuum"})
         assert w._analytics_view.current_phase() == "vacuum"
     finally:
         w._status_timer.stop()
@@ -306,9 +334,7 @@ def test_experiment_status_missing_phase_clears_analytics_phase():
     w = MainWindowV2()
     try:
         w._ensure_overlay("analytics")
-        w._on_experiment_status_received(
-            {"active_experiment": {}, "current_phase": "vacuum"}
-        )
+        w._on_experiment_status_received({"active_experiment": {}, "current_phase": "vacuum"})
         assert w._analytics_view.current_phase() == "vacuum"
         w._on_experiment_status_received({"active_experiment": None})
         assert w._analytics_view.current_phase() is None
@@ -358,7 +384,7 @@ def test_mbar_latin_pressure_reading_reaches_analytics():
         status=ChannelStatus.OK,
         metadata={},
     )
-    w._dispatch_reading(reading)
+    _dispatch_described(w, reading, ChannelQuantity.PRESSURE)
 
     assert "set_pressure_reading" in w._analytics_snapshot, (
         "Pressure reading with unit='mbar' was silently dropped; "
@@ -426,7 +452,7 @@ def test_temperature_overview_xaxis_scrolls_with_live_readings():
 def _t_reading(channel: str, value: float = 4.5) -> Reading:
     return Reading(
         timestamp=datetime.now(UTC),
-        instrument_id="LS218_1",
+        instrument_id="LS218_2",
         channel=channel,
         value=value,
         unit="K",
@@ -435,33 +461,34 @@ def _t_reading(channel: str, value: float = 4.5) -> Reading:
     )
 
 
-def test_cold_stage_reading_routed_to_analytics_view():
-    """Т12 readings (canonical cold-stage landmark) must be pushed into
-    AnalyticsView via set_cold_temperature_reading and cached in the
-    F4 lazy-replay snapshot, while non-Т12 K-unit readings must NOT
-    trigger the cold-stage forwarder.
-    """
+def test_only_authoritative_canonical_t12_feeds_cold_stage_predictor():
     _app()
     w = MainWindowV2()
     _stop_timers(w)
     w._ensure_overlay("analytics")
     assert isinstance(w._analytics_view, AnalyticsView)
 
-    # Canonical short-id form.
-    short_reading = _t_reading("Т12", value=4.51)
-    w._dispatch_reading(short_reading)
-    assert w._analytics_view._last_cold_temperature_reading is short_reading
-    assert w._analytics_snapshot.get("set_cold_temperature_reading") == (short_reading,)
+    cold_stage = _t_reading("Т12", value=4.51)
+    _dispatch_described(
+        w,
+        cold_stage,
+        ChannelQuantity.TEMPERATURE,
+        display_name="Т1 — misleading relocatable sensor label",
+        source_key="input.4.temperature",
+        safety_class=ChannelSafetyClass.SAFETY_CRITICAL_INPUT,
+        display_group="компрессор",
+    )
+    assert w._analytics_view._last_cold_temperature_reading is cold_stage
+    assert w._analytics_snapshot["set_cold_temperature_reading"] == (cold_stage,)
 
-    # Long-form "Т12 <label>" must also route through the canonical short id.
-    long_reading = _t_reading("Т12 Холодная плита", value=4.52)
-    w._dispatch_reading(long_reading)
-    assert w._analytics_view._last_cold_temperature_reading is long_reading
-
-    # A non-Т12 cold-channel reading must NOT replace the cached cold-stage
-    # value — only Т12 feeds the asymptote predictor.
-    w._dispatch_reading(_t_reading("Т11 Тёплая плита", value=77.0))
-    assert w._analytics_view._last_cold_temperature_reading is long_reading
+    non_cold_stage = _t_reading("sensor.cold-looking", value=4.52)
+    _dispatch_described(
+        w,
+        non_cold_stage,
+        ChannelQuantity.TEMPERATURE,
+        display_name="Т12 — misleading display label",
+    )
+    assert w._analytics_view._last_cold_temperature_reading is cold_stage
 
 
 def test_cold_stage_reading_skipped_when_unit_not_kelvin():

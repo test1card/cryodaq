@@ -9,6 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+from cryodaq.gui.shell.operator_components import NavigationIntent
+from cryodaq.gui.shell.views.operator_display import OperatorDisplay
 
 
 def _app() -> QApplication:
@@ -41,7 +43,44 @@ def test_main_window_v2_constructs_with_shell_components() -> None:
     assert w._bottom_bar is not None
     assert w._overlay is not None
     assert w._overlay.current_overlay == "home"
+    assert w._overlay.currentWidget() is w._overview_panel
+    assert isinstance(w._operator_display, OperatorDisplay)
+    assert not w._top_bar.isHidden()
+    assert not w._bottom_bar.isHidden()
     assert w.windowTitle() == "CryoDAQ"
+
+
+def test_operator_display_is_fail_closed_home_and_routes_to_drill_down(monkeypatch) -> None:
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+
+    assert w._operator_display.snapshot is None
+    assert w._operator_display.accessibleName() == "Сводка смены"
+    assert "недоступны" in w._operator_display.accessibleDescription()
+
+    accepted = []
+    monkeypatch.setattr(w._operator_display, "render", accepted.append)
+    snapshot = object()
+    w.render_operator_snapshot(snapshot)
+    assert accepted == [snapshot]
+
+    typed: list[NavigationIntent] = []
+    w._operator_display.navigation_requested.connect(typed.append)
+    w._operator_display._forward_navigation(w._operator_display.next_action.intent)
+    assert typed == [w._operator_display.next_action.intent]
+    assert isinstance(typed[0], NavigationIntent)
+
+    w._operator_display.route_requested.emit("alarms")
+    assert w._overlay.currentWidget() is w._alarm_panel
+    assert w._tool_rail._buttons["alarms"]._active is True
+    assert not w._top_bar.isHidden()
+    assert not w._bottom_bar.isHidden()
+
+    w._on_tool_clicked("summary")
+    assert w._overlay.currentWidget() is w._operator_display
+    assert w._overlay.current_overlay == "summary"
+    assert w._tool_rail._buttons["more"]._active is True
 
 
 def test_tool_rail_click_switches_overlay() -> None:
@@ -59,3 +98,5 @@ def test_tool_rail_click_switches_overlay() -> None:
     assert w._overlay.currentWidget() is w._overview_panel
     assert w._overlay.current_overlay == "home"
     assert w._tool_rail._buttons["home"]._active is True
+    assert not w._top_bar.isHidden()
+    assert not w._bottom_bar.isHidden()
