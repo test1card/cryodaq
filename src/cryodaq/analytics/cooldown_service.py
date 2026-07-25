@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -23,15 +25,26 @@ if TYPE_CHECKING:
 
 from cryodaq.analytics.base_plugin import DerivedMetric
 from cryodaq.analytics.cooldown_predictor import (
+    MIN_COOLDOWN_MODEL_CURVES,
+    CooldownModelStatus,
     EnsembleModel,
     PredictionResult,
     compute_rate_from_history,
+    cooldown_curve_source_digest,
     ingest_from_raw_arrays,
     load_model,
     predict,
 )
 from cryodaq.analytics.steady_state import SteadyStatePredictor
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.shutdown_settlement import (
+    CancelledTaskSettlement,
+    await_executor_owner,
+    cancel_and_settle_tasks,
+    combine_settlements,
+    settle_executor_operation,
+    settle_without_cancelling,
+)
 from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
@@ -191,6 +204,7 @@ class CooldownService:
         *,
         event_bus: EventBus | None = None,
         reader: Any | None = None,
+        safety_manager: Any = None,
     ) -> None:
         self._broker = broker
         self._config = config
@@ -201,6 +215,17 @@ class CooldownService:
         # A2: read-only history reader (SQLiteWriter.read_readings_history)
         # for off-hot-path ultimate_vacuum enrichment at cooldown end.
         self._reader = reader
+        # P0 fail-open fix — optional SafetyManager handle (same pattern as
+        # CooldownAlarm's ``safety_manager``), so unit tests and headless
+        # paths can construct CooldownService without safety wiring. When
+        # set, _start_locked() reports predictor model health through
+        # SafetyManager.set_cooldown_predictor_status() so a missing,
+        # malformed, or below-minimum model blocks request_run() via the
+        # existing precondition gate instead of silently reporting
+        # available. NOT wired from engine.py yet in this candidate — see
+        # implementer report; that one-line construction-site change is
+        # outside this fix's writable surface.
+        self._safety_manager = safety_manager
 
         self._channel_cold: str = config.get("channel_cold", "")
         self._channel_warm: str = config.get("channel_warm", "")
@@ -225,12 +250,20 @@ class CooldownService:
 
         # Model
         self._model: EnsembleModel | None = None
+        # P0 fail-open fix — typed status of the last attempt to establish
+        # self._model, never a bare None/bool (see CooldownModelStatus).
+        # None until _start_locked has run at least once.
+        self.model_status: CooldownModelStatus | None = None
 
         # Queue & tasks
         self._queue: asyncio.Queue | None = None
         self._consume_task: asyncio.Task | None = None
         self._predict_task: asyncio.Task | None = None
         self._running = False
+        self._stopping = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._executor_admission_open = True
+        self._executor_futures: set[asyncio.Task[Any]] = set()
 
         # Latest T values for detector
         self._last_T_cold: float | None = None
@@ -273,9 +306,7 @@ class CooldownService:
         """Return last computed prediction metadata, or None if not yet predicted."""
         return self._last_prediction
 
-    def expected_value(
-        self, channel: str, ts_monotonic: float
-    ) -> tuple[float, float] | None:
+    def expected_value(self, channel: str, ts_monotonic: float) -> tuple[float, float] | None:
         """Interpolate expected (T, sigma) at ``ts_monotonic`` for the given channel.
 
         Returns ``None`` if any precondition is unmet:
@@ -335,10 +366,101 @@ class CooldownService:
         sigma = max(0.0, (upper_val - lower_val) / 2.0)
         return (mean_val, sigma)
 
+    def _lifecycle_transition_lock(self) -> asyncio.Lock:
+        """Return the single owner that serializes start/stop generations."""
+
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            # Compatibility for partially constructed terminal-settlement
+            # owners. Creation is atomic on one event loop.
+            lock = asyncio.Lock()
+            self._lifecycle_lock = lock
+        return lock
+
     async def start(self) -> None:
+        """Start exactly one lifecycle generation."""
+
+        async with self._lifecycle_transition_lock():
+            try:
+                await self._start_locked()
+            except asyncio.CancelledError as cancellation:
+                await self._settle_cancelled_start(cancellation)
+                raise cancellation
+            except BaseException:
+                await self._settle_partial_start()
+                raise
+
+    async def _settle_cancelled_start(self, cancellation: asyncio.CancelledError) -> None:
+        """Rollback every partial startup owner before propagating cancellation."""
+
+        await self._settle_partial_start(cancellation)
+
+    async def _settle_partial_start(
+        self,
+        cancellation: asyncio.CancelledError | None = None,
+    ) -> None:
+        """Settle only owners acquired by this partial startup generation."""
+
+        self._stopping = True
+        self._executor_admission_open = False
+        self._running = False
+        combined: CancelledTaskSettlement | None = None
+        try:
+            tasks = tuple(task for task in (self._consume_task, self._predict_task) if task is not None)
+            executor_futures = tuple(getattr(self, "_executor_futures", ()))
+            task_settlement = await cancel_and_settle_tasks(tasks)
+            executor_settlement = await settle_without_cancelling(
+                executor_futures,
+                name="cooldown-start-executor-settlement",
+            )
+            queue = self._queue
+            if queue is None:
+                unsubscribe_settlement = CancelledTaskSettlement()
+            else:
+                unsubscribe = asyncio.create_task(
+                    self._broker.unsubscribe(
+                        "cooldown_service",
+                        expected_queue=queue,
+                    ),
+                    name="cooldown-start-subscription-settlement",
+                )
+                unsubscribe_settlement = await settle_without_cancelling(
+                    (unsubscribe,),
+                    name="cooldown-start-subscription-drain",
+                )
+            self._consume_task = None
+            self._predict_task = None
+            self._queue = None
+            if hasattr(self, "_executor_futures"):
+                self._executor_futures.clear()
+            combined = combine_settlements(
+                task_settlement,
+                executor_settlement,
+                unsubscribe_settlement,
+                CancelledTaskSettlement(cancellation=cancellation),
+            )
+        finally:
+            self._stopping = False
+        assert combined is not None
+        combined.raise_if_unsuccessful()
+
+    async def _start_locked(self) -> None:
         """Запустить сервис: подписка на брокер, загрузка модели, запуск задач."""
-        if self._running:
+        consume_live = self._consume_task is not None and not self._consume_task.done()
+        predict_live = self._predict_task is not None and not self._predict_task.done()
+        if self._running and consume_live and predict_live and self._queue is not None:
             return
+        if self._stopping:
+            raise RuntimeError("cooldown service cannot start while shutdown is settling")
+        if (
+            self._running
+            or self._queue is not None
+            or self._consume_task is not None
+            or self._predict_task is not None
+            or self._executor_futures
+        ):
+            await self._stop_locked()
+        self._executor_admission_open = True
 
         channels = {self._channel_cold, self._channel_warm}
 
@@ -351,12 +473,39 @@ class CooldownService:
             filter_fn=_filter,
         )
 
-        # Load model (in executor, may be slow)
-        loop = asyncio.get_running_loop()
+        # Load model (in executor, may be slow).
+        #
+        # P0 fail-open fix: a missing, malformed, or below-minimum-curve
+        # model must never present as usable safety infrastructure. Every
+        # branch below sets self.model_status to a typed CooldownModelStatus
+        # (never a bare None/bool) and, when a SafetyManager is wired in
+        # (see __init__), reports it through set_cooldown_predictor_status()
+        # — the existing request_run() precondition gate
+        # (SafetyManager._check_preconditions()) then denies RUN and the
+        # SAFE_OFF -> READY auto-transition until a later available=True
+        # report clears it. This never touches OFF/emergency-off authority:
+        # SafetyManager remains the sole authority for source on/off, and
+        # this is a new *fact* fed into its existing gate, not a second one.
         try:
             model_file = self._model_dir / "predictor_model.json"
             if model_file.exists():
-                self._model = await loop.run_in_executor(None, load_model, self._model_dir)
+                loaded_model = await self._run_owned_executor(load_model, self._model_dir)
+                if not self._executor_admission_open:
+                    return
+                if loaded_model.n_curves < MIN_COOLDOWN_MODEL_CURVES:
+                    # Defense in depth (item 2, third enforcement point):
+                    # load_model()/_require_model_capacity() already reject a
+                    # below-minimum on-disk model before this line can be
+                    # reached, but this call site — the one that actually
+                    # adopts a model as self._model — is re-checked
+                    # explicitly so it can never adopt one by any other path
+                    # or future refactor of load_model().
+                    raise ValueError(
+                        f"loaded cooldown model has {loaded_model.n_curves} curve(s), "
+                        f"below the reviewed minimum {MIN_COOLDOWN_MODEL_CURVES}"
+                    )
+                self._model = loaded_model
+                self.model_status = CooldownModelStatus(available=True)
                 logger.info(
                     "Модель охлаждения загружена: %d кривых, %.1f +/- %.1f ч",
                     self._model.n_curves,
@@ -364,13 +513,27 @@ class CooldownService:
                     self._model.duration_std,
                 )
             else:
+                reason = f"predictor model file not found: {model_file}"
                 logger.warning(
                     "Файл модели не найден: %s — прогнозирование недоступно",
                     model_file,
                 )
+                self.model_status = CooldownModelStatus(available=False, reason=reason)
         except Exception as exc:
+            if isinstance(exc.__cause__, asyncio.CancelledError):
+                raise
+            reason = f"{type(exc).__name__}: {exc}"
             logger.error("Ошибка загрузки модели охлаждения: %s", exc)
+            self.model_status = CooldownModelStatus(available=False, reason=reason)
 
+        if self._safety_manager is not None and self.model_status is not None:
+            await self._safety_manager.set_cooldown_predictor_status(
+                self.model_status.available,
+                self.model_status.reason,
+            )
+
+        if not self._executor_admission_open:
+            return
         self._running = True
         self._consume_task = asyncio.create_task(
             self._consume_loop(),
@@ -383,21 +546,75 @@ class CooldownService:
         logger.info("CooldownService запущен")
 
     async def stop(self) -> None:
+        """Settle one lifecycle generation without racing a replacement."""
+
+        async with self._lifecycle_transition_lock():
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         """Остановить сервис: отмена задач, отписка от брокера."""
-        if not self._running:
-            return
+        self._stopping = True
+        self._executor_admission_open = False
         self._running = False
-
-        for task in (self._consume_task, self._predict_task):
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        await self._broker.unsubscribe("cooldown_service")
+        combined: CancelledTaskSettlement | None = None
+        try:
+            tasks = tuple(task for task in (self._consume_task, self._predict_task) if task is not None)
+            executor_futures = tuple(getattr(self, "_executor_futures", ()))
+            task_settlement = await cancel_and_settle_tasks(tasks)
+            executor_settlement = await settle_without_cancelling(
+                executor_futures,
+                name="cooldown-executor-terminal-settlement",
+            )
+            queue = self._queue
+            if queue is None:
+                unsubscribe_settlement = CancelledTaskSettlement()
+            else:
+                unsubscribe = asyncio.create_task(
+                    self._broker.unsubscribe(
+                        "cooldown_service",
+                        expected_queue=queue,
+                    ),
+                    name="cooldown-unsubscribe-terminal-settlement",
+                )
+                unsubscribe_settlement = await settle_without_cancelling(
+                    (unsubscribe,),
+                    name="cooldown-unsubscribe-drain",
+                )
+            self._consume_task = None
+            self._predict_task = None
+            self._executor_futures.clear()
+            self._queue = None
+            combined = combine_settlements(
+                task_settlement,
+                executor_settlement,
+                unsubscribe_settlement,
+            )
+        finally:
+            self._stopping = False
+        assert combined is not None
+        combined.raise_if_unsuccessful()
         logger.info("CooldownService остановлен")
+
+    async def _run_owned_executor[ExecutorResult](
+        self,
+        function: Callable[..., ExecutorResult],
+        /,
+        *args: Any,
+    ) -> ExecutorResult:
+        if not self._executor_admission_open:
+            raise RuntimeError("cooldown service is stopping; new executor work is rejected")
+        loop = asyncio.get_running_loop()
+        operation = loop.run_in_executor(None, function, *args)
+        owner = asyncio.create_task(
+            settle_executor_operation(operation),
+            name="cooldown-executor-owner",
+        )
+        self._executor_futures.add(owner)
+        try:
+            return await await_executor_owner(owner)
+        finally:
+            if owner.done():
+                self._executor_futures.discard(owner)
 
     async def _consume_loop(self) -> None:
         """Читать показания из очереди брокера и обновлять буфер/детектор."""
@@ -480,11 +697,7 @@ class CooldownService:
         # at high replay speeds → predictor falls back to uniform weights
         # and emits trajectories anchored at "now" instead of the
         # accelerated timeline.
-        if (
-            self._cooldown_wall_start is not None
-            and cooldown_active
-            and self._last_reading_ts is not None
-        ):
+        if self._cooldown_wall_start is not None and cooldown_active and self._last_reading_ts is not None:
             t_elapsed = (self._last_reading_ts - self._cooldown_wall_start) / 3600.0
         else:
             t_elapsed = 0.0
@@ -505,10 +718,8 @@ class CooldownService:
             )
 
         # Run predict in executor (scipy is CPU-heavy)
-        loop = asyncio.get_running_loop()
         try:
-            pred = await loop.run_in_executor(
-                None,
+            pred = await self._run_owned_executor(
                 lambda: predict(
                     self._model,
                     T_cold,
@@ -521,6 +732,9 @@ class CooldownService:
             )
         except Exception as exc:
             logger.error("Ошибка прогнозирования охлаждения: %s", exc)
+            return
+
+        if not self._executor_admission_open:
             return
 
         # Build metadata
@@ -573,11 +787,80 @@ class CooldownService:
             pred.phase,
         )
 
+    def _cooldown_cycle_ingest_identity(self) -> str:
+        """Return one stable model-curve identity for the active cooldown."""
+
+        started_at = self._detector.cooldown_start_ts
+        if type(started_at) is not float:
+            raise RuntimeError("completed cooldown has no stable start identity")
+        if not math.isfinite(started_at) or started_at < 0.0 or started_at > 253_402_300_799.0:
+            raise RuntimeError("completed cooldown start identity is invalid")
+        started_at_us = int(round(started_at * 1_000_000.0))
+        return f"auto_ingest_cycle_{started_at_us:020d}"
+
+    def _load_reconciled_cycle_model(
+        self,
+        cycle_identity: str,
+        source_digest: str,
+    ) -> EnsembleModel | None:
+        """Load only an exact cycle-identity and numeric-payload match."""
+
+        model = load_model(self._model_dir)
+        for curve in model.curves:
+            if curve.name != cycle_identity:
+                continue
+            if getattr(curve, "source_digest", None) == source_digest:
+                return model
+            raise RuntimeError("cooldown cycle identity is bound to a different payload")
+        return None
+
+    def _ingest_completed_cycle(
+        self,
+        cycle_identity: str,
+        t_hours: Any,
+        T_cold: Any,
+        T_warm: Any,
+    ) -> tuple[bool, str, EnsembleModel | None]:
+        """Commit or reconcile one idempotently named cooldown curve."""
+
+        source_digest = cooldown_curve_source_digest(t_hours, T_cold, T_warm)
+        try:
+            result = ingest_from_raw_arrays(
+                self._model_dir,
+                t_hours,
+                T_cold,
+                T_warm,
+                name=cycle_identity,
+            )
+        except Exception as ingest_error:
+            try:
+                reconciled = self._load_reconciled_cycle_model(
+                    cycle_identity,
+                    source_digest,
+                )
+            except Exception:
+                raise ingest_error from None
+            if reconciled is None:
+                raise
+            return True, f"already committed: '{cycle_identity}'", reconciled
+
+        if result[0]:
+            return result
+        try:
+            reconciled = self._load_reconciled_cycle_model(
+                cycle_identity,
+                source_digest,
+            )
+        except Exception:
+            return result
+        if reconciled is None:
+            return result
+        return True, f"already committed: '{cycle_identity}'", reconciled
+
     async def _on_cooldown_end(self) -> None:
         """Обработка завершения цикла охлаждения: auto-ingest."""
         if not self._buffer:
             logger.warning("Цикл охлаждения завершён, но буфер пуст")
-            self._detector.reset()
             return
 
         buf_arr = np.array(list(self._buffer))
@@ -593,6 +876,13 @@ class CooldownService:
             len(t_hours),
         )
 
+        try:
+            cycle_identity = self._cooldown_cycle_ingest_identity()
+            source_digest = cooldown_curve_source_digest(t_hours, T_cold, T_warm)
+        except Exception as exc:
+            logger.error("Completed cooldown identity is not authoritative: %s", exc)
+            return
+
         if self._auto_ingest and self._model is not None:
             if duration_h < self._min_cooldown_hours:
                 logger.warning(
@@ -601,24 +891,25 @@ class CooldownService:
                     self._min_cooldown_hours,
                 )
             else:
-                loop = asyncio.get_running_loop()
                 try:
-                    ok, msg, new_model = await loop.run_in_executor(
-                        None,
-                        lambda: ingest_from_raw_arrays(
-                            self._model_dir,
-                            t_hours,
-                            T_cold,
-                            T_warm,
-                        ),
+                    ok, msg, new_model = await self._run_owned_executor(
+                        self._ingest_completed_cycle,
+                        cycle_identity,
+                        t_hours,
+                        T_cold,
+                        T_warm,
                     )
+                    if not self._executor_admission_open:
+                        return
                     if ok and new_model is not None:
                         self._model = new_model
                         logger.info("Модель обновлена: %s", msg)
                     else:
                         logger.warning("Auto-ingest отклонён: %s", msg)
+                        return
                 except Exception as exc:
                     logger.error("Ошибка auto-ingest: %s", exc)
+                    return
 
         # Task 8a: persist a cooldown fingerprint BEFORE clearing the buffer.
         # Flag-guarded, off hot-path, and never allowed to break cooldown-end
@@ -629,25 +920,36 @@ class CooldownService:
         fingerprint_id: str | None = None
         if cfg.get("enabled", False):
             pressures = await self._read_cooldown_pressures(cfg)
-            loop = asyncio.get_running_loop()
-            fp = await loop.run_in_executor(
-                None,
+            if not self._executor_admission_open:
+                return
+            fp = await self._run_owned_executor(
                 self._persist_cooldown_fingerprint,
                 t_hours,
                 T_cold,
                 pressures,
                 cfg,
             )
+            if not self._executor_admission_open:
+                return
             if fp is not None:
                 fingerprint_id = fp.fingerprint_id
 
-        # A1: publish an engine-level cooldown-end event on the EventBus so
-        # downstream consumers (event log, assistant, a future GUI badge
-        # bridge) learn of completion without polling. Fires regardless of
-        # the fingerprint feature flag; must never break cooldown end.
-        await self._publish_cooldown_end_event(
-            duration_h, float(T_cold[-1]), fingerprint_id
-        )
+        # Admit the identity-bound cooldown-end event before clearing any
+        # authoritative cycle state. Publication failure is terminal for this
+        # attempt and leaves the COMPLETE detector state and buffer retryable.
+        try:
+            published = await self._publish_cooldown_end_event(
+                duration_h,
+                float(T_cold[-1]),
+                fingerprint_id,
+                cycle_identity=cycle_identity,
+                source_digest=source_digest,
+            )
+        except Exception as exc:
+            logger.error("Cooldown-end publication did not settle: %s", exc)
+            raise
+        if published is False:
+            return
 
         # Reset for next cycle
         self._buffer.clear()
@@ -679,15 +981,22 @@ class CooldownService:
             return None
 
     async def _publish_cooldown_end_event(
-        self, duration_h: float, T_cold_final: float, fingerprint_id: str | None
-    ) -> None:
-        """Publish a ``cooldown_end`` EngineEvent. Never raises."""
+        self,
+        duration_h: float,
+        T_cold_final: float,
+        fingerprint_id: str | None,
+        *,
+        cycle_identity: str,
+        source_digest: str,
+    ) -> bool:
+        """Publish one identity-bound ``cooldown_end`` event and report settlement."""
+
         if self._event_bus is None:
-            return
+            raise RuntimeError("required cooldown-end EventBus target is unavailable")
         try:
             from cryodaq.core.event_bus import EngineEvent
 
-            await self._event_bus.publish(
+            receipt = await self._event_bus.publish_required(
                 EngineEvent(
                     event_type="cooldown_end",
                     timestamp=datetime.now(UTC),
@@ -695,11 +1004,23 @@ class CooldownService:
                         "duration_h": duration_h,
                         "T_cold_final": T_cold_final,
                         "fingerprint_id": fingerprint_id,
+                        "cycle_identity": cycle_identity,
+                        "source_digest": source_digest,
                     },
-                )
+                ),
+                event_identity=cycle_identity,
+                payload_digest=source_digest,
             )
-        except Exception as exc:  # noqa: BLE001 — event publish must never break cooldown end
+            if not self._event_bus.validates_required_publication(
+                receipt,
+                event_identity=cycle_identity,
+                payload_digest=source_digest,
+            ):
+                raise RuntimeError("cooldown-end EventBus admission receipt is invalid")
+        except Exception as exc:  # noqa: BLE001 — required publication must fail closed
             logger.error("Ошибка публикации события cooldown_end: %s", exc)
+            raise
+        return True
 
     def _load_baseline_config(self) -> dict[str, Any]:
         """Load the ``cooldown_baseline`` block from plugins.yaml once.

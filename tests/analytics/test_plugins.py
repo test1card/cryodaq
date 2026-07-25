@@ -160,9 +160,7 @@ async def test_bad_plugin_isolated(tmp_path: Path, caplog):
     assert result.channel == "analytics/good_companion/companion_metric"
 
     # The bad plugin's error was logged
-    error_records = [
-        r for r in caplog.records if r.levelno >= logging.ERROR and "bad_plugin" in r.message
-    ]
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR and "bad_plugin" in r.message]
     assert error_records, "Expected an error log entry for bad_plugin"
 
 
@@ -261,8 +259,11 @@ async def test_teardown_called_on_unload(tmp_path: Path):
         await pipeline.stop()
 
 
-async def test_bad_teardown_does_not_break_unload(tmp_path: Path, caplog):
-    """A plugin whose teardown() raises is still unloaded; the error is logged."""
+async def test_bad_teardown_retains_owner_and_blocks_replacement_until_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A failed teardown remains owned until an exact retry settles it."""
     plugin_file = tmp_path / "bad_teardown_plugin.py"
     plugin_file.write_text(_BAD_TEARDOWN_PLUGIN_SRC, encoding="utf-8")
 
@@ -271,15 +272,14 @@ async def test_bad_teardown_does_not_break_unload(tmp_path: Path, caplog):
     await pipeline.start()
     try:
         assert "bad_teardown_plugin" in pipeline._plugins
+        exact_owner = pipeline._plugins["bad_teardown_plugin"]
+        with pytest.raises(RuntimeError, match="teardown"):
+            pipeline._unload_plugin("bad_teardown_plugin")
+        assert pipeline._plugins["bad_teardown_plugin"] is exact_owner
+
+        monkeypatch.setattr(exact_owner, "teardown", lambda: None)
         pipeline._unload_plugin("bad_teardown_plugin")
-        # Unload must complete despite the teardown exception.
         assert "bad_teardown_plugin" not in pipeline._plugins
-        error_records = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.ERROR and "teardown" in r.message.lower()
-        ]
-        assert error_records, "Expected a logged error for the failing teardown()"
     finally:
         await pipeline.stop()
 
@@ -315,9 +315,7 @@ async def test_watch_loop_skips_unstable_file(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(pl, "_WATCH_INTERVAL_S", 0.01)
 
     loaded: list[str] = []
-    monkeypatch.setattr(
-        pipeline, "_load_plugin", lambda path: loaded.append(Path(path).name)
-    )
+    monkeypatch.setattr(pipeline, "_load_plugin", lambda path: loaded.append(Path(path).name))
 
     # Scan sequence: initial (empty) → new mtime → shifted mtime → stable.
     scans = iter(
@@ -343,6 +341,4 @@ async def test_watch_loop_skips_unstable_file(tmp_path: Path, monkeypatch):
 
     await pipeline._watch_loop()
 
-    assert loaded == ["simple_plugin.py"], (
-        "file must load exactly once, only after its mtime stabilised"
-    )
+    assert loaded == ["simple_plugin.py"], "file must load exactly once, only after its mtime stabilised"

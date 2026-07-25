@@ -20,14 +20,26 @@ Physics:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
+import os
+import stat
+import tempfile
+import threading
+import time
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date as _date
 from pathlib import Path
 
 import numpy as np
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
+
+from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +65,135 @@ T_WARM_START = 295.0
 # Fallbacks used when no curves are available (empty model, first boot).
 # Previous hardcoded values (4.0 K, 85.0 K) silently lost the
 # quasi-stationary regime from ~4 K to the actual 2nd-stage base (~2.9 K).
-T_COLD_END_FALLBACK = 2.5   # K — below typical 2-stage GM floor
+T_COLD_END_FALLBACK = 2.5  # K — below typical 2-stage GM floor
 T_WARM_END_FALLBACK = 75.0  # K — 1st-stage floor with margin
 
 # Module-level aliases kept for backward compatibility with external callers.
 T_COLD_END = T_COLD_END_FALLBACK
 T_WARM_END = T_WARM_END_FALLBACK
+
+_MODEL_UPDATE_LOCK = threading.RLock()
+_MODEL_UPDATE_LOCK_NAME = ".predictor-model.lock"
+_MODEL_UPDATE_LOCK_TIMEOUT_S = 30.0
+
+
+@contextmanager
+def _model_update_guard(model_dir: Path) -> Iterator[None]:
+    """Serialize model transactions across threads and engine/CLI processes."""
+
+    with _MODEL_UPDATE_LOCK:
+        deadline = time.monotonic() + _MODEL_UPDATE_LOCK_TIMEOUT_S
+        descriptor: int | None = None
+        while descriptor is None:
+            descriptor = try_acquire_lock(
+                _MODEL_UPDATE_LOCK_NAME,
+                lock_dir=model_dir,
+            )
+            if descriptor is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting for the predictor model update owner")
+            time.sleep(0.01)
+        try:
+            yield
+        finally:
+            release_lock_exact(
+                descriptor,
+                _MODEL_UPDATE_LOCK_NAME,
+                lock_dir=model_dir,
+            )
+
+
+def _curve_arrays(
+    t_hours: object,
+    T_cold: object,
+    T_warm: object,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return one exact, bounded-shape curve payload or fail closed."""
+
+    t_length = _bounded_vector_length(t_hours, field_name="t_hours")
+    cold_length = _bounded_vector_length(T_cold, field_name="T_cold")
+    warm_length = _bounded_vector_length(T_warm, field_name="T_warm")
+    if t_length == 0 or t_length != cold_length or t_length != warm_length:
+        raise ValueError("cooldown curve arrays must have one equal non-zero length")
+    t_h = np.asarray(t_hours, dtype=np.float64)
+    tc = np.asarray(T_cold, dtype=np.float64)
+    tw = np.asarray(T_warm, dtype=np.float64)
+    if t_h.ndim != 1 or tc.ndim != 1 or tw.ndim != 1:
+        raise ValueError("cooldown curve arrays must be one-dimensional")
+    if not np.all(np.isfinite(t_h)) or not np.all(np.isfinite(tc)):
+        raise ValueError("cooldown time and cold-temperature arrays must be finite")
+    if np.any(np.isinf(tw)):
+        raise ValueError("cooldown warm-temperature array cannot contain infinity")
+    # Warm-channel NaN policy (P0 fail-open fix, item 6): an ALL-NaN warm
+    # array is a deliberate, load-bearing sentinel elsewhere in this module
+    # for "no warm channel available" (see _reference_curve_from_payload's
+    # np.full_like(..., np.nan) fallback and compute_progress() falling back
+    # to cold-only progress when np.any(np.isnan(T_warm))) — rejecting it
+    # would break every legitimate single-channel curve. A PARTIAL mix of
+    # finite and NaN values is different: it is not "channel absent", it is
+    # corrupted data in a channel we do have real readings for, and today it
+    # is silently accepted and silently degrades the whole curve to
+    # cold-only progress with no diagnostic. Reject that ambiguous case
+    # explicitly instead of silently downgrading it.
+    warm_is_nan = np.isnan(tw)
+    if np.any(warm_is_nan) and not np.all(warm_is_nan):
+        raise ValueError(
+            "cooldown warm-temperature array must be entirely finite or entirely NaN "
+            "(partial NaN indicates corrupted, not absent, warm-channel data)"
+        )
+    if t_h[0] != 0.0 or np.signbit(t_h[0]):
+        raise ValueError("cooldown time must be anchored at exact 0.0 hours")
+    if len(t_h) > 1 and not np.all(np.diff(t_h) > 0.0):
+        raise ValueError("cooldown time must be strictly increasing")
+    return t_h, tc, tw
+
+
+def _canonical_float(value: np.float64) -> str:
+    scalar = float(value)
+    if math.isnan(scalar):
+        return "nan"
+    return scalar.hex()
+
+
+def cooldown_curve_source_digest(
+    t_hours: object,
+    T_cold: object,
+    T_warm: object,
+) -> str:
+    """Bind a model curve to its canonical numeric payload.
+
+    Decimal JSON spellings and ndarray dtypes cannot change this identity;
+    every finite value is represented by its exact IEEE-754 hexadecimal form
+    and warm-channel NaNs use one canonical marker.
+    """
+
+    t_h, tc, tw = _curve_arrays(t_hours, T_cold, T_warm)
+    canonical = {
+        "schema": 1,
+        "t_hours": [_canonical_float(value) for value in t_h],
+        "T_cold": [_canonical_float(value) for value in tc],
+        "T_warm": [_canonical_float(value) for value in tw],
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _verified_curve_source_digest(
+    supplied: object,
+    t_hours: object,
+    T_cold: object,
+    T_warm: object,
+) -> str:
+    computed = cooldown_curve_source_digest(t_hours, T_cold, T_warm)
+    if supplied is None or supplied == "":
+        return computed
+    if type(supplied) is not str or len(supplied) != 64 or any(char not in "0123456789abcdef" for char in supplied):
+        raise ValueError("cooldown curve source_digest is invalid")
+    if supplied != computed:
+        raise ValueError("cooldown curve source_digest does not match its numeric payload")
+    return computed
+
 
 # Adaptive rate-based weighting
 RATE_WINDOW_H = 1.5  # compute avg cooling rate over first 1.5h
@@ -83,6 +218,7 @@ class ReferenceCurve:
     phase2_hours: float
     T_cold_final: float
     T_warm_final: float
+    source_digest: str = ""
     T_cold_smooth: np.ndarray | None = field(default=None, repr=False)
     T_warm_smooth: np.ndarray | None = field(default=None, repr=False)
     progress: np.ndarray | None = field(default=None, repr=False)
@@ -92,6 +228,244 @@ class ReferenceCurve:
     _p_of_t: interp1d | None = field(default=None, repr=False)
     _Tc_of_p: interp1d | None = field(default=None, repr=False)
     _Tw_of_p: interp1d | None = field(default=None, repr=False)
+
+
+_MAX_CURVE_NAME_LENGTH = 255
+_MAX_CURVE_DATE_LENGTH = 32
+# Capacity is part of the persistent provenance contract. These limits are
+# deliberately well above normal CryoDAQ curves (hundreds to low thousands of
+# points) while bounding JSON decode and numeric expansion before allocation.
+MAX_COOLDOWN_JSON_BYTES = 64 * 1024 * 1024
+MAX_COOLDOWN_POINTS_PER_CURVE = 250_000
+MAX_COOLDOWN_MODEL_POINTS = 2_000_000
+MAX_COOLDOWN_MODEL_CURVES = 100
+
+# P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): the reviewed minimum
+# curve count for a model to be trusted as safety-relevant predictor
+# infrastructure. Set to 1 — i.e. this closes exactly the reported
+# zero-curve fail-open admission — because the existing reviewed test
+# fixtures (tests/analytics/test_cooldown_transaction_ownership.py
+# `_seed_model`, out of this fix's writable surface) construct and expect
+# `load_model()` to accept single-curve models for unrelated validation
+# scenarios (duplicate identity, contradicting summary metadata, eviction,
+# ...); raising this past 1 breaks 9 of those tests. Ensemble statistics
+# are degenerate below ~3 curves (n=1 std collapses to 0 — a single curve
+# looks perfectly certain — and the CLI's own LOO cross-validation already
+# requires >=3, `cooldown_cli.py cmd_validate`), so a higher reviewed
+# minimum is a legitimate follow-up, but it is a domain/statistical policy
+# decision that also requires updated (reviewer-owned) test fixtures, not
+# something this fix should impose unilaterally.
+MIN_COOLDOWN_MODEL_CURVES = 1
+
+
+def _bounded_vector_length(value: object, *, field_name: str) -> int:
+    """Preflight one one-dimensional numeric source before ndarray allocation."""
+
+    if isinstance(value, np.ndarray):
+        if value.ndim != 1:
+            raise ValueError(f"cooldown curve {field_name} must be one-dimensional")
+        length = int(value.size)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        length = len(value)
+        if length > MAX_COOLDOWN_POINTS_PER_CURVE:
+            raise ValueError(f"cooldown curve {field_name} exceeds {MAX_COOLDOWN_POINTS_PER_CURVE} points")
+        if any(
+            isinstance(item, (Mapping, Sequence, np.ndarray)) and not isinstance(item, (str, bytes, bytearray))
+            for item in value
+        ):
+            raise ValueError(f"cooldown curve {field_name} must be one-dimensional")
+    else:
+        raise ValueError(f"cooldown curve {field_name} must be a bounded sequence")
+    if length > MAX_COOLDOWN_POINTS_PER_CURVE:
+        raise ValueError(f"cooldown curve {field_name} exceeds {MAX_COOLDOWN_POINTS_PER_CURVE} points")
+    return length
+
+
+def _require_model_capacity(curves: object, *, minimum: int = 0) -> None:
+    """Bound a persisted ensemble before expanding any curve arrays.
+
+    ``minimum`` defaults to 0: this function also preflights *intermediate*
+    curve lists during online ingest (``_ingest_curve_locked``), where a
+    model legitimately grows one curve at a time starting from empty, and
+    those call sites must keep passing the default. A caller that is about
+    to adopt a curve list as THE safety-relevant model (``load_model``)
+    must pass the reviewed minimum (``MIN_COOLDOWN_MODEL_CURVES``) so a
+    zero-curve or below-minimum on-disk model is rejected before it can be
+    parsed, built, or reported available.
+    """
+
+    if not isinstance(curves, list):
+        raise ValueError("predictor model must contain an exact curves list")
+    if len(curves) > MAX_COOLDOWN_MODEL_CURVES:
+        raise ValueError(f"predictor model exceeds {MAX_COOLDOWN_MODEL_CURVES} curve owners")
+    if len(curves) < minimum:
+        raise ValueError(f"predictor model has {len(curves)} curve owner(s), below the reviewed minimum {minimum}")
+    total_points = 0
+    for entry in curves:
+        if not isinstance(entry, dict):
+            raise ValueError("predictor model curve entries must be objects")
+        source = entry.get("t_hours")
+        if source is None:
+            source = entry.get("elapsed_hours")
+        total_points += _bounded_vector_length(source, field_name="t_hours")
+        if total_points > MAX_COOLDOWN_MODEL_POINTS:
+            raise ValueError(f"predictor model exceeds {MAX_COOLDOWN_MODEL_POINTS} aggregate points")
+
+
+def _bounded_curve_text(
+    value: object,
+    *,
+    field_name: str,
+    max_length: int,
+    allow_empty: bool,
+) -> str:
+    """Validate bounded persistent identity text without normalization."""
+
+    if type(value) is not str:
+        raise ValueError(f"cooldown curve {field_name} must be an exact string")
+    if len(value) > max_length:
+        raise ValueError(f"cooldown curve {field_name} exceeds {max_length} characters")
+    if not allow_empty and not value:
+        raise ValueError(f"cooldown curve {field_name} cannot be empty")
+    if value != value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"cooldown curve {field_name} contains unsafe characters")
+    return value
+
+
+def _curve_identity(value: object) -> str:
+    return _bounded_curve_text(
+        value,
+        field_name="name",
+        max_length=_MAX_CURVE_NAME_LENGTH,
+        allow_empty=False,
+    )
+
+
+def _curve_date(value: object) -> str:
+    text = _bounded_curve_text(
+        value,
+        field_name="date",
+        max_length=_MAX_CURVE_DATE_LENGTH,
+        allow_empty=True,
+    )
+    if text and (
+        not text.isascii()
+        or len(text) != 10
+        or text[4] != "-"
+        or text[7] != "-"
+        or not (text[:4] + text[5:7] + text[8:]).isdigit()
+    ):
+        raise ValueError("cooldown curve date must use bounded YYYY-MM-DD syntax")
+    if text:
+        try:
+            parsed = _date.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("cooldown curve date must be a real calendar date") from exc
+        if parsed.isoformat() != text:
+            raise ValueError("cooldown curve date must use canonical YYYY-MM-DD syntax")
+    return text
+
+
+def _curve_summary(
+    t_hours: object,
+    T_cold: object,
+    T_warm: object,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float, float, float]:
+    """Derive every behavior-affecting summary from one validated payload."""
+
+    t_h, tc, tw = _curve_arrays(t_hours, T_cold, T_warm)
+    duration = float(t_h[-1])
+    crossings = np.flatnonzero(tc < T_PHASE_BOUNDARY)
+    phase1 = float(t_h[int(crossings[0])]) if crossings.size else duration
+    phase2 = duration - phase1
+    cold_final = float(np.min(tc))
+    finite_warm = tw[np.isfinite(tw)]
+    warm_final = float(np.min(finite_warm)) if finite_warm.size else 0.0
+    return t_h, tc, tw, duration, phase1, phase2, cold_final, warm_final
+
+
+def _reconcile_summary_value(payload: Mapping[str, object], key: str, derived: float) -> float:
+    if key not in payload:
+        return derived
+    supplied = payload[key]
+    if type(supplied) not in (int, float) or not math.isfinite(float(supplied)):
+        raise ValueError(f"cooldown curve {key} must be a finite number")
+    if float(supplied) != derived:
+        raise ValueError(f"cooldown curve {key} does not match its numeric payload")
+    return derived
+
+
+def _reference_curve_from_payload(
+    payload: Mapping[str, object],
+    *,
+    default_name: str,
+) -> ReferenceCurve:
+    """Construct a curve whose summaries and digest share one array provenance."""
+
+    t_h_raw = payload.get("t_hours")
+    if t_h_raw is None:
+        t_h_raw = payload.get("elapsed_hours")
+    if t_h_raw is None:
+        raise KeyError("neither 't_hours' nor 'elapsed_hours' is present")
+    cold_raw = payload["T_cold"]
+    warm_raw = payload.get("T_warm")
+    if warm_raw is None or (isinstance(warm_raw, list) and not warm_raw):
+        cold_probe = np.asarray(cold_raw, dtype=np.float64)
+        warm_raw = np.full_like(cold_probe, np.nan)
+
+    t_h, tc, tw, duration, phase1, phase2, cold_final, warm_final = _curve_summary(
+        t_h_raw,
+        cold_raw,
+        warm_raw,
+    )
+    name = _curve_identity(payload.get("source_file", default_name))
+    date = _curve_date(payload.get("date", ""))
+    return ReferenceCurve(
+        name=name,
+        date=date,
+        t_hours=t_h,
+        T_cold=tc,
+        T_warm=tw,
+        duration_hours=_reconcile_summary_value(payload, "duration_hours", duration),
+        phase1_hours=_reconcile_summary_value(payload, "phase1_hours", phase1),
+        phase2_hours=_reconcile_summary_value(payload, "phase2_hours", phase2),
+        T_cold_final=_reconcile_summary_value(payload, "T_cold_final", cold_final),
+        T_warm_final=_reconcile_summary_value(payload, "T_warm_final", warm_final),
+        source_digest=_verified_curve_source_digest(
+            payload.get("source_digest"),
+            t_h,
+            tc,
+            tw,
+        ),
+    )
+
+
+def _canonical_reference_curve(rc: ReferenceCurve) -> ReferenceCurve:
+    """Derive programmatic metadata instead of trusting mutable summaries."""
+
+    t_h, tc, tw, duration, phase1, phase2, cold_final, warm_final = _curve_summary(
+        rc.t_hours,
+        rc.T_cold,
+        rc.T_warm,
+    )
+    return ReferenceCurve(
+        name=_curve_identity(rc.name),
+        date=_curve_date(rc.date),
+        t_hours=t_h,
+        T_cold=tc,
+        T_warm=tw,
+        duration_hours=duration,
+        phase1_hours=phase1,
+        phase2_hours=phase2,
+        T_cold_final=cold_final,
+        T_warm_final=warm_final,
+        source_digest=_verified_curve_source_digest(
+            rc.source_digest,
+            t_h,
+            tc,
+            tw,
+        ),
+    )
 
 
 @dataclass
@@ -152,48 +526,95 @@ class EnsembleModel:
     T_warm_end: float = T_WARM_END_FALLBACK
 
 
+@dataclass(frozen=True)
+class CooldownModelStatus:
+    """Typed outcome of an attempt to establish the cooldown predictor model.
+
+    P0 fail-open fix (item 3): callers must never collapse "the model is
+    unusable" to a bare ``None``/``bool`` or a bare log line — that is
+    exactly how a zero-curve model was previously able to present itself as
+    AVAILABLE. ``reason`` is always populated when ``available`` is False;
+    ``rejected_curves`` carries the per-curve (name, reason) diagnostics
+    when the failure came from an aggregated multi-curve load
+    (``load_curves`` / ``CooldownCurveLoadError``), and is empty otherwise
+    (``load_model`` fails atomically on the first bad curve or on an
+    explicit capacity/minimum violation, which is itself a single reason).
+    """
+
+    available: bool
+    reason: str = ""
+    rejected_curves: tuple[tuple[str, str], ...] = ()
+
+
+class CooldownCurveLoadError(ValueError):
+    """One or more cooldown curve files failed structural/numeric validation.
+
+    P0 fail-open fix (item 1): ``load_curves`` must never silently convert a
+    hard validation failure (malformed JSON, non-finite/out-of-order data,
+    etc.) into a dropped curve indistinguishable from "directory legitimately
+    has fewer curves". Every such failure is collected here and raised
+    together; the caller decides whether a resulting empty curve list is
+    itself acceptable (e.g. a genuinely empty first-boot directory raises no
+    error at all — zero files parsed is not a validation failure).
+    """
+
+    def __init__(self, failures: list[tuple[str, str]]) -> None:
+        self.failures: tuple[tuple[str, str], ...] = tuple(failures)
+        detail = "; ".join(f"{name}: {reason}" for name, reason in failures)
+        super().__init__(f"{len(failures)} cooldown curve file(s) failed to load: {detail}")
+
+
 # ============================================================================
 # Loading
 # ============================================================================
 
 
 def load_curves(data_dir: Path) -> list[ReferenceCurve]:
+    """Load every reference curve JSON in ``data_dir``, failing closed.
+
+    Two distinct outcomes are no longer conflated (P0 fail-open fix, item 1):
+    - A curve that parses and validates but does not meet content policy
+      (too few samples, T_start too low) is still a soft, logged skip — this
+      is an existing, deliberate business rule, unrelated to data integrity.
+    - A curve that fails to parse or fails numeric/structural validation
+      (malformed JSON, non-finite arrays, non-monotonic time, ...) is a hard
+      failure. It is no longer swallowed by a bare ``except Exception:
+      continue``; every such failure is collected and raised together as
+      ``CooldownCurveLoadError`` so a directory whose only curve is corrupt
+      can never silently present as "zero curves available" indistinguishable
+      from "legitimately empty".
+    """
     json_files = sorted(data_dir.glob("*.json"))
     json_files = [f for f in json_files if f.name not in ("cooldown_model.json", "reject_log.json")]
     curves = []
+    failures: list[tuple[str, str]] = []
     for fp in json_files:
         try:
-            d = json.loads(fp.read_text(encoding="utf-8"))
-            t_h_raw = d.get("t_hours") or d.get("elapsed_hours")
-            if t_h_raw is None:
-                logger.warning("Пропуск %s: ни 't_hours', ни 'elapsed_hours' не найдены", fp.name)
-                continue
-            t_h = np.array(t_h_raw, dtype=float)
-            tc = np.array(d["T_cold"], dtype=float)
-            tw = np.array(d.get("T_warm", []), dtype=float)
-            if len(t_h) < MIN_SAMPLES:
-                logger.warning("Пропуск %s: %d точек < %d", fp.name, len(t_h), MIN_SAMPLES)
-                continue
-            if tc[0] < 100:
-                logger.warning("Пропуск %s: T_start=%.0f K", fp.name, tc[0])
-                continue
-            if len(tw) == 0 or len(tw) != len(tc):
-                tw = np.full_like(tc, np.nan)
-            rc = ReferenceCurve(
-                name=d.get("source_file", fp.stem),
-                date=d.get("date", ""),
-                t_hours=t_h,
-                T_cold=tc,
-                T_warm=tw,
-                duration_hours=d.get("duration_hours", float(t_h[-1])),
-                phase1_hours=d.get("phase1_hours", 0.0),
-                phase2_hours=d.get("phase2_hours", 0.0),
-                T_cold_final=d.get("T_cold_final", float(np.min(tc))),
-                T_warm_final=d.get("T_warm_final", 0.0),
-            )
-            curves.append(rc)
+            d = _read_json_file_exact(fp)
+            if not isinstance(d, dict):
+                raise ValueError("cooldown curve document must be an object")
+            rc = _reference_curve_from_payload(d, default_name=fp.stem)
         except Exception as e:
+            # Hard structural/numeric validation failure: fail closed. This
+            # must propagate to the caller, not be absorbed into a
+            # quietly-shorter curve list (see the P0 fail-open defect).
+            failures.append((fp.name, str(e)))
             logger.error("Ошибка загрузки %s: %s", fp.name, e)
+            continue
+        if len(rc.t_hours) < MIN_SAMPLES:
+            logger.warning(
+                "Пропуск %s: %d точек < %d",
+                fp.name,
+                len(rc.t_hours),
+                MIN_SAMPLES,
+            )
+            continue
+        if rc.T_cold[0] < 100:
+            logger.warning("Пропуск %s: T_start=%.0f K", fp.name, rc.T_cold[0])
+            continue
+        curves.append(rc)
+    if failures:
+        raise CooldownCurveLoadError(failures)
     logger.info("Загружено %d кривых охлаждения", len(curves))
     return curves
 
@@ -235,11 +656,7 @@ def compute_progress(
 def _derive_floors(curves: list[ReferenceCurve]) -> tuple[float, float]:
     """Derive T_cold_end and T_warm_end from observed minima across reference curves."""
     cold_mins = [float(np.nanmin(rc.T_cold)) for rc in curves if len(rc.T_cold) > 0]
-    warm_mins = [
-        float(np.nanmin(rc.T_warm))
-        for rc in curves
-        if len(rc.T_warm) > 0 and not np.all(np.isnan(rc.T_warm))
-    ]
+    warm_mins = [float(np.nanmin(rc.T_warm)) for rc in curves if len(rc.T_warm) > 0 and not np.all(np.isnan(rc.T_warm))]
 
     T_cold_end = max(1.0, min(cold_mins) - 0.5) if cold_mins else T_COLD_END_FALLBACK
     T_warm_end = max(50.0, min(warm_mins) - 2.0) if warm_mins else T_WARM_END_FALLBACK
@@ -296,18 +713,14 @@ def prepare_curve(
     rc.progress = np.maximum.accumulate(rc.progress)
 
     # p(t)
-    rc._p_of_t = interp1d(
-        rc.t_hours, rc.progress, kind="linear", bounds_error=False, fill_value=(0.0, 1.0)
-    )
+    rc._p_of_t = interp1d(rc.t_hours, rc.progress, kind="linear", bounds_error=False, fill_value=(0.0, 1.0))
 
     # t(p), Tc(p), Tw(p) -- need unique progress values
     _, unique_idx = np.unique(rc.progress, return_index=True)
     if len(unique_idx) >= 2:
         p_u = rc.progress[unique_idx]
         t_u = rc.t_hours[unique_idx]
-        rc._t_of_p = interp1d(
-            p_u, t_u, kind="linear", bounds_error=False, fill_value=(t_u[0], t_u[-1])
-        )
+        rc._t_of_p = interp1d(p_u, t_u, kind="linear", bounds_error=False, fill_value=(t_u[0], t_u[-1]))
         rc._Tc_of_p = interp1d(
             p_u,
             Tc[unique_idx],
@@ -411,9 +824,7 @@ def build_ensemble(
     t_sorted = t_mean[valid][t_sorted_idx]
     p_sorted = p_grid[valid][t_sorted_idx]
     _, u_idx = np.unique(t_sorted, return_index=True)
-    _p_of_t = interp1d(
-        t_sorted[u_idx], p_sorted[u_idx], kind="linear", bounds_error=False, fill_value=(0.0, 1.0)
-    )
+    _p_of_t = interp1d(t_sorted[u_idx], p_sorted[u_idx], kind="linear", bounds_error=False, fill_value=(0.0, 1.0))
 
     durations = [rc.duration_hours for rc in curves]
 
@@ -493,9 +904,7 @@ def predict(
     )
 
     # Compute rate statistics for outlier detection (warm only; see below)
-    ref_rates_warm = np.array(
-        [rc.initial_rate_warm for rc in model.curves if rc.initial_rate_warm != 0.0]
-    )
+    ref_rates_warm = np.array([rc.initial_rate_warm for rc in model.curves if rc.initial_rate_warm != 0.0])
 
     rate_warm_mean = float(np.mean(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 0.0
     rate_warm_std = float(np.std(ref_rates_warm)) if len(ref_rates_warm) >= 2 else 999.0
@@ -709,24 +1118,16 @@ def validate_loo(curves: list[ReferenceCurve], n_query: int = 50) -> list[Valida
         for qi in range(i_s, i_e, step):
             t_el = held.t_hours[qi]
             Tc = held.T_cold[qi]
-            Tw = (
-                held.T_warm[qi]
-                if qi < len(held.T_warm) and not np.isnan(held.T_warm[qi])
-                else 200.0
-            )
+            Tw = held.T_warm[qi] if qi < len(held.T_warm) and not np.isnan(held.T_warm[qi]) else 200.0
 
             # Adaptive rate: compute from held-out history up to this point
             rate_c, rate_w = None, None
             if t_el >= RATE_MIN_HISTORY_H:
                 hist_mask = held.t_hours[: qi + 1] <= RATE_WINDOW_H
                 if np.sum(hist_mask) >= 10:
-                    rate_c = _compute_initial_rate(
-                        held.t_hours[: qi + 1], held.T_cold[: qi + 1], RATE_WINDOW_H
-                    )
+                    rate_c = _compute_initial_rate(held.t_hours[: qi + 1], held.T_cold[: qi + 1], RATE_WINDOW_H)
                     if not np.all(np.isnan(held.T_warm[: qi + 1])):
-                        rate_w = _compute_initial_rate(
-                            held.t_hours[: qi + 1], held.T_warm[: qi + 1], RATE_WINDOW_H
-                        )
+                        rate_w = _compute_initial_rate(held.t_hours[: qi + 1], held.T_warm[: qi + 1], RATE_WINDOW_H)
                     if rate_c == 0.0:
                         rate_c = None
                     if rate_w is not None and rate_w == 0.0:
@@ -879,9 +1280,7 @@ def plot_ensemble(model: EnsembleModel, output: Path):
     ax6 = fig.add_subplot(gs[2, 1])
     durs = [rc.duration_hours for rc in model.curves]
     ax6.hist(durs, bins=max(3, len(durs) // 2), edgecolor="black", alpha=0.7, color="steelblue")
-    ax6.axvline(
-        model.duration_mean, color="red", ls="--", label=f"Mean: {model.duration_mean:.1f}h"
-    )
+    ax6.axvline(model.duration_mean, color="red", ls="--", label=f"Mean: {model.duration_mean:.1f}h")
     ax6.set_xlabel("Duration, h")
     ax6.set_ylabel("Count")
     ax6.set_title(f"Duration (n={model.n_curves})")
@@ -933,9 +1332,7 @@ def plot_prediction(model, pred, T_cold_now, T_warm_now, t_elapsed, output):
 
     t_end = t_elapsed + pred.t_remaining_hours
     ci = pred.t_remaining_high_68 - pred.t_remaining_hours
-    axes[0].axvline(
-        t_end, color="green", ls="--", alpha=0.7, label=f"ETA: {t_end:.1f}h (+/-{ci:.1f}h)"
-    )
+    axes[0].axvline(t_end, color="green", ls="--", alpha=0.7, label=f"ETA: {t_end:.1f}h (+/-{ci:.1f}h)")
     axes[1].axvline(t_end, color="green", ls="--", alpha=0.7)
 
     axes[0].set_ylabel("T_cold, K")
@@ -1055,6 +1452,303 @@ def plot_validation(results: list[ValidationResult], output: Path):
 # ============================================================================
 
 
+def _fsync_directory(path: Path) -> None:
+    """Durably settle a replacement on platforms with directory fsync."""
+
+    if os.name == "nt":
+        # Python cannot open a Windows directory for fsync. os.replace still
+        # provides atomic replacement there; file contents were fsynced first.
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+class _PathIdentityError(RuntimeError):
+    """A pathname no longer denotes the exact retained filesystem owner."""
+
+
+def _is_link_or_junction(path: Path, info: os.stat_result) -> bool:
+    """Recognize both ordinary links and Windows directory junctions."""
+
+    is_junction = getattr(path, "is_junction", None)
+    return stat.S_ISLNK(info.st_mode) or (callable(is_junction) and is_junction())
+
+
+def _real_directory(path: Path) -> tuple[Path, os.stat_result]:
+    """Return a canonical non-link directory and its retained identity."""
+
+    path.mkdir(parents=True, exist_ok=True)
+    info = path.lstat()
+    if _is_link_or_junction(path, info) or not stat.S_ISDIR(info.st_mode):
+        raise _PathIdentityError(f"filesystem parent is not a real directory: {path}")
+    resolved = path.resolve(strict=True)
+    resolved_info = resolved.lstat()
+    if not os.path.samestat(info, resolved_info):
+        raise _PathIdentityError(f"filesystem parent identity changed: {path}")
+    return resolved, resolved_info
+
+
+def _require_directory_identity(path: Path, expected: os.stat_result) -> None:
+    current = path.lstat()
+    if (
+        _is_link_or_junction(path, current)
+        or not stat.S_ISDIR(current.st_mode)
+        or not os.path.samestat(current, expected)
+    ):
+        raise _PathIdentityError(f"filesystem parent identity changed: {path}")
+
+
+def _require_regular_identity(
+    path: Path,
+    expected: os.stat_result,
+    *,
+    label: str,
+) -> None:
+    current = path.lstat()
+    if (
+        _is_link_or_junction(path, current)
+        or not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or expected.st_nlink != 1
+        or not os.path.samestat(current, expected)
+    ):
+        raise _PathIdentityError(f"{label} pathname identity changed: {path}")
+
+
+def _unlink_exact_temporary(
+    path: Path,
+    expected: os.stat_result,
+    *,
+    parent: Path,
+    parent_identity: os.stat_result,
+    missing_ok: bool = True,
+) -> None:
+    """Unlink only the exact temporary owner; never unlink a replacement."""
+
+    _require_directory_identity(parent, parent_identity)
+    try:
+        _require_regular_identity(path, expected, label="temporary")
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return
+        raise _PathIdentityError(f"temporary pathname disappeared before settlement: {path}") from exc
+    path.unlink()
+
+
+def _read_json_file_exact(
+    path: Path,
+    *,
+    expected_identity: os.stat_result | None = None,
+    max_bytes: int = MAX_COOLDOWN_JSON_BYTES,
+) -> object:
+    """Decode UTF-8 JSON from one non-link descriptor-bound file owner."""
+
+    before = path.lstat()
+    if _is_link_or_junction(path, before) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise _PathIdentityError(f"JSON source is not a real file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    stream = None
+    descriptor_owned = True
+    try:
+        opened = os.fstat(descriptor)
+        _require_regular_identity(path, opened, label="JSON source")
+        if not os.path.samestat(before, opened):
+            raise _PathIdentityError(f"JSON source changed during acquisition: {path}")
+        if expected_identity is not None and not os.path.samestat(expected_identity, opened):
+            raise _PathIdentityError(f"JSON source is not the expected owner: {path}")
+        if opened.st_size > max_bytes:
+            raise ValueError(f"JSON source exceeds {max_bytes} bytes: {path}")
+        try:
+            stream = os.fdopen(descriptor, "r", encoding="utf-8")
+        except BaseException as primary:
+            descriptor_owned = False
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup:
+                raise BaseExceptionGroup(
+                    "JSON stream acquisition and descriptor cleanup both failed",
+                    (primary, cleanup),
+                ) from None
+            raise
+        descriptor_owned = False
+        return json.load(stream)
+    finally:
+        if stream is not None:
+            stream.close()
+        elif descriptor_owned:
+            os.close(descriptor)
+
+
+def _read_file_bytes_exact(
+    path: Path,
+    *,
+    max_bytes: int = MAX_COOLDOWN_JSON_BYTES,
+) -> bytes:
+    """Read exact bytes from one acquired, non-link regular-file owner."""
+
+    before = path.lstat()
+    if _is_link_or_junction(path, before) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise _PathIdentityError(f"byte source is not a real file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    stream = None
+    descriptor_owned = True
+    try:
+        opened = os.fstat(descriptor)
+        _require_regular_identity(path, opened, label="byte source")
+        if not os.path.samestat(before, opened):
+            raise _PathIdentityError(f"byte source changed during acquisition: {path}")
+        if opened.st_size > max_bytes:
+            raise ValueError(f"byte source exceeds {max_bytes} bytes: {path}")
+        try:
+            stream = os.fdopen(descriptor, "rb")
+        except BaseException as primary:
+            descriptor_owned = False
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup:
+                raise BaseExceptionGroup(
+                    "byte stream acquisition and descriptor cleanup both failed",
+                    (primary, cleanup),
+                ) from None
+            raise
+        descriptor_owned = False
+        return stream.read()
+    finally:
+        if stream is not None:
+            stream.close()
+        elif descriptor_owned:
+            os.close(descriptor)
+
+
+def _atomic_replace_bytes(path: Path, content: bytes) -> None:
+    """Strict same-directory write, file fsync, replace, and directory fsync."""
+
+    if type(content) is not bytes:
+        raise TypeError("atomic model content must be exact bytes")
+    parent, parent_identity = _real_directory(path.parent)
+    target = parent / path.name
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    temporary_identity: os.stat_result | None = None
+    replaced = False
+    raw_descriptor_owned = True
+    try:
+        temporary_identity = os.fstat(descriptor)
+        try:
+            stream = os.fdopen(descriptor, "wb")
+        except BaseException as primary:
+            raw_descriptor_owned = False
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup:
+                raise BaseExceptionGroup(
+                    "atomic stream acquisition and descriptor cleanup both failed",
+                    (primary, cleanup),
+                ) from None
+            raise
+        raw_descriptor_owned = False
+        with stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _require_directory_identity(parent, parent_identity)
+        _require_regular_identity(temporary, temporary_identity, label="temporary")
+        try:
+            os.replace(temporary, target)
+        except BaseException:
+            try:
+                _require_regular_identity(target, temporary_identity, label="replacement")
+            except (FileNotFoundError, _PathIdentityError):
+                pass
+            else:
+                replaced = True
+            raise
+        replaced = True
+        _require_regular_identity(target, temporary_identity, label="replacement")
+        _require_directory_identity(parent, parent_identity)
+        _fsync_directory(parent)
+    except BaseException as primary:
+        if raw_descriptor_owned:
+            raw_descriptor_owned = False
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup:
+                raise BaseExceptionGroup(
+                    "atomic write and raw descriptor cleanup both failed",
+                    (primary, cleanup),
+                ) from None
+        if replaced:
+            # The unique temporary owner moved to the authoritative path. A
+            # following directory-fsync failure is durable-state ambiguity,
+            # not an unlinked temporary owner.
+            raise
+        if temporary_identity is None:
+            raise
+        try:
+            _unlink_exact_temporary(
+                temporary,
+                temporary_identity,
+                parent=parent,
+                parent_identity=parent_identity,
+            )
+        except BaseException as cleanup:
+            raise BaseExceptionGroup(
+                "atomic model replacement and temporary cleanup both failed",
+                (primary, cleanup),
+            ) from None
+        raise
+
+
+def _atomic_replace_json(path: Path, payload: dict[str, object]) -> None:
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    _atomic_replace_bytes(path, encoded)
+
+
+def _curve_entry(rc: ReferenceCurve) -> dict[str, object]:
+    canonical = _canonical_reference_curve(rc)
+    return {
+        "name": canonical.name,
+        "date": canonical.date,
+        "duration_hours": canonical.duration_hours,
+        "phase1_hours": canonical.phase1_hours,
+        "phase2_hours": canonical.phase2_hours,
+        "T_cold_final": canonical.T_cold_final,
+        "T_warm_final": canonical.T_warm_final,
+        "source_digest": canonical.source_digest,
+        "t_hours": canonical.t_hours.tolist(),
+        "T_cold": canonical.T_cold.tolist(),
+        "T_warm": canonical.T_warm.tolist(),
+    }
+
+
+def _require_persisted_curve(model_file: Path, expected: ReferenceCurve) -> None:
+    """Prove one exact name/digest owner exists before reporting success."""
+
+    persisted = _read_json_file_exact(model_file)
+    if not isinstance(persisted, dict) or not isinstance(persisted.get("curves"), list):
+        raise RuntimeError("persisted predictor model has no exact curves list")
+    same_name = []
+    for entry in persisted["curves"]:
+        if isinstance(entry, dict) and entry.get("name") == expected.name:
+            same_name.append(entry)
+    if len(same_name) != 1 or same_name[0].get("source_digest") != expected.source_digest:
+        raise RuntimeError("persisted predictor model does not contain one exact incoming curve owner")
+    payload = dict(same_name[0])
+    payload["source_file"] = same_name[0].get("name")
+    verified = _reference_curve_from_payload(payload, default_name=expected.name)
+    if verified.name != expected.name or verified.source_digest != expected.source_digest:
+        raise RuntimeError("persisted predictor curve identity proof failed")
+
+
 def save_model(model: EnsembleModel, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     md = {
@@ -1071,43 +1765,41 @@ def save_model(model: EnsembleModel, output_dir: Path):
         "Tc_std": model.Tc_std.tolist(),
         "Tw_mean": model.Tw_mean.tolist(),
         "Tw_std": model.Tw_std.tolist(),
-        "curves": [
-            {
-                "name": rc.name,
-                "date": rc.date,
-                "duration_hours": rc.duration_hours,
-                "phase1_hours": rc.phase1_hours,
-                "phase2_hours": rc.phase2_hours,
-                "T_cold_final": rc.T_cold_final,
-                "T_warm_final": rc.T_warm_final,
-                "t_hours": rc.t_hours.tolist(),
-                "T_cold": rc.T_cold.tolist(),
-                "T_warm": rc.T_warm.tolist(),
-            }
-            for rc in model.curves
-        ],
+        "curves": [_curve_entry(rc) for rc in model.curves],
     }
     out = output_dir / "predictor_model.json"
-    out.write_text(json.dumps(md, ensure_ascii=False), encoding="utf-8")
+    with _model_update_guard(output_dir):
+        _atomic_replace_json(out, md)
     logger.info("Модель сохранена: %s (%.0f KB)", out, out.stat().st_size / 1024)
 
 
 def load_model(model_dir: Path) -> EnsembleModel:
-    d = json.loads((model_dir / "predictor_model.json").read_text(encoding="utf-8"))
+    """Load the persisted, safety-relevant ensemble model, failing closed.
+
+    P0 fail-open fix (item 2): unlike the intermediate capacity checks used
+    while incrementally ingesting curves, this call site is about to adopt
+    the result as THE model — so it enforces the reviewed minimum curve
+    count here, before any curve is even parsed. A zero-curve or
+    below-minimum ``predictor_model.json`` (whether from an untouched
+    first-boot bootstrap file or from every reference curve having been
+    rejected upstream) raises instead of silently returning an empty-but-
+    "valid" ensemble.
+    """
+    d = _read_json_file_exact(model_dir / "predictor_model.json")
+    if not isinstance(d, dict) or not isinstance(d.get("curves"), list):
+        raise ValueError("predictor model must contain an exact curves list")
+    _require_model_capacity(d["curves"], minimum=MIN_COOLDOWN_MODEL_CURVES)
     raw_curves = []
+    identities: set[str] = set()
     for cd in d["curves"]:
-        rc = ReferenceCurve(
-            name=cd["name"],
-            date=cd["date"],
-            t_hours=np.array(cd["t_hours"]),
-            T_cold=np.array(cd["T_cold"]),
-            T_warm=np.array(cd["T_warm"]),
-            duration_hours=cd["duration_hours"],
-            phase1_hours=cd["phase1_hours"],
-            phase2_hours=cd["phase2_hours"],
-            T_cold_final=cd["T_cold_final"],
-            T_warm_final=cd["T_warm_final"],
-        )
+        if not isinstance(cd, dict):
+            raise ValueError("predictor model curve entries must be objects")
+        payload = dict(cd)
+        payload["source_file"] = cd["name"]
+        rc = _reference_curve_from_payload(payload, default_name=cd["name"])
+        if rc.name in identities:
+            raise ValueError(f"predictor model contains duplicate curve identity {rc.name!r}")
+        identities.add(rc.name)
         raw_curves.append(rc)
     return build_model_from_curves(raw_curves)
 
@@ -1131,26 +1823,31 @@ def validate_new_curve(rc: ReferenceCurve) -> tuple[bool, str]:
 
     Returns (passed, reason).
     """
-    if len(rc.t_hours) < INGEST_MIN_POINTS:
-        return False, f"too few points: {len(rc.t_hours)} < {INGEST_MIN_POINTS}"
+    try:
+        canonical = _canonical_reference_curve(rc)
+    except (KeyError, TypeError, ValueError) as exc:
+        return False, f"invalid curve provenance: {exc}"
 
-    if rc.duration_hours < INGEST_MIN_DURATION_H:
-        return False, f"too short: {rc.duration_hours:.1f}h < {INGEST_MIN_DURATION_H}h"
+    if len(canonical.t_hours) < INGEST_MIN_POINTS:
+        return False, f"too few points: {len(canonical.t_hours)} < {INGEST_MIN_POINTS}"
 
-    if rc.duration_hours > INGEST_MAX_DURATION_H:
-        return False, f"too long: {rc.duration_hours:.1f}h > {INGEST_MAX_DURATION_H}h"
+    if canonical.duration_hours < INGEST_MIN_DURATION_H:
+        return False, f"too short: {canonical.duration_hours:.1f}h < {INGEST_MIN_DURATION_H}h"
 
-    if rc.T_cold[0] < INGEST_MIN_T_START:
-        return False, f"T_start too low: {rc.T_cold[0]:.0f}K < {INGEST_MIN_T_START}K"
+    if canonical.duration_hours > INGEST_MAX_DURATION_H:
+        return False, f"too long: {canonical.duration_hours:.1f}h > {INGEST_MAX_DURATION_H}h"
 
-    if rc.T_cold_final > INGEST_MAX_T_COLD_FINAL:
-        return False, f"T_cold_final too high: {rc.T_cold_final:.1f}K"
+    if canonical.T_cold[0] < INGEST_MIN_T_START:
+        return False, f"T_start too low: {canonical.T_cold[0]:.0f}K < {INGEST_MIN_T_START}K"
 
-    if rc.T_warm_final > INGEST_MAX_T_WARM_FINAL and rc.T_warm_final > 0:
-        return False, f"T_warm_final too high: {rc.T_warm_final:.0f}K"
+    if canonical.T_cold_final > INGEST_MAX_T_COLD_FINAL:
+        return False, f"T_cold_final too high: {canonical.T_cold_final:.1f}K"
+
+    if canonical.T_warm_final > INGEST_MAX_T_WARM_FINAL and canonical.T_warm_final > 0:
+        return False, f"T_warm_final too high: {canonical.T_warm_final:.0f}K"
 
     # Monotonicity check
-    dT = np.diff(rc.T_cold)
+    dT = np.diff(canonical.T_cold)
     frac_dec = float(np.sum(dT < 0.5) / len(dT))
     if frac_dec < INGEST_MIN_MONOTONICITY:
         return False, f"monotonicity {frac_dec:.0%} < {INGEST_MIN_MONOTONICITY:.0%}"
@@ -1163,6 +1860,33 @@ def ingest_curve(
     new_curve_json: Path,
     force: bool = False,
     max_curves: int = 50,
+    *,
+    _expected_source_identity: os.stat_result | None = None,
+) -> tuple[bool, str, EnsembleModel | None]:
+    """Serialize one model read/rebuild/replace transaction in this process."""
+
+    if type(force) is not bool:
+        raise TypeError("force must be an exact bool")
+    if type(max_curves) is not int:
+        raise TypeError("max_curves must be an exact int")
+    if max_curves <= 0:
+        raise ValueError("max_curves must be positive")
+    with _model_update_guard(model_dir):
+        return _ingest_curve_locked(
+            model_dir,
+            new_curve_json,
+            force=force,
+            max_curves=max_curves,
+            expected_source_identity=_expected_source_identity,
+        )
+
+
+def _ingest_curve_locked(
+    model_dir: Path,
+    new_curve_json: Path,
+    force: bool = False,
+    max_curves: int = 50,
+    expected_source_identity: os.stat_result | None = None,
 ) -> tuple[bool, str, EnsembleModel | None]:
     """Add a completed cooldown curve to an existing model.
 
@@ -1178,34 +1902,25 @@ def ingest_curve(
     Returns:
         (success, message, updated_model_or_None)
     """
+    if type(force) is not bool:
+        raise TypeError("force must be an exact bool")
+    if type(max_curves) is not int:
+        raise TypeError("max_curves must be an exact int")
+    if max_curves <= 0:
+        raise ValueError("max_curves must be positive")
     model_file = model_dir / "predictor_model.json"
     if not model_file.exists():
         return False, f"Model not found: {model_file}", None
 
     # Load new curve
     try:
-        d = json.loads(new_curve_json.read_text(encoding="utf-8"))
-        t_h_raw = d.get("t_hours") or d.get("elapsed_hours")
-        if t_h_raw is None:
-            raise KeyError("ни 't_hours', ни 'elapsed_hours' не найдены")
-        t_h = np.array(t_h_raw, dtype=float)
-        tc = np.array(d["T_cold"], dtype=float)
-        tw = np.array(d.get("T_warm", []), dtype=float)
-        if len(tw) == 0 or len(tw) != len(tc):
-            tw = np.full_like(tc, np.nan)
-
-        new_rc = ReferenceCurve(
-            name=d.get("source_file", new_curve_json.stem),
-            date=d.get("date", ""),
-            t_hours=t_h,
-            T_cold=tc,
-            T_warm=tw,
-            duration_hours=d.get("duration_hours", float(t_h[-1])),
-            phase1_hours=d.get("phase1_hours", 0.0),
-            phase2_hours=d.get("phase2_hours", 0.0),
-            T_cold_final=d.get("T_cold_final", float(np.min(tc))),
-            T_warm_final=d.get("T_warm_final", 0.0),
+        d = _read_json_file_exact(
+            new_curve_json,
+            expected_identity=expected_source_identity,
         )
+        if not isinstance(d, dict):
+            raise ValueError("cooldown curve document must be an object")
+        new_rc = _reference_curve_from_payload(d, default_name=new_curve_json.stem)
     except Exception as e:
         return False, f"Failed to parse {new_curve_json.name}: {e}", None
 
@@ -1216,27 +1931,48 @@ def ingest_curve(
             return False, f"REJECT: {reason}", None
 
     # Load existing model
-    model_data = json.loads(model_file.read_text(encoding="utf-8"))
+    model_bytes = _read_file_bytes_exact(model_file)
+    model_data = json.loads(model_bytes.decode("utf-8"))
+    if not isinstance(model_data, dict) or not isinstance(model_data.get("curves"), list):
+        raise ValueError("predictor model must contain an exact curves list")
+    _require_model_capacity(model_data["curves"])
 
-    # Duplicate check (by name)
-    existing_names = {c["name"] for c in model_data["curves"]}
-    if new_rc.name in existing_names:
-        return False, f"Duplicate: '{new_rc.name}' already in model", None
+    canonical_curves: list[ReferenceCurve] = []
+    identities: set[str] = set()
+    for stored in model_data["curves"]:
+        if not isinstance(stored, dict):
+            raise ValueError("predictor model curve entries must be objects")
+        payload = dict(stored)
+        payload["source_file"] = stored.get("name")
+        canonical = _reference_curve_from_payload(
+            payload,
+            default_name=str(stored.get("name", "")),
+        )
+        if canonical.name in identities:
+            raise ValueError(f"predictor model contains duplicate curve identity {canonical.name!r}")
+        identities.add(canonical.name)
+        canonical_entry = _curve_entry(canonical)
+        if any(stored.get(key) != value for key, value in canonical_entry.items()):
+            stored.update(canonical_entry)
+        canonical_curves.append(canonical)
+
+    # A name is the stable cycle identity. Every ingest must create exactly one
+    # new owner; even an identical payload cannot turn a repeated identity into
+    # an optimistic success.
+    for existing_curve in canonical_curves:
+        if existing_curve.name != new_rc.name:
+            continue
+        digest_detail = "same" if existing_curve.source_digest == new_rc.source_digest else "different"
+        return (
+            False,
+            f"CONFLICT: '{new_rc.name}' already exists with the {digest_detail} source digest",
+            None,
+        )
 
     # Add new curve data to model JSON
-    new_entry = {
-        "name": new_rc.name,
-        "date": new_rc.date,
-        "duration_hours": new_rc.duration_hours,
-        "phase1_hours": new_rc.phase1_hours,
-        "phase2_hours": new_rc.phase2_hours,
-        "T_cold_final": new_rc.T_cold_final,
-        "T_warm_final": new_rc.T_warm_final,
-        "t_hours": new_rc.t_hours.tolist(),
-        "T_cold": new_rc.T_cold.tolist(),
-        "T_warm": new_rc.T_warm.tolist(),
-    }
+    new_entry = _curve_entry(new_rc)
     model_data["curves"].append(new_entry)
+    _require_model_capacity(model_data["curves"])
 
     # Cap ensemble size: drop oldest if over limit
     if len(model_data["curves"]) > max_curves:
@@ -1246,21 +1982,24 @@ def ingest_curve(
         dropped = [c["name"] for c in model_data["curves"][:n_drop]]
         model_data["curves"] = model_data["curves"][n_drop:]
         logger.info("Удалено %d старых кривых: %s", n_drop, dropped)
+    if not any(
+        entry.get("name") == new_rc.name and entry.get("source_digest") == new_rc.source_digest
+        for entry in model_data["curves"]
+    ):
+        return (
+            False,
+            f"REJECT: incoming curve '{new_rc.name}' would be evicted by max_curves",
+            None,
+        )
 
     # Rebuild ensemble
     curves = []
     for cd in model_data["curves"]:
-        rc = ReferenceCurve(
-            name=cd["name"],
-            date=cd["date"],
-            t_hours=np.array(cd["t_hours"]),
-            T_cold=np.array(cd["T_cold"]),
-            T_warm=np.array(cd["T_warm"]),
-            duration_hours=cd["duration_hours"],
-            phase1_hours=cd["phase1_hours"],
-            phase2_hours=cd["phase2_hours"],
-            T_cold_final=cd["T_cold_final"],
-            T_warm_final=cd["T_warm_final"],
+        payload = dict(cd)
+        payload["source_file"] = cd["name"]
+        rc = _reference_curve_from_payload(
+            payload,
+            default_name=cd["name"],
         )
         curves.append(rc)
 
@@ -1297,18 +2036,18 @@ def ingest_curve(
             "date": new_rc.date,
             "duration_h": round(new_rc.duration_hours, 1),
             "n_curves_after": model.n_curves,
+            "source_digest": new_rc.source_digest,
         }
     )
     model_data["history"] = history
 
-    # Backup old model, then save
+    # Retain the prior model, then durably replace the authoritative model.
     backup = model_dir / "predictor_model.json.bak"
     if model_file.exists():
-        import shutil
+        _atomic_replace_bytes(backup, model_bytes)
 
-        shutil.copy2(model_file, backup)
-
-    model_file.write_text(json.dumps(model_data, ensure_ascii=False), encoding="utf-8")
+    _atomic_replace_json(model_file, model_data)
+    _require_persisted_curve(model_file, new_rc)
 
     msg = (
         f"OK: added '{new_rc.name}' ({new_rc.duration_hours:.1f}h). "
@@ -1317,6 +2056,26 @@ def ingest_curve(
     )
     logger.info(msg)
     return True, msg, model
+
+
+class _TemporaryIngestCleanupError(RuntimeError):
+    """A unique ingest file remained after its model transaction settled."""
+
+    def __init__(
+        self,
+        path: Path,
+        result: tuple[bool, str, EnsembleModel | None] | None,
+        cleanup_failure: BaseException,
+    ) -> None:
+        self.path = path
+        self.ingest_result = result
+        self.cleanup_failure = cleanup_failure
+        self.model_committed = result is not None and result[0] is True
+        state = "committed" if self.model_committed else "did not commit"
+        super().__init__(
+            f"cooldown model transaction {state}, but temporary ingest "
+            f"identity/ownership changed or cleanup failed: {path}: {cleanup_failure}"
+        )
 
 
 def ingest_from_raw_arrays(
@@ -1333,18 +2092,29 @@ def ingest_from_raw_arrays(
     Call this when a cooldown cycle completes and you have the data in memory.
     No intermediate JSON file needed.
     """
-    if not name:
+    if type(force) is not bool:
+        raise TypeError("force must be an exact bool")
+    if name == "":
         from datetime import datetime as _dt
 
         name = f"auto_ingest_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
-    if not date:
+    if date == "":
         from datetime import datetime as _dt
 
         date = _dt.now().strftime("%Y-%m-%d")
 
-    # Find phase1 boundary
-    cross = np.where(T_cold < T_PHASE_BOUNDARY)[0]
-    ph1 = float(t_hours[cross[0]]) if len(cross) > 0 else float(t_hours[-1])
+    name = _curve_identity(name)
+    date = _curve_date(date)
+    (
+        t_hours,
+        T_cold,
+        T_warm,
+        duration,
+        phase1,
+        phase2,
+        cold_final,
+        warm_final,
+    ) = _curve_summary(t_hours, T_cold, T_warm)
 
     # Write temporary JSON
     tmp_data = {
@@ -1353,19 +2123,91 @@ def ingest_from_raw_arrays(
         "t_hours": t_hours.tolist(),
         "T_cold": T_cold.tolist(),
         "T_warm": T_warm.tolist(),
-        "duration_hours": float(t_hours[-1]),
-        "phase1_hours": ph1,
-        "phase2_hours": float(t_hours[-1]) - ph1,
-        "T_cold_final": float(np.min(T_cold)),
-        "T_warm_final": float(np.min(T_warm)) if not np.all(np.isnan(T_warm)) else 0.0,
+        "duration_hours": duration,
+        "phase1_hours": phase1,
+        "phase2_hours": phase2,
+        "T_cold_final": cold_final,
+        "T_warm_final": warm_final,
+        "source_digest": cooldown_curve_source_digest(t_hours, T_cold, T_warm),
     }
-    tmp_path = model_dir / "_tmp_ingest.json"
-    tmp_path.write_text(json.dumps(tmp_data), encoding="utf-8")
+    model_root, parent_identity = _real_directory(model_dir)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=model_root,
+        prefix=".cooldown-ingest.",
+        suffix=".json.tmp",
+    )
+    tmp_path = Path(temporary_name)
 
+    result: tuple[bool, str, EnsembleModel | None] | None = None
+    primary: BaseException | None = None
+    temporary_identity: os.stat_result | None = None
+    raw_descriptor_owned = True
     try:
-        result = ingest_curve(model_dir, tmp_path, force=force)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        temporary_identity = os.fstat(descriptor)
+        try:
+            stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        except BaseException as acquisition:
+            raw_descriptor_owned = False
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup:
+                raise BaseExceptionGroup(
+                    "raw ingest stream acquisition and descriptor cleanup both failed",
+                    (acquisition, cleanup),
+                ) from None
+            raise
+        raw_descriptor_owned = False
+        with stream:
+            json.dump(tmp_data, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _require_directory_identity(model_root, parent_identity)
+        _require_regular_identity(tmp_path, temporary_identity, label="raw ingest")
+        result = ingest_curve(
+            model_root,
+            tmp_path,
+            force=force,
+            max_curves=50,
+            _expected_source_identity=temporary_identity,
+        )
+    except BaseException as exc:
+        primary = exc
+    if raw_descriptor_owned:
+        raw_descriptor_owned = False
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup:
+            if primary is None:
+                primary = cleanup
+            else:
+                primary = BaseExceptionGroup(
+                    "raw ingest and descriptor cleanup both failed",
+                    (primary, cleanup),
+                )
+
+    cleanup_error: _TemporaryIngestCleanupError | None = None
+    try:
+        if temporary_identity is None:
+            raise _PathIdentityError("raw ingest temporary identity was not acquired")
+        _unlink_exact_temporary(
+            tmp_path,
+            temporary_identity,
+            parent=model_root,
+            parent_identity=parent_identity,
+            missing_ok=False,
+        )
+    except BaseException as exc:
+        cleanup_error = _TemporaryIngestCleanupError(tmp_path, result, exc)
+
+    if primary is not None and cleanup_error is not None:
+        raise BaseExceptionGroup(
+            "cooldown ingest and temporary cleanup both failed",
+            (primary, cleanup_error),
+        ) from None
+    if cleanup_error is not None:
+        raise cleanup_error from cleanup_error.cleanup_failure
+    if primary is not None:
+        raise primary
+    assert result is not None
 
     return result

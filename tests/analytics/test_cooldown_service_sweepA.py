@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,9 +26,36 @@ from cryodaq.core.broker import DataBroker
 class _StubBus:
     def __init__(self) -> None:
         self.events: list[Any] = []
+        self._authority = object()
 
-    async def publish(self, event: Any) -> None:
+    async def publish_required(
+        self,
+        event: Any,
+        *,
+        event_identity: str,
+        payload_digest: str,
+    ) -> object:
         self.events.append(event)
+        return SimpleNamespace(
+            event_identity=event_identity,
+            payload_digest=payload_digest,
+            admitted_subscribers=1,
+            _authority=self._authority,
+        )
+
+    def validates_required_publication(
+        self,
+        receipt: object,
+        *,
+        event_identity: str,
+        payload_digest: str,
+    ) -> bool:
+        return (
+            getattr(receipt, "_authority", None) is self._authority
+            and getattr(receipt, "event_identity", None) == event_identity
+            and getattr(receipt, "payload_digest", None) == payload_digest
+            and getattr(receipt, "admitted_subscribers", None) == 1
+        )
 
 
 class _StubReader:
@@ -48,6 +76,7 @@ def _config() -> dict:
 
 
 def _make_service(tmp_path: Path, **kwargs: Any) -> CooldownService:
+    kwargs.setdefault("event_bus", _StubBus())
     svc = CooldownService(
         broker=DataBroker(),
         config=_config(),
@@ -78,9 +107,7 @@ def test_a1_cooldown_end_publishes_event(tmp_path: Path) -> None:
 
 def test_a2_fingerprint_gains_ultimate_vacuum(tmp_path: Path, monkeypatch) -> None:
     """A2: reader pressure series → ``ultimate_vacuum_mbar`` (its minimum)."""
-    reader = _StubReader(
-        {"VSP63D_1/pressure": [(1000.0, 1.0e-5), (1500.0, 3.0e-6), (2000.0, 8.0e-6)]}
-    )
+    reader = _StubReader({"VSP63D_1/pressure": [(1000.0, 1.0e-5), (1500.0, 3.0e-6), (2000.0, 8.0e-6)]})
     svc = _make_service(tmp_path, reader=reader)
     svc._baseline_cfg = {"enabled": True, "base_threshold_K": 5.0}
 
