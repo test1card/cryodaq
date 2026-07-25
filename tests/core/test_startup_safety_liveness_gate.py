@@ -195,74 +195,16 @@ def test_actual_runtime_union_resolves_canonical_patterns_to_raw_throttle_plane(
     assert "^Т12\\ Теплообменник\\ 2$" in resolved
 
 
-def test_shipped_safety_decision_inputs_are_protected_from_adaptive_throttle() -> None:
-    """The shipped config protects each per-channel or per-source safety input."""
+def test_unprotected_keithley_heartbeat_does_not_block_startup_liveness() -> None:
+    """Throttle protection is archival only; it cannot starve SafetyBroker."""
+    patterns = _real_merged_patterns() - {"Keithley_1/smub/power"}
+
     validate_safety_pattern_liveness(
         descriptor_catalog=_real_catalog(),
         interlocks_config_path=_INTERLOCKS_PATH,
         safety_manager=_real_safety_manager(),
-        adaptive_throttle_patterns=_real_merged_patterns(),
+        adaptive_throttle_patterns=patterns,
     )
-
-
-def test_unprotected_resolved_safety_channel_raises_and_names_channel(tmp_path: Path) -> None:
-    """A live safety channel outside throttle protection fails startup closed."""
-    descriptor_path = tmp_path / "channel_descriptors.yaml"
-    critical = _manifest(
-        instrument_id="critical",
-        emitted_channel="critical emitted",
-        channel_id="critical.1",
-    )
-    protected = _manifest(
-        instrument_id="protected",
-        emitted_channel="protected emitted",
-        channel_id="protected.1",
-    )
-    _write_manifest(
-        descriptor_path,
-        {
-            "schema_version": 1,
-            "descriptors": [critical["descriptors"][0], protected["descriptors"][0]],
-            "bindings": [critical["bindings"][0], protected["bindings"][0]],
-        },
-    )
-    interlocks_path = tmp_path / "interlocks.yaml"
-    interlocks_path.write_text("interlocks: []\n", encoding="utf-8")
-    safety_path = tmp_path / "safety.yaml"
-    safety_path.write_text(
-        'critical_channels:\n  - "^critical\\\\.1$"\nkeithley_channels: []\n',
-        encoding="utf-8",
-    )
-    safety_manager = SafetyManager(SafetyBroker())
-    safety_manager.load_config(safety_path)
-
-    with pytest.raises(SafetyPatternLivenessError) as exc_info:
-        validate_safety_pattern_liveness(
-            descriptor_catalog=load_live_channel_descriptor_catalog(descriptor_path),
-            interlocks_config_path=interlocks_path,
-            safety_manager=safety_manager,
-            adaptive_throttle_patterns={r"protected\.1"},
-        )
-
-    assert "critical emitted" in str(exc_info.value)
-
-
-def test_each_keithley_source_requires_its_own_protected_heartbeat_channel() -> None:
-    """One protected smua metric must not satisfy smub's source heartbeat."""
-    patterns = _real_merged_patterns() - {"Keithley_1/smub/power"}
-
-    with pytest.raises(SafetyPatternLivenessError) as exc_info:
-        validate_safety_pattern_liveness(
-            descriptor_catalog=_real_catalog(),
-            interlocks_config_path=_INTERLOCKS_PATH,
-            safety_manager=_real_safety_manager(),
-            adaptive_throttle_patterns=patterns,
-        )
-
-    message = str(exc_info.value)
-    assert "heartbeat source 'smub'" in message
-    assert "Keithley_1/smub/power" in message
-    assert "heartbeat source 'smua'" not in message
 
 
 async def test_runtime_heartbeat_accepts_power_as_the_only_fresh_metric_per_active_smu(

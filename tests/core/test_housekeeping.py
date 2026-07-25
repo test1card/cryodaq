@@ -129,6 +129,45 @@ async def test_protected_channels_are_not_throttled(tmp_path: Path) -> None:
     assert data_queue.qsize() == safety_queue.qsize()
 
 
+async def test_adaptive_throttle_does_not_suppress_keithley_heartbeat_on_safety_broker(tmp_path: Path) -> None:
+    """Archival throttling leaves each raw SMU heartbeat available to SafetyManager."""
+    broker = DataBroker()
+    safety_broker = SafetyBroker()
+    data_queue = await broker.subscribe("data", maxsize=100)
+    safety_queue = safety_broker.subscribe("safety", maxsize=100)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    throttle = AdaptiveThrottle(
+        {
+            "enabled": True,
+            "include_patterns": ["Keithley_1/smub/power"],
+            "stable_duration_s": 0.0,
+            "max_interval_s": 100.0,
+            "absolute_delta": {"default": 0.5},
+            "transition_holdoff_s": 0.0,
+        }
+    )
+    scheduler = Scheduler(broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle)
+    scheduler.add(
+        InstrumentConfig(
+            driver=StableDriver([0.5] * 20, channel="Keithley_1/smub/power", unit="W"),
+            poll_interval_s=0.01,
+        )
+    )
+
+    await scheduler.start()
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 5.0
+    while safety_queue.qsize() < 6 and loop.time() < deadline:  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
+    await scheduler.stop()
+    await writer.stop()
+
+    assert safety_queue.qsize() >= 6, "Keithley heartbeat did not reach SafetyBroker within the wait"
+    assert safety_queue.qsize() > data_queue.qsize()
+
+
 def test_adaptive_throttle_holds_full_rate_during_transition() -> None:
     throttle = AdaptiveThrottle(
         {

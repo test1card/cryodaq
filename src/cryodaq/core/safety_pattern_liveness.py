@@ -34,7 +34,6 @@ import yaml
 
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_manager import SafetyConfigError
-from cryodaq.core.smu_channel import SMU_CHANNELS
 
 if TYPE_CHECKING:
     from cryodaq.core.safety_manager import SafetyManager
@@ -75,18 +74,6 @@ class _DeadPattern:
     pattern: str
     plane: str
     source: str
-
-
-@dataclass(frozen=True, slots=True)
-class _UnprotectedSafetyChannel:
-    channel: str
-    source: str
-
-
-@dataclass(frozen=True, slots=True)
-class _UnprotectedHeartbeatSource:
-    smu_channel: str
-    candidates: tuple[str, ...]
 
 
 def _resolve_critical_patterns_to_raw(
@@ -383,10 +370,8 @@ def validate_safety_pattern_liveness(
     # ``_keithley_patterns`` holds the YAML-loaded compiled patterns
     # (src/cryodaq/core/safety_manager.py:257) — the actual runtime value the
     # heartbeat watchdog matches, not the dataclass default.
-    keithley_channels: set[str] = set()
     for pattern in safety_manager._keithley_patterns:
         matched_channels = {channel for channel in raw_labels if pattern.match(channel)}
-        keithley_channels.update(matched_channels)
         if not matched_channels:
             dead.append(
                 _DeadPattern(
@@ -407,47 +392,9 @@ def validate_safety_pattern_liveness(
     )
     dead.extend(adaptive_dead)
 
-    # Both resolver outputs are exact raw-label matchers. Derive concrete
-    # channel sets on the AdaptiveThrottle's input plane rather than trying to
-    # prove regex-language inclusion. Critical inputs are checked per channel:
-    # stale/bad/non-finite data and rate excursions each gate a safety decision.
-    # Keithley heartbeat is different: _has_fresh_keithley_data accepts any
-    # fresh OK keithley_channels match for each active smua/smub source. Require
-    # one protected candidate per source, not every metric matched by the broad
-    # config regex.
-    critical_channels = {
-        channel for pattern in resolved_critical for channel in raw_labels if pattern.fullmatch(channel)
-    }
-    protected_channels = {
-        channel for pattern in resolved_adaptive for channel in raw_labels if re.fullmatch(pattern, channel)
-    }
-    uncovered_channels = [
-        _UnprotectedSafetyChannel(
-            channel=channel,
-            source="safety.yaml critical_channels",
-        )
-        for channel in sorted(critical_channels - protected_channels)
-    ]
-    uncovered_heartbeat_sources: list[_UnprotectedHeartbeatSource] = []
-    for smu_channel in SMU_CHANNELS:
-        aliases = {smu_channel, smu_channel.replace("smu", "smu_")}
-        candidates = tuple(
-            sorted(channel for channel in keithley_channels if any(f"/{alias}/" in channel for alias in aliases))
-        )
-        if not any(channel in protected_channels for channel in candidates):
-            uncovered_heartbeat_sources.append(
-                _UnprotectedHeartbeatSource(
-                    smu_channel=smu_channel,
-                    candidates=candidates,
-                )
-            )
-
-    if dead or uncovered_channels or uncovered_heartbeat_sources:
+    if dead:
         lines = [
-            "Startup safety-pattern liveness check FAILED: safety monitoring "
-            "must be live and every input that independently gates a safety "
-            "decision must be protected from AdaptiveThrottle archival "
-            "suppression before startup:",
+            "Startup safety-pattern liveness check FAILED: safety monitoring must be live before startup:",
         ]
         if dead:
             lines.append(
@@ -456,25 +403,6 @@ def validate_safety_pattern_liveness(
             )
             for d in dead:
                 lines.append(f"  - pattern={d.pattern!r} plane={d.plane} source={d.source}")
-        if uncovered_channels:
-            lines.append(
-                f"Unprotected critical safety channel(s): {len(uncovered_channels)} are "
-                "outside the AdaptiveThrottle protected set."
-            )
-            for item in uncovered_channels:
-                lines.append(f"  - channel={item.channel!r} source={item.source}")
-        if uncovered_heartbeat_sources:
-            lines.append(
-                "Unprotected Keithley heartbeat source(s): "
-                f"{len(uncovered_heartbeat_sources)} have no protected matching "
-                "channel."
-            )
-            for item in uncovered_heartbeat_sources:
-                lines.append(
-                    f"  - heartbeat source {item.smu_channel!r}: no protected "
-                    f"candidate; candidates={list(item.candidates)!r} "
-                    "source=safety.yaml keithley_channels"
-                )
         lines.append(f"Canonical roster sample: {canonical_ids[:6]}. Raw roster sample: {raw_labels[:6]}.")
         raise SafetyPatternLivenessError("\n".join(lines))
     return resolved_adaptive
