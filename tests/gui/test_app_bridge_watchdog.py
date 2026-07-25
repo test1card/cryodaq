@@ -15,10 +15,20 @@ The fix, ``gui.app._BridgeWatchdog``, mirrors
 consecutive restart failures and latch HOLD once the bound is hit, never
 retrying again, and never reporting the latched bridge as healthy.
 
-Before this fix, a version of
+This ``50 ticks, 50 calls`` figure is static analysis of the parent commit
+``526c2f24``'s ``gui/app.py``, not an observed failing run. That parent had
+no module-level watchdog -- the per-tick restart path was a nested ``_tick()``
+closure defined inside ``main()`` (it closes over ``main()``'s locals, so it
+cannot be imported or unit-tested in isolation). Read straight off that nested
+``_tick``: when ``bridge.is_healthy()`` is False it calls ``bridge.shutdown()``
++ ``bridge.start()`` and returns, with no cap on consecutive failures and no
+``try/except`` around ``start()`` -- so a dead bridge would be
+spawn-and-rollbacked once per tick for as long as ``main()``'s QTimer fires.
+There is no reproducible 50-for-50 red to rerun against the committed parent;
+the regression guard is
 ``test_bridge_watchdog_restart_attempts_are_bounded_when_start_always_fails``
-written against the (then module-level, unbounded) watchdog function showed
-``bridge.start()`` called once per tick with no cap -- 50 ticks, 50 calls.
+below, run against the current module-level ``_BridgeWatchdog`` (bound by
+``_BRIDGE_RESTART_ATTEMPT_LIMIT``).
 """
 
 from __future__ import annotations

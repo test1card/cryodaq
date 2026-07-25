@@ -272,9 +272,10 @@ git diff --name-only --diff-filter=ACMR -z <FORMAT_BASE>...HEAD -- '*.py' \
 ```
 
 If your slice is clean under that command, the repo-wide red is not a
-blocker and must not be "fixed" wholesale — only run mutating `ruff format`
-on files you touched in this slice, per the Ruff rule above, then rerun both
-read-only checks.
+blocker and must not be "fixed" wholesale. If the changed-files gate is
+instead red against your own slice, the correction is an explicit
+reviewed patch, never a mutating formatter — apply it by hand, keep it
+within the files you touched, and rerun both read-only checks.
 
 Tests that bind loopback ports, spawn processes, exercise frozen builds, or
 require OS facilities must run in an environment that genuinely supports
