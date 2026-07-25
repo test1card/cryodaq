@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import re
 import time
 
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
@@ -31,6 +32,9 @@ _STATUS_MAP: dict[int, ChannelStatus] = {
 
 # Mock-параметры: реалистичный вакуум
 _MOCK_BASE_PRESSURE_MBAR: float = 1.5e-6
+_MV00_STATUS_RE = re.compile(r"[0-9]\Z", re.ASCII)
+_V1_VALUE_RE = re.compile(r"[0-9]{6}\Z", re.ASCII)
+_V1_ADDRESS_RE = re.compile(r"[0-9]{3}\Z", re.ASCII)
 
 
 class ThyracontVSP63D(InstrumentDriver):
@@ -82,6 +86,12 @@ class ThyracontVSP63D(InstrumentDriver):
         validate_checksum: bool = True,
     ) -> None:
         super().__init__(name, mock=mock)
+        if type(baudrate) is not int or baudrate <= 0:
+            raise ValueError(f"baudrate must be a positive integer, got {baudrate!r}")
+        if not isinstance(address, str) or _V1_ADDRESS_RE.fullmatch(address) is None:
+            raise ValueError(f"address must contain exactly three ASCII digits, got {address!r}")
+        if type(validate_checksum) is not bool:
+            raise ValueError(f"validate_checksum must be a boolean, got {validate_checksum!r}")
         self._resource_str = resource_str
         self._baudrate = baudrate
         self._address = address
@@ -117,37 +127,46 @@ class ThyracontVSP63D(InstrumentDriver):
                 last_error = str(exc)
                 continue
 
-            # Try Protocol V1
-            if await self._try_v1_probe():
-                self._protocol_v1 = True
-                self._instrument_id = f"Thyracont-V1@{self._address}"
-                self._connected = True
-                if baud != self._baudrate:
-                    log.info(
-                        "%s: connected via Protocol V1 @ %d baud (fallback from %d)",
-                        self.name,
-                        baud,
-                        self._baudrate,
-                    )
-                else:
-                    log.info("%s: connected via Protocol V1", self.name)
-                return
+            try:
+                # Try Protocol V1
+                if await self._try_v1_probe():
+                    self._protocol_v1 = True
+                    self._instrument_id = f"Thyracont-V1@{self._address}"
+                    self._connected = True
+                    if baud != self._baudrate:
+                        log.info(
+                            "%s: connected via Protocol V1 @ %d baud (fallback from %d)",
+                            self.name,
+                            baud,
+                            self._baudrate,
+                        )
+                    else:
+                        log.info("%s: connected via Protocol V1", self.name)
+                    return
 
-            # Try MV00
-            if await self._try_mv00_probe():
-                self._protocol_v1 = False
-                self._instrument_id = f"Thyracont-MV00@{self._resource_str}"
-                self._connected = True
-                if baud != self._baudrate:
-                    log.info(
-                        "%s: connected via MV00 @ %d baud (fallback from %d)",
-                        self.name,
-                        baud,
-                        self._baudrate,
-                    )
-                else:
-                    log.info("%s: connected via MV00", self.name)
-                return
+                # Try MV00
+                if await self._try_mv00_probe():
+                    self._protocol_v1 = False
+                    self._instrument_id = f"Thyracont-MV00@{self._resource_str}"
+                    self._connected = True
+                    if baud != self._baudrate:
+                        log.info(
+                            "%s: connected via MV00 @ %d baud (fallback from %d)",
+                            self.name,
+                            baud,
+                            self._baudrate,
+                        )
+                    else:
+                        log.info("%s: connected via MV00", self.name)
+                    return
+            except BaseException:
+                try:
+                    await self._transport.close()
+                except BaseException as close_exc:
+                    log.critical("%s: probe-abort transport cleanup failed: %s", self.name, close_exc)
+                finally:
+                    self._connected = False
+                raise
 
             await self._transport.close()
             last_error = f"neither V1 nor MV00 responded @ {baud} baud"
@@ -165,6 +184,11 @@ class ThyracontVSP63D(InstrumentDriver):
                 resp = await self._transport.query(cmd)
                 resp_stripped = resp.strip()
                 if resp_stripped.startswith(expected_prefix):
+                    payload = resp_stripped[len(expected_prefix) :]
+                    if len(payload) != 7 or _V1_VALUE_RE.fullmatch(payload[:6]) is None:
+                        continue
+                    if int(payload[:4]) <= 0:
+                        continue
                     if self._validate_checksum and not self._verify_v1_checksum(resp_stripped):
                         log.warning(
                             "%s: V1 probe checksum mismatch in '%s'",
@@ -185,7 +209,17 @@ class ThyracontVSP63D(InstrumentDriver):
             resp = await self._transport.query("MV00")
             resp_stripped = resp.strip()
             # MV00 returns "<status>,<value>" e.g. "0,1.234E-06"
-            if "," in resp_stripped:
+            parts = resp_stripped.split(",")
+            if len(parts) == 2:
+                status_token = parts[0].strip()
+                if _MV00_STATUS_RE.fullmatch(status_token) is None:
+                    return False
+                status_code = int(status_token)
+                value = float(parts[1].strip())
+                if status_code not in _STATUS_MAP or not math.isfinite(value):
+                    return False
+                if status_code == _STATUS_OK and value <= 0:
+                    return False
                 log.debug("%s: MV00 probe OK: %s", self.name, resp_stripped)
                 return True
         except Exception as exc:
@@ -197,8 +231,10 @@ class ThyracontVSP63D(InstrumentDriver):
         if not self._connected:
             return
         log.info("%s: отключение", self.name)
-        await self._transport.close()
-        self._connected = False
+        try:
+            await self._transport.close()
+        finally:
+            self._connected = False
 
     async def read_channels(self) -> list[Reading]:
         """Считать давление командой ``MV00``.
@@ -259,7 +295,10 @@ class ThyracontVSP63D(InstrumentDriver):
             if len(parts) != 2:
                 raise ValueError(f"Неверный формат ответа: '{response_stripped}'")
 
-            status_code = int(parts[0].strip())
+            status_token = parts[0].strip()
+            if _MV00_STATUS_RE.fullmatch(status_token) is None:
+                raise ValueError(f"invalid MV00 status token: {status_token!r}")
+            status_code = int(status_token)
             value = float(parts[1].strip())
         except (ValueError, IndexError) as exc:
             log.error(
@@ -279,6 +318,26 @@ class ThyracontVSP63D(InstrumentDriver):
             )
 
         ch_status = _STATUS_MAP.get(status_code, ChannelStatus.SENSOR_ERROR)
+        reported_value = value
+        finite_value = math.isfinite(reported_value)
+        if not finite_value:
+            ch_status = ChannelStatus.SENSOR_ERROR
+        if ch_status is ChannelStatus.OK and reported_value <= 0:
+            ch_status = ChannelStatus.SENSOR_ERROR
+        if ch_status is ChannelStatus.OK:
+            value = reported_value
+        elif ch_status is ChannelStatus.OVERRANGE:
+            value = float("inf")
+        elif ch_status is ChannelStatus.UNDERRANGE:
+            value = float("-inf")
+        else:
+            value = float("nan")
+        metadata: dict[str, object] = {"status_code": status_code}
+        if finite_value:
+            metadata["reported_value"] = reported_value
+        else:
+            metadata["reported_value"] = None
+            metadata["reported_value_raw"] = repr(reported_value)
 
         if ch_status != ChannelStatus.OK:
             log.warning(
@@ -295,8 +354,8 @@ class ThyracontVSP63D(InstrumentDriver):
             unit="mbar",
             instrument_id=self.name,
             status=ch_status,
-            raw=value,
-            metadata={"status_code": status_code},
+            raw=reported_value if finite_value else None,
+            metadata=metadata,
         )
 
     # ------------------------------------------------------------------
@@ -369,20 +428,26 @@ class ThyracontVSP63D(InstrumentDriver):
         try:
             # Ожидаемый формат: <addr><cmd><6digits><checksum>
             # Например: "001M260017N" → addr="001", cmd="M", value="260017", checksum="N"
-            if not response_stripped.startswith(self._address):
+            expected_prefix = f"{self._address}M"
+            if not response_stripped.startswith(expected_prefix):
                 raise ValueError(f"Неверный адрес в ответе: '{response_stripped}'")
 
-            # Пропустить адрес (3 символа) + команду (1 символ)
-            payload = response_stripped[len(self._address) + 1 :]
+            # Skip the exact address+command prefix. The remaining frame is
+            # six ASCII digits plus one checksum byte.
+            payload = response_stripped[len(expected_prefix) :]
 
-            if len(payload) < 6:
-                raise ValueError(f"Слишком короткий payload: '{payload}'")
+            if len(payload) != 7:
+                raise ValueError(f"Неверная длина payload: '{payload}'")
 
             # Первые 6 символов: 4 мантисса + 2 экспонента
             value_str = payload[:6]
+            if _V1_VALUE_RE.fullmatch(value_str) is None:
+                raise ValueError(f"V1 pressure payload must contain six ASCII digits: {value_str!r}")
             mantissa = int(value_str[:4])
             exponent = int(value_str[4:6])
             pressure_mbar = (mantissa / 1000.0) * (10.0 ** (exponent - 20))
+            if not math.isfinite(pressure_mbar) or pressure_mbar <= 0:
+                raise ValueError(f"V1 pressure must be finite and positive: {pressure_mbar!r}")
 
         except (ValueError, IndexError) as exc:
             log.error(

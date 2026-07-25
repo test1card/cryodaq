@@ -1,54 +1,53 @@
--- CryoDAQ dead-man watchdog for the Keithley 2604B — BOTH SMU channels.
+-- CryoDAQ software late-pet watchdog for the Keithley 2604B — BOTH channels.
 --
--- Pure firmware backstop that sits BELOW the host SafetyManager. It carries
--- no regulation logic (the host owns P=const): its only job is to kill both
--- outputs if the host stops proving it is alive. Heartbeat mechanics are
--- salvaged from the old p_const.lua draft; all constant-power control was
--- dropped.
+-- This script is deliberately limited to a documented, testable mechanism:
+-- a host pet that arrives after its deadline turns both outputs OFF and latches
+-- the trip. It has ZERO coverage for complete host death because no later TSP
+-- command arrives to evaluate the deadline. It is not an autonomous safety
+-- function and must not be represented as one.
 --
 -- Host protocol (see keithley_2604b.py):
---   0. read    — print(cryodaq_wdog_tripped)  (latch from a PAST kill; read
---                BEFORE upload, which re-runs `tripped = 0` and wipes it)
---   1. upload  — send this script (defines the globals + functions below)
---   2. set     — CRYODAQ_WDOG_TIMEOUT_S = <seconds>   (deadline, default 5.0)
---   3. run     — cryodaq_wdog_run()                    (NON-blocking arm)
---   pet        — cryodaq_wdog_pet()                    (called on every poll)
---   disarm     — cryodaq_wdog_disarm()                 (clean release)
+--   0. read       — print(cryodaq_wdog_tripped) before upload resets the latch
+--   1. upload     — send this script
+--   2. verify     — read CRYODAQ_WDOG_VERSION and cryodaq_wdog_autonomous
+--   3. set        — CRYODAQ_WDOG_TIMEOUT_S = <seconds>
+--   4. activate   — cryodaq_wdog_run()
+--   pet           — cryodaq_wdog_pet() on every host poll
+--   disarm        — cryodaq_wdog_disarm()
+--   acknowledge   — cryodaq_wdog_acknowledge(), only after host verified OFF
 --
--- On a missed deadline BOTH outputs go OFF and the persistent global
--- cryodaq_wdog_tripped is latched to 1 so the host can read it back on the
--- next connect (SafetyManager reconcile also polls it mid-session).
+-- `cryodaq_wdog_autonomous` is the fail-closed host contract. It stays 0 in
+-- this version. Required mode must therefore refuse this script; best_effort
+-- may use only its explicitly degraded stall-then-recover behavior.
+-- `cryodaq_wdog_timer_armed` is retained for readback compatibility and also
+-- stays 0. There is no autonomous timer or output-action binding in this file.
 --
--- COVERAGE (honest, current mechanism — TSP is single-threaded):
---   cryodaq_wdog_run() only ARMS (sets state + returns immediately); it does
---   NOT loop, so it never owns the command FIFO. The deadline is evaluated
---   inside cryodaq_wdog_pet(), which the host calls each poll. This kills
---   outputs on a STALL-THEN-RECOVER (a pet that arrives late) and latches for
---   the reconcile. It does NOT cover full host death: with no autonomous
---   execution, a host that stops petting entirely is never re-evaluated in
---   firmware. The true dead-man (an autonomous loop / trigger.timer-driven
---   mechanism that fires without host calls) is the single remaining
---   bench-verified upgrade. Until then, the host-side crash-recovery force-OFF
---   on the next connect (keithley_2604b.py) is the host-death backstop.
+-- Bump this integer on ANY globals/protocol change and update
+-- _WDOG_SCRIPT_VERSION in keithley_2604b.py to match.
+CRYODAQ_WDOG_VERSION = 3
 
+cryodaq_wdog_autonomous = 0
+cryodaq_wdog_timer_armed = 0
 cryodaq_wdog_tripped = 0
 cryodaq_wdog_last_pet = os.time()
 cryodaq_wdog_active = 0
 
-local function cryodaq_wdog_shutdown()
+function cryodaq_wdog_shutdown()
     smua.source.levelv = 0
     smua.source.output = smua.OUTPUT_OFF
     smub.source.levelv = 0
     smub.source.output = smub.OUTPUT_OFF
+    cryodaq_wdog_tripped = 1
+    cryodaq_wdog_active = 0
 end
 
 function cryodaq_wdog_pet()
-    -- Deadline check rides the host poll loop (no autonomous firmware timer).
+    -- os.time() is a documented 2600B API with one-second granularity. The
+    -- host validates timeout to finite [1, 300] seconds. Strict `>` means an
+    -- elapsed value exactly equal to timeout is not late until the next second.
     local timeout = CRYODAQ_WDOG_TIMEOUT_S or 5.0
     if cryodaq_wdog_active == 1 and (os.time() - cryodaq_wdog_last_pet) > timeout then
         cryodaq_wdog_shutdown()
-        cryodaq_wdog_tripped = 1
-        cryodaq_wdog_active = 0
         return
     end
     cryodaq_wdog_last_pet = os.time()
@@ -56,12 +55,26 @@ end
 
 function cryodaq_wdog_disarm()
     cryodaq_wdog_active = 0
+    cryodaq_wdog_timer_armed = 0
 end
 
-function cryodaq_wdog_run()
-    -- NON-blocking arm: set state and return immediately (do NOT loop — a loop
-    -- would own the single-threaded command FIFO and starve every pet).
+function cryodaq_wdog_acknowledge()
+    -- Explicit operator-authorized latch consumption. The host calls this only
+    -- after both outputs are independently readback-verified OFF and records
+    -- the recovery reason in SafetyManager. Reactivate late-pet checking in the
+    -- same TSP command so recovery cannot silently leave it disabled.
     cryodaq_wdog_tripped = 0
     cryodaq_wdog_last_pet = os.time()
     cryodaq_wdog_active = 1
+    cryodaq_wdog_autonomous = 0
+    cryodaq_wdog_timer_armed = 0
+end
+
+function cryodaq_wdog_run()
+    -- Activate only the late-pet deadline check and return immediately.
+    cryodaq_wdog_tripped = 0
+    cryodaq_wdog_last_pet = os.time()
+    cryodaq_wdog_active = 1
+    cryodaq_wdog_autonomous = 0
+    cryodaq_wdog_timer_armed = 0
 end

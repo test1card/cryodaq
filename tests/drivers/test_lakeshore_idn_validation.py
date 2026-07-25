@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -71,9 +71,7 @@ async def test_connect_retries_once_when_query_raises():
     transport = MagicMock()
     transport.open = AsyncMock()
     transport.close = AsyncMock()
-    transport.query = AsyncMock(
-        side_effect=[OSError("transport hiccup"), "LSCI,MODEL218S,12345,1.5"]
-    )
+    transport.query = AsyncMock(side_effect=[OSError("transport hiccup"), "LSCI,MODEL218S,12345,1.5"])
     transport.write = AsyncMock()
     transport.clear_bus = AsyncMock(return_value=True)
 
@@ -97,3 +95,28 @@ async def test_connect_raises_when_both_attempts_fail():
         await ls.connect()
     assert ls._connected is False
     assert transport.query.await_count == 2  # initial + retry
+
+
+@pytest.mark.asyncio
+async def test_idn_attempts_use_connect_timeout_without_changing_read_timeout() -> None:
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=["wrong", "LSCI,MODEL218S,12345,1.5"])
+    transport.clear_bus = AsyncMock(return_value=True)
+    ls = LakeShore218S(
+        name="LS1",
+        resource_str="GPIB0::12::INSTR",
+        mock=False,
+        connect_timeout_s=0.123,
+        read_timeout_s=91.0,
+    )
+    ls._transport = transport
+
+    await ls.connect()
+
+    transport.open.assert_awaited_once_with("GPIB0::12::INSTR", timeout_ms=91_000)
+    assert transport.query.await_args_list == [
+        call("*IDN?", timeout_ms=123),
+        call("*IDN?", timeout_ms=123),
+    ]

@@ -1,20 +1,25 @@
 """Keithley 2604B driver with dual-channel runtime support.
 
-P=const control loop runs host-side in read_channels() — no TSP scripts
-are uploaded to the instrument, so the VISA bus stays free for queries.
+P=const control runs host-side in read_channels(). The optional TSP v3 script
+only checks a late pet; it does not regulate and is not autonomous.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import re
+import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
-from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +31,25 @@ class OutputStateUnverifiedError(RuntimeError):
     (SafetyManager) must fail CLOSED and latch a fault rather than report a
     clean SAFE_OFF.
     """
+
+
+class TransportTeardownIncompleteError(RuntimeError):
+    """The source transport has not produced a terminal close settlement."""
+
+
+class FailedConnectCleanupError(TransportTeardownIncompleteError):
+    """A failed connect and its terminal cleanup failure, preserved together."""
+
+    def __init__(
+        self,
+        *,
+        connect_error: BaseException,
+        cleanup_error: TransportTeardownIncompleteError,
+    ) -> None:
+        super().__init__("Keithley connect failed and transport cleanup did not produce a successful settlement")
+        self.connect_error = connect_error
+        self.cleanup_error = cleanup_error
+
 
 # Minimum measurable current for resistance calculation (avoid division by noise).
 # At 1 nA, R = V/I is dominated by noise.  For heaters with R ~ 10–1000 Ω,
@@ -40,6 +64,12 @@ MAX_DELTA_V_PER_STEP = 0.5  # V — do not increase without thermal analysis
 # Number of consecutive compliance cycles before notifying SafetyManager.
 _COMPLIANCE_NOTIFY_THRESHOLD = 10
 
+# TSP os.time() has one-second granularity. Sub-second deadlines are therefore
+# misleading, while an excessively long late-pet window defeats its diagnostic
+# purpose. The upper bound is deliberately generous for slow lab setups.
+_WDOG_TIMEOUT_MIN_S = 1.0
+_WDOG_TIMEOUT_MAX_S = 300.0
+
 _MOCK_R0 = 100.0
 _MOCK_T0 = 300.0
 _MOCK_ALPHA = 0.0033
@@ -53,19 +83,219 @@ _IV_FIELDS = (
     ("power", "W"),
 )
 
-# TSP dead-man watchdog (Task 9): inert firmware backstop below the host
-# SafetyManager, gated on _wdog_enabled (default False). See tsp/cryodaq_wdog.lua.
+_OUTPUT_STATE_NUMBER_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+_OUTPUT_STATE_MAX_CHARS = 64
+_PROTOCOL_TRIM_CHARS = " \t\r\n"
+_IDN_MAX_CHARS = 256
+_IDN_VALUE_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+_KEITHLEY_USB_RESOURCE_RE = re.compile(
+    r"USB(?P<board>[0-9]*)::"
+    r"(?P<vendor>0x[0-9A-Fa-f]{4})::"
+    r"(?P<product>0x[0-9A-Fa-f]{4})::"
+    r"(?P<serial>[A-Za-z0-9._-]+)"
+    r"(?:::(?P<interface>[0-9]+))?::INSTR\Z"
+)
+_KEITHLEY_VENDOR_ID = 0x05E6
+_KEITHLEY_2604_PRODUCT_ID = 0x2604
+_MOCK_IDN = "Keithley Instruments Inc., Model 2604B, MOCK00001, 3.0.0"
+_OFF_CHALLENGE_PREFIX = "CRYODAQ_OFF_V1"
+_OFF_CHALLENGE_NONCE_RE = re.compile(r"[0-9a-f]{32}\Z")
+_OFF_CHALLENGE_MAX_CHARS = 96
+
+# TSP software late-pet watchdog, gated on _wdog_enabled (default False).
+# Version 3 is explicitly non-autonomous: it covers stall-then-recover only.
+# See tsp/cryodaq_wdog.lua.
 _WDOG_SCRIPT: str | None = None
+
+# Version stamp the driver was written against. Must equal CRYODAQ_WDOG_VERSION
+# in tsp/cryodaq_wdog.lua — the script is re-uploaded from repo tsp/ on every
+# arm, so the host reads this back post-upload and refuses to arm on mismatch
+# (catches a truncated or stale upload; firmware gets no CI).
+_WDOG_SCRIPT_VERSION = 3
+
+
+def _bounded_ascii_token(raw: str, *, field: str, max_chars: int = 64) -> str:
+    """Return one bounded ASCII protocol token with transport whitespace removed."""
+
+    if not isinstance(raw, str):
+        raise ValueError(f"{field} response is not text")
+    if not raw or len(raw) > max_chars:
+        raise ValueError(f"{field} response length is outside 1..{max_chars}")
+    if not raw.isascii():
+        raise ValueError(f"{field} response is not ASCII")
+    token = raw.strip(_PROTOCOL_TRIM_CHARS)
+    if not token:
+        raise ValueError(f"{field} response is empty")
+    return token
+
+
+def _parse_keithley_idn_family(raw: str, *, mock: bool) -> tuple[str, tuple[str, str, str, str]]:
+    """Authorize 2604B-specific OFF commands without accepting full identity."""
+
+    token = _bounded_ascii_token(raw, field="*IDN?", max_chars=_IDN_MAX_CHARS)
+    if mock:
+        if token != _MOCK_IDN:
+            raise ValueError("mock *IDN? response does not match the exact simulator identity")
+
+    fields = [field.strip(" \t") for field in token.split(",")]
+    if len(fields) != 4:
+        raise ValueError("*IDN? response must contain exactly four comma-separated fields")
+    manufacturer, model, serial, firmware = fields
+    if manufacturer != "Keithley Instruments Inc.":
+        raise ValueError("*IDN? manufacturer is not Keithley Instruments Inc.")
+    if model != "Model 2604B":
+        raise ValueError("*IDN? model is not exactly 2604B")
+    return token, (manufacturer, model, serial, firmware)
+
+
+def _parse_configured_keithley_serial(resource_str: str) -> str:
+    """Return the serial from one canonical Keithley 2604 USB VISA resource."""
+
+    if not isinstance(resource_str, str) or not resource_str.isascii():
+        raise ValueError("Keithley resource must be an ASCII USB VISA resource")
+    match = _KEITHLEY_USB_RESOURCE_RE.fullmatch(resource_str)
+    if match is None:
+        raise ValueError("Keithley resource must be a canonical USB VISA INSTR resource with a serial")
+    if int(match.group("vendor"), 16) != _KEITHLEY_VENDOR_ID:
+        raise ValueError("Keithley resource vendor ID is not exactly 0x05E6")
+    if int(match.group("product"), 16) != _KEITHLEY_2604_PRODUCT_ID:
+        raise ValueError("Keithley resource product ID is not exactly 0x2604")
+    serial = match.group("serial")
+    if len(serial) > 64:
+        raise ValueError("Keithley resource serial is overlong")
+    return serial
+
+
+def _parse_keithley_idn(raw: str, *, mock: bool, expected_serial: str | None = None) -> str:
+    """Validate one documented four-field Keithley 2604B identity response."""
+
+    token, (_manufacturer, _model, serial, firmware) = _parse_keithley_idn_family(raw, mock=mock)
+    if not serial or len(serial) > 64 or _IDN_VALUE_RE.fullmatch(serial) is None:
+        raise ValueError("*IDN? serial field is empty, overlong, or malformed")
+    if not mock and serial.upper().startswith("MOCK"):
+        raise ValueError("mock identity is not valid for a physical connection")
+    if not mock:
+        if expected_serial is None:
+            raise ValueError("physical Keithley identity requires a configured resource serial")
+        if serial != expected_serial:
+            raise ValueError("*IDN? serial does not exactly match the configured USB resource serial")
+    if not firmware or len(firmware) > 64 or _IDN_VALUE_RE.fullmatch(firmware) is None:
+        raise ValueError("*IDN? firmware field is empty, overlong, or malformed")
+    return token
+
+
+def _parse_output_enabled(raw: str) -> bool:
+    """Parse one exact Keithley output enum without coercing ambiguity to OFF."""
+
+    token = _bounded_ascii_token(raw, field="output-state", max_chars=_OUTPUT_STATE_MAX_CHARS)
+    try:
+        if _OUTPUT_STATE_NUMBER_RE.fullmatch(token) is None:
+            raise InvalidOperation
+        value = Decimal(token)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid output-state token {token!r}") from exc
+    if not value.is_finite() or value not in (Decimal(0), Decimal(1)):
+        raise ValueError(f"output-state token must be exactly 0 or 1, got {token!r}")
+    return value == Decimal(1)
+
+
+def _parse_output_off_challenge(raw: str, *, expected_nonce: str) -> bool:
+    """Accept only the current nonce and literal OFF state in one response."""
+
+    if _OFF_CHALLENGE_NONCE_RE.fullmatch(expected_nonce) is None:
+        raise ValueError("OFF challenge nonce must be 32 lowercase hexadecimal characters")
+    token = _bounded_ascii_token(
+        raw,
+        field="output-OFF challenge",
+        max_chars=_OFF_CHALLENGE_MAX_CHARS,
+    )
+    fields = token.split("|")
+    if len(fields) != 3:
+        raise ValueError("output-OFF challenge must contain exactly three pipe-separated fields")
+    prefix, nonce, state = fields
+    if prefix != _OFF_CHALLENGE_PREFIX:
+        raise ValueError("output-OFF challenge prefix does not match")
+    if nonce != expected_nonce:
+        raise ValueError("output-OFF challenge nonce is stale or does not match")
+    return state == "0"
+
+
+def _parse_compliance(raw: str) -> bool:
+    """Parse the exact lowercase TSP boolean emitted by source.compliance."""
+
+    token = _bounded_ascii_token(raw, field="source.compliance")
+    if token == "true":
+        return True
+    if token == "false":
+        return False
+    raise ValueError(f"source.compliance must be literal 'true' or 'false', got {token!r}")
+
+
+class _WatchdogArmError(RuntimeError):
+    """Watchdog upload/activation integrity check failed.
+
+    ``required`` also raises when the uploaded script does not report the
+    literal autonomous contract bit ``1``. Version 3 intentionally reports 0,
+    so it is usable only as a degraded late-pet check in ``best_effort`` mode.
+    """
+
+
+class _WatchdogTransportAuthorityError(RuntimeError):
+    """A watchdog I/O failure that invalidates the underlying session."""
+
+
+def _parse_wdog_version(raw: str, *, field: str) -> int:
+    """Parse one canonical non-negative decimal integer version token."""
+
+    token = _bounded_ascii_token(raw, field=field)
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)\Z", token) is None:
+        raise ValueError(f"{field} readback is not a canonical integer: {token!r}")
+    return int(token)
+
+
+def _parse_wdog_flag(raw: str, *, field: str) -> bool:
+    """Parse an exact TSP protocol flag: literal ASCII 0 or 1 only."""
+
+    token = _bounded_ascii_token(raw, field=field)
+    if token == "0":
+        return False
+    if token == "1":
+        return True
+    raise ValueError(f"{field} readback must be literal 0 or 1, got {token!r}")
+
+
+def _parse_wdog_latch(raw: str) -> bool:
+    """Parse pre-upload latch, admitting only explicit fresh-state sentinels."""
+    token = _bounded_ascii_token(raw, field="cryodaq_wdog_tripped")
+    if token == "nil":
+        return False
+    return _parse_wdog_flag(token, field="cryodaq_wdog_tripped")
+
+
+def _validate_wdog_timeout_s(value: object) -> float:
+    """Return a finite late-pet timeout within the supported safety range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("watchdog_timeout_s must be a real number, not a boolean or string")
+    timeout_s = float(value)
+    if not math.isfinite(timeout_s):
+        raise ValueError("watchdog_timeout_s must be finite")
+    if not (_WDOG_TIMEOUT_MIN_S <= timeout_s <= _WDOG_TIMEOUT_MAX_S):
+        raise ValueError(
+            f"watchdog_timeout_s must be between {_WDOG_TIMEOUT_MIN_S:g} and {_WDOG_TIMEOUT_MAX_S:g} seconds"
+        )
+    return timeout_s
 
 
 class WatchdogMode(StrEnum):
     """Operator-selected TSP watchdog behaviour (config: keithley.watchdog.mode).
 
-    - ``off``: no firmware watchdog; host SafetyManager is the sole authority.
+    - ``off``: no TSP watchdog; host SafetyManager is the sole authority.
       Zero ``cryodaq_wdog`` writes — the command stream is byte-identical.
-    - ``best_effort``: arm on connect; on arm failure log CRITICAL and continue
-      host-only (fail-OPEN on the watchdog layer). == legacy ``enabled: true``.
-    - ``required``: fail-CLOSED — an arm failure makes connect() raise, so the
+    - ``best_effort``: activate the software late-pet check on connect; report
+      the absence of autonomous host-death protection at CRITICAL severity.
+      == legacy ``enabled: true``.
+    - ``required``: fail-CLOSED unless the uploaded script explicitly reports
+      an autonomous protection bit of literal 1. Version 3 reports 0, so the
       instrument stays unavailable and the SafetyManager holds SAFE_OFF. A
       read-back latched trip is NOT a failure: it is logged CRITICAL and armed
       over (outputs were already forced OFF; raising would only lock the
@@ -110,21 +340,25 @@ class Keithley2604B(InstrumentDriver):
         self._resource_str = resource_str
         self._transport = USBTMCTransport(mock=mock)
         self._instrument_id = ""
-        # TSP dead-man watchdog plumbing (default OFF → byte-identical stream).
+        # TSP late-pet watchdog plumbing (default OFF → byte-identical stream).
         # Explicit mode wins; else the deprecated ``watchdog_enabled`` alias
         # maps True→best_effort / False→off; else default off. Unknown mode
         # string raises ValueError (fail-closed config).
         if watchdog_mode is not None:
             self._wdog_mode = WatchdogMode(watchdog_mode)
         elif watchdog_enabled is not None:
-            self._wdog_mode = (
-                WatchdogMode.BEST_EFFORT if watchdog_enabled else WatchdogMode.OFF
-            )
+            self._wdog_mode = WatchdogMode.BEST_EFFORT if watchdog_enabled else WatchdogMode.OFF
         else:
             self._wdog_mode = WatchdogMode.OFF
         self._wdog_enabled = self._wdog_mode is not WatchdogMode.OFF
-        self._wdog_timeout_s = float(watchdog_timeout_s)
+        self._wdog_timeout_s = _validate_wdog_timeout_s(watchdog_timeout_s)
         self._wdog_armed = False
+        # Separate truth bit: _wdog_armed means only that the software late-pet
+        # check is active. It must never imply autonomous host-death coverage.
+        self._wdog_autonomous = False
+        # Host-side evidence bit survives a firmware trip or a pre-upload latch
+        # read until explicit operator-authorized acknowledgment succeeds.
+        self._wdog_trip_pending = False
         self._channels: dict[SmuChannel, ChannelRuntime] = {
             "smua": ChannelRuntime(channel="smua"),
             "smub": ChannelRuntime(channel="smub"),
@@ -137,98 +371,385 @@ class Keithley2604B(InstrumentDriver):
         # F2: set True when the crash-recovery force-OFF on connect() cannot be
         # readback-verified (outputs may still be ON). A blocking RUN
         # precondition in SafetyManager, cleared by a later verified OFF.
-        self._unsafe_output_state = False
+        self._unsafe_output_state = True
+        # Connection-scoped evidence: only OFF readback collected in the
+        # current connection generation may authorize transport teardown.
+        self._connection_generation = 0
+        self._teardown_incomplete = False
+        self._teardown_can_settle = False
+        self._recovery_transport_open = False
+        self._connect_in_progress = False
+        self._disconnect_in_progress = False
+        self._ordinary_io_lock = asyncio.Lock()
+        self._source_command_epoch: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
+        self._source_start_token: dict[SmuChannel, int | None] = {"smua": None, "smub": None}
+        self._source_off_depth: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
+        self._source_regulation_epoch: dict[SmuChannel, int | None] = {
+            "smua": None,
+            "smub": None,
+        }
+        self._output_off_verified: dict[SmuChannel, bool] = {
+            "smua": False,
+            "smub": False,
+        }
+        self._output_off_verified_generation: dict[SmuChannel, int | None] = {
+            "smua": None,
+            "smub": None,
+        }
+        self._output_off_verified_epoch: dict[SmuChannel, int | None] = {
+            "smua": None,
+            "smub": None,
+        }
 
-    async def connect(self) -> None:
-        log.info("%s: connecting to %s", self.name, self._resource_str)
-        await self._transport.open(self._resource_str)
-        try:
-            idn = await self._transport.query("*IDN?")
-            self._instrument_id = idn
-            if "2604B" not in idn:
-                raise RuntimeError(f"{self.name}: unexpected IDN {idn!r}")
-            # Drain stale errors so they don't confuse runtime error checks.
-            await self._transport.write("errorqueue.clear()")
-            # Mark connected BEFORE the crash-recovery readback so
-            # _verify_output_off issues a real query (it short-circuits to True
-            # while _connected is False). Reset in the except below if anything
-            # here re-raises (only the IDN/clear steps above can, and they run
-            # before this point).
-            self._connected = True
-            # SAFETY (Phase 2a G.1): force outputs off on every connect.
-            # The previous engine process may have crashed mid-experiment
-            # while sourcing — Keithley holds the last programmed voltage
-            # indefinitely with no TSP-side watchdog . This
-            # guarantees a known-safe state every time we assume control.
-            # connect() must NOT abort on a force-off failure (refusing connect
-            # strips the operator of all control — Phase 2a G.1 rationale). F2:
-            # instead readback-verify both channels; an unverified/still-ON
-            # output sets the blocking _unsafe_output_state flag so SafetyManager
-            # refuses RUN (only RUN) until a later verified OFF clears it.
-            if not self.mock:
-                self._unsafe_output_state = False
-                try:
-                    await self._transport.write("smua.source.levelv = 0")
-                    await self._transport.write("smub.source.levelv = 0")
-                    await self._transport.write("smua.source.output = smua.OUTPUT_OFF")
-                    await self._transport.write("smub.source.output = smub.OUTPUT_OFF")
-                except Exception as exc:
-                    log.critical(
-                        "%s: SAFETY: failed to force output off on connect: %s",
-                        self.name,
-                        exc,
-                    )
-                    self._unsafe_output_state = True
-                else:
-                    for smu_channel in SMU_CHANNELS:
-                        try:
-                            if not await self._verify_output_off(smu_channel):
-                                self._unsafe_output_state = True
-                        except Exception as exc:
-                            log.critical(
-                                "%s: SAFETY: connect force-off readback FAILED on %s: %s",
-                                self.name,
-                                smu_channel,
-                                exc,
-                            )
-                            self._unsafe_output_state = True
-                    if self._unsafe_output_state:
-                        log.critical(
-                            "%s: SAFETY: output state UNVERIFIED after connect "
-                            "force-OFF — RUN blocked until a verified OFF",
-                            self.name,
-                        )
-                    else:
-                        log.info(
-                            "%s: SAFETY: forced outputs off on connect "
-                            "(crash-recovery guard, readback-verified)",
-                            self.name,
-                        )
-        except Exception:
-            self._connected = False
-            await self._transport.close()
-            raise
-        try:
-            await self._wdog_arm()
-        except Exception:
-            # required-mode fail-CLOSED: an arm failure aborts connect
-            # (a latched past-trip does NOT raise — see _wdog_arm).
-            # best_effort never raises here.
-            self._connected = False
-            await self._transport.close()
-            raise
+    def _raise_if_operationally_barred(self, operation: str) -> None:
+        """Reject ordinary traffic after teardown uncertainty or transport loss."""
 
-    async def disconnect(self) -> None:
-        if not self._connected:
-            return
-        await self.emergency_off()
-        await self._wdog_disarm()
-        await self._transport.close()
-        self._connected = False
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(
+                f"{self.name}: {operation} blocked while transport teardown remains incomplete"
+            )
+        if self._recovery_transport_open:
+            raise RuntimeError(f"{self.name}: {operation} blocked on recovery-only transport")
 
-    async def read_channels(self) -> list[Reading]:
+    def _require_operational_connection(self, operation: str) -> None:
+        self._raise_if_operationally_barred(operation)
+        if self._connect_in_progress or self._disconnect_in_progress:
+            raise RuntimeError(f"{self.name}: lifecycle transition blocks {operation}")
         if not self._connected:
             raise RuntimeError(f"{self.name}: instrument not connected")
+        if not self.mock:
+            try:
+                expected_serial = _parse_configured_keithley_serial(self._resource_str)
+                _parse_keithley_idn(
+                    self._instrument_id,
+                    mock=False,
+                    expected_serial=expected_serial,
+                )
+            except ValueError as exc:
+                self._enter_recovery_after_transport_loss(f"{operation} identity validation")
+                raise OutputStateUnverifiedError(
+                    f"{self.name}: {operation} blocked without exact connected identity authority"
+                ) from exc
+
+    def _enter_recovery_after_transport_loss(self, operation: str) -> None:
+        """Atomically demote a live physical session without closing its handle."""
+
+        if self.mock or not self._connected:
+            return
+        self._connected = False
+        self._recovery_transport_open = True
+        self._instrument_id = ""
+        self._wdog_armed = False
+        self._wdog_autonomous = False
+        self._revoke_off_evidence()
+        log.critical(
+            "%s: SAFETY: %s lost transport authority; retaining the existing handle only for OFF recovery and close",
+            self.name,
+            operation,
+        )
+
+    async def _operational_query(self, command: str, *, timeout_ms: int | None = None) -> str:
+        """Issue one ordinary query and demote any ambiguous transport failure."""
+
+        async with self._ordinary_io_lock:
+            self._require_operational_connection("query")
+            try:
+                if timeout_ms is None:
+                    return await self._transport.query(command)
+                return await self._transport.query(command, timeout_ms=timeout_ms)
+            except BaseException:
+                self._enter_recovery_after_transport_loss("query")
+                raise
+
+    async def _operational_write(
+        self,
+        command: str,
+        *,
+        authority_check: Callable[[], None] | None = None,
+    ) -> None:
+        """Issue one ordinary write and demote any ambiguous transport failure."""
+
+        async with self._ordinary_io_lock:
+            self._require_operational_connection("write")
+            if authority_check is not None:
+                authority_check()
+            try:
+                await self._transport.write(command)
+            except BaseException:
+                self._enter_recovery_after_transport_loss("write")
+                raise
+
+    def _normalize_cleanup_error(self, error: BaseException) -> TransportTeardownIncompleteError:
+        normalized = TransportTeardownIncompleteError(
+            f"{self.name}: VISA teardown is incomplete; reconnect remains blocked"
+        )
+        if isinstance(error, USBTMCIncompleteCloseError) and error.cleanup_error is not None:
+            normalized.__cause__ = error.cleanup_error
+        else:
+            normalized.__cause__ = error
+        return normalized
+
+    async def connect(self) -> None:
+        if self._teardown_incomplete:
+            if not self._teardown_can_settle:
+                raise TransportTeardownIncompleteError(
+                    f"{self.name}: reconnect refused after a terminal VISA teardown failure"
+                )
+            try:
+                await self._transport.close()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                self._teardown_can_settle = isinstance(exc, USBTMCIncompleteCloseError) and not exc.settled
+                raise self._normalize_cleanup_error(exc) from exc
+            self._teardown_incomplete = False
+            self._teardown_can_settle = False
+            self._recovery_transport_open = False
+            self._connected = False
+            self._instrument_id = ""
+            self._revoke_off_evidence()
+        if self._recovery_transport_open:
+            raise RuntimeError(f"{self.name}: recovery transport remains open; settle it before reconnect")
+        if self._connected or self._connect_in_progress or self._disconnect_in_progress:
+            raise RuntimeError(f"{self.name}: connect already active")
+        if any(self._source_start_token.values()) or any(self._source_off_depth.values()):
+            raise RuntimeError(f"{self.name}: source transition blocks connect")
+        self._instrument_id = ""
+        configured_serial = None if self.mock else _parse_configured_keithley_serial(self._resource_str)
+        self._connect_in_progress = True
+        log.info("%s: connecting to %s", self.name, self._resource_str)
+        self._connection_generation += 1
+        for smu_channel, runtime in self._channels.items():
+            self._source_command_epoch[smu_channel] += 1
+            self._source_start_token[smu_channel] = None
+            runtime.active = False
+            runtime.p_target = 0.0
+            self._last_v[smu_channel] = 0.0
+            self._compliance_count[smu_channel] = 0
+        self._revoke_off_evidence()
+        self._wdog_armed = False
+        self._wdog_autonomous = False
+
+        family_authorized = False
+        accepted_identity: str | None = None
+        try:
+            await self._transport.open(self._resource_str)
+            idn_raw = await self._transport.query("*IDN?")
+
+            # Two-stage trust boundary: only an exact documented vendor/model
+            # family authorizes TSP-specific recovery commands.  Serial and
+            # firmware remain untrusted until every OFF attempt has settled.
+            _parse_keithley_idn_family(idn_raw, mock=self.mock)
+            family_authorized = True
+            off_confirmed, pending_cancel = await self._attempt_owned_off(
+                list(SMU_CHANNELS),
+                context="connect",
+            )
+            identity_error: ValueError | None = None
+            try:
+                accepted_identity = _parse_keithley_idn(
+                    idn_raw,
+                    mock=self.mock,
+                    expected_serial=configured_serial,
+                )
+            except ValueError as exc:
+                identity_error = exc
+            if pending_cancel is not None:
+                raise pending_cancel
+            if not off_confirmed:
+                log.critical(
+                    "%s: SAFETY: output state UNVERIFIED after connect force-OFF; transport retained only for recovery",
+                    self.name,
+                )
+                raise OutputStateUnverifiedError(
+                    f"{self.name}: connect did not obtain current-generation OFF proof for both channels; "
+                    "transport is retained only for recovery and connected authority was not granted"
+                ) from identity_error
+            if identity_error is not None:
+                raise identity_error
+
+            # Drain stale errors only after family authorization and OFF
+            # settlement; unknown hardware receives no vendor-specific write.
+            await self._transport.write("errorqueue.clear()")
+            await self._wdog_arm()
+        except BaseException as connect_error:
+            self._instrument_id = ""
+            retained_for_recovery = family_authorized and not all(
+                self._has_current_off_proof(channel) for channel in SMU_CHANNELS
+            )
+            self._connect_in_progress = False
+            if retained_for_recovery:
+                self._connected = False
+                self._recovery_transport_open = True
+                self._unsafe_output_state = True
+                log.critical(
+                    "%s: retaining family-authorized transport for OFF recovery; "
+                    "identity is unpublished and source start remains blocked",
+                    self.name,
+                )
+                raise
+            cleanup_error = await self._settle_failed_connect()
+            if cleanup_error is None:
+                raise
+            primary_connect_error = (
+                connect_error.primary_error
+                if isinstance(connect_error, USBTMCIncompleteCloseError) and connect_error.primary_error is not None
+                else connect_error
+            )
+            combined = FailedConnectCleanupError(
+                connect_error=primary_connect_error,
+                cleanup_error=cleanup_error,
+            )
+            if isinstance(connect_error, asyncio.CancelledError):
+                raise connect_error from combined
+            raise combined from cleanup_error
+
+        assert accepted_identity is not None
+        self._instrument_id = accepted_identity
+        self._connected = True
+        self._recovery_transport_open = False
+        self._connect_in_progress = False
+
+    async def _settle_failed_connect(
+        self,
+    ) -> TransportTeardownIncompleteError | None:
+        """Attempt cleanup once and retain any unsettled exact owner for later reconciliation."""
+
+        self._connected = False
+        self._recovery_transport_open = False
+        self._instrument_id = ""
+        self._revoke_off_evidence()
+        cleanup_error: TransportTeardownIncompleteError | None = None
+        try:
+            try:
+                await self._transport.close()
+            except BaseException as exc:
+                settlement_error: BaseException = exc
+                if isinstance(exc, asyncio.CancelledError) and isinstance(exc.__cause__, USBTMCIncompleteCloseError):
+                    settlement_error = exc.__cause__
+                self._teardown_incomplete = True
+                self._teardown_can_settle = (
+                    isinstance(settlement_error, USBTMCIncompleteCloseError) and not settlement_error.settled
+                )
+                cleanup_error = self._normalize_cleanup_error(settlement_error)
+                log.critical("%s: failed-connect transport cleanup failed: %s", self.name, settlement_error)
+        finally:
+            self._connected = False
+            self._recovery_transport_open = False
+            self._connect_in_progress = False
+            self._instrument_id = ""
+            self._revoke_off_evidence()
+        return cleanup_error
+
+    async def disconnect(self) -> None:
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(f"{self.name}: previous transport close remains unsettled")
+        if self._connect_in_progress or self._disconnect_in_progress:
+            raise RuntimeError(f"{self.name}: lifecycle transition blocks disconnect")
+        self._disconnect_in_progress = True
+        pending_cancel: asyncio.CancelledError | None = None
+        terminal_error: BaseException | None = None
+        recovery_only = self._recovery_transport_open
+        disconnect_generation = self._connection_generation
+        try:
+            if not (self._connected or recovery_only):
+                self._instrument_id = ""
+                self._revoke_off_evidence()
+                return
+
+            off_confirmed = all(self._has_current_off_proof(channel) for channel in SMU_CHANNELS)
+            if recovery_only and not off_confirmed:
+                raise OutputStateUnverifiedError(
+                    f"{self.name}: recovery close refused until emergency_off verifies both outputs"
+                )
+            if not off_confirmed:
+                try:
+                    off_confirmed, pending_cancel = await self._attempt_owned_off(
+                        list(SMU_CHANNELS),
+                        context="disconnect",
+                    )
+                except BaseException as exc:
+                    if isinstance(exc, asyncio.CancelledError):
+                        pending_cancel = pending_cancel or exc
+                    else:
+                        terminal_error = exc
+                    off_confirmed = all(self._has_current_off_proof(channel) for channel in SMU_CHANNELS)
+            if not off_confirmed:
+                self._unsafe_output_state = True
+                if pending_cancel is not None:
+                    raise pending_cancel
+                if terminal_error is not None:
+                    raise terminal_error
+                raise OutputStateUnverifiedError(
+                    f"{self.name}: disconnect refused without a readback-verified OFF for both outputs"
+                )
+
+            # Terminal current-generation OFF proof authorizes teardown.  Keep
+            # the lifecycle barrier raised until disarm and close both settle.
+            if not recovery_only:
+                try:
+                    await self._wdog_disarm()
+                except asyncio.CancelledError as exc:
+                    pending_cancel = pending_cancel or exc
+                except BaseException as exc:
+                    terminal_error = terminal_error or exc
+
+            close_task = asyncio.create_task(self._transport.close())
+            close_settled = False
+            while not close_task.done():
+                try:
+                    await asyncio.wait({close_task})
+                except asyncio.CancelledError as exc:
+                    pending_cancel = pending_cancel or exc
+                except BaseException:
+                    break
+            try:
+                close_task.result()
+                close_settled = True
+            except asyncio.CancelledError as exc:
+                pending_cancel = pending_cancel or exc
+            except BaseException as exc:
+                terminal_error = terminal_error or exc
+            finally:
+                generation_is_current = self._connection_generation == disconnect_generation
+                if close_settled and generation_is_current:
+                    self._connected = False
+                    self._recovery_transport_open = False
+                    self._instrument_id = ""
+                    self._wdog_armed = False
+                    self._wdog_autonomous = False
+                    self._revoke_off_evidence()
+                else:
+                    self._connected = False
+                    self._recovery_transport_open = not close_settled
+                    self._instrument_id = ""
+                    self._wdog_armed = False
+                    self._wdog_autonomous = False
+                    self._revoke_off_evidence()
+                    self._teardown_incomplete = True
+                    self._teardown_can_settle = (
+                        isinstance(terminal_error, USBTMCIncompleteCloseError) and not terminal_error.settled
+                    )
+                    self._unsafe_output_state = True
+                    if close_settled:
+                        terminal_error = terminal_error or TransportTeardownIncompleteError(
+                            f"{self.name}: late close for generation {disconnect_generation} "
+                            f"cannot settle current generation {self._connection_generation}"
+                        )
+
+            if pending_cancel is not None:
+                raise pending_cancel
+            if terminal_error is not None:
+                if isinstance(terminal_error, USBTMCIncompleteCloseError):
+                    raise TransportTeardownIncompleteError(
+                        f"{self.name}: VISA teardown is incomplete; reconnect remains blocked"
+                    ) from terminal_error
+                raise terminal_error
+        finally:
+            self._disconnect_in_progress = False
+
+    async def read_channels(self) -> list[Reading]:
+        self._require_operational_connection("read_channels")
 
         if self.mock:
             return self._mock_readings()
@@ -238,53 +759,83 @@ class Keithley2604B(InstrumentDriver):
         readings: list[Reading] = []
         for smu_channel in SMU_CHANNELS:
             runtime = self._channels[smu_channel]
+            iv_evidence: str | None = None
+            output_evidence: str | None = None
+            compliance_evidence: str | None = None
             try:
                 if not runtime.active:
                     # Check output state — source may be OFF or left ON from
                     # a previous session.  measure.iv() errors when output is OFF.
-                    output_raw = await self._transport.query(
-                        f"print({smu_channel}.source.output)", timeout_ms=3000
+                    output_raw = await self._operational_query(
+                        f"print({smu_channel}.source.output)",
+                        timeout_ms=3000,
                     )
+                    output_evidence = output_raw
                     try:
-                        output_on = float(output_raw.strip()) > 0.5
-                    except ValueError:
-                        output_on = False
-
-                    if not output_on:
+                        output_on = _parse_output_enabled(output_raw)
+                    except ValueError as exc:
+                        self._invalidate_channel_off_evidence(smu_channel, advance_epoch=True)
+                        log.error(
+                            "%s: invalid output state on %s: %s",
+                            self.name,
+                            smu_channel,
+                            exc,
+                        )
                         readings.extend(
-                            self._build_channel_readings(
-                                smu_channel, 0.0, 0.0, resistance_override=0.0
+                            self._error_readings_for_channel(
+                                smu_channel,
+                                output_evidence=output_evidence,
                             )
                         )
                         continue
 
+                    if not output_on:
+                        readings.extend(self._build_channel_readings(smu_channel, 0.0, 0.0, resistance_override=0.0))
+                        continue
+
                     # Output is ON but not managed by us — read for monitoring.
-                    raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
+                    self._invalidate_channel_off_evidence(smu_channel, advance_epoch=True)
+                    raw = await self._operational_query(f"print({smu_channel}.measure.iv())")
+                    iv_evidence = raw
                     current, voltage = self._parse_iv_response(raw, smu_channel)
                     readings.extend(self._build_channel_readings(smu_channel, voltage, current))
                     continue
 
                 # --- Active P=const channel: measure + regulate ---
-                raw = await self._transport.query(f"print({smu_channel}.measure.iv())")
+                regulation_generation = self._connection_generation
+                regulation_epoch = self._source_command_epoch[smu_channel]
+                raw = await self._operational_query(f"print({smu_channel}.measure.iv())")
+                iv_evidence = raw
                 current, voltage = self._parse_iv_response(raw, smu_channel)
 
                 # --- Compliance check ---
-                comp_raw = await self._transport.query(f"print({smu_channel}.source.compliance)")
-                in_compliance = comp_raw.strip().lower() == "true"
+                comp_raw = await self._operational_query(f"print({smu_channel}.source.compliance)")
+                compliance_evidence = comp_raw
+                in_compliance = _parse_compliance(comp_raw)
 
                 extra_meta: dict[str, Any] = {}
                 if in_compliance:
-                    self._compliance_count[smu_channel] += 1
-                    log.warning(
-                        "%s: %s in compliance — P=const regulation ineffective (consecutive=%d)",
-                        self.name,
+                    if self._regulation_is_current(
                         smu_channel,
-                        self._compliance_count[smu_channel],
-                    )
+                        generation=regulation_generation,
+                        command_epoch=regulation_epoch,
+                    ):
+                        self._compliance_count[smu_channel] += 1
+                        log.warning(
+                            "%s: %s in compliance — P=const regulation ineffective (consecutive=%d)",
+                            self.name,
+                            smu_channel,
+                            self._compliance_count[smu_channel],
+                        )
                     extra_meta["compliance"] = True
                     # Do NOT adjust voltage — the SMU is already at its limit.
                 else:
-                    self._compliance_count[smu_channel] = 0
+                    if self._regulation_is_current(
+                        smu_channel,
+                        generation=regulation_generation,
+                        command_epoch=regulation_epoch,
+                    ):
+                        self._compliance_count[smu_channel] = 0
 
                     # --- P=const voltage regulation with slew rate limit ---
                     if abs(current) > _I_MIN_A:
@@ -297,9 +848,7 @@ class Keithley2604B(InstrumentDriver):
                             current_v = self._last_v[smu_channel]
                             delta_v = target_v - current_v
                             if abs(delta_v) > MAX_DELTA_V_PER_STEP:
-                                delta_v = (
-                                    MAX_DELTA_V_PER_STEP if delta_v > 0 else -MAX_DELTA_V_PER_STEP
-                                )
+                                delta_v = MAX_DELTA_V_PER_STEP if delta_v > 0 else -MAX_DELTA_V_PER_STEP
                                 target_v = current_v + delta_v
                                 log.debug(
                                     "Slew rate limited: delta=%.3f V, target=%.3f V",
@@ -307,23 +856,44 @@ class Keithley2604B(InstrumentDriver):
                                     target_v,
                                 )
 
-                            await self._transport.write(f"{smu_channel}.source.levelv = {target_v}")
-                            self._last_v[smu_channel] = target_v
+                            if self._regulation_is_current(
+                                smu_channel,
+                                generation=regulation_generation,
+                                command_epoch=regulation_epoch,
+                            ):
+                                await self._operational_write(
+                                    f"{smu_channel}.source.levelv = {target_v}",
+                                    authority_check=lambda: self._require_current_regulation(
+                                        smu_channel,
+                                        generation=regulation_generation,
+                                        command_epoch=regulation_epoch,
+                                    ),
+                                )
+                                if self._regulation_is_current(
+                                    smu_channel,
+                                    generation=regulation_generation,
+                                    command_epoch=regulation_epoch,
+                                ):
+                                    self._last_v[smu_channel] = target_v
 
-                readings.extend(
-                    self._build_channel_readings(
-                        smu_channel, voltage, current, extra_meta=extra_meta
-                    )
-                )
+                readings.extend(self._build_channel_readings(smu_channel, voltage, current, extra_meta=extra_meta))
             except OSError as exc:
                 # Transport-level error (USB disconnect, pipe broken) —
-                # mark disconnected so scheduler triggers reconnect.
+                # retain this exact handle for recovery; replacement-open is blocked.
                 log.error("%s: transport error on %s: %s", self.name, smu_channel, exc)
-                self._connected = False
                 raise
             except Exception as exc:
+                if self._recovery_transport_open:
+                    raise
                 log.error("%s: read failure on %s: %s", self.name, smu_channel, exc)
-                readings.extend(self._error_readings_for_channel(smu_channel))
+                readings.extend(
+                    self._error_readings_for_channel(
+                        smu_channel,
+                        raw_evidence=iv_evidence,
+                        output_evidence=output_evidence,
+                        compliance_evidence=compliance_evidence,
+                    )
+                )
         return readings
 
     async def start_source(
@@ -336,13 +906,8 @@ class Keithley2604B(InstrumentDriver):
         smu_channel = normalize_smu_channel(channel)
         runtime = self._channels[smu_channel]
 
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
-        if not (
-            math.isfinite(p_target)
-            and math.isfinite(v_compliance)
-            and math.isfinite(i_compliance)
-        ):
+        self._require_operational_connection("start_source")
+        if not (math.isfinite(p_target) and math.isfinite(v_compliance) and math.isfinite(i_compliance)):
             # Non-finite would be formatted straight into the SCPI level/limit
             # writes below (and nan defeats the <= 0 guard). Reject at the
             # hardware boundary regardless of caller.
@@ -351,132 +916,528 @@ class Keithley2604B(InstrumentDriver):
             raise ValueError("P/V/I must be > 0")
         if runtime.active:
             raise RuntimeError(f"Channel {smu_channel} already active")
+        start_token = self._begin_start_operation(smu_channel)
 
         runtime.p_target = p_target
         runtime.v_comp = v_compliance
         runtime.i_comp = i_compliance
+        self._source_regulation_epoch[smu_channel] = None
+        output_on_attempted = False
+
+        async def write_owned(command: str) -> None:
+            self._require_current_start(smu_channel, start_token)
+            await self._operational_write(
+                command,
+                authority_check=lambda: self._require_current_start(smu_channel, start_token),
+            )
+            self._require_current_start(smu_channel, start_token)
+
+        try:
+            if self.mock:
+                runtime.active = True
+                self._source_regulation_epoch[smu_channel] = start_token
+                return
+
+            # Every hazardous write is bracketed by an ownership check.  OFF
+            # authority may supersede this start at any await boundary.
+            for command in (
+                f"{smu_channel}.reset()",
+                f"{smu_channel}.source.func = {smu_channel}.OUTPUT_DCVOLTS",
+                f"{smu_channel}.source.autorangev = {smu_channel}.AUTORANGE_ON",
+                f"{smu_channel}.measure.autorangei = {smu_channel}.AUTORANGE_ON",
+                f"{smu_channel}.source.limitv = {v_compliance}",
+                f"{smu_channel}.source.limiti = {i_compliance}",
+                f"{smu_channel}.source.levelv = 0",
+            ):
+                await write_owned(command)
+
+            self._require_current_start(smu_channel, start_token)
+            output_on_attempted = True
+            # A write can reach the instrument and then raise locally. Publish
+            # the hazardous possibility before awaiting the command.
+            runtime.active = True
+            await self._operational_write(
+                f"{smu_channel}.source.output = {smu_channel}.OUTPUT_ON",
+                authority_check=lambda: self._require_current_start(smu_channel, start_token),
+            )
+            self._require_current_start(smu_channel, start_token)
+
+            self._last_v[smu_channel] = 0.0
+            self._compliance_count[smu_channel] = 0
+            self._source_regulation_epoch[smu_channel] = start_token
+        except BaseException as original_error:
+            cleanup_exact = False
+            cleanup_pending: asyncio.CancelledError | None = None
+            try:
+                cleanup_exact, cleanup_pending = await self._attempt_owned_off(
+                    [smu_channel],
+                    context="failed_start",
+                )
+            except BaseException as cleanup_error:
+                cleanup_exact = self._has_current_off_readback(smu_channel)
+                log.critical(
+                    "%s: SAFETY: failed-start OFF cleanup raised on %s: %s",
+                    self.name,
+                    smu_channel,
+                    cleanup_error,
+                )
+
+            if not cleanup_exact:
+                self._source_regulation_epoch[smu_channel] = None
+                runtime.active = output_on_attempted
+                if not output_on_attempted:
+                    runtime.p_target = 0.0
+                self._unsafe_output_state = True
+
+            if isinstance(original_error, asyncio.CancelledError):
+                raise original_error
+            if cleanup_pending is not None:
+                raise cleanup_pending from original_error
+            raise
+        finally:
+            self._finish_start_operation(smu_channel, start_token)
+
+    async def update_source_limit(
+        self,
+        channel: str,
+        *,
+        v_comp: float | None = None,
+        i_comp: float | None = None,
+    ) -> float:
+        """Apply exactly one active-channel compliance limit under operational authority."""
+
+        smu_channel = normalize_smu_channel(channel)
+        if (v_comp is None) == (i_comp is None):
+            raise ValueError("exactly one of v_comp or i_comp is required")
+        value = v_comp if v_comp is not None else i_comp
+        assert value is not None
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("source compliance limit must be finite and > 0")
+
+        self._require_operational_connection("update_source_limit")
+        runtime = self._channels[smu_channel]
+        if not runtime.active:
+            raise RuntimeError(f"{self.name}: {smu_channel} source is not active")
+        update_generation = self._connection_generation
+        update_epoch = self._source_command_epoch[smu_channel]
+
+        def require_update_authority() -> None:
+            self._require_current_regulation(
+                smu_channel,
+                generation=update_generation,
+                command_epoch=update_epoch,
+            )
+
+        require_update_authority()
+
+        if v_comp is not None:
+            if not self.mock:
+                await self._operational_write(
+                    f"{smu_channel}.source.limitv = {value}",
+                    authority_check=require_update_authority,
+                )
+            require_update_authority()
+            runtime.v_comp = value
+        else:
+            if not self.mock:
+                await self._operational_write(
+                    f"{smu_channel}.source.limiti = {value}",
+                    authority_check=require_update_authority,
+                )
+            require_update_authority()
+            runtime.i_comp = value
+        return value
+
+    async def _settle_owned_bool_task(
+        self,
+        task: asyncio.Task[bool],
+    ) -> tuple[bool | None, BaseException | None, asyncio.CancelledError | None]:
+        """Retain one safety task to terminal state despite caller cancellation."""
+
+        caller_cancelled: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                caller_cancelled = caller_cancelled or exc
+                continue
+            except BaseException:
+                break
+        try:
+            return task.result(), None, caller_cancelled
+        except BaseException as exc:
+            return None, exc, caller_cancelled
+
+    async def _attempt_output_off_sequence(
+        self,
+        channels: list[SmuChannel],
+        *,
+        tokens: dict[SmuChannel, int],
+        generation: int,
+        context: str,
+    ) -> bool:
+        """Attempt every OFF command, then independently verify every target."""
 
         if self.mock:
-            runtime.active = True
-            return
+            all_confirmed = True
+            for smu_channel in channels:
+                committed = self._mark_channel_off_verified(
+                    smu_channel,
+                    generation=generation,
+                    command_epoch=tokens[smu_channel],
+                )
+                all_confirmed = committed and all_confirmed
+            return all_confirmed
 
-        # Configure source directly via VISA — no TSP script.
-        await self._transport.write(f"{smu_channel}.reset()")
-        await self._transport.write(f"{smu_channel}.source.func = {smu_channel}.OUTPUT_DCVOLTS")
-        await self._transport.write(f"{smu_channel}.source.autorangev = {smu_channel}.AUTORANGE_ON")
-        await self._transport.write(
-            f"{smu_channel}.measure.autorangei = {smu_channel}.AUTORANGE_ON"
+        deferred_error: BaseException | None = None
+        command_failed = {smu_channel: False for smu_channel in channels}
+        for smu_channel in channels:
+            for command in (
+                f"{smu_channel}.source.levelv = 0",
+                f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF",
+            ):
+                try:
+                    await self._transport.write(command)
+                except Exception as exc:
+                    self._enter_recovery_after_transport_loss(f"{context} write")
+                    command_failed[smu_channel] = True
+                    log.critical(
+                        "%s: SAFETY: %s command failed on %s (%s): %s",
+                        self.name,
+                        context,
+                        smu_channel,
+                        command,
+                        exc,
+                    )
+                except BaseException as exc:
+                    self._enter_recovery_after_transport_loss(f"{context} write")
+                    command_failed[smu_channel] = True
+                    deferred_error = deferred_error or exc
+                    log.critical(
+                        "%s: SAFETY: %s command interrupted on %s (%s): %s",
+                        self.name,
+                        context,
+                        smu_channel,
+                        command,
+                        exc,
+                    )
+
+        all_confirmed = True
+        for smu_channel in channels:
+            try:
+                readback_confirmed = await self._verify_output_off(smu_channel)
+            except Exception as exc:
+                self._enter_recovery_after_transport_loss(f"{context} query")
+                log.critical(
+                    "%s: SAFETY: %s OFF readback failed on %s: %s",
+                    self.name,
+                    context,
+                    smu_channel,
+                    exc,
+                )
+                readback_confirmed = False
+            except BaseException as exc:
+                self._enter_recovery_after_transport_loss(f"{context} query")
+                deferred_error = deferred_error or exc
+                log.critical(
+                    "%s: SAFETY: %s OFF readback interrupted on %s: %s",
+                    self.name,
+                    context,
+                    smu_channel,
+                    exc,
+                )
+                readback_confirmed = False
+            if readback_confirmed and not command_failed[smu_channel]:
+                committed = self._mark_channel_off_verified(
+                    smu_channel,
+                    generation=generation,
+                    command_epoch=tokens[smu_channel],
+                )
+                all_confirmed = committed and all_confirmed
+            else:
+                all_confirmed = False
+                if tokens[smu_channel] == self._source_command_epoch[smu_channel]:
+                    self._invalidate_channel_off_evidence(smu_channel)
+        if deferred_error is not None:
+            raise deferred_error
+        return all_confirmed
+
+    async def _attempt_owned_off(
+        self,
+        channels: list[SmuChannel],
+        *,
+        context: str,
+    ) -> tuple[bool, asyncio.CancelledError | None]:
+        """Preclaim and settle one complete OFF sequence without a broad lock."""
+
+        tokens = self._begin_off_operation(channels)
+        generation = self._connection_generation
+        task = asyncio.create_task(
+            self._attempt_output_off_sequence(
+                channels,
+                tokens=tokens,
+                generation=generation,
+                context=context,
+            ),
+            name=f"{self.name}_{context}_off",
         )
-        await self._transport.write(f"{smu_channel}.source.limitv = {v_compliance}")
-        await self._transport.write(f"{smu_channel}.source.limiti = {i_compliance}")
-        await self._transport.write(f"{smu_channel}.source.levelv = 0")
-        await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_ON")
-        self._last_v[smu_channel] = 0.0
-        self._compliance_count[smu_channel] = 0
-        runtime.active = True
+        try:
+            result, error, caller_cancelled = await self._settle_owned_bool_task(task)
+        finally:
+            self._finish_off_operation(channels)
+        if error is not None:
+            raise error
+        return result is True, caller_cancelled
 
     async def stop_source(self, channel: str) -> None:
         smu_channel = normalize_smu_channel(channel)
-        runtime = self._channels[smu_channel]
-
-        if self.mock:
-            self._last_v[smu_channel] = 0.0
-            self._compliance_count[smu_channel] = 0
-            runtime.active = False
-            runtime.p_target = 0.0
-            return
+        self._raise_if_operationally_barred("stop_source")
 
         if not self._connected:
-            return
+            if self.mock:
+                tokens = self._begin_off_operation([smu_channel])
+                try:
+                    self._mark_channel_off_verified(
+                        smu_channel,
+                        command_epoch=tokens[smu_channel],
+                    )
+                finally:
+                    self._finish_off_operation([smu_channel])
+                return
+            self._unsafe_output_state = True
+            raise OutputStateUnverifiedError(
+                f"{self.name}: {smu_channel} is disconnected; output OFF cannot be verified"
+            )
+        self._require_operational_connection("stop_source")
 
-        await self._transport.write(f"{smu_channel}.source.levelv = 0")
-        await self._transport.write(f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF")
-        # F1 fail-closed: an unverified OFF (readback still ON / unparseable)
-        # must RAISE so SafetyManager latches FAULT instead of reporting
-        # SAFE_OFF. Raise BEFORE clearing runtime state — the host-side P=const
-        # loop must keep treating this channel as active while the output is
-        # UNVERIFIED. (A transport error from the query already propagates.)
-        if not await self._verify_output_off(smu_channel):
+        off_confirmed, pending_cancel = await self._attempt_owned_off(
+            [smu_channel],
+            context="stop_source",
+        )
+        if pending_cancel is not None:
+            raise pending_cancel
+        if not off_confirmed:
             raise OutputStateUnverifiedError(
                 f"{self.name}: {smu_channel} output state UNVERIFIED after "
                 f"OUTPUT_OFF (readback did not confirm OFF) — output may still be ON"
             )
-        self._last_v[smu_channel] = 0.0
-        self._compliance_count[smu_channel] = 0
-        runtime.active = False
-        runtime.p_target = 0.0
 
     async def read_buffer(self, start_idx: int = 1, count: int = 100) -> list[dict[str, float]]:
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
+        self._require_operational_connection("read_buffer")
         if self.mock:
             return self._mock_buffer(start_idx, count)
 
         end_idx = start_idx + count - 1
-        raw = await self._transport.query(
+        raw = await self._operational_query(
             f"printbuffer({start_idx}, {end_idx}, smua.nvbuffer1.timestamps, smua.nvbuffer1.sourcevalues, smua.nvbuffer1)",  # noqa: E501
             timeout_ms=10_000,
         )
         return self._parse_buffer_response(raw)
 
     async def emergency_off(self, channel: str | None = None) -> bool:
-        """Force output OFF on the targeted channel(s). NEVER raises.
+        """Force output OFF on the targeted channel(s).
 
-        Returns True iff, for EVERY targeted channel, the ``levelv = 0`` +
-        ``OUTPUT_OFF`` writes succeeded AND the readback verify confirmed the
-        output is OFF. Returns False otherwise — the instrument may still be
-        sourcing and callers must FAIL CLOSED (CR-2: SafetyManager latches a
-        fault instead of reporting SAFE_OFF).
+        A fresh exact readback is the sole positive authority for each target.
+        Every command and readback is attempted even after an earlier ordinary
+        failure.  Caller cancellation is delivered only after the full sequence
+        reaches a terminal result.
         """
+        if self._teardown_incomplete:
+            raise TransportTeardownIncompleteError(
+                f"{self.name}: emergency_off blocked while transport teardown remains incomplete"
+            )
         channels = [normalize_smu_channel(channel)] if channel is not None else list(SMU_CHANNELS)
-        for smu_channel in channels:
-            runtime = self._channels[smu_channel]
-            runtime.active = False
-            runtime.p_target = 0.0
-            self._last_v[smu_channel] = 0.0
-            self._compliance_count[smu_channel] = 0
 
-        if self.mock or not self._connected:
+        if not (self._connected or self._recovery_transport_open):
+            if not self.mock:
+                self._unsafe_output_state = True
+                return False
+            tokens = self._begin_off_operation(channels)
+            try:
+                for smu_channel in channels:
+                    self._mark_channel_off_verified(
+                        smu_channel,
+                        command_epoch=tokens[smu_channel],
+                    )
+            finally:
+                self._finish_off_operation(channels)
             return True
 
-        all_confirmed = True
+        off_confirmed, pending_cancel = await self._attempt_owned_off(
+            channels,
+            context="emergency_off",
+        )
+        if pending_cancel is not None:
+            raise pending_cancel
+        return off_confirmed
+
+    def _has_current_off_proof(self, smu_channel: SmuChannel) -> bool:
+        return (
+            self._has_current_off_readback(smu_channel)
+            and self._source_start_token[smu_channel] is None
+            and self._source_off_depth[smu_channel] == 0
+        )
+
+    def _has_current_off_readback(self, smu_channel: SmuChannel) -> bool:
+        """Return exact OFF evidence without treating an active transition as settled."""
+
+        return (
+            (self._connected or self._connect_in_progress or self._recovery_transport_open)
+            and self._output_off_verified[smu_channel] is True
+            and self._output_off_verified_generation[smu_channel] == self._connection_generation
+            and self._output_off_verified_epoch[smu_channel] == self._source_command_epoch[smu_channel]
+        )
+
+    def _refresh_output_uncertainty(self) -> None:
+        self._unsafe_output_state = not all(self._has_current_off_proof(channel) for channel in SMU_CHANNELS)
+
+    def _invalidate_channel_off_evidence(
+        self,
+        smu_channel: SmuChannel,
+        *,
+        advance_epoch: bool = False,
+    ) -> None:
+        if advance_epoch:
+            self._source_command_epoch[smu_channel] += 1
+        self._source_regulation_epoch[smu_channel] = None
+        self._output_off_verified[smu_channel] = False
+        self._output_off_verified_generation[smu_channel] = None
+        self._output_off_verified_epoch[smu_channel] = None
+        self._unsafe_output_state = True
+
+    def _revoke_off_evidence(self) -> None:
+        self._output_off_verified = {"smua": False, "smub": False}
+        self._output_off_verified_generation = {"smua": None, "smub": None}
+        self._output_off_verified_epoch = {"smua": None, "smub": None}
+        self._unsafe_output_state = True
+
+    def _begin_off_operation(self, channels: list[SmuChannel]) -> dict[SmuChannel, int]:
+        """Preclaim OFF authority for every target before the first await."""
+
+        tokens: dict[SmuChannel, int] = {}
         for smu_channel in channels:
-            try:
-                await self._transport.write(f"{smu_channel}.source.levelv = 0")
-                await self._transport.write(
-                    f"{smu_channel}.source.output = {smu_channel}.OUTPUT_OFF"
-                )
-            except Exception as exc:
-                log.critical("%s: emergency_off failed on %s: %s", self.name, smu_channel, exc)
-                all_confirmed = False
-            # SAFETY (Phase 2a G.1): readback-verify each channel.
-            # emergency_off is the most critical path — silent failure here
-            # is unacceptable. _verify_output_off logs CRITICAL on mismatch.
-            # Wrap in try because the caller is already in an emergency path
-            # and a raise here would just propagate noise; the CRITICAL log
-            # plus the False return are the signalling mechanisms (CR-2).
-            try:
-                if not await self._verify_output_off(smu_channel):
-                    all_confirmed = False
-            except Exception as exc:
-                log.critical(
-                    "%s: emergency_off verify FAILED on %s: %s — instrument may still be sourcing!",
-                    self.name,
-                    smu_channel,
-                    exc,
-                )
-                all_confirmed = False
-        # F2: a full both-channel emergency_off that confirms OFF resolves any
-        # connect-time unverified-output block. Only the full scope (channel is
-        # None) confirms BOTH channels, so only it may clear the flag.
-        if channel is None and all_confirmed:
-            self._unsafe_output_state = False
-        return all_confirmed
+            self._source_command_epoch[smu_channel] += 1
+            token = self._source_command_epoch[smu_channel]
+            self._source_off_depth[smu_channel] += 1
+            self._invalidate_channel_off_evidence(smu_channel)
+            tokens[smu_channel] = token
+        return tokens
+
+    def _finish_off_operation(self, channels: list[SmuChannel]) -> None:
+        for smu_channel in channels:
+            self._source_off_depth[smu_channel] = max(0, self._source_off_depth[smu_channel] - 1)
+        self._refresh_output_uncertainty()
+
+    def _begin_start_operation(self, smu_channel: SmuChannel) -> int:
+        if self._connect_in_progress or self._disconnect_in_progress:
+            raise RuntimeError(f"{self.name}: lifecycle transition blocks source start")
+        if self._wdog_trip_pending:
+            raise OutputStateUnverifiedError(
+                f"{self.name}: {smu_channel} source start blocked by pending watchdog trip evidence"
+            )
+        if not self.mock and not self._instrument_id:
+            raise OutputStateUnverifiedError(
+                f"{self.name}: {smu_channel} source start blocked without exact connected identity authority"
+            )
+        if self._source_start_token[smu_channel] is not None:
+            raise RuntimeError(f"{self.name}: {smu_channel} source start already in progress")
+        if self._source_off_depth[smu_channel] != 0:
+            raise RuntimeError(f"{self.name}: {smu_channel} OFF operation is in progress")
+        if not self._has_current_off_proof(smu_channel):
+            raise OutputStateUnverifiedError(
+                f"{self.name}: {smu_channel} source start blocked without current readback-verified OFF"
+            )
+        self._source_command_epoch[smu_channel] += 1
+        token = self._source_command_epoch[smu_channel]
+        self._source_start_token[smu_channel] = token
+        self._invalidate_channel_off_evidence(smu_channel)
+        return token
+
+    def _start_operation_is_current(self, smu_channel: SmuChannel, token: int) -> bool:
+        return (
+            self._connected
+            and not self._wdog_trip_pending
+            and not self._connect_in_progress
+            and not self._disconnect_in_progress
+            and self._source_start_token[smu_channel] == token
+            and self._source_command_epoch[smu_channel] == token
+            and self._source_off_depth[smu_channel] == 0
+        )
+
+    def _require_current_start(self, smu_channel: SmuChannel, token: int) -> None:
+        if not self._start_operation_is_current(smu_channel, token):
+            raise RuntimeError(f"{self.name}: {smu_channel} source start was superseded by OFF/lifecycle authority")
+
+    def _finish_start_operation(self, smu_channel: SmuChannel, token: int) -> None:
+        if self._source_start_token[smu_channel] == token:
+            self._source_start_token[smu_channel] = None
+        self._refresh_output_uncertainty()
+
+    def _regulation_is_current(
+        self,
+        smu_channel: SmuChannel,
+        *,
+        generation: int,
+        command_epoch: int,
+    ) -> bool:
+        return (
+            self._connected
+            and not self._wdog_trip_pending
+            and not self._connect_in_progress
+            and not self._disconnect_in_progress
+            and generation == self._connection_generation
+            and command_epoch == self._source_command_epoch[smu_channel]
+            and self._source_regulation_epoch[smu_channel] == command_epoch
+            and self._source_start_token[smu_channel] is None
+            and self._source_off_depth[smu_channel] == 0
+            and self._channels[smu_channel].active
+        )
+
+    def _require_current_regulation(
+        self,
+        smu_channel: SmuChannel,
+        *,
+        generation: int,
+        command_epoch: int,
+    ) -> None:
+        if not self._regulation_is_current(
+            smu_channel,
+            generation=generation,
+            command_epoch=command_epoch,
+        ):
+            raise RuntimeError(
+                f"{self.name}: {smu_channel} regulation was superseded by OFF/lifecycle/watchdog authority"
+            )
+
+    def _mark_channel_off_verified(
+        self,
+        smu_channel: SmuChannel,
+        *,
+        generation: int | None = None,
+        command_epoch: int | None = None,
+    ) -> bool:
+        """Commit one exact current-connection/current-command OFF readback."""
+        transport_available = self._connected or self._connect_in_progress or self._recovery_transport_open
+        if generation is not None and (not transport_available or generation != self._connection_generation):
+            return False
+        proof_epoch = self._source_command_epoch[smu_channel] if command_epoch is None else command_epoch
+        if proof_epoch != self._source_command_epoch[smu_channel]:
+            return False
+        runtime = self._channels[smu_channel]
+        self._source_regulation_epoch[smu_channel] = None
+        runtime.active = False
+        runtime.p_target = 0.0
+        self._last_v[smu_channel] = 0.0
+        self._compliance_count[smu_channel] = 0
+        self._output_off_verified[smu_channel] = True
+        self._output_off_verified_generation[smu_channel] = self._connection_generation
+        self._output_off_verified_epoch[smu_channel] = proof_epoch
+        self._refresh_output_uncertainty()
+        return True
 
     async def check_error(self) -> str | None:
-        if not self._connected:
-            raise RuntimeError(f"{self.name}: instrument not connected")
-        response = (await self._transport.query("print(errorqueue.count)")).strip()
+        self._require_operational_connection("check_error")
+        response = (await self._operational_query("print(errorqueue.count)")).strip()
         if response in {"", "0"}:
             return None
         return response
@@ -486,6 +1447,8 @@ class Keithley2604B(InstrumentDriver):
         """True when the crash-recovery force-OFF on connect() could not be
         readback-verified (outputs may still be ON). SafetyManager treats this
         as a blocking RUN precondition until a later verified OFF clears it."""
+        if not self.mock and not (self._connected or self._recovery_transport_open):
+            return True
         return self._unsafe_output_state
 
     @property
@@ -500,118 +1463,281 @@ class Keithley2604B(InstrumentDriver):
         """True if compliance has persisted for >= threshold consecutive cycles."""
         return self._compliance_count.get(channel, 0) >= _COMPLIANCE_NOTIFY_THRESHOLD
 
+    @property
+    def watchdog_trip_pending(self) -> bool:
+        """Whether unconsumed TSP trip evidence requires operator recovery."""
+        return self._wdog_trip_pending
+
     async def diagnostics(self) -> dict[str, Any]:
         """Periodic health check — called by scheduler every 30s."""
+        self._raise_if_operationally_barred("diagnostics")
         if not self._connected or self.mock:
             return {}
         result: dict[str, Any] = {}
         try:
-            raw = await self._transport.query("print(errorqueue.count)")
+            raw = await self._operational_query("print(errorqueue.count)")
             err_count = int(float(raw.strip()))
             if err_count > 0:
-                raw = await self._transport.query("print(errorqueue.next())")
+                raw = await self._operational_query("print(errorqueue.next())")
                 log.warning("Keithley error queue: %s", raw.strip())
                 result["error_queue"] = raw.strip()
         except Exception as exc:
+            if self._recovery_transport_open:
+                raise
             log.error("%s: diagnostics error: %s", self.name, exc)
         return result
 
-    # --- TSP dead-man watchdog (Task 9) -------------------------------------
+    # --- TSP software late-pet watchdog -------------------------------------
     # All methods are no-ops unless _wdog_enabled and not mock, so the default
     # command stream is byte-identical to the pre-watchdog driver.
 
-    async def _wdog_arm(self) -> None:
-        """Upload + arm the firmware watchdog.
-
-        Latch read FIRST (before upload): re-uploading the script re-runs
-        ``cryodaq_wdog_tripped = 0`` and would wipe a past kill before it can
-        be seen. A fresh instrument has no such global → prints ``nil`` →
-        unparseable → treated as untripped. A latched past-trip is logged
-        CRITICAL and we PROCEED (in every armed mode): the outputs were already
-        force-OFF'd on connect and arming clears the latch, so raising would
-        only lock the operator out (escape = power-cycle) — never blocks.
-
-        best_effort: NON-fatal on arm failure — connect still succeeds,
-        _wdog_armed stays False, CRITICAL flags the degraded run.
-
-        required: fail-CLOSED — an arm FAILURE (the backstop cannot be
-        established) re-raises so connect() aborts. A pre-existing latch is NOT
-        a failure and does not raise."""
-        if not self._wdog_enabled or self.mock:
-            return
-        # DELTA 1: read the latch before the upload clears it. Two failure
-        # cases must NOT be conflated:
-        #   (a) query SUCCEEDS but the value is unparseable — a fresh instrument
-        #       has no cryodaq_wdog_tripped global and prints "nil" →
-        #       float("nil") raises ValueError → genuinely "no latch" → proceed.
-        #   (b) query FAILS (transport timeout / I/O error) — the latch state is
-        #       UNKNOWN. Proceeding re-uploads the script, which re-runs
-        #       ``cryodaq_wdog_tripped = 0`` and silently destroys evidence of a
-        #       past firmware kill. This follows ARM-FAILURE semantics per mode.
-        try:
-            raw = await self._transport.query("print(cryodaq_wdog_tripped)")
-        except Exception as exc:
-            self._wdog_armed = False
-            if self._wdog_mode is WatchdogMode.REQUIRED:
-                log.critical(
-                    "%s: TSP watchdog latch read FAILED and mode=required — "
-                    "refusing to connect (fail-closed): %s",
-                    self.name,
-                    exc,
-                )
-                raise
+    def _wdog_reject_unknown_latch(self, detail: str) -> bool:
+        """Route an unknown pre-upload latch without erasing instrument state."""
+        self._wdog_armed = False
+        self._wdog_autonomous = False
+        if self._wdog_mode is WatchdogMode.REQUIRED:
             log.critical(
-                "%s: TSP watchdog latch read FAILED — latch state UNKNOWN; NOT "
-                "arming the watchdog to avoid erasing a possible past firmware "
-                "kill (degraded, host-only): %s",
+                "%s: TSP watchdog latch state UNKNOWN and mode=required — "
+                "refusing to connect without uploading/resetting it: %s",
+                self.name,
+                detail,
+            )
+            raise _WatchdogArmError(f"TSP watchdog latch state unknown: {detail}")
+        log.critical(
+            "%s: TSP watchdog latch state UNKNOWN; NOT activating or uploading "
+            "because that would erase possible trip evidence (degraded, "
+            "host-only): %s",
+            self.name,
+            detail,
+        )
+        return False
+
+    async def _wdog_authority_query(self, command: str) -> str:
+        """Keep transport/session failures distinct from semantic watchdog degradation."""
+
+        try:
+            return await self._transport.query(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.critical(
+                "%s: watchdog query invalidated transport/session authority: %s",
                 self.name,
                 exc,
             )
-            return
+            raise _WatchdogTransportAuthorityError(
+                f"watchdog query invalidated transport authority: {command}"
+            ) from exc
+
+    async def _wdog_authority_write(self, command: str) -> None:
+        """Raise a non-degradable marker for any ambiguous watchdog write."""
+
         try:
-            latched = float(raw.strip()) > 0.5
-        except ValueError:
-            latched = False  # nil / unparseable on a fresh instrument
-        if latched:
+            await self._transport.write(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             log.critical(
-                "%s: TSP watchdog read back a LATCHED trip from a PAST firmware "
-                "kill — re-arming (outputs already forced OFF on connect)",
+                "%s: watchdog write invalidated transport/session authority: %s",
+                self.name,
+                exc,
+            )
+            raise _WatchdogTransportAuthorityError("watchdog write invalidated transport authority") from exc
+
+    async def _wdog_arm(self) -> None:
+        """Upload and activate the selected watchdog behavior.
+
+        Latch read FIRST (before upload): re-uploading the script re-runs
+        ``cryodaq_wdog_tripped = 0`` and would wipe a prior trip before it can
+        be seen. A fresh instrument has no such global → prints ``nil`` →
+        accepted only as the explicit fresh-state sentinel. A latched prior trip
+        is preserved without upload and exposed as pending evidence. The
+        operator must acknowledge it through SafetyManager after outputs are
+        verified OFF; connect itself remains available for recovery.
+
+        best_effort: NON-fatal on activation failure — connect still succeeds,
+        _wdog_armed stays False, CRITICAL flags the degraded run. With v3 it
+        may activate late-pet checking while _wdog_autonomous remains False.
+
+        required: fail-CLOSED unless the uploaded script reports the literal
+        autonomous bit 1. The current version truthfully reports 0, so required
+        refuses it before activation. A pre-existing latch is not a failure."""
+        self._raise_if_operationally_barred("watchdog arm")
+        if not self._wdog_enabled or self.mock:
+            return
+        self._wdog_armed = False
+        self._wdog_autonomous = False
+        if self._wdog_trip_pending:
+            log.critical(
+                "%s: preserving previously observed watchdog trip evidence; "
+                "explicit operator acknowledgment required before reactivation",
                 self.name,
             )
+            return
+        # DELTA 1: read the latch before the upload clears it. Two failure
+        # cases must NOT be conflated:
+        #   (a) query succeeds with the explicit TSP nil sentinel from a
+        #       fresh instrument → genuinely "no latch" → proceed.
+        #   (b) query fails OR returns malformed/non-finite/out-of-domain data —
+        #       the latch state is
+        #       UNKNOWN. Proceeding re-uploads the script, which re-runs
+        #       ``cryodaq_wdog_tripped = 0`` and silently destroys evidence of a
+        #       past watchdog trip. This follows failure semantics per mode.
+        raw = await self._wdog_authority_query("print(cryodaq_wdog_tripped)")
         try:
-            await self._transport.write(_load_wdog_script())
-            await self._transport.write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
-            await self._transport.write("cryodaq_wdog_run()")
+            latched = _parse_wdog_latch(raw)
+        except ValueError as exc:
+            self._wdog_reject_unknown_latch(str(exc))
+            return
+        if latched:
+            self._wdog_trip_pending = True
+            log.critical(
+                "%s: TSP watchdog read back a LATCHED prior trip — "
+                "preserving evidence without upload/reactivation; explicit "
+                "operator acknowledgment is required after verified OFF",
+                self.name,
+            )
+            return
+        run_issued = False
+        try:
+            watchdog_script = await asyncio.to_thread(_load_wdog_script)
+            await self._wdog_authority_write(watchdog_script)
+            # DELTA A8a — version stamp: the script is re-uploaded every arm, so
+            # a truncated/stale upload passes the fire-and-forget writes silently.
+            # Read CRYODAQ_WDOG_VERSION back and refuse to arm on mismatch.
+            ver_raw = await self._wdog_authority_query("print(CRYODAQ_WDOG_VERSION)")
+            try:
+                ver = _parse_wdog_version(ver_raw, field="CRYODAQ_WDOG_VERSION")
+            except ValueError as exc:
+                raise _WatchdogArmError(str(exc)) from exc
+            if ver != _WDOG_SCRIPT_VERSION:
+                raise _WatchdogArmError(
+                    f"TSP watchdog version mismatch: firmware={ver_raw.strip()!r} "
+                    f"expected={_WDOG_SCRIPT_VERSION} (truncated or stale upload)"
+                )
+
+            # An active late-pet checker is not an autonomous dead-man. Read a
+            # separate explicit contract bit and never infer it from
+            # cryodaq_wdog_active. Version 3 deliberately reports 0.
+            self._wdog_autonomous = False
+            autonomous_read_ok = False
+            try:
+                autonomous_raw = await self._wdog_authority_query("print(cryodaq_wdog_autonomous)")
+                self._wdog_autonomous = _parse_wdog_flag(autonomous_raw, field="cryodaq_wdog_autonomous")
+                autonomous_read_ok = True
+            except _WatchdogTransportAuthorityError:
+                raise
+            except Exception as autonomous_exc:
+                if self._wdog_mode is WatchdogMode.REQUIRED:
+                    raise _WatchdogArmError(
+                        "TSP watchdog autonomous readback failed; required mode "
+                        "refuses unverified host-death protection"
+                    ) from autonomous_exc
+                log.critical(
+                    "%s: SAFETY DEGRADED: autonomous watchdog readback failed; "
+                    "continuing with software late-pet protection only, which "
+                    "has ZERO full-host-death coverage: %s",
+                    self.name,
+                    autonomous_exc,
+                )
+            if autonomous_read_ok and not self._wdog_autonomous:
+                if self._wdog_mode is WatchdogMode.REQUIRED:
+                    raise _WatchdogArmError(
+                        "TSP watchdog is not autonomous: "
+                        f"cryodaq_wdog_autonomous={autonomous_raw.strip()!r}; "
+                        "required mode refuses source availability"
+                    )
+                log.critical(
+                    "%s: SAFETY DEGRADED: watchdog is NON-AUTONOMOUS; "
+                    "best_effort enables only the software late-pet check "
+                    "and provides ZERO full-host-death coverage",
+                    self.name,
+                )
+            await self._wdog_authority_write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
+            # R2 (Phase A recheck, MEDIUM): mark issued BEFORE the write, not
+            # after it returns. A write that raises AFTER the instrument has
+            # already accepted the command (ambiguous VISA/TSP failure) must
+            # still trigger the best-effort disarm below — conservative:
+            # ambiguity means attempt the disarm.
+            run_issued = True
+            await self._wdog_authority_write("cryodaq_wdog_run()")
+            # Software state readback: confirm the script became active and did
+            # not boot latched. This bit says nothing about autonomy; that was
+            # read separately above.
+            active_raw = await self._wdog_authority_query("print(cryodaq_wdog_active)")
+            tripped_raw = await self._wdog_authority_query("print(cryodaq_wdog_tripped)")
+            active = _parse_wdog_flag(active_raw, field="cryodaq_wdog_active")
+            tripped = _parse_wdog_flag(tripped_raw, field="cryodaq_wdog_tripped")
+            if not active or tripped:
+                raise _WatchdogArmError(
+                    f"TSP watchdog arm readback bad: active={active_raw.strip()!r} "
+                    f"tripped={tripped_raw.strip()!r} (expected active=1 tripped=0)"
+                )
             self._wdog_armed = True
-            log.info("%s: TSP watchdog armed (timeout=%.1fs)", self.name, self._wdog_timeout_s)
+            log.info(
+                "%s: TSP software late-pet watchdog active (timeout=%.1fs, fw v%d, autonomous=%s)",
+                self.name,
+                self._wdog_timeout_s,
+                _WDOG_SCRIPT_VERSION,
+                self._wdog_autonomous,
+            )
         except Exception as exc:
             self._wdog_armed = False
+            self._wdog_autonomous = False
+            if run_issued:
+                # F4 (Phase A gate, MEDIUM): cryodaq_wdog_run() was already
+                # written before this failure (e.g. the readback that would
+                # confirm/refute activation timed out) — the script may still
+                # be active even though we just set _wdog_armed=False.
+                # Best-effort disarm write, bypassing the
+                # _wdog_armed gate in _wdog_disarm() (we don't trust host
+                # state here — that's the whole problem).
+                try:
+                    await self._transport.write("cryodaq_wdog_disarm()")
+                except Exception as disarm_exc:
+                    log.critical(
+                        "%s: TSP watchdog best-effort disarm after a failed "
+                        "post-run readback ALSO failed — TSP activation state "
+                        "UNKNOWN: %s",
+                        self.name,
+                        disarm_exc,
+                    )
+            if isinstance(exc, _WatchdogTransportAuthorityError):
+                log.critical(
+                    "%s: watchdog transport/session authority failed; refusing connected publication: %s",
+                    self.name,
+                    exc,
+                )
+                raise
             if self._wdog_mode is WatchdogMode.REQUIRED:
                 log.critical(
-                    "%s: TSP watchdog arm FAILED and mode=required — refusing to "
-                    "connect (fail-closed): %s",
+                    "%s: TSP watchdog arm FAILED and mode=required — refusing to connect (fail-closed): %s",
                     self.name,
                     exc,
                 )
                 raise
             log.critical(
-                "%s: TSP watchdog upload/arm FAILED — running WITHOUT firmware "
-                "backstop (degraded): %s",
+                "%s: TSP watchdog upload/activation FAILED — running host-only "
+                "without even the software late-pet check (degraded): %s",
                 self.name,
                 exc,
             )
 
     async def _wdog_pet(self) -> None:
-        """Refresh the firmware deadline. No-op unless enabled+armed."""
+        """Run the TSP late-pet deadline check. No-op unless active."""
+        self._raise_if_operationally_barred("watchdog pet")
         if not (self._wdog_enabled and self._wdog_armed) or self.mock:
             return
         try:
-            await self._transport.write("cryodaq_wdog_pet()")
+            await self._operational_write("cryodaq_wdog_pet()")
         except Exception as exc:
             log.error("%s: TSP watchdog pet failed: %s", self.name, exc)
+            if self._recovery_transport_open:
+                raise
 
     async def _wdog_disarm(self) -> None:
-        """Clean release of the firmware watchdog on disconnect."""
+        """Clean release of the TSP late-pet checker on disconnect."""
+        self._raise_if_operationally_barred("watchdog disarm")
         if not (self._wdog_enabled and self._wdog_armed) or self.mock:
             return
         try:
@@ -620,45 +1746,173 @@ class Keithley2604B(InstrumentDriver):
             log.error("%s: TSP watchdog disarm failed: %s", self.name, exc)
         finally:
             self._wdog_armed = False
+            self._wdog_autonomous = False
+
+    async def acknowledge_wdog_trip(self) -> bool:
+        """Consume a trip only after verified OFF and explicit operator ack.
+
+        SafetyManager calls this from its fault-acknowledgment path after it has
+        accepted and recorded a recovery reason. A successful command clears
+        the latch and reactivates only the non-autonomous late-pet checker.
+        Any ambiguity keeps recovery fault-latched and attempts a disarm.
+        """
+        self._raise_if_operationally_barred("watchdog acknowledgment")
+        if not self._wdog_enabled or self.mock:
+            return True
+        if not self._connected:
+            if self._wdog_trip_pending:
+                log.critical(
+                    "%s: refusing watchdog trip acknowledgment while disconnected; trip evidence remains pending",
+                    self.name,
+                )
+                return False
+            return True
+        if not self._wdog_armed and not self._wdog_trip_pending:
+            return True
+
+        raw = await self._operational_query("print(cryodaq_wdog_tripped)")
+        fresh_instrument = raw.strip(_PROTOCOL_TRIM_CHARS) == "nil"
+        if fresh_instrument:
+            if not self._wdog_trip_pending:
+                raise ValueError("watchdog latch disappeared without host-side pending evidence")
+            tripped = False
+        else:
+            tripped = _parse_wdog_flag(raw, field="cryodaq_wdog_tripped")
+        if not tripped and not self._wdog_trip_pending:
+            return True
+        # Preserve host evidence until verified OFF + successful reactivation.
+        self._wdog_trip_pending = True
+        force_upload = fresh_instrument or not tripped
+
+        if not await self.emergency_off():
+            log.critical(
+                "%s: refusing watchdog trip acknowledgment because both-output OFF could not be readback-verified",
+                self.name,
+            )
+            return False
+
+        if self._wdog_mode is WatchdogMode.REQUIRED:
+            log.critical(
+                "%s: watchdog trip evidence preserved: required mode cannot "
+                "reactivate non-autonomous v3; explicitly select best_effort "
+                "and reconnect before acknowledging (off only intentionally "
+                "disables the TSP path)",
+                self.name,
+            )
+            return False
+
+        ack_issued = False
+        try:
+            ack_issued = True
+            version: int | None = None
+            if not force_upload:
+                version_raw = await self._operational_query("print(CRYODAQ_WDOG_VERSION)")
+                if version_raw.strip().lower() != "nil":
+                    version = _parse_wdog_version(version_raw, field="CRYODAQ_WDOG_VERSION")
+            if version == _WDOG_SCRIPT_VERSION:
+                await self._operational_write("cryodaq_wdog_acknowledge()")
+            else:
+                # Explicit operator acknowledgment authorizes consuming a latch
+                # left by an older script, but only after verified OFF above.
+                # Upgrade and reactivate v3 in this same visible recovery path.
+                watchdog_script = await asyncio.to_thread(_load_wdog_script)
+                await self._operational_write(watchdog_script)
+                uploaded_raw = await self._operational_query("print(CRYODAQ_WDOG_VERSION)")
+                uploaded = _parse_wdog_version(uploaded_raw, field="CRYODAQ_WDOG_VERSION")
+                if uploaded != _WDOG_SCRIPT_VERSION:
+                    raise _WatchdogArmError(
+                        f"watchdog acknowledgment upgrade version mismatch: {uploaded_raw.strip()!r}"
+                    )
+                autonomous_raw = await self._operational_query("print(cryodaq_wdog_autonomous)")
+                autonomous = _parse_wdog_flag(autonomous_raw, field="cryodaq_wdog_autonomous")
+                if autonomous:
+                    raise _WatchdogArmError("v3 acknowledgment upgrade unexpectedly reported autonomous=1")
+                await self._operational_write(f"CRYODAQ_WDOG_TIMEOUT_S = {self._wdog_timeout_s}")
+                await self._operational_write("cryodaq_wdog_run()")
+            active_raw = await self._operational_query("print(cryodaq_wdog_active)")
+            tripped_raw = await self._operational_query("print(cryodaq_wdog_tripped)")
+            active = _parse_wdog_flag(active_raw, field="cryodaq_wdog_active")
+            still_tripped = _parse_wdog_flag(tripped_raw, field="cryodaq_wdog_tripped")
+            if not active or still_tripped:
+                raise _WatchdogArmError(
+                    "TSP watchdog acknowledgment readback bad: "
+                    f"active={active_raw.strip()!r} tripped={tripped_raw.strip()!r}"
+                )
+        except Exception as exc:
+            self._wdog_armed = False
+            if ack_issued and not self._recovery_transport_open:
+                try:
+                    await self._transport.write("cryodaq_wdog_disarm()")
+                except Exception as disarm_exc:
+                    log.critical(
+                        "%s: watchdog acknowledgment failed and disarm also failed; TSP state UNKNOWN: %s",
+                        self.name,
+                        disarm_exc,
+                    )
+            log.critical("%s: watchdog acknowledgment failed: %s", self.name, exc)
+            return False
+
+        self._wdog_armed = True
+        self._wdog_autonomous = False
+        self._wdog_trip_pending = False
+        log.warning(
+            "%s: operator acknowledgment consumed the late-pet trip after "
+            "verified both-output OFF; late-pet checking reactivated",
+            self.name,
+        )
+        return True
 
     async def wdog_tripped(self) -> bool:
-        """True iff the firmware watchdog latched a trip (killed outputs while
-        the host was away). Inert (returns False, no bus I/O) unless the
+        """True iff the software late-pet check latched a trip.
+
+        This means a pet arrived after its deadline; it does not mean outputs
+        were removed during complete host death. Inert unless the
         watchdog is enabled+armed on a real connected instrument — so the
         SafetyManager reconcile is a no-op under the default-OFF flag."""
+        self._raise_if_operationally_barred("watchdog status")
+        if self._wdog_trip_pending:
+            return True
         if not (self._wdog_enabled and self._wdog_armed) or self.mock or not self._connected:
             return False
-        try:
-            raw = await self._transport.query("print(cryodaq_wdog_tripped)")
-            return float(raw.strip()) > 0.5
-        except Exception as exc:
-            log.error("%s: TSP watchdog trip query failed: %s", self.name, exc)
-            return False
+        raw = await self._operational_query("print(cryodaq_wdog_tripped)")
+        tripped = _parse_wdog_flag(raw, field="cryodaq_wdog_tripped")
+        if tripped:
+            self._wdog_trip_pending = True
+        return tripped
 
     async def _verify_output_off(self, channel: str) -> bool:
         """Readback-verify that ``channel``'s output is OFF.
 
-        Returns True iff the readback confirms output OFF; False on a
-        still-on readback or an unparseable response (CRITICAL logged, not
-        raised). Transport exceptions from the query DO propagate — callers
-        that must not raise (emergency_off) catch them and map to False,
-        while stop_source keeps its fail-closed raise-through behavior.
+        The output state and a unique host challenge must arrive in the same
+        TSP response.  A stale queued response from an earlier query or process
+        therefore cannot establish OFF authority.
         """
-        if self.mock or not self._connected:
+        if self.mock:
             return True
+        if not (self._connected or self._connect_in_progress or self._recovery_transport_open):
+            log.critical("%s: cannot verify %s OFF while disconnected", self.name, channel)
+            return False
         smu_channel = normalize_smu_channel(channel)
-        response = await self._transport.query(
-            f"print({smu_channel}.source.output)", timeout_ms=3000
-        )
+        nonce = secrets.token_hex(16)
+        command = f'print(string.format("{_OFF_CHALLENGE_PREFIX}|{nonce}|%g", {smu_channel}.source.output))'
+        response = await self._transport.query(command, timeout_ms=3000)
         try:
-            if float(response.strip()) > 0.5:
-                log.critical(
-                    "%s: %s still reports output=%s", self.name, smu_channel, response.strip()
-                )
-                return False
-        except ValueError:
+            off_confirmed = _parse_output_off_challenge(response, expected_nonce=nonce)
+        except ValueError as exc:
             log.critical(
-                "%s: %s unexpected output response: %r", self.name, smu_channel, response.strip()
+                "%s: %s invalid OFF challenge response (%s): %r",
+                self.name,
+                smu_channel,
+                exc,
+                response[:256],
+            )
+            return False
+        if not off_confirmed:
+            log.critical(
+                "%s: %s current OFF challenge did not report literal state 0: %r",
+                self.name,
+                smu_channel,
+                response[:256],
             )
             return False
         return True
@@ -667,7 +1921,10 @@ class Keithley2604B(InstrumentDriver):
         parts = raw.strip().split("\t")
         if len(parts) != 2:
             raise ValueError(f"{channel}: expected 2 values, got {raw!r}")
-        return float(parts[0]), float(parts[1])
+        current, voltage = float(parts[0]), float(parts[1])
+        if not (math.isfinite(current) and math.isfinite(voltage)):
+            raise ValueError(f"{channel}: non-finite IV response {raw[:256]!r}")
+        return current, voltage
 
     def _build_channel_readings(
         self,
@@ -687,46 +1944,30 @@ class Keithley2604B(InstrumentDriver):
         metadata: dict[str, Any] = {"resource_str": self._resource_str, "smu_channel": channel}
         if extra_meta:
             metadata.update(extra_meta)
-        return [
-            Reading.now(
-                channel=f"{self.name}/{channel}/voltage",
-                value=voltage,
-                unit="V",
-                instrument_id=self.name,
-                status=ChannelStatus.OK,
-                raw=voltage,
-                metadata=metadata,
-            ),
-            Reading.now(
-                channel=f"{self.name}/{channel}/current",
-                value=current,
-                unit="A",
-                instrument_id=self.name,
-                status=ChannelStatus.OK,
-                raw=current,
-                metadata=metadata,
-            ),
-            Reading.now(
-                channel=f"{self.name}/{channel}/resistance",
-                value=resistance,
-                unit="Ohm",
-                instrument_id=self.name,
-                status=ChannelStatus.OK
-                if math.isfinite(resistance)
-                else ChannelStatus.SENSOR_ERROR,
-                raw=resistance if math.isfinite(resistance) else None,
-                metadata=metadata,
-            ),
-            Reading.now(
-                channel=f"{self.name}/{channel}/power",
-                value=power,
-                unit="W",
-                instrument_id=self.name,
-                status=ChannelStatus.OK,
-                raw=power,
-                metadata=metadata,
-            ),
-        ]
+        values = {
+            "voltage": voltage,
+            "current": current,
+            "resistance": resistance,
+            "power": power,
+        }
+        if not all(math.isfinite(value) for value in values.values()):
+            metadata["reported_iv"] = {field: repr(value) for field, value in values.items()}
+        readings: list[Reading] = []
+        for field, unit in _IV_FIELDS:
+            value = values[field]
+            finite = math.isfinite(value)
+            readings.append(
+                Reading.now(
+                    channel=f"{self.name}/{channel}/{field}",
+                    value=value if finite else float("nan"),
+                    unit=unit,
+                    instrument_id=self.name,
+                    status=ChannelStatus.OK if finite else ChannelStatus.SENSOR_ERROR,
+                    raw=value if finite else None,
+                    metadata=metadata,
+                )
+            )
+        return readings
 
     def _parse_buffer_response(self, raw: str) -> list[dict[str, float]]:
         tokens = [token.strip() for token in raw.replace("\t", ",").split(",")]
@@ -739,8 +1980,14 @@ class Keithley2604B(InstrumentDriver):
                 current = float(tokens[2 * n + idx])
             except (ValueError, IndexError):
                 continue
+            if not all(math.isfinite(value) for value in (ts, voltage, current)):
+                log.error("%s: discarding non-finite buffered IV row", self.name)
+                continue
             resistance = voltage / current if current != 0.0 else float("nan")
             power = voltage * current
+            if not math.isfinite(power):
+                log.error("%s: buffered IV row has non-finite derived power", self.name)
+                power = float("nan")
             results.append(
                 {
                     "timestamp": ts,
@@ -784,11 +2031,7 @@ class Keithley2604B(InstrumentDriver):
         results: list[dict[str, float]] = []
         resistance = self._mock_r_of_t()
         runtime = self._channels["smua"]
-        voltage = (
-            math.sqrt(runtime.p_target * resistance)
-            if runtime.active and runtime.p_target > 0.0
-            else 0.0
-        )
+        voltage = math.sqrt(runtime.p_target * resistance) if runtime.active and runtime.p_target > 0.0 else 0.0
         current = voltage / resistance if resistance > 0.0 else 0.0
         for idx in range(count):
             results.append(
@@ -802,8 +2045,21 @@ class Keithley2604B(InstrumentDriver):
             )
         return results
 
-    def _error_readings_for_channel(self, channel: SmuChannel) -> list[Reading]:
+    def _error_readings_for_channel(
+        self,
+        channel: SmuChannel,
+        *,
+        raw_evidence: str | None = None,
+        output_evidence: str | None = None,
+        compliance_evidence: str | None = None,
+    ) -> list[Reading]:
         metadata: dict[str, Any] = {"resource_str": self._resource_str, "smu_channel": channel}
+        if raw_evidence is not None:
+            metadata["reported_iv_response"] = repr(raw_evidence[:256])
+        if output_evidence is not None:
+            metadata["reported_output_response"] = repr(output_evidence[:256])
+        if compliance_evidence is not None:
+            metadata["reported_compliance_response"] = repr(compliance_evidence[:256])
         return [
             Reading.now(
                 channel=f"{self.name}/{channel}/{field}",

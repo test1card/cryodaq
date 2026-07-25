@@ -209,7 +209,21 @@ def test_set_channels_command_returns_unknown_driver_error() -> None:
         )
     )
     assert out["ok"] is False
-    assert "not found" in out["error"]
+    # 2026-07-25: production deliberately stopped echoing the raw operator-
+    # supplied `name` back into the error text (was: f"MultiLine driver
+    # '{name}' not found") and added a stable machine-readable error_code
+    # alongside it (engine.py:1111-1117), matching the same pattern used
+    # throughout the zmq_client.py transport rewrite. Assert on the stable
+    # code, not the human-readable substring that broke this test.
+    # NOTE: the human-readable text is still English, not Russian, despite
+    # reaching the operator verbatim via QMessageBox.warning() in
+    # multiline_panel.py:886-891 -- a real, pre-existing Russian-operator-
+    # wording gap that predates this campaign (the original base string was
+    # also English). Flagging, not fixing, here: reworked strings landed
+    # in this task's scope, but "should this be Russian" is a separate,
+    # substantive product-text decision outside a test-repair.
+    assert out["error_code"] == "multiline_driver_unavailable"
+    assert "unavailable" in out["error"]
 
 
 def test_set_channels_command_default_name_when_one_driver(tmp_path: Path) -> None:

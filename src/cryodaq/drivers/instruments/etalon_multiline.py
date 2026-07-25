@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
+import re
 import time
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +28,16 @@ from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.drivers.transport.tcp import TCPTransport, TCPTransportError
 
 logger = logging.getLogger(__name__)
+
+_ASCII_INTEGER_RE = re.compile(r"[+-]?[0-9]+\Z", re.ASCII)
+
+
+def _parse_ascii_integer(token: str, *, field: str) -> int:
+    """Parse one exact protocol integer without Unicode/coercive aliases."""
+
+    if _ASCII_INTEGER_RE.fullmatch(token) is None:
+        raise ValueError(f"{field} must be an ASCII integer, got {token!r}")
+    return int(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,38 +82,41 @@ def _parse_channeldata_response(response: str) -> tuple[list[_ChannelData], int]
     channels: list[_ChannelData] = []
     for ch_str in channel_parts:
         fields = ch_str.split(",")
-        if len(fields) < 17:
-            logger.warning("channeldata channel record too short: %r", ch_str[:80])
+        if len(fields) != 17:
+            logger.warning("channeldata channel record must have 17 fields: %r", ch_str[:80])
             continue
         try:
+            channel_number = _parse_ascii_integer(fields[0], field="channel_number")
+            if not 1 <= channel_number <= 32:
+                raise ValueError(f"channel_number outside 1..32: {channel_number}")
             channels.append(
                 _ChannelData(
-                    channel_number=int(fields[0]),
+                    channel_number=channel_number,
                     length_mm=float(fields[1]),
-                    intensity_min=int(fields[2]),
-                    intensity_max=int(fields[3]),
+                    intensity_min=_parse_ascii_integer(fields[2], field="intensity_min"),
+                    intensity_max=_parse_ascii_integer(fields[3], field="intensity_max"),
                     temperature_c=float(fields[4]),
                     pressure_hpa=float(fields[5]),
                     humidity_pct=float(fields[6]),
-                    analysis_error=int(fields[7]),
-                    beam_break=int(fields[8]),
-                    temp_error=int(fields[9]),
-                    motion_tolerance_error=int(fields[10]),
-                    intensity_error=int(fields[11]),
-                    usb_error=int(fields[12]),
-                    dll_error=int(fields[13]),
-                    laser_speed_error=int(fields[14]),
-                    laser_temp_error=int(fields[15]),
-                    daq_error=int(fields[16]),
+                    analysis_error=_parse_ascii_integer(fields[7], field="analysis_error"),
+                    beam_break=_parse_ascii_integer(fields[8], field="beam_break"),
+                    temp_error=_parse_ascii_integer(fields[9], field="temp_error"),
+                    motion_tolerance_error=_parse_ascii_integer(fields[10], field="motion_tolerance_error"),
+                    intensity_error=_parse_ascii_integer(fields[11], field="intensity_error"),
+                    usb_error=_parse_ascii_integer(fields[12], field="usb_error"),
+                    dll_error=_parse_ascii_integer(fields[13], field="dll_error"),
+                    laser_speed_error=_parse_ascii_integer(fields[14], field="laser_speed_error"),
+                    laser_temp_error=_parse_ascii_integer(fields[15], field="laser_temp_error"),
+                    daq_error=_parse_ascii_integer(fields[16], field="daq_error"),
                 )
             )
         except (ValueError, IndexError) as exc:
             logger.warning("channeldata field parse failed (%r): %s", ch_str[:80], exc)
 
-    try:
-        server_error = int(se_str)
-    except ValueError:
-        server_error = -1
+    server_error = _parse_ascii_integer(se_str, field="server_error")
+    channel_ids = [channel.channel_number for channel in channels]
+    if len(channel_ids) != len(set(channel_ids)):
+        raise ValueError(f"channeldata contains duplicate channel ids: {channel_ids}")
     return channels, server_error
 
 
@@ -119,9 +135,22 @@ def _parse_environmentdata_response(response: str) -> tuple[float, float, float]
     if not response.startswith("environmentdata_"):
         raise ValueError(f"Unexpected response: {response[:80]}")
     parts = response[len("environmentdata_") :].split(",")
-    if len(parts) < 3:
-        raise ValueError(f"environmentdata too short: {response[:80]}")
+    if len(parts) != 3:
+        raise ValueError(f"environmentdata must contain exactly three fields: {response[:80]}")
     return float(parts[0]), float(parts[1]), float(parts[2])
+
+
+def _safe_numeric_metadata(**reported: float) -> dict[str, Any]:
+    """Retain finite evidence numerically and non-finite evidence as text."""
+
+    metadata: dict[str, Any] = {}
+    for key, value in reported.items():
+        if math.isfinite(value):
+            metadata[key] = value
+        else:
+            metadata[key] = None
+            metadata[f"{key}_raw"] = repr(value)
+    return metadata
 
 
 def _parse_isconnected_response(response: str) -> bool:
@@ -183,10 +212,12 @@ class MultiLineDriver(InstrumentDriver):
         # over ``channel_count`` (count-only sugar) so an operator can
         # pin a specific laser subset (e.g. [2, 5, 7] when one mirror
         # is replaced) without rewriting the implicit-range default.
-        if channel_numbers:
+        if channel_numbers is not None:
             resolved = list(channel_numbers)
         elif channel_count is not None:
-            resolved = list(range(1, int(channel_count) + 1))
+            if type(channel_count) is not int:
+                raise ValueError(f"MultiLine channel_count must be an int, got {channel_count!r}")
+            resolved = list(range(1, channel_count + 1))
         else:
             resolved = [1, 2, 3, 4]
         self._validate_channel_numbers(resolved)
@@ -197,13 +228,14 @@ class MultiLineDriver(InstrumentDriver):
         # so configuration mistakes surface at engine boot rather than at
         # the first read_channels() tick.
         if mode not in self._VALID_MODES:
-            raise ValueError(
-                f"MultiLine mode must be one of {self._VALID_MODES}, got {mode!r}"
-            )
-        if target_rate_hz <= 0:
-            raise ValueError(
-                f"MultiLine target_rate_hz must be > 0, got {target_rate_hz!r}"
-            )
+            raise ValueError(f"MultiLine mode must be one of {self._VALID_MODES}, got {mode!r}")
+        if (
+            isinstance(target_rate_hz, bool)
+            or not isinstance(target_rate_hz, (int, float))
+            or not math.isfinite(float(target_rate_hz))
+            or float(target_rate_hz) <= 0
+        ):
+            raise ValueError(f"MultiLine target_rate_hz must be > 0, got {target_rate_hz!r}")
         self._mode = mode
         self._target_rate_hz = float(target_rate_hz)
         self._target_interval_s = 1.0 / self._target_rate_hz
@@ -213,9 +245,7 @@ class MultiLineDriver(InstrumentDriver):
         # land the blob.
         self._burst_dir = burst_dir
         self._transport: TCPTransport | None = None
-        self._mock_nominal_lengths_mm = {
-            ch: 1000.0 + ch * 50.0 for ch in self._channel_numbers
-        }
+        self._mock_nominal_lengths_mm = {ch: 1000.0 + ch * 50.0 for ch in self._channel_numbers}
         # Continuous-mode state. _last_cycle is a single-slot buffer the
         # listener task fills; read_channels() snapshots it under the
         # decimation gate. Burst capture appends every cycle to
@@ -260,9 +290,7 @@ class MultiLineDriver(InstrumentDriver):
         self._channel_numbers = normalised
         # Refresh mock-mode nominals so a mock deployment reports
         # plausible lengths for the newly-selected channels.
-        self._mock_nominal_lengths_mm = {
-            ch: 1000.0 + ch * 50.0 for ch in self._channel_numbers
-        }
+        self._mock_nominal_lengths_mm = {ch: 1000.0 + ch * 50.0 for ch in self._channel_numbers}
 
         # Continuous-mode listener restart: tell the server to stop the
         # current measurement, then re-spawn the listener which issues
@@ -277,18 +305,19 @@ class MultiLineDriver(InstrumentDriver):
         # complete cleanly, we log CRITICAL and leave the new listener
         # un-spawned so the operator gets immediate feedback rather
         # than a silent double-listener race.
-        if (
-            self._mode == self.MODE_CONTINUOUS
-            and self._listener_task is not None
-            and not self._listener_task.done()
-        ):
+        if self._mode == self.MODE_CONTINUOUS and self._listener_task is not None and not self._listener_task.done():
+            caller_task = asyncio.current_task()
+            cancelling_at_start = caller_task.cancelling() if caller_task is not None else 0
+            caller_cancelled: asyncio.CancelledError | None = None
             self._listener_task.cancel()
             cancel_clean = False
             try:
                 await asyncio.wait_for(self._listener_task, timeout=2.0)
                 cancel_clean = True
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 cancel_clean = True
+                if caller_task is not None and caller_task.cancelling() > cancelling_at_start:
+                    caller_cancelled = exc
             except TimeoutError:
                 logger.error(
                     "MultiLine '%s' reconfigure: listener did not cancel "
@@ -307,17 +336,17 @@ class MultiLineDriver(InstrumentDriver):
             # under the new channel filter.
             self._last_cycle = None
             self._last_emit_mono = None
-            if (
-                cancel_clean
-                and self._transport is not None
-                and self._connected
-            ):
+            if caller_cancelled is None and cancel_clean and self._transport is not None and self._connected:
                 self._listener_started_mono = time.monotonic()
                 self._first_cycle_logged = False
                 self._listener_task = asyncio.create_task(
                     self._continuous_listener(),
                     name=f"multiline_listener_{self.name}",
                 )
+            if caller_cancelled is None and caller_task is not None and caller_task.cancelling() > cancelling_at_start:
+                caller_cancelled = asyncio.CancelledError()
+            if caller_cancelled is not None:
+                raise caller_cancelled
 
         return list(self._channel_numbers)
 
@@ -325,14 +354,11 @@ class MultiLineDriver(InstrumentDriver):
     def _validate_channel_numbers(cls, channels: list[int]) -> None:
         if len(channels) < cls._MIN_CHANNELS or len(channels) > cls._MAX_CHANNELS:
             raise ValueError(
-                f"MultiLine channel set must have {cls._MIN_CHANNELS}..{cls._MAX_CHANNELS} "
-                f"entries, got {len(channels)}"
+                f"MultiLine channel set must have {cls._MIN_CHANNELS}..{cls._MAX_CHANNELS} entries, got {len(channels)}"
             )
         for ch in channels:
-            if not isinstance(ch, int) or ch < 1 or ch > cls._MAX_CHANNELS:
-                raise ValueError(
-                    f"MultiLine channel id must be int in 1..{cls._MAX_CHANNELS}, got {ch!r}"
-                )
+            if type(ch) is not int or ch < 1 or ch > cls._MAX_CHANNELS:
+                raise ValueError(f"MultiLine channel id must be int in 1..{cls._MAX_CHANNELS}, got {ch!r}")
         if len(set(channels)) != len(channels):
             raise ValueError(f"MultiLine channel set must be unique, got {channels}")
 
@@ -394,16 +420,20 @@ class MultiLineDriver(InstrumentDriver):
     async def disconnect(self) -> None:
         # v0.55.11 — cancel listener first so its stopmeasnogui handshake
         # writes to the still-open transport, then close.
+        caller_task = asyncio.current_task()
+        cancelling_at_start = caller_task.cancelling() if caller_task is not None else 0
+        caller_cancelled: asyncio.CancelledError | None = None
         if self._listener_task is not None:
             self._listener_task.cancel()
             try:
                 await asyncio.wait_for(self._listener_task, timeout=2.0)
-            except (TimeoutError, asyncio.CancelledError):
+            except TimeoutError:
                 pass
+            except asyncio.CancelledError as exc:
+                if caller_task is not None and caller_task.cancelling() > cancelling_at_start:
+                    caller_cancelled = exc
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "MultiLine '%s' listener cancel raised: %s", self.name, exc
-                )
+                logger.warning("MultiLine '%s' listener cancel raised: %s", self.name, exc)
             self._listener_task = None
         # If a burst was in flight when the operator disconnected, drop
         # the buffer rather than half-persist it. burst_stop must be the
@@ -413,12 +443,38 @@ class MultiLineDriver(InstrumentDriver):
         self._burst_started_ts = None
         self._burst_started_iso = None
         self._burst_experiment_id = None
-        if self._transport is not None:
-            await self._transport.close()
+        close_error: BaseException | None = None
+        try:
+            if self._transport is not None:
+                transport = self._transport
+                close_task = asyncio.create_task(transport.close())
+                while not close_task.done():
+                    try:
+                        await asyncio.shield(close_task)
+                    except asyncio.CancelledError as exc:
+                        if caller_task is not None and caller_task.cancelling() > cancelling_at_start:
+                            caller_cancelled = caller_cancelled or exc
+                        else:
+                            break
+                    except BaseException:
+                        break
+                try:
+                    close_task.result()
+                except BaseException as exc:
+                    close_error = exc
+        finally:
             self._transport = None
-        self._connected = False
-        self._last_cycle = None
-        self._last_emit_mono = None
+            self._connected = False
+            self._last_cycle = None
+            self._last_emit_mono = None
+        if caller_cancelled is None and caller_task is not None and caller_task.cancelling() > cancelling_at_start:
+            caller_cancelled = asyncio.CancelledError()
+        if caller_cancelled is not None:
+            if close_error is not None:
+                raise caller_cancelled from close_error
+            raise caller_cancelled
+        if close_error is not None:
+            raise close_error
 
     async def read_channels(self) -> list[Reading]:
         if self.mock:
@@ -437,25 +493,29 @@ class MultiLineDriver(InstrumentDriver):
             if self._transport is None:
                 raise TCPTransportError("Driver not connected")
             channels_arg = ",".join(str(c) for c in self._channel_numbers)
-            response = await self._transport.query(
-                f"latestlengthvalid,{channels_arg}"
-            )
-            channel_data, _server_error = _parse_channeldata_response(response)
+            response = await self._transport.query(f"latestlengthvalid,{channels_arg}")
+            channel_data, server_error = _parse_channeldata_response(response)
+            self._validate_channel_frame(channel_data, server_error)
             for ch in channel_data:
                 status = self._status_from_errors(ch)
+                reported_length = ch.length_mm
+                if not math.isfinite(reported_length):
+                    status = ChannelStatus.SENSOR_ERROR
+                value = reported_length if status is ChannelStatus.OK else float("nan")
                 readings.append(
                     Reading.now(
                         channel=f"{self.name}/length_ch{ch.channel_number}",
-                        value=ch.length_mm,
+                        value=value,
                         unit="mm",
                         instrument_id=self.name,
                         status=status,
-                        metadata={
-                            "intensity_min": ch.intensity_min,
-                            "intensity_max": ch.intensity_max,
-                            "temperature_c": ch.temperature_c,
-                            "pressure_hpa": ch.pressure_hpa,
-                        },
+                        metadata=_safe_numeric_metadata(
+                            intensity_min=ch.intensity_min,
+                            intensity_max=ch.intensity_max,
+                            temperature_c=ch.temperature_c,
+                            pressure_hpa=ch.pressure_hpa,
+                            reported_length_mm=reported_length,
+                        ),
                     )
                 )
             env_response = await self._transport.query("environmentdata")
@@ -488,6 +548,7 @@ class MultiLineDriver(InstrumentDriver):
             logger.error("MultiLine '%s' read failed: %s", self.name, exc)
             return []
 
+        readings[-3:] = [self._mask_nonfinite_reading(reading) for reading in readings[-3:]]
         return readings
 
     # ------------------------------------------------------------------
@@ -522,11 +583,13 @@ class MultiLineDriver(InstrumentDriver):
                     continue
                 if line.startswith("channeldata_"):
                     try:
-                        channel_data, _server_error = _parse_channeldata_response(line)
+                        channel_data, server_error = _parse_channeldata_response(line)
+                        self._validate_channel_frame(channel_data, server_error)
                     except ValueError as exc:
                         logger.warning(
                             "MultiLine '%s' cycle parse failed: %s",
-                            self.name, exc,
+                            self.name,
+                            exc,
                         )
                         continue
                     snapshot = CycleSnapshot(
@@ -538,7 +601,8 @@ class MultiLineDriver(InstrumentDriver):
                         elapsed = time.monotonic() - self._listener_started_mono
                         logger.info(
                             "MultiLine '%s' first cycle received after %.2fs",
-                            self.name, elapsed,
+                            self.name,
+                            elapsed,
                         )
                         self._first_cycle_logged = True
                     if self._burst_active:
@@ -553,13 +617,16 @@ class MultiLineDriver(InstrumentDriver):
             except (TimeoutError, TCPTransportError, OSError) as exc:
                 logger.warning(
                     "MultiLine '%s' stopmeasnogui on cancel failed: %s",
-                    self.name, exc,
+                    self.name,
+                    exc,
                 )
             raise
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "MultiLine '%s' continuous listener crashed: %s",
-                self.name, exc, exc_info=True,
+                self.name,
+                exc,
+                exc_info=True,
             )
 
     def _read_channels_continuous(self) -> list[Reading]:
@@ -575,6 +642,9 @@ class MultiLineDriver(InstrumentDriver):
             if (now_mono - self._last_emit_mono) < self._target_interval_s:
                 return []
         self._last_emit_mono = now_mono
+        # Consume the exact snapshot. If the stream stalls or the listener
+        # dies, polling must not republish one old hardware cycle forever.
+        self._last_cycle = None
         return self._cycle_to_readings(cycle)
 
     def _cycle_to_readings(self, cycle: CycleSnapshot) -> list[Reading]:
@@ -582,20 +652,25 @@ class MultiLineDriver(InstrumentDriver):
         ts = datetime.fromtimestamp(cycle.timestamp, tz=UTC)
         for ch in cycle.channels:
             status = self._status_from_errors(ch)
+            reported_length = ch.length_mm
+            if not math.isfinite(reported_length):
+                status = ChannelStatus.SENSOR_ERROR
+            value = reported_length if status is ChannelStatus.OK else float("nan")
             readings.append(
                 Reading(
                     timestamp=ts,
                     channel=f"{self.name}/length_ch{ch.channel_number}",
-                    value=ch.length_mm,
+                    value=value,
                     unit="mm",
                     instrument_id=self.name,
                     status=status,
-                    metadata={
-                        "intensity_min": ch.intensity_min,
-                        "intensity_max": ch.intensity_max,
-                        "temperature_c": ch.temperature_c,
-                        "pressure_hpa": ch.pressure_hpa,
-                    },
+                    metadata=_safe_numeric_metadata(
+                        intensity_min=ch.intensity_min,
+                        intensity_max=ch.intensity_max,
+                        temperature_c=ch.temperature_c,
+                        pressure_hpa=ch.pressure_hpa,
+                        reported_length_mm=reported_length,
+                    ),
                 )
             )
         # Per-channel records carry env (T/P/RH); use the first channel's
@@ -631,7 +706,25 @@ class MultiLineDriver(InstrumentDriver):
                     instrument_id=self.name,
                 )
             )
+        if cycle.channels:
+            readings[-3:] = [self._mask_nonfinite_reading(reading) for reading in readings[-3:]]
         return readings
+
+    @staticmethod
+    def _mask_nonfinite_reading(reading: Reading) -> Reading:
+        """Never publish a non-finite scientific value with OK status."""
+
+        if math.isfinite(reading.value):
+            return reading
+        metadata = dict(reading.metadata)
+        metadata["reported_value_raw"] = repr(reading.value)
+        return replace(
+            reading,
+            value=float("nan"),
+            status=ChannelStatus.SENSOR_ERROR,
+            raw=None,
+            metadata=metadata,
+        )
 
     def burst_status(self) -> dict[str, Any]:
         elapsed = 0.0
@@ -647,17 +740,13 @@ class MultiLineDriver(InstrumentDriver):
     async def burst_start(self, *, experiment_id: str | None = None) -> None:
         if self._mode != self.MODE_CONTINUOUS:
             raise RuntimeError(
-                "Burst capture requires continuous mode "
-                f"(driver '{self.name}' currently in {self._mode!r})"
+                f"Burst capture requires continuous mode (driver '{self.name}' currently in {self._mode!r})"
             )
         if self._burst_active:
             raise RuntimeError(f"Burst already active for '{self.name}'")
         self._burst_active = True
         self._burst_started_ts = time.time()
-        self._burst_started_iso = (
-            datetime.fromtimestamp(self._burst_started_ts, tz=UTC)
-            .strftime("%Y%m%dT%H%M%SZ")
-        )
+        self._burst_started_iso = datetime.fromtimestamp(self._burst_started_ts, tz=UTC).strftime("%Y%m%dT%H%M%SZ")
         self._burst_experiment_id = experiment_id
         self._burst_buffer = []
 
@@ -679,9 +768,7 @@ class MultiLineDriver(InstrumentDriver):
         self._burst_active = False
         snapshots = self._burst_buffer
         started_ts = self._burst_started_ts or time.time()
-        started_iso = self._burst_started_iso or (
-            datetime.fromtimestamp(started_ts, tz=UTC).strftime("%Y%m%dT%H%M%SZ")
-        )
+        started_iso = self._burst_started_iso or (datetime.fromtimestamp(started_ts, tz=UTC).strftime("%Y%m%dT%H%M%SZ"))
         experiment_id = self._burst_experiment_id
         # Reset state regardless of whether persist runs — failed persist
         # must not leave the next burst unable to start.
@@ -791,12 +878,35 @@ class MultiLineDriver(InstrumentDriver):
         id cannot write outside the experiment root.
         """
         if experiment_id and experiments_root is not None:
-            safe_id = experiment_id.replace("/", "_").replace("\\", "_")
+            # Treat the id as one portable path component. In particular, ':'
+            # is drive/ADS syntax on Windows even though it is not a separator.
+            forbidden = '<>:"/\\|?*'
+            safe_id = "".join(
+                "_" if character in forbidden or unicodedata.category(character).startswith("C") else character
+                for character in experiment_id
+            )
             safe_id = safe_id.replace("..", "_")
-            return Path(experiments_root) / safe_id
+            safe_id = safe_id.rstrip(" .") or "_"
+            root = Path(experiments_root).resolve()
+            candidate = (root / safe_id).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("experiment burst directory resolves outside experiments_root") from exc
+            return candidate
         if self._burst_dir is not None:
             return Path(self._burst_dir)
         return Path("data") / "multiline_bursts"
+
+    def _validate_channel_frame(self, channels: list[_ChannelData], server_error: int) -> None:
+        """Reject server errors and frames that violate configured identity."""
+
+        if server_error != 0:
+            raise ValueError(f"channeldata server error {server_error}")
+        received = {channel.channel_number for channel in channels}
+        expected = set(self._channel_numbers)
+        if received != expected or len(channels) != len(expected):
+            raise ValueError(f"channeldata identity mismatch: expected {sorted(expected)}, received {sorted(received)}")
 
     @staticmethod
     def _status_from_errors(ch: _ChannelData) -> ChannelStatus:
