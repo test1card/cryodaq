@@ -9249,6 +9249,12 @@ class SQLiteWriter:
                 name="sqlite_prepare_control_data_directory",
             )
             self._data_dir = await self._await_owned_task(owner)
+        except asyncio.CancelledError:
+            # Must precede except BaseException: a requested shutdown arrives
+            # here as CancelledError and must propagate as cancellation, not
+            # become a phantom "data directory authority unavailable" boot
+            # failure. Genuine failures still raise RuntimeError below.
+            raise
         except BaseException:
             raise RuntimeError("SQLiteWriter data directory authority is unavailable") from None
         self._running = True
