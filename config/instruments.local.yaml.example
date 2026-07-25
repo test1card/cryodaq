@@ -9,7 +9,7 @@
 #     Поэтому каждый top-level блок, который читает engine, должен быть
 #     перенесён сюда, иначе он молча пропадёт:
 #       - instruments        — список приборов (ниже)
-#       - keithley.watchdog  — прошивочный dead-man бэкстоп (иначе default off)
+#       - keithley.watchdog  — TSP late-pet check (иначе driver default off)
 #       - chamber            — объём камеры + leak_rate (иначе volume_l пропадёт
 #                              и оценка F13 leak rate отключится)
 #     Значения keithley/chamber ниже — копия base-дефолтов из instruments.yaml;
@@ -89,12 +89,14 @@ instruments:
 # ЗАМЕНА-семантика (см. шапку): блоки ниже перенесены из base instruments.yaml —
 # без них engine потеряет watchdog и chamber, т.к. local НЕ мержится с base.
 
-# Keithley 2604B TSP dead-man watchdog (прошивочный бэкстоп под host
-# SafetyManager). Режим по умолчанию off; полное описание режимов — в base
-# instruments.yaml (off | best_effort | required).
+# Keithley 2604B TSP late-pet check под host SafetyManager. V3 неавтономен:
+# best_effort покрывает только stall-then-recover, required fail-closed
+# отказывает при autonomous=0. Полное описание — в base instruments.yaml.
 keithley:
   watchdog:
     mode: "off"   # quote: bare off/on — YAML booleans
+    # Finite numeric seconds in [1, 300]; use >= 2 * Keithley poll_interval_s.
+    # os.time() is one-second-granularity and the deadline comparison is `>`.
     timeout_s: 5.0
 
 chamber:

@@ -4,7 +4,7 @@ agent:
   brand_emoji: "🤖"
 
   ollama:
-    base_url: http://localhost:11434
+    base_url: http://127.0.0.1:11434
     default_model: gemma4:e4b
     timeout_s: 120  # gemma4:e4b thinking-first; cold-load ~40s, warm ~10s on RTX 5070 Ti 16GB
     temperature: 0.3

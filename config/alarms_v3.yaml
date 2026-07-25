@@ -4,8 +4,8 @@
 #
 # Криовакуумный стенд, проект Миллиметрон, АКЦ ФИАН
 #
-# Калиброванные датчики:  Т11 (2-я ступень, холодная точка, 3–8 K)
-#                         Т12 (Азотная плита, 1-я ступень, 30–80 K)
+# Калиброванные датчики:  Т11 (азотная/первая ступень, 30–80 K)
+#                         Т12 (холодная/вторая ступень, 3–8 K)
 # Остальные:              только fault-детекция (0 K / 350+ K)
 #
 # Физическое обоснование: alarm_tz_physics_v3.md
@@ -48,7 +48,7 @@ global_alarms:
       - channels: [Т11, Т12]
         check: any_below
         threshold: 200           # K
-      - channel: P1
+      - channel: VSP63D_1/pressure
         check: above
         threshold: 1.0e-3        # mbar — граница молекулярного режима
     level: CRITICAL
@@ -68,10 +68,10 @@ global_alarms:
       - channels: [Т11, Т12]
         check: any_below
         threshold: 200
-      - channel: P1
+      - channel: VSP63D_1/pressure
         check: above
         threshold: 1.0e-4        # mbar — ещё безопасно, но аномально
-      - channel: P1
+      - channel: VSP63D_1/pressure
         check: rate_above
         threshold: 0             # dP/dt > 0
         rate_window_s: 60
@@ -149,16 +149,23 @@ global_alarms:
 
   data_loss_pressure:
     alarm_type: stale
-    channel: P1
+    channel: VSP63D_1/pressure
     timeout_s: 60
     level: CRITICAL
     message: "Нет данных давления > 60с. Вакуумный контроль потерян."
     notify: [gui, telegram, sound]
 
   # --- Keithley ---
+  # B2 alarm-v1→v2 migration: channels corrected from bare "smua_power"/
+  # "smub_power" to the real Reading.channel emitted by Keithley2604B
+  # ("{instrument_name}/smua/power") — AlarmEvaluator/ChannelStateTracker
+  # match channels by EXACT string, no regex/alias resolution, so the old
+  # short names never matched anything and this alarm never fired. Ties
+  # the rule to the current instruments.yaml instrument name ("Keithley_1");
+  # rename here too if that instrument name ever changes.
   keithley_overpower:
     alarm_type: threshold
-    channels: [smua_power, smub_power]
+    channels: ["Keithley_1/smua/power", "Keithley_1/smub/power"]
     check: above
     threshold: 4.0               # W (лимит 5W, запас 20%)
     hysteresis: 0.5
@@ -168,20 +175,25 @@ global_alarms:
     notify: [gui, telegram, sound]
 
   # --- Диск ---
+  # B2: channel corrected from "system_disk_gb" (never published by anything)
+  # to the real DiskMonitor channel "system/disk_free_gb"; hysteresis restored
+  # to match the retired alarms.yaml v1 rule (same thresholds, no re-tuning).
   disk_space_warning:
     alarm_type: threshold
-    channel: system_disk_gb
+    channel: system/disk_free_gb
     check: below
     threshold: 10
+    hysteresis: 2.0
     level: WARNING
     message: "Диск < 10 GB."
     notify: [gui]
 
   disk_space_critical:
     alarm_type: threshold
-    channel: system_disk_gb
+    channel: system/disk_free_gb
     check: below
     threshold: 2
+    hysteresis: 0.5
     level: CRITICAL
     message: "Диск < 2 GB. Запись может прерваться."
     notify: [gui, telegram]
@@ -196,7 +208,7 @@ phase_alarms:
       alarm_type: composite
       operator: AND
       conditions:
-        - channel: P1
+        - channel: VSP63D_1/pressure
           check: above
           threshold: 1.0e-4
         - channel: phase_elapsed_s
@@ -208,11 +220,11 @@ phase_alarms:
 
     vacuum_stall:
       alarm_type: rate
-      channel: P1
+      channel: VSP63D_1/pressure
       check: relative_rate_near_zero
       rate_threshold: 0.01       # |dP/P| < 1% за окно
       additional_condition:
-        channel: P1
+        channel: VSP63D_1/pressure
         check: above
         threshold: 1.0e-5
       level: INFO
@@ -233,12 +245,12 @@ phase_alarms:
   measurement:
     shield_warming:
       alarm_type: rate
-      channel: Т12               # азотная плита — индикатор 1-й ступени (F-X: Т12=nitrogen plate)
+      channel: Т11               # азотная плита — индикатор 1-й ступени
       check: rate_above
       threshold: 0.5             # K/мин
       rate_window_s: 300
       level: WARNING
-      message: "Азотная плита (Т12) нагревается при measurement."
+      message: "Азотная плита (Т11) нагревается при measurement."
       notify: [gui, telegram]
 
   warmup:
@@ -262,7 +274,7 @@ phase_alarms:
 #
 # Секция ниже содержит только те интерлоки, чьи каналы НЕ покрываются regex
 # patterns из config/interlocks.yaml — сейчас это только Keithley power каналы
-# (smua_power, smub_power), которые не матчатся temperature-regex из interlocks.yaml.
+# (Keithley_1/smua/power, Keithley_1/smub/power), которые не матчатся temperature-regex из interlocks.yaml.
 #
 # НЕ добавлять сюда дубликаты config/interlocks.yaml. Каналы Т1–Т12 уже
 # защищены через regex patterns в interlocks.yaml.
@@ -270,7 +282,7 @@ phase_alarms:
 interlocks:
 
   keithley_overpower_interlock:
-    channels: [smua_power, smub_power]
+    channels: ["Keithley_1/smua/power", "Keithley_1/smub/power"]
     check: any_above
     threshold: 4.5               # W — жёстче аларма (4.0), мягче лимита (5.0)
     action: stop_source
