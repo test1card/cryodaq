@@ -621,6 +621,112 @@ def test_composite_absent_operator_loads(tmp_path: Path) -> None:
     assert any(a.alarm_id == "vac_cold" for a in alarms)
 
 
+# ---------------------------------------------------------------------------
+# fail-OPEN gap: composite `conditions` presence/type. alarm_v2._eval_composite
+# (L293-305) does `conditions = cfg.get("conditions", [])` then
+# `results = [self._eval_condition(c) for c in conditions]` and runs all()/
+# any() on it. Each defect below was VERIFIED by running the evaluator against
+# the pre-fix loader — these are observed fail-open shapes, not theoretical.
+#
+#   1. missing/empty conditions + AND (default op): all([]) is True → the alarm
+#      FIRES on vacuous truth forever. Observed: a CRITICAL annunciator firing
+#      continuously with channels=[] and no evidence (alarm fatigue + poisons
+#      the ack workflow).
+#   2. missing/empty conditions + OR: any([]) is False → silently never fires.
+#      Same dead-annunciator class as the operator defect.
+#   3. non-dict entry, e.g. conditions: ["typo_string"]: _eval_condition does
+#      cond.get(...) (alarm_v2.py:331) → AttributeError → swallowed by
+#      evaluate()'s broad `except Exception` → returns None → silently dead.
+#      The loader currently SKIPS non-dict entries (`if isinstance(cond, dict)`);
+#      skipping a malformed entry is exactly the fail-open shape being closed.
+#   4. non-list `conditions` (e.g. a dict or a string) is the same hole — the
+#      runtime would either mis-iterate or AttributeError — and must not load.
+# ---------------------------------------------------------------------------
+def test_composite_missing_conditions_raises(tmp_path: Path) -> None:
+    """Reported defect #1 (AND form): no `conditions` key → cfg.get(..., [])
+    yields [] → all([]) is True → a CRITICAL alarm fires on vacuous truth
+    forever. Observed event: AlarmEvent(alarm_id='a1', level='CRITICAL',
+    channels=[], ...)."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="conditions"):
+        load_alarm_config(p)
+
+
+def test_composite_empty_conditions_list_raises(tmp_path: Path) -> None:
+    """Reported defect #2 (OR form, same shape for AND): an explicitly empty
+    conditions list. OR → any([]) is False → silently never fires; AND →
+    all([]) is True → fires forever. Either way it is a dead/misfiring
+    annunciator that loaded cleanly."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: OR
+            conditions: []
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="conditions"):
+        load_alarm_config(p)
+
+
+def test_composite_non_dict_condition_entry_raises(tmp_path: Path) -> None:
+    """Reported defect #3: conditions: ["typo_string"] — _eval_condition does
+    cond.get(...) (alarm_v2.py:331) → AttributeError('str' object has no
+    attribute 'get') → swallowed by evaluate()'s broad except → returns None
+    → silently dead. The loader currently SKIPS non-dict entries; skipping a
+    malformed entry is the fail-open shape being eliminated. Must name the
+    index and the offending value so an operator can find the fault."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - "typo_string"
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="conditions"):
+        load_alarm_config(p)
+
+
+def test_composite_non_list_conditions_raises(tmp_path: Path) -> None:
+    """A non-list `conditions` (e.g. a dict or a string) must not be silently
+    accepted: the runtime would mis-iterate or AttributeError. Same fail-open
+    hole as missing/empty, one level up — reject it at load with the field
+    name and the offending value."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions: not_a_list
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="conditions"):
+        load_alarm_config(p)
+
+
 def test_shipped_alarms_v3_still_loads() -> None:
     """The shipped config/alarms_v3.yaml must continue to load cleanly."""
     _, alarms = load_alarm_config(None)

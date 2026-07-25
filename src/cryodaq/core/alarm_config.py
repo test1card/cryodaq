@@ -345,10 +345,57 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
                 f"alarm {alarm_id!r} (alarm_type=composite) has unknown operator "
                 f"{operator!r}; valid operators are {sorted(_VALID_COMPOSITE_OPERATORS)}"
             )
+        # composite `conditions` — alarm_v2._eval_composite (L293-300) does
+        # `conditions = cfg.get("conditions", [])` then
+        # `results = [self._eval_condition(c) for c in conditions]`, then
+        # all(results) for AND / any(results) for OR. Three fail-open shapes
+        # were VERIFIED by running the evaluator against the pre-fix loader:
+        #
+        #   - missing/empty conditions + AND (the default op): all([]) is True
+        #     → the alarm FIRES on vacuous truth forever. Observed a CRITICAL
+        #     annunciator firing continuously with channels=[] and no evidence.
+        #   - missing/empty conditions + OR: any([]) is False → silently never
+        #     fires. Same dead-annunciator class as the operator defect above.
+        #   - a non-dict entry (e.g. conditions: ["typo_string"]): _eval_condition
+        #     does cond.get(...) (alarm_v2.py:331) → AttributeError → swallowed
+        #     by evaluate()'s broad `except Exception` → returns None → silently
+        #     dead. The loader previously SKIPPED non-dict entries; skipping a
+        #     malformed entry is exactly the fail-open shape being eliminated.
+        #
+        # Reject all three at load time. A non-list `conditions` (e.g. a dict
+        # or a string) is the same hole one level up and is rejected the same
+        # way rather than silently accepted.
+        if "conditions" not in cfg:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} (alarm_type=composite) is missing required "
+                f"field 'conditions' (a non-empty list of sub-condition dicts); "
+                f"runtime cfg.get('conditions', []) yields [] → all([])/any([]) "
+                f"is vacuous (AND fires forever, OR never fires)"
+            )
+        conditions = cfg["conditions"]
+        if not isinstance(conditions, list):
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} (alarm_type=composite) field 'conditions' "
+                f"must be a list, got {type(conditions).__name__} {conditions!r}"
+            )
+        if not conditions:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} (alarm_type=composite) field 'conditions' "
+                f"is an empty list; all([])/any([]) is vacuous (AND fires "
+                f"forever, OR never fires) — supply at least one sub-condition"
+            )
         # Each element of `conditions` is passed to _eval_condition
-        for i, cond in enumerate(cfg.get("conditions", [])):
-            if isinstance(cond, dict):
-                _validate_condition(alarm_id, cond, context=f"conditions[{i}]")
+        # (alarm_v2.py:331 hard-reads cond.get(...)). Reject a non-dict entry
+        # instead of skipping it, naming the index and offending value so an
+        # operator can find the fault without reading source.
+        for i, cond in enumerate(conditions):
+            if not isinstance(cond, dict):
+                raise AlarmConfigError(
+                    f"alarm {alarm_id!r} (alarm_type=composite) "
+                    f"conditions[{i}] must be a sub-condition dict, got "
+                    f"{type(cond).__name__} {cond!r}"
+                )
+            _validate_condition(alarm_id, cond, context=f"conditions[{i}]")
 
     elif alarm_type == "stale":
         pass  # no hard reads — exempt (alarm_v2._eval_stale, alarm_v2.py:440-462)
