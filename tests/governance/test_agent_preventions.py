@@ -12,7 +12,7 @@ import yaml
 
 from tools.check_python_compile import compile_python_tree
 from tools.ci_candidate_runner import suite_for_node
-from tools.ci_guard_execution import active_guard_nodes
+from tools.ci_guard_execution import GIT_INDEX_CHECKOUT_GUARD_NODES, active_guard_nodes
 from tools.governance_contract import (
     GovernanceContractError,
     closure_semantics_sha256,
@@ -385,8 +385,16 @@ def test_every_nonexpired_mapping_is_one_unique_active_guard_in_its_default_suit
 
         for suite, expected_nodes in expected.items():
             active = active_guard_nodes(ROOT, suite, platform=platform)
-            assert active == tuple(sorted(expected_nodes))
+            # Guards that read the Git index cannot run inside the sealed
+            # candidate (it has no .git), so they are relocated to the
+            # workflow's exact-checkout step rather than dropped. The invariant
+            # keeps its strength: every non-expired mapping still executes
+            # exactly once, in exactly one place. Relocation is spelled out
+            # here so that deleting a guard can never pass as relocating one.
+            relocated = {node for node in GIT_INDEX_CHECKOUT_GUARD_NODES if node in expected_nodes}
+            assert active == tuple(sorted(expected_nodes - relocated))
             assert len(active) == len(set(active))
+            assert relocated.isdisjoint(active)
 
 
 def test_test_assertions_cannot_be_swallowed_by_broad_exception_handlers() -> None:

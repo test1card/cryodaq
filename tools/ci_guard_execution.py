@@ -25,6 +25,21 @@ from yaml.nodes import MappingNode
 from tools.governance_contract import validate_registry
 
 ACTIVE_GUARD_STATUSES = frozenset({"open", "reopened", "closed"})
+# Registry guards that interrogate the Git *index* (`git ls-files`,
+# `git check-ignore`) rather than the file tree. The exported candidate is a
+# sealed copy with no `.git`, so no sealed-candidate cut -- ordinary or guard --
+# can execute them. They are excluded here and executed instead against the
+# exact checkout, in the workflow's active-remaining step, whose outcome the
+# enforce step requires. They are not made to skip: inside the bundle a skip is
+# indistinguishable from a pass, which is the false green this design exists to
+# remove. ci_candidate_runner re-exports these so the ordinary exported suite
+# deselects the same nodes, and test_ci_candidate_evidence.py requires each to
+# appear literally in that workflow step.
+GIT_INDEX_CHECKOUT_GUARD_NODES = (
+    "tests/governance/test_agent_formatter_gate.py::test_mutating_formatter_wrapper_is_absent",
+    "tests/governance/test_agent_formatter_gate.py::test_tracked_recipes_forbid_mutating_ruff_modes",
+    "tests/governance/test_agent_preventions.py::test_generated_candidate_and_test_evidence_prefixes_are_ignored",
+)
 DEFAULT_CI_SUITES = ("agents", "core", "gui", "remaining")
 GUARD_PLATFORMS = frozenset({"posix", "windows"})
 FORBIDDEN_GUARD_MARKERS = frozenset({"skip", "timeout", "xfail"})
@@ -169,6 +184,7 @@ def active_guard_specs(
         and pair["ci_partition"] == suite
         and pair.get("platform") in {None, selected_platform}
     )
+    active = [spec for spec in active if spec.node not in GIT_INDEX_CHECKOUT_GUARD_NODES]
     by_node: dict[str, GuardSpec] = {}
     for spec in active:
         previous = by_node.get(spec.node)

@@ -12,6 +12,7 @@ from typing import Any
 
 from tools.check_python_compile import compile_python_tree
 from tools.ci_guard_execution import (
+    GIT_INDEX_CHECKOUT_GUARD_NODES,
     RECEIPT_PREFIX,
     GuardExecutionError,
     active_guard_specs,
@@ -63,10 +64,18 @@ ACTIVE_CHECKOUT_REMAINING_FILES = (
     "tests/governance/test_agent_formatter_gate.py",
     "tests/test_claudemd_index.py",
 )
-ACTIVE_CHECKOUT_REMAINING_NODES = (
-    "tests/governance/test_agent_preventions.py::test_generated_candidate_and_test_evidence_prefixes_are_ignored",
-    "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six",
-    "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six",
+ACTIVE_CHECKOUT_REMAINING_NODES = tuple(
+    sorted(
+        {
+            *GIT_INDEX_CHECKOUT_GUARD_NODES,
+            "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six",
+            "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six",
+        }
+        # The two formatter-gate nodes are the whole of their file, which is
+        # already ignored wholesale above; deselecting a node inside an ignored
+        # file is a pytest error, so keep only nodes whose file still collects.
+        - {node for node in GIT_INDEX_CHECKOUT_GUARD_NODES if node.split("::", 1)[0] in ACTIVE_CHECKOUT_REMAINING_FILES}
+    )
 )
 EXPORTED_REMAINING_EXCLUDED_FILES = ACTIVE_CHECKOUT_REMAINING_FILES
 EXPORTED_REMAINING_EXCLUDED_NODES = ACTIVE_CHECKOUT_REMAINING_NODES

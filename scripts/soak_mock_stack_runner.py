@@ -986,6 +986,37 @@ class _ChildIdentityObserver(Protocol):
     def identity_for_pid(self, pid: int) -> _ProcessIdentity: ...
 
 
+def _interpreter_multiprocessing_service_pids() -> frozenset[int]:
+    """PIDs of *this* interpreter's own multiprocessing service processes.
+
+    The forkserver daemon and the resource tracker are children of the running
+    interpreter, started lazily by ``multiprocessing`` itself. No launcher
+    spawns them, they outlive every individual launcher by design, and from
+    Python 3.14 ``forkserver`` is the default start method on Linux -- so any
+    process that has touched ``multiprocessing`` at all owns one. Counting them
+    as launcher survivors fails an ownership assertion for a process the
+    launcher never created; this is what made
+    ``test_owned_session_reaps_clean_terminal_only_after_stable_empty_cut``
+    fail on Linux CI and pass everywhere the default was still ``fork``.
+
+    Only the service processes themselves are excluded. Descendant traversal
+    still passes through them, so a genuine leak parented by one is reported.
+    """
+
+    pids: set[int] = set()
+    for module_name, service_attribute, pid_attribute in (
+        ("multiprocessing.forkserver", "_forkserver", "_forkserver_pid"),
+        ("multiprocessing.resource_tracker", "_resource_tracker", "_pid"),
+    ):
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        pid = getattr(getattr(module, service_attribute, None), pid_attribute, None)
+        if type(pid) is int and pid > 0:
+            pids.add(pid)
+    return frozenset(pids)
+
+
 class _LockedPsutilObserver:
     """Fail-closed PID/start observer used only by source qualification.
 
@@ -1098,14 +1129,21 @@ class _LockedPsutilObserver:
             except (self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
                 raise _RunnerFoundationError("owned descendant scan is unavailable") from exc
             observed.append((identity, parent_pid))
+        service_pids = _interpreter_multiprocessing_service_pids()
         owned: set[_ProcessIdentity] = set()
         frontier = {leader.pid}
+        seen: set[int] = set()
         while frontier:
             next_frontier: set[int] = set()
             for identity, parent_pid in observed:
-                if identity in owned or parent_pid not in frontier:
+                if identity in owned or identity.pid in seen or parent_pid not in frontier:
                     continue
-                owned.add(identity)
+                seen.add(identity.pid)
+                # Traverse *through* this interpreter's own multiprocessing
+                # service processes without counting them; anything they in
+                # turn parent is still reported.
+                if identity.pid not in service_pids:
+                    owned.add(identity)
                 next_frontier.add(identity.pid)
             if len(owned) > 128:
                 raise _RunnerFoundationError("owned descendant count exceeds the reviewed bound")
