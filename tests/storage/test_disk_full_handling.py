@@ -74,10 +74,7 @@ async def test_persistence_failure_callback_invoked(tmp_path):
     try:
         await asyncio.wait_for(callback_invoked.wait(), timeout=2.0)
     except TimeoutError:
-        pytest.fail(
-            "persistence_failure_callback was not invoked within 2s. "
-            f"is_disk_full={writer.is_disk_full}"
-        )
+        pytest.fail(f"persistence_failure_callback was not invoked within 2s. is_disk_full={writer.is_disk_full}")
 
     assert any("disk full" in r.lower() for r in received_reasons), (
         f"callback received unexpected reasons: {received_reasons}"
@@ -115,7 +112,7 @@ async def test_safety_manager_on_persistence_failure_latches_fault():
 
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock()
+    keithley.emergency_off = AsyncMock(return_value=True)
 
     mgr = SafetyManager(safety_broker, keithley_driver=keithley, mock=True)
     await mgr.start()
@@ -171,7 +168,7 @@ async def test_acknowledge_fault_clears_disk_full_flag():
 
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock()
+    keithley.emergency_off = AsyncMock(return_value=True)
     mgr = SafetyManager(safety_broker, keithley_driver=keithley, mock=True)
     mgr._config.cooldown_before_rearm_s = 0.0  # no cooldown for the test
     mgr._config.require_reason = False
@@ -191,9 +188,7 @@ async def test_acknowledge_fault_clears_disk_full_flag():
 
         result = await mgr.acknowledge_fault("ack")
         assert result.get("ok"), f"acknowledge_fault failed: {result}"
-        assert cleared["called"] is True, (
-            "acknowledge_fault must invoke the persistence_failure_clear callback"
-        )
+        assert cleared["called"] is True, "acknowledge_fault must invoke the persistence_failure_clear callback"
     finally:
         await mgr.stop()
 
@@ -234,9 +229,7 @@ async def test_disk_full_classifier_accepts_real_messages(tmp_path):
         writer = SQLiteWriter(tmp_path)
         poisoned = _poisoned_conn(sqlite3.OperationalError(msg))
         writer._write_day_batch(poisoned, [_reading()])
-        assert writer.is_disk_full is True, (
-            f"Real disk-full message {msg!r} was not classified as disk-full"
-        )
+        assert writer.is_disk_full is True, f"Real disk-full message {msg!r} was not classified as disk-full"
 
 
 @pytest.mark.asyncio
