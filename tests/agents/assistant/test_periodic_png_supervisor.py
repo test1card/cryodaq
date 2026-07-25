@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -33,9 +35,32 @@ def _runnable_load() -> PeriodicPngConfigLoad:
     )
 
 
+def _settle_attempts(seconds: float = 30.0) -> Iterator[None]:
+    """Yield settle attempts until a wall-clock budget expires.
+
+    See the twin in ``test_periodic_png_recovery.py``: each loop exits as soon
+    as its condition holds, so this is a give-up point rather than a latency
+    assertion, and the former ``range(100)`` around a 1 ms sleep expired on
+    loaded CI runners. The budget is wall-clock because a 1 ms sleep costs
+    ~1 ms on Linux and ~15 ms on Windows, so a fixed count is two different
+    budgets.
+    """
+
+    deadline = time.monotonic() + seconds
+    while True:
+        yield None
+        if time.monotonic() >= deadline:
+            return
+
+
+# Separate and deliberately small: bounds a filesystem inode-fence race, not a
+# state transition.
+_STABLE_LOAD_RETRIES = 100
+
+
 async def _load_stable(data_dir: Path):
     last_error: PeriodicContractError | None = None
-    for _ in range(100):
+    for _ in range(_STABLE_LOAD_RETRIES):
         try:
             return load_periodic_state(data_dir)
         except PeriodicContractError as exc:
@@ -149,7 +174,10 @@ async def test_standby_without_leadership_constructs_zero_runtime_resources(
     )
     task = asyncio.create_task(supervisor.run())
     try:
-        for _ in range(100):
+        # Negative assertion: this is the one loop here that *wants* to run out.
+        # It gives the supervisor a window in which to wrongly finish, so a
+        # generous budget buys nothing and costs the whole wait every run.
+        for _ in _settle_attempts(0.5):
             if task.done():
                 break
             await asyncio.sleep(0.001)
@@ -202,7 +230,7 @@ async def test_runnable_leader_starts_one_runtime_and_stop_releases_lock(
         clock=Clock(),
     )
     task = asyncio.create_task(supervisor.run())
-    for _ in range(100):
+    for _ in _settle_attempts():
         if coordinator.started:
             break
         await asyncio.sleep(0.001)
@@ -213,7 +241,7 @@ async def test_runnable_leader_starts_one_runtime_and_stop_releases_lock(
     assert coordinator.stopped == 1
     assert load_periodic_state(tmp_path).payload["health"]["status"] == "stopped"
     fd = None
-    for _ in range(100):
+    for _ in _settle_attempts():
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
         if fd is not None:
             break
@@ -434,7 +462,7 @@ async def test_invalid_requested_config_writes_redacted_health_without_runtime(
         clock=Clock(),
     )
     task = asyncio.create_task(supervisor.run())
-    for _ in range(100):
+    for _ in _settle_attempts():
         state = load_periodic_state(tmp_path).payload
         if state["health"]["status"] == "degraded_config":
             break
@@ -487,7 +515,7 @@ async def test_startup_cancellation_cleans_up_releases_leader_and_propagates(
         await task
     assert coordinator.stopped == 1
     fd = None
-    for _ in range(100):
+    for _ in _settle_attempts():
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
         if fd is not None:
             break
@@ -551,7 +579,7 @@ async def test_initial_factory_failure_marks_nonready_before_release_and_backoff
     await clock.entered.wait()
     assert load_periodic_state(tmp_path).payload["health"]["status"] == ("degraded_runtime")
     fd = None
-    for _ in range(100):
+    for _ in _settle_attempts():
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
         if fd is not None:
             break
@@ -749,13 +777,13 @@ async def test_critical_runtime_failure_marks_nonready_before_re_election(
         clock=clock,
     )
     task = asyncio.create_task(supervisor.run())
-    for _ in range(100):
+    for _ in _settle_attempts():
         if (await _load_stable(tmp_path)).payload["health"]["status"] == "degraded_runtime":
             break
         await asyncio.sleep(0.001)
     assert (await _load_stable(tmp_path)).payload["health"]["status"] == ("degraded_runtime")
     fd = None
-    for _ in range(100):
+    for _ in _settle_attempts():
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
         if fd is not None:
             break
@@ -849,7 +877,7 @@ async def test_reload_factory_failure_replaces_prior_ready_with_nonready(
     await clock.entered.wait()
     clock.entered.clear()
     clock.release.set()
-    for _ in range(100):
+    for _ in _settle_attempts():
         if (await _load_stable(tmp_path)).payload["health"]["status"] == "degraded_runtime":
             break
         await asyncio.sleep(0.001)
@@ -885,7 +913,7 @@ async def test_repeated_supervisor_cancellation_settles_nonready_before_release(
         clock=Clock(),
     )
     task = asyncio.create_task(supervisor.run())
-    for _ in range(100):
+    for _ in _settle_attempts():
         if coordinator.started:
             break
         await asyncio.sleep(0.001)
@@ -945,7 +973,7 @@ async def test_cancelled_initial_config_load_does_not_latch_run_task(
     with pytest.raises(asyncio.CancelledError):
         await first
     second = asyncio.create_task(supervisor.run())
-    for _ in range(100):
+    for _ in _settle_attempts():
         if calls == 1:
             break
         await asyncio.sleep(0.001)
@@ -1012,7 +1040,7 @@ async def test_raising_config_loader_backs_off_then_recovers_to_idle(
     assert not task.done()
     clock.entered.clear()
     clock.release.set()
-    for _ in range(100):
+    for _ in _settle_attempts():
         if calls == 2:
             break
         await asyncio.sleep(0.001)
@@ -1042,7 +1070,7 @@ async def test_stop_cleanup_error_still_persists_nonready_before_release(
         clock=Clock(),
     )
     task = asyncio.create_task(supervisor.run())
-    for _ in range(100):
+    for _ in _settle_attempts():
         if coordinator.started:
             break
         await asyncio.sleep(0.001)
@@ -1158,7 +1186,7 @@ async def test_unrequested_requested_cycle_stays_alive_without_host_restart(
 
     requested = True
     clock.pulse()
-    for _ in range(100):
+    for _ in _settle_attempts():
         if len(coordinators) == 1 and coordinators[0].started == 1:
             break
         await asyncio.sleep(0.001)
@@ -1176,7 +1204,7 @@ async def test_unrequested_requested_cycle_stays_alive_without_host_restart(
     assert coordinators[0].stopped == 1
     assert state.payload["health"]["status"] == "disabled"
     fd = None
-    for _ in range(100):
+    for _ in _settle_attempts():
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
         if fd is not None:
             break
@@ -1187,7 +1215,7 @@ async def test_unrequested_requested_cycle_stays_alive_without_host_restart(
 
     requested = True
     clock.pulse()
-    for _ in range(100):
+    for _ in _settle_attempts():
         if len(coordinators) == 2 and coordinators[1].started == 1:
             break
         await asyncio.sleep(0.001)

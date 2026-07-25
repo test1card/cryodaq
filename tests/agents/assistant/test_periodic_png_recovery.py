@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -53,11 +54,38 @@ from tests.agents.assistant.test_periodic_png_coordinator import (
 )
 
 
+def _settle_attempts(seconds: float = 30.0) -> Iterator[None]:
+    """Yield settle attempts until a wall-clock budget expires.
+
+    Each polling loop below exits the moment its condition holds, so this is a
+    give-up point, never a latency assertion. It replaces a literal
+    ``range(100)`` around ``await asyncio.sleep(0.001)``, which expired on
+    loaded CI runners -- the coordinator was still DELIVERING when the test
+    demanded FAILED.
+
+    The budget is wall-clock rather than an iteration count on purpose: a
+    1 ms sleep costs ~1 ms on Linux but ~15 ms on Windows, where the default
+    timer resolution is coarse, so any fixed count means two very different
+    budgets. If work genuinely wedges, pytest's --timeout still reports it.
+    """
+
+    deadline = time.monotonic() + seconds
+    while True:
+        yield None
+        if time.monotonic() >= deadline:
+            return
+
+
+# Separate and deliberately small: this bounds retries of a filesystem
+# inode-fence race, not a coordinator state transition.
+_STABLE_LOAD_RETRIES = 100
+
+
 async def _load_stable(data_dir: Path):
     """Retry only the expected inode-fence race during atomic state replacement."""
 
     last_error: PeriodicContractError | None = None
-    for _ in range(100):
+    for _ in range(_STABLE_LOAD_RETRIES):
         try:
             return load_periodic_state(data_dir)
         except PeriodicContractError as exc:
@@ -240,7 +268,7 @@ async def test_non_bytes_artifact_reader_terminalizes_ready_without_send(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             if payload["last_terminal"] is not None:
                 break
@@ -323,7 +351,7 @@ async def test_due_delivery_failure_artifact_loss_preserves_phase_and_settles(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             if payload["last_terminal"] is not None:
                 break
@@ -396,7 +424,7 @@ async def test_config_change_terminalizes_retryable_failed_without_rewriting_pha
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             state = (await _load_stable(tmp_path)).payload
             if state["last_terminal"] is not None:
                 break
@@ -529,7 +557,7 @@ async def test_config_change_during_delivering_preserves_unknown_no_resend(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             active = (await _load_stable(tmp_path)).payload["active"]
             if active["status"] == "DELIVERY_UNKNOWN":
                 break
@@ -646,7 +674,7 @@ async def test_sender_four_outcomes_map_to_exact_durable_state(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             active = payload["active"]
             terminal = payload["last_terminal"]
@@ -700,7 +728,7 @@ async def test_delivery_attempt_exhaustion_is_terminal(tmp_path: Path) -> None:
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             if payload["last_terminal"] is not None:
                 break
@@ -896,7 +924,7 @@ async def test_post_construction_delivery_result_corruption_is_unknown(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             observed = payload["last_terminal"] or payload["active"]
             if observed is not None and observed["status"] == "DELIVERY_UNKNOWN":
@@ -941,7 +969,7 @@ async def test_retry_after_is_used_as_exact_durable_delivery_deadline(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             observed = payload["last_terminal"] or payload["active"]
             if observed is not None and observed["status"] == "FAILED":
@@ -1013,12 +1041,12 @@ async def test_blocked_sender_heartbeats_at_30_and_60_with_one_call(
         await telegram.entered.wait()
         previous = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
         for tick in (30, 60):
-            for _ in range(100):
+            for _ in _settle_attempts():
                 if clock.sleepers:
                     break
                 await asyncio.sleep(0.001)
             clock.advance(30.0)
-            for _ in range(100):
+            for _ in _settle_attempts():
                 current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
                 if current > previous:
                     break
@@ -1112,7 +1140,7 @@ async def test_send_return_racing_heartbeat_orders_before_success_persist(
     try:
         await telegram.entered.wait()
         pause_health_load = True
-        for _ in range(100):
+        for _ in _settle_attempts():
             if clock.sleepers:
                 break
             await asyncio.sleep(0.001)
@@ -1245,7 +1273,7 @@ async def test_full_unknown_ledger_pauses_ready_and_never_calls_sender(tmp_path:
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             if payload["health"]["status"] == "paused_unknown_capacity":
                 break
@@ -1301,7 +1329,7 @@ async def test_newer_slot_with_full_ledger_persists_pause_without_send(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
             if payload["health"]["status"] == "paused_unknown_capacity":
                 break
@@ -1679,12 +1707,12 @@ async def test_blocked_render_keeps_strict_heartbeat_and_240s_alarm_refresh(
         baseline_snapshots = alarm.snapshots
         assert baseline_snapshots >= 1
         for tick in range(1, 9):
-            for _ in range(100):
+            for _ in _settle_attempts():
                 if clock.sleepers:
                     break
                 await asyncio.sleep(0.001)
             clock.advance(30.0)
-            for _ in range(100):
+            for _ in _settle_attempts():
                 current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
                 if current > previous:
                     break
@@ -1693,7 +1721,7 @@ async def test_blocked_render_keeps_strict_heartbeat_and_240s_alarm_refresh(
             previous = current
         assert alarm.snapshots == baseline_snapshots + 1
         release.set()
-        for _ in range(100):
+        for _ in _settle_attempts():
             if not coordinator._loop_task or coordinator._loop_task.done():
                 break
             if clock.sleepers:
@@ -1730,7 +1758,7 @@ async def test_closed_input_publication_failure_consumes_known_render_attempt(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             active = (await _load_stable(tmp_path)).payload["active"]
             if active["status"] == "FAILED":
                 break
@@ -1810,7 +1838,7 @@ async def test_existing_input_reuse_requires_every_deterministic_binding(tmp_pat
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             active = (await _load_stable(tmp_path)).payload["active"]
             if active["status"] == "FAILED":
                 break
@@ -1842,7 +1870,7 @@ async def test_rendering_without_live_owner_becomes_retryable_orphan_failure(
     )
     await coordinator.start()
     try:
-        for _ in range(100):
+        for _ in _settle_attempts():
             active = (await _load_stable(tmp_path)).payload["active"]
             if active["status"] == "FAILED":
                 break
