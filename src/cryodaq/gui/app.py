@@ -505,29 +505,14 @@ def main() -> None:
         owners.timer = timer
         timer.setInterval(10)
         callback_epoch = owners.epoch
+        bridge_watchdog = _BridgeWatchdog()
 
         def _tick() -> None:
             if not owners.callback_is_current(callback_epoch):
                 return
             _drain_bridge_readings(bridge, window)
             snapshot_ingress.pump()
-
-            if not bridge.is_healthy():
-                snapshot_ingress.invalidate_transport()
-                window.invalidate_descriptor_transport()
-                if bridge.is_alive():
-                    logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
-                    bridge.shutdown()
-                else:
-                    logger.warning("ZMQ bridge died, restarting...")
-                bridge.start()
-                return
-            if bridge.data_flow_stalled():
-                snapshot_ingress.invalidate_transport()
-                window.invalidate_descriptor_transport()
-                logger.warning("ZMQ bridge not healthy (no readings), restarting...")
-                bridge.shutdown()
-                bridge.start()
+            bridge_watchdog.tick(bridge=bridge, window=window, snapshot_ingress=snapshot_ingress)
 
         timer.timeout.connect(_tick)
         timer.start()
@@ -560,6 +545,89 @@ def _drain_bridge_readings(bridge: ZmqBridge, window: MainWindow) -> None:
     """Drain one qualified batch through the production GUI ingress."""
     for qualified in bridge.poll_readings_with_descriptor():
         window.dispatch_qualified_reading(qualified)
+
+
+# Bound consecutive failed bridge-restart attempts before latching HOLD.
+# Mirrors LauncherWindow._latch_bridge_watchdog_hold / _replace_bridge_from_
+# watchdog in launcher.py, which never lets a bridge that fails to settle
+# keep spawning fresh mp.Queues + a safe-IPC bundle + a subprocess forever.
+_BRIDGE_RESTART_ATTEMPT_LIMIT = 5
+
+
+class _BridgeWatchdog:
+    """Bound bridge-restart retries with a settlement latch.
+
+    ``bridge.start()`` raises on persistent failure (``gui/zmq_client.py``),
+    and after a failed start the bridge is neither alive nor healthy. A
+    naive per-tick watchdog therefore re-runs the whole spawn-and-rollback
+    cycle every single tick, forever. This tracks consecutive restart
+    failures and, once ``_BRIDGE_RESTART_ATTEMPT_LIMIT`` is reached, latches
+    HOLD: no further ``shutdown()``/``start()`` calls are made, and
+    :meth:`is_healthy` fails closed regardless of what the bridge itself
+    reports, so a latched bridge can never be mistaken for a live one.
+    """
+
+    def __init__(self) -> None:
+        self._consecutive_failures = 0
+        self.latched = False
+
+    def is_healthy(self, bridge: ZmqBridge) -> bool:
+        """Fail-closed health probe: a latched bridge never reads healthy."""
+        if self.latched:
+            return False
+        return bool(bridge.is_healthy())
+
+    def tick(
+        self,
+        *,
+        bridge: ZmqBridge,
+        window: MainWindow,
+        snapshot_ingress: OperatorSnapshotIngressOwner,
+    ) -> None:
+        """Restart the bridge subprocess when it stops reporting healthy."""
+        if self.latched:
+            return
+        if not self.is_healthy(bridge):
+            snapshot_ingress.invalidate_transport()
+            window.invalidate_descriptor_transport()
+            if bridge.is_alive():
+                logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
+                self._restart(bridge, shutdown_first=True)
+            else:
+                logger.warning("ZMQ bridge died, restarting...")
+                self._restart(bridge, shutdown_first=False)
+            return
+        if bridge.data_flow_stalled():
+            snapshot_ingress.invalidate_transport()
+            window.invalidate_descriptor_transport()
+            logger.warning("ZMQ bridge not healthy (no readings), restarting...")
+            self._restart(bridge, shutdown_first=True)
+
+    def _restart(self, bridge: ZmqBridge, *, shutdown_first: bool) -> None:
+        if shutdown_first:
+            bridge.shutdown()
+        try:
+            bridge.start()
+        except Exception as exc:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= _BRIDGE_RESTART_ATTEMPT_LIMIT:
+                self.latched = True
+                logger.critical(
+                    "ZMQ bridge watchdog HOLD: %d consecutive restart failures "
+                    "(limit=%d); giving up automatic recovery; failure=%s",
+                    self._consecutive_failures,
+                    _BRIDGE_RESTART_ATTEMPT_LIMIT,
+                    type(exc).__name__,
+                )
+            else:
+                logger.warning(
+                    "ZMQ bridge restart failed (attempt %d/%d); exception=%s",
+                    self._consecutive_failures,
+                    _BRIDGE_RESTART_ATTEMPT_LIMIT,
+                    type(exc).__name__,
+                )
+            return
+        self._consecutive_failures = 0
 
 
 if __name__ == "__main__":

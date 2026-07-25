@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import gzip
 import json
 import logging
@@ -463,7 +464,15 @@ class HousekeepingService:
             return
 
     async def run_once(self, *, now: datetime | None = None) -> list[HousekeepingAction]:
-        actions = self.plan_actions(now=now)
+        # Engine loop performs no blocking I/O (AGENTS.md: "Keep blocking I/O
+        # off the engine event loop"). plan_actions() globs and stat()s every
+        # data_*.db/.db.gz and parses every experiments/*/metadata.json, so it
+        # must be offloaded exactly like the apply step below — otherwise the
+        # loop cannot run heartbeats, cancellation, or safety coroutines while
+        # it scans. plan_actions only reads config captured once at __init__
+        # (paths, thresholds) plus the local `now` argument, so running it off
+        # the loop thread introduces no data race.
+        actions = await self._run_owned_executor(functools.partial(self.plan_actions, now=now))
         if self._dry_run:
             return actions
         for index, action in enumerate(actions):

@@ -78,12 +78,23 @@ def _operator_log_monotonic() -> float:
     return time.monotonic()
 
 
-def _operator_log_read_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+def _operator_log_read_identity(
+    info: os.stat_result, *, directory: bool
+) -> tuple[int, int, int, int, int, int, int]:
     return (
         info.st_dev,
         info.st_ino,
         stat.S_IFMT(info.st_mode),
-        getattr(info, "st_nlink", 1),
+        # st_nlink is identity evidence for a FILE (1 == not hardlinked). For
+        # a DIRECTORY it is 2 + the subdirectory count — a property of the
+        # directory's CONTENTS, not of the directory itself: a subdirectory
+        # created mid-scan (e.g. cold rotation writing a new date directory)
+        # changes it while st_dev/st_ino/mtime/ctime still prove it is the
+        # same directory. Folding it in made directory mutation tokens raise
+        # a false-positive "authority changed" on a benign concurrent
+        # mkdir. Mirrors the same fix already applied to
+        # _control_handle_identity() above.
+        0 if directory else getattr(info, "st_nlink", 1),
         info.st_size,
         info.st_mtime_ns,
         info.st_ctime_ns,
@@ -100,7 +111,7 @@ def _operator_log_regular_identity(path: Path) -> tuple[int, int, int, int, int,
         or bool(getattr(info, "st_file_attributes", 0) & reparse_flag)
     ):
         raise OSError("operator-log authority is not a single-link regular file")
-    return _operator_log_read_identity(info)
+    return _operator_log_read_identity(info, directory=False)
 
 
 def _canonical_operator_log_relative(relative: str) -> str:
@@ -165,7 +176,9 @@ def _read_posix_operator_log_bytes(
             raise OSError("operator-log authority is not a bounded single-link regular file")
         file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
         opened = os.fstat(file_fd)
-        if _operator_log_read_identity(opened) != _operator_log_read_identity(before):
+        if _operator_log_read_identity(opened, directory=False) != _operator_log_read_identity(
+            before, directory=False
+        ):
             raise OSError("operator-log authority changed before reading")
         chunks: list[bytes] = []
         remaining = max_bytes + 1
@@ -182,7 +195,8 @@ def _read_posix_operator_log_bytes(
         if (
             len(raw) > max_bytes
             or len(raw) != opened.st_size
-            or _operator_log_read_identity(finished) != _operator_log_read_identity(opened)
+            or _operator_log_read_identity(finished, directory=False)
+            != _operator_log_read_identity(opened, directory=False)
         ):
             raise OSError("operator-log authority changed while reading or exceeded its bound")
         return raw
@@ -1409,12 +1423,12 @@ class _OperatorLogRegistryRootAuthority:
     def mutation_token(self) -> tuple[int, int, int, int, int, int, int]:
         self.validate()
         if os.name != "nt":
-            token = _operator_log_read_identity(os.fstat(self.handle))
+            token = _operator_log_read_identity(os.fstat(self.handle), directory=True)
         else:
             before = self.data_dir.lstat()
             _control_path_identity(self.data_dir, directory=True)
-            token = _operator_log_read_identity(before)
-            if _operator_log_read_identity(self.data_dir.lstat()) != token:
+            token = _operator_log_read_identity(before, directory=True)
+            if _operator_log_read_identity(self.data_dir.lstat(), directory=True) != token:
                 raise RuntimeError("operator-log registry root mutation evidence changed")
         self.validate()
         return token
@@ -1450,8 +1464,8 @@ class _OperatorLogRegistryRootAuthority:
                 _control_path_identity(selected, directory=directory)
                 handle, _identity = self._open_checked_handle(selected, directory=directory)
                 transient.append(handle)
-                token = _operator_log_read_identity(before)
-                if _operator_log_read_identity(selected.lstat()) != token:
+                token = _operator_log_read_identity(before, directory=directory)
+                if _operator_log_read_identity(selected.lstat(), directory=directory) != token:
                     raise RuntimeError("operator-log registry relative mutation evidence changed")
             finally:
                 for handle in reversed(transient):
@@ -1480,7 +1494,7 @@ class _OperatorLogRegistryRootAuthority:
                     dir_fd=current,
                 )
                 transient.append(selected)
-                token = _operator_log_read_identity(os.fstat(selected))
+                token = _operator_log_read_identity(os.fstat(selected), directory=directory)
             finally:
                 for handle in reversed(transient):
                     self._close_transient_handle(handle)
@@ -1626,7 +1640,7 @@ class _ControlDatabaseAuthority:
                 raise RuntimeError("read-only database evidence escaped its retained root") from None
             return self._root_authority.relative_mutation_token(relative, directory=directory)
         _control_path_identity(path, directory=directory)
-        return _operator_log_read_identity(path.lstat())
+        return _operator_log_read_identity(path.lstat(), directory=directory)
 
     def _capture_read_only_mutation_tokens(self) -> None:
         if not self.read_only:
@@ -9213,11 +9227,28 @@ class SQLiteWriter:
         Legacy writers use ``write_immediate``; descriptor-authoritative
         production uses ``write_committed`` and its post-commit receipt.
         """
+        # _prepare_control_data_directory() walks the pinned ancestor chain
+        # with os.open/os.mkdir and handle-settlement retries — blocking
+        # filesystem work. The engine awaits start_immediate() before
+        # SafetyManager.start() and before signal-handler/readiness
+        # installation, so running this inline on the event loop thread
+        # would stall every other coroutine (heartbeat, cancellation) until
+        # the walk returns. Route it through the same owned-executor idiom
+        # every other blocking call in this file uses, so the loop stays
+        # responsive during startup.
+        task = partial(
+            _prepare_control_data_directory,
+            self._data_dir,
+            retained_on_failure=self._retained_control_bootstrap_handles,
+        )
         try:
-            self._data_dir = _prepare_control_data_directory(
-                self._data_dir,
-                retained_on_failure=self._retained_control_bootstrap_handles,
+            owner = self._owned_executor_task(
+                self._executor,
+                task,
+                read=False,
+                name="sqlite_prepare_control_data_directory",
             )
+            self._data_dir = await self._await_owned_task(owner)
         except BaseException:
             raise RuntimeError("SQLiteWriter data directory authority is unavailable") from None
         self._running = True

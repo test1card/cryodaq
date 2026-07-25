@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -351,6 +352,71 @@ def test_retention_compresses_daily_db_when_rotation_disabled(tmp_path: Path) ->
     )
     actions = service.plan_actions(now=datetime.now(UTC))
     assert any(a.action == "compress_db" and a.source == old for a in actions)
+
+
+# ---------------------------------------------------------------------------
+# `run_once`'s planning scan must not block the engine loop (AGENTS.md: "Keep
+# blocking I/O off the engine event loop"). `plan_actions` globs and stat()s
+# every data_*.db and parses every experiments/*/metadata.json; only the
+# apply step was previously offloaded to a thread.
+# ---------------------------------------------------------------------------
+
+
+async def test_run_once_plan_scan_does_not_block_engine_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proof: a 10ms ticker keeps advancing while a ~250ms filesystem glob is
+    monkeypatched to block during the planning scan. If `plan_actions` runs
+    inline on the loop (the defect), the ticker cannot be scheduled during
+    the blocking window and the tick count stays flat. If the scan is
+    offloaded to the executor (the fix), the ticker keeps advancing.
+    """
+    data_dir = tmp_path / "data"
+    artifacts = data_dir / "experiments"
+    artifacts.mkdir(parents=True)
+
+    service = HousekeepingService(
+        data_dir,
+        artifacts,
+        config={"enabled": True, "dry_run": True},
+    )
+
+    original_glob = Path.glob
+    delayed = {"done": False}
+
+    def slow_glob(self: Path, pattern: str, *args: object, **kwargs: object):
+        if self == data_dir and not delayed["done"]:
+            delayed["done"] = True
+            time.sleep(0.25)
+        return original_glob(self, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", slow_glob)
+
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker_task = asyncio.create_task(ticker())
+    await asyncio.sleep(0.03)
+    before = ticks
+
+    await service.run_once(now=datetime.now(UTC))
+
+    after = ticks
+    ticker_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ticker_task
+
+    advanced = after - before
+    assert advanced >= 10, (
+        f"ticker only advanced {advanced} ticks while the ~250ms planning scan ran — "
+        "the engine loop was blocked by plan_actions instead of the scan being "
+        "offloaded to the executor"
+    )
 
 
 # ---------------------------------------------------------------------------
