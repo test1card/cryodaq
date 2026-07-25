@@ -9,6 +9,12 @@ import logging
 
 def test_setup_logging_creates_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+    # `logs/` hangs off the *state* root, which CRYODAQ_STATE_ROOT relocates
+    # independently of CRYODAQ_ROOT. The sealed-candidate runner sets it for
+    # every execution, so without this the handler wrote under the candidate's
+    # runtime root and this assertion failed on both operating systems in CI
+    # while passing in every checkout run. Same idiom as test_paths_frozen.py.
+    monkeypatch.delenv("CRYODAQ_STATE_ROOT", raising=False)
 
     from cryodaq import logging_setup, paths
 
