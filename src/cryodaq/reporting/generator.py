@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,13 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Mm, Pt, RGBColor
 
+from cryodaq.report_process import terminate_descendant_tree
+from cryodaq.report_state import (
+    ReportContractError,
+    compute_source_fingerprint,
+    resolve_experiment_dir,
+    resolve_report_paths,
+)
 from cryodaq.reporting.data import ReportDataExtractor
 from cryodaq.reporting.sections import SECTION_REGISTRY
 
@@ -19,8 +27,49 @@ from cryodaq.reporting.sections import SECTION_REGISTRY
 # thread cannot be killed mid-call — eventually exhausting the thread pool.
 # On timeout the report degrades to docx-only, exactly like a missing soffice.
 _SOFFICE_TIMEOUT_S = 120
+# Preserve a bounded tail for DOCX hashing, manifest construction, durable
+# fsync, atomic generation promotion, and the final result write. Frozen
+# Windows builds can pay antivirus and filesystem latency at each boundary.
+_REPORT_COMMIT_TAIL_RESERVE_S = 8.0
+# POSIX tree termination can spend two seconds enumerating descendants, one
+# second settling TERM, and two more observing the direct process. Windows is
+# bounded below that value, so reserve the conservative cross-platform maximum.
+_SOFFICE_TERMINATION_RESERVE_S = 5.0
 
 logger = logging.getLogger(__name__)
+
+
+def _settle_soffice_process(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort bounded tree cleanup with a direct-leader fallback."""
+
+    tree_cleanup_failed = False
+    try:
+        terminate_descendant_tree(process.pid)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        tree_cleanup_failed = True
+        logger.error(
+            "ReportGenerator: cleanup of the soffice descendant tree failed; "
+            "falling back to direct leader termination: %s",
+            exc,
+        )
+    if tree_cleanup_failed:
+        try:
+            process.kill()
+        except OSError as exc:
+            logger.error("ReportGenerator: direct soffice termination failed: %s", exc)
+    try:
+        process.wait(timeout=2.0)
+        return
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error("ReportGenerator: soffice did not settle after cleanup: %s", exc)
+    try:
+        process.kill()
+    except OSError as exc:
+        logger.error("ReportGenerator: repeated direct soffice termination failed: %s", exc)
+    try:
+        process.wait(timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error("ReportGenerator: soffice leader could not be reaped within the cleanup bound: %s", exc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,11 +107,45 @@ class ReportGenerator:
         self._extractor = ReportDataExtractor(data_dir)
 
     def generate(self, experiment_id: str) -> ReportGenerationResult:
-        metadata_path = self._experiments_dir / experiment_id / "metadata.json"
+        experiment_root = resolve_experiment_dir(self._data_dir, experiment_id)
+        compute_source_fingerprint(experiment_root)
+        report_paths = resolve_report_paths(experiment_root, create_reports=True)
+        return self._generate_into(experiment_root, report_paths.reports)
+
+    def generate_to_directory(
+        self,
+        experiment_id: str,
+        output_dir: Path,
+        *,
+        deadline_epoch: float | None = None,
+    ) -> ReportGenerationResult:
+        """Render into one validated, child-owned generation staging directory."""
+        experiment_root = resolve_experiment_dir(self._data_dir, experiment_id)
+        report_paths = resolve_report_paths(experiment_root)
+        staging_root = report_paths.staging_root
+        output_dir = Path(output_dir)
+        if output_dir.is_symlink():
+            raise ReportContractError("report output directory must not be a symlink")
+        resolved_output = output_dir.resolve()
+        if resolved_output.parent != staging_root or report_paths.experiment_root not in resolved_output.parents:
+            raise ReportContractError("report output must be one generation staging directory")
+        return self._generate_into(
+            experiment_root,
+            resolved_output,
+            deadline_epoch=deadline_epoch,
+        )
+
+    def _generate_into(
+        self,
+        experiment_root: Path,
+        reports_dir: Path,
+        *,
+        deadline_epoch: float | None = None,
+    ) -> ReportGenerationResult:
+        metadata_path = experiment_root / "metadata.json"
         dataset = self._extractor.load_dataset(metadata_path)
         experiment = dataset.metadata["experiment"]
         template = dataset.metadata["template"]
-        reports_dir = metadata_path.parent / "reports"
         assets_dir = reports_dir / "assets"
         editable_docx_path = reports_dir / "report_editable.docx"
         raw_source_docx_path = reports_dir / "report_raw.docx"
@@ -84,30 +167,25 @@ class ReportGenerator:
         raw_sections = self._resolve_raw_sections(dataset.metadata)
         editable_sections = tuple(list(raw_sections) + list(self._EDITABLE_ONLY_SECTIONS))
 
-        # Slice C: Гемма-generated annotation (sync, graceful degradation)
+        # B1 (2026-07): Гемма-generated annotation used to be produced
+        # in-process here (import + synchronous Ollama call from the
+        # engine process). B1 moved all LLM/RAG code out of the engine —
+        # the intro paragraph is not reinstated via a cross-process call
+        # in this pass (see scratchpad/montana/exec/impl_b1.md, "forks").
+        # ``_build_document`` already treats ``gemma_intro=None`` as
+        # "skip the annotation section", which is exactly the existing
+        # graceful-degradation behaviour when Ollama was unavailable.
         gemma_intro: str | None = None
-        try:
-            from cryodaq.agents.assistant.shared.report_intro import (
-                generate_report_intro,
-                load_intro_config,
-            )
-
-            gemma_intro = generate_report_intro(dataset, load_intro_config())
-        except Exception:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "ReportGenerator: Гемма intro unavailable — continuing without",
-                exc_info=True,
-            )
 
         raw_document = self._build_document(dataset, assets_dir, raw_sections, gemma_intro)
         raw_document.save(str(raw_source_docx_path))
-        pdf_path = self._try_convert_pdf(raw_source_docx_path, raw_pdf_path)
-
-        editable_document = self._build_document(
-            dataset, assets_dir, editable_sections, gemma_intro
+        pdf_path = self._try_convert_pdf(
+            raw_source_docx_path,
+            raw_pdf_path,
+            deadline_epoch=deadline_epoch,
         )
+
+        editable_document = self._build_document(dataset, assets_dir, editable_sections, gemma_intro)
         editable_document.save(str(editable_docx_path))
 
         return ReportGenerationResult(
@@ -246,23 +324,17 @@ class ReportGenerator:
         from docx.oxml.ns import qn
 
         run = fp.add_run()
-        run._element.append(
-            run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"})
-        )
+        run._element.append(run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"}))
         run2 = fp.add_run()
         instr = run2._element.makeelement(qn("w:instrText"), {qn("xml:space"): "preserve"})
         instr.text = " PAGE "
         run2._element.append(instr)
         run3 = fp.add_run()
-        run3._element.append(
-            run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"})
-        )
+        run3._element.append(run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"}))
 
     def _resolve_raw_sections(self, metadata: dict) -> tuple[str, ...]:
         template = metadata.get("template", {})
-        configured = [
-            name for name in list(template.get("report_sections") or []) if name in SECTION_REGISTRY
-        ]
+        configured = [name for name in list(template.get("report_sections") or []) if name in SECTION_REGISTRY]
         ordered: list[str] = []
         for name in self._BASE_RAW_SECTIONS + tuple(configured):
             if name not in ordered:
@@ -271,7 +343,13 @@ class ReportGenerator:
             ordered.append("config_section")
         return tuple(ordered)
 
-    def _try_convert_pdf(self, source_docx_path: Path, target_pdf_path: Path) -> Path | None:
+    def _try_convert_pdf(
+        self,
+        source_docx_path: Path,
+        target_pdf_path: Path,
+        *,
+        deadline_epoch: float | None = None,
+    ) -> Path | None:
         """Best-effort DOCX→PDF via LibreOffice; None on any degradation.
 
         Every degradation path (missing soffice, timeout, failed conversion)
@@ -288,27 +366,69 @@ class ReportGenerator:
             )
             return None
         output_dir = source_docx_path.parent
+        timeout_s = float(_SOFFICE_TIMEOUT_S)
+        if deadline_epoch is not None:
+            remaining_s = deadline_epoch - time.time()
+            conversion_budget_s = remaining_s - _SOFFICE_TERMINATION_RESERVE_S - _REPORT_COMMIT_TAIL_RESERVE_S
+            if conversion_budget_s <= 0:
+                logger.warning(
+                    "ReportGenerator: PDF-конвертация пропущена — оставшееся "
+                    "время зарезервировано для надёжной публикации DOCX."
+                )
+                return None
+            timeout_s = min(timeout_s, conversion_budget_s)
+        command = [
+            soffice,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            str(source_docx_path),
+            "--outdir",
+            str(output_dir),
+        ]
         try:
-            subprocess.run(
-                [
-                    soffice,
-                    "--headless",
-                    "--convert-to",
-                    "pdf",
-                    str(source_docx_path),
-                    "--outdir",
-                    str(output_dir),
-                ],
-                check=False,
-                capture_output=True,
-                timeout=_SOFFICE_TIMEOUT_S,
-            )
+            if deadline_epoch is None:
+                # Preserve the direct synchronous API's characterized behavior.
+                subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    timeout=timeout_s,
+                )
+            else:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
+                remaining_s = deadline_epoch - time.time()
+                timeout_s = min(
+                    float(_SOFFICE_TIMEOUT_S),
+                    remaining_s - _SOFFICE_TERMINATION_RESERVE_S - _REPORT_COMMIT_TAIL_RESERVE_S,
+                )
+                if timeout_s <= 0:
+                    # Process creation is synchronous and cannot be cancelled.
+                    # Once it returns, settle its tree even when startup latency
+                    # has already consumed the safe conversion budget.
+                    _settle_soffice_process(process)
+                    logger.warning(
+                        "ReportGenerator: PDF-конвертация пропущена — запуск процесса "
+                        "исчерпал безопасный бюджет конвертации."
+                    )
+                    return None
+                try:
+                    process.wait(timeout=timeout_s)
+                except subprocess.TimeoutExpired:
+                    _settle_soffice_process(process)
+                    raise
         except subprocess.TimeoutExpired:
             logger.error(
                 "ReportGenerator: конвертация soffice в PDF превысила таймаут %d с — "
                 "PDF не создан, доступен только DOCX. Проверьте зависшие процессы "
                 "soffice / установку LibreOffice.",
-                _SOFFICE_TIMEOUT_S,
+                timeout_s,
             )
             return None
         produced = output_dir / f"{source_docx_path.stem}.pdf"

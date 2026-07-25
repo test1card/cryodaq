@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cryodaq.engine import _handle_assistant_query_command
+from cryodaq.agents.assistant_main import _handle_assistant_query_command
 
 
 def _run(coro):

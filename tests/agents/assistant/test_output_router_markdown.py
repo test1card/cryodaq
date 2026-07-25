@@ -25,9 +25,7 @@ from cryodaq.agents.assistant.live.output_router import (
 
 
 def test_bold_and_italic_converted_without_mutual_eating():
-    out = _markdown_to_html_for_telegram(
-        "**сильно** и *мягко*, плюс **жирный** хвост"
-    )
+    out = _markdown_to_html_for_telegram("**сильно** и *мягко*, плюс **жирный** хвост")
     assert "<b>сильно</b>" in out
     assert "<i>мягко</i>" in out
     assert "<b>жирный</b>" in out
@@ -81,11 +79,9 @@ def trigger_event():
 
 def test_telegram_dispatch_normalizes_markdown(trigger_event):
     telegram = AsyncMock()
-    event_logger = AsyncMock()
     event_bus = AsyncMock()
     router = OutputRouter(
         telegram_bot=telegram,
-        event_logger=event_logger,
         event_bus=event_bus,
     )
     body = "**Аларм!** канал *Т12* в норме."
@@ -110,43 +106,11 @@ def test_telegram_dispatch_normalizes_markdown(trigger_event):
     assert sent.startswith("🤖 Гемма:")
 
 
-def test_operator_log_keeps_raw_markdown(trigger_event):
-    telegram = AsyncMock()
-    event_logger = AsyncMock()
-    event_bus = AsyncMock()
-    router = OutputRouter(
-        telegram_bot=telegram,
-        event_logger=event_logger,
-        event_bus=event_bus,
-    )
-    body = "**Аларм!** канал *Т12*"
-
-    import asyncio
-
-    asyncio.run(
-        router.dispatch(
-            trigger_event,
-            body,
-            targets=[OutputTarget.OPERATOR_LOG],
-            audit_id="aud-1",
-        )
-    )
-
-    telegram._send_to_all.assert_not_called()
-    event_logger.log_event.assert_awaited_once()
-    logged: str = event_logger.log_event.await_args.args[1]
-    assert "**Аларм!**" in logged
-    assert "*Т12*" in logged
-    assert "<b>" not in logged
-
-
 def test_gui_insight_keeps_raw_markdown(trigger_event):
     telegram = AsyncMock()
-    event_logger = AsyncMock()
     event_bus = AsyncMock()
     router = OutputRouter(
         telegram_bot=telegram,
-        event_logger=event_logger,
         event_bus=event_bus,
     )
     body = "**Аларм!** канал *Т12*"
@@ -168,11 +132,9 @@ def test_gui_insight_keeps_raw_markdown(trigger_event):
 
 
 def test_telegram_skipped_when_bot_none(trigger_event):
-    event_logger = AsyncMock()
     event_bus = AsyncMock()
     router = OutputRouter(
         telegram_bot=None,
-        event_logger=event_logger,
         event_bus=event_bus,
     )
 
@@ -188,3 +150,36 @@ def test_telegram_skipped_when_bot_none(trigger_event):
     )
 
     assert dispatched == []  # silently skipped; no exception raised
+
+
+def test_failed_telegram_is_not_reported_as_dispatched(trigger_event):
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock(return_value=False)
+    router = OutputRouter(
+        telegram_bot=telegram,
+        event_bus=AsyncMock(),
+    )
+
+    import asyncio
+
+    outcomes = asyncio.run(
+        router.dispatch_detailed(
+            trigger_event,
+            "alarm",
+            targets=[OutputTarget.TELEGRAM],
+            audit_id="aud-failed",
+        )
+    )
+
+    assert outcomes == {"telegram": "failed"}
+    assert (
+        asyncio.run(
+            router.dispatch(
+                trigger_event,
+                "alarm",
+                targets=[OutputTarget.TELEGRAM],
+                audit_id="aud-failed",
+            )
+        )
+        == []
+    )

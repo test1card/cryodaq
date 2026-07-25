@@ -3,19 +3,43 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
 
-from cryodaq.core.alarm import AlarmEvent, AlarmSeverity
 from cryodaq.notifications.telegram import TelegramNotifier
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+#
+# AlarmSeverity / AlarmEvent below are test-local stand-ins for the retired
+# alarm-v1 types (cryodaq.core.alarm, deleted in the v1->v2 migration).
+# TelegramNotifier.__call__/_format_message are duck-typed (event: Any) and
+# were never actually wired to a notifiers list in production engine.py, so
+# any object exposing this shape exercises the same formatting code.
+
+
+class AlarmSeverity(Enum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+@dataclass(frozen=True)
+class AlarmEvent:
+    timestamp: datetime
+    alarm_name: str
+    channel: str
+    value: float
+    threshold: float
+    severity: AlarmSeverity
+    event_type: str
 
 
 def _event(
@@ -234,9 +258,7 @@ def _make_bot(**kwargs):
     broker = MagicMock()
     broker.subscribe = AsyncMock(return_value=asyncio.Queue())
     alarm_engine = MagicMock()
-    alarm_engine.get_active_alarms.return_value = {}
-    alarm_engine.get_state.return_value = {}
-    alarm_engine.get_events.return_value = []
+    alarm_engine.get_active.return_value = {}
     # Phase 2b K.1: TelegramCommandBot now refuses empty allowlist
     # when commands are enabled. Pass a default test chat id unless the
     # caller overrides it.
@@ -251,11 +273,56 @@ def _make_bot(**kwargs):
     return bot
 
 
-def _tg_msg(text: str, chat_id: int = 1234, username: str = "testuser") -> dict:
+def _tg_msg(
+    text: str,
+    chat_id: int = 1234,
+    username: str = "testuser",
+    message_id: int = 77,
+) -> dict:
     return {
         "text": text,
+        "message_id": message_id,
         "chat": {"id": chat_id},
         "from": {"id": 9, "username": username, "first_name": "Test"},
+    }
+
+
+def _capability_response(token: str = "token-1") -> dict:
+    return {
+        "ok": True,
+        "compatibility_receipt": {
+            "schema": "mutation_compatibility_v1",
+            "accepted": True,
+            "server_protocol_major": 1,
+            "required_capability": "cryodaq_mutation_v1",
+            "capability_token": token,
+        },
+    }
+
+
+def _published_log_result(command: dict, *, entry_id: int = 1) -> dict:
+    entry = {
+        "id": entry_id,
+        "timestamp": "2026-07-23T00:00:00+00:00",
+        "experiment_id": command["experiment_id"],
+        "author": command["author"],
+        "source": command["source"],
+        "message": command["message"],
+        "tags": list(command.get("tags", [])),
+    }
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "entry": entry,
+        "commit_receipt": {
+            "schema": "operator_log_commit_v1",
+            "request_id": command["request_id"],
+            "entry_id": entry_id,
+            "experiment_id": command["experiment_id"],
+            "committed": True,
+        },
     }
 
 
@@ -268,16 +335,62 @@ async def test_cmd_status_formats_message() -> None:
 
 
 async def test_cmd_log_writes_entry() -> None:
-    handler = AsyncMock(return_value={"ok": True})
+    async def dispatch(command: dict) -> dict:
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response()
+        return _published_log_result(command)
+
+    handler = AsyncMock(side_effect=dispatch)
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/log Всё штатно"))
-    handler.assert_called_once()
-    cmd = handler.call_args[0][0]
+    await bot._handle_message(_tg_msg("/log exp-1 Всё штатно"))
+    assert handler.await_count == 2
+    cmd = handler.await_args_list[1].args[0]
     assert cmd["cmd"] == "log_entry"
     assert "Всё штатно" in cmd["message"]
     assert cmd["author"] == "testuser"
+    assert cmd["experiment_id"] == "exp-1"
+    assert len(cmd["request_id"]) == 32
+    assert set(cmd["request_id"]) <= set("0123456789abcdef")
+    assert set(cmd) == {
+        "cmd",
+        "request_id",
+        "experiment_id",
+        "message",
+        "author",
+        "source",
+        "protocol_major",
+        "mutation_capability",
+        "capability_token",
+    }
+    assert cmd["protocol_major"] == 1
+    assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
+    assert cmd["capability_token"] == "token-1"
     bot._send.assert_called_once()
     assert "✅" in bot._send.call_args[0][1]
+
+
+@pytest.mark.parametrize("corruption", ["missing_publication", "wrong_request", "wrong_author", "extra_key"])
+async def test_cmd_log_never_accepts_incomplete_or_misbound_success(corruption: str) -> None:
+    async def dispatch(command: dict) -> dict:
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response()
+        result = _published_log_result(command)
+        if corruption == "missing_publication":
+            result.pop("publication_state")
+        elif corruption == "wrong_request":
+            result["commit_receipt"]["request_id"] = "f" * 32
+        elif corruption == "wrong_author":
+            result["entry"]["author"] = "forged"
+        else:
+            result["unexpected"] = True
+        return result
+
+    bot = _make_bot(command_handler=AsyncMock(side_effect=dispatch))
+    await bot._handle_message(_tg_msg("/log exp-1 exact"))
+
+    reply = bot._send.await_args.args[1]
+    assert "✅" not in reply
+    assert "Подробности" in reply
 
 
 async def test_query_agent_missing_reply_has_no_english_terms() -> None:
@@ -293,7 +406,7 @@ async def test_query_agent_missing_reply_has_no_english_terms() -> None:
 async def test_unavailable_command_handler_reply_has_no_english_terms() -> None:
     bot = _make_bot(command_handler=None)
 
-    await bot._handle_message(_tg_msg("/log запись"))
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "command_handler" not in text
@@ -304,7 +417,7 @@ async def test_command_handler_failure_does_not_expose_raw_english_error() -> No
     handler = AsyncMock(return_value={"ok": False, "error": "backend failure"})
     bot = _make_bot(command_handler=handler)
 
-    await bot._handle_message(_tg_msg("/log запись"))
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
 
     text: str = bot._send.call_args[0][1]
     assert "backend failure" not in text
@@ -315,19 +428,38 @@ async def test_cmd_log_empty_text_returns_error() -> None:
     bot = _make_bot()
     await bot._handle_message(_tg_msg("/log"))
     bot._send.assert_called_once()
-    assert "❌" in bot._send.call_args[0][1]
+    reply = bot._send.call_args[0][1]
+    assert reply == "❌ Укажите experiment_id и текст: /log &lt;experiment_id&gt; &lt;текст&gt;"
+    assert reply.encode("utf-8").decode("utf-8") == reply
+    assert "\ufffd" not in reply
 
 
 async def test_cmd_phase_advances() -> None:
     """Phase 2c I.2: legacy 'cooling' alias canonicalises to the
     ExperimentPhase enum value 'cooldown' before being dispatched."""
-    handler = AsyncMock(return_value={"ok": True})
+
+    async def dispatch(command: dict) -> dict:
+        if command == {"cmd": "experiment_status"}:
+            return {
+                "ok": True,
+                "active_experiment": {"experiment_id": "exp-current"},
+            }
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response()
+        return {"ok": True}
+
+    handler = AsyncMock(side_effect=dispatch)
     bot = _make_bot(command_handler=handler)
-    await bot._handle_message(_tg_msg("/phase cooling"))
-    handler.assert_called_once()
-    cmd = handler.call_args[0][0]
+    await bot._handle_message(_tg_msg("/phase cooling exp-current"))
+    assert handler.await_count == 3
+    cmd = handler.await_args_list[2].args[0]
     assert cmd["cmd"] == "experiment_advance_phase"
+    assert cmd["experiment_id"] == "exp-current"
     assert cmd["phase"] == "cooldown", "legacy 'cooling' must canonicalise to enum value 'cooldown'"
+    assert cmd["protocol_major"] == 1
+    assert cmd["mutation_capability"] == "cryodaq_mutation_v1"
+    assert cmd["capability_token"] == "token-1"
+    assert "expected_experiment_id" not in cmd
     assert "✅" in bot._send.call_args[0][1]
 
 
@@ -338,7 +470,169 @@ async def test_cmd_phase_invalid_returns_error() -> None:
     assert "❌" in bot._send.call_args[0][1]
 
 
+@pytest.mark.parametrize(
+    "discovery_response",
+    [
+        {"ok": True},
+        {"ok": True, "compatibility_receipt": None},
+        {
+            "ok": True,
+            "compatibility_receipt": {
+                **_capability_response()["compatibility_receipt"],
+                "unexpected": True,
+            },
+        },
+        {
+            "ok": True,
+            "compatibility_receipt": {
+                **_capability_response()["compatibility_receipt"],
+                "server_protocol_major": 2,
+            },
+        },
+        {
+            "ok": True,
+            "compatibility_receipt": {
+                **_capability_response()["compatibility_receipt"],
+                "capability_token": "",
+            },
+        },
+    ],
+)
+async def test_mutation_discovery_refuses_missing_or_malformed_receipts(
+    discovery_response: dict,
+) -> None:
+    handler = AsyncMock(return_value=discovery_response)
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/log exp-1 запись"))
+
+    handler.assert_awaited_once_with({"cmd": "mutation_capabilities"})
+    assert bot._mutation_envelope is None
+    assert "Подробности" in bot._send.await_args.args[1]
+
+
+async def test_rotated_token_is_invalidated_without_automatic_mutation_replay() -> None:
+    discoveries = iter(("token-old", "token-new"))
+    commands: list[dict] = []
+
+    async def dispatch(command: dict) -> dict:
+        commands.append(command)
+        if command == {"cmd": "mutation_capabilities"}:
+            return _capability_response(next(discoveries))
+        if command.get("capability_token") == "token-old":
+            return {
+                "ok": False,
+                "error_code": "mutation_protocol_incompatible",
+                "retry_safe": True,
+            }
+        return {"ok": True}
+
+    bot = _make_bot(command_handler=dispatch)
+
+    await bot._handle_message(_tg_msg("/log exp-1 first", message_id=91))
+
+    assert len(commands) == 2
+    assert [command["cmd"] for command in commands] == [
+        "mutation_capabilities",
+        "log_entry",
+    ]
+    assert bot._mutation_envelope is None
+
+    await bot._handle_message(_tg_msg("/log exp-1 second", message_id=92))
+
+    assert [command["cmd"] for command in commands] == [
+        "mutation_capabilities",
+        "log_entry",
+        "mutation_capabilities",
+        "log_entry",
+    ]
+    assert commands[-1]["capability_token"] == "token-new"
+    assert commands[1]["request_id"] != commands[-1]["request_id"]
+
+
+async def test_concurrent_mutations_share_one_capability_discovery() -> None:
+    discovery_entered = asyncio.Event()
+    release_discovery = asyncio.Event()
+    commands: list[dict] = []
+
+    async def dispatch(command: dict) -> dict:
+        commands.append(command)
+        if command == {"cmd": "mutation_capabilities"}:
+            discovery_entered.set()
+            await release_discovery.wait()
+            return _capability_response("shared-token")
+        return {"ok": True}
+
+    bot = _make_bot(command_handler=dispatch)
+    first = asyncio.create_task(bot._handle_message(_tg_msg("/log exp-1 first", message_id=101)))
+    second = asyncio.create_task(bot._handle_message(_tg_msg("/log exp-2 second", message_id=102)))
+    await asyncio.wait_for(discovery_entered.wait(), timeout=1)
+    assert [command["cmd"] for command in commands] == ["mutation_capabilities"]
+    release_discovery.set()
+    await asyncio.gather(first, second)
+
+    assert sum(command["cmd"] == "mutation_capabilities" for command in commands) == 1
+    mutations = [command for command in commands if command["cmd"] == "log_entry"]
+    assert len(mutations) == 2
+    assert {command["capability_token"] for command in mutations} == {"shared-token"}
+    assert len({command["request_id"] for command in mutations}) == 2
+
+
+async def test_phase_refuses_to_discover_or_mutate_without_stable_experiment_id() -> None:
+    handler = AsyncMock(return_value={"ok": True, "active_experiment": None})
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/phase cooldown exp-claimed"))
+
+    handler.assert_awaited_once_with({"cmd": "experiment_status"})
+    assert bot._mutation_envelope is None
+    assert "Подробности" in bot._send.await_args.args[1]
+
+
+async def test_phase_refuses_mismatched_operator_identity_before_capability_discovery() -> None:
+    handler = AsyncMock(
+        return_value={
+            "ok": True,
+            "active_experiment": {"experiment_id": "exp-new"},
+        }
+    )
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/phase cooldown exp-stale"))
+
+    handler.assert_awaited_once_with({"cmd": "experiment_status"})
+    assert bot._mutation_envelope is None
+    assert "Подробности" in bot._send.await_args.args[1]
+
+
+async def test_invalid_phase_with_exact_identity_never_dispatches() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+
+    await bot._handle_message(_tg_msg("/phase definitely-not-a-phase exp-A"))
+
+    handler.assert_not_awaited()
+    bot._send.assert_awaited_once()
+    assert "\u274c" in bot._send.await_args.args[1]
+
+
+async def test_cmd_phase_without_identity_is_rejected() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/phase cooling"))
+    handler.assert_not_called()
+    assert "experiment_id" in bot._send.call_args[0][1]
+
+
 # ===========================================================================
+async def test_cmd_log_without_identity_is_rejected() -> None:
+    handler = AsyncMock(return_value={"ok": True})
+    bot = _make_bot(command_handler=handler)
+    await bot._handle_message(_tg_msg("/log запись"))
+    handler.assert_not_called()
+    assert "experiment_id" in bot._send.call_args[0][1]
+
+
 # EscalationService tests
 # ===========================================================================
 
@@ -399,8 +693,7 @@ async def test_escalation_cancel_stops() -> None:
     # Task must be registered immediately after escalate()
     pending_key = "shift_missed_111"
     assert pending_key in svc._pending, (
-        f"Expected task key '{pending_key}' in _pending after escalate(), "
-        f"got keys: {list(svc._pending)}"
+        f"Expected task key '{pending_key}' in _pending after escalate(), got keys: {list(svc._pending)}"
     )
     task_ref = svc._pending[pending_key]
     assert not task_ref.done(), "Task should be waiting (not done) before cancel()"
@@ -410,8 +703,6 @@ async def test_escalation_cancel_stops() -> None:
     # cancel() awaits the task cancellation — task must be done and cancelled
     assert task_ref.cancelled(), "Task must be in cancelled state after cancel()"
     # Key must be removed from _pending
-    assert pending_key not in svc._pending, (
-        f"Key '{pending_key}' must be removed from _pending after cancel()"
-    )
+    assert pending_key not in svc._pending, f"Key '{pending_key}' must be removed from _pending after cancel()"
     # Belt-and-suspenders: send_message must not have been called
     notifier.send_message.assert_not_called()

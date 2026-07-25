@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,12 +29,14 @@ def _j(
     window: int | None = None,
     quantity: str = "",
 ) -> str:
-    return json.dumps({
-        "category": category,
-        "target_channels": channels,
-        "time_window_minutes": window,
-        "quantity": quantity,
-    })
+    return json.dumps(
+        {
+            "category": category,
+            "target_channels": channels,
+            "time_window_minutes": window,
+            "quantity": quantity,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +118,7 @@ def _make_ollama_result(text: str, truncated: bool = False) -> MagicMock:
 
 def _make_ollama(text: str, truncated: bool = False) -> MagicMock:
     client = MagicMock()
-    client.generate = AsyncMock(
-        return_value=_make_ollama_result(text, truncated)
-    )
+    client.generate = AsyncMock(return_value=_make_ollama_result(text, truncated))
     return client
 
 
@@ -188,6 +189,26 @@ async def test_intent_classifier_handles_llm_timeout() -> None:
     clf = IntentClassifier(client)
     intent = await clf.classify("ETA охлаждения")
     assert intent.category == QueryCategory.UNKNOWN
+
+
+async def test_intent_classifier_applies_configured_timeout() -> None:
+    """The query-specific timeout must win over a slower Ollama client bound."""
+    cancelled = asyncio.Event()
+
+    async def _slow_generate(*_args, **_kwargs):
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            cancelled.set()
+
+    client = MagicMock()
+    client.generate = AsyncMock(side_effect=_slow_generate)
+    classifier = IntentClassifier(client, timeout_s=0.01)
+
+    intent = await asyncio.wait_for(classifier.classify("ETA охлаждения"), timeout=0.2)
+
+    assert intent.category == QueryCategory.UNKNOWN
+    assert cancelled.is_set(), "timed-out generate coroutine was not cancelled"
 
 
 async def test_intent_classifier_handles_truncated_response() -> None:

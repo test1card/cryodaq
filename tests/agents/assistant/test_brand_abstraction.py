@@ -46,7 +46,6 @@ def test_format_with_brand_uses_exact_name() -> None:
 def test_telegram_prefix_uses_brand_emoji() -> None:
     router = OutputRouter(
         telegram_bot=None,
-        event_logger=MagicMock(),
         event_bus=MagicMock(),
         brand_name="Минерва",
         brand_emoji="🦉",
@@ -57,7 +56,6 @@ def test_telegram_prefix_uses_brand_emoji() -> None:
 def test_telegram_prefix_default_is_gemma() -> None:
     router = OutputRouter(
         telegram_bot=None,
-        event_logger=MagicMock(),
         event_bus=MagicMock(),
     )
     assert router._prefix == "🤖 Гемма:"
@@ -89,12 +87,7 @@ def test_new_agent_config_loads_clean(caplog: pytest.LogCaptureFixture) -> None:
 def test_legacy_gemma_config_loads_with_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    yaml_content = (
-        "gemma:\n"
-        "  enabled: true\n"
-        "  ollama:\n"
-        "    default_model: gemma4:e4b\n"
-    )
+    yaml_content = "gemma:\n  enabled: true\n  ollama:\n    default_model: gemma4:e4b\n"
     with caplog.at_level(logging.WARNING):
         config = AssistantConfig.from_yaml_string(yaml_content)
 
@@ -110,9 +103,7 @@ def test_config_brand_fields_default() -> None:
 
 
 def test_config_from_dict_reads_brand_fields() -> None:
-    config = AssistantConfig.from_dict(
-        {"brand_name": "Афина", "brand_emoji": "🏛️", "enabled": True}
-    )
+    config = AssistantConfig.from_dict({"brand_name": "Афина", "brand_emoji": "🏛️", "enabled": True})
     assert config.brand_name == "Афина"
     assert config.brand_emoji == "🏛️"
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -15,8 +16,7 @@ from typing import Any
 
 import aiohttp
 
-from cryodaq.agents.assistant.query.ru_labels import phase_display_name
-from cryodaq.core.alarm import AlarmEngine
+from cryodaq.core.alarm_v2 import AlarmStateManager
 from cryodaq.core.broker import DataBroker
 
 # Phase 2c I.2: derive the accepted phase vocabulary from the canonical
@@ -25,6 +25,8 @@ from cryodaq.core.broker import DataBroker
 # missing "vacuum") so remote operators received bogus "unknown phase"
 # errors for phases that exist locally.
 from cryodaq.core.experiment import ExperimentPhase as _ExperimentPhase
+from cryodaq.core.ru_labels import phase_display_name
+from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
 
@@ -60,6 +62,23 @@ _PHASE_ALIASES: dict[str, str] = {
 # Legacy mutable list kept for any callers that import it. Prefer VALID_PHASES.
 _VALID_PHASES = sorted(VALID_PHASES)
 _COMMAND_FAILED_TEXT = "❌ Команда не выполнена. Подробности в логах."
+_MUTATION_PROTOCOL_MAJOR = 1
+_MUTATION_CAPABILITY = "cryodaq_mutation_v1"
+_MUTATION_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "accepted",
+        "server_protocol_major",
+        "required_capability",
+        "capability_token",
+    }
+)
+_OPERATOR_LOG_SUCCESS_KEYS = frozenset(
+    {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt"}
+)
+_OPERATOR_LOG_PENDING_KEYS = _OPERATOR_LOG_SUCCESS_KEYS | {"error_code", "error"}
+_OPERATOR_LOG_ENTRY_KEYS = frozenset({"id", "timestamp", "experiment_id", "author", "source", "message", "tags"})
+_OPERATOR_LOG_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
 
 
 class _TelegramAuthError(Exception):
@@ -72,7 +91,7 @@ class TelegramCommandBot:
     Параметры
     ----------
     broker:       DataBroker для подписки на данные.
-    alarm_engine: AlarmEngine для запроса состояния тревог.
+    alarm_engine: AlarmStateManager (alarm v2) для запроса состояния тревог.
     bot_token:    Токен Telegram-бота (str или SecretStr).
     allowed_chat_ids: Список разрешённых chat_id. Phase 2b K.1:
         пустой список + commands_enabled=True → ValueError при создании
@@ -86,7 +105,7 @@ class TelegramCommandBot:
     def __init__(
         self,
         broker: DataBroker | None = None,
-        alarm_engine: AlarmEngine | None = None,
+        alarm_engine: AlarmStateManager | None = None,
         *,
         bot_token: str | SecretStr,
         allowed_chat_ids: list[int] | None = None,
@@ -135,6 +154,8 @@ class TelegramCommandBot:
         self._poll_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[Reading] | None = None
         self._session: aiohttp.ClientSession | None = None
+        self._mutation_envelope: dict[str, Any] | None = None
+        self._mutation_discovery_task: asyncio.Task[dict[str, Any]] | None = None
 
     @property
     def _api(self) -> str:
@@ -166,19 +187,54 @@ class TelegramCommandBot:
         return self._session
 
     async def stop(self) -> None:
-        for task in (self._collect_task, self._poll_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        tasks = tuple(
+            task
+            for task in (
+                self._collect_task,
+                self._poll_task,
+                self._mutation_discovery_task,
+            )
+            if task is not None
+        )
+        settlement = await cancel_and_settle_tasks(tasks)
         self._collect_task = None
         self._poll_task = None
-        if self._session and not self._session.closed:
-            await self._session.close()
+        self._mutation_discovery_task = None
+        self._mutation_envelope = None
+        dependency_failures: list[BaseException] = []
+        session = self._session
+        if session is None or session.closed is True:
             self._session = None
-        await self._broker.unsubscribe(_SUBSCRIBE_NAME)
+        else:
+            try:
+                await session.close()
+                if session.closed is not True:
+                    raise RuntimeError("Telegram HTTP session did not report exact terminal closure")
+            except Exception as exc:
+                dependency_failures.append(exc)
+            else:
+                self._session = None
+        queue = self._queue
+        if queue is not None:
+            try:
+                unsubscribe_result = await self._broker.unsubscribe(
+                    _SUBSCRIBE_NAME,
+                    expected_queue=queue,
+                )
+                if unsubscribe_result is not True:
+                    raise RuntimeError("Telegram broker did not release the exact queue owner")
+            except Exception as exc:
+                dependency_failures.append(exc)
+            else:
+                self._queue = None
+        if dependency_failures:
+            if settlement.failures:
+                logger.error(
+                    "Telegram terminal task failed during dependency settlement; exception=%s",
+                    type(settlement.failures[0]).__name__,
+                )
+            raise RuntimeError("Telegram shutdown dependencies remain unsettled") from dependency_failures[0]
+        settlement.raise_if_unsuccessful()
         logger.info("TelegramCommandBot остановлен")
 
     # ------------------------------------------------------------------
@@ -293,9 +349,15 @@ class TelegramCommandBot:
         even though ``_fetch_updates`` already filters. Direct callers
         (tests, future code paths) must NOT bypass the allowlist.
         """
-        text = msg.get("text", "").strip()
-        chat_id = msg.get("chat", {}).get("id")
-        if not chat_id or not text.startswith("/"):
+        if type(msg) is not dict:
+            return
+        raw_text = msg.get("text")
+        chat = msg.get("chat")
+        if type(raw_text) is not str or type(chat) is not dict:
+            return
+        text = raw_text.strip()
+        chat_id = chat.get("id")
+        if type(chat_id) is not int or chat_id == 0 or not text.startswith("/"):
             return
 
         if not self._is_chat_allowed(chat_id):
@@ -320,11 +382,23 @@ class TelegramCommandBot:
         elif command in ("/help", "/start"):
             await self._send(chat_id, _HELP_TEXT)
         elif command == "/log":
-            log_text = text[len("/log") :].strip()
-            await self._cmd_log(chat_id, log_text, msg)
+            log_args = text[len("/log") :].strip().split(maxsplit=1)
+            if len(log_args) != 2:
+                await self._send(
+                    chat_id,
+                    "❌ Укажите experiment_id и текст: /log &lt;experiment_id&gt; &lt;текст&gt;",
+                )
+                return
+            await self._cmd_log(chat_id, log_args[1], log_args[0], msg)
         elif command == "/phase":
-            phase_arg = text[len("/phase") :].strip()
-            await self._cmd_phase(chat_id, phase_arg, msg)
+            phase_args = text[len("/phase") :].strip().split()
+            if len(phase_args) != 2:
+                await self._send(
+                    chat_id,
+                    "❌ Укажите фазу и точный experiment_id: /phase <фаза> <experiment_id>",
+                )
+                return
+            await self._cmd_phase(chat_id, phase_args[0], phase_args[1], msg)
         elif command == "/ask":
             query_text = text[len("/ask") :].strip()
             if not query_text:
@@ -351,9 +425,7 @@ class TelegramCommandBot:
             return
 
         if self._query_agent is None:
-            await self._send(
-                chat_id, "Я понимаю только команды с косой чертой. /help для списка."
-            )
+            await self._send(chat_id, "Я понимаю только команды с косой чертой. /help для списка.")
             return
 
         try:
@@ -386,7 +458,7 @@ class TelegramCommandBot:
             if inst:
                 instruments[inst] = instruments.get(inst, 0) + 1
 
-        alarms = self._alarm_engine.get_active_alarms()
+        alarms = list(self._alarm_engine.get_active().keys())
 
         lines = [
             "<b>CryoDAQ — Статус</b>",
@@ -451,60 +523,243 @@ class TelegramCommandBot:
         return "\n".join(lines)
 
     def _cmd_alarms(self) -> str:
-        active = self._alarm_engine.get_active_alarms()
-        states = self._alarm_engine.get_state()
-        events = self._alarm_engine.get_events()
+        active = self._alarm_engine.get_active()
 
         if not active:
             return "Активных тревог нет."
 
         lines = ["<b>Активные тревоги</b>", ""]
-        for name in active:
-            state = states.get(name)
-            recent = [e for e in events if e.alarm_name == name]
-            last = recent[-1] if recent else None
-            state_ru = _ALARM_STATE_RU.get(state.value, state.value) if state else "?"
-            line = f"  <b>{name}</b> — {state_ru}"
-            if last:
-                line += f"\n    Канал: {last.channel}, значение: {last.value:.4g}"
+        for alarm_id, event in active.items():
+            state_ru = "подтверждена" if event.acknowledged else "активна"
+            line = f"  <b>{alarm_id}</b> [{event.level}] — {state_ru}"
+            if event.channels:
+                ch = event.channels[0]
+                val = event.values.get(ch)
+                if val is not None:
+                    line += f"\n    Канал: {ch}, значение: {val:.4g}"
             lines.append(line)
         return "\n".join(lines)
 
     def _cmd_help(self) -> str:
         return _HELP_TEXT
 
-    async def _cmd_log(self, chat_id: int, text: str, msg: dict) -> None:
+    async def _discover_mutation_envelope(self) -> dict[str, Any]:
+        if self._command_handler is None:
+            raise RuntimeError("command handler unavailable")
+        response = await self._command_handler({"cmd": "mutation_capabilities"})
+        if type(response) is not dict or response.get("ok") is not True:
+            raise RuntimeError("mutation capability discovery failed")
+        receipt = response.get("compatibility_receipt")
+        if type(receipt) is not dict or set(receipt) != _MUTATION_RECEIPT_KEYS:
+            raise RuntimeError("mutation capability receipt is malformed")
+        token = receipt.get("capability_token")
+        if (
+            receipt.get("schema") != "mutation_compatibility_v1"
+            or receipt.get("accepted") is not True
+            or type(receipt.get("server_protocol_major")) is not int
+            or receipt.get("server_protocol_major") != _MUTATION_PROTOCOL_MAJOR
+            or receipt.get("required_capability") != _MUTATION_CAPABILITY
+            or type(token) is not str
+            or not token
+            or len(token) > 256
+            or not token.isprintable()
+        ):
+            raise RuntimeError("mutation capability receipt is incompatible")
+        envelope = {
+            "protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "mutation_capability": _MUTATION_CAPABILITY,
+            "capability_token": token,
+        }
+        self._mutation_envelope = envelope
+        return envelope
+
+    def _mutation_discovery_done(self, task: asyncio.Task[dict[str, Any]]) -> None:
+        if self._mutation_discovery_task is task:
+            self._mutation_discovery_task = None
+        if task.cancelled():
+            return
+        # Retrieve any exception even if all shielded waiters were cancelled.
+        task.exception()
+
+    async def _get_mutation_envelope(self) -> dict[str, Any]:
+        if self._mutation_envelope is not None:
+            return dict(self._mutation_envelope)
+        task = self._mutation_discovery_task
+        if task is None:
+            task = asyncio.create_task(
+                self._discover_mutation_envelope(),
+                name="telegram_mutation_capability_discovery",
+            )
+            self._mutation_discovery_task = task
+            task.add_done_callback(self._mutation_discovery_done)
+        return dict(await asyncio.shield(task))
+
+    async def _dispatch_mutation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._command_handler is None:
+            return {
+                "ok": False,
+                "error_code": "mutation_capability_unavailable",
+            }
+        try:
+            envelope = await self._get_mutation_envelope()
+            result = await self._command_handler({**payload, **envelope})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Telegram mutation capability/dispatch failed: exception=%s",
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error_code": "mutation_capability_unavailable",
+            }
+        if type(result) is not dict:
+            return {
+                "ok": False,
+                "error_code": "mutation_response_invalid",
+            }
+        if result.get("error_code") == "mutation_protocol_incompatible":
+            # Invalidate for the *next operator command*. Never replay this
+            # mutation: its outcome belongs to this one authoritative request.
+            self._mutation_envelope = None
+        return result
+
+    @staticmethod
+    def _operator_log_request_id(msg: dict[str, Any], expected_chat_id: int) -> str | None:
+        chat = msg.get("chat")
+        if type(chat) is not dict:
+            return None
+        chat_id = chat.get("id")
+        message_id = msg.get("message_id")
+        if (
+            type(expected_chat_id) is int
+            and type(chat_id) is int
+            and chat_id == expected_chat_id
+            and type(message_id) is int
+            and message_id > 0
+        ):
+            identity = f"telegram:{chat_id}:{message_id}".encode()
+            return hashlib.sha256(identity).hexdigest()[:32]
+        return None
+
+    @staticmethod
+    def _operator_log_author(msg: dict[str, Any]) -> str | None:
+        from_info = msg.get("from")
+        if type(from_info) is not dict:
+            return None
+        raw = from_info.get("username") or from_info.get("first_name")
+        if type(raw) is not str:
+            return None
+        author = raw.strip()
+        if (
+            not author
+            or not author.isprintable()
+            or len(author.encode("utf-8")) > 4096
+            or author.casefold() in {"system", "auto", "machine"}
+        ):
+            return None
+        return author
+
+    @staticmethod
+    def _operator_log_commit_matches(
+        result: object,
+        payload: dict[str, Any],
+        *,
+        publication_state: str,
+    ) -> bool:
+        if publication_state not in {"published", "pending"}:
+            return False
+        expected_keys = _OPERATOR_LOG_SUCCESS_KEYS if publication_state == "published" else _OPERATOR_LOG_PENDING_KEYS
+        expected_ok = publication_state == "published"
+        if (
+            type(result) is not dict
+            or set(result) != expected_keys
+            or result.get("ok") is not expected_ok
+            or result.get("committed") is not True
+            or result.get("retry_safe") is not False
+            or result.get("publication_state") != publication_state
+        ):
+            return False
+        if publication_state == "pending" and (
+            result.get("error_code") != "committed_reconciliation_failed"
+            or type(result.get("error")) is not str
+            or len(result["error"]) > 512
+        ):
+            return False
+        entry = result.get("entry")
+        receipt = result.get("commit_receipt")
+        if (
+            type(entry) is not dict
+            or set(entry) != _OPERATOR_LOG_ENTRY_KEYS
+            or type(receipt) is not dict
+            or set(receipt) != _OPERATOR_LOG_RECEIPT_KEYS
+        ):
+            return False
+        entry_id = entry.get("id")
+        timestamp = entry.get("timestamp")
+        if type(entry_id) is not int or entry_id <= 0 or type(timestamp) is not str or len(timestamp) > 128:
+            return False
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return False
+        if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed) or parsed.isoformat() != timestamp:
+            return False
+        return (
+            receipt.get("schema") == "operator_log_commit_v1"
+            and receipt.get("request_id") == payload.get("request_id")
+            and receipt.get("entry_id") == entry_id
+            and receipt.get("experiment_id") == payload.get("experiment_id")
+            and receipt.get("committed") is True
+            and entry.get("experiment_id") == payload.get("experiment_id")
+            and entry.get("author") == payload.get("author")
+            and entry.get("source") == "telegram"
+            and entry.get("message") == payload.get("message")
+            and entry.get("tags") == []
+        )
+
+    async def _cmd_log(self, chat_id: int, text: str, experiment_id: str, msg: dict) -> None:
         if not text:
             await self._send(chat_id, "❌ Укажите текст: /log &lt;текст&gt;")
             return
         if self._command_handler is None:
             await self._send(chat_id, "❌ Команды недоступны: нет обработчика команд")
             return
-        from_info = msg.get("from", {})
-        username = from_info.get("username") or from_info.get("first_name", "telegram")
-        result = await self._command_handler(
-            {
-                "cmd": "log_entry",
-                "message": text,
-                "author": username,
-                "source": "telegram",
-            }
-        )
-        if result.get("ok"):
+        request_id = self._operator_log_request_id(msg, chat_id)
+        username = self._operator_log_author(msg)
+        if request_id is None or username is None:
+            logger.warning("Telegram /log refused: stable message or actor identity unavailable")
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
+            return
+        payload = {
+            "cmd": "log_entry",
+            "request_id": request_id,
+            "message": text,
+            "author": username,
+            "source": "telegram",
+            "experiment_id": experiment_id,
+        }
+        result = await self._dispatch_mutation(payload)
+        if self._operator_log_commit_matches(result, payload, publication_state="published"):
             await self._send(chat_id, "✅ Записано в журнал")
+        elif self._operator_log_commit_matches(result, payload, publication_state="pending"):
+            await self._send(chat_id, "⚠️ Запись сохранена; подтверждение публикации ожидается")
         else:
-            logger.warning("Telegram /log failed: %s", result.get("error"))
+            error_code = result.get("error_code")
+            logger.warning(
+                "Telegram /log failed: error_code=%s",
+                error_code if type(error_code) is str and len(error_code) <= 128 else "invalid_response",
+            )
             await self._send(chat_id, _COMMAND_FAILED_TEXT)
 
-    async def _cmd_phase(self, chat_id: int, phase: str, msg: dict) -> None:
+    async def _cmd_phase(self, chat_id: int, phase: str, expected_experiment_id: str, msg: dict) -> None:
         # Phase 2c I.2: accept legacy aliases (cooling/warming) and
         # canonicalise to ExperimentPhase enum values.
         normalized = phase.strip().lower()
         normalized = _PHASE_ALIASES.get(normalized, normalized)
         if normalized not in VALID_PHASES:
-            phases_ru = ", ".join(
-                phase_display_name(p) for p in sorted(VALID_PHASES)
-            )
+            phases_ru = ", ".join(phase_display_name(p) for p in sorted(VALID_PHASES))
             await self._send(chat_id, f"❌ Неверная фаза. Доступные: {phases_ru}")
             return
         phase = normalized
@@ -513,9 +768,25 @@ class TelegramCommandBot:
             return
         from_info = msg.get("from", {})
         username = from_info.get("username") or from_info.get("first_name", "telegram")
-        result = await self._command_handler(
+        status = await self._command_handler({"cmd": "experiment_status"})
+        active = status.get("active_experiment") if type(status) is dict and status.get("ok") is True else None
+        experiment_id = active.get("experiment_id") if type(active) is dict else None
+        if type(experiment_id) is not str or not experiment_id:
+            logger.warning("Telegram /phase refused: no stable active experiment identity")
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
+            return
+        if experiment_id != expected_experiment_id:
+            logger.warning(
+                "Telegram /phase refused: operator experiment identity %r does not match active identity %r",
+                expected_experiment_id,
+                experiment_id,
+            )
+            await self._send(chat_id, _COMMAND_FAILED_TEXT)
+            return
+        result = await self._dispatch_mutation(
             {
                 "cmd": "experiment_advance_phase",
+                "experiment_id": experiment_id,
                 "phase": phase,
                 "operator": username,
             }
@@ -563,6 +834,7 @@ class TelegramCommandBot:
         """Отправить PNG-изображение в указанный chat_id через sendPhoto."""
         try:
             import aiohttp  # noqa: PLC0415
+
             session = await self._get_session()
             form = aiohttp.FormData()
             form.add_field("chat_id", str(chat_id))
@@ -584,9 +856,7 @@ class TelegramCommandBot:
         """Resolve Telegram file_id к downloadable path via getFile API."""
         session = await self._get_session()
         try:
-            async with session.get(
-                f"{self._api}/getFile", params={"file_id": file_id}
-            ) as resp:
+            async with session.get(f"{self._api}/getFile", params={"file_id": file_id}) as resp:
                 if resp.status != 200:
                     logger.error("Telegram getFile %d", resp.status)
                     return None
@@ -628,14 +898,10 @@ class TelegramCommandBot:
         }
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/sendMessage", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/sendMessage", json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(
-                        "Telegram sendMessage (keyboard) %d: %s", resp.status, body[:200]
-                    )
+                    logger.error("Telegram sendMessage (keyboard) %d: %s", resp.status, body[:200])
                     return None
                 data = await resp.json()
                 return data.get("result", {}).get("message_id")
@@ -643,9 +909,7 @@ class TelegramCommandBot:
             logger.error("sendMessage keyboard error: %s", exc)
             return None
 
-    async def edit_message(
-        self, chat_id: int, message_id: int, text: str
-    ) -> None:
+    async def edit_message(self, chat_id: int, message_id: int, text: str) -> None:
         """Edit existing message text (used after inline keyboard tap)."""
         payload = {
             "chat_id": chat_id,
@@ -655,14 +919,10 @@ class TelegramCommandBot:
         }
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/editMessageText", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/editMessageText", json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(
-                        "Telegram editMessage %d: %s", resp.status, body[:200]
-                    )
+                    logger.error("Telegram editMessage %d: %s", resp.status, body[:200])
         except Exception as exc:
             logger.error("editMessage error: %s", exc)
 
@@ -673,9 +933,7 @@ class TelegramCommandBot:
             payload["text"] = text
         session = await self._get_session()
         try:
-            async with session.post(
-                f"{self._api}/answerCallbackQuery", json=payload
-            ) as resp:
+            async with session.post(f"{self._api}/answerCallbackQuery", json=payload) as resp:
                 if resp.status != 200:
                     logger.warning("Telegram answerCallback %d", resp.status)
         except Exception as exc:

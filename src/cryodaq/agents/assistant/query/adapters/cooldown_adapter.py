@@ -1,32 +1,33 @@
-"""CooldownAdapter — wraps CooldownService.last_prediction() for query agent."""
+"""CooldownAdapter — reads the engine's live cooldown ETA prediction.
+
+B1: previously wrapped a direct reference to the in-process
+``CooldownService``; now calls the engine's read-only ``cooldown_eta_get``
+REP command (new, additive — mirrors the existing ``get_vacuum_trend``
+read command, exposing ``CooldownService.last_prediction()`` the same way).
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from cryodaq.agents.assistant.query.schemas import CooldownETA
-
-if TYPE_CHECKING:
-    from cryodaq.analytics.cooldown_service import CooldownService
+from cryodaq.agents.assistant.shared.engine_client import EngineQueryClient
 
 logger = logging.getLogger(__name__)
 
 
 class CooldownAdapter:
-    """Read cached cooldown prediction from CooldownService.
+    """Read the engine's cached cooldown prediction over ZMQ. Read-only."""
 
-    CooldownService runs predict() every 30s and caches the result via
-    last_prediction(). We read that cache; no new computation here.
-    """
-
-    def __init__(self, cooldown_service: CooldownService | None) -> None:
-        self._service = cooldown_service
+    def __init__(self, engine_client: EngineQueryClient) -> None:
+        self._client = engine_client
 
     async def eta(self) -> CooldownETA | None:
-        if self._service is None:
+        reply = await self._client.call({"cmd": "cooldown_eta_get"})
+        if not reply.get("ok"):
             return None
-        pred: dict[str, Any] | None = self._service.last_prediction()
+        pred: dict[str, Any] | None = reply.get("prediction")
         if pred is None:
             return None
         try:

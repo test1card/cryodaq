@@ -7,6 +7,7 @@ Falls back to UNKNOWN on JSON parse failure or timeout.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -55,7 +56,7 @@ def _build_landmark_hint(channel_manager: ChannelManager) -> str:
         physical = entry.get("physical", "")
         lines.append(f"▶ {ch_id} ({physical})")
         if aliases:
-            lines.append(f"  Любая из этих фраз → target_channels=[\"{ch_id}\"]:")
+            lines.append(f'  Любая из этих фраз → target_channels=["{ch_id}"]:')
             for alias in aliases:
                 lines.append(f"    • «{alias}»")
         lines.append("")
@@ -63,10 +64,7 @@ def _build_landmark_hint(channel_manager: ChannelManager) -> str:
         "Если запрос содержит ЛЮБУЮ из перечисленных фраз выше — "
         "ОБЯЗАТЕЛЬНО положи соответствующий channel_id в target_channels."
     )
-    lines.append(
-        "Категория для таких запросов = current_value (если спрашивают "
-        "значение/температуру/сейчас)."
-    )
+    lines.append("Категория для таких запросов = current_value (если спрашивают значение/температуру/сейчас).")
     lines.append("═" * 50)
     return "\n".join(lines)
 
@@ -134,18 +132,20 @@ _VALID_CATEGORIES = frozenset(c.value for c in QueryCategory)
 # — оператор спрашивает «процедура захолаживания» → classifier хочет
 # filter `procedure` → rejected → no filter → noisy retrieval с
 # experiment metadata вместо procedure markdown.
-_VALID_SOURCE_KINDS = frozenset({
-    "experiment_metadata",
-    "vault_note",
-    "operator_log",
-    # v0.55.7.1 KB expansion (knowledge corpus):
-    "equipment_manual",
-    "procedure",
-    "operator_manual",
-    "readme",
-    "readme_en",
-    "changelog",
-})
+_VALID_SOURCE_KINDS = frozenset(
+    {
+        "experiment_metadata",
+        "vault_note",
+        "operator_log",
+        # v0.55.7.1 KB expansion (knowledge corpus):
+        "equipment_manual",
+        "procedure",
+        "operator_manual",
+        "readme",
+        "readme_en",
+        "changelog",
+    }
+)
 
 
 def _normalise_source_kind(raw: Any) -> str | None:
@@ -270,13 +270,17 @@ class IntentClassifier:
             # critical instructions must lead.
             system_prompt = channel_hint + "\n\n" + INTENT_CLASSIFIER_SYSTEM
             user_prompt = INTENT_CLASSIFIER_USER.format(query=query)
-            result = await self._ollama.generate(
+            generation = self._ollama.generate(
                 user_prompt,
                 model=self._model,
                 system=system_prompt,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
             )
+            if self._timeout_s is None:
+                result = await generation
+            else:
+                result = await asyncio.wait_for(generation, timeout=self._timeout_s)
             if result.truncated or not result.text.strip():
                 logger.warning("IntentClassifier: empty/truncated response for %r", query[:80])
                 return _UNKNOWN_INTENT

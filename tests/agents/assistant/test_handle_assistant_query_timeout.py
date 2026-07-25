@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import inspect
 
+from cryodaq.agents.assistant_main import _handle_assistant_query_command
 from cryodaq.core.zmq_bridge import HANDLER_TIMEOUT_SLOW_S
-from cryodaq.engine import _handle_assistant_query_command
 from cryodaq.gui.zmq_client import _CMD_REPLY_TIMEOUT_S
 
 

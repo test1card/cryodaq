@@ -1,37 +1,46 @@
-"""AlarmAdapter — wraps AlarmEngine for query agent."""
+"""AlarmAdapter — reads active alarms (alarm v2) from the engine over ZMQ.
+
+B1: previously wrapped a direct reference to the in-process
+``AlarmStateManager``; now calls the engine's existing read-only
+``alarm_v2_status`` REP command (same one the GUI alarm banner uses).
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from typing import Any
 
 from cryodaq.agents.assistant.query.schemas import ActiveAlarmInfo, AlarmStatusResult
-
-if TYPE_CHECKING:
-    from cryodaq.core.alarm import AlarmEngine
+from cryodaq.agents.assistant.shared.engine_client import EngineQueryClient
 
 logger = logging.getLogger(__name__)
 
 
 class AlarmAdapter:
-    """Read active alarms from AlarmEngine. Read-only."""
+    """Read active alarms from the engine over ZMQ. Read-only."""
 
-    def __init__(self, alarm_engine: AlarmEngine | None) -> None:
-        self._engine = alarm_engine
+    def __init__(self, engine_client: EngineQueryClient) -> None:
+        self._client = engine_client
 
     async def active(self) -> AlarmStatusResult:
-        if self._engine is None:
+        reply = await self._client.call({"cmd": "alarm_v2_status"})
+        if not reply.get("ok"):
             return AlarmStatusResult()
         try:
-            details: list[dict[str, Any]] = self._engine.get_active_alarm_details()
+            active: dict[str, Any] = reply.get("active", {})
             infos = [
                 ActiveAlarmInfo(
-                    alarm_id=d["alarm_id"],
-                    level=d["level"],
-                    channels=[d["channel_pattern"]],
-                    triggered_at=d["triggered_at"],
+                    alarm_id=alarm_id,
+                    level=info.get("level", ""),
+                    channels=list(info.get("channels", [])),
+                    triggered_at=(
+                        datetime.fromtimestamp(info["triggered_at"], tz=UTC)
+                        if info.get("triggered_at") is not None
+                        else None
+                    ),
                 )
-                for d in details
+                for alarm_id, info in active.items()
             ]
             return AlarmStatusResult(active=infos)
         except Exception as exc:

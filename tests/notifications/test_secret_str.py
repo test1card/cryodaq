@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from cryodaq.notifications._secrets import SecretStr
 
 
@@ -212,3 +215,115 @@ def test_telegram_notifier_constructed_with_secret_str():
     assert "AAEhBP0av8XyZabc-defGHIJklmnopqrstuv" in url
     # repr of the notifier itself never leaks the token.
     assert "AAEhBP0av8XyZabc" not in repr(n._bot_token)
+
+
+class _PeriodicTransportProbe:
+    def __init__(self) -> None:
+        self.called = asyncio.Event()
+        self.release = asyncio.Event()
+        self.saw_secret_wrapper = False
+        self.close_calls = 0
+
+    async def send_photo(self, **kwargs: object):
+        from cryodaq.agents.assistant.periodic_telegram import (
+            TelegramDeliveryResult,
+            TelegramOutcome,
+        )
+
+        self.saw_secret_wrapper = isinstance(kwargs.get("token"), SecretStr)
+        self.called.set()
+        await self.release.wait()
+        return TelegramDeliveryResult(
+            TelegramOutcome.UNKNOWN,
+            None,
+            None,
+            None,
+            "telegram_transport_unknown",
+            "Telegram delivery outcome is unknown",
+        )
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class _RawLogCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+async def test_periodic_telegram_client_no_plain_token_in_attrs_before_after_send_close() -> None:
+    from cryodaq.agents.assistant.periodic_telegram import PeriodicTelegramClient
+    from cryodaq.periodic_config import PeriodicPngConfig
+
+    token = "7701234567:SENTINEL_TOK_9f3a_ABCDEFGHIJKLMNOP"
+    config = PeriodicPngConfig(
+        enabled=True,
+        interval_s=1_800,
+        chart_window_s=7_200,
+        include_channels=None,
+        max_points_per_channel=20_000,
+        max_total_points=100_000,
+        max_input_bytes=8 * 1024 * 1024,
+        render_timeout_s=120.0,
+        max_render_attempts=5,
+        max_delivery_attempts=5,
+        backoff_base_s=30.0,
+        backoff_cap_s=3_600.0,
+        telegram_token=SecretStr(token),
+        telegram_chat_id=-100123,
+        telegram_timeout_s=10.0,
+        telegram_verify_ssl=False,
+        config_fingerprint="sha256:" + "a" * 64,
+    )
+    transport = _PeriodicTransportProbe()
+    capture = _RawLogCapture()
+    client_logger = logging.getLogger("cryodaq.agents.assistant.periodic_telegram")
+    client_logger.addHandler(capture)
+    try:
+        client = PeriodicTelegramClient(config, _transport=transport)
+
+        def assert_secret_absent() -> None:
+            assert isinstance(client._token, SecretStr)
+            assert token not in list(_walk_plain_strings(client))
+            assert token not in repr(client)
+
+        assert_secret_absent()
+        send = asyncio.create_task(client.send_photo(_minimal_png(), "periodic report"))
+        await transport.called.wait()
+        assert_secret_absent()
+        assert transport.saw_secret_wrapper is True
+        transport.release.set()
+        result = await send
+        assert_secret_absent()
+        assert token not in repr(result)
+        await client.close()
+        assert_secret_absent()
+        assert transport.close_calls == 1
+    finally:
+        client_logger.removeHandler(capture)
+
+    assert capture.records
+    for record in capture.records:
+        assert token not in str(record.msg)
+        assert token not in repr(record.args)
+        assert token not in record.getMessage()
+
+
+def _minimal_png() -> bytes:
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", 640, 480, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", b"data") + chunk(b"IEND", b"")

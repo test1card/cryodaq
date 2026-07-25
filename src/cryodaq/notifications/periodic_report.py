@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 import aiohttp
 
 if TYPE_CHECKING:
-    from cryodaq.core.alarm import AlarmEngine
+    from cryodaq.core.alarm_v2 import AlarmStateManager
     from cryodaq.core.broker import DataBroker
 
 logger = logging.getLogger("cryodaq.notifications.periodic_report")
@@ -51,7 +51,7 @@ class PeriodicReporter:
     broker:
         DataBroker для получения показаний в реальном времени.
     alarm_engine:
-        AlarmEngine для получения списка активных тревог.
+        AlarmStateManager (alarm v2) для получения списка активных тревог.
     bot_token:
         Токен Telegram-бота.
     chat_id:
@@ -69,7 +69,7 @@ class PeriodicReporter:
     def __init__(
         self,
         broker: DataBroker,
-        alarm_engine: AlarmEngine,
+        alarm_engine: AlarmStateManager,
         *,
         bot_token,
         chat_id: int | str,
@@ -112,12 +112,8 @@ class PeriodicReporter:
             _SUBSCRIPTION_NAME,
             maxsize=20_000,
         )
-        self._collect_task = asyncio.create_task(
-            self._collect_loop(), name="periodic_reporter_collect"
-        )
-        self._report_task = asyncio.create_task(
-            self._report_loop(), name="periodic_reporter_report"
-        )
+        self._collect_task = asyncio.create_task(self._collect_loop(), name="periodic_reporter_collect")
+        self._report_task = asyncio.create_task(self._report_loop(), name="periodic_reporter_report")
         logger.info(
             "PeriodicReporter запущен: интервал=%.0f с, глубина=%.1f ч, буфер=%d точек",
             self._report_interval_s,
@@ -127,9 +123,7 @@ class PeriodicReporter:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self._timeout_s)
-            )
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self._timeout_s))
         return self._session
 
     async def stop(self) -> None:
@@ -149,8 +143,15 @@ class PeriodicReporter:
             await self._session.close()
             self._session = None
 
-        await self._broker.unsubscribe(_SUBSCRIPTION_NAME)
-        self._queue = None
+        queue = self._queue
+        if queue is not None:
+            removed = await self._broker.unsubscribe(
+                _SUBSCRIPTION_NAME,
+                expected_queue=queue,
+            )
+            if removed is not True:
+                raise RuntimeError("periodic reporter broker did not release the exact queue owner")
+            self._queue = None
         logger.info("PeriodicReporter остановлен")
 
     # ------------------------------------------------------------------
@@ -239,20 +240,11 @@ class PeriodicReporter:
         has_pressure = bool(pres_channels)
 
         # Активные тревоги для подсветки каналов
-        alarm_states = self._alarm_engine.get_state()
+        active_alarms = self._alarm_engine.get_active()
 
-        # Определить «тревожные» каналы: те, чьё имя совпадает с именем активной тревоги
-        # или содержится в имени активной тревоги (простое соответствие)
         def _channel_in_alarm(channel: str) -> bool:
-            """Проверить, находится ли канал под активной тревогой."""
-            from cryodaq.core.alarm import AlarmState
-
-            for alarm_name, state in alarm_states.items():
-                if state in (AlarmState.ACTIVE, AlarmState.ACKNOWLEDGED):
-                    # Используем имя канала для грубого совпадения
-                    if channel in alarm_name or alarm_name in channel:
-                        return True
-            return False
+            """Проверить, находится ли канал под активной тревогой (alarm v2)."""
+            return any(channel in event.channels for event in active_alarms.values())
 
         # Создать фигуру
         if has_pressure:
@@ -412,9 +404,7 @@ class PeriodicReporter:
         lines.append("")
 
         # --- Температурные каналы ---
-        temp_channels = sorted(
-            (ch for ch, u in self._units.items() if u == "K"), key=_natural_sort_key
-        )
+        temp_channels = sorted((ch for ch, u in self._units.items() if u == "K"), key=_natural_sort_key)
         if temp_channels:
             lines.append("<b>Температуры:</b>")
             for ch in temp_channels:
@@ -426,9 +416,7 @@ class PeriodicReporter:
                 lines.append(f"  {label}: {cur:.4g} К")
 
         # --- Каналы давления ---
-        pres_channels = sorted(
-            (ch for ch, u in self._units.items() if u == "mbar"), key=_natural_sort_key
-        )
+        pres_channels = sorted((ch for ch, u in self._units.items() if u == "mbar"), key=_natural_sort_key)
         if pres_channels:
             lines.append("")
             lines.append("<b>Давление:</b>")
@@ -459,12 +447,12 @@ class PeriodicReporter:
                 lines.append(f"  {label}: {cur:.4g} {unit}")
 
         # --- Активные тревоги ---
-        active = self._alarm_engine.get_active_alarms()
+        active = self._alarm_engine.get_active()
         lines.append("")
         if active:
             lines.append(f"<b>Активные тревоги ({len(active)}):</b>")
-            for alarm_name in active:
-                lines.append(f"  ⚠ {alarm_name}")
+            for alarm_id in active:
+                lines.append(f"  ⚠ {alarm_id}")
         else:
             lines.append("Тревог нет ✓")
 

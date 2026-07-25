@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from cryodaq.core.experiment import ExperimentManager
     from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
+from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
+
 logger = logging.getLogger(__name__)
 
 _PENDING_TTL_S = 1800  # 30 min
@@ -62,17 +64,13 @@ class CompositionPhotoHandler:
         self._cleanup_task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        self._cleanup_task = asyncio.create_task(
-            self._cleanup_loop(), name="composition_photo_cleanup"
-        )
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop(), name="composition_photo_cleanup")
 
     async def stop(self) -> None:
-        if self._cleanup_task is not None:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
+        task = self._cleanup_task
+        settlement = await cancel_and_settle_tasks(() if task is None else (task,))
+        self._cleanup_task = None
+        settlement.raise_if_unsuccessful()
 
     async def handle_photo(self, msg: dict) -> None:
         """Photo arrived from operator. Download and present confirmation prompt."""
@@ -103,17 +101,14 @@ class CompositionPhotoHandler:
         if active is None:
             await self._bot._send(
                 chat_id,
-                "ℹ️ Нет активного эксперимента. Фото не прикреплено.\n"
-                "Создай эксперимент в GUI и отправь фото снова.",
+                "ℹ️ Нет активного эксперимента. Фото не прикреплено.\nСоздай эксперимент в GUI и отправь фото снова.",
             )
             return
 
         # Build confirmation inline keyboard
         import html as _html
 
-        cb_key = hashlib.sha1(
-            f"{file_id}:{chat_id}:{datetime.now(UTC).isoformat()}".encode()
-        ).hexdigest()[:16]
+        cb_key = hashlib.sha1(f"{file_id}:{chat_id}:{datetime.now(UTC).isoformat()}".encode()).hexdigest()[:16]
         keyboard = [
             [
                 {"text": "✅ Да", "callback_data": f"{_CALLBACK_PREFIX}yes:{cb_key}"},
@@ -128,16 +123,11 @@ class CompositionPhotoHandler:
         ]
         title = _html.escape(active.title or active.name or active.experiment_id[:8])
         safe_user = _html.escape(username)
-        confirm_text = (
-            f"📸 Получено фото от @{safe_user}\n"
-            f"Прикрепить к эксперименту <b>«{title}»</b>?"
-        )
+        confirm_text = f"📸 Получено фото от @{safe_user}\nПрикрепить к эксперименту <b>«{title}»</b>?"
         if caption:
             confirm_text += f"\n<i>Подпись: {_html.escape(caption[:80])}</i>"
 
-        message_id = await self._bot.send_message_with_keyboard(
-            chat_id, confirm_text, keyboard
-        )
+        message_id = await self._bot.send_message_with_keyboard(chat_id, confirm_text, keyboard)
         if message_id is None:
             return
 
@@ -199,9 +189,7 @@ class CompositionPhotoHandler:
             exp_id_short = parts[3]
             # Resolve full experiment_id from short prefix via archive
             entries = self._em.list_archive_entries()
-            matched = next(
-                (e for e in entries if e.experiment_id.startswith(exp_id_short)), None
-            )
+            matched = next((e for e in entries if e.experiment_id.startswith(exp_id_short)), None)
             # Also check active experiment
             active = self._em.get_active_experiment()
             if active and active.experiment_id.startswith(exp_id_short):
@@ -225,9 +213,7 @@ class CompositionPhotoHandler:
         if action == "yes" and pending.target_experiment_id:
             await self._attach(pending, cb_key)
 
-    async def _show_experiment_picker(
-        self, pending: PendingPhoto, cb_key: str
-    ) -> None:
+    async def _show_experiment_picker(self, pending: PendingPhoto, cb_key: str) -> None:
         """Show recent experiment list for operator to pick alternative."""
         entries = self._em.list_archive_entries()
         recent = sorted(entries, key=lambda e: e.start_time, reverse=True)[:5]
@@ -239,9 +225,7 @@ class CompositionPhotoHandler:
             options.append((active.experiment_id, disp))
         for e in recent:
             if not any(opt[0] == e.experiment_id for opt in options):
-                options.append(
-                    (e.experiment_id, e.title or e.experiment_id[:8])
-                )
+                options.append((e.experiment_id, e.title or e.experiment_id[:8]))
         options = options[:5]
 
         if not options:
@@ -271,9 +255,7 @@ class CompositionPhotoHandler:
             "Выбери эксперимент для прикрепления:",
         )
         # Send new message with picker keyboard (edit doesn't update keyboard layout)
-        await self._bot.send_message_with_keyboard(
-            pending.chat_id, "Выбери эксперимент:", keyboard
-        )
+        await self._bot.send_message_with_keyboard(pending.chat_id, "Выбери эксперимент:", keyboard)
 
     async def _attach(self, pending: PendingPhoto, cb_key: str) -> None:
         """Persist photo and notify operator of result."""
@@ -370,9 +352,7 @@ class CompositionPhotoHandler:
                 async with self._lock:
                     now = datetime.now(UTC)
                     expired = [
-                        k
-                        for k, p in self._pending.items()
-                        if (now - p.arrived_at).total_seconds() > _PENDING_TTL_S
+                        k for k, p in self._pending.items() if (now - p.arrived_at).total_seconds() > _PENDING_TTL_S
                     ]
                     for k in expired:
                         self._pending.pop(k, None)

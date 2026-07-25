@@ -113,7 +113,9 @@ def test_burst_command_rejects_unknown_driver_name(tmp_path: Path) -> None:
         )
     )
     assert out["ok"] is False
-    assert "не сконфигурирован" in out["error"]
+    assert out["error_code"] == "multiline_driver_unavailable"
+    assert out["error"] == "The requested MultiLine driver is unavailable."
+    assert "MissingInstrument" not in out["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +139,7 @@ def test_burst_start_invokes_driver_with_active_experiment(tmp_path: Path) -> No
     assert out["ok"] is True
     assert out["experiment_id"] == "exp-2026-05-07-001"
     assert out["duration_s"] == 10.0
-    drivers["MultiLine_1"].burst_start.assert_awaited_once_with(
-        experiment_id="exp-2026-05-07-001"
-    )
+    drivers["MultiLine_1"].burst_start.assert_awaited_once_with(experiment_id="exp-2026-05-07-001")
 
 
 def test_burst_start_passes_none_when_no_active_experiment(tmp_path: Path) -> None:
@@ -208,7 +208,7 @@ def test_burst_start_records_auto_stop_meta(tmp_path: Path) -> None:
     assert auto_stop["MultiLine_1"]["duration_s"] == 30.0
 
 
-def test_burst_start_propagates_driver_runtime_error(tmp_path: Path) -> None:
+def test_burst_start_redacts_driver_runtime_error(tmp_path: Path) -> None:
     drivers = _make_drivers_by_name()
     drivers["MultiLine_1"].burst_start.side_effect = RuntimeError("Burst already active")
     out = _run(
@@ -221,7 +221,9 @@ def test_burst_start_propagates_driver_runtime_error(tmp_path: Path) -> None:
         )
     )
     assert out["ok"] is False
-    assert "already active" in out["error"]
+    assert out["error_code"] == "multiline_burst_start_failed"
+    assert out["error"] == "MultiLine burst capture could not be started."
+    assert "Burst already active" not in out["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +247,7 @@ def test_burst_stop_returns_persisted_path(tmp_path: Path) -> None:
     assert out["ok"] is True
     assert out["saved"] is True
     assert out["path"] == str(fake_path)
-    drivers["MultiLine_1"].burst_stop.assert_awaited_once_with(
-        experiments_root=tmp_path
-    )
+    drivers["MultiLine_1"].burst_stop.assert_awaited_once_with(experiments_root=tmp_path)
 
 
 def test_burst_stop_when_empty_returns_saved_false(tmp_path: Path) -> None:
@@ -296,4 +296,5 @@ def test_unknown_burst_action_returns_error(tmp_path: Path) -> None:
         )
     )
     assert out["ok"] is False
-    assert "unknown" in out["error"].lower()
+    assert out["error_code"] == "multiline_burst_action_invalid"
+    assert out["error"] == "MultiLine burst action is invalid."

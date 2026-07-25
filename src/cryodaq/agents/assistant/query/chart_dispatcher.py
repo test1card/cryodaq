@@ -40,6 +40,7 @@ class ChartDispatcher:
         # H5: strong-ref task set against asyncio's weak-ref GC of
         # fire-and-forget tasks. Mirrors engine _alarm_dispatch_tasks.
         self._tasks: set[asyncio.Task] = set()
+        self._closed = False
 
     def dispatch(
         self,
@@ -54,6 +55,8 @@ class ChartDispatcher:
         """
         if category not in (QueryCategory.COMPOSITE_STATUS, QueryCategory.RANGE_STATS):
             return
+        if self._closed:
+            raise RuntimeError("chart dispatcher is closed")
         task = asyncio.create_task(
             self._maybe_send(category, data, chat_id),
             name="chart_dispatch",
@@ -73,9 +76,7 @@ class ChartDispatcher:
         elif category == QueryCategory.RANGE_STATS:
             await self._send_range_chart(data, chat_id)
 
-    async def _send_composite_chart(
-        self, data: dict[str, Any], chat_id: int | str
-    ) -> None:
+    async def _send_composite_chart(self, data: dict[str, Any], chat_id: int | str) -> None:
         cs = data.get("composite_status")
         if cs is None:
             return
@@ -88,9 +89,20 @@ class ChartDispatcher:
         if chart:
             await self._send_photo(chat_id, chart)
 
-    async def _send_range_chart(
-        self, data: dict[str, Any], chat_id: int | str
-    ) -> None:
+    async def close(self) -> None:
+        """Reject new chart work and settle every already admitted task."""
+        self._closed = True
+        while self._tasks:
+            tasks = tuple(self._tasks)
+            for task in tasks:
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    pass
+
+    async def _send_range_chart(self, data: dict[str, Any], chat_id: int | str) -> None:
         stats = data.get("range_stats", {})
         if not stats:
             return
