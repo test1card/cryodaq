@@ -257,6 +257,15 @@ _VALID_CONDITION_CHECKS = frozenset(
     {"any_below", "any_above", "above", "below", "rate_above", "rate_below", "rate_near_zero"}
 )
 
+# operator values recognised by alarm_v2._eval_composite (alarm_v2.py:299-305).
+# The runtime comparison is CASE-SENSITIVE (`operator == "AND"`), so "and"/"And"
+# fall into its `else` branch, which only logs a warning and returns None — a
+# CRITICAL annunciator that loaded cleanly then silently never fires. Do NOT
+# normalise case at load time: that would mask a config typo by changing runtime
+# behaviour instead of rejecting it. Absent operator is legitimate — runtime
+# defaults to "AND" (alarm_v2.py:292).
+_VALID_COMPOSITE_OPERATORS = frozenset({"AND", "OR"})
+
 
 def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
     """Fail-closed presence/type check of evaluate-time required keys.
@@ -285,6 +294,8 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
       - additional_condition (if present) → validated as a composite sub-condition
 
     alarm_type: composite — sub-conditions via _eval_condition (alarm_v2.py:284-330)
+      - operator AND|OR (case-sensitive; absent defaults to AND, alarm_v2.py:292)
+        any other / wrong-case / non-string operator → rejected
       - check any_below / any_above / above / below / rate_above / rate_below
         → each sub-condition requires numeric `threshold`
       - check rate_near_zero → exempt (.get("rate_threshold", 0.1))
@@ -320,6 +331,20 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
             _validate_condition(alarm_id, add_cond, context="additional_condition")
 
     elif alarm_type == "composite":
+        # composite operator — alarm_v2._eval_composite (L291-305) dispatches on
+        # a case-sensitive `operator == "AND"` / `== "OR"`; its `else` branch
+        # only logs a warning and returns None, so a typo'd, wrong-case, or
+        # non-string operator loads cleanly then silently never fires (a dead
+        # CRITICAL annunciator that looks healthy). Absent operator is
+        # legitimate — runtime defaults to "AND" (L292). isinstance() short-
+        # circuits before the membership test so an unhashable value (e.g. a
+        # list) is rejected here rather than raising TypeError.
+        operator = cfg.get("operator", "AND")
+        if not isinstance(operator, str) or operator not in _VALID_COMPOSITE_OPERATORS:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} (alarm_type=composite) has unknown operator "
+                f"{operator!r}; valid operators are {sorted(_VALID_COMPOSITE_OPERATORS)}"
+            )
         # Each element of `conditions` is passed to _eval_condition
         for i, cond in enumerate(cfg.get("conditions", [])):
             if isinstance(cond, dict):

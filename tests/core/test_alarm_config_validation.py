@@ -518,6 +518,109 @@ def test_composite_wellformed_loads(tmp_path: Path) -> None:
     assert any(a.alarm_id == "vac_cold" for a in alarms)
 
 
+# ---------------------------------------------------------------------------
+# fail-OPEN gap: composite `operator`. alarm_v2._eval_composite (L291-305)
+# dispatches on a CASE-SENSITIVE `operator == "AND"` / `== "OR"` and its `else`
+# branch only logs a warning and returns None — a CRITICAL annunciator that
+# loaded cleanly then silently never fires forever (dead, looks healthy).
+# Absent operator is legitimate: runtime defaults to "AND" (L292).
+# ---------------------------------------------------------------------------
+def test_composite_unknown_operator_raises(tmp_path: Path) -> None:
+    """Reported defect: operator: ADN (typo) loads, both conditions true,
+    evaluator returns None forever — a dead CRITICAL annunciator."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: ADN
+            conditions:
+              - channels: [T11, T12]
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="operator"):
+        load_alarm_config(p)
+
+
+def test_composite_wrong_case_operator_raises(tmp_path: Path) -> None:
+    """Runtime comparison is case-sensitive: operator: and / And are also
+    dead at runtime (fall into the `else` branch). Must be rejected at load,
+    not normalised — normalising would change runtime behaviour."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: and
+            conditions:
+              - channels: [T11, T12]
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="operator"):
+        load_alarm_config(p)
+
+
+def test_composite_nonstring_operator_raises(tmp_path: Path) -> None:
+    """A non-string operator (e.g. a list) must be rejected with
+    AlarmConfigError, not crash the loader with a TypeError."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: [AND]
+            conditions:
+              - channels: [T11, T12]
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="operator"):
+        load_alarm_config(p)
+
+
+def test_composite_absent_operator_loads(tmp_path: Path) -> None:
+    """An absent operator key is legitimate: alarm_v2._eval_composite L292
+    defaults to 'AND'. Must NOT be rejected."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            conditions:
+              - channels: [T11, T12]
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    assert any(a.alarm_id == "vac_cold" for a in alarms)
+
+
 def test_shipped_alarms_v3_still_loads() -> None:
     """The shipped config/alarms_v3.yaml must continue to load cleanly."""
     _, alarms = load_alarm_config(None)
