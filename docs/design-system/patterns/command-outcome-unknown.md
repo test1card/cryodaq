@@ -4,7 +4,7 @@ keywords: outcome unknown, delivery_state, commit_state, retry-safety, idempoten
 applies_to: what a GUI surface shows and does when a dispatched mutating command's outcome cannot be proven
 status: canonical
 references: rules/color-rules.md, rules/accessibility-rules.md, patterns/state-visualization.md, patterns/real-time-data.md, patterns/operator-evidence-and-retention.md
-last_updated: 2026-07-25
+last_updated: 2026-07-26
 ---
 
 # Command-Outcome-Unknown State
@@ -42,6 +42,39 @@ implemented once, in `src/cryodaq/gui/zmq_client.py`:
   pessimism guarantee than any single widget's presentation, and it is the
   reason none of the presentation instances below may treat "connection
   dropped" as license to silently forget an in-flight command.
+
+## The canonical entry classifier: `command_outcome.result_outcome_unknown()`
+
+Deciding *whether* a given mutation reply counts as outcome-unknown is a
+separate axis from how that state is then presented (below). Until the
+2026-07-25 fix, `ExperimentOverlay` and `KeithleyPanel` each carried their own
+private copy of this predicate, and both classified purely by matching six
+English/Russian error-prose substrings (`"timeout"`, `"тайм-аут"`, etc.).
+Prose-only matching misclassified genuinely-unknown outcomes as ordinary,
+resolved refusals whenever the reply carried none of those substrings — for
+`keithley_start` this could tell the operator a hazardous source command was
+refused when the source may in fact be ON.
+
+`src/cryodaq/gui/shell/command_outcome.py::result_outcome_unknown()` is now
+the single canonical classifier. Both surfaces call it instead of
+reimplementing the check: `experiment_overlay.py`'s `_result_outcome_unknown`
+(:783-785) and `keithley_panel.py`'s `_result_outcome_unknown` (:758-760) are
+now thin delegates to this shared function. Its rule, in order:
+
+1. A non-dict reply is unknown (fails closed).
+2. Structured settlement evidence — `_handler_timeout: True`,
+   `outcome_unknown: True`, `commit_state: "unknown"`, or
+   `delivery_state: "unknown"` — is checked **first** and decides the
+   question outright.
+3. Error-prose substring matching is only a **fallback**, for reply shapes
+   that carry none of the structured keys above at all.
+4. `not_committed` / `not_dispatched` commit/delivery states are truthful,
+   *resolved* refusals (e.g. `mutation_protocol_incompatible`,
+   `command_authority_quarantined`) and must **never** be folded into
+   "unknown", even though they sound adjacent to the unresolved case.
+
+Any new surface implementing this pattern must call this shared function for
+its entry check rather than reimplementing prose matching locally.
 
 ## The rule: colour is never the sole carrier of this state
 
@@ -128,15 +161,16 @@ after it gains a glanceable counterpart.
 | Surface (file) | Entry | Exit | Cue sub-family | Proactive / reactive | Pessimism notes | Structural guarantees |
 |---|---|---|---|---|---|---|
 | `zmq_client.py` (shared contract, not a presentation) | non-READ command times out / is cancelled / raises after dispatch | matched late reply via `_route_reply_locked()` → `reconcile_late_result()` | n/a — transport layer | n/a | READ commands never enter the retained set; every return path is a `dict`, never `None`/non-dict | `_close_locked()` **raises** if any request remains retained — terminal close cannot silently forget a mutation |
+| `command_outcome.py` (`result_outcome_unknown()`, shared contract, not a presentation) | called by `experiment_overlay.py` and `keithley_panel.py` at their own Entry, in place of a private per-surface predicate | n/a — this is the classifier consulted at each caller's Entry, not a state with its own exit | n/a — classification logic, not a cue sub-family | n/a | canonical entry classifier (see "The canonical entry classifier" above); replaces two former private duplicates that matched only error-prose, which could misclassify a genuinely unknown outcome as a resolved refusal | structured `outcome_unknown` / `commit_state` / `delivery_state` checked before the prose fallback; `not_committed` / `not_dispatched` are truthful refusals, never folded into "unknown"; non-dict replies fail closed to unknown |
 | `quick_log_block.py` (`QuickLogBlock.set_submission_state`, orchestrated by `dashboard_view.py`) | `_log_result_is_unknown(result)` true, or a disk-persisted unresolved entry restored at construction | `confirm_submission()` after `_log_commit_receipt_matches()` proves the exact same message committed | canonical (a) | proactive | default entry check is `if not isinstance(result, dict): return True` — fails closed on malformed input; Send stays enabled but reconciles by the *same* message/key, not a blind new mutation | — |
 | `phase_aware_widget.py` (`PhaseAwareWidget.set_operation_state`, orchestrated by `dashboard_view.py`) | `_phase_result_is_unknown(result)` true after phase-advance, or an inexact reconciliation read | `on_status_update()` once an authoritative `experiment_status` read matches the expected phase | canonical (a) | proactive | auto-polls an authoritative **read** every 5s to resolve — never a blind mutation retry | — |
 | `operator_log_panel.py` (`show_unknown`) | connection lost before commit confirmation, or a disk-persisted unresolved submit restored at construction | operator-confirmed reconciliation of the retained submit context | canonical (a) | proactive | persistent banner (`persistent=True`), never auto-clears while unresolved | — |
 | `calibration_panel.py` (`show_unknown`) | six call sites across run/export/apply operations | matching operation-specific reconciliation | canonical (a) | proactive | `auto_clear=False` while unresolved | — |
-| `keithley_panel.py` (`_latch_unknown_outcome` / `_unknown_outcome_requires`, per-channel) | stale reply after connection-generation turnover, or `_result_outcome_unknown(result)` true (handler timeout / timeout-shaped error text) | `_maybe_reconcile_unknown_outcome()` — requires **both** a fresh source-state observation **and** a fresh Safety observation past the latched revision, not merely "connection is back" | deviation — tooltip/accessible-description only, no colour, not glanceable (see "Deviation: tooltip/accessible-description only" above) | proactive since the 2026-07-25 fix (`_update_control_enablement()` now sets `setToolTip`/`setAccessibleDescription` on the blocked Start/Stop buttons while latched, cleared symmetrically on reconcile) — previously reactive (visible only after a rejected command attempt); the fix closed the proactivity defect and stopped there, short of canonical | `authorization_reason()` returns this text only when `_read_only` is false and `_connected` is true — **the tooltip is conditional on connectivity, not a guaranteed latch indicator.** While disconnected or read-only, the tooltip reads the connectivity/read-only reason instead; the latch text reappears once connectivity returns and `_update_control_enablement()` re-runs. Do not describe this tooltip as unconditionally reflecting latch state. | Per-channel scope: blocks only that channel's Start/Stop, not the other channel or Emergency OFF |
+| `keithley_panel.py` (`_latch_unknown_outcome` / `_unknown_outcome_requires`, per-channel) | stale reply after connection-generation turnover, or `_result_outcome_unknown(result)` true (delegates to the shared `command_outcome.result_outcome_unknown()` — structured `outcome_unknown`/`commit_state`/`delivery_state` decide first, prose is only a fallback) | `_maybe_reconcile_unknown_outcome()` — requires **both** a fresh source-state observation **and** a fresh Safety observation past the latched revision, not merely "connection is back" | deviation — tooltip/accessible-description only, no colour, not glanceable (see "Deviation: tooltip/accessible-description only" above) | proactive since the 2026-07-25 fix (`_update_control_enablement()` now sets `setToolTip`/`setAccessibleDescription` on the blocked Start/Stop buttons while latched, cleared symmetrically on reconcile) — previously reactive (visible only after a rejected command attempt); the fix closed the proactivity defect and stopped there, short of canonical | `authorization_reason()` returns this text only when `_read_only` is false and `_connected` is true — **the tooltip is conditional on connectivity, not a guaranteed latch indicator.** While disconnected or read-only, the tooltip reads the connectivity/read-only reason instead; the latch text reappears once connectivity returns and `_update_control_enablement()` re-runs. Do not describe this tooltip as unconditionally reflecting latch state. | Per-channel scope: blocks only that channel's Start/Stop, not the other channel or Emergency OFF |
 | `conductivity_panel.py` (`_latch_auto_outcome_unknown`) | disconnect while active, non-`ok` reply to *any* in-sweep command (including `keithley_stop`), or enqueue failure | `_commit_auto_stop()` / `_commit_auto_complete()` — reached only after an authoritative `result.get("ok") is True` for the exact expected command and generation | deviation (b) | proactive | stricter than most instances: *any* non-`ok` reply latches unknown, not only timeout-shaped ones — deliberate for an unattended auto-sweep; `get_auto_state()` documents that external finalize-guards must treat outcome-unknown as part of the blocking `"stabilizing"` state | — |
 | `multiline_panel.py` (`_latch_burst_outcome_unknown`) | disconnect or read-only revocation while active/in-flight, non-`ok` reply, or enqueue failure | authoritative `ok: True` reply for the matching action plus generation/staleness match | deviation (b) | proactive | **the latched button's label changes to "Остановить" and clicking it while latched routes to `multiline.burst_stop`, not a repeat of the ambiguous original action** — control flow steers the operator toward the safe direction structurally, not just by warning text | Latched state also (re)starts the status-poll timer to actively resolve via a read, not a mutation retry |
 | `alarm_panel.py` (`_pending_ack_states[key] == "outcome_unknown"`, per alarm row) | `_on_ack_v2_result()` when settlement is none of published / pending / aborted, or a worker construction exception before dispatch | operator clicks the relabelled row button → `_retry_pending_ack()` reuses the **identical retained command object** | sanctioned variant (d) | proactive | three-way settlement classification (`validate_alarm_ack_wire_result`): published (exit), pending (retained, distinct substate — commit succeeded, publication unproven), **aborted is terminal and is *not* collapsed into unknown** | `request_id` is **deterministically derived** from `(alarm_name, engine_instance_id, activation_id, operator, reason)` — retry is structurally idempotent, not hopefully-idempotent; per-row gating does not block unrelated alarms |
-| `experiment_overlay.py` (`_result_outcome_unknown`, three call sites: card save, phase advance, finalize/abort) | any of the three mutation result handlers finds `_result_outcome_unknown(result)` true | a later authoritative status read reconciles state, or a fresh operator action after reading the explicit warning text — no built-in reconciliation poller for these three, unlike Conductivity/MultiLine/PhaseAwareWidget | deviation (c) | proactive | all three call sites include an explicit operator-facing instruction not to retry blindly; **`_result_outcome_unknown()` (:783) does not guard `isinstance(result, dict)` before calling `.get(...)`, unlike the equivalent predicates in `keithley_panel.py`/`dashboard_view.py`** — this is recorded as an **inconsistency in defensive posture across the family; tracing `zmq_client.py:send_command()` found no live path that returns a non-dict result, so this is not a demonstrated defect** | finalize/abort is the highest-stakes call site — it ends an experiment |
+| `experiment_overlay.py` (`_result_outcome_unknown`, three call sites: card save, phase advance, finalize/abort) | any of the three mutation result handlers finds `_result_outcome_unknown(result)` true (delegates to the shared `command_outcome.result_outcome_unknown()` — structured `outcome_unknown`/`commit_state`/`delivery_state` decide first, prose is only a fallback) | a later authoritative status read reconciles state, or a fresh operator action after reading the explicit warning text — no built-in reconciliation poller for these three, unlike Conductivity/MultiLine/PhaseAwareWidget | deviation (c) | proactive | all three call sites include an explicit operator-facing instruction not to retry blindly; **`_result_outcome_unknown()` (:783-785) now delegates to the shared classifier, which guards `isinstance(result, dict)` before any `.get(...)` call** — this closes the previously recorded inconsistency in defensive posture against `keithley_panel.py`/`dashboard_view.py` | finalize/abort is the highest-stakes call site — it ends an experiment |
 
 ## Common mistakes
 
@@ -183,6 +217,12 @@ recorded here rather than a claimed guarantee.
 
 ## Changelog
 
+- 2026-07-26 (v4.0.4): Documented `command_outcome.py::result_outcome_unknown()`
+  as the canonical entry classifier now shared by `experiment_overlay.py` and
+  `keithley_panel.py`, replacing their former private per-surface prose-only
+  duplicates; updated both instance-table rows and closed the stale
+  `isinstance` inconsistency note on `experiment_overlay.py` now that it
+  delegates to the guarded shared function.
 - 2026-07-25 (v4.0.3): Initial pattern — canonical treatment, sanctioned
   per-row variant, two recorded deviations with migration notes, and the
   nine-instance table with structural-guarantee findings from source tracing.

@@ -1383,6 +1383,8 @@ class ZmqBridge:
                         "generation": binding.generation,
                         "dispatched": True,
                         "outcome_unknown": True,
+                        "delivery_state": "dispatched",
+                        "commit_state": "unknown",
                     }
                 )
             self._retain_unknown_owner_locked(request_id, future)
@@ -1677,6 +1679,8 @@ class ZmqBridge:
                         "generation": generation,
                         "dispatched": True,
                         "outcome_unknown": True,
+                        "delivery_state": "dispatched",
+                        "commit_state": "unknown",
                     }
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1708,6 +1712,8 @@ class ZmqBridge:
                         "generation": generation,
                         "dispatched": True,
                         "outcome_unknown": True,
+                        "delivery_state": "dispatched",
+                        "commit_state": "unknown",
                     }
                 try:
                     return future.result(timeout=min(0.05, remaining))

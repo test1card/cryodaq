@@ -1056,3 +1056,103 @@ def test_saved_card_stays_local_until_exact_engine_ack(app):
     assert overlay._pending_card_snapshot is None
     assert overlay._card_dirty is False
     assert overlay._save_status.text() == "Сохранено"
+
+
+# -- _result_outcome_unknown: structured transport evidence -----------------
+#
+# Regression coverage for the defect where only `_handler_timeout` and six
+# hardcoded error-prose substrings were checked, so replies that carried
+# structured `outcome_unknown` / `commit_state` / `delivery_state` evidence
+# but different prose (command_endpoint_unavailable, command_forward_failed,
+# command_handler_failed, command_dispatch_failed,
+# command_reply_serialization_failed, and the zmq_client.py
+# cancellation/timeout-after-dispatch replies) were rendered as plain
+# rejections instead of "outcome unknown".
+
+
+def test_outcome_unknown_true_with_no_prose_marker_is_unknown():
+    """Reproduces the client-side cancellation-after-dispatch reply shape
+    (zmq_client.py ~1673-1680): outcome_unknown=True, no delivery_state or
+    commit_state keys at all, and prose that names none of the six known
+    markers. Before the fix this returned False (misclassified as a plain
+    rejection)."""
+
+    result = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after cancellation",
+        "dispatched": True,
+        "outcome_unknown": True,
+    }
+    assert ExperimentOverlay._result_outcome_unknown(result) is True
+
+
+def test_commit_state_unknown_with_unrelated_prose_is_unknown():
+    """Reproduces command_handler_failed / command_dispatch_failed
+    (_post_dispatch_failure in zmq_bridge.py): delivery_state=dispatched,
+    commit_state=unknown, prose names none of the six markers."""
+
+    result = {
+        "ok": False,
+        "error_code": "command_handler_failed",
+        "error": "Command handler failed; outcome may be unknown.",
+        "delivery_state": "dispatched",
+        "commit_state": "unknown",
+        "retry_safe": False,
+    }
+    assert ExperimentOverlay._result_outcome_unknown(result) is True
+
+
+def test_command_endpoint_unavailable_is_unknown():
+    """Reproduces zmq_subprocess.py command_endpoint_unavailable: both
+    delivery_state and commit_state are "unknown", no outcome_unknown key,
+    prose names none of the six markers."""
+
+    result = {
+        "ok": False,
+        "error_code": "command_endpoint_unavailable",
+        "error": "Engine command endpoint is unavailable.",
+        "delivery_state": "unknown",
+        "commit_state": "unknown",
+        "retry_safe": False,
+    }
+    assert ExperimentOverlay._result_outcome_unknown(result) is True
+
+
+def test_truthful_not_committed_refusal_is_not_unknown():
+    """A genuine, resolved refusal (command_authority_quarantined /
+    mutation_protocol_incompatible): commit_state="not_committed" must never
+    be reclassified as unknown, even though the transport is reporting a
+    settlement outcome."""
+
+    result = {
+        "ok": False,
+        "error_code": "command_authority_quarantined",
+        "error": "A prior command outcome is still uncertain; mutation is quarantined.",
+        "delivery_state": "not_dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": False,
+    }
+    assert ExperimentOverlay._result_outcome_unknown(result) is False
+
+
+def test_handler_timeout_flag_is_still_unknown():
+    """No-regression: the pre-existing `_handler_timeout` fast path must
+    keep working."""
+
+    assert ExperimentOverlay._result_outcome_unknown({"ok": False, "_handler_timeout": True}) is True
+
+
+def test_prose_fallback_still_matches_timeout_marker():
+    """No-regression: a reply with no structured settlement keys at all
+    still falls back to prose matching."""
+
+    result = {"ok": False, "error": "Engine did not respond in time (timeout)"}
+    assert ExperimentOverlay._result_outcome_unknown(result) is True
+
+
+def test_plain_rejection_without_any_marker_is_not_unknown():
+    """No-regression: an ordinary, fully-resolved rejection with no
+    structured evidence and no prose marker stays a plain rejection."""
+
+    result = {"ok": False, "error_code": "experiment_update_invalid", "error": "Experiment payload is invalid."}
+    assert ExperimentOverlay._result_outcome_unknown(result) is False

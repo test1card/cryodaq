@@ -34,6 +34,7 @@ from cryodaq.core.phase_labels import (
 )
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.phase_content.eta_display import _format_duration_ru
+from cryodaq.gui.shell.command_outcome import result_outcome_unknown
 from cryodaq.gui.shell.composition_photos_widget import CompositionPhotosWidget
 
 logger = logging.getLogger(__name__)
@@ -781,20 +782,7 @@ class ExperimentOverlay(QWidget):
 
     @staticmethod
     def _result_outcome_unknown(result: dict) -> bool:
-        if result.get("_handler_timeout") is True:
-            return True
-        error = str(result.get("error", "")).casefold()
-        return any(
-            marker in error
-            for marker in (
-                "timeout",
-                "timed out",
-                "тайм-аут",
-                "не отвечает",
-                "may still be running",
-                "исход неизвестен",
-            )
-        )
+        return result_outcome_unknown(result)
 
     @staticmethod
     def _card_snapshot_from_experiment(experiment: dict) -> dict:

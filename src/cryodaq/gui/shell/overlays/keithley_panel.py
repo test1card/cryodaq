@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style
+from cryodaq.gui.shell.command_outcome import result_outcome_unknown
 from cryodaq.gui.shell.overlays._base_panel import is_stale
 from cryodaq.gui.state.time_window import TimeWindow, get_time_window_controller
 from cryodaq.gui.state.time_window_selector import TimeWindowSelector
@@ -756,22 +757,7 @@ class _SmuChannelBlock(QFrame):
 
     @staticmethod
     def _result_outcome_unknown(result: object) -> bool:
-        if not isinstance(result, dict):
-            return True
-        if result.get("_handler_timeout") is True:
-            return True
-        error = str(result.get("error") or "").casefold()
-        return any(
-            marker in error
-            for marker in (
-                "timeout",
-                "timed out",
-                "тайм-аут",
-                "не отвечает",
-                "may still be running",
-                "исход неизвестен",
-            )
-        )
+        return result_outcome_unknown(result)
 
     # ------------------------------------------------------------------
     # Public state pushers
