@@ -676,9 +676,14 @@ async def test_sender_four_outcomes_map_to_exact_durable_state(
     try:
         for _ in _settle_attempts():
             payload = (await _load_stable(tmp_path)).payload
-            active = payload["active"]
-            terminal = payload["last_terminal"]
-            if terminal is not None or (isinstance(active, dict) and active["status"] == "FAILED"):
+            # Wait for exactly what is asserted below. The previous condition
+            # -- a terminal record, or an active FAILED -- could never be
+            # satisfied by the DELIVERY_UNKNOWN case, which lands as an
+            # *active* DELIVERY_UNKNOWN with no terminal. That parametrization
+            # therefore always ran the loop to exhaustion and then asserted,
+            # passing only because the budget happened to outlast the write.
+            observed = payload["last_terminal"] or payload["active"]
+            if isinstance(observed, dict) and observed["status"] == expected_status:
                 break
             await asyncio.sleep(0.001)
         payload = (await _load_stable(tmp_path)).payload
