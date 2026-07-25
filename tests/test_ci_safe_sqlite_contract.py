@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
+
+from cryodaq.storage._sqlite import SQLITE_BACKPORT_SAFE, SQLITE_BROKEN_RANGE
+
+ROOT = Path(__file__).resolve().parents[1]
+PINNED_MINICONDA = "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5"
+
+
+def test_supported_test_workflows_use_safe_tracked_runtime() -> None:
+    for relative in (
+        ".github/workflows/main.yml",
+        ".github/workflows/nightly.yml",
+    ):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert PINNED_MINICONDA in text
+        assert "environment-file: environment.yml" in text
+        assert "python -m pip install -r requirements-lock.txt" in text
+        assert "python -m pip install -e . --no-deps --no-build-isolation" in text
+        assert "python -m pip check" in text
+        assert "Verify safe SQLite runtime" in text
+        assert "actions/setup-python" not in text
+
+
+def test_main_ci_binds_h4_alias_to_the_running_linux_interpreter_fail_closed() -> None:
+    text = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+    install = text.index("- name: Install dependencies")
+    binding = text.index("- name: Bind H4 reviewed interpreter alias (Linux)")
+    first_test = text.index("- name: Run exact exported candidate suite")
+
+    assert install < binding < first_test
+    assert "if: runner.os == 'Linux'" in text[binding:first_test]
+    assert "[ -e .venv ] || [ -L .venv ]" in text[binding:first_test]
+    assert 'ln -s -- "$(command -v python)" .venv/bin/python' in text[binding:first_test]
+    assert "Path('/proc/self/exe').resolve(strict=True)" in text[binding:first_test]
+
+
+def test_pip_lock_preserves_platform_specific_runtime_dependencies() -> None:
+    lines = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").splitlines()
+    assert "--all-build-deps" in "\n".join(lines[:8])
+    requirements = {
+        requirement.name.lower(): requirement
+        for line in lines
+        if (text := line.strip()) and not text.startswith("#")
+        for requirement in (Requirement(text),)
+    }
+
+    def selected(name: str, platform: str, implementation: str = "CPython") -> bool:
+        requirement = requirements[name]
+        environment = default_environment()
+        environment.update(
+            sys_platform=platform,
+            platform_python_implementation=implementation,
+        )
+        return requirement.marker is None or requirement.marker.evaluate(environment)
+
+    for name in ("colorama", "pefile", "pywin32-ctypes"):
+        assert selected(name, "win32")
+        assert not selected(name, "linux")
+    assert not selected("uvloop", "win32")
+    assert selected("uvloop", "linux")
+    assert not selected("uvloop", "linux", "PyPy")
+    assert selected("macholib", "darwin")
+    assert not selected("macholib", "win32")
+    assert not selected("macholib", "linux")
+
+
+def test_windows_installer_sqlite_policy_matches_runtime_gate() -> None:
+    text = (ROOT / "install.bat").read_text(encoding="ascii")
+    lines = [line for line in text.splitlines() if "sqlite_version_info" in line]
+
+    assert len(lines) == 1
+    lo, hi = SQLITE_BROKEN_RANGE
+    backports = tuple(sorted(SQLITE_BACKPORT_SAFE))
+    expected = f"not ({lo!r} <= v < {hi!r}) or v in {backports!r}"
+    condition = lines[0].split("0 if ", 1)[1].split(" else 1", 1)[0]
+
+    assert condition.replace(" ", "") == expected.replace(" ", "")

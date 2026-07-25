@@ -2,19 +2,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Phase 2c M.1: install from lockfile first for reproducible builds.
-# Two operators building on different days now get the exact same
-# transitive deps. The --no-deps install of cryodaq itself avoids
-# pulling in `>=` resolutions that would shadow the locked versions.
-if [ -f requirements-lock.txt ]; then
-    echo "Installing from requirements-lock.txt (reproducible build)..."
-    pip install --require-hashes -r requirements-lock.txt 2>/dev/null \
-        || pip install -r requirements-lock.txt
-    pip install -e . --no-deps
+# Install the tracked version-pinned Python dependency set first. The
+# --no-deps/--no-build-isolation project install avoids a second
+# unconstrained runtime or build-backend resolution.
+if [ ! -f requirements-lock.txt ]; then
+    echo "ERROR: requirements-lock.txt is required for a supported build." >&2
+    exit 1
 fi
+echo "Installing version-pinned dependencies from requirements-lock.txt..."
+python -m pip install -r requirements-lock.txt
+python -m pip install -e . --no-deps --no-build-isolation
+python -m pip check
 
 rm -rf build/ dist/
-pyinstaller build_scripts/cryodaq.spec --clean --noconfirm
+python -m PyInstaller build_scripts/cryodaq.spec --clean --noconfirm
 python build_scripts/post_build.py
 echo ""
 echo "Build complete: dist/CryoDAQ/"

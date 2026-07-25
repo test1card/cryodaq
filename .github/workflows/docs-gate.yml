@@ -1,0 +1,32 @@
+name: Docs Freshness Gate
+
+# E2: mechanical doc-freshness invariants (tests/docs/test_docs_freshness.py).
+# Deliberately separate from main.yml's full test matrix — this needs only
+# pytest + stdlib (git ls-files, tomllib), not the full cryodaq install, so
+# it stays fast and does not interfere with the main CI workflow.
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: docs-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs-freshness:
+    name: docs freshness (E2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install pytest
+        run: pip install "pytest>=8"
+
+      - name: Run docs freshness gate
+        run: pytest tests/docs/test_docs_freshness.py -v
