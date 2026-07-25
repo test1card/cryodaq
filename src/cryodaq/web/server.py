@@ -21,6 +21,8 @@ For LAN access route via SSH tunnel; never bind 0.0.0.0 directly.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.metadata import version as _get_version
 
 try:
@@ -30,6 +32,7 @@ except Exception:
 import json
 import logging
 import math
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,7 +43,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from cryodaq.core.zmq_bridge import ZMQSubscriber
+from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQSubscriber
 from cryodaq.drivers.base import Reading
 from cryodaq.paths import get_data_dir
 from cryodaq.storage._sqlite import sqlite3
@@ -61,23 +64,189 @@ _CMD_ADDR = "tcp://127.0.0.1:5556"  # REP port = PUB + 1
 # and can OOM the web process. Clamp rather than 500.
 _HISTORY_MAX_MINUTES = 1440  # 24 h — covers the dashboard's longest window
 _LOG_MAX_LIMIT = 2000
+_MUTATION_PROTOCOL_MAJOR = 1
+_MUTATION_CAPABILITY = "cryodaq_mutation_v1"
+_MUTATION_RECEIPT_SCHEMA = "mutation_compatibility_v1"
+_MUTATION_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "accepted",
+        "server_protocol_major",
+        "required_capability",
+        "capability_token",
+    }
+)
+_MUTATION_ENVELOPE_KEYS = frozenset({"protocol_major", "mutation_capability", "capability_token"})
+_WEB_READ_ONLY_COMMANDS = frozenset(
+    {
+        "mutation_capabilities",
+        "safety_status",
+        "alarm_v2_status",
+        "experiment_status",
+        "log_get",
+    }
+)
+_mutation_lock = threading.Lock()
+_mutation_receipt: dict[str, Any] | None = None
 
 
-def _send_engine_command(cmd: dict) -> dict:
-    """Send a command to the engine via ZMQ REQ/REP. Thread-safe per call."""
+def _json_safe_value(value: Any) -> Any:
+    """Return a strict-JSON projection with non-finite floats masked.
+
+    JSON's ``NaN``/``Infinity`` extensions are not valid RFC 8259 values and
+    browsers disagree about how to handle them.  Public monitoring surfaces
+    therefore preserve the reading/status evidence but represent an unknown
+    numeric value as ``null``.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe_value(item) for item in value]
+    return value
+
+
+def _requires_mutation_envelope(action: object) -> bool:
+    """Default unknown web commands to the fail-closed mutation path."""
+    return type(action) is not str or not action or action not in _WEB_READ_ONLY_COMMANDS
+
+
+def _send_engine_command_once(cmd: dict[str, Any]) -> dict[str, Any]:
+    """Send exactly one REQ and classify whether a mutation may have landed."""
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.REQ)
     sock.setsockopt(zmq.RCVTIMEO, 5000)
     sock.setsockopt(zmq.SNDTIMEO, 5000)
     sock.setsockopt(zmq.LINGER, 0)
+    send_started = False
     try:
         sock.connect(_CMD_ADDR)
+        send_started = True
         sock.send_json(cmd)
-        return sock.recv_json()
-    except zmq.ZMQError:
-        return {"ok": False, "error": "Engine не отвечает"}
+        response = sock.recv_json()
+        if type(response) is not dict:
+            raise ValueError("engine response is not an object")
+        return response
+    except Exception as exc:  # noqa: BLE001 - turn transport/codec faults into evidence
+        logger.warning("Web engine command transport failed for %s: %s", cmd.get("cmd"), exc)
+        if send_started and _requires_mutation_envelope(cmd.get("cmd")):
+            return {
+                "ok": False,
+                "error_code": "mutation_outcome_unknown",
+                "error": "Engine did not return a valid mutation receipt; outcome is unknown",
+                "delivery_state": "unknown",
+                "commit_state": "unknown",
+                "retry_safe": False,
+            }
+        return {
+            "ok": False,
+            "error_code": "engine_unavailable",
+            "error": "Engine не отвечает",
+            "delivery_state": "not_confirmed",
+            "retry_safe": True,
+        }
     finally:
         sock.close()
+
+
+def _mutation_discovery_failure() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error_code": "mutation_protocol_incompatible",
+        "error": "Web mutation compatibility discovery failed; command was not dispatched",
+        "delivery_state": "not_dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": True,
+        "compatibility_receipt": {
+            "schema": _MUTATION_RECEIPT_SCHEMA,
+            "accepted": False,
+            "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "required_capability": _MUTATION_CAPABILITY,
+        },
+    }
+
+
+def _ensure_mutation_compatibility() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Discover one strict receipt; concurrent web writes share the flight."""
+    global _mutation_receipt
+    with _mutation_lock:
+        if _mutation_receipt is not None:
+            return dict(_mutation_receipt), None
+        discovery = _send_engine_command_once({"cmd": "mutation_capabilities"})
+        receipt = discovery.get("compatibility_receipt") if type(discovery) is dict else None
+        token = receipt.get("capability_token") if type(receipt) is dict else None
+        valid = (
+            discovery.get("ok") is True
+            and type(receipt) is dict
+            and set(receipt) == _MUTATION_RECEIPT_KEYS
+            and receipt.get("schema") == _MUTATION_RECEIPT_SCHEMA
+            and receipt.get("accepted") is True
+            and type(receipt.get("server_protocol_major")) is int
+            and receipt.get("server_protocol_major") == _MUTATION_PROTOCOL_MAJOR
+            and receipt.get("required_capability") == _MUTATION_CAPABILITY
+            and type(token) is str
+            and 16 <= len(token) <= 512
+            and token.isprintable()
+        )
+        if not valid:
+            _mutation_receipt = None
+            return None, _mutation_discovery_failure()
+        _mutation_receipt = {
+            "schema": receipt["schema"],
+            "accepted": True,
+            "server_protocol_major": receipt["server_protocol_major"],
+            "required_capability": receipt["required_capability"],
+            "capability_token": token,
+        }
+        return dict(_mutation_receipt), None
+
+
+def _invalidate_mutation_compatibility() -> None:
+    global _mutation_receipt
+    with _mutation_lock:
+        _mutation_receipt = None
+
+
+def _send_engine_command(cmd: dict) -> dict:
+    """Dispatch one web command with fail-closed mutation negotiation."""
+    if type(cmd) is not dict:
+        return {
+            "ok": False,
+            "error_code": "command_invalid",
+            "error": "Web engine command must be a plain mapping",
+            "retry_safe": True,
+        }
+    action = cmd.get("cmd")
+    if type(action) is not str or not action:
+        return {
+            "ok": False,
+            "error_code": "command_invalid",
+            "error": "Web engine command requires a non-empty string cmd",
+            "retry_safe": True,
+        }
+    command = {key: value for key, value in cmd.items() if key not in _MUTATION_ENVELOPE_KEYS}
+    if not _requires_mutation_envelope(action):
+        return _send_engine_command_once(command)
+
+    receipt, failure = _ensure_mutation_compatibility()
+    if failure is not None:
+        return failure
+    assert receipt is not None
+    command.update(
+        {
+            "protocol_major": receipt["server_protocol_major"],
+            "mutation_capability": receipt["required_capability"],
+            "capability_token": receipt["capability_token"],
+        }
+    )
+    result = _send_engine_command_once(command)
+    if result.get("error_code") == "mutation_protocol_incompatible":
+        # Refresh only for the next explicit HTTP request; never replay here.
+        _invalidate_mutation_compatibility()
+    return result
 
 
 async def _async_engine_command(cmd: dict) -> dict:
@@ -117,7 +286,7 @@ class _ServerState:
         data = {
             "timestamp": reading.timestamp.isoformat(),
             "channel": reading.channel,
-            "value": reading.value,
+            "value": _json_safe_value(reading.value),
             "unit": reading.unit,
             "status": reading.status.value,
         }
@@ -143,8 +312,7 @@ class _ServerState:
             self.instrument_status[inst_id] = {
                 "last_seen": reading.timestamp.isoformat(),
                 "status": reading.status.value,
-                "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0)
-                + 1,
+                "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0) + 1,
             }
 
     def status_json(self) -> dict[str, Any]:
@@ -176,7 +344,7 @@ async def _broadcast(data: dict[str, Any]) -> None:
     """Отправить JSON всем подключённым WebSocket-клиентам."""
     if not _state.clients:
         return
-    message = json.dumps(data, ensure_ascii=False)
+    message = json.dumps(_json_safe_value(data), ensure_ascii=False, allow_nan=False)
     disconnected: list[WebSocket] = []
     for ws in _state.clients:
         try:
@@ -206,14 +374,18 @@ async def _zmq_to_ws_bridge() -> None:
     """Фоновая задача: получает Reading от ZMQ, рассылает по WebSocket."""
     sub = ZMQSubscriber(callback=_on_reading_callback)
     _state.subscriber = sub
-    await sub.start()
-    logger.info("ZMQ→WS мост запущен")
-    # Задача живёт вечно — остановка через lifespan
     try:
+        await sub.start()
+        logger.info("ZMQ→WS мост запущен")
+        # Задача живёт вечно — остановка через lifespan
         while True:  # noqa: ASYNC110
             await asyncio.sleep(3600)
-    except asyncio.CancelledError:
-        await sub.stop()
+    finally:
+        try:
+            await sub.stop()
+        finally:
+            if _state.subscriber is sub:
+                _state.subscriber = None
 
 
 def _on_reading_callback(reading: Reading) -> None:
@@ -227,14 +399,9 @@ def _on_reading_callback(reading: Reading) -> None:
     if q is None:
         return
 
-    data = {
-        "type": "reading",
-        "timestamp": reading.timestamp.isoformat(),
-        "channel": reading.channel,
-        "value": reading.value,
-        "unit": reading.unit,
-        "status": reading.status.value,
-    }
+    # Build the event from the already-normalised cache entry so the REST and
+    # WebSocket surfaces cannot drift on missing/non-finite value semantics.
+    data = {"type": "reading", **_state.last_readings[reading.channel]}
     try:
         q.put_nowait(data)
     except asyncio.QueueFull:
@@ -273,7 +440,19 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
     if not _DATA_DIR.exists():
         return result
 
+    # Daily filenames use the writer's wall-clock date. Include one preceding
+    # day conservatively for timezone/cross-midnight overlap, but never open
+    # the entire archive for a short dashboard request.
+    oldest_candidate_date = (cutoff - timedelta(days=1)).date()
+    latest_candidate_date = (datetime.now(UTC) + timedelta(days=1)).date()
     for db_path in sorted(_DATA_DIR.glob("data_????-??-??.db")):
+        try:
+            db_date = datetime.strptime(db_path.stem.removeprefix("data_"), "%Y-%m-%d").date()
+        except ValueError:
+            logger.warning("Ignoring malformed daily SQLite filename: %s", db_path.name)
+            continue
+        if not oldest_candidate_date <= db_date <= latest_candidate_date:
+            continue
         conn = None
         try:
             conn = sqlite3.connect(str(db_path), timeout=5)
@@ -311,38 +490,48 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
 
 def create_app() -> FastAPI:
     """Создать и настроить FastAPI-приложение."""
+
+    @asynccontextmanager
+    async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        # Initialize loop-owned state only while this application is live.
+        _state.broadcast_q = asyncio.Queue(maxsize=200)
+        pump_task = asyncio.create_task(_broadcast_pump(), name="broadcast_pump")
+        zmq_task = asyncio.create_task(_zmq_to_ws_bridge(), name="zmq_ws_bridge")
+        tasks = (zmq_task, pump_task)
+        logger.info("Веб-сервер CryoDAQ запущен")
+        try:
+            yield
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            _state.broadcast_q = None
+            failures = [
+                result
+                for result in results
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+            ]
+            logger.info("Веб-сервер CryoDAQ остановлен")
+            if failures:
+                raise RuntimeError("web background task settlement failed") from failures[0]
+
     application = FastAPI(
         title="CryoDAQ Web Dashboard",
         description="Удалённый мониторинг криогенной системы",
         version=_VERSION,
+        lifespan=_lifespan,
     )
-
-    _zmq_task: asyncio.Task[None] | None = None
-    _pump_task: asyncio.Task[None] | None = None
-
-    @application.on_event("startup")
-    async def _startup() -> None:
-        nonlocal _zmq_task, _pump_task
-        # Инициализируем очередь в контексте event loop
-        _state.broadcast_q = asyncio.Queue(maxsize=200)
-        _pump_task = asyncio.create_task(_broadcast_pump(), name="broadcast_pump")
-        _zmq_task = asyncio.create_task(_zmq_to_ws_bridge(), name="zmq_ws_bridge")
-        logger.info("Веб-сервер CryoDAQ запущен")
-
-    @application.on_event("shutdown")
-    async def _shutdown() -> None:
-        for task in (_zmq_task, _pump_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        logger.info("Веб-сервер CryoDAQ остановлен")
 
     # Read-only REST facade + Swagger. Imported here (not at module top) to
     # keep the server<->rest_api import non-circular.
-    from cryodaq.web.rest_api import BodySizeLimitMiddleware, WriteAuthMiddleware
+    from cryodaq.web.rest_api import (
+        BodySizeLimitMiddleware,
+        WriteAuthMiddleware,
+        project_public_experiment,
+        project_public_log_entries,
+        redact_public_payload,
+    )
     from cryodaq.web.rest_api import router as rest_router
 
     application.add_middleware(BodySizeLimitMiddleware)
@@ -362,12 +551,12 @@ def create_app() -> FastAPI:
     @application.get("/status")
     async def status() -> dict[str, Any]:
         """JSON-статус системы."""
-        return _state.status_json()
+        return redact_public_payload(_state.status_json())
 
     @application.get("/api/status")
     async def api_status() -> dict[str, Any]:
         """Полный JSON-статус: readings + experiment + shift."""
-        base = _state.status_json()
+        base = redact_public_payload(_state.status_json())
         base["readings"] = _state.last_readings
         # Safety status via engine command
         try:
@@ -381,18 +570,24 @@ def create_app() -> FastAPI:
         try:
             alarms = await _async_engine_command({"cmd": "alarm_v2_status"})
             if alarms.get("ok"):
-                base["active_alarms"] = alarms.get("active", {})
                 _state.active_alarms = alarms.get("active", {})
+                base["active_alarms"] = redact_public_payload(alarms.get("active", {}))
         except Exception as exc:
             logger.warning("api_status alarm fetch failed: %s", exc)
         # Experiment/shift data via ZMQ command
         try:
             exp = await _async_engine_command({"cmd": "experiment_status"})
-            base["experiment"] = exp if exp.get("ok") else None
+            base["experiment"] = project_public_experiment(exp) if exp.get("ok") else None
         except Exception as exc:
             logger.warning("api_status experiment fetch failed: %s", exc)
             base["experiment"] = None
-        return base
+        return redact_public_payload(base)
+
+    @application.get("/api/version")
+    async def api_version() -> dict[str, Any]:
+        """Protocol + app version triple — unauthenticated read, same trust
+        as the other GET routes (see docs/protocol.md)."""
+        return {"proto": PROTOCOL_VERSION, "server": "web", "app_version": _VERSION}
 
     @application.get("/api/log")
     async def api_log(limit: int = 10) -> dict[str, Any]:
@@ -402,7 +597,10 @@ def create_app() -> FastAPI:
         try:
             result = await _async_engine_command({"cmd": "log_get", "limit": limit})
             if result.get("ok"):
-                return {"ok": True, "entries": result.get("entries", [])}
+                return {
+                    "ok": True,
+                    "entries": project_public_log_entries(result.get("entries", [])),
+                }
         except Exception as exc:
             logger.warning("api_log fetch failed: %s", exc)
         return {"ok": False, "entries": []}

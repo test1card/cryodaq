@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
 from starlette.testclient import TestClient
 
+from cryodaq.core.zmq_bridge import PROTOCOL_VERSION
 from cryodaq.web.server import _query_history, create_app
 
 
@@ -53,8 +55,22 @@ def test_api_status_returns_json(client) -> None:
     assert "active_alarms" in data
 
 
+def test_api_version_returns_proto_server_app_version(client) -> None:
+    """GET /api/version is unauthenticated (same trust as other reads)
+    and returns the {proto, server, app_version} triple, `server: "web"`."""
+    resp = client.get("/api/version")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == {
+        "proto": PROTOCOL_VERSION,
+        "server": "web",
+        "app_version": data["app_version"],
+    }
+    assert isinstance(data["app_version"], str) and data["app_version"]
+
+
 def test_api_log_returns_entries(client) -> None:
-    """_async_engine_command receives correct payload and entries are forwarded."""
+    """The legacy dashboard receives the canonical author-free projection."""
     received: list[dict] = []
     expected_entries = [{"message": "test", "timestamp": "2026-03-17T10:00:00Z"}]
 
@@ -67,7 +83,19 @@ def test_api_log_returns_entries(client) -> None:
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data == {"ok": True, "entries": expected_entries}
+    assert data == {
+        "ok": True,
+        "entries": [
+            {
+                "id": None,
+                "timestamp": "2026-03-17T10:00:00Z",
+                "experiment_id": None,
+                "source": None,
+                "message": "test",
+                "tags": [],
+            }
+        ],
+    }
     assert len(received) == 1
     assert received[0] == {"cmd": "log_get", "limit": 5}
 
@@ -90,7 +118,7 @@ def test_status_endpoint_returns_json(client) -> None:
 
 
 def test_query_history_closes_connection_on_exception(monkeypatch, tmp_path) -> None:
-    db_path = tmp_path / "data_2026-04-18.db"
+    db_path = tmp_path / f"data_{datetime.now(UTC).date().isoformat()}.db"
     db_path.write_text("")
     closed: list[bool] = []
 

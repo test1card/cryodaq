@@ -10,7 +10,10 @@ bound (the value actually used in the query / forwarded to the engine), not a
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 import cryodaq.web.server as server
 
@@ -48,20 +51,53 @@ def test_query_history_clamps_oversized_minutes(monkeypatch) -> None:
             pass
 
     monkeypatch.setattr(
-        server, "_DATA_DIR", _PatchedDir([server.Path("data_2026-03-16.db")])
+        server,
+        "_DATA_DIR",
+        _PatchedDir([server.Path(f"data_{datetime.now(UTC).date().isoformat()}.db")]),
     )
     monkeypatch.setattr(server.sqlite3, "connect", lambda *_a, **_k: _FakeConn())
 
     server._query_history(99999999)
 
     # Effective cutoff must be no older than now - max-window (with slack).
-    floor = (
-        datetime.now(UTC) - timedelta(minutes=server._HISTORY_MAX_MINUTES + 1)
-    ).timestamp()
+    floor = (datetime.now(UTC) - timedelta(minutes=server._HISTORY_MAX_MINUTES + 1)).timestamp()
     assert "cutoff_epoch" in captured, "query never ran"
-    assert captured["cutoff_epoch"] >= floor, (
-        "minutes not clamped — cutoff reaches far past the max window"
-    )
+    assert captured["cutoff_epoch"] >= floor, "minutes not clamped — cutoff reaches far past the max window"
+
+
+def test_query_history_skips_archive_files_outside_window(monkeypatch) -> None:
+    """A short dashboard query must not open every historical daily DB."""
+    today = datetime.now(UTC).date()
+    recent = server.Path(f"data_{today.isoformat()}.db")
+    old = server.Path(f"data_{(today - timedelta(days=30)).isoformat()}.db")
+    future = server.Path(f"data_{(today + timedelta(days=30)).isoformat()}.db")
+    opened: list[str] = []
+
+    class _FakeCursor:
+        def fetchall(self):
+            return []
+
+    class _FakeConn:
+        row_factory = None
+
+        def execute(self, _sql, _params):
+            return _FakeCursor()
+
+        def close(self) -> None:
+            pass
+
+    def _connect(path, **_kwargs):
+        opened.append(str(path))
+        return _FakeConn()
+
+    monkeypatch.setattr(server, "_DATA_DIR", _PatchedDir([old, recent, future]))
+    monkeypatch.setattr(server.sqlite3, "connect", _connect)
+
+    server._query_history(1)
+
+    assert str(recent) in opened
+    assert str(old) not in opened
+    assert str(future) not in opened
 
 
 def test_api_log_clamps_oversized_limit(monkeypatch) -> None:
@@ -84,9 +120,7 @@ def test_api_log_clamps_oversized_limit(monkeypatch) -> None:
 
     asyncio.run(handler(limit=10_000_000))
 
-    assert captured["cmd"]["limit"] == server._LOG_MAX_LIMIT, (
-        "limit not clamped to _LOG_MAX_LIMIT"
-    )
+    assert captured["cmd"]["limit"] == server._LOG_MAX_LIMIT, "limit not clamped to _LOG_MAX_LIMIT"
 
 
 def test_query_history_masks_sentinel(tmp_path, monkeypatch) -> None:
@@ -136,3 +170,43 @@ def test_query_history_masks_sentinel(tmp_path, monkeypatch) -> None:
     assert not any(isinstance(v, float) and not math.isfinite(v) for v in vs), (
         "non-finite number leaked into history feed"
     )
+
+
+async def test_live_reading_cache_and_websocket_mask_nonfinite(monkeypatch) -> None:
+    """Live public surfaces retain status but serialize non-finite values as null."""
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    class _Client:
+        messages: list[str] = []
+
+        async def send_text(self, message: str) -> None:
+            self.messages.append(message)
+
+    client = _Client()
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+    monkeypatch.setattr(server._state, "last_readings", {})
+    monkeypatch.setattr(server._state, "clients", {client})
+    monkeypatch.setattr(server._state, "broadcast_q", queue)
+
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="ls218",
+            channel="T1",
+            value=float("nan"),
+            unit="K",
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+    )
+
+    cached = server._state.last_readings["T1"]
+    event = queue.get_nowait()
+    assert cached["value"] is None
+    assert cached["status"] == "sensor_error"
+    assert event["value"] is None
+
+    # _broadcast is defensive even if an unexpected producer bypasses the
+    # canonical reading callback.
+    await server._broadcast({"type": "reading", "value": float("inf")})
+    assert len(client.messages) == 1
+    assert json.loads(client.messages[0], parse_constant=lambda token: pytest.fail(token))["value"] is None

@@ -186,12 +186,12 @@
         }
         .alarm-critical .alarm-level { color: var(--red); }
 
-        .alarm-warning {
+        .alarm-caution {
             background: #2d1f08;
             border-color: #9e6a03;
             color: var(--orange);
         }
-        .alarm-warning .alarm-level { color: var(--orange); }
+        .alarm-caution .alarm-level { color: var(--orange); }
 
         .alarm-info {
             background: #0d2340;
@@ -664,9 +664,9 @@ const activeAlarms = new Map();
 
 function handleAlarm(msg) {
     const key = msg.alarm_id || msg.channel;
-    if (msg.state === 'OK' || msg.state === 'ACKNOWLEDGED') {
+    if (msg.state === 'OK') {
         activeAlarms.delete(key);
-    } else {
+    } else if (msg.state !== 'ACKNOWLEDGED') {
         activeAlarms.set(key, msg);
     }
     renderAlarms();
@@ -683,11 +683,12 @@ function renderAlarms() {
 
     panel.classList.add('visible');
     const html = Array.from(activeAlarms.values()).map(a => {
-        const severity = (a.severity || 'info').toLowerCase();
-        let cls = 'alarm-info';
-        let lvlText = 'ИНФО';
+        const severity = (a.severity || 'unknown').toLowerCase();
+        let cls = 'alarm-critical';
+        let lvlText = 'НЕИЗВЕСТНЫЙ УРОВЕНЬ';
         if (severity === 'critical') { cls = 'alarm-critical'; lvlText = 'КРИТИЧНО'; }
-        else if (severity === 'warning') { cls = 'alarm-warning'; lvlText = 'ПРЕДУПРЕЖДЕНИЕ'; }
+        else if (severity === 'warning' || severity === 'caution') { cls = 'alarm-caution'; lvlText = 'ВНИМАНИЕ'; }
+        else if (severity === 'info') { cls = 'alarm-info'; lvlText = 'ИНФО'; }
         return `<div class="alarm-badge ${esc(cls)}">
             <span class="alarm-level">${lvlText}</span>
             <span class="alarm-channel">${esc(a.channel || '')}</span>
