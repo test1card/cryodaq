@@ -213,12 +213,12 @@ def _expand_alarm(
     _validate_required_keys(alarm_id, cfg)
 
     # Expand channel_group → channels
-    _expand_channel_group(cfg, channel_groups)
+    _expand_channel_group(alarm_id, cfg, channel_groups)
 
     # Expand channel_group inside composite conditions
-    for cond in cfg.get("conditions", []):
+    for i, cond in enumerate(cfg.get("conditions", [])):
         if isinstance(cond, dict):
-            _expand_channel_group(cond, channel_groups)
+            _expand_channel_group(alarm_id, cond, channel_groups, context=f"conditions[{i}]")
 
     return AlarmConfig(
         alarm_id=alarm_id,
@@ -233,6 +233,31 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+# alarm_type values recognised by alarm_v2.AlarmEvaluator.evaluate() (alarm_v2.py:185-200).
+# Anything else falls into evaluate()'s own `else` branch, which only logs a
+# warning and returns None — i.e. the alarm silently never fires at runtime.
+_VALID_ALARM_TYPES = frozenset({"threshold", "rate", "composite", "stale"})
+
+# check values recognised by alarm_v2._check_threshold_channel (alarm_v2.py:261-285).
+# Its own `else` branch (L283-285) only logs a warning and returns (False, value).
+_VALID_THRESHOLD_CHECKS = frozenset(
+    {"above", "below", "outside_range", "deviation_from_setpoint", "fault_count_in_window"}
+)
+
+# check values recognised by alarm_v2._eval_rate (alarm_v2.py:394-434). Unknown
+# values leave `fired` at its initial False — the rate alarm silently never fires.
+_VALID_RATE_CHECKS = frozenset(
+    {"rate_above", "rate_below", "rate_near_zero", "relative_rate_near_zero"}
+)
+
+# check values recognised by alarm_v2._eval_condition (alarm_v2.py:329-388), used
+# for composite sub-conditions and rate additional_condition. Its own `else`
+# branch (L386-388) only logs a warning and returns False.
+_VALID_CONDITION_CHECKS = frozenset(
+    {"any_below", "any_above", "above", "below", "rate_above", "rate_below", "rate_near_zero"}
+)
+
+
 def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
     """Fail-closed presence/type check of evaluate-time required keys.
 
@@ -240,23 +265,34 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
     fails closed at startup (AlarmConfigError) instead of silently
     returning None at runtime (KeyError caught by evaluate()).
 
+    Also mirrors every dispatch `else` branch (alarm_type / check /
+    channel_group) that would otherwise let an unrecognised value — e.g. a
+    typo like alarm_type: composit — load cleanly and then silently never
+    fire at runtime (evaluate() logs a warning and returns None; see
+    alarm_v2.py:198-200, 283-285, 386-388).
+
     alarm_type: threshold — _check_threshold_channel (alarm_v2.py:224-233)
       - check above/below             → numeric `threshold`
       - check outside_range           → 2-element numeric `range`
       - check deviation_from_setpoint → str `setpoint_source` + numeric `threshold`
       - check fault_count_in_window   → exempt (uses .get("min_fault_count", 1))
+      - any other check               → rejected (unknown to alarm_v2)
 
     alarm_type: rate — _eval_rate (alarm_v2.py:362-365)
       - check rate_above/rate_below   → numeric `threshold`
       - check rate_near_zero / relative_rate_near_zero → exempt (.get("rate_threshold", …))
+      - any other check               → rejected (unknown to alarm_v2)
       - additional_condition (if present) → validated as a composite sub-condition
 
     alarm_type: composite — sub-conditions via _eval_condition (alarm_v2.py:284-330)
       - check any_below / any_above / above / below / rate_above / rate_below
         → each sub-condition requires numeric `threshold`
       - check rate_near_zero → exempt (.get("rate_threshold", 0.1))
+      - any other check       → rejected (unknown to alarm_v2)
 
     alarm_type: stale → no hard reads, exempt.
+
+    Any other alarm_type → rejected (unknown to alarm_v2).
     """
     alarm_type = cfg.get("alarm_type")
 
@@ -264,8 +300,13 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
         _validate_threshold_check(alarm_id, cfg)
 
     elif alarm_type == "rate":
-        # alarm_v2._eval_rate L362-365
+        # alarm_v2._eval_rate L362-365 / L407-417
         check = cfg.get("check", "rate_above")
+        if check not in _VALID_RATE_CHECKS:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} has alarm_type=rate with unknown check "
+                f"{check!r}; valid checks are {sorted(_VALID_RATE_CHECKS)}"
+            )
         if check in ("rate_above", "rate_below"):
             if not _is_number(cfg.get("threshold")):
                 raise AlarmConfigError(
@@ -283,6 +324,15 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
         for i, cond in enumerate(cfg.get("conditions", [])):
             if isinstance(cond, dict):
                 _validate_condition(alarm_id, cond, context=f"conditions[{i}]")
+
+    elif alarm_type == "stale":
+        pass  # no hard reads — exempt (alarm_v2._eval_stale, alarm_v2.py:440-462)
+
+    else:
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r} has unknown alarm_type {alarm_type!r}; "
+            f"valid values are {sorted(_VALID_ALARM_TYPES)}"
+        )
 
 
 def _validate_threshold_check(alarm_id: str, cfg: dict) -> None:
@@ -316,7 +366,13 @@ def _validate_threshold_check(alarm_id: str, cfg: dict) -> None:
                 f"alarm {alarm_id!r} (check=deviation_from_setpoint) requires a numeric "
                 f"'threshold', got {cfg.get('threshold')!r}"
             )
-    # fault_count_in_window: exempt — uses .get("min_fault_count", 1), no hard subscript
+    elif check == "fault_count_in_window":
+        pass  # exempt — uses .get("min_fault_count", 1), no hard subscript
+    else:
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r} has alarm_type=threshold with unknown check "
+            f"{check!r}; valid checks are {sorted(_VALID_THRESHOLD_CHECKS)}"
+        )
 
 
 def _validate_condition(alarm_id: str, cond: dict, context: str) -> None:
@@ -328,6 +384,11 @@ def _validate_condition(alarm_id: str, cond: dict, context: str) -> None:
       rate_near_zero                     → exempt (.get("rate_threshold", 0.1))
     """
     check = cond.get("check", "above")
+    if check not in _VALID_CONDITION_CHECKS:
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r} {context} has unknown check {check!r}; "
+            f"valid checks are {sorted(_VALID_CONDITION_CHECKS)}"
+        )
     needs_threshold = check in ("any_below", "any_above", "above", "below", "rate_above", "rate_below")
     if needs_threshold and not _is_number(cond.get("threshold")):
         raise AlarmConfigError(
@@ -336,11 +397,30 @@ def _validate_condition(alarm_id: str, cond: dict, context: str) -> None:
         )
 
 
-def _expand_channel_group(cfg: dict, groups: dict[str, list[str]]) -> None:
-    """Заменить channel_group → channels in-place."""
+def _expand_channel_group(
+    alarm_id: str,
+    cfg: dict,
+    groups: dict[str, list[str]],
+    context: str = "",
+) -> None:
+    """Заменить channel_group → channels in-place.
+
+    Fail-closed: a channel_group typo (e.g. "uncalibrted") must not be
+    silently dropped. Previously an unknown group_name left `cfg` without a
+    `channels` key at all, so alarm_v2._resolve_channels() resolved to an
+    empty list at runtime and the alarm silently never fired (no hard read,
+    no exception — a dead annunciator that looks configured).
+    """
     group_name = cfg.pop("channel_group", None)
-    if group_name and group_name in groups:
-        cfg["channels"] = list(groups[group_name])
+    if group_name is None:
+        return
+    if group_name not in groups:
+        where = f" {context}" if context else ""
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r}{where} references unknown channel_group "
+            f"{group_name!r}; known groups are {sorted(groups)}"
+        )
+    cfg["channels"] = list(groups[group_name])
 
 
 def _find_default_config() -> Path | None:

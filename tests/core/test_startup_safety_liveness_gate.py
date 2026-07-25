@@ -19,9 +19,11 @@ exercises the startup gate that consumes the same proven logic.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -29,11 +31,17 @@ import yaml
 import cryodaq.engine as engine
 from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
 from cryodaq.core.safety_broker import SafetyBroker
-from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.core.safety_pattern_liveness import (
     _THROTTLE_BYPASS_PATTERNS,
     SafetyPatternLivenessError,
     validate_safety_pattern_liveness,
+)
+from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
 )
 from cryodaq.engine import DriverLoadResult
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
@@ -187,6 +195,158 @@ def test_actual_runtime_union_resolves_canonical_patterns_to_raw_throttle_plane(
     assert "^Т12\\ Теплообменник\\ 2$" in resolved
 
 
+def test_shipped_safety_decision_inputs_are_protected_from_adaptive_throttle() -> None:
+    """The shipped config protects each per-channel or per-source safety input."""
+    validate_safety_pattern_liveness(
+        descriptor_catalog=_real_catalog(),
+        interlocks_config_path=_INTERLOCKS_PATH,
+        safety_manager=_real_safety_manager(),
+        adaptive_throttle_patterns=_real_merged_patterns(),
+    )
+
+
+def test_unprotected_resolved_safety_channel_raises_and_names_channel(tmp_path: Path) -> None:
+    """A live safety channel outside throttle protection fails startup closed."""
+    descriptor_path = tmp_path / "channel_descriptors.yaml"
+    critical = _manifest(
+        instrument_id="critical",
+        emitted_channel="critical emitted",
+        channel_id="critical.1",
+    )
+    protected = _manifest(
+        instrument_id="protected",
+        emitted_channel="protected emitted",
+        channel_id="protected.1",
+    )
+    _write_manifest(
+        descriptor_path,
+        {
+            "schema_version": 1,
+            "descriptors": [critical["descriptors"][0], protected["descriptors"][0]],
+            "bindings": [critical["bindings"][0], protected["bindings"][0]],
+        },
+    )
+    interlocks_path = tmp_path / "interlocks.yaml"
+    interlocks_path.write_text("interlocks: []\n", encoding="utf-8")
+    safety_path = tmp_path / "safety.yaml"
+    safety_path.write_text(
+        'critical_channels:\n  - "^critical\\\\.1$"\nkeithley_channels: []\n',
+        encoding="utf-8",
+    )
+    safety_manager = SafetyManager(SafetyBroker())
+    safety_manager.load_config(safety_path)
+
+    with pytest.raises(SafetyPatternLivenessError) as exc_info:
+        validate_safety_pattern_liveness(
+            descriptor_catalog=load_live_channel_descriptor_catalog(descriptor_path),
+            interlocks_config_path=interlocks_path,
+            safety_manager=safety_manager,
+            adaptive_throttle_patterns={r"protected\.1"},
+        )
+
+    assert "critical emitted" in str(exc_info.value)
+
+
+def test_each_keithley_source_requires_its_own_protected_heartbeat_channel() -> None:
+    """One protected smua metric must not satisfy smub's source heartbeat."""
+    patterns = _real_merged_patterns() - {"Keithley_1/smub/power"}
+
+    with pytest.raises(SafetyPatternLivenessError) as exc_info:
+        validate_safety_pattern_liveness(
+            descriptor_catalog=_real_catalog(),
+            interlocks_config_path=_INTERLOCKS_PATH,
+            safety_manager=_real_safety_manager(),
+            adaptive_throttle_patterns=patterns,
+        )
+
+    message = str(exc_info.value)
+    assert "heartbeat source 'smub'" in message
+    assert "Keithley_1/smub/power" in message
+    assert "heartbeat source 'smua'" not in message
+
+
+async def test_runtime_heartbeat_accepts_power_as_the_only_fresh_metric_per_active_smu(
+    tmp_path: Path,
+) -> None:
+    """The watchdog requires one fresh matching metric per active SMU, not every metric."""
+    broker = SafetyBroker()
+    keithley = MagicMock()
+    keithley.connected = True
+    keithley.output_state_unverified = False
+    keithley.emergency_off = AsyncMock(return_value=True)
+    keithley.start_source = AsyncMock()
+    keithley.stop_source = AsyncMock()
+    binding = _issue_registry_runtime_binding(
+        driver=keithley,
+        timing=AcquisitionTiming(1.0, 1.0, 1.0),
+        registry_provenance="test:startup-safety-liveness",
+        trust_class=DriverTrustClass.REVIEWED_SOURCE,
+    )
+    manager = SafetyManager(
+        broker,
+        keithley_driver=keithley,
+        reviewed_source_runtime_binding=binding,
+        mock=False,
+    )
+    safety_config = yaml.safe_load(_SAFETY_PATH.read_text(encoding="utf-8"))
+    safety_config["heartbeat_timeout_s"] = 0.2
+    safety_config["stale_timeout_s"] = 5.0
+    safety_path = tmp_path / "safety.yaml"
+    safety_path.write_text(
+        yaml.safe_dump(safety_config, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    manager.load_config(safety_path)
+    validate_safety_pattern_liveness(
+        descriptor_catalog=_real_catalog(),
+        interlocks_config_path=_INTERLOCKS_PATH,
+        safety_manager=manager,
+        adaptive_throttle_patterns=_real_merged_patterns(),
+    )
+
+    async def _publish(channel: str, value: float, unit: str) -> None:
+        await broker.publish(
+            Reading.now(
+                channel=channel,
+                value=value,
+                unit=unit,
+                instrument_id="test",
+                status=ChannelStatus.OK,
+            )
+        )
+
+    await manager.start()
+    try:
+        generation = await manager.begin_reviewed_source_connect(keithley, binding, "test setup")
+        assert await manager.complete_reviewed_source_connect(
+            keithley,
+            binding,
+            generation,
+            "test setup",
+        )
+        await _publish("Т11 Теплообменник 1", 40.0, "K")
+        await _publish("Т12 Теплообменник 2", 3.0, "K")
+        for _ in range(150):
+            if manager.state == SafetyState.READY:
+                break
+            await asyncio.sleep(0.01)
+        assert manager.state == SafetyState.READY
+
+        assert (await manager.request_run(0.5, 10.0, 0.1, channel="smua"))["ok"] is True
+        assert (await manager.request_run(0.5, 10.0, 0.1, channel="smub"))["ok"] is True
+
+        # Keep only power fresh for longer than two heartbeat windows. Current,
+        # resistance, and voltage are deliberately absent.
+        for _ in range(30):
+            await _publish("Keithley_1/smua/power", 0.5, "W")
+            await _publish("Keithley_1/smub/power", 0.5, "W")
+            await asyncio.sleep(0.05)
+
+        assert manager.state == SafetyState.RUNNING
+    finally:
+        await manager.stop()
+
+
 async def test_run_engine_uses_local_replacement_and_fails_closed_on_dead_pattern(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -331,13 +491,15 @@ def test_disk_synthetic_channel_does_not_trigger_raise() -> None:
     assert _DISK_CHANNEL not in raw_labels
     assert _DISK_CHANNEL not in canonical_ids
 
-    # Protected patterns containing ONLY the disk channel: must NOT raise.
-    validate_safety_pattern_liveness(
+    # Keep all actual safety requirements protected and prove that the
+    # descriptor-less disk pattern itself does not add a false failure.
+    resolved = validate_safety_pattern_liveness(
         descriptor_catalog=catalog,
         interlocks_config_path=_INTERLOCKS_PATH,
         safety_manager=_real_safety_manager(),
-        adaptive_throttle_patterns={re.escape(_DISK_CHANNEL)},
+        adaptive_throttle_patterns=_real_merged_patterns(),
     )
+    assert re.escape(_DISK_CHANNEL) in resolved
 
 
 def test_non_default_yaml_keithley_pattern_uses_effective_runtime_field(tmp_path: Path) -> None:

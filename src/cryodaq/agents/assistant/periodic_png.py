@@ -918,7 +918,20 @@ class PeriodicPngCoordinator:
                 code = "periodic_projection_incomplete"
                 text = "periodic projection evidence is incomplete"
         active = state.payload["active"]
-        delivery_capacity_full = len(state.payload["unresolved_delivery"]) >= MAX_UNRESOLVED_DELIVERIES
+        unresolved_count = len(state.payload["unresolved_delivery"])
+        # A single unresolved delivery is a genuine, durably-recorded
+        # ambiguity (see mark_delivery_unknown / DELIVERY_UNKNOWN): the
+        # delivery state machine correctly refuses to guess whether it sent,
+        # but that refusal must not read as ordinary health. Below the
+        # accumulation cap this is an attention signal, not a fault, so it
+        # only ever *lifts* the normal-path statuses -- it never masks a
+        # harder fault (degraded_source) and it is itself superseded by the
+        # capacity-full pause below.
+        if status in {"ready", "degraded_projection", "degraded_tls"} and unresolved_count > 0:
+            status = "degraded_delivery_unknown"
+            code = "periodic_delivery_unresolved"
+            text = "periodic delivery outcome is unresolved and awaiting reconciliation"
+        delivery_capacity_full = unresolved_count >= MAX_UNRESOLVED_DELIVERIES
         delivery_ready = isinstance(active, dict) and (
             active.get("status") == PeriodicStatus.READY.value
             or (
@@ -927,7 +940,12 @@ class PeriodicPngCoordinator:
                 and active.get("retryable") is True
             )
         )
-        if status in {"ready", "degraded_projection", "degraded_tls"} and delivery_capacity_full and delivery_ready:
+        if status in {
+            "ready",
+            "degraded_projection",
+            "degraded_tls",
+            "degraded_delivery_unknown",
+        } and delivery_capacity_full and delivery_ready:
             status = "paused_unknown_capacity"
             code = "delivery_paused_unknown_capacity"
             text = "delivery paused because unresolved evidence capacity is full"
@@ -936,6 +954,7 @@ class PeriodicPngCoordinator:
             "ready",
             "degraded_projection",
             "degraded_tls",
+            "degraded_delivery_unknown",
         } and existing_health["status"] in {
             "paused_unknown_capacity",
             "delivery_paused_unknown_capacity",

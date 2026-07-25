@@ -991,6 +991,151 @@ async def test_engine_disconnect_invalidates_cached_context() -> None:
         await cache.stop()
 
 
+def _status_receipt(scope: str, *, experiment_id: str = "exp-1") -> dict[str, object]:
+    return {
+        "schema": "assistant_context_receipt_v1",
+        "log_scope": scope,
+        "experiment_id": experiment_id,
+        "engine_incarnation": "engine-1",
+        "experiment_incarnation": "experiment-1",
+        "revision": 7,
+        "order": 11,
+        "query_start": None,
+        "query_end": None,
+        "received_at": datetime.now(UTC).isoformat(),
+        "freshness_s": 30.0,
+    }
+
+
+async def test_missing_phase_keys_in_reply_resolve_to_unavailable_not_empty() -> None:
+    """A receipt-valid experiment_status reply that is missing BOTH
+    ``current_phase`` and ``phases`` entirely (schema skew / engine defect —
+    not an explicit empty value) must not be accepted as "an active
+    experiment with no phases". The whole reply is structurally untrustworthy,
+    so it must be invalidated exactly like a failed receipt validation
+    invalidates the cache (active_experiment_id -> None too), not silently
+    downgraded into a confident-but-wrong empty phase history.
+    """
+    first_cycle_done = asyncio.Event()
+    park = asyncio.Event()
+
+    class Client:
+        calls = 0
+
+        async def call(self, command: dict[str, object]) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                assert command == {"cmd": "experiment_status"}
+                # current_phase / phases deliberately absent — the defect.
+                return {
+                    "ok": True,
+                    "active_experiment": {"experiment_id": "exp-1"},
+                    "scope_receipt": _status_receipt("experiment_status"),
+                }
+            if self.calls == 2:
+                assert command == {"cmd": "get_sensor_diagnostics"}
+                first_cycle_done.set()
+                return {"ok": False, "error": "not needed for this test"}
+            await park.wait()
+            raise AssertionError("parked client unexpectedly resumed")
+
+    cache = _RemoteEngineStateCache(Client(), poll_interval_s=0.0)
+    await cache.start()
+    try:
+        await asyncio.wait_for(first_cycle_done.wait(), 1.0)
+        await asyncio.sleep(0)
+        assert cache.active_experiment_id is None
+        assert cache.get_current_phase() is None
+        assert cache.get_phase_history() == []
+    finally:
+        await cache.stop()
+
+
+async def test_explicit_empty_phases_with_keys_present_is_legitimate_empty_history() -> None:
+    """A genuinely fresh experiment (no phase transition yet) still gets
+    BOTH keys from the real engine's ExperimentManager.get_status_payload()
+    (core/experiment.py) — current_phase=None, phases=[] — present but
+    empty, never absent. That is a legitimate, known, empty phase history
+    for a known active experiment, and must resolve normally (NOT to
+    unavailable) — distinguishing an absent key (unknown) from an explicit
+    empty value (known-and-empty) is exactly the invariant this defect is
+    about.
+    """
+    first_cycle_done = asyncio.Event()
+    park = asyncio.Event()
+
+    class Client:
+        calls = 0
+
+        async def call(self, command: dict[str, object]) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                assert command == {"cmd": "experiment_status"}
+                return {
+                    "ok": True,
+                    "active_experiment": {"experiment_id": "exp-1"},
+                    "current_phase": None,
+                    "phases": [],
+                    "scope_receipt": _status_receipt("experiment_status"),
+                }
+            if self.calls == 2:
+                assert command == {"cmd": "get_sensor_diagnostics"}
+                first_cycle_done.set()
+                return {"ok": False, "error": "not needed for this test"}
+            await park.wait()
+            raise AssertionError("parked client unexpectedly resumed")
+
+    cache = _RemoteEngineStateCache(Client(), poll_interval_s=0.0)
+    await cache.start()
+    try:
+        await asyncio.wait_for(first_cycle_done.wait(), 1.0)
+        await asyncio.sleep(0)
+        assert cache.active_experiment_id == "exp-1"
+        assert cache.get_current_phase() is None
+        assert cache.get_phase_history() == []
+    finally:
+        await cache.stop()
+
+
+async def test_complete_valid_status_reply_is_unaffected_by_key_presence_check() -> None:
+    """A fully-populated, receipt-valid experiment_status reply (both keys
+    present with real values) must behave exactly as before this fix."""
+    first_cycle_done = asyncio.Event()
+    park = asyncio.Event()
+
+    class Client:
+        calls = 0
+
+        async def call(self, command: dict[str, object]) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                assert command == {"cmd": "experiment_status"}
+                return {
+                    "ok": True,
+                    "active_experiment": {"experiment_id": "exp-1"},
+                    "current_phase": "COOLDOWN",
+                    "phases": [{"phase": "COOLDOWN"}],
+                    "scope_receipt": _status_receipt("experiment_status"),
+                }
+            if self.calls == 2:
+                assert command == {"cmd": "get_sensor_diagnostics"}
+                first_cycle_done.set()
+                return {"ok": False, "error": "not needed for this test"}
+            await park.wait()
+            raise AssertionError("parked client unexpectedly resumed")
+
+    cache = _RemoteEngineStateCache(Client(), poll_interval_s=0.0)
+    await cache.start()
+    try:
+        await asyncio.wait_for(first_cycle_done.wait(), 1.0)
+        await asyncio.sleep(0)
+        assert cache.active_experiment_id == "exp-1"
+        assert cache.get_current_phase() == "COOLDOWN"
+        assert cache.get_phase_history() == [{"phase": "COOLDOWN"}]
+    finally:
+        await cache.stop()
+
+
 async def test_live_runtime_consumes_context_receipt_and_expires_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

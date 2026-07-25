@@ -34,6 +34,7 @@ import yaml
 
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_manager import SafetyConfigError
+from cryodaq.core.smu_channel import SMU_CHANNELS
 
 if TYPE_CHECKING:
     from cryodaq.core.safety_manager import SafetyManager
@@ -74,6 +75,18 @@ class _DeadPattern:
     pattern: str
     plane: str
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class _UnprotectedSafetyChannel:
+    channel: str
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class _UnprotectedHeartbeatSource:
+    smu_channel: str
+    candidates: tuple[str, ...]
 
 
 def _resolve_critical_patterns_to_raw(
@@ -280,7 +293,8 @@ def validate_safety_pattern_liveness(
          ``.match`` (``InterlockCondition.matches_channel``).
       2. ``safety.yaml`` ``critical_channels`` — RAW plane, ``.match``.
       3. ``safety.yaml`` ``keithley_channels`` — RAW plane, ``.match`` (source
-         heartbeat watchdog, src/cryodaq/core/safety_manager.py:1794).
+         heartbeat watchdog, existential per active SMU in
+         ``SafetyManager._has_fresh_keithley_data``).
       4. The exact runtime ``AdaptiveThrottle`` protected-pattern union:
          legacy ``interlocks.yaml`` patterns plus ``alarms_v3.yaml`` patterns
          derived from CRITICAL/HIGH alarms and all v3 interlocks. RAW plane,
@@ -369,8 +383,11 @@ def validate_safety_pattern_liveness(
     # ``_keithley_patterns`` holds the YAML-loaded compiled patterns
     # (src/cryodaq/core/safety_manager.py:257) — the actual runtime value the
     # heartbeat watchdog matches, not the dataclass default.
+    keithley_channels: set[str] = set()
     for pattern in safety_manager._keithley_patterns:
-        if not any(pattern.match(ch) for ch in raw_labels):
+        matched_channels = {channel for channel in raw_labels if pattern.match(channel)}
+        keithley_channels.update(matched_channels)
+        if not matched_channels:
             dead.append(
                 _DeadPattern(
                     pattern=pattern.pattern,
@@ -390,15 +407,74 @@ def validate_safety_pattern_liveness(
     )
     dead.extend(adaptive_dead)
 
-    if dead:
+    # Both resolver outputs are exact raw-label matchers. Derive concrete
+    # channel sets on the AdaptiveThrottle's input plane rather than trying to
+    # prove regex-language inclusion. Critical inputs are checked per channel:
+    # stale/bad/non-finite data and rate excursions each gate a safety decision.
+    # Keithley heartbeat is different: _has_fresh_keithley_data accepts any
+    # fresh OK keithley_channels match for each active smua/smub source. Require
+    # one protected candidate per source, not every metric matched by the broad
+    # config regex.
+    critical_channels = {
+        channel for pattern in resolved_critical for channel in raw_labels if pattern.fullmatch(channel)
+    }
+    protected_channels = {
+        channel for pattern in resolved_adaptive for channel in raw_labels if re.fullmatch(pattern, channel)
+    }
+    uncovered_channels = [
+        _UnprotectedSafetyChannel(
+            channel=channel,
+            source="safety.yaml critical_channels",
+        )
+        for channel in sorted(critical_channels - protected_channels)
+    ]
+    uncovered_heartbeat_sources: list[_UnprotectedHeartbeatSource] = []
+    for smu_channel in SMU_CHANNELS:
+        aliases = {smu_channel, smu_channel.replace("smu", "smu_")}
+        candidates = tuple(
+            sorted(channel for channel in keithley_channels if any(f"/{alias}/" in channel for alias in aliases))
+        )
+        if not any(channel in protected_channels for channel in candidates):
+            uncovered_heartbeat_sources.append(
+                _UnprotectedHeartbeatSource(
+                    smu_channel=smu_channel,
+                    candidates=candidates,
+                )
+            )
+
+    if dead or uncovered_channels or uncovered_heartbeat_sources:
         lines = [
-            f"Startup safety-pattern liveness check FAILED: {len(dead)} "
-            f"CRITICAL/safety channel pattern(s) match NO channel on the plane "
-            f"their consumer sees (F-1 silent safety kill). Correct each one in "
-            f"its config file before permanent fail-closed activation:",
+            "Startup safety-pattern liveness check FAILED: safety monitoring "
+            "must be live and every input that independently gates a safety "
+            "decision must be protected from AdaptiveThrottle archival "
+            "suppression before startup:",
         ]
-        for d in dead:
-            lines.append(f"  - pattern={d.pattern!r} plane={d.plane} source={d.source}")
+        if dead:
+            lines.append(
+                f"Dead CRITICAL/safety channel pattern(s): {len(dead)} match NO "
+                "channel on the plane their consumer sees (F-1 silent safety kill)."
+            )
+            for d in dead:
+                lines.append(f"  - pattern={d.pattern!r} plane={d.plane} source={d.source}")
+        if uncovered_channels:
+            lines.append(
+                f"Unprotected critical safety channel(s): {len(uncovered_channels)} are "
+                "outside the AdaptiveThrottle protected set."
+            )
+            for item in uncovered_channels:
+                lines.append(f"  - channel={item.channel!r} source={item.source}")
+        if uncovered_heartbeat_sources:
+            lines.append(
+                "Unprotected Keithley heartbeat source(s): "
+                f"{len(uncovered_heartbeat_sources)} have no protected matching "
+                "channel."
+            )
+            for item in uncovered_heartbeat_sources:
+                lines.append(
+                    f"  - heartbeat source {item.smu_channel!r}: no protected "
+                    f"candidate; candidates={list(item.candidates)!r} "
+                    "source=safety.yaml keithley_channels"
+                )
         lines.append(f"Canonical roster sample: {canonical_ids[:6]}. Raw roster sample: {raw_labels[:6]}.")
         raise SafetyPatternLivenessError("\n".join(lines))
     return resolved_adaptive

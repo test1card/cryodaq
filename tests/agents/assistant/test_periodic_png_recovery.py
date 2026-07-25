@@ -1349,6 +1349,68 @@ async def test_newer_slot_with_full_ledger_persists_pause_without_send(
         await coordinator.stop()
 
 
+@pytest.mark.asyncio
+async def test_single_unresolved_delivery_is_visible_as_degraded_health(tmp_path: Path) -> None:
+    """A lone DELIVERY_UNKNOWN must not hide behind a plain 'ready' health.
+
+    The delivery state machine is sound on its own terms (terminal
+    uniqueness, reconciliation prefers UNKNOWN over re-delivery), but that
+    correctness lives in ``unresolved_delivery`` -- a durable ledger the
+    health computation did not read at all below the
+    ``MAX_UNRESOLVED_DELIVERIES`` cap. One unresolved delivery is real,
+    persisted ambiguity and must be an attention signal, not silence.
+    """
+
+    config = _config()
+    _append_unknown_slot(tmp_path, config, 120, 0)
+    coordinator = PeriodicPngCoordinator(
+        data_dir=tmp_path,
+        config=config,
+        live_sources=Live(),
+        alarm_query=Alarm(),
+        archive_query=Archive(),
+        runner=Runner(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
+        clock=Clock(1.0),
+    )
+    await coordinator.start()
+    try:
+        payload = load_periodic_state(tmp_path).payload
+        assert len(payload["unresolved_delivery"]) == 1
+        assert payload["health"]["status"] != "ready"
+        assert payload["health"]["status"] == "degraded_delivery_unknown"
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_zero_unresolved_delivery_health_is_unaffected(tmp_path: Path) -> None:
+    """No unresolved deliveries must not raise a false alarm."""
+
+    config = _config()
+    coordinator = PeriodicPngCoordinator(
+        data_dir=tmp_path,
+        config=config,
+        live_sources=Live(),
+        alarm_query=Alarm(),
+        archive_query=Archive(),
+        runner=Runner(),
+        delivery=Telegram(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
+        clock=Clock(1.0),
+    )
+    await coordinator.start()
+    try:
+        payload = load_periodic_state(tmp_path).payload
+        assert len(payload["unresolved_delivery"]) == 0
+        assert payload["health"]["status"] == "ready"
+    finally:
+        await coordinator.stop()
+
+
 def _persist_ready_for_end(data_dir: Path, config, end: int) -> None:
     state = load_periodic_state(data_dir)
     slot = latest_completed_slot(float(end + 1), 60)

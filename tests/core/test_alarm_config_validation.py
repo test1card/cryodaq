@@ -522,3 +522,211 @@ def test_shipped_alarms_v3_still_loads() -> None:
     """The shipped config/alarms_v3.yaml must continue to load cleanly."""
     _, alarms = load_alarm_config(None)
     assert len(alarms) > 0
+
+
+# ---------------------------------------------------------------------------
+# fail-OPEN gap: unrecognised alarm_type / check / channel_group used to load
+# cleanly and then silently never fire at runtime (alarm_v2's own dispatch
+# `else` branches only log a warning and return None/False — see
+# alarm_v2.py:198-200, 283-285, 386-388). These pin the fix: unrecognised
+# values must now raise AlarmConfigError at LOAD time instead.
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_alarm_type_typo_raises(tmp_path: Path) -> None:
+    """Reported defect: alarm_type: composit (typo for composite) on a
+    vacuum_loss_cold-style alarm used to load with no error and never fire."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vacuum_loss_cold:
+            alarm_type: composit
+            operator: AND
+            conditions:
+              - channels: [T11, T12]
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="alarm_type"):
+        load_alarm_config(p)
+
+
+def test_unknown_threshold_check_raises(tmp_path: Path) -> None:
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          over_power:
+            alarm_type: threshold
+            channel: smua_power
+            check: abov
+            threshold: 4.0
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="check"):
+        load_alarm_config(p)
+
+
+def test_unknown_rate_check_raises(tmp_path: Path) -> None:
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          excessive_cooling:
+            alarm_type: rate
+            channels: [T11, T12]
+            check: rate_abov
+            threshold: -5.0
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="check"):
+        load_alarm_config(p)
+
+
+def test_unknown_composite_sub_condition_check_raises(tmp_path: Path) -> None:
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channels: [T11, T12]
+                check: any_belw
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="check"):
+        load_alarm_config(p)
+
+
+def test_unknown_channel_group_raises(tmp_path: Path) -> None:
+    """A channel_group typo used to be silently dropped (no 'channels' key
+    ever set), leaving alarm_v2._resolve_channels() an empty list at
+    runtime — the alarm silently never fired for any channel."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          uncalibrated: [T1, T2]
+        global_alarms:
+          sensor_fault:
+            alarm_type: threshold
+            channel_group: uncalibrted
+            check: outside_range
+            range: [0.0, 350.0]
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+def test_unknown_channel_group_in_composite_condition_raises(tmp_path: Path) -> None:
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          calibrated: [T11, T12]
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channel_group: calibrted
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+# ---------------------------------------------------------------------------
+# known-good values of the newly-validated fields must be unaffected
+# ---------------------------------------------------------------------------
+
+
+def test_known_good_alarm_type_stale_unaffected(tmp_path: Path) -> None:
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          data_loss_temperature:
+            alarm_type: stale
+            channel: T11
+            timeout_s: 120
+            level: CRITICAL
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    assert any(a.alarm_id == "data_loss_temperature" for a in alarms)
+
+
+def test_known_good_rate_check_relative_rate_near_zero_unaffected(tmp_path: Path) -> None:
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vacuum_stall:
+            alarm_type: rate
+            channel: P1
+            check: relative_rate_near_zero
+            rate_threshold: 0.01
+            level: INFO
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    assert any(a.alarm_id == "vacuum_stall" for a in alarms)
+
+
+def test_known_good_channel_group_unaffected(tmp_path: Path) -> None:
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          uncalibrated: [T1, T2]
+        global_alarms:
+          sensor_fault:
+            alarm_type: threshold
+            channel_group: uncalibrated
+            check: outside_range
+            range: [0.0, 350.0]
+            level: WARNING
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    found = next(a for a in alarms if a.alarm_id == "sensor_fault")
+    assert found.config["channels"] == ["T1", "T2"]
+
+
+def test_shipped_physical_alarms_and_interlocks_not_parsed_by_this_loader() -> None:
+    """physical_alarms.yaml and interlocks.yaml are consumed by other modules
+    (CooldownAlarm/VacuumGuard, the interlock engine), not by
+    load_alarm_config — so this loader's stricter validation cannot newly
+    reject anything in them. Documented here so that assumption stays
+    pinned; it is NOT a claim that this loader validates those files."""
+    import inspect
+
+    from cryodaq.core import alarm_config
+
+    source = inspect.getsource(alarm_config)
+    assert "physical_alarms" not in source
+    assert "interlocks.yaml" not in source

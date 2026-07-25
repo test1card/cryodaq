@@ -580,7 +580,7 @@ idempotent, and complete across restart and cold rotation.
 
 Required acquisition behavior:
 
-- uncommitted acquisition readings never reach live or safety fan-out;
+- uncommitted acquisition readings never reach LIVE fan-out; the safety broker deliberately receives the full unfiltered acquisition stream; and every channel matched by `safety.yaml` `critical_channels`/`keithley_channels` is guaranteed to be inside the throttle's protected set, enforced at startup;
 - commit receipts, cardinality, descriptors, and provenance match exact
   persisted rows;
 - writer lock/busy/disk-full/hang/cancellation is bounded and visible;

@@ -100,6 +100,18 @@ def _cfg(name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+# Keys a well-formed ``experiment_status`` reply must carry. A genuinely
+# fresh experiment (no phase set yet) still gets both keys from the real
+# engine — ``ExperimentManager.get_status_payload()`` (core/experiment.py)
+# unconditionally sets ``current_phase`` (possibly ``None``) and ``phases``
+# (possibly ``[]``). Their outright *absence* from the reply — as opposed to
+# an explicit empty/None value — means the reply itself is malformed or
+# schema-skewed (engine defect, version mismatch, ...) and must be treated
+# as untrustworthy rather than silently downgraded to "no phases": an
+# unknown state and a legitimately empty one are different answers.
+_REQUIRED_EXPERIMENT_STATUS_KEYS = ("current_phase", "phases")
+
+
 class _RemoteEngineStateCache:
     """Background-refreshed cache of engine state for the synchronous
     ``ExperimentManager``-shaped / ``sensor_diag_provider``-shaped duck
@@ -138,7 +150,12 @@ class _RemoteEngineStateCache:
                 exp_reply = await self._client.call({"cmd": "experiment_status"})
                 active = (exp_reply.get("active_experiment") or {}).get("experiment_id")
                 experiment_receipt_valid = False
-                if exp_reply.get("ok") and isinstance(active, str) and active:
+                if (
+                    exp_reply.get("ok")
+                    and isinstance(active, str)
+                    and active
+                    and all(key in exp_reply for key in _REQUIRED_EXPERIMENT_STATUS_KEYS)
+                ):
                     try:
                         _validate_context_receipt(
                             exp_reply.get("scope_receipt"),
