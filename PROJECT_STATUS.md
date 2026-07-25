@@ -319,7 +319,7 @@ cryodaq-replay-curve ...       # extract/transform reference curve for replay
 pytest                         # current suite; counts above are the v0.64.1 release snapshot
 pytest tests/ --cov=src/cryodaq --cov-report=term
 ruff check src/ tests/         # запускать на frozen candidate; текущий dirty tree не сертифицирован
-ruff format src/ tests/
+ruff format --check --no-cache src/ tests/   # read-only; repo-wide baseline is dirty by design, see AGENTS.md "Verification baseline"
 ```
 
 ---

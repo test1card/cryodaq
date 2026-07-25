@@ -223,20 +223,63 @@ for manual changes. Prefer the existing project environment and commands from
 
 ## Verification baseline
 
-Typical local gates are:
+Neither `install.bat` nor `environment.yml` creates a `.venv`. `install.bat`
+installs straight into whatever `python` is first on `PATH` (no venv step at
+all), and the `conda`/`environment.yml` route documented in
+`PROJECT_STATUS.md` creates a *conda* environment named `cryodaq`, not a
+`.venv` directory. The `.venv/bin/python` path that appears below and in CI
+(`.github/workflows/main.yml`, the Linux-only "H4 evidence" step) is that one
+workflow job's own transient symlink; it is not a setup artifact this
+repository provides, and it does not exist on a fresh Windows clone or a
+fresh Windows CI runner.
+
+If you want a project-local interpreter at that path, create one yourself
+(`python -m venv .venv`, then install per `install.bat`'s pip steps or the
+conda route above). Otherwise substitute whatever interpreter is actually
+active. Typical local gates, in both platform forms:
 
 ```bash
+# POSIX (bash/zsh)
 PYTHONPATH="$PWD/src" .venv/bin/python -m pytest -q <focused paths>
 PYTHONPATH="$PWD/src" .venv/bin/python -m pytest -q tests/
 .venv/bin/python -m ruff check --no-cache src tests
 .venv/bin/python -m ruff format --check --no-cache src tests
 ```
 
-Use the repository's configured interpreter if `.venv` is unavailable. Tests
-that bind loopback ports, spawn processes, exercise frozen builds, or require
-OS facilities must run in an environment that genuinely supports them; do not
-mock away the property under test. Never touch real instruments unless the
-task explicitly authorizes the exact hardware procedure.
+```powershell
+# Windows (PowerShell)
+$env:PYTHONPATH = "$PWD\src"; .venv\Scripts\python.exe -m pytest -q <focused paths>
+$env:PYTHONPATH = "$PWD\src"; .venv\Scripts\python.exe -m pytest -q tests/
+.venv\Scripts\python.exe -m ruff check --no-cache src tests
+.venv\Scripts\python.exe -m ruff format --check --no-cache src tests
+```
+
+A repo-wide `ruff format --check --no-cache src tests` is expected to be
+dirty: measured 2026-07-26 against a clean `montana/review-history` head
+(ruff 0.15.8), it reports 160 files would be reformatted out of 864 scanned.
+That is pre-existing formatting debt in files this slice did not touch, not
+a defect you introduced and not yours to fix under the "do not touch
+unrelated files" rule below. The gate actually enforced in CI
+(`.github/workflows/main.yml`, "Check formatting of changed Python files")
+only checks files changed since the commit pinned in that workflow's
+`FORMAT_BASE` variable; restricted to that same changed set, the check
+currently passes clean (564/564 files, 0 would reformat). Reproduce the real
+gate locally with:
+
+```bash
+git diff --name-only --diff-filter=ACMR -z <FORMAT_BASE>...HEAD -- '*.py' \
+  | xargs -0 -n 100 .venv/bin/python -m ruff format --check --no-cache --
+```
+
+If your slice is clean under that command, the repo-wide red is not a
+blocker and must not be "fixed" wholesale — only run mutating `ruff format`
+on files you touched in this slice, per the Ruff rule above, then rerun both
+read-only checks.
+
+Tests that bind loopback ports, spawn processes, exercise frozen builds, or
+require OS facilities must run in an environment that genuinely supports
+them; do not mock away the property under test. Never touch real instruments
+unless the task explicitly authorizes the exact hardware procedure.
 
 For concurrency, persistence, cancellation, election, or safety work, add a
 deterministic regression test and repeat the failure-prone boundary. A passing
