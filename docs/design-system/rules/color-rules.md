@@ -4,7 +4,7 @@ keywords: color, token, palette, accent, status, semantic, hardcoded, hex, icon,
 applies_to: all widgets using color
 enforcement: strict
 priority: critical
-last_updated: 2026-04-17
+last_updated: 2026-07-20
 status: canonical
 ---
 
@@ -18,7 +18,7 @@ Enforce in code via `# DESIGN: RULE-COLOR-XXX` comment marker.
 - RULE-COLOR-001 — No raw hex in widget code
 - RULE-COLOR-002 — Status color semantic lock
 - RULE-COLOR-003 — One primary accent per composition
-- RULE-COLOR-004 — ACCENT reserved for focus/selection affordance
+- RULE-COLOR-004 — ACCENT reserved for interaction and current activity, never health
 - RULE-COLOR-005 — Icon color inheritance from text
 - RULE-COLOR-006 — Hover state uses MUTED, never ACCENT
 - RULE-COLOR-007 — Destructive actions use DESTRUCTIVE token (aliased to STATUS_FAULT)
@@ -91,9 +91,9 @@ Only `theme.py` defines raw hex values. Asset SVG files may contain hex if immut
 
 ```python
 # DESIGN: RULE-COLOR-002
-# Active phase uses STATUS_OK — "this phase is operationally active and healthy"
+# Active phase uses ACCENT because progress is not health
 active_phase_pill.setStyleSheet(
-    f"border: 2px solid {theme.STATUS_OK};"
+    f"border: 2px solid {theme.ACCENT};"
     f"color: {theme.FOREGROUND};"
 )
 
@@ -172,11 +172,11 @@ sensor_cell.setStyleSheet(
 
 ---
 
-## RULE-COLOR-004: ACCENT reserved for focus/selection affordance
+## RULE-COLOR-004: ACCENT is interaction/current-activity, never health
 
-**TL;DR:** `ACCENT #7c8cff` (and `RING`, same hex) is the focus/selection color ONLY. Not for status, not for phase indication, not for hover, not for primary buttons.
+**TL;DR:** `ACCENT #7c8cff` marks UI activation: focus/selection, a primary action, or current activity/progress. It never asserts health, safety, success, caution, or fault, and it is not a hover/decorative color.
 
-**Statement:** `theme.ACCENT` has exactly ONE semantic role: **focus or selection affordance**. Valid uses:
+**Statement:** `theme.ACCENT` has one semantic family: **UI activation affordance**. Valid uses:
 
 - Keyboard focus ring on any interactive widget
 - Selected tab indicator (underline or background)
@@ -184,18 +184,22 @@ sensor_cell.setStyleSheet(
 - Focused text input border
 - Link color in text
 - `TEXT_ACCENT` color for current selection label
+- Primary action background when the action is neither destructive nor a safety-state assertion
+- Current experiment phase, running task, progress-bar chunk, and ordinary settling/stability progress
 
 Invalid uses (violations):
 
 - Status color (use `STATUS_*`)
-- Phase indication / active phase (use `STATUS_OK`)
+- Health/safe/success state (use `STATUS_OK` only when independently demonstrated; otherwise use the applicable status or neutral chrome)
 - Hover state background (use `MUTED`, see RULE-COLOR-006)
-- "Primary button" color — CryoDAQ has no primary button style; forms use `SECONDARY` surface
 - Decorative accent (use neutral `FOREGROUND` or `MUTED_FOREGROUND`)
 
-**Rationale:** Phase 0 decision. ACCENT was being used as both "focus ring" AND "active phase indicator" on dashboard PhaseStepper (violet fill for active phase). Two different semantic roles sharing one color = operators cannot distinguish "focused UI element" from "active experiment phase." Locking ACCENT to focus/selection restores clarity.
+**Rationale:** Active phase is the current progress selection, not proof of a
+healthy experiment. ACCENT consistently means activated/current UI;
+health is rendered independently with STATUS_OK only when demonstrated.
 
-**Historical context:** Dashboard PhaseStepper previously used ACCENT as active-phase fill — this was the visual inconsistency Vladimir identified in first Phase I.1 review. ExperimentOverlay correctly used STATUS_OK green for active phase. Phase II.9 rebuild migrates PhaseStepper to STATUS_OK.
+**Historical context:** An earlier rule used STATUS_OK for active/completed
+progress. v4 removes that collision so safety colors keep one meaning.
 
 **Applies to:** any widget considering using `ACCENT` / `RING` / `TEXT_ACCENT`
 
@@ -219,19 +223,25 @@ selected_tab.setStyleSheet(
     f"border-bottom: 2px solid {theme.ACCENT};"  # selection — correct
 )
 
-# Active phase — uses STATUS_OK, NOT ACCENT
+# Active phase — uses ACCENT, not a safety color
 active_phase_pill.setStyleSheet(
-    f"border: 2px solid {theme.STATUS_OK};"  # correct per RULE-COLOR-002
+    f"border: 2px solid {theme.ACCENT};"
+)
+
+# Primary non-destructive action — UI activation, not a health claim
+save_button.setStyleSheet(
+    f"background: {theme.ACCENT};"
+    f"color: {theme.ON_ACCENT};"
 )
 ```
 
 **Example (bad):**
 
 ```python
-# ACCENT misused as active phase
+# STATUS_OK misused as active/completed progress
 active_phase_pill.setStyleSheet(
-    f"background: {theme.ACCENT};"  # WRONG — active phase is status, not selection
-    f"color: {theme.ON_ACCENT};"
+    f"background: {theme.STATUS_OK};"  # WRONG — progress is not health
+    f"color: {theme.ON_DESTRUCTIVE};"
 )
 
 # ACCENT misused as status color
@@ -239,17 +249,13 @@ success_banner.setStyleSheet(
     f"background: {theme.ACCENT};"  # WRONG — use STATUS_OK
 )
 
-# ACCENT misused as generic "primary button"
-submit_button.setStyleSheet(
-    f"background: {theme.ACCENT};"  # WRONG — no primary button style in CryoDAQ
-)
 ```
 
 **Detection:**
 
 ```bash
-# Any ACCENT usage outside focus/selection context is suspicious
-rg -n "theme\.ACCENT" src/cryodaq/gui/ | grep -v "focus\|:focus\|selected\|FocusRing\|focus_ring"
+# Inspect each ACCENT use: it must be interaction/current activity, never health.
+rg -n "theme\.ACCENT" src/cryodaq/gui/
 ```
 
 **Related rules:** RULE-COLOR-002 (status semantic), RULE-COLOR-006 (hover state)
@@ -270,18 +276,18 @@ rg -n "theme\.ACCENT" src/cryodaq/gui/ | grep -v "focus\|:focus\|selected\|Focus
 
 ```python
 # DESIGN: RULE-COLOR-005
-# Inline alert icon with warning status label — both amber
+# Inline alert icon with caution status label — both amber
 row = QHBoxLayout()
 row.setSpacing(theme.SPACE_1)
 
 icon = QLabel()
 icon.setPixmap(
-    load_colored_icon("alert-triangle", color=theme.STATUS_WARNING)
+    load_colored_icon("alert-triangle", color=theme.STATUS_CAUTION)
       .pixmap(theme.ICON_SIZE_SM, theme.ICON_SIZE_SM)  # proposed: theme.ICON_SIZE_SM — not yet in theme.py
 )
 
 label = QLabel("Внимание: калибровка устарела")
-label.setStyleSheet(f"color: {theme.STATUS_WARNING};")
+label.setStyleSheet(f"color: {theme.STATUS_CAUTION};")
 
 row.addWidget(icon)
 row.addWidget(label)
@@ -320,9 +326,9 @@ label = QLabel("Норма")  # FOREGROUND text
 
 ## RULE-COLOR-006: Hover state uses MUTED, never ACCENT
 
-**TL;DR:** Hover background on buttons, list rows, and interactive elements uses `theme.MUTED` (subtle dark overlay). Never `theme.ACCENT` (ACCENT is for focus/selection only).
+**TL;DR:** Hover background on buttons, list rows, and interactive elements uses `theme.MUTED` (subtle dark overlay). Never `theme.ACCENT` (ACCENT is reserved for interaction state and current activity, not pointer proximity).
 
-**Statement:** Mouse hover indicates "can interact with this." It is a subtle affordance, not a committed state. Hover state uses `MUTED #1d2028` (one shade above CARD background) as subtle highlight. Focus/selected/active states use ACCENT or STATUS_OK — those are committed states (user has navigated to, selected, or activated). Hover ≠ focus; their colors differ.
+**Statement:** Mouse hover indicates "can interact with this." It is a subtle affordance, not a committed state. Hover state uses `MUTED #1d2028` (one shade above CARD background) as subtle highlight. Focus, selection, and ordinary activity use ACCENT; STATUS_OK is permitted only for independently proven health or safety truth. Hover ≠ focus; their colors differ.
 
 **Rationale:** Conflating hover with focus destroys keyboard navigation affordance. If hover paints ACCENT and focus paints ACCENT, operator can't tell by looking at the screen whether a button is "cursor is over it" or "keyboard has focused it" — two very different states.
 
@@ -615,6 +621,24 @@ rg -n "theme\.STONE_" src/cryodaq/gui/ | wc -l
 
 ---
 
+## RULE-COLOR-011: Measurement colors never reuse safety semantics
+
+**TL;DR:** Plot-series, category, and `QUANTITY_*` colors must not equal any bundled safety/status color.
+
+**Statement:** `PLOT_LINE_PALETTE` and `QUANTITY_*` values MUST remain disjoint from `STATUS_OK`, `STATUS_WARNING`, `STATUS_CAUTION`, `STATUS_FAULT`, `STATUS_INFO`, `STATUS_STALE`, and `COLD_HIGHLIGHT` in every bundled theme. Data identity is always accompanied by a visible label/legend and unit; it is never communicated by color alone. Status-colored threshold regions and labeled event annotations remain valid because they express actual status semantics rather than series identity.
+
+**Rationale:** Reusing green, amber, or red for an ordinary measurement trains the operator to ignore the same colors when they mean healthy, caution, or fault. Exact palette separation preserves the learned safety grammar. Labels and line style preserve identification for color-blind operators.
+
+**Tradeoff:** The fifth series and three quantity hues change from the previous palette, temporarily weakening color muscle memory. The eight series positions and cycling order remain fixed; legends and units remain authoritative.
+
+**Detection:** `tests/gui/test_theme_tokens.py` checks both measurement palettes against all bundled theme packs.
+
+**Related rules:** RULE-COLOR-002 (status semantic lock), RULE-DATA-007 (series identity), RULE-A11Y-002 (never color alone)
+
+---
+
 ## Changelog
 
+- 2026-07-20: Reserved safety colors for health/attention/fault, moved ordinary
+  activity to ACCENT, and changed new producer examples to canonical CAUTION.
 - 2026-04-17: Initial version. 10 rules covering hex literals, status semantic lock, ACCENT discipline, icon color inheritance, hover/focus distinction, destructive actions, text-on-color pairing, COLD_HIGHLIGHT vs INFO distinction, STONE_* legacy policy. RULE-COLOR-005 (icon color inheritance) absorbed from earlier proposed standalone "icon" category per audit decision.

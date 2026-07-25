@@ -90,7 +90,7 @@ plot.addItem(fault_region)
 | 1 | `#9b7bb8` | Dusty purple | Second series |
 | 2 | `#5fa090` | Teal green | Third series, cool tone |
 | 3 | `#a3b85b` | Olive yellow | Fourth series, warm tone |
-| 4 | `#c4862e` | Warning amber (STATUS_WARNING) | Fifth series, reusable for warning context |
+| 4 | `#8f8578` | Warm grey | Fifth series, non-status neutral |
 | 5 | `#b88a5b` | Ochre brown | Sixth series |
 | 6 | `#b87b9b` | Dusty rose | Seventh series |
 | 7 | `#7c8cff` | Periwinkle (ACCENT) | Eighth series, cool tone |

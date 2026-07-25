@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
-from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
+from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore, peak_preserving_decimate
 from cryodaq.gui.state.time_window import (
     TimeWindow,
     get_time_window_controller,
@@ -29,18 +29,6 @@ from cryodaq.gui.state.time_window import (
 from cryodaq.gui.state.time_window_selector import TimeWindowSelector
 
 _MAX_POINTS = 2000
-
-
-def _decimate(pts: list[tuple[float, float]], target: int) -> list[tuple[float, float]]:
-    """Simple decimation via stride. Keeps first and last."""
-    n = len(pts)
-    if n <= target:
-        return pts
-    stride = max(1, n // target)
-    result = pts[::stride]
-    if result[-1] is not pts[-1]:
-        result.append(pts[-1])
-    return result
 
 
 class TempPlotWidget(QWidget):
@@ -160,7 +148,7 @@ class TempPlotWidget(QWidget):
         self._rebuild_curves()
 
     # ------------------------------------------------------------------
-    # Refresh (called by DashboardView at 1 Hz)
+    # Refresh (called by DashboardView at no more than 2 Hz)
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
@@ -177,7 +165,7 @@ class TempPlotWidget(QWidget):
                 item.setData([], [])
                 continue
             if len(pts) > _MAX_POINTS:
-                pts = _decimate(pts, _MAX_POINTS)
+                pts = peak_preserving_decimate(pts, _MAX_POINTS)
             xs = [t for t, _ in pts]
             ys = [v for _, v in pts]
             item.setData(x=xs, y=ys)
@@ -193,69 +181,35 @@ class TempPlotWidget(QWidget):
             x_max = now
             self._plot.setXRange(x_min, x_max, padding=0)
 
-        # 2026-05-08 (v0.56.3): manual Y deadband — see _init_plot for why
-        # pyqtgraph's float enable= autoRange is not enough.
+        # Seed once, then preserve the operator's viewport. Scale toggles
+        # explicitly clear the cache and authorize one compatible reseed.
         self._update_y_range_with_deadband(in_window_y)
 
     def _update_y_range_with_deadband(self, in_window_y: list[float]) -> None:
-        """Cache-driven deadband: rate-limit to ≥2 s between Y resizes,
-        widen Y only when new bounds escape ±max(15%, 0.5 K) of the
-        widget-cached last-set range.
+        """Seed one compatible Y range without overriding later operator zoom.
 
-        Two prior fixes failed to stop the jitter operator-side:
-        - v0.56.2 used pyqtgraph ``enableAutoRange(axis="y", enable=0.95)``,
-          which is a percentile selector that re-runs on every ``setData``.
-        - v0.56.3 disabled native autoRange and read the current Y range
-          via ``getViewBox().viewRange()[1]`` to gate the deadband.
-
-        The v0.56.3 fix likely fired spuriously because pyqtgraph can
-        report stale or default ``viewRange`` mid-update (especially
-        right after ``setAxisItems`` / ``setData`` re-computes
-        ``childrenBoundingRect``), so the comparison kept saying "drift
-        too big, resize" even when no real envelope change had occurred.
-
-        This version owns Y range state widget-side: cache the range
-        we last asked pyqtgraph for, gate every future setYRange against
-        that cache (never against pyqtgraph's reported view), and rate
-        limit so even pathological signals can resize Y at most once
-        per 2 seconds.
+        Refreshes never authorize live auto-ranging. The only intentional
+        cache reset is an explicit linear/log scale change.
         """
-        import time as _time
+        import math
 
-        if not in_window_y or self._is_log_y:
+        values = [value for value in in_window_y if math.isfinite(value) and (not self._is_log_y or value > 0.0)]
+        if not values:
             return
-        new_lo_raw = min(in_window_y)
-        new_hi_raw = max(in_window_y)
-        span = max(new_hi_raw - new_lo_raw, 1.0)
+        if self._is_log_y:
+            values = [math.log10(value) for value in values]
+        new_lo_raw = min(values)
+        new_hi_raw = max(values)
+        span = max(new_hi_raw - new_lo_raw, 0.1 if self._is_log_y else 1.0)
         new_lo = new_lo_raw - span * 0.05
         new_hi = new_hi_raw + span * 0.05
         pi = self._plot.getPlotItem()
 
-        # First call — seed the cache without rate-limit / threshold gate.
-        if self._y_cache_lo is None or self._y_cache_hi is None:
-            pi.setYRange(new_lo, new_hi, padding=0)
-            self._y_cache_lo = new_lo
-            self._y_cache_hi = new_hi
-            self._y_last_set_ts = _time.monotonic()
+        if self._y_cache_lo is not None and self._y_cache_hi is not None:
             return
-
-        # Rate limit — at most one Y resize per 2 wall-clock seconds.
-        now_mono = _time.monotonic()
-        if now_mono - self._y_last_set_ts < 2.0:
-            return
-
-        # Threshold floor 0.5 K so sensor noise (~0.01-0.1 K) is absorbed
-        # even when the visible span is small (steady-state at 4 K).
-        cached_span = max(self._y_cache_hi - self._y_cache_lo, 1.0)
-        threshold = max(cached_span * 0.15, 0.5)
-        if (
-            abs(new_lo - self._y_cache_lo) > threshold
-            or abs(new_hi - self._y_cache_hi) > threshold
-        ):
-            pi.setYRange(new_lo, new_hi, padding=0)
-            self._y_cache_lo = new_lo
-            self._y_cache_hi = new_hi
-            self._y_last_set_ts = now_mono
+        pi.setYRange(new_lo, new_hi, padding=0)
+        self._y_cache_lo = new_lo
+        self._y_cache_hi = new_hi
 
     # ------------------------------------------------------------------
     # Time picker
@@ -274,8 +228,11 @@ class TempPlotWidget(QWidget):
     def _on_log_y_toggled(self, checked: bool) -> None:
         self._is_log_y = checked
         self._plot.getPlotItem().setLogMode(x=False, y=checked)
+        self._y_cache_lo = None
+        self._y_cache_hi = None
         self._log_button.setText("Лог Y" if checked else "Лин Y")
         self._style_time_button(self._log_button, checked)
+        self.refresh()
 
     # ------------------------------------------------------------------
     # Cleanup

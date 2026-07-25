@@ -4,7 +4,7 @@ keywords: experiment, card, active-experiment, phase, dashboard, tile, metadata,
 applies_to: compound widget showing active experiment metadata + phase progression
 status: active
 implements: src/cryodaq/gui/dashboard/experiment_card.py (Phase B.6 — dashboard variant)
-last_updated: 2026-04-17
+last_updated: 2026-07-19
 references: rules/data-display-rules.md, rules/surface-rules.md, patterns/real-time-data.md
 ---
 
@@ -15,7 +15,7 @@ Compound widget showing the currently-active experiment's metadata, phase progre
 > **Implementation status.** The shipped dashboard variant at
 > `src/cryodaq/gui/dashboard/experiment_card.py` is aligned with this
 > spec: header row with UPPERCASE category + experiment name + mode
-> badge (STATUS_OK / STATUS_CAUTION mirroring TopWatchBar) + tabular
+> badge (neutral experiment identity / STATUS_CAUTION attention treatment mirroring TopWatchBar) + tabular
 > elapsed time, compact `PhaseStepper`, two-line vitals (target
 > channel Т11 / Т12 + pressure in Cyrillic мбар), actions row
 > («Подробнее» → `open_requested`, «Завершить» → `finalize_requested`),
@@ -301,8 +301,8 @@ class ExperimentCard(Card):
     
     def _confirm_abort(self) -> None:
         # DESIGN: RULE-INTER-004 — destructive requires confirmation
-        # PhaseStepper's HoldConfirmButton already provides hold-to-confirm safety.
-        # Additional Dialog for extra safety on experiment abort:
+        # The reviewed cancel-default Dialog is the confirmation boundary.
+        # Do not assume a HoldConfirm gesture exists unless runtime + tests ship it.
         dialog = Dialog(
             parent=self.window(),
             title="Прервать эксперимент?",
@@ -340,7 +340,7 @@ The overlay is opened from the dashboard variant via `open_requested` signal →
 | State | Treatment |
 |---|---|
 | **No active experiment** | Card shows empty state: «Нет активного эксперимента» + button «Начать эксперимент» (opens Create Experiment modal) |
-| **Active, healthy** | Normal chrome + STATUS_OK mode badge + live values |
+| **Active** | Normal chrome + neutral experiment-identity badge + live values; health is rendered separately and alone may use STATUS_OK |
 | **Active, faulted** | 3px STATUS_FAULT left border + phase stepper shows faulted node + mode stays visible |
 | **Active, debug mode** | Mode badge STATUS_CAUTION (amber); data displayed same but operator knows no archive |
 | **Completing / closing** | Brief transition state (few seconds) then empty state |
@@ -349,7 +349,9 @@ The overlay is opened from the dashboard variant via `open_requested` signal →
 
 1. **Using a relocatable channel as target.** Т5 as target — its physical position may differ across experiments, so thresholds built on it are not reproducible. Target must be Т11 or Т12 (positionally fixed). Enforce at ExperimentSnapshot validation level.
 
-2. **Inventing new mode color.** Using custom blue for mode — should mirror TopWatchBar source of truth. STATUS_OK for Experiment, STATUS_CAUTION for Debug.
+2. **Rendering experiment identity as safety green.** A running experiment does
+   not prove safety. Mirror TopWatchBar: neutral chrome for Experiment;
+   STATUS_CAUTION only for an approved attention meaning such as Debug/Replay.
 
 3. **Non-tnum elapsed counter.** «43 мин» → «44 мин» with digits shifting. FONT_MONO + tnum.
 

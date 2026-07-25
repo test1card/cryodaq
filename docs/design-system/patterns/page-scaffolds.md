@@ -32,7 +32,7 @@ Every screen has the same three chrome zones, always in the same positions:
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │                                                                   │
-│  [TopWatchBar — 4 vitals + mode badge]                            │  ◀── HEADER_HEIGHT (56)
+│  [TopWatchBar — pressure + T12 + T11 + mode badge]                │  ◀── HEADER_HEIGHT (56)
 │                                                                   │
 ├──────┬────────────────────────────────────────────────────────────┤
 │      │                                                            │

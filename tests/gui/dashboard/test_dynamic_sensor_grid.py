@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
+
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from cryodaq.gui.dashboard.dynamic_sensor_grid import DynamicSensorGrid
+from cryodaq.gui.state.descriptor_store import IdentityStatus
 
 
 def test_grid_constructs(app, mock_channel_mgr, buffer_store):
@@ -19,6 +22,33 @@ def test_grid_creates_cells_for_visible_channels(app, mock_channel_mgr, buffer_s
     assert "\u04221" in grid._cells
     assert "\u04222" in grid._cells
     assert "\u04223" in grid._cells
+
+
+def test_grid_reflows_from_logical_width_without_hiding_selected_sensors(app, mock_channel_mgr, buffer_store):
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    selected = tuple(grid._cells)
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(grid)
+
+    host.resize(330, 320)
+    host.show()
+    app.processEvents()
+    grid._relayout_cells()
+
+    narrow_positions = [grid._grid_layout.getItemPosition(index)[:2] for index in range(grid._grid_layout.count())]
+    assert narrow_positions == [(0, 0), (1, 0), (2, 0)]
+    assert tuple(grid._cells) == selected
+    assert all(cell.isVisible() for cell in grid._cells.values())
+
+    host.resize(700, 320)
+    app.processEvents()
+    grid._relayout_cells()
+
+    wide_positions = [grid._grid_layout.getItemPosition(index)[:2] for index in range(grid._grid_layout.count())]
+    assert wide_positions == [(0, 0), (0, 1), (0, 2)]
+    assert tuple(grid._cells) == selected
 
 
 def test_grid_rebuilds_on_channel_change(app, mock_channel_mgr, buffer_store):
@@ -53,6 +83,7 @@ def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
             def _spy():
                 call_counts[cid] += 1
                 orig()
+
             return _spy
 
         cell.refresh_from_buffer = _make_spy(ch_id, original)
@@ -74,29 +105,116 @@ def test_grid_refresh_calls_each_cell(app, mock_channel_mgr, buffer_store):
         cell = grid._cells[ch_id]
         expected = f"{val:.2f}"
         actual = cell._value_widget.text()
-        assert expected in actual, (
-            f"Cell {ch_id!r} must display '{expected}' after refresh, got {actual!r}"
-        )
+        assert expected in actual, f"Cell {ch_id!r} must display '{expected}' after refresh, got {actual!r}"
 
 
-def test_grid_dispatch_reading(app, mock_channel_mgr, buffer_store):
-    from datetime import datetime
-
+def test_grid_dispatch_coalesces_until_tick_and_renders_latest(app, mock_channel_mgr, buffer_store):
     from cryodaq.drivers.base import ChannelStatus, Reading
 
     grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
-    reading = Reading(
+    cell = grid._cells.get("\u04221")
+    assert cell is not None
+    before = cell._value_widget.text()
+
+    for value in (77.1, 77.2, 77.3):
+        reading = Reading(
+            channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+            value=value,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        )
+        grid.dispatch_reading(reading, IdentityStatus.AUTHORITATIVE)
+        assert cell._value_widget.text() == before
+
+    grid.refresh()
+
+    assert "77.30" in cell._value_widget.text()
+    assert grid._pending_readings == {}
+
+
+def test_coalesced_cut_uses_source_timestamp_for_staleness(app, mock_channel_mgr, buffer_store):
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    grid.dispatch_reading(
+        Reading(
+            channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+            value=77.3,
+            unit="K",
+            timestamp=datetime.now(UTC) - timedelta(seconds=30),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+
+    grid.refresh()
+
+    cell = grid._cells["\u04221"]
+    assert cell._value_widget.text() == "77.30"
+    assert cell._data_stale is True
+    assert cell._status_hint_widget.text() == "\u0423\u0441\u0442\u0430\u0440\u0435\u043b\u043e"
+
+
+def test_malformed_status_fails_closed_without_suppressing_valid_peer(app, mock_channel_mgr, buffer_store):
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.gui import theme
+
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    now = datetime.now(UTC)
+    valid_same_channel = Reading(
         channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
         value=77.3,
         unit="K",
-        timestamp=datetime.now(UTC),
+        timestamp=now,
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    grid.dispatch_reading(reading)
-    cell = grid._cells.get("\u04221")
-    assert cell is not None
-    assert "77.30" in cell._value_widget.text()
+    malformed = Reading(
+        channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
+        value=77.4,
+        unit="K",
+        timestamp=now + timedelta(milliseconds=1),
+        status="ok",  # type: ignore[arg-type] -- hostile decoded input
+        instrument_id="hostile",
+    )
+    valid_peer = Reading(
+        channel="\u04222 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u043d\u0438\u0437",
+        value=55.3,
+        unit="K",
+        timestamp=now + timedelta(milliseconds=2),
+        status=ChannelStatus.OK,
+        instrument_id="lakeshore_218s",
+    )
+
+    grid.dispatch_reading(valid_same_channel, IdentityStatus.AUTHORITATIVE)
+    grid.dispatch_reading(malformed, IdentityStatus.AUTHORITATIVE)
+    grid.dispatch_reading(valid_peer, IdentityStatus.AUTHORITATIVE)
+    grid.refresh()
+
+    malformed_cell = grid._cells["\u04221"]
+    assert malformed_cell._value_widget.text() == "\u2014"
+    assert (
+        malformed_cell._status_hint_widget.text()
+        == "\u041e\u0448\u0438\u0431\u043a\u0430 \u0434\u0430\u0442\u0447\u0438\u043a\u0430"
+    )
+    assert theme.STATUS_FAULT in malformed_cell.styleSheet()
+    assert "55.30" in grid._cells["\u04222"]._value_widget.text()
+    assert grid._cells["\u04222"]._status_hint_widget.text() == "\u041d\u043e\u0440\u043c\u0430"
+
+
+def test_grid_read_only_survives_cell_rebuild(app, mock_channel_mgr, buffer_store):
+    grid = DynamicSensorGrid(mock_channel_mgr, buffer_store)
+    grid.set_read_only(True)
+    assert all(cell._read_only for cell in grid._cells.values())
+
+    mock_channel_mgr.set_visible("Т2", False)
+    mock_channel_mgr._notify()
+
+    assert grid._read_only is True
+    assert all(cell._read_only for cell in grid._cells.values())
 
 
 def test_grid_close_event_cleans_up(app, mock_channel_mgr, buffer_store):

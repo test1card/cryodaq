@@ -26,14 +26,14 @@ Breakpoint tokens are PROPOSED. Currently most widgets hardcode minimum widths o
 - Vladimir's MacBook Pro: 1440×900 (scaled from retina)
 - Occasionally 1680×1050 in docked mode
 
-**Minimum supported viewport: 1280×720.** Below this, layout breaks and some tiles cannot display. This is the hard lower bound — not a responsive breakpoint, a system requirement.
+**Runtime logical minimum viewport: 1280×800.** `MainWindowV2` enforces this logical size. Below it remains outside the release target, but the dashboard must not deliberately clip current truth or hide sensors. Logical-width reflow and vertical scrolling provide a best-effort complete path without claiming that any physical resolution or high-DPI configuration has been validated.
 
 ## Proposed constants
 
 | Token (proposed) | Value (px) | Use |
 |---|---|---|
-| `VIEWPORT_MIN_WIDTH` | `1280` | Hard minimum — below this, warn operator and reject layout |
-| `VIEWPORT_MIN_HEIGHT` | `720` | Hard minimum |
+| `VIEWPORT_MIN_WIDTH` | `1280` | Runtime logical minimum — below this, warn while retaining a complete scrollable truth path |
+| `VIEWPORT_MIN_HEIGHT` | `800` | Runtime logical minimum |
 | `VIEWPORT_TARGET_WIDTH` | `1920` | Design optimization target |
 | `VIEWPORT_TARGET_HEIGHT` | `1080` | Design optimization target |
 | `OVERLAY_MAX_WIDTH` (proposed) | `1400` | Max width for modal overlays — keeps backdrop visible on all sides |
@@ -44,20 +44,20 @@ Breakpoint tokens are PROPOSED. Currently most widgets hardcode minimum widths o
 
 Design is optimized for **1920×1080** — tiles sized, spacing calibrated, typography tuned for this viewport.
 
-At **1280×720** (minimum), expect:
+At **1280×800** (runtime logical minimum), expect:
 - Fewer tiles visible simultaneously (dashboard may scroll)
-- Some content truncated with ellipsis
+- Non-critical labels may ellipsize with a complete tooltip; current values, units, status, freshness, and provenance remain accessible
 - Overlays using nearly full viewport width
 
-Below 1280×720 CryoDAQ should **refuse to render** and display:
+Below 1280×800 CryoDAQ may warn the operator, but must keep a vertically scrollable path to dashboard truth. Suggested warning copy:
 
 ```
-Минимальный размер окна: 1280×720
+Минимальный размер окна: 1280×800
 Текущий: 1024×768
 Пожалуйста увеличьте размер окна или разрешение.
 ```
 
-Not responsive — fixed minimum.
+This warning does not authorize clipping or automatic sensor hiding, and does not certify the constrained layout for laboratory use.
 
 ## No mobile, no tablet
 
@@ -87,7 +87,7 @@ overlay_height = min(
 )
 ```
 
-At 1920×1080 viewport: overlay clamped to 1400×900, leaving ~260px margin on sides and ~90px top/bottom. At 1280×720: overlay at 1152×648 (90% of viewport).
+At 1920×1080 viewport: overlay clamped to 1400×900, leaving ~260px margin on sides and ~90px top/bottom. At 1280×800: overlay at 1152×720 (90% of viewport).
 
 See `components/modal.md` for overlay positioning.
 
@@ -107,7 +107,7 @@ Dashboard uses an **8-column logical grid** (`DASHBOARD_GRID_COLUMNS = 8`) as th
 Column gap: `GRID_GAP = 8px`.
 Grid width at 1920 viewport: (1920 − 56 toolrail − 48 margin) = 1816 / 8 ≈ 227px per column + 8 gap.
 
-At 1280 viewport, columns become narrower (~142px + 8 gap). Dense content may clip — use responsive tile logic (future work, see `patterns/responsive-behavior.md`).
+At 1280 viewport, columns become narrower (~142px + 8 gap). Dashboard sensors reflow; tile internals must preserve a complete path to current truth (see `patterns/responsive-behavior.md`).
 
 > **Implementation status (AD-001).** The Phase I.1 code at
 > `src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py` currently
@@ -124,14 +124,14 @@ Qt supports `QT_SCALE_FACTOR` env var for HiDPI. If operator runs at 125% or 150
 QT_SCALE_FACTOR=1.25 python -m cryodaq.launcher
 ```
 
-All tokens (spacing, radius, font sizes) scale proportionally — no additional token changes needed. This is a system-level concern, not design-system.
+Qt reports logical widget dimensions after scaling. Responsive calculations use those logical dimensions directly; they do not apply device-pixel-ratio arithmetic. Automated logical-geometry tests do not close real configured-DPI validation, which remains an external lab gate.
 
 ## Anti-patterns
 
 - **Hardcoded window sizes** — `setGeometry(100, 100, 1366, 768)` — use minimum/target tokens
 - **"Mobile mode" logic** — not applicable
 - **Collapsible tool rail** — ToolRail is always visible
-- **Horizontal scrollbar** — ever, anywhere. Content must fit or clip, not scroll sideways.
+- **Dashboard horizontal scrollbar or clipping** — sensor cells reflow and the dashboard scrolls vertically. Dense tables may use a deliberate, labeled horizontal scroll path when columns cannot safely reflow.
 - **Rendering at <1280 without warning** — surfaces layout bugs to operators
 
 ## Rule references
@@ -148,4 +148,5 @@ All tokens (spacing, radius, font sizes) scale proportionally — no additional 
 
 ## Changelog
 
+- 2026-07-15 (v4.0.0): Defined logical-width dashboard reflow and vertical truth preservation below constrained widths without claiming new physical-DPI support.
 - 2026-04-17: Initial version. PROPOSED tokens. Desktop-only scope clarified.

@@ -4,7 +4,7 @@ keywords: contribution, governance, review, proposal, new-token, new-rule, new-c
 applies_to: process for proposing additions or changes to the design system
 status: canonical
 references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md, governance/testing-strategy.md
-last_updated: 2026-04-17
+last_updated: 2026-07-14
 ---
 
 # Contribution
@@ -18,7 +18,7 @@ How changes enter the design system. CryoDAQ's design system is a shared contrac
 - **External audit** — reviews proposals for consistency with existing system
 - **Lab operators** — produce pain points, feedback, and validation signals that drive proposals
 
-For CryoDAQ v1.x, the architect role is singular. If the system scales to multiple contributors (unlikely near-term), the process adapts to multi-reviewer but the gates stay the same.
+For the current release line, including v2.x, the architect role is singular. If the system scales to multiple contributors (unlikely near-term), the process adapts to multi-reviewer but the gates stay the same.
 
 ## Types of contribution
 
@@ -250,4 +250,5 @@ Currently internal-only.
 
 ## Changelog
 
-- 2026-04-17: Initial version. Six contribution types. Per-type review gates. Architect approval as singular gate for v1.x. Rejection reasons. Division of labor (draft / architect approve / implement). Governance exception process. Revert path.
+- 2026-04-17: Initial version. Six contribution types. Per-type review gates. Architect approval as singular gate for the initial v1.x line. Rejection reasons. Division of labor (draft / architect approve / implement). Governance exception process. Revert path.
+- 2026-07-14 (v2.0.0): Confirmed that the singular architect gate continues through the current v2.x line.

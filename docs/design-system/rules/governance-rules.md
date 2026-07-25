@@ -4,12 +4,12 @@ keywords: rules, governance, token-naming, versioning, deprecation, RULE-GOV
 applies_to: meta-rules about how the design system itself evolves
 status: canonical
 references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md
-last_updated: 2026-04-17
+last_updated: 2026-07-20
 ---
 
 # Governance Rules
 
-Three rules that govern how the design system itself evolves. Distinct from the eight enforcement-rule categories (COLOR, SURF, TYPO, SPACE, INTER, DATA, A11Y, COPY) — those govern what widgets look like; these govern how the system gets changed.
+Four rules govern how the design system itself evolves. Distinct from the eight enforcement-rule categories (COLOR, SURF, TYPO, SPACE, INTER, DATA, A11Y, COPY) — those govern what widgets look like; these govern how the system gets changed.
 
 Each rule is a thin pointer to the authoritative governance document, because the full specification is too long to duplicate here and because governance documents need room for worked examples, migration guides, and lifecycle diagrams.
 
@@ -20,7 +20,7 @@ Each rule is a thin pointer to the authoritative governance document, because th
 Every new token (color, spacing, typography, radius, layout, icon size) follows the naming patterns, prefix registry, and ALL_CAPS Python-constant convention defined in the canonical governance doc. Deviations require an explicit exception per `governance/contribution.md`.
 
 **Canonical source:** `governance/token-naming.md`. Includes:
-- Flat current architecture (v1.x) vs target three-layer (v2.0)
+- Flat current architecture (v3.0.x) vs a separately approved future-major three-layer candidate
 - Prefix registry (STATUS_*, FONT_*, SPACE_*, etc.)
 - STONE_* legacy alias policy
 - W3C DTCG alignment (future export path)
@@ -44,7 +44,9 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v1.0.1 (post-deep-audit cleanup of v1.0.0 initial release).
+**Current version:** v4.0.3 (operator-state semantic correction: safety green is
+reserved for independently demonstrated health; ordinary activity uses accent,
+and new attention producers use the single caution rung; flat tokens unchanged).
 
 ## RULE-GOV-003
 
@@ -55,7 +57,7 @@ Lifecycle: Active → Deprecated → Removed. Deprecation window is at least one
 **Canonical source:** `governance/deprecation-policy.md`. Includes:
 - Per-artifact deprecation windows (1 version for tokens, 2-3 for components / full rules)
 - Emergency deprecation exception
-- STONE_* legacy lifecycle (currently deprecated in v1.0.0, removed v2.0.0)
+- STONE_* legacy lifecycle (deprecated since v1.0.0, still available in v3.0.x, removal only in a separately approved future major)
 - Un-deprecation (reverting deprecations) process
 - What cannot be deprecated (Cyrillic Т, SI units, WCAG AA commitment, persistence-first, TSP-not-SCPI)
 
@@ -63,19 +65,27 @@ Lifecycle: Active → Deprecated → Removed. Deprecation window is at least one
 
 **Currently deprecated artifacts:** STONE_* token aliases (~15 legacy-panel call sites, being migrated).
 
-## Why three rules, not more
+## RULE-GOV-004
 
-RULE-GOV-* deliberately minimal. Governance rules describe the system's self-change mechanism; each additional rule adds process overhead. Three rules cover the critical axes:
+Every GUI/UI/UX change MUST include the five-field operator/safety tradeoff
+record defined by `governance/change-impact.md`. Review blocks the change when
+an aesthetic benefit obscures truth or when the downside has no mitigation,
+test, and revise/revert trigger.
+
+## Why four rules, not more
+
+RULE-GOV-* deliberately minimal. Governance rules describe the system's self-change mechanism; each additional rule adds process overhead. Four rules cover the critical axes:
 
 1. **Naming** (GOV-001) — how artifacts are identified
 2. **Versioning** (GOV-002) — when changes ship
 3. **Deprecation** (GOV-003) — how old artifacts retire
+4. **Operator impact** (GOV-004) — how GUI benefits and costs are reviewed
 
 Other governance concerns (testing, performance, contribution workflow) are documented as governance documents but not promoted to RULE-* status because they're process guidance rather than invariant constraints.
 
 ## Rules applied to themselves
 
-These three rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v1.0.1 state: all three Active, no pending changes.
+These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.0.3 state: all four Active, no pending removals.
 
 ## Related rules and patterns
 
@@ -86,4 +96,15 @@ These three rules are themselves subject to the design system's evolution proces
 
 ## Changelog
 
+- 2026-07-15 (v4.0.0): Added RULE-GOV-004, the mandatory five-field
+  operator/safety change-impact record.
 - 2026-04-17: Initial version. Three governance rules as thin pointers to canonical governance documents. Closes forward references to RULE-GOV-001 and RULE-GOV-003 from Batches 1 and 2.
+- 2026-07-14 (v2.0.0): Reconciled the current flat-token architecture and STONE_* deprecation schedule with the scoped descriptor-identity major release.
+- 2026-07-14 (v3.0.0): Applied governance to the breaking corpus-wide
+  informative/beautiful composition contract and retained the flat-token and
+  STONE_* lifecycle decisions.
+- 2026-07-17 (v4.0.2): Reconciled the current version marker and applied the
+  operator-impact gate to deferred theme selection and fail-visible shutdown.
+- 2026-07-20 (v4.0.3): Reconciled governance markers to the semantic correction
+  that reserves safety colors for health/attention/fault and requires every GUI
+  change to retain explicit better/worse evidence.

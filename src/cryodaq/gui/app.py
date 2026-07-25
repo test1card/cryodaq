@@ -24,8 +24,18 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 # import. See gui/theme.py docstring for the contract.
 import cryodaq.gui.theme as theme  # noqa: F401 (side-effect import)
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
-from cryodaq.gui.zmq_client import ZmqBridge, set_bridge, shutdown
-from cryodaq.instance_lock import release_lock, try_acquire_lock
+from cryodaq.gui.state.operator_snapshot_ingress import (
+    OperatorSnapshotIngressOwner,
+    start_operator_snapshot_ingress,
+)
+from cryodaq.gui.zmq_client import (
+    ZmqBridge,
+    open_gui_command_worker_admission,
+    revoke_gui_command_worker_admission,
+    set_bridge,
+)
+from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
+from cryodaq.operator_snapshot import SnapshotMode
 
 logger = logging.getLogger("cryodaq.gui")
 
@@ -41,7 +51,7 @@ def _load_bundled_fonts() -> None:
 
     fonts_dir = Path(__file__).parent / "resources" / "fonts"
     if not fonts_dir.exists():
-        logger.warning(f"Fonts directory not found: {fonts_dir}")
+        logger.warning("Bundled fonts directory is unavailable")
         return
 
     font_files = [
@@ -63,7 +73,7 @@ def _load_bundled_fonts() -> None:
     for font_file in font_files:
         font_path = fonts_dir / font_file
         if not font_path.exists():
-            logger.warning(f"Font file missing: {font_path}")
+            logger.warning("Bundled font file is unavailable; font=%s", font_file)
             continue
         # B.5.7.2: use addApplicationFontFromData because
         # addApplicationFont(path) fails on macOS PySide6/Qt6
@@ -85,8 +95,7 @@ def _load_bundled_fonts() -> None:
     for required in (theme.FONT_BODY, theme.FONT_DISPLAY):
         if required not in all_families:
             logger.warning(
-                "Required font '%s' not found after registration. "
-                "Design system will use system fallback.",
+                "Required font '%s' not found after registration. Design system will use system fallback.",
                 required,
             )
 
@@ -209,6 +218,205 @@ def apply_fusion_dark_palette(app: QApplication) -> None:
     app.setStyleSheet((existing + "\n" + extras) if existing else extras)
 
 
+class _GuiRuntimeOwners:
+    """Retain every partially constructed GUI owner until exact settlement."""
+
+    def __init__(self) -> None:
+        self.bridge: ZmqBridge | None = None
+        self.window: MainWindow | None = None
+        self.snapshot_ingress: OperatorSnapshotIngressOwner | None = None
+        self.timer: QTimer | None = None
+        self.worker_session_epoch: int | None = None
+        self._worker_session_revoked = False
+        self._callbacks_open = True
+        self._epoch = 1
+        self._settled: set[str] = set()
+        self._shutdown_retry_pending = False
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch
+
+    def callback_is_current(self, epoch: int) -> bool:
+        return self._callbacks_open and epoch == self._epoch
+
+    def begin_shutdown(self) -> None:
+        if self._callbacks_open:
+            self._callbacks_open = False
+            self._epoch += 1
+        worker_session_epoch = self.worker_session_epoch
+        if worker_session_epoch is not None and not self._worker_session_revoked:
+            revoke_gui_command_worker_admission(worker_session_epoch)
+            self._worker_session_revoked = True
+
+    def request_shutdown(self, app: QApplication) -> None:
+        """Accept one close request and keep retrying until every owner settles."""
+
+        self.begin_shutdown()
+        self._schedule_shutdown_retry(app, delay_ms=0)
+
+    def _schedule_shutdown_retry(self, app: QApplication, *, delay_ms: int) -> None:
+        if self._shutdown_retry_pending:
+            return
+        self._shutdown_retry_pending = True
+
+        def retry() -> None:
+            self._shutdown_retry_pending = False
+            try:
+                settled = self.settle()
+            except Exception as exc:
+                logger.error(
+                    "GUI HOLD retry failed; exception=%s",
+                    type(exc).__name__,
+                )
+                settled = False
+            if settled:
+                try:
+                    app.quit()
+                except Exception as exc:
+                    logger.error(
+                        "GUI application quit request failed; exception=%s",
+                        type(exc).__name__,
+                    )
+                    self._schedule_shutdown_retry(app, delay_ms=1_000)
+                return
+            self._schedule_shutdown_retry(app, delay_ms=1_000)
+
+        try:
+            QTimer.singleShot(delay_ms, retry)
+        except Exception:
+            self._shutdown_retry_pending = False
+            raise
+
+    def settle(self) -> bool:
+        self.begin_shutdown()
+        errors: dict[str, Exception] = {}
+
+        def attempt(label: str, action) -> None:  # noqa: ANN001
+            if label in self._settled:
+                return
+            try:
+                action()
+            except Exception as exc:
+                errors[label] = exc
+            else:
+                self._settled.add(label)
+
+        timer = self.timer
+        if timer is None:
+            self._settled.add("timer")
+        else:
+            attempt("timer", lambda: timer.stop())
+
+        window = self.window
+        if window is None:
+            self._settled.update({"window", "annunciation_terminal"})
+        else:
+
+            def settle_window() -> None:
+                window.invalidate_descriptor_transport()
+                if not window.settle_owned_workers():
+                    raise RuntimeError("GUI descendant workers remain alive")
+
+            attempt("window", settle_window)
+
+        ingress = self.snapshot_ingress
+        if ingress is None:
+            self._settled.add("snapshot_ingress")
+        else:
+
+            def settle_ingress() -> None:
+                ingress.stop()
+                if ingress.active:
+                    raise RuntimeError("snapshot ingress remained active")
+
+            attempt("snapshot_ingress", settle_ingress)
+
+        bridge = self.bridge
+        if bridge is None:
+            self._settled.update({"bridge_shutdown", "bridge_terminal", "bridge_registration"})
+        elif {"window", "snapshot_ingress"}.issubset(self._settled):
+            attempt("bridge_shutdown", lambda: bridge.shutdown())
+            if "bridge_shutdown" in self._settled:
+                attempt("bridge_terminal", lambda: bridge.close())
+            if "bridge_terminal" in self._settled:
+
+                def release_bridge() -> None:
+                    set_bridge(None)
+                    self.bridge = None
+
+                attempt("bridge_registration", release_bridge)
+
+        if window is not None and {
+            "window",
+            "snapshot_ingress",
+            "bridge_shutdown",
+            "bridge_terminal",
+            "bridge_registration",
+        }.issubset(self._settled):
+            attempt("annunciation_terminal", window.complete_root_shutdown)
+
+        for label, error in errors.items():
+            logger.error(
+                "GUI HOLD owner unsettled; owner=%s exception=%s",
+                label,
+                type(error).__name__,
+            )
+        required = {
+            "timer",
+            "window",
+            "snapshot_ingress",
+            "bridge_shutdown",
+            "bridge_terminal",
+            "bridge_registration",
+            "annunciation_terminal",
+        }
+        return required.issubset(self._settled)
+
+
+def _hold_gui_runtime(app: QApplication, owners: _GuiRuntimeOwners) -> None:
+    """Drive owners to fail-closed settlement via the existing retry chain.
+
+    This used to be an unbounded ``while True:`` that called
+    ``owners.settle()`` directly from plain Python — outside any Qt event
+    loop — and then pumped the event loop for a fixed second via a nested
+    ``app.exec()`` before trying again. ``settle()`` walks down into
+    ``MainWindow.settle_owned_workers()``, which an independent reviewer
+    measured blocking the Qt main thread for 18.12s with 3 unresponsive
+    workers; every second of that was also a second the annunciation
+    alarm's QTimer could not fire, and the loop had no bound on how many
+    times it could repeat that.
+
+    ``settle_owned_workers()`` is now itself bounded to one small slice of
+    wall clock per call (see ``_SETTLE_CALL_BUDGET_MS`` in
+    ``shell/main_window_v2.py``), so a direct first check here is cheap.
+    Anything left unsettled is handed to ``_GuiRuntimeOwners.request_shutdown``
+    — the same QTimer-driven retry machinery ``MainWindow.closeEvent`` already
+    uses via ``_root_shutdown_request`` — instead of a second, parallel
+    retry loop. Running the real Qt event loop (one ``app.exec()``, not a
+    repeated enter/exit) means the annunciation QTimer keeps firing on its
+    own cadence for as long as HOLD lasts, instead of only in the gaps
+    between hand-rolled pumping windows.
+
+    HOLD stays fail-closed: this returns only once ``owners.settle()``
+    reports every owner settled and the retry chain calls ``app.quit()``.
+    It never gives up on an unsettled owner and never reports a clean exit
+    early — there is still no retry-count ceiling, because abandoning an
+    unsettled owner is exactly what the HOLD contract forbids.
+    """
+
+    try:
+        if owners.settle():
+            return
+    except Exception as exc:
+        logger.error(
+            "GUI HOLD settlement attempt failed; exception=%s",
+            type(exc).__name__,
+        )
+    owners.request_shutdown(app)
+    app.exec()
+
+
 def main() -> None:
     """Точка входа cryodaq-gui."""
     # NOTE: multiprocessing.freeze_support() is called in
@@ -258,38 +466,81 @@ def main() -> None:
         sys.exit(0)
 
     # --- ZMQ Bridge subprocess ---
-    bridge = ZmqBridge()
-    set_bridge(bridge)
-    bridge.start()
+    owners = _GuiRuntimeOwners()
+    construction_phase = "gui_worker_session"
+    try:
+        owners.worker_session_epoch = open_gui_command_worker_admission()
+        app.aboutToQuit.connect(owners.begin_shutdown)
 
-    # --- MainWindow ---
-    window = MainWindow(bridge=bridge)
-    window.show()
+        construction_phase = "bridge"
+        bridge = ZmqBridge()
+        owners.bridge = bridge
+        set_bridge(bridge)
+        bridge.start()
 
-    # --- QTimer для опроса данных из subprocess ---
-    timer = QTimer()
-    timer.setInterval(10)  # 100 Hz
+        construction_phase = "main_window"
+        MainWindow(
+            bridge=bridge,
+            owner_anchor=lambda owner: setattr(owners, "window", owner),
+            shutdown_request=lambda: owners.request_shutdown(app),
+        )
+        window = owners.window
+        if window is None:
+            raise RuntimeError("main window owner anchor was not invoked")
 
-    def _tick() -> None:
-        for reading in bridge.poll_readings():
-            window._dispatch_reading(reading)
+        construction_phase = "snapshot_ingress"
+        start_operator_snapshot_ingress(
+            bridge,
+            window,
+            expected_mode=SnapshotMode.LIVE,
+            anchor=lambda owner: setattr(owners, "snapshot_ingress", owner),
+        )
+        snapshot_ingress = owners.snapshot_ingress
+        if snapshot_ingress is None:
+            raise RuntimeError("snapshot ingress owner anchor was not invoked")
+        window.show()
 
-        # Auto-restart subprocess if it dies or stops sending heartbeats
-        if not bridge.is_healthy():
-            if bridge.is_alive():
-                logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
+        construction_phase = "poll_timer"
+        timer = QTimer()
+        owners.timer = timer
+        timer.setInterval(10)
+        callback_epoch = owners.epoch
+
+        def _tick() -> None:
+            if not owners.callback_is_current(callback_epoch):
+                return
+            _drain_bridge_readings(bridge, window)
+            snapshot_ingress.pump()
+
+            if not bridge.is_healthy():
+                snapshot_ingress.invalidate_transport()
+                window.invalidate_descriptor_transport()
+                if bridge.is_alive():
+                    logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
+                    bridge.shutdown()
+                else:
+                    logger.warning("ZMQ bridge died, restarting...")
+                bridge.start()
+                return
+            if bridge.data_flow_stalled():
+                snapshot_ingress.invalidate_transport()
+                window.invalidate_descriptor_transport()
+                logger.warning("ZMQ bridge not healthy (no readings), restarting...")
                 bridge.shutdown()
-            else:
-                logger.warning("ZMQ bridge died, restarting...")
-            bridge.start()
-            return
-        if bridge.data_flow_stalled():
-            logger.warning("ZMQ bridge not healthy (no readings), restarting...")
-            bridge.shutdown()
-            bridge.start()
+                bridge.start()
 
-    timer.timeout.connect(_tick)
-    timer.start()
+        timer.timeout.connect(_tick)
+        timer.start()
+    except BaseException as exc:
+        logger.critical(
+            "GUI construction failed; phase=%s exception=%s",
+            construction_phase,
+            type(exc).__name__,
+        )
+        owners.begin_shutdown()
+        _hold_gui_runtime(app, owners)
+        release_lock_exact(lock_fd, ".gui.lock")
+        raise SystemExit(1) from None
 
     logger.info("GUI запущен, ZMQ bridge subprocess active")
 
@@ -297,12 +548,18 @@ def main() -> None:
     exit_code = app.exec()
 
     # --- Корректное завершение ---
-    timer.stop()
-    shutdown()
-    release_lock(lock_fd, ".gui.lock")
+    owners.begin_shutdown()
+    _hold_gui_runtime(app, owners)
+    release_lock_exact(lock_fd, ".gui.lock")
     logger.info("GUI завершён")
 
     sys.exit(exit_code)
+
+
+def _drain_bridge_readings(bridge: ZmqBridge, window: MainWindow) -> None:
+    """Drain one qualified batch through the production GUI ingress."""
+    for qualified in bridge.poll_readings_with_descriptor():
+        window.dispatch_qualified_reading(qualified)
 
 
 if __name__ == "__main__":

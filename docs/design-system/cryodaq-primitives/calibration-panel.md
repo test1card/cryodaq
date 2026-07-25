@@ -3,8 +3,8 @@ title: CalibrationPanel
 keywords: calibration, krdg, srdg, calibration curves, cooldown calibration, three-mode, setup, acquisition, results, chebyshev fit
 applies_to: Three-mode sensor calibration overlay (Setup → Acquisition → Results)
 status: active
-implements: src/cryodaq/gui/shell/overlays/calibration_panel.py (Phase II.7); legacy src/cryodaq/gui/widgets/calibration_panel.py retained (DEPRECATED) until Phase III.3
-last_updated: 2026-04-19
+implements: src/cryodaq/gui/shell/overlays/calibration_panel.py; removed v1 widget is historical only
+last_updated: 2026-07-19
 references: rules/data-display-rules.md, rules/interaction-rules.md, components/card.md, components/input-field.md, components/button.md
 ---
 
@@ -57,7 +57,7 @@ K3-critical overlay for calibrating temperature sensors against a reference prob
 1. **Auto-switch logic preserved verbatim.** Setup → Acquisition when engine reports `active: True`; Acquisition → Results when engine reports `active: False` after the widget was in acquisition mode. Any other transition keeps the current mode. Changing this breaks operator muscle memory.
 2. **3 s poll cadence preserved.** Faster polls stress the engine REP handler; slower polls make the transition feel laggy. 3 s is the established number — do not tune here.
 3. **Reference channel auto-excluded from targets** at engine-side `experiment_start`. Do not filter visually in the target checkboxes — v1 semantic preserved (all checkboxes default-on, reference is excluded at submit time via `get_selected_targets` comparison).
-4. **`calibration_curve_export` is eager.** The engine writes all four formats (`.330`, `.340`, `.json`, `.csv`) in one call. Per-button UX uses the single format-specific path parameter (`curve_330_path`, `curve_340_path`, `json_path`, `table_path`) to control where that format lands; the other three go to engine defaults. Do not attempt to split into four command variants.
+4. **`calibration_curve_export` is eager.** The engine writes all four formats (`.cof`, `.340`, `.json`, `.csv`) in one call. Per-button UX uses the single format-specific path parameter (`curve_cof_path`, `curve_340_path`, `json_path`, `table_path`) to control where that format lands; the other three go to engine defaults. Do not attempt to split into four command variants.
 5. **Russian operator-facing text.** Labels, banners, dialogs — all Russian.
 6. **No emoji** (RULE-COPY-005). **No hardcoded hex** outside `PLOT_LINE_PALETTE` indexing (CoverageBar uses STATUS_* tokens).
 
@@ -78,7 +78,7 @@ K3-critical overlay for calibrating temperature sensors against a reference prob
 │  │  │ [Начать калибровочный прогон]                     │         │  │
 │  │  └────────────────────────────────────────────────────┘         │  │
 │  │  ┌─ Импорт внешней кривой ──────────────────────────┐         │  │
-│  │  │ [Импорт .330] [Импорт .340] [Импорт JSON]         │         │  │
+│  │  │ [Импорт .340] [Импорт JSON]                        │         │  │
 │  │  └────────────────────────────────────────────────────┘         │  │
 │  │  ┌─ Существующие кривые ────────────────────────────┐         │  │
 │  │  │ Датчик | Curve ID | Зон | RMSE | Источник         │         │  │
@@ -109,7 +109,7 @@ K3-critical overlay for calibrating temperature sensors against a reference prob
 │  │  │ Зон Chebyshev / RMSE / Max ошибка                  │         │  │
 │  │  └────────────────────────────────────────────────────┘         │  │
 │  │  ┌─ Экспорт кривой ─────────────────────────────────┐         │  │
-│  │  │ [.330] [.340] [JSON] [CSV]                         │         │  │
+│  │  │ [.cof] [.340] [JSON] [CSV]                         │         │  │
 │  │  └────────────────────────────────────────────────────┘         │  │
 │  │  ┌─ Применить в CryoDAQ ────────────────────────────┐         │  │
 │  │  │ ☐ SRDG + calibration curves (глобально)           │         │  │
@@ -129,14 +129,14 @@ K3-critical overlay for calibrating temperature sensors against a reference prob
 | **Status banner** | Yes | Transient info / warning / error; auto-clear 4 s |
 | **QStackedWidget** | Yes | Three child widgets. Mode poll (3 s) via `ZmqCommandWorker` with in-flight guard, started/stopped by `set_connected`. |
 | **Setup: Params card** | Yes | Reference channel combo (LakeShore channels grouped `<instrument>:<channel>`), target QCheckBox groups per instrument, start button (primary). |
-| **Setup: Import card** | Yes | Three buttons (`Импорт .330` / `.340` / `JSON`) each wired via `QFileDialog.getOpenFileName` → `calibration_curve_import`. |
+| **Setup: Import card** | Yes | Two buttons (`Импорт .340` / `JSON`) each wired via `QFileDialog.getOpenFileName` → `calibration_curve_import`. `.330` is deliberately unsupported. |
 | **Setup: Curves card** | Yes | 5-column QTableWidget (Датчик / Curve ID / Зон / RMSE / Источник) populated from `calibration_curve_list` on connect + after any import success. |
 | **Acquisition: Stats card** | Yes | Эксперимент / Время (HH:MM:SS) / Точек / Диапазон T_ref. Values from poll result. |
-| **Acquisition: Coverage card** | Yes | `CoverageBar` widget paints one segment per bin using STATUS_* tokens. |
+| **Acquisition: Coverage card** | Yes | `CoverageBar` paints one segment per bin. Current code incorrectly uses safety-status tokens for density identity; migration to a disjoint data palette plus text/legend cues is open. |
 | **Acquisition: Live card** | Yes | Read-only QPlainTextEdit with last 5 `_raw` / `sensor_unit` readings, FONT_MONO tabular figures. |
 | **Results: Channel selector** | Yes | ComboBox populated from last acquisition's `target_channels` (or `calibration_curve_list` on fresh launch). |
 | **Results: Metrics card** | Yes | 6-row form: Raw пар / После downsample / Breakpoints / Зон Chebyshev / RMSE / Max ошибка. Updates on selector change via `calibration_curve_get`. |
-| **Results: Export card** | Yes | Four buttons (`.330` / `.340` / `JSON` / `CSV`) each wired via `QFileDialog.getSaveFileName` → `calibration_curve_export` with format-specific path param. |
+| **Results: Export card** | Yes | Four buttons (`.cof` / `.340` / `JSON` / `CSV`) each wired via `QFileDialog.getSaveFileName` → `calibration_curve_export` with format-specific path param. |
 | **Results: Apply card** | Yes | Global checkbox + channel-policy combo (Наследовать / Включить / Выключить) + Применить button. Dispatches `calibration_runtime_set_global` (if checkbox toggled) then `calibration_curve_lookup` → `calibration_runtime_set_channel_policy` chain. |
 
 ## Invariants
@@ -147,7 +147,10 @@ K3-critical overlay for calibrating temperature sensors against a reference prob
 4. **Import flow.** Click → `QFileDialog.getOpenFileName` with format-specific filter → `ZmqCommandWorker({"cmd": "calibration_curve_import", "path": ...})` → banner + refresh. Cancel (empty path) is a no-op; no worker spawned.
 5. **Export flow.** Click → `QFileDialog.getSaveFileName` with format filter → `ZmqCommandWorker({"cmd": "calibration_curve_export", "sensor_id": ..., <format>_path: ...})` → banner. Engine writes all four formats per call; only the clicked format's path is operator-specified. No channel selected → error banner, no dialog.
 6. **Apply flow.** If global checkbox toggled: `calibration_runtime_set_global` first; on success, dispatch `calibration_curve_lookup` to resolve `curve_id` → `calibration_runtime_set_channel_policy` with `{channel_key, policy, sensor_id, curve_id}`. If global unchecked: skip straight to the lookup → policy chain. No channel selected → error banner.
-7. **CoverageBar token-coded.** Status strings (`dense` / `medium` / `sparse` / `empty`) map 1:1 to `STATUS_OK` / `STATUS_CAUTION` / `STATUS_WARNING` / `MUTED_FOREGROUND`. RULE-COLOR-010 compliance verified by pre-commit hex grep.
+7. **Coverage density is data identity, not safety state.** `dense`, `medium`,
+   `sparse`, and `empty` require a disjoint data palette plus visible text,
+   legend, or pattern cues. The current STATUS_OK/CAUTION/WARNING mapping is a
+   known production migration gap; this specification does not bless it.
 8. **Reference auto-exclusion.** `_SetupWidget.get_selected_targets()` excludes the reference channel at the Python level before the `experiment_start` dispatch; engine receives only true target channels in `custom_fields.target_channels`.
 9. **Readings filter.** `on_reading()` in acquisition mode only routes channels ending with `_raw` OR `unit == "sensor_unit"`. Regular `K` readings are ignored even though the shell dispatcher sends them through.
 10. **No emoji, no hardcoded hex.** Pre-commit gates enforce.
@@ -198,7 +201,7 @@ All commands fire via `ZmqCommandWorker`. The overlay never calls engine / analy
 | `calibration_curve_get` | Results channel-selector change | `sensor_id` | `{ok, curve}` |
 | `calibration_curve_lookup` | Apply button (channel-policy bridge) | `channel_key` | `{ok, assignment: {curve_id, ...}}` |
 | `calibration_curve_import` | Import button click (after file dialog) | `path` | `{ok, curve, artifacts, assignment}` |
-| `calibration_curve_export` | Export button click (after file dialog) | `sensor_id`, `<format>_path` (one of `curve_330_path` / `curve_340_path` / `json_path` / `table_path`) | `{ok, json_path, table_path, curve_330_path, curve_340_path}` |
+| `calibration_curve_export` | Export button click (after file dialog) | `sensor_id`, `<format>_path` (one of `curve_cof_path` / `curve_340_path` / `json_path` / `table_path`) | `{ok, json_path, table_path, curve_cof_path, curve_340_path}` |
 | `calibration_runtime_set_global` | Apply with checkbox toggled | `global_mode`: `"on"` / `"off"` | `{ok, runtime}` |
 | `calibration_runtime_set_channel_policy` | Apply second step | `channel_key`, `policy`, `sensor_id`, `curve_id` | `{ok, ...}` |
 
@@ -230,7 +233,10 @@ All commands fire via `ZmqCommandWorker`. The overlay never calls engine / analy
 2. **Reimplementing calibration math in GUI.** `CalibrationStore` + `CalibrationFitter` live in `analytics/`. The overlay is a thin engine-command dispatcher; no Python-level calibration logic.
 3. **Polling in setup mode.** Mode poll runs continuously while connected — not only in acquisition. That's how Setup → Acquisition transitions at all. Gating poll on mode would break the flow.
 4. **Filtering readings by `K` unit.** The overlay only wants `_raw` / `sensor_unit` readings in the live area; regular K readings are noise here. The shell dispatcher's `unit=="K"` gate is a superset; the overlay narrows internally.
-5. **Hardcoded hex in CoverageBar.** Legacy v1 shipped `#2ECC40` / `#FFDC00` / `#FF851B` / `#333333`. II.7 migrated to `theme.STATUS_OK` / `STATUS_CAUTION` / `STATUS_WARNING` / `MUTED_FOREGROUND`. Pre-commit hex grep guards against regression.
+5. **Treating density as safety.** Replacing legacy hardcoded coverage colors
+   with `STATUS_OK` / `STATUS_CAUTION` / `STATUS_WARNING` did not make the
+   semantics compliant: density is series/data identity. Migrate it to the
+   disjoint data palette with a non-color legend; until then this is open.
 6. **Ignoring no-channel error paths.** Export and Apply BOTH require a selected channel. Click with empty `_current_sensor_id` → error banner, no command dispatched.
 7. **Forgetting the reference auto-exclusion.** Target checkboxes are default-all-on and visually include the reference. Exclusion happens at submit time in `get_selected_targets`. V1 operator muscle memory assumes this; UI-level filtering would confuse.
 
@@ -243,4 +249,4 @@ All commands fire via `ZmqCommandWorker`. The overlay never calls engine / analy
 
 ## Changelog
 
-- **2026-04-19 — Phase II.7 initial version.** Full rewrite from legacy v1 at `src/cryodaq/gui/widgets/calibration_panel.py`. DS v1.0.1 tokens throughout; legacy helpers (`PanelHeader` / `StatusBanner` / `apply_button_style` / `apply_group_box_style` / `create_panel_root` / `setup_standard_table`) purged. CoverageBar hardcoded hex palette replaced with DS status tokens. Three-mode QStackedWidget + 3 s engine poll + auto-switch logic preserved verbatim. **K3 mandate completed:** all six import / export / runtime-apply buttons now dispatch real engine commands (`calibration_curve_import`, `calibration_curve_export`, `calibration_runtime_set_global`, `calibration_runtime_set_channel_policy` with `calibration_curve_lookup` bridge). Acquisition widget's `_experiment_label` / `_elapsed_label` populated from poll result (v1 declared them but never wrote). Public accessors `get_current_mode()` / `is_acquisition_active()` added for future finalize guards. Host Integration Contract wired: `_tick_status` mirror + `_ensure_overlay("calibration")` replay. Legacy widget marked DEPRECATED; removal scheduled for Phase III.3.
+- **2026-04-19 — Phase II.7 initial version.** Full rewrite from the former v1 calibration widget. DS v1.0.1 tokens throughout; legacy helpers (`PanelHeader` / `StatusBanner` / `apply_button_style` / `apply_group_box_style` / `create_panel_root` / `setup_standard_table`) purged. CoverageBar hardcoded hex palette replaced with DS status tokens. Three-mode QStackedWidget + 3 s engine poll + auto-switch logic preserved verbatim. **K3 mandate completed:** all six import / export / runtime-apply buttons now dispatch real engine commands (`calibration_curve_import`, `calibration_curve_export`, `calibration_runtime_set_global`, `calibration_runtime_set_channel_policy` with `calibration_curve_lookup` bridge). Acquisition widget's `_experiment_label` / `_elapsed_label` populated from poll result (v1 declared them but never wrote). Public accessors `get_current_mode()` / `is_acquisition_active()` added for future finalize guards. Host Integration Contract wired: `_tick_status` mirror + `_ensure_overlay("calibration")` replay. The superseded widget was removed in the Montana cleanup.

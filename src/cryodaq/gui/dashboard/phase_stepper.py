@@ -47,10 +47,7 @@ class PhaseStepper(QWidget):
                 arrow = QLabel("\u203a")  # › (smaller than →)
                 arrow.setObjectName(f"stepperArrow_{phase}")
                 arrow.setStyleSheet(
-                    f"#{arrow.objectName()} {{ "
-                    f"color: {theme.MUTED_FOREGROUND}; "
-                    f"font-size: {theme.FONT_SIZE_XS}px; "
-                    f"}}"
+                    f"#{arrow.objectName()} {{ color: {theme.MUTED_FOREGROUND}; font-size: {theme.FONT_SIZE_XS}px; }}"
                 )
                 layout.addWidget(arrow)
 
@@ -83,10 +80,9 @@ class PhaseStepper(QWidget):
             # per Phase III.A convention.
             border, bg, fg = theme.ACCENT, theme.SECONDARY, theme.FOREGROUND
         elif state == "past":
-            # v0.55.2 A6: per cryodaq-primitives/phase-stepper.md, completed
-            # phases render as a filled STATUS_OK node; pending phases stay
-            # hollow on BORDER. Differentiates progress at a glance.
-            border, bg, fg = theme.STATUS_OK, theme.STATUS_OK, theme.MUTED_FOREGROUND
+            # Completion is progress, not proof of healthy/safe state.
+            # Keep a neutral filled-vs-hollow cue without consuming STATUS_OK.
+            border, bg, fg = theme.BORDER, theme.SECONDARY, theme.FOREGROUND
         else:
             border, bg, fg = theme.BORDER, "transparent", theme.MUTED_FOREGROUND
         pill.setStyleSheet(

@@ -65,34 +65,44 @@ Each arrow is a potential drift or failure surface. Key invariants at each stage
 
 ## Coalescing pattern
 
-When data arrives faster than the 2 Hz render budget, coalesce: drop intermediate samples, render only the most recent at the tick boundary.
+When data arrives faster than the 2 Hz render budget, ingestion and evidence
+remain full-rate. At the tick boundary, numeric readouts render the latest
+sample, while plots render a peak-preserving projection that retains the
+interval minimum and maximum in timestamp order. Alarm and persistence paths do
+not wait for this presentation tick.
 
 ```python
 class CoalescingUpdater:
-    """Holds the latest value, emits at ≤ 2 Hz via timer."""
+    """Keeps latest digits plus interval evidence; emits at ≤ 2 Hz."""
     
     def __init__(self, widget, interval_ms=500):
         self._widget = widget
         self._latest = None
+        self._interval = []
         self._timer = QTimer()
         self._timer.setInterval(interval_ms)  # 500ms = 2 Hz
         self._timer.timeout.connect(self._flush)
         self._timer.start()
     
     def push(self, value):
-        # DESIGN: RULE-DATA-002 — keep latest only
+        # The authoritative full-rate buffer/persistence path runs before this.
         self._latest = value
+        self._interval.append(value)
     
     def _flush(self):
         if self._latest is not None:
-            # DESIGN: RULE-DATA-001 atomic widget update
-            self._widget.set_value(self._latest)
+            # Numeric value is latest; plot input retains interval extrema.
+            evidence = peak_preserving(self._interval)
+            self._widget.set_cut(latest=self._latest, plot_evidence=evidence)
             self._latest = None
+            self._interval.clear()
 ```
 
 Why 2 Hz: operators can notice and read changes at this rate; faster than 2 Hz the eye can't parse individual values, only motion; motion without parseable values is decorative flicker.
 
-Exception: charts update at their own configured rate (typically also 2 Hz for plot data), but the chart widget's setData is itself atomic per update.
+Charts and digits share the 2 Hz repaint cap. Their evidence differs: digits
+show the latest value, while charts preserve interval extrema and labeled event
+evidence before calling `setData` atomically.
 
 ## Stale detection
 
@@ -142,6 +152,7 @@ Per `components/chart-tile.md` and RULE-DATA-008 / 009 / 010:
    - Auto-range allowed on initial load (to get oriented)
    - Auto-range disabled during live streaming (prevents axis jumping as outliers arrive) — value stays in same axis scale
    - Operator can manually zoom via dedicated analytics view (not dashboard tiles)
+   - An explicit linear/log scale toggle MUST recompute a compatible visible range once; it MUST NOT leave transformed data outside the existing viewport. This does not authorize continuous live auto-ranging.
 3. **Pressure plots mandatory log Y-scale** (RULE-DATA-008).
 4. **Point density capped** at `max_points` per series. Deque/ring-buffer of latest N samples.
 5. **No trend line smoothing** (would misrepresent noise). Show raw samples.
@@ -185,6 +196,18 @@ This is operator verification — when in doubt, they can check whether the show
 Two data points from different channels arriving in different orders than they were published: this happens in async ZMQ. UI should render both in the order received, not try to reorder to match timestamps. Each channel is independent; cross-channel ordering is not a product guarantee.
 
 Within a single channel, engine guarantees monotonic timestamps. UI should never display an older value on a channel that already showed a newer one.
+
+A timestamp more than one second ahead of the GUI wall clock is not accepted as
+quiet ordering truth. TopWatchBar presents a static Russian clock-skew caution,
+retains the event in its constant-size interval cut, and temporarily uses
+arrival order until a non-skewed sample arrives. This narrow fallback prevents
+a poisoned future timestamp from pinning an old OK digit above later fault
+evidence; it does not reorder persistence, alarms, or cross-channel history.
+
+Critical numeric accessibility detail names both the latest received source
+and the provenance/time of the displayed last-usable value. Interval extrema
+include their own source times. Stale age, disconnect, physical invalidity, and
+clock skew remain explicit orthogonal facts rather than replacing one another.
 
 ## Missing-data handling
 
@@ -235,6 +258,23 @@ If the whole channel goes silent (stale_timeout exceeded):
 - `patterns/numeric-formatting.md` — precision and unit formatting rules
 - `patterns/information-hierarchy.md` — Tier-1 vitals get priority in update scheduling
 
+## Dashboard coalescing change impact
+
+| Field | Evidence |
+|---|---|
+| Better | Digits and plots remain readable because one latest-value cut repaints at 2 Hz instead of once per incoming sample. |
+| Worse | An intermediate sample may not appear as a standalone digit. |
+| Safety/workflow justification | Presentation cadence is for human legibility only; ingestion, buffering, persistence, and alarms remain full-rate. |
+| Mitigation and tests | The full-rate buffer receives every sample; peak-preserving plot decimation retains interval extrema; deterministic tests prove no pre-tick repaint, latest-value digits, source-ordered transient fault/skew evidence, extrema times, disconnect retention, and constant-size state across 10,000 updates. |
+| Revise/revert trigger | Revise if coalescing drops stored samples, delays alarm evaluation, exceeds 2 Hz, hides a fault behind a future timestamp, erases the last usable value/provenance, or fails to show the latest trustworthy value on the next tick. |
+
+A transient per-interval range marker is presentation evidence, not an alarm:
+TopWatchBar may show `↕` until the next clean interval while Russian accessible
+detail names the min/max/status cut. A persistent excursion badge remains open;
+the GUI aggregate must not invent or latch alarm truth. Persistence requires an
+authoritative backend alarm/event record and its acknowledgement workflow.
+
 ## Changelog
 
+- 2026-07-17: Defined future-source clock-skew caution and bounded arrival-order recovery; required provenance/extrema times, disconnect retention, and O(1) interval state evidence.
 - 2026-04-17: Initial version. Coalescing pattern. Stale / initial-empty / missing-data handling. Update frequency table per element type. Rationale for 2 Hz cap and no-animation rules.

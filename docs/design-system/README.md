@@ -3,13 +3,38 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-04-17
+last_updated: 2026-07-20
 status: canonical
+version: 4.0.3
 ---
 
 # CryoDAQ Design Language
 
+**Current design-system version:** `4.0.3`
+
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
+
+## Operator-first observability
+
+The primary operating surface MUST preserve panoramic observability: current
+channel values, trends, experiment context, provenance, and explicit
+stale/disconnected/fault state remain discoverable even when the software did
+not anticipate the condition. Summaries and prioritization may guide attention,
+but they are additive and MUST NOT replace or hide the comprehensive evidence
+view. A visually calmer screen is not an improvement if it reduces anomaly
+discovery, provenance, or operator agency.
+
+Every GUI change records five items in its reviewed evidence:
+
+1. what becomes easier, clearer, faster, or safer for the operator;
+2. what becomes harder, less visible, slower, or less flexible;
+3. which operator workflow and safety goal justify the tradeoff;
+4. how the downside is mitigated and tested; and
+5. the observable condition that requires reverting or revising the change.
+
+If the benefit is purely aesthetic while the cost reduces panoramic awareness,
+unexpected-condition discovery, raw evidence, provenance, or truthful state,
+the change fails the design-system gate.
 
 This document is written for both automated tooling and human developers. Every rule has a unique ID, grep-friendly keywords, and concrete code examples.
 
@@ -19,19 +44,34 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 
 **Operating principles, ranked by priority:**
 
-1. **Data legibility over decoration.** Sensor readings are life-critical. Nothing visual may impair reading of temperature, pressure, or safety state. No animation on data flow, no decoration near readouts.
-2. **Deliberate desaturation.** Our palette is intentionally desaturated dark. This reduces eye strain during long shifts and avoids the "toy" appearance of bright neon dashboards. Sharp primary colors are signal loss to the eye.
-3. **Static by default, motion only for state transition.** UI is still. Motion indicates change, never decoration. Pulsing alarms, count-up numbers, parallax — all forbidden.
-4. **Consistency over cleverness.** The same concept must render the same way across every surface. If "active phase" is green border in dashboard, it must be green border in overlay. No per-surface variation.
-5. **Discoverability via layout, not via interaction.** Everything an operator needs must be visible or at most one click away. Hover-only affordances fail in stress operations.
-6. **Operator autonomy.** No magic. Operators can see what the system is doing, why, and override if needed. No actions happen without explicit operator trigger.
-7. **Quiet normalcy, loud exceptions.** Normal state is invisible (muted tones). Abnormal state is impossible to miss (loud red, prominent placement, persistent badge).
+1. **Informative before everything else.** The interface must make current truth,
+   change, uncertainty, and the next safe action understandable at a glance.
+   Sensor readings are life-critical; beauty never obscures temperature,
+   pressure, safety state, provenance, or freshness.
+2. **Beautiful by deliberate composition.** Beauty is a functional quality:
+   purposeful hierarchy, proportion, spacing rhythm, typography, restraint,
+   and a recognisable CryoDAQ visual identity reduce fatigue and make important
+   differences easier to perceive. Token compliance alone is insufficient.
+   A generic LabVIEW-style grid of equally weighted boxes, default controls,
+   and dense chrome is a design failure even when it is technically usable.
+3. **Deliberate desaturation.** Our palette is intentionally desaturated dark. This reduces eye strain during long shifts and avoids the "toy" appearance of bright neon dashboards. Sharp primary colors are signal loss to the eye.
+4. **Static by default, motion only for state transition.** UI is still. Motion indicates change, never decoration. Pulsing alarms, count-up numbers, parallax — all forbidden.
+5. **Consistency over cleverness.** The same concept must render the same way
+   across every surface. An active phase uses the canonical ACCENT progress
+   treatment everywhere; green remains reserved for safe/healthy truth. No
+   per-surface variation.
+6. **Discoverability via layout, not via interaction.** Everything an operator needs must be visible or at most one click away. Hover-only affordances fail in stress operations.
+7. **Operator clarity and bounded autonomy.** No magic: operators can see what the system is doing and why, and may override only where the safety architecture explicitly permits it. Ordinary UI actions require an explicit operator trigger; automatic fail-closed, interlock, verified-OFF, persistence, and bounded-shutdown actions retain their independent authority.
+8. **Quiet normalcy, loud exceptions.** Normal state is invisible (muted tones). Abnormal state is impossible to miss (loud red, prominent placement, persistent badge).
 
 **Anti-philosophies explicitly rejected:**
 - Material Design playfulness (ripples, elevation transitions) — we are not Google Calendar.
 - Apple HIG soft-touch aesthetic (translucent blur, dock bounce) — we are not iOS.
 - Enterprise SaaS gradient CTAs (Indigo→Violet buttons) — we are not Stripe.
 - Gaming/cyberpunk neon (glow, chromatic aberration) — we are not a crypto dashboard.
+- Generic LabVIEW-style dashboard assembly (uniform box grids, default widgets,
+  dense chrome, equal visual weight everywhere) — instrumentation does not have
+  to look accidental or interchangeable.
 
 ## Navigation
 
@@ -49,6 +89,9 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 | Wire a destructive action | `patterns/destructive-actions.md` |
 | Format a number (temperature/pressure/time) | `patterns/numeric-formatting.md` |
 | Display stale data | `patterns/real-time-data.md` |
+| Compose the supplemental operator briefing | `patterns/operator-display-composition.md` |
+| Preserve operator evidence and reviewed workflow decisions | `patterns/operator-evidence-and-retention.md` |
+| Check or update GUI v3 migration status | `GUI_MIGRATION_INVENTORY.md` |
 | Check WCAG contrast | `accessibility/contrast-matrix.md` |
 | Write Russian copy | `patterns/copy-voice.md` |
 | Add a new token | `governance/contribution.md` |
@@ -58,16 +101,24 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 ```
 docs/design-system/
 ├── README.md                        # this file
+├── MANIFEST.md                      # exact corpus inventory and encoded decisions
+├── GUI_MIGRATION_INVENTORY.md       # auditable v3 surface migration backlog
+├── CHANGELOG.md                     # design-system release history
+├── VERSION                          # authoritative version marker
 ├── ANTI_PATTERNS.md                 # catalog of forbidden patterns with historical refs
+├── DEEP_AUDIT_REPORT.md             # retained v1.0.0 audit evidence
+├── adr/                             # accepted architecture/design decisions
+│   ├── 001-light-theme-status-unlock.md
+│   └── 002-accent-status-decoupling.md
 │
 ├── tokens/                          # what values to use
-│   ├── colors.md                    # 71 color tokens
+│   ├── colors.md                    # 77 color tokens
 │   ├── typography.md                # 36 typography tokens
 │   ├── spacing.md                   # 9 spacing tokens
 │   ├── radius.md                    # 5 radius tokens
-│   ├── layout.md                    # 5 layout tokens
+│   ├── layout.md                    # 7 layout tokens
 │   ├── chart-tokens.md              # 12 pyqtgraph-specific tokens
-│   ├── motion.md                    # proposed motion tokens (not in theme.py yet)
+│   ├── motion.md                    # 3 transition tokens
 │   ├── elevation.md                 # zero-shadow policy
 │   ├── icons.md                     # proposed icon sizing tokens
 │   ├── breakpoints.md               # viewport constraints
@@ -107,8 +158,18 @@ docs/design-system/
 │   ├── sensor-cell.md
 │   ├── phase-stepper.md
 │   ├── alarm-badge.md
+│   ├── tray-status.md
+│   ├── alarm-panel.md
+│   ├── analytics-panel.md
+│   ├── archive-panel.md
+│   ├── calibration-panel.md
+│   ├── conductivity-panel.md
 │   ├── experiment-card.md
+│   ├── experiment-panel.md
+│   ├── instruments-panel.md
 │   ├── quick-log-block.md
+│   ├── operator-log-panel.md
+│   ├── operator-snapshot-components.md
 │   └── keithley-panel.md
 │
 ├── patterns/                        # multi-component compositions
@@ -120,6 +181,9 @@ docs/design-system/
 │   ├── cross-surface-consistency.md
 │   ├── destructive-actions.md
 │   ├── copy-voice.md
+│   ├── operator-snapshot-presentation.md
+│   ├── operator-display-composition.md
+│   ├── operator-evidence-and-retention.md
 │   └── responsive-behavior.md
 │
 ├── accessibility/                   # WCAG + keyboard + motion
@@ -134,6 +198,7 @@ docs/design-system/
     ├── deprecation-policy.md
     ├── testing-strategy.md
     ├── performance-budget.md
+    ├── change-impact.md
     ├── versioning.md
     └── contribution.md
 ```
@@ -198,7 +263,8 @@ Rules can conflict in edge cases. When they do, this precedence applies:
 4. **Newer rule** (by `last_updated`) overrides older rule within same enforcement level.
 5. **More specific rule** overrides more general rule. E.g., `RULE-DATA-005` (sensor reading format) overrides `RULE-TYPO-003` (generic text formatting).
 
-If precedence still ambiguous, decision is Vladimir's.
+If precedence is still ambiguous, the project architect (currently Vladimir)
+makes the decision.
 
 ## How LLM consumers should use this document
 
@@ -211,15 +277,19 @@ When given a task touching GUI:
 5. **Apply enforcement markers** — when code implements a rule, add `# DESIGN: RULE-XXX` comment.
 6. **Check ANTI_PATTERNS.md** — confirm the approach isn't historically forbidden.
 
-When in doubt: **read the rule, not my code**. If my code contradicts a rule, code is wrong.
+For non-safety presentation behavior, start from the reviewed rule rather than
+copying incidental legacy code. For software truth, safety authority, hardware
+evidence, or a conflict with root `AGENTS.md`, inspect the reachable code and
+tests and follow the higher-precedence repository contract; repair stale
+design-system prose in the same reviewed slice.
 
 ## Token count summary
 
-From `src/cryodaq/gui/theme.py` inventory (v1.0.1, 139 tokens):
+From `src/cryodaq/gui/theme.py` inventory (v3.0.0, 142 exported uppercase constants):
 
 | Category | Count | File |
 |---|---:|---|
-| Colors | 74 | `tokens/colors.md` |
+| Colors | 77 | `tokens/colors.md` |
 | Typography | 36 | `tokens/typography.md` |
 | Spacing | 9 | `tokens/spacing.md` |
 | Radius | 5 | `tokens/radius.md` |
@@ -236,4 +306,33 @@ From `src/cryodaq/gui/theme.py` inventory (v1.0.1, 139 tokens):
 
 ## Changelog
 
+- 2026-07-20: Released v4.0.3: removed remaining safety-green collisions from
+  running/authorized, conductivity settling, and shift-handover presentation;
+  normalized new operator-facing attention wording to the single caution rung
+  while preserving legacy `warning` as an accepted source value.
+- 2026-07-17: Released v4.0.2: theme selection is validated and atomically
+  deferred to the next ordinary launch without touching acquisition; tray
+  health now also requires fresh data and known reporting truth, and incomplete
+  launcher shutdown remains visible and locked until exact owners settle.
+- 2026-07-17: Released v4.0.1: corrected shipped emergency, calibration,
+  tray, alarm, responsive, TopWatchBar, experiment-identity, and theme-selection
+  contracts against current runtime behavior; open code migrations remain
+  explicit rather than being described as complete.
+- 2026-07-15: Released v4.0.0: restored panoramic observability as the
+  mandatory primary-surface contract, made the shift briefing additive, and
+  added an explicit operator/safety tradeoff gate for every GUI change.
+- 2026-07-15: Released v3.0.2: aligned the ToolRail home destination and
+  tooltip with the Primary Operator Display term «Сводка смены».
+- 2026-07-15: Released v3.0.1: completed the software POD home cutover with
+  one visible truth owner, consolidated provenance, and quiet-normal cards;
+  physical, DPI/NVDA, long-session, and operator evidence remain open.
+- 2026-07-14: Released v3.0.0: made informative and intentionally beautiful
+  composition jointly mandatory across the complete GUI corpus, and explicitly
+  rejected generic LabVIEW-style dashboard assembly. Safety truth, legibility,
+  provenance, freshness, uncertainty, and the next safe action retain
+  precedence over aesthetics.
+- 2026-07-14: Released v2.0.0 for the breaking descriptor-qualified
+  `InstrumentsPanel` ingress contract; tokens and visual anatomy are unchanged.
+- 2026-07-11: Added the F36 snapshot and Primary Operator Display entry points;
+  reconciled the root tree and runtime-token inventory with the v1.2.0 corpus.
 - 2026-04-17: Initial version. Written during Phase I.1 after Vladimir visual review revealed cross-surface inconsistency. Based on real `theme.py` token inventory (126 tokens across 5 categories at v1.0.0; expanded to 139 tokens in v1.0.1).

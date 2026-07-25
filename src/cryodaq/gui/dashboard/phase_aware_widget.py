@@ -52,6 +52,8 @@ class PhaseAwareWidget(QWidget):
         self._current_phase: str | None = None
         self._phase_started_at: float | None = None
         self._has_active_experiment: bool = False
+        self._active_experiment_id: str | None = None
+        self._mutation_enabled = True
         self._completed_phases_count: int = 0
 
         # Cached analytics values for inline context
@@ -99,6 +101,12 @@ class PhaseAwareWidget(QWidget):
             f"}}"
         )
         root.addWidget(self._duration_label)
+
+        self._operation_label = QLabel()
+        self._operation_label.setObjectName("phaseOperationStatus")
+        self._operation_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._operation_label.setVisible(False)
+        root.addWidget(self._operation_label)
 
         # Inactive: «+ Создать» button (visible only when no experiment)
         self._create_btn = QPushButton(
@@ -168,9 +176,7 @@ class PhaseAwareWidget(QWidget):
         self._jump_combo.setObjectName("phaseJumpCombo")
         self._jump_combo.setFixedHeight(_BUTTON_HEIGHT_PX)
         self._jump_combo.setMaximumWidth(140)
-        self._jump_combo.addItem(
-            "\u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a...", ""
-        )  # Перейти к...
+        self._jump_combo.addItem("\u041f\u0435\u0440\u0435\u0439\u0442\u0438 \u043a...", "")  # Перейти к...
         for phase in PHASE_ORDER:
             self._jump_combo.addItem(PHASE_LABELS_RU[phase], phase)
         self._jump_combo.setStyleSheet(f"#phaseJumpCombo {{ {btn_style} }}")
@@ -217,25 +223,15 @@ class PhaseAwareWidget(QWidget):
 
             if self._current_phase == "cooldown":
                 if self._cached_eta_s is not None:
-                    parts.append(
-                        self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s))
-                    )
+                    parts.append(self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s)))
                 if self._cached_r_thermal is not None:
-                    parts.append(
-                        self._styled_metric(
-                            "R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"
-                        )
-                    )
+                    parts.append(self._styled_metric("R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"))
             elif self._current_phase == "vacuum":
                 if self._cached_pressure is not None:
                     parts.append(self._styled_metric("P", f"{self._cached_pressure:.2e} mbar"))
             elif self._current_phase == "measurement":
                 if self._cached_r_thermal is not None:
-                    parts.append(
-                        self._styled_metric(
-                            "R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"
-                        )
-                    )
+                    parts.append(self._styled_metric("R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"))
             elif self._current_phase == "teardown":
                 if self._completed_phases_count > 0:
                     parts.append(
@@ -246,8 +242,7 @@ class PhaseAwareWidget(QWidget):
                     )
 
             text = (
-                f' <span style="color:{theme.MUTED_FOREGROUND}; '
-                f'font-size:{theme.FONT_SIZE_SM}px;"> \u00b7 </span> '
+                f' <span style="color:{theme.MUTED_FOREGROUND}; font-size:{theme.FONT_SIZE_SM}px;"> \u00b7 </span> '
             ).join(parts)
 
         if text != self._last_context_text:
@@ -292,10 +287,49 @@ class PhaseAwareWidget(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def active_experiment_id(self) -> str | None:
+        return self._active_experiment_id
+
+    def set_mutation_enabled(self, enabled: bool) -> None:
+        """Gate every phase mutation without hiding phase evidence."""
+
+        self._mutation_enabled = bool(enabled)
+        self._update_control_enablement()
+
+    def set_operation_state(self, state: str, detail: str = "") -> None:
+        if state not in {"idle", "pending", "unknown", "error"}:
+            raise ValueError(f"unsupported phase operation state: {state}")
+        if state == "idle":
+            self._operation_label.clear()
+            self._operation_label.setToolTip("")
+            self._operation_label.setVisible(False)
+            return
+        text, color = {
+            "pending": ("СМЕНА ФАЗЫ…", theme.STATUS_INFO),
+            "unknown": ("ИСХОД НЕИЗВЕСТЕН", theme.STATUS_CAUTION),
+            "error": ("ФАЗА НЕ ИЗМЕНЕНА", theme.STATUS_FAULT),
+        }[state]
+        explanation = detail.strip() or text
+        self._operation_label.setText(text)
+        self._operation_label.setToolTip(explanation)
+        self._operation_label.setAccessibleName(text)
+        self._operation_label.setAccessibleDescription(explanation)
+        self._operation_label.setStyleSheet(
+            f"color: {color}; font-family: '{theme.FONT_BODY}'; "
+            f"font-size: {theme.FONT_SIZE_XS}px; font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        self._operation_label.setVisible(True)
+
     def on_status_update(self, status: dict) -> None:
         """Receive experiment_status response. Update UI accordingly."""
         try:
-            has_experiment = status.get("active_experiment") is not None
+            active = status.get("active_experiment")
+            has_experiment = isinstance(active, dict)
+            raw_experiment_id = active.get("experiment_id") if has_experiment else None
+            new_experiment_id = (
+                raw_experiment_id.strip() if type(raw_experiment_id) is str and raw_experiment_id.strip() else None
+            )
             new_phase = status.get("current_phase")
             new_started = status.get("phase_started_at")
 
@@ -305,11 +339,17 @@ class PhaseAwareWidget(QWidget):
 
             if (
                 has_experiment == self._has_active_experiment
+                and new_experiment_id == self._active_experiment_id
                 and new_phase == self._current_phase
                 and new_started == self._phase_started_at
             ):
                 return
 
+            if new_experiment_id != self._active_experiment_id:
+                self._cached_eta_s = None
+                self._cached_r_thermal = None
+                self._cached_pressure = None
+            self._active_experiment_id = new_experiment_id
             self._current_phase = new_phase
             self._phase_started_at = new_started
 
@@ -351,6 +391,7 @@ class PhaseAwareWidget(QWidget):
         self._duration_label.setText("")
         self._controls.setVisible(False)
         self._create_btn.setVisible(True)
+        self._update_control_enablement()
         self._refresh_context_label()
 
     def _apply_active_state_no_phase(self) -> None:
@@ -360,8 +401,7 @@ class PhaseAwareWidget(QWidget):
         self._duration_label.setText("")
         self._controls.setVisible(True)
         self._create_btn.setVisible(False)
-        self._back_btn.setEnabled(False)
-        self._forward_btn.setEnabled(True)
+        self._update_control_enablement()
         self._refresh_context_label()
 
     def _apply_active_state(self) -> None:
@@ -373,22 +413,38 @@ class PhaseAwareWidget(QWidget):
         if self._current_phase is None:
             return
         try:
-            current_idx = PHASE_ORDER.index(self._current_phase)
+            PHASE_ORDER.index(self._current_phase)
         except ValueError:
             logger.warning("Unknown phase: %s", self._current_phase)
+            self._update_control_enablement()
             return
 
         self._stepper.set_current_phase(self._current_phase)
         self._update_duration_display()
 
-        self._back_btn.setEnabled(current_idx > 0)
-        self._forward_btn.setEnabled(current_idx < len(PHASE_ORDER) - 1)
+        self._update_control_enablement()
 
         self._jump_combo.blockSignals(True)
         self._jump_combo.setCurrentIndex(0)
         self._jump_combo.blockSignals(False)
 
         self._refresh_context_label()
+
+    def _update_control_enablement(self) -> None:
+        self._create_btn.setEnabled(self._mutation_enabled and not self._has_active_experiment)
+        self._jump_combo.setEnabled(self._mutation_enabled and self._has_active_experiment)
+        if not self._mutation_enabled or not self._has_active_experiment:
+            self._back_btn.setEnabled(False)
+            self._forward_btn.setEnabled(False)
+            return
+        try:
+            current_idx = PHASE_ORDER.index(self._current_phase)
+        except (TypeError, ValueError):
+            self._back_btn.setEnabled(False)
+            self._forward_btn.setEnabled(False)
+            return
+        self._back_btn.setEnabled(current_idx > 0)
+        self._forward_btn.setEnabled(current_idx < len(PHASE_ORDER) - 1)
 
     def _update_duration_display(self) -> None:
         if not self._has_active_experiment or self._phase_started_at is None:
@@ -406,7 +462,7 @@ class PhaseAwareWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _on_back_clicked(self) -> None:
-        if self._current_phase is None:
+        if not self._mutation_enabled or self._current_phase is None:
             return
         try:
             idx = PHASE_ORDER.index(self._current_phase)
@@ -416,7 +472,7 @@ class PhaseAwareWidget(QWidget):
             pass
 
     def _on_forward_clicked(self) -> None:
-        if self._current_phase is None:
+        if not self._mutation_enabled or self._current_phase is None:
             return
         try:
             idx = PHASE_ORDER.index(self._current_phase)
@@ -426,7 +482,7 @@ class PhaseAwareWidget(QWidget):
             pass
 
     def _on_jump_selected(self, idx: int) -> None:
-        if idx <= 0:
+        if not self._mutation_enabled or idx <= 0:
             return
         target = self._jump_combo.itemData(idx)
         if target and target != self._current_phase:

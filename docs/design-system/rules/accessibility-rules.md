@@ -163,21 +163,20 @@ status_label.setStyleSheet(f"color: {theme.STATUS_OK};")
 
 ## RULE-A11Y-003: Status color body-text contrast constraint
 
-**TL;DR:** STATUS_FAULT (#c44545, 3.94:1), STATUS_INFO (#4a7ba8, 4.31:1), STATUS_STALE (#5a5d68, 2.94:1) fail WCAG AA body contrast. Do not use them as color for body-size text (<18pt / <14pt bold).
+**TL;DR:** STATUS_FAULT (#c44545, 3.94:1) and STATUS_STALE (#5a5d68, 2.94:1) fail WCAG AA body contrast on the default dark background. Do not use them for body-size numeric value text.
 
 **Statement:** Measured contrast ratios vs BACKGROUND #0d0e12:
 
 | Token | Ratio | AA body (≥4.5) | Use for body text? |
 |---|---|---|---|
 | STATUS_OK | 4.67:1 | ✓ | Yes |
-| STATUS_WARNING | 6.24:1 | ✓ | Yes |
-| STATUS_CAUTION | 5.67:1 | ✓ | Yes |
+| STATUS_CAUTION / legacy WARNING | 6.24:1 | ✓ | Yes |
 | STATUS_FAULT | 3.94:1 | ✗ | **No** — use FOREGROUND + icon |
-| STATUS_INFO | 4.31:1 | ✗ | **No** — use FOREGROUND + icon |
+| STATUS_INFO | 5.81:1 | ✓ | Yes |
 | STATUS_STALE | 2.94:1 | ✗✗ | **No** — deliberately low |
-| COLD_HIGHLIGHT | 5.46:1 | ✓ | Yes |
+| COLD_HIGHLIGHT | 8.71:1 | ✓ | Yes |
 
-For contexts where STATUS_FAULT / STATUS_INFO / STATUS_STALE must convey status in body text, use this compound pattern:
+For contexts where STATUS_FAULT / STATUS_STALE must convey status in body text, use this compound pattern:
 
 - Text color: `theme.FOREGROUND` (readable)
 - Icon prefix: colored in status token
@@ -222,9 +221,6 @@ row_layout.addWidget(text)
 fault_label = QLabel("Т11 вышел за уставку, срабатывание блокировки")
 fault_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")  # WRONG — 3.94:1
 
-# Long info body in STATUS_INFO
-info_label = QLabel("Калибровка выполнена 23 дня назад. Планируйте перекалибровку.")
-info_label.setStyleSheet(f"color: {theme.STATUS_INFO};")  # WRONG — 4.31:1
 ```
 
 **Exception (narrow):** Large-size headings (18pt+ = FONT_SIZE_LG+) pass AA large at 3.0:1. Fault banner title "АВАРИЯ" at FONT_TITLE_SIZE (22px) with STATUS_FAULT color is acceptable — passes AA large. But body paragraph beneath should be FOREGROUND.

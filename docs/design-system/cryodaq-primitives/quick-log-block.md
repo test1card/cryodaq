@@ -326,6 +326,8 @@ Toast notification also shown for visibility
 
 ## States
 
+- **Replay/read-only host:** recent entries remain visible; the dashboard host disables input/send and independently rejects direct or queued `log_entry` submission.
+
 | State | Treatment |
 |---|---|
 | **Empty (no entries)** | Input available + «Нет записей» message |

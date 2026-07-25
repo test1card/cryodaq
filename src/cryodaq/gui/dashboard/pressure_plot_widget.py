@@ -10,21 +10,10 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore
+from cryodaq.gui.dashboard.channel_buffer import ChannelBufferStore, peak_preserving_decimate
 from cryodaq.gui.widgets.shared.pressure_plot import PressurePlot
 
 _MAX_POINTS = 2000
-
-
-def _decimate(pts: list[tuple[float, float]], target: int) -> list[tuple[float, float]]:
-    n = len(pts)
-    if n <= target:
-        return pts
-    stride = max(1, n // target)
-    result = pts[::stride]
-    if result[-1] is not pts[-1]:
-        result.append(pts[-1])
-    return result
 
 
 class PressurePlotWidget(QWidget):
@@ -54,7 +43,7 @@ class PressurePlotWidget(QWidget):
         if not pts:
             return
         if len(pts) > _MAX_POINTS:
-            pts = _decimate(pts, _MAX_POINTS)
+            pts = peak_preserving_decimate(pts, _MAX_POINTS)
         xs = [t for t, _ in pts]
         ys = [v for _, v in pts]
         self._shared.set_series(xs, ys)

@@ -72,9 +72,9 @@ content_width  = viewport_width − TOOL_RAIL_WIDTH
 content_height = viewport_height − HEADER_HEIGHT − BOTTOM_BAR_HEIGHT
 ```
 
-For minimum viewport 1280×720:
+For runtime logical minimum viewport 1280×800:
 - content_width = 1280 − 56 = 1224px
-- content_height = 720 − 56 − 28 = 636px
+- content_height = 800 − 56 − 28 = 716px
 
 For target viewport 1920×1080:
 - content_width = 1920 − 56 = 1864px
@@ -119,4 +119,5 @@ Not all interactive controls are exactly ROW_HEIGHT — use it as default baseli
 
 ## Changelog
 
+- 2026-07-15 (v4.0.0): Aligned minimum content-height arithmetic with the runtime `MainWindowV2` logical minimum of 1280×800; this does not certify a physical or configured-DPI target.
 - 2026-04-17: Initial version from theme.py inventory (5 layout tokens)

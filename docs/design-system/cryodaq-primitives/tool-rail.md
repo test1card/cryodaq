@@ -4,7 +4,7 @@ keywords: tool-rail, sidebar, left-rail, navigation, icon-only, vertical, chrome
 applies_to: left vertical icon-only navigation strip
 status: active
 implements: src/cryodaq/gui/shell/tool_rail.py (Phase 0)
-last_updated: 2026-04-17
+last_updated: 2026-07-15
 references: rules/interaction-rules.md, rules/color-rules.md, tokens/icons.md
 ---
 
@@ -46,7 +46,7 @@ Per Phase 0 audit, these icons open functional panels. **Canonical shortcut = mn
 
 | Slot | Icon | Panel | Canonical shortcut | Numeric fallback |
 |---|---|---|---|---|
-| 1 | `home` or `layout-dashboard` | Дашборд (overview) | *(no mnemonic yet — propose `Ctrl+H` for "home" in a future release)* | Ctrl+1 |
+| 1 | `home` or `layout-dashboard` | Дашборд (panoramic overview) | `Ctrl+H` | Ctrl+1 |
 | 2 | `plus-circle` | Создать эксперимент | *(no mnemonic yet — Ctrl+E is taken by slot 3; candidate: `Ctrl+N` for "new experiment")* | Ctrl+2 |
 | 3 | `flask-conical` | Карточка эксперимента | `Ctrl+E` | Ctrl+3 |
 | 4 | `zap` | Keithley (источник мощности) | `Ctrl+K` | Ctrl+4 |
@@ -58,7 +58,7 @@ Per Phase 0 audit, these icons open functional panels. **Canonical shortcut = mn
 
 Per Phase 0 product decision: «Создать эксперимент» (slot 2) and «Карточка эксперимента» (slot 3) may be merged into a single slot in Phase II — mnemonic for slot 2 will be settled at that point.
 
-When both a canonical mnemonic and a numeric fallback exist, the tooltip shows the **canonical** shortcut: `«Дашборд (Ctrl+1)»` today, migrating to the mnemonic as slot mnemonics are finalized. Do not display both in one tooltip — pick the canonical one.
+When both a canonical mnemonic and a numeric fallback exist, the tooltip shows the **canonical** shortcut: `«Дашборд (Ctrl+H)»`. Do not display both in one tooltip — pick the canonical one. The supplemental «Сводка смены» is available from «Ещё» and does not replace home.
 
 ## Anatomy
 
@@ -103,7 +103,7 @@ When both a canonical mnemonic and a numeric fallback exist, the tooltip shows t
 ## Invariants
 
 1. **Width = TOOL_RAIL_WIDTH (56).** Coupled to HEADER_HEIGHT per RULE-SPACE-006.
-2. **Icon-only, tooltip mandatory** per RULE-INTER-008. Tooltip includes name + shortcut: «Дашборд (Ctrl+1)».
+2. **Icon-only, tooltip mandatory** per RULE-INTER-008. Tooltip includes name + shortcut: «Дашборд (Ctrl+H)».
 3. **Active slot uses ACCENT.** This is legitimate ACCENT use — selection affordance per RULE-COLOR-004.
 4. **Inactive slots MUTED_FOREGROUND icons.** Active slot FOREGROUND icon + 3px ACCENT bar on left edge.
 5. **Click selects.** Hover does not select — hover only changes icon color to FOREGROUND (RULE-COLOR-006).
@@ -112,6 +112,7 @@ When both a canonical mnemonic and a numeric fallback exist, the tooltip shows t
 8. **Icon color inherits from slot's text color.** Recolor via `load_colored_icon`. (RULE-COLOR-005)
 9. **Icon size 24×24** centered in 56×56 slot — even padding all around (16px).
 10. **No badges on icons** in default rail (alarm badge is separate widget in TopWatchBar area, not on rail slot).
+11. **Replay routing is host-authoritative.** The rail may still emit inspection destinations, but `MainWindowV2` rejects new-experiment, settings/channel-editor, calibration and Engine-restart routes in replay. Mnemonic shortcuts traverse the same guarded handler; no shortcut may bypass it. Source, experiment, alarm and log destinations open read-only evidence surfaces.
 
 ## API
 
@@ -311,7 +312,8 @@ Per `tokens/keyboard-shortcuts.md` (canonical registry, AD-002):
 - **Canonical (mnemonic):** `Ctrl+L`, `Ctrl+E`, `Ctrl+A`, `Ctrl+K`, `Ctrl+M`, `Ctrl+C`, `Ctrl+D` (and others in the registry) route to their respective rail slots by panel identity, independent of slot position.
 - **Transitional fallback:** `Ctrl+1` … `Ctrl+9` route to rail slots 1–9 by position. Being phased out — do not extend.
 - `F11` — toggle fullscreen.
-- `Ctrl+Shift+X` — emergency stop (hold-to-confirm).
+- Emergency stop has no shipped global shortcut. `Ctrl+K` opens the Keithley
+  panel; the operator uses its visible emergency action and confirmation modal.
 
 ToolRail registers both the canonical mnemonic and the numeric-fallback shortcut at application level (not rail-local) so shortcuts work from anywhere. When mnemonics are finalized for all nine slots, the numeric registrations will be removed per deprecation policy.
 
@@ -347,5 +349,6 @@ ToolRail registers both the canonical mnemonic and the numeric-fallback shortcut
 
 ## Changelog
 
+- 2026-07-12 (v1.2.0): Documented host-owned replay destination gating shared by mouse and mnemonic paths; mutating global routes are rejected and legacy operational panels open read-only.
 - 2026-04-17: Initial version. Documents Phase 0 implementation. 9 slot definitions confirmed. Slot 2+3 merge pending product decision. Ctrl+[1-9] shortcuts + Ctrl+L alias for Operator Log.
 - 2026-04-17 (v1.0.1): Aligned with canonical mnemonic shortcut registry per AD-002 (FR-011). Added canonical-shortcut column to the slot table (Ctrl+E / Ctrl+K / Ctrl+A / Ctrl+C / Ctrl+M / Ctrl+L / Ctrl+D). Demoted Ctrl+[1-9] to "numeric fallback" column. Clarified that slots 1 and 2 do not yet have approved mnemonics and still rely on the fallback. Keyboard-shortcut-policy section rewritten to match.

@@ -4,7 +4,7 @@ keywords: color, token, palette, surface, status, text, plot, stone, accent, hex
 applies_to: all widgets
 enforcement: strict
 priority: critical
-last_updated: 2026-04-17
+last_updated: 2026-07-20
 status: canonical
 ---
 
@@ -33,7 +33,7 @@ Compare our palette to common alternatives:
 |---|---|---|
 | `STATUS_OK #4a8a5e` (forest green, 40% saturation) | ~~`green-500 #22C55E` (bright, 70% saturation)~~ | ~~`#4CAF50` (Material green)~~ |
 | `STATUS_FAULT #c44545` (muted brick red) | ~~`red-500 #EF4444`~~ | ~~`#F44336` (Material red)~~ |
-| `COLD_HIGHLIGHT #5b8db8` (dusty slate blue) | ~~`cyan-400 #22D3EE`~~ | ~~`#2196F3` (Material blue)~~ |
+| `COLD_HIGHLIGHT #7ab8c4` (muted cyan) | ~~`cyan-400 #22D3EE`~~ | ~~`#2196F3` (Material blue)~~ |
 | `BACKGROUND #0d0e12` (near-black, blue-shifted) | ~~`slate-900 #0F172A`~~ | ~~`#121212` (Material dark)~~ |
 
 Do not substitute Tailwind / Material shades without product-level decision.
@@ -82,35 +82,37 @@ Semantic colors with locked meaning. Cross-use is a specification violation.
 > Dark packs ship the hex values in the table below verbatim. Light
 > packs (`gost`, `xcode`, `braun`) ship a shifted-lightness variant of
 > the same HUE to restore WCAG AA contrast (≥4.5:1) against a light
-> `SURFACE_CARD`. Semantic identity («amber = WARNING, red = FAULT»)
-> is preserved 1:1 across mode switches; only lightness adapts to
+> `SURFACE_CARD`. Semantic identity («amber = CAUTION, red = FAULT»)
+> is preserved 1:1 across mode switches; legacy `warning` input maps to the
+> same caution presentation and never creates another rung. Only lightness adapts to
 > substrate. See
 > [`docs/design-system/adr/001-light-theme-status-unlock.md`](../adr/001-light-theme-status-unlock.md)
 > for the rationale and the dark↔light hex correspondence table.
 
 | Token | Hex | Meaning | Use | Anti-use |
 |---|---|---|---|---|
-| `STATUS_OK` | `#4a8a5e` | Normal operating, within spec, healthy | "Норма" badge, active phase border, safety READY, successful confirmation | Any non-healthy meaning, decorative |
-| `STATUS_WARNING` | `#c4862e` | Attention, approaching limit | Amber "Внимание" label, rate-of-change warning, calibration stale | Fault state (use FAULT); generic notice (use INFO) |
-| `STATUS_CAUTION` | `#c47a30` | Intermediate severity between warning and fault | Temperature climbing into danger zone, pressure drift accelerating | Default warning (use WARNING) |
+| `STATUS_OK` | `#4a8a5e` | Normal operating, within spec, healthy | "Норма" badge, independently demonstrated connection/channel/safety health | READY/permission/activity/completion, selection, any non-healthy meaning, decorative |
+| `STATUS_CAUTION` | `#c4862e` | Abnormal or approaching a limit; investigate | Yellow-orange «Внимание», rate-of-change caution | Fault state (use FAULT); generic notice (use INFO) |
+| `STATUS_WARNING` | `STATUS_CAUTION` | Legacy compatibility input | Existing backend/history `warning` rendered exactly as caution | A separate operator-visible severity step |
 | `STATUS_FAULT` | `#c44545` | Out of spec, interlock, fault_latched | Red alarm badge, "АВАР. ОТКЛ." text, safety fault | Any non-fault red, generic error display text |
-| `STATUS_INFO` | `#4a7ba8` | Informational, neutral notice | Info badge, neutral notification | Status meaning (use OK for healthy); primary action (no primary action color) |
+| `STATUS_INFO` | `#6490c4` | Informational, neutral notice | Info badge, neutral notification | Status meaning (use OK for healthy); primary action |
 | `STATUS_STALE` | `#5a5d68` | No data, disconnected, unknown | Stale sensor badge, disconnected instrument indicator | Muted-but-active text (use `MUTED_FOREGROUND`) |
-| `COLD_HIGHLIGHT` | `#5b8db8` | Cryogenic temperature emphasis | Cold channel highlighting, low-temp series in plots, Т5 Экран 77К badge | General informational use (use INFO) |
+| `COLD_HIGHLIGHT` | `#7ab8c4` | Cryogenic temperature emphasis | Cold channel highlighting, Т5 Экран 77К badge | General informational use (use INFO); ordinary plot-series identity |
 
 **Contrast matrix vs `BACKGROUND #0d0e12`** (measured, not estimated):
 
 | Status token | Ratio | AA body (≥4.5) | AA large (≥3.0) | Use in body text? |
 |---|---|---|---|---|
 | `STATUS_OK #4a8a5e` | 4.67:1 | ✓ passes | ✓ | Yes — body text OK |
-| `STATUS_WARNING #c4862e` | 6.24:1 | ✓ passes | ✓ | Yes — body text OK |
-| `STATUS_CAUTION #c47a30` | 5.67:1 | ✓ passes | ✓ | Yes — body text OK |
+| `STATUS_CAUTION` / legacy `STATUS_WARNING #c4862e` | 6.24:1 | ✓ passes | ✓ | Yes — body text OK |
 | `STATUS_FAULT #c44545` | 3.94:1 | ✗ **fails** | ✓ | **No** — large text (18pt+) / icons / borders only |
-| `STATUS_INFO #4a7ba8` | 4.31:1 | ✗ **fails** | ✓ | **No** — large text / icons / borders only |
+| `STATUS_INFO #6490c4` | 5.81:1 | ✓ passes | ✓ | Yes — body text OK |
 | `STATUS_STALE #5a5d68` | 2.94:1 | ✗ fails | ✗ fails | **No** — deliberate low contrast (stale data must not demand attention) |
-| `COLD_HIGHLIGHT #5b8db8` | 5.46:1 | ✓ passes | ✓ | Yes — body text OK |
+| `COLD_HIGHLIGHT #7ab8c4` | 8.71:1 | ✓ passes | ✓ | Yes — body text OK |
 
-**Critical rule:** `STATUS_FAULT`, `STATUS_INFO`, and `STATUS_STALE` CANNOT be used for body-size text on the default dark background. For inline fault/info status in body text, use `FOREGROUND` for text color with a `STATUS_FAULT` / `STATUS_INFO` colored icon prefix. See `rules/accessibility-rules.md` RULE-A11Y-003.
+**Critical rule:** `STATUS_FAULT` and `STATUS_STALE` cannot be used for
+body-size value text on the default dark background. Keep numeric value text
+`FOREGROUND`; carry fault/stale meaning through static border, icon, and label.
 
 `STATUS_STALE` fails all WCAG levels intentionally — stale/disconnected state should be visibly muted, not demanding attention. Never use for actionable or readable content; only for the "stale" visual treatment itself.
 
@@ -127,10 +129,10 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 | `TEXT_INVERSE` | `ON_PRIMARY` | `#e8eaf0` | Reserved for light surfaces (we have none) |
 | `TEXT_ACCENT` | `ACCENT` | `#7c8cff` | Link color, selected item text, focused label |
 | `TEXT_OK` | `STATUS_OK` | `#4a8a5e` | Positive status inline (respect contrast constraint) |
-| `TEXT_WARNING` | `STATUS_WARNING` | `#c4862e` | Warning status inline |
-| `TEXT_CAUTION` | `STATUS_CAUTION` | `#c47a30` | Caution status inline |
+| `TEXT_WARNING` | `STATUS_CAUTION` | `#c4862e` | Legacy compatibility alias; do not create a separate visual step |
+| `TEXT_CAUTION` | `STATUS_CAUTION` | `#c4862e` | Canonical caution status inline |
 | `TEXT_FAULT` | `STATUS_FAULT` | `#c44545` | Fault status inline (respect contrast constraint) |
-| `TEXT_INFO` | `STATUS_INFO` | `#4a7ba8` | Info status inline |
+| `TEXT_INFO` | `STATUS_INFO` | `#6490c4` | Info status inline |
 
 `MUTED_FOREGROUND` passes AA body at 5.95:1 — safe for captions and secondary text.
 `TEXT_DISABLED` at 2.79:1 fails all contrast levels — this is intentional (disabled controls should be visibly unavailable).
@@ -156,28 +158,26 @@ ADR 002):
 - ✗ Progress-bar chunk for user-triggered task → use `ACCENT`.
 - ✗ Active tab / selected ToolRail slot → use `ACCENT`.
 - ✗ Selected table row background → use `SELECTION_BG`.
-- ✓ Safety-state labels (engine/connection/running/permitted) — keep.
-- ✓ Channel-health indicators (ChannelStatus.OK, `_health_color`
-  ≥80 threshold, stability-ok, steady-state-reached banners) — keep.
-- ✓ CoverageBar dense segment, SeverityChip("OK") — keep.
-- ✓ Current-phase pill border in phase stepper — keep (phase is a
-  state indicator, not user activation).
+- ✓ Independently demonstrated connection, channel, and safety health — keep.
+- ✗ `running` / `run_permitted`, task completion, settling/stability,
+  coverage progress, and current experiment phase — use ACCENT or neutral
+  chrome because activity and progress do not prove health.
 
 See `rules/color-rules.md` RULE-COLOR-004 and
 `adr/002-accent-status-decoupling.md`.
 
 ## Domain-semantic palette (physics quantities)
 
-Maps physical measurements to status colors. Used in Keithley panel and related widgets.
+Maps physical measurements to non-status data hues. Used in Keithley panel and related widgets. Quantity identity never borrows a safety/status token.
 
 | Token | Resolves to | Physical quantity | Rationale |
 |---|---|---|---|
-| `QUANTITY_CURRENT` | `STATUS_OK` = `#4a8a5e` | Current (I) | Current flow = operational health = OK green |
-| `QUANTITY_POWER` | `#c44545` | Power (P) | Power dissipation = potential hazard = FAULT red |
-| `QUANTITY_RESISTANCE` | `STATUS_WARNING` = `#c4862e` | Resistance (R) | Resistance varies during experiment = attention = WARNING amber |
-| `QUANTITY_VOLTAGE` | `#5b8db8` | Voltage (V) | Voltage applied (cold side) = COLD_HIGHLIGHT blue |
+| `QUANTITY_CURRENT` | `#5fa090` | Current (I) | Muted teal data hue; not a health assertion |
+| `QUANTITY_POWER` | `#b87b9b` | Power (P) | Muted rose data hue; not a fault assertion |
+| `QUANTITY_RESISTANCE` | `#b88a5b` | Resistance (R) | Warm tan data hue; not a warning assertion |
+| `QUANTITY_VOLTAGE` | `#5b8db8` | Voltage (V) | Steel-blue data hue; not a cold/info assertion |
 
-This mapping is **a domain convention**, not arbitrary. Do not swap without consulting lab personnel.
+This mapping is **a domain convention**, not arbitrary. Labels and units remain authoritative; color is supplemental and must not be the only identity cue. Do not swap without consulting lab personnel.
 
 ## Plot palette (pyqtgraph-specific)
 
@@ -196,11 +196,11 @@ See `tokens/chart-tokens.md` for full list with usage context. Summary:
 | `PLOT_LINE_PALETTE` | array of 8 hex | Default multi-series line colors |
 
 `PLOT_LINE_PALETTE`:
-1. `#5b8db8` (cold blue, COLD_HIGHLIGHT)
+1. `#5b8db8` (steel blue)
 2. `#9b7bb8` (dusty purple)
 3. `#5fa090` (teal green)
 4. `#a3b85b` (olive)
-5. `#c4862e` (WARNING amber)
+5. `#8f8578` (warm grey)
 6. `#b88a5b` (ochre)
 7. `#b87b9b` (dusty rose)
 8. `#7c8cff` (ACCENT periwinkle)
@@ -258,7 +258,7 @@ See `governance/deprecation-policy.md` for formal policy.
 
 | Color family | Reason | Alternative |
 |---|---|---|
-| Purple/violet bright (`#8B5CF6`, `#A855F7`, `#6366F1`) | No semantic role; violates status grammar. Dashboard phase stepper violation — corrected in Phase II.9 | Use `ACCENT #7c8cff` ONLY for focus/selection, `STATUS_OK` for active phase |
+| Purple/violet bright (`#8B5CF6`, `#A855F7`, `#6366F1`) | No direct status role | Use canonical `ACCENT` for focus/current progress and neutral chrome for completion; never substitute ad-hoc violet |
 | Pure red `#FF0000` | Over-saturated on dark, eye strain | `STATUS_FAULT #c44545` |
 | Pure white `#FFFFFF` | Too harsh, fatigue over long shifts | `FOREGROUND #e8eaf0` |
 | Pure black `#000000` | Not in palette | `BACKGROUND #0d0e12` |
@@ -273,7 +273,8 @@ See `ANTI_PATTERNS.md` for historical regressions and their corrections.
 - `RULE-COLOR-001` — No raw hex in widget code (`rules/color-rules.md`)
 - `RULE-COLOR-002` — Status color semantic lock (`rules/color-rules.md`)
 - `RULE-COLOR-003` — One primary accent per composition (`rules/color-rules.md`)
-- `RULE-COLOR-004` — ACCENT reserved for focus/selection (`rules/color-rules.md`)
+- `RULE-COLOR-004` — ACCENT reserved for interaction, selection, primary
+  action, and current activity/progress; never health (`rules/color-rules.md`)
 - `RULE-SURF-001` — Single visible surface per card (`rules/surface-rules.md`)
 - `RULE-A11Y-003` — Status color text contrast constraint (`rules/accessibility-rules.md`)
 
@@ -287,4 +288,6 @@ See `ANTI_PATTERNS.md` for historical regressions and their corrections.
 
 ## Changelog
 
+- 2026-07-20: Reserved OK for independently demonstrated health; documented
+  activity/progress as ACCENT and canonicalized the single caution rung.
 - 2026-04-17: Initial version from theme.py inventory at commit 53e258c (71 color tokens)

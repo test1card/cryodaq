@@ -416,7 +416,7 @@ close_button.setIcon(QIcon(":/icons/x.svg"))
 
 **TL;DR:** Import shortcuts from `cryodaq.gui.shortcuts`. Don't hardcode `QKeySequence("Ctrl+L")` in widget code.
 
-**Statement:** Keyboard shortcuts in widget code MUST reference constants from central registry (proposed: `src/cryodaq/gui/shortcuts.py`). Hardcoded `QKeySequence` strings forbidden — they risk collision.
+**Statement:** Keyboard shortcuts in widget code MUST reference constants from a central registry (proposed module: `cryodaq.gui.shortcuts`). Hardcoded `QKeySequence` strings are forbidden — they risk collision.
 
 **Rationale:** Without registry, two features might bind same key unknowingly. Registry forces collision resolution at declaration.
 

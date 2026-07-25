@@ -55,7 +55,7 @@ Small static chip that communicates status, count, or category. Display-only; no
 
 ## Invariants
 
-1. **Status color matches semantic role.** STATUS_OK for healthy, STATUS_WARNING for attention, STATUS_FAULT for fault. Never arbitrary green/red. (RULE-COLOR-002)
+1. **Status color matches semantic role.** STATUS_OK for healthy, STATUS_CAUTION for attention, STATUS_FAULT for fault. Legacy WARNING input resolves to CAUTION; never use arbitrary green/red. (RULE-COLOR-002)
 2. **Color never sole signal.** Status badge MUST include text label or icon. Color-blind safety. (RULE-A11Y-002)
 3. **Uppercase Cyrillic has letter-spacing.** Filled status badges use `0.05em` tracking. (RULE-TYPO-005)
 4. **Filled badges use ON_* text colors.** Text on filled status background uses paired ON_* token. (RULE-COLOR-008)
@@ -166,7 +166,7 @@ badge.setStyleSheet(f"""
 """)
 ```
 
-> **Contrast note per RULE-A11Y-003:** STATUS_FAULT (3.94:1) and STATUS_INFO (4.31:1) fail AA body. At badge size with letter-spacing and semibold weight, they may pass AA large (18pt equivalent) — verify per context. For body-size outline badges with failing colors, pair with an icon prefix (RULE-A11Y-002).
+> **Contrast note per RULE-A11Y-003:** STATUS_FAULT (3.94:1) fails AA body on the default BACKGROUND; pair a body-size outline badge with an icon prefix. STATUS_INFO (`#6490c4`, 5.81:1) passes on that background, but every theme/surface pair still requires its measured token value. Filled badges use different contrast math and require an adjacent readable label when their text pair is sub-threshold.
 
 ### Variant 3: Count badge
 
@@ -249,7 +249,7 @@ Usage: `● Норма`, `● Авария канала Т11`, `● Ожидан
 Use in TopWatchBar or inline references. Not the full PhaseStepper (which is `cryodaq-primitives/phase-stepper.md`).
 
 ```python
-# DESIGN: RULE-COLOR-004 — active phase uses STATUS_OK, NOT ACCENT
+# DESIGN: RULE-COLOR-004 — phase progress is not a health assertion
 # Badge for active phase
 phase_name = "Захолаживание"
 
@@ -260,8 +260,8 @@ badge.setFont(badge_font)
 badge.setStyleSheet(f"""
     QLabel {{
         background: transparent;
-        color: {theme.STATUS_OK};
-        border: 1px solid {theme.STATUS_OK};
+        color: {theme.ACCENT};
+        border: 1px solid {theme.ACCENT};
         border-radius: {theme.RADIUS_SM}px;
         padding: {theme.SPACE_1}px {theme.SPACE_2}px;
     }}
@@ -270,7 +270,7 @@ badge.setStyleSheet(f"""
 
 ## States
 
-Badges are static — they do not have interactive states. Transitions between badge states (e.g., channel goes from STATUS_OK to STATUS_WARNING) are **instant** per RULE-INTER-006 for fault transitions. No fade-in, no animation — snap to new state.
+Badges are static — they do not have interactive states. Transitions between badge states (e.g., channel goes from STATUS_OK to STATUS_CAUTION) are **instant** per RULE-INTER-006 for fault transitions. No fade-in, no animation — snap to new state.
 
 ## Accessibility
 
@@ -314,7 +314,9 @@ All sizes below ROW_HEIGHT. Badges are small.
 
 2. **Color-only indicator without label.** A colored dot with no label fails RULE-A11Y-002. Always pair with text or icon.
 
-3. **Wrong status semantic.** Using STATUS_OK green for "active phase" instead of "healthy state" — this was the Phase 0 Dashboard PhaseStepper violation. Active phase IS status (it's operationally healthy and running), so STATUS_OK is correct there. But if you use STATUS_OK for "selected tab" — that's RULE-COLOR-004 violation. Selected uses ACCENT.
+3. **Wrong status semantic.** Using STATUS_OK green for active/completed phase
+   or selected tab. Progress/selection uses ACCENT or neutral chrome; green is
+   reserved for demonstrated healthy/safe state.
 
 4. **Cyrillic uppercase without letter-spacing.** "АВАРИЯ" cramps without tracking. RULE-TYPO-005.
 

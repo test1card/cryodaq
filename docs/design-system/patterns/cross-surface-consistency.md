@@ -4,7 +4,7 @@ keywords: consistency, cross-surface, uniformity, siblings, visual-coherence, de
 applies_to: ensuring panels, overlays, and tiles feel like parts of the same product
 status: canonical
 references: all tokens, all rules, all components
-last_updated: 2026-04-17
+last_updated: 2026-07-16
 ---
 
 # Cross-Surface Consistency
@@ -53,9 +53,14 @@ The easiest drift: one panel uses «Температуры» sentence case as a 
 
 ### 4. Color semantics
 
-STATUS_OK means healthy. STATUS_WARNING means attention. STATUS_FAULT means problem. ACCENT means focus/selection. These are LOCKED per RULE-COLOR-002 and RULE-COLOR-004.
+The operator-facing safety ladder has three rungs: `STATUS_OK` means safe,
+`STATUS_CAUTION` means attention, and `STATUS_FAULT` means failure. A legacy
+backend `warning` value is accepted only as a source-compatible alias and maps
+to the same `STATUS_CAUTION` treatment; it must not create another color,
+label, icon, count, or escalation rung. ACCENT means focus/selection. These
+meanings are LOCKED per RULE-COLOR-002 and RULE-COLOR-004.
 
-When one panel uses blue for "OK active" and another uses green — operators build incorrect mental model. When ACCENT is reserved for focus here but used as brand accent there — the focus ring loses its meaning.
+When one panel uses blue for "OK active" and another uses green — operators build an incorrect mental model. Safety colors are exclusive: measurement-series identity, experiment phase, selection, and ordinary activity must use non-safety tokens. When ACCENT is reserved for focus here but used as a safety claim there, the focus ring loses its meaning.
 
 ### 5. Interaction conventions
 
@@ -101,7 +106,7 @@ Operator cold-reading test — does a panel the operator has never seen work the
 
 - They press Escape → does this new panel dismiss? (It should, if it's an overlay.)
 - They click a faulted sensor cell → does it show details? (Yes, because they did that in dashboard.)
-- They see a filled amber pill → do they know it means "warning"? (Yes, because that's what it means everywhere.)
+- They see a filled amber pill → do they know it means "caution"? (Yes, because legacy warning input renders as the same caution rung everywhere.)
 - They scan for the mode badge → is it in TopWatchBar top-right? (Yes, same place always.)
 
 Every "no" is a consistency failure. Every "yes" saves training time and reduces operator errors.
@@ -113,7 +118,8 @@ Consistency has one escape hatch: documented intentional divergence.
 Examples:
 - **BottomStatusBar height = 28** deliberately != TopWatchBar height = 56. Documented in `tokens/layout.md`.
 - **Pressure in log scale** in charts; temperatures in linear. Documented in `rules/data-display-rules.md`.
-- **Active PhaseStepper phase uses STATUS_OK**; active tab in TabGroup uses ACCENT. Both are "active" but different semantic — phase IS healthy running; tab IS selected. Documented in respective component specs.
+- **Active PhaseStepper phase and active tab use ACCENT selection/progress
+  chrome.** Experiment health is a separate fact and alone may use STATUS_OK.
 
 These divergences are legitimate because they express distinct meanings. The difference has to carry actual information.
 
@@ -134,7 +140,7 @@ These divergences are legitimate because they express distinct meanings. The dif
 
 4. **Tuning padding by pixel-pushing.** "I'll use 20px here because 24 looks too loose." Wrong — 24 is `SPACE_5`. 20 has no token. Use `SPACE_5` OR document why this panel needs `SPACE_4` = 16.
 
-5. **Per-panel status color shades.** "This panel's warnings should be a brighter amber." No. STATUS_WARNING is STATUS_WARNING. Brightness is a token, not a local choice.
+5. **Per-panel status color shades.** "This panel's caution should be a brighter amber." No. STATUS_CAUTION is STATUS_CAUTION. Legacy warning input maps to that same token; brightness is not a local choice.
 
 6. **Different empty states.** «Нет записей» in one panel, «No data» in another, «Пусто» in a third. Pick one Russian idiom and use it everywhere. Standardize via `patterns/copy-voice.md`.
 
@@ -150,4 +156,5 @@ These divergences are legitimate because they express distinct meanings. The dif
 
 ## Changelog
 
+- 2026-07-16: Defined one operator-facing caution rung, retained `warning` only as a source-compatible alias, and made safety-color exclusivity explicit.
 - 2026-04-17: Initial version. Five consistency dimensions (surface, spacing, typography, color, interaction). Two-surface test. Sibling-panel inheritance. Documented escape hatch for deliberate divergences.

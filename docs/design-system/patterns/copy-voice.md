@@ -4,7 +4,7 @@ keywords: copy, voice, tone, russian, vocabulary, imperative, descriptive, fsm-s
 applies_to: operator-facing text across all surfaces — labels, buttons, messages, tooltips
 status: canonical
 references: rules/content-voice-rules.md, rules/typography-rules.md
-last_updated: 2026-04-17
+last_updated: 2026-07-15
 ---
 
 # Copy Voice
@@ -27,7 +27,7 @@ Target: a lab engineer who knows the domain should read a label, button, or mess
 - Panel titles: «Создать эксперимент», «Диагностика датчиков»
 - Buttons: «Сохранить», «Начать эксперимент», «Применить»
 - Tab labels: «Общие», «Датчики», «Соединения»
-- Breadcrumb crumbs: «Дашборд», «Эксперимент»
+- Breadcrumb crumbs: «Дашборд» (primary root), «Эксперимент»
 - Tooltips: «Закрыть (Esc)», «Аварийное отключение обоих каналов»
 - Body text in messages: «Эксперимент будет прерван.»
 - Operator log entries: «Давление упало до 1.23e-6»
@@ -39,7 +39,7 @@ Only the first word capitalized, proper nouns capitalized. Russian sentence case
 Only two contexts use UPPERCASE Russian:
 
 1. **Category labels above values** (Tier-3 typography per `patterns/information-hierarchy.md`):
-   - «ДАВЛЕНИЕ», «Т МИН», «Т МАКС», «НАГРЕВАТЕЛЬ» (TopWatchBar)
+   - «ДАВЛЕНИЕ», «Т 2-Й СТУПЕНИ», «Т ПЛИТЫ N₂» (TopWatchBar)
    - «ЭКСПЕРИМЕНТ», «ЖУРНАЛ ОПЕРАТОРА» (card titles)
    - «ДИНАМИКА ТЕМПЕРАТУР» (chart tile title)
 
@@ -160,7 +160,7 @@ Combined form: code identifier first, explanation after em-dash. Operator gets b
 Always Cyrillic Т (U+0422) in channel identifiers shown to the operator:
 
 - «Т1», «Т11», «Т24» (not Latin «T11»)
-- «Т мин», «Т макс» (TopWatchBar labels)
+- «Т 2-й ступени» (Т12), «Т плиты N₂» (Т11) (TopWatchBar labels)
 
 Latin T in channel IDs is a specific violation per RULE-COPY-001.
 
@@ -217,8 +217,8 @@ Instruction-as-placeholder violates RULE-COPY (placeholder-as-label antipattern 
 Concise. Describe what clicking / hovering does, and if there's a shortcut, include it:
 
 - «Закрыть (Esc)»
-- «Аварийное отключение обоих каналов (Ctrl+Shift+X)»
-- «3 активные тревоги: 1 авария, 2 предупреждения (Ctrl+A)»
+- «Аварийное отключение обоих каналов»
+- «3 неподтверждённые активные тревоги: 1 авария, 2 замечания (Ctrl+M)»
 - «Неподвижный опорный канал (вторая ступень, азотная плита)»
 
 Not full sentences; no trailing period for short tooltips; multi-line allowed (newline between main description and extra details).
@@ -242,7 +242,7 @@ System-generated log entries (as distinct from operator-entered ones) use past-t
 - «Перешли в фазу захолаживания»
 - «Keithley подключён (smua, smub активны)»
 - «Давление достигло 1.23e-06 мбар»
-- «Аварийное отключение по сигналу оператора (Ctrl+Shift+X)»
+- «Аварийное отключение по сигналу оператора»
 
 Not first-person («Я запустил...»), not present continuous («Запуск эксперимента...»), not future («Будет запущен...»).
 
