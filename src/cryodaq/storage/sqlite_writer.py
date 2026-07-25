@@ -1221,7 +1221,16 @@ def _control_handle_identity(
             int(observed.st_dev),
             int(observed.st_ino),
             expected_kind,
-            int(observed.st_nlink),
+            # st_nlink is identity evidence for a FILE (1 == not hardlinked; the
+            # invalid_links guard above rejects anything else). For a DIRECTORY it is
+            # 2 + the subdirectory count — a property of the directory's CONTENTS, not
+            # of the directory itself: creating any subdirectory under a retained
+            # handle changes it while st_dev/st_ino still prove it is the same
+            # directory. Including it made validate_retained_handles() raise
+            # "control database retained directory authority changed" on Linux as soon
+            # as a subdirectory appeared. Windows takes the branch below and never
+            # observed this, which is why it survived local gating.
+            int(observed.st_nlink) if not directory else 0,
             0,
         )
 
