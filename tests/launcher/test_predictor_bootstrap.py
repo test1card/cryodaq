@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import logging
+import os
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -47,10 +48,22 @@ def _make_fake_self(replay_source=None):
         _engine_stderr_logger=None,
         _engine_stderr_thread=None,
         _restart_pending=False,
+        _wait_engine_ready=MagicMock(),
+        _bridge=MagicMock(),
+        _replay_session_verified=False,
     )
     # _check_predictor_bootstrap_hint will be patched at call-site
     ns._check_predictor_bootstrap_hint = lambda: None
     return ns
+
+
+def _pipe_backed_process(pid: int) -> MagicMock:
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    process = MagicMock()
+    process.pid = pid
+    process.stderr = os.fdopen(read_fd, "rb", buffering=0)
+    return process
 
 
 def test_start_engine_calls_hint_in_non_replay_path() -> None:
@@ -65,17 +78,18 @@ def test_start_engine_calls_hint_in_non_replay_path() -> None:
 
     fake._check_predictor_bootstrap_hint = _spy_hint
 
-    with (
-        patch("cryodaq.launcher._is_port_busy", return_value=False),
-        patch("cryodaq.launcher.subprocess.Popen") as mock_popen,
-        patch("cryodaq.launcher._create_engine_stderr_logger", return_value=(None, None, Path("/tmp/x.log"))),
-        patch("cryodaq.paths.get_data_dir", return_value=Path("/tmp")),
-    ):
-        m = MagicMock()
-        m.pid = 99
-        m.stderr = None
-        mock_popen.return_value = m
-        mod.LauncherWindow._start_engine(fake, wait=False)
+    try:
+        with (
+            patch("cryodaq.launcher._is_port_busy", return_value=False),
+            patch("cryodaq.launcher.subprocess.Popen") as mock_popen,
+            patch("cryodaq.launcher._create_engine_stderr_logger", return_value=(None, None, Path("/tmp/x.log"))),
+            patch("cryodaq.launcher.LauncherWindow._wait_engine_ready"),
+            patch("cryodaq.paths.get_data_dir", return_value=Path("/tmp")),
+        ):
+            mock_popen.return_value = _pipe_backed_process(99)
+            mod.LauncherWindow._start_engine(fake)
+    finally:
+        mod.LauncherWindow._close_engine_stderr_stream(fake)
 
     assert hint_called, "_check_predictor_bootstrap_hint was NOT called in non-replay path"
 
@@ -92,19 +106,26 @@ def test_hint_is_not_triggered_in_replay_branch() -> None:
 
     fake._check_predictor_bootstrap_hint = _spy_hint
 
-    with (
-        patch("cryodaq.launcher._is_port_busy", return_value=False),
-        patch("cryodaq.launcher.subprocess.Popen") as mock_popen,
-        patch("cryodaq.launcher._create_engine_stderr_logger", return_value=(None, None, Path("/tmp/x.log"))),
-        patch("cryodaq.paths.get_data_dir", return_value=Path("/tmp")),
-    ):
-        m = MagicMock()
-        m.pid = 99
-        m.stderr = None
-        mock_popen.return_value = m
-        mod.LauncherWindow._start_engine(fake, wait=False)
+    try:
+        with (
+            patch("cryodaq.launcher._is_port_busy", return_value=False),
+            patch("cryodaq.launcher.subprocess.Popen") as mock_popen,
+            patch("cryodaq.launcher._create_engine_stderr_logger", return_value=(None, None, Path("/tmp/x.log"))),
+            patch("cryodaq.launcher.LauncherWindow._wait_engine_ready"),
+            patch("cryodaq.paths.get_data_dir", return_value=Path("/tmp")),
+        ):
+            mock_popen.return_value = _pipe_backed_process(99)
+            mod.LauncherWindow._start_engine(fake)
+    finally:
+        mod.LauncherWindow._close_engine_stderr_stream(fake)
 
-    assert not hint_called, "_check_predictor_bootstrap_hint was called in replay path — must be suppressed"
+    assert not hint_called
+    fake._bridge.bind_verified_replay_session.assert_called_once_with(
+        session_id=fake._replay_session_id,
+        source=str(fake._replay_source),
+        speed=float(fake._replay_speed),
+    )
+    assert fake._replay_session_verified is True
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +138,7 @@ def _make_fake_launcher() -> types.SimpleNamespace:
     return types.SimpleNamespace()
 
 
-def test_launcher_logs_bootstrap_hint_when_missing(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_launcher_logs_bootstrap_hint_when_missing(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """Hint logged when deployed model absent but canonical source present."""
     canonical = tmp_path / "cooldown_v5" / "predictor_model.json"
     canonical.parent.mkdir(parents=True)
@@ -137,9 +156,7 @@ def test_launcher_logs_bootstrap_hint_when_missing(
     assert all(r.levelno == logging.INFO for r in caplog.records if "bootstrap" in r.message)
 
 
-def test_launcher_silent_when_model_deployed(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_launcher_silent_when_model_deployed(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """No hint logged when deployed model already exists."""
     canonical = tmp_path / "cooldown_v5" / "predictor_model.json"
     canonical.parent.mkdir(parents=True)
@@ -159,9 +176,7 @@ def test_launcher_silent_when_model_deployed(
     assert not any("bootstrap-predictor" in r.message for r in caplog.records)
 
 
-def test_launcher_silent_when_canonical_missing(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_launcher_silent_when_canonical_missing(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """No hint logged when canonical source is absent (nothing to bootstrap from)."""
     # Neither cooldown_v5/ nor data/cooldown_model/ exist under tmp_path
 

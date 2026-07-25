@@ -15,6 +15,7 @@ DEEP_AUDIT_CC.md E.2 for the Windows fork bomb explanation.
 Configs and data live NEXT TO the exe, not inside ``_MEIPASS``. ``paths.py``
 detects ``sys.frozen`` and resolves against ``sys.executable.parent``.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -42,8 +43,10 @@ hidden_imports = [
     "pyqtgraph.canvas",
     # ZMQ
     "zmq",
+    "zmq.asyncio",
     "zmq.backend.cython",
     "zmq.utils",
+    "zmq.utils.monitor",
     "zmq.utils.strtypes",
     "zmq.utils.jsonapi",
     # Serial
@@ -73,6 +76,16 @@ hidden_imports = [
     # msgpack (C extension)
     "msgpack",
     "msgpack._cmsgpack",
+    # H3 outbound transport is loaded through importlib only after exact-on.
+    "aiohttp",
+    "aiohttp.client",
+    "aiohttp.client_exceptions",
+    "aiohttp.client_reqrep",
+    "aiohttp.cookiejar",
+    "aiohttp.connector",
+    "aiohttp.formdata",
+    "aiohttp.payload",
+    "aiohttp.resolver",
     # matplotlib (used in periodic reports)
     "matplotlib",
     "matplotlib.backends.backend_agg",
@@ -81,19 +94,55 @@ hidden_imports = [
     # Our own dynamically-loaded modules
     "cryodaq.engine",
     "cryodaq.launcher",
+    "cryodaq.agents.assistant_bootstrap",
+    "cryodaq.agents.assistant.periodic_png",
+    "cryodaq.agents.assistant.periodic_projection",
+    "cryodaq.agents.assistant.periodic_runtime",
+    "cryodaq.agents.assistant.periodic_telegram",
+    "cryodaq.periodic_config",
+    "cryodaq.periodic_state",
+    "cryodaq.report_process",
     "cryodaq.gui.app",
     "cryodaq.gui.main_window",
-    "cryodaq.drivers.instruments.lakeshore_218s",
-    "cryodaq.drivers.instruments.keithley_2604b",
-    "cryodaq.drivers.instruments.thyracont_vsp63d",
+    "cryodaq.reporting.__main__",
+    "cryodaq.reporting.generator",
+    "cryodaq.reporting.periodic_input",
+    "cryodaq.reporting.periodic_renderer",
     "cryodaq.analytics.plugin_loader",
     "cryodaq.core.safety_manager",
     "cryodaq.core.scheduler",
     "cryodaq.storage.sqlite_writer",
+    "cryodaq.storage.archive_reader",
+    # H3 archive hydration imports Arrow inside bounded read methods.
+    "pyarrow",
+    "pyarrow.compute",
+    "pyarrow.parquet",
 ]
 
-# Collect every cryodaq submodule (catches anything we missed above).
-hidden_imports += collect_submodules("cryodaq")
+# This is the reviewed frozen-driver allowlist.  Keep it set-equal to the
+# runtime registry; tests enforce equality in both directions.
+FROZEN_DRIVER_MODULES = (
+    "cryodaq.drivers.instruments.etalon_multiline",
+    "cryodaq.drivers.instruments.keithley_2604b",
+    "cryodaq.drivers.instruments.lakeshore_218s",
+    "cryodaq.drivers.instruments.thyracont_vsp63d",
+    "cryodaq.drivers.passive_extensions.asc_reference_tcp",
+)
+
+
+def _is_non_driver_application_module(name):
+    return not (
+        name == "cryodaq.drivers.instruments"
+        or name.startswith("cryodaq.drivers.instruments.")
+        or name == "cryodaq.drivers.passive_extensions"
+        or name.startswith("cryodaq.drivers.passive_extensions.")
+    )
+
+
+# Broad collection remains for non-driver application closure only. Driver
+# namespaces are excluded first, then the reviewed allowlist is added exactly.
+hidden_imports += collect_submodules("cryodaq", filter=_is_non_driver_application_module)
+hidden_imports += list(FROZEN_DRIVER_MODULES)
 
 # datas: files bundled INSIDE the _MEIPASS dir (read-only constants).
 # Configs, plugins and runtime data live NEXT TO the exe and are seeded by
