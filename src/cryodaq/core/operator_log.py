@@ -37,3 +37,23 @@ class OperatorLogEntry:
             "message": self.message,
             "tags": list(self.tags),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorLogCommitResult:
+    """Durable keyed-append result without exposing persistence-private keys."""
+
+    entry: OperatorLogEntry
+    replayed: bool
+
+
+class OperatorLogIdempotencyError(RuntimeError):
+    """Base class for durable operator-log idempotency failures."""
+
+
+class OperatorLogIdempotencyConflictError(OperatorLogIdempotencyError):
+    """The request key already belongs to different persisted content."""
+
+
+class OperatorLogIdempotencyUnavailableError(OperatorLogIdempotencyError):
+    """The complete retained-data deduplication view could not be proven."""

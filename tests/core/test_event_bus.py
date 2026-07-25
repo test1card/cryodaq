@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+import pytest
+
 from cryodaq.core.event_bus import EngineEvent, EventBus
 
 # ---------------------------------------------------------------------------
@@ -127,6 +129,42 @@ async def test_full_queue_drops_event_with_warning() -> None:
         assert "slow_consumer" in call_args[1]
 
     assert q.qsize() == 2  # original two remain
+
+
+async def test_required_publish_preflights_every_subscriber_without_partial_delivery() -> None:
+    bus = EventBus()
+    first = await bus.subscribe("first", maxsize=1)
+    full = await bus.subscribe("full", maxsize=1)
+    retained = _event("retained")
+    full.put_nowait(retained)
+
+    with pytest.raises(RuntimeError, match="required event publication capacity"):
+        await bus.publish_required(_event("cooldown_end"))
+
+    assert first.empty()
+    assert full.get_nowait() is retained
+
+
+async def test_required_publish_returns_digest_bound_receipt_and_isolates_subscribers() -> None:
+    bus = EventBus()
+    first = await bus.subscribe("first", maxsize=1)
+    second = await bus.subscribe("second", maxsize=1)
+    event = _event("cooldown_end")
+
+    receipt = await bus.publish_required(event)
+    first_event = first.get_nowait()
+    second_event = second.get_nowait()
+
+    assert receipt.admitted_subscribers == 2
+    assert isinstance(receipt.event_digest, str)
+    assert len(receipt.event_digest) == 64
+    assert first_event == event
+    assert second_event == event
+    assert first_event is not event and second_event is not event
+    assert first_event is not second_event
+    first_event.payload["mutated"] = True
+    assert "mutated" not in event.payload
+    assert "mutated" not in second_event.payload
 
 
 # ---------------------------------------------------------------------------

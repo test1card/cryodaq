@@ -4,6 +4,7 @@ F23: SafetyManager._collect_loop must use reading.timestamp.timestamp() not time
 F24: InterlockEngine.acknowledge() re-arms TRIPPED interlock; KeyError for unknown name.
 F25: _check_sqlite_version() hard-fails on affected versions; CRYODAQ_ALLOW_BROKEN_SQLITE=1 bypass.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -139,12 +140,13 @@ def test_interlock_acknowledge_idempotent_on_already_armed() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_sqlite_check():
+def _reset_sqlite_check(monkeypatch: pytest.MonkeyPatch):
     """Reset the module-level checked flag before each F25 test.
 
     Teardown sets True (not False) to prevent the gate from firing in
     subsequent tests on machines with affected SQLite (e.g. 3.50.4).
     """
+    monkeypatch.delenv("CRYODAQ_ALLOW_BROKEN_SQLITE", raising=False)
     _sw._SQLITE_VERSION_CHECKED = False
     yield
     _sw._SQLITE_VERSION_CHECKED = True

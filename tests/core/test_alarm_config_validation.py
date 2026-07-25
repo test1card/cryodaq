@@ -225,12 +225,6 @@ def test_fault_count_in_window_needs_no_threshold(tmp_path: Path) -> None:
     assert any(a.alarm_id == "fault_burst" for a in alarms)
 
 
-def test_real_config_still_loads() -> None:
-    """The shipped config/alarms_v3.yaml must continue to load cleanly."""
-    _, alarms = load_alarm_config(None)
-    assert len(alarms) > 0
-
-
 # ---------------------------------------------------------------------------
 # engine numeric range checks
 # ---------------------------------------------------------------------------

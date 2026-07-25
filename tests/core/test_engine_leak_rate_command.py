@@ -20,9 +20,7 @@ def _make_estimator(volume: float = 50.0) -> LeakRateEstimator:
     return LeakRateEstimator(chamber_volume_l=volume, sample_window_s=60.0)
 
 
-async def _dispatch(
-    action: str, cmd: dict, estimator: LeakRateEstimator, leak_cfg: dict, event_logger
-) -> dict:
+async def _dispatch(action: str, cmd: dict, estimator: LeakRateEstimator, leak_cfg: dict, event_logger) -> dict:
     """Call the REAL engine leak_rate handler (no test-side reproduction).
 
     The extraction (F13) made ``_handle_leak_rate_command`` an importable
@@ -57,19 +55,13 @@ def test_leak_rate_volume_warning_fires_on_zero_volume() -> None:
 def test_leak_rate_volume_warning_silent_when_volume_set() -> None:
     from cryodaq.engine import _leak_rate_volume_warning
 
-    assert (
-        _leak_rate_volume_warning({"leak_rate": {"enabled": True}, "volume_l": 50.0})
-        is None
-    )
+    assert _leak_rate_volume_warning({"leak_rate": {"enabled": True}, "volume_l": 50.0}) is None
 
 
 def test_leak_rate_volume_warning_silent_when_disabled() -> None:
     from cryodaq.engine import _leak_rate_volume_warning
 
-    assert (
-        _leak_rate_volume_warning({"leak_rate": {"enabled": False}, "volume_l": 0.0})
-        is None
-    )
+    assert _leak_rate_volume_warning({"leak_rate": {"enabled": False}, "volume_l": 0.0}) is None
 
 
 @pytest.mark.asyncio
@@ -90,9 +82,7 @@ async def test_leak_rate_start_with_duration_override() -> None:
     """duration_s=120 is honoured: should_finalize() is False just before the boundary
     and True just after, proving the override window was applied (not the default 60s)."""
     est = _make_estimator()
-    response = await _dispatch(
-        "leak_rate_start", {"duration_s": 120.0}, est, {}, AsyncMock()
-    )
+    response = await _dispatch("leak_rate_start", {"duration_s": 120.0}, est, {}, AsyncMock())
     assert response["ok"] is True
     assert est.is_active
 
@@ -102,16 +92,12 @@ async def test_leak_rate_start_with_duration_override() -> None:
     # Feed a sample at t_rel≈61s — past the default window (60s) but inside the override (120s).
     # should_finalize() must be False here (override window not yet elapsed).
     est.add_sample(t0 + timedelta(seconds=61.0), 1e-5)
-    assert not est.should_finalize(), (
-        "should_finalize() must be False at 61s when duration_s=120 was requested"
-    )
+    assert not est.should_finalize(), "should_finalize() must be False at 61s when duration_s=120 was requested"
 
     # Feed a sample at t_rel≈121s — past the override window boundary.
     # should_finalize() must be True now.
     est.add_sample(t0 + timedelta(seconds=121.0), 1e-5)
-    assert est.should_finalize(), (
-        "should_finalize() must be True at 121s when duration_s=120 was requested"
-    )
+    assert est.should_finalize(), "should_finalize() must be True at 121s when duration_s=120 was requested"
 
 
 @pytest.mark.asyncio
@@ -148,9 +134,7 @@ async def test_leak_rate_stop_without_start_returns_error() -> None:
 async def test_leak_rate_disabled_config_returns_error() -> None:
     """enabled=False in config prevents measurement from starting."""
     est = _make_estimator()
-    response = await _dispatch(
-        "leak_rate_start", {}, est, {"enabled": False}, AsyncMock()
-    )
+    response = await _dispatch("leak_rate_start", {}, est, {"enabled": False}, AsyncMock())
     assert response["ok"] is False
     assert "disabled" in response["error"]
 
@@ -163,9 +147,7 @@ async def test_leak_rate_start_non_numeric_duration_returns_error() -> None:
     copy silently forwarded the bad value. Now reachable via the real handler.
     """
     est = _make_estimator()
-    response = await _dispatch(
-        "leak_rate_start", {"duration_s": "soon"}, est, {}, AsyncMock()
-    )
+    response = await _dispatch("leak_rate_start", {"duration_s": "soon"}, est, {}, AsyncMock())
     assert response["ok"] is False
     assert "not numeric" in response["error"]
     assert not est.is_active
@@ -175,9 +157,7 @@ async def test_leak_rate_start_non_numeric_duration_returns_error() -> None:
 async def test_leak_rate_start_negative_duration_returns_error() -> None:
     """duration_s must be positive and finite — negative is rejected."""
     est = _make_estimator()
-    response = await _dispatch(
-        "leak_rate_start", {"duration_s": -5.0}, est, {}, AsyncMock()
-    )
+    response = await _dispatch("leak_rate_start", {"duration_s": -5.0}, est, {}, AsyncMock())
     assert response["ok"] is False
     assert "positive and finite" in response["error"]
     assert not est.is_active
@@ -204,4 +184,6 @@ async def test_leak_rate_volume_unset_stop_returns_error() -> None:
 
     response = await _dispatch("leak_rate_stop", {}, est, {}, AsyncMock())
     assert response["ok"] is False
-    assert "Chamber volume" in response["error"]
+    assert response["error_code"] == "leak_rate_stop_invalid"
+    assert response["error"] == "Leak-rate measurement is not ready to stop."
+    assert "Chamber volume" not in response["error"]

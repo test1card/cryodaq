@@ -22,6 +22,11 @@ import pytest
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers (mirror test_safety_manager.py conventions)
@@ -32,7 +37,8 @@ def _mock_keithley():
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock()
+    # Exact verified-OFF contract: only literal True proves the hardware OFF.
+    k.emergency_off = AsyncMock(return_value=True)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -40,11 +46,29 @@ def _mock_keithley():
 
 async def _make_manager(*, mock=True, keithley=None, stale=10.0):
     broker = SafetyBroker()
-    mgr = SafetyManager(broker, keithley_driver=keithley, mock=mock)
+    binding = None
+    if not mock:
+        binding = _issue_registry_runtime_binding(
+            driver=keithley,
+            timing=AcquisitionTiming(1.0, 1.0, 1.0),
+            registry_provenance="test:safety-fixes",
+            trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        )
+    mgr = SafetyManager(
+        broker,
+        keithley_driver=keithley,
+        reviewed_source_runtime_binding=binding,
+        mock=mock,
+    )
     mgr._config.stale_timeout_s = stale
     mgr._config.cooldown_before_rearm_s = 0.1
     mgr._config.require_keithley_for_run = not mock
     await mgr.start()
+    if not mock:
+        # The real engine installs reviewed connection-generation OFF proof;
+        # these focused driver doubles must model that authority explicitly.
+        generation = await mgr.begin_reviewed_source_connect(keithley, binding, "test setup")
+        assert await mgr.complete_reviewed_source_connect(keithley, binding, generation, "test setup")
     return mgr, broker
 
 
@@ -115,9 +139,7 @@ async def test_fault_latched_not_cleared_by_stop():
         result = await mgr.request_stop()
 
         # State must remain FAULT_LATCHED — a plain stop must not clear the latch
-        assert mgr.state == SafetyState.FAULT_LATCHED, (
-            f"Expected FAULT_LATCHED after request_stop, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.FAULT_LATCHED, f"Expected FAULT_LATCHED after request_stop, got {mgr.state}"
         assert result["ok"] is False, "request_stop() from FAULT_LATCHED should report ok=False"
     finally:
         await mgr.stop()
@@ -140,20 +162,15 @@ async def test_fault_latched_not_cleared_by_emergency():
         k.emergency_off.assert_called()
 
         # The fault latch must persist — emergency_off is NOT an acknowledge
-        assert mgr.state == SafetyState.FAULT_LATCHED, (
-            f"emergency_off must not clear FAULT_LATCHED, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.FAULT_LATCHED, f"emergency_off must not clear FAULT_LATCHED, got {mgr.state}"
         # Production contract: emergency_off() from FAULT_LATCHED returns ok=True
         # but includes latched=True to signal the fault is still active.
         # (Verified in safety_manager.py:410-418: the latched branch returns
         # ok=True, latched=True, with warning="Outputs disabled but fault remains latched")
         assert result["ok"] is True, (
-            f"emergency_off from FAULT_LATCHED should return ok=True (outputs disabled), "
-            f"got ok={result.get('ok')}"
+            f"emergency_off from FAULT_LATCHED should return ok=True (outputs disabled), got ok={result.get('ok')}"
         )
-        assert result.get("latched") is True, (
-            f"emergency_off from FAULT_LATCHED must set latched=True, got {result}"
-        )
+        assert result.get("latched") is True, f"emergency_off from FAULT_LATCHED must set latched=True, got {result}"
     finally:
         await mgr.stop()
 
@@ -179,9 +196,7 @@ async def test_fault_recovery_only_through_acknowledge():
         await _feed(broker)
         await asyncio.sleep(1.5)
 
-        assert mgr.state == SafetyState.READY, (
-            f"Expected READY after MANUAL_RECOVERY + good data, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.READY, f"Expected READY after MANUAL_RECOVERY + good data, got {mgr.state}"
     finally:
         await mgr.stop()
 
@@ -232,9 +247,7 @@ async def test_nan_value_triggers_fault():
         await _feed(broker, channel="Т7 Нагреватель", value=float("nan"), unit="K")
         await asyncio.sleep(1.5)  # let monitor loop tick
 
-        assert mgr.state == SafetyState.FAULT_LATCHED, (
-            f"NaN reading must cause FAULT_LATCHED, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.FAULT_LATCHED, f"NaN reading must cause FAULT_LATCHED, got {mgr.state}"
     finally:
         await mgr.stop()
 
@@ -255,9 +268,7 @@ async def test_ok_status_passes():
 
         result = await mgr.request_run(0.5, 40.0, 1.0)
 
-        assert result["ok"] is True, (
-            f"request_run must succeed with OK status reading, error: {result.get('error')}"
-        )
+        assert result["ok"] is True, f"request_run must succeed with OK status reading, error: {result.get('error')}"
         assert mgr.state == SafetyState.RUNNING
     finally:
         await mgr.stop()
@@ -302,9 +313,7 @@ async def test_rate_limit_ignores_non_temperature():
 
         # Primary assertion: manager stayed RUNNING — voltage is excluded at the
         # unit level even though the channel IS critical.
-        assert mgr.state == SafetyState.RUNNING, (
-            f"Voltage rate change must not trigger FAULT_LATCHED, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.RUNNING, f"Voltage rate change must not trigger FAULT_LATCHED, got {mgr.state}"
         # Secondary: confirm the estimator has NO entry for the voltage channel.
         assert "Keithley/voltage" not in mgr._rate_estimator.channels(), (
             "Voltage channel must not be pushed into the rate estimator (unit != 'K')"
@@ -495,15 +504,11 @@ async def test_nonusable_reading_not_pushed_to_rate_estimator():
         )
         await asyncio.sleep(0.02)
         # ... then more usable rising samples.
-        await _publish_rising(
-            broker, crit, start=44.0, step=1.0, count=40, base=ts + timedelta(seconds=0.5)
-        )
+        await _publish_rising(broker, crit, start=44.0, step=1.0, count=40, base=ts + timedelta(seconds=0.5))
         await asyncio.sleep(0.05)
 
         rate = mgr._rate_estimator.get_rate(crit)
-        assert rate is not None, (
-            "rate must stay computable — a NaN in the OLS buffer would make it return None"
-        )
+        assert rate is not None, "rate must stay computable — a NaN in the OLS buffer would make it return None"
         assert rate > 5.0, "the steep ramp must still be detectable through the NaN"
     finally:
         await mgr.stop()
@@ -523,11 +528,71 @@ async def test_interlock_stop_source_faults_when_off_unconfirmed():
     mgr, broker = await _make_manager(mock=False, keithley=k)
     try:
         await _get_to_running(mgr, broker)
-        await mgr.on_interlock_trip(
-            "overheat_soft", "Т5 Радиатор", 320.0, action="stop_source"
-        )
+        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
         assert mgr.state == SafetyState.FAULT_LATCHED, (
             f"unconfirmed OFF on interlock stop must latch FAULT, got {mgr.state}"
         )
+    finally:
+        # The assertion intentionally leaves OFF unverified. The hardened
+        # lifecycle retains HOLD until this explicit later exact proof.
+        k.emergency_off = AsyncMock(return_value=True)
+        await mgr.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unqualified_result",
+    [
+        pytest.param(1, id="integer-one"),
+        pytest.param("confirmed", id="nonempty-string"),
+        pytest.param(AsyncMock(), id="async-mock-object"),
+        pytest.param(object(), id="truthy-object"),
+    ],
+)
+async def test_interlock_stop_source_rejects_truthy_non_bool_off_evidence(
+    unqualified_result,
+):
+    """Only literal ``True`` may clear active-source evidence after a trip."""
+    k = _mock_keithley()
+    k.emergency_off = AsyncMock(return_value=unqualified_result)
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _get_to_running(mgr, broker)
+        active_before = set(mgr._active_sources)
+        assert active_before
+
+        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
+
+        assert mgr.state is SafetyState.FAULT_LATCHED
+        assert mgr._active_sources == active_before
+        snapshot = mgr.snapshot_operator_safety()
+        assert snapshot.verified_off is False
+        assert any(blocker.code == "reviewed_source_off_unverified" for blocker in snapshot.blockers)
+        source = next(fact for fact in snapshot.plant_health if fact.subsystem_id == "reviewed_source")
+        assert source.reason_code == "reviewed_source_off_unverified"
+    finally:
+        # Truthy non-bools are correctly rejected as OFF evidence. Restore an
+        # exact bool only for teardown so the stronger HOLD contract can close.
+        k.emergency_off = AsyncMock(return_value=True)
+        await mgr.stop()
+
+
+@pytest.mark.asyncio
+async def test_interlock_stop_source_accepts_exact_true_off_evidence():
+    k = _mock_keithley()
+    k.emergency_off = AsyncMock(return_value=True)
+    mgr, broker = await _make_manager(mock=False, keithley=k)
+    try:
+        await _get_to_running(mgr, broker)
+
+        await mgr.on_interlock_trip("overheat_soft", "Т5 Радиатор", 320.0, action="stop_source")
+
+        assert mgr.state is SafetyState.SAFE_OFF
+        assert mgr._active_sources == set()
+        snapshot = mgr.snapshot_operator_safety()
+        assert snapshot.verified_off is True
+        assert all(blocker.code != "reviewed_source_off_unverified" for blocker in snapshot.blockers)
+        source = next(fact for fact in snapshot.plant_health if fact.subsystem_id == "reviewed_source")
+        assert source.reason_code == "reviewed_source_verified_off"
     finally:
         await mgr.stop()

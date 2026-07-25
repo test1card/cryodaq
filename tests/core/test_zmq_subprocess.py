@@ -176,11 +176,12 @@ def test_is_healthy_threshold_generous():
     assert not bridge.heartbeat_stale(), "20s-old heartbeat must not be stale with default 30s threshold"
 
 
-def test_launcher_poll_checks_is_healthy():
+def test_launcher_poll_checks_is_healthy(monkeypatch):
     """_poll_bridge_data behavioral contract:
 
-    - alive-but-hung bridge (is_healthy=False, is_alive=True)  → shutdown() + start()
-    - dead bridge          (is_healthy=False, is_alive=False) → start() only (no shutdown)
+    Both alive-but-hung and dead bridges delegate one exact heartbeat-driven
+    replacement transaction. ``_poll_bridge_data`` never performs partial
+    shutdown/start ownership itself.
 
     Tests call _poll_bridge_data directly on a minimal mock self so no
     QApplication or real subprocess is needed.
@@ -193,12 +194,16 @@ def test_launcher_poll_checks_is_healthy():
     def _make_self(*, is_healthy: bool, is_alive: bool) -> MagicMock:
         fake_self = MagicMock()
         fake_bridge = MagicMock()
-        fake_bridge.poll_readings.return_value = []
+        fake_bridge.poll_readings_with_descriptor.return_value = []
         fake_bridge.is_healthy.return_value = is_healthy
         fake_bridge.is_alive.return_value = is_alive
         fake_bridge.data_flow_stalled.return_value = False
         fake_bridge.command_channel_stalled.return_value = False
         fake_self._bridge = fake_bridge
+        fake_self._snapshot_ingress = None
+        fake_self._runtime_callbacks_open = True
+        fake_self._runtime_callback_epoch = 1
+        fake_self._shutdown_requested = False
         # Real LauncherWindow leaves these unset until the first watchdog restart
         # (getattr-defaulted to 0.0); a bare MagicMock would auto-create them as
         # MagicMocks and break the numeric cooldown comparison.
@@ -206,14 +211,17 @@ def test_launcher_poll_checks_is_healthy():
         fake_self._last_cmd_watchdog_restart = 0.0
         return fake_self
 
-    # Case 1: alive-but-hung → shutdown() then start()
+    replace = MagicMock(return_value=True)
+    monkeypatch.setattr(LauncherWindow, "_replace_bridge_from_watchdog", replace)
+    monkeypatch.setattr("cryodaq.launcher.time.monotonic", lambda: 120.0)
+
+    # Case 1: alive-but-hung delegates one complete replacement.
     fake_self = _make_self(is_healthy=False, is_alive=True)
     LauncherWindow._poll_bridge_data(fake_self)
-    fake_self._bridge.shutdown.assert_called_once()
-    fake_self._bridge.start.assert_called_once()
+    replace.assert_called_once_with(fake_self, reason="heartbeat")
 
-    # Case 2: dead (not alive) → start() only, no shutdown()
+    # Case 2: dead bridge uses the same owner-settling replacement path.
+    replace.reset_mock()
     fake_self = _make_self(is_healthy=False, is_alive=False)
     LauncherWindow._poll_bridge_data(fake_self)
-    fake_self._bridge.shutdown.assert_not_called()
-    fake_self._bridge.start.assert_called_once()
+    replace.assert_called_once_with(fake_self, reason="heartbeat")

@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,9 +14,25 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.shutdown_settlement import (
+    CancelledTaskSettlement,
+    await_executor_owner,
+    cancel_and_settle_tasks,
+    combine_settlements,
+    settle_executor_operation,
+    settle_without_cancelling,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 logger = logging.getLogger(__name__)
+
+
+async def _settle_without_cancelling(
+    owners: tuple[asyncio.Future[Any], ...],
+) -> CancelledTaskSettlement:
+    """Observe retained executor work without abandoning it on caller cancellation."""
+
+    return await settle_without_cancelling(owners, name="housekeeping-executor-terminal-settlement")
 
 
 class HousekeepingConfigError(RuntimeError):
@@ -26,20 +43,15 @@ def load_housekeeping_config(config_path: Path) -> dict[str, Any]:
     """Load housekeeping.yaml. Raises HousekeepingConfigError on failure."""
     if not config_path.exists():
         raise HousekeepingConfigError(
-            f"housekeeping.yaml not found at {config_path} — refusing to start "
-            f"without housekeeping configuration"
+            f"housekeeping.yaml not found at {config_path} — refusing to start without housekeeping configuration"
         )
     try:
         with config_path.open(encoding="utf-8") as handle:
             raw = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
-        raise HousekeepingConfigError(
-            f"housekeeping.yaml at {config_path}: YAML parse error — {exc}"
-        ) from exc
+        raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: YAML parse error — {exc}") from exc
     if not isinstance(raw, dict):
-        raise HousekeepingConfigError(
-            f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
-        )
+        raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}")
     return raw
 
 
@@ -208,8 +220,7 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
             channels = groups.get(group_name)
             if not channels:
                 logger.warning(
-                    "alarms_v3 references unknown channel_group %r — "
-                    "no channels protected for this reference",
+                    "alarms_v3 references unknown channel_group %r — no channels protected for this reference",
                     group_name,
                 )
                 continue
@@ -221,6 +232,31 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
     return patterns
 
 
+def resolve_canonical_temperature_bindings(descriptor_catalog: Any, canonical_ids: set[str]) -> set[str]:
+    """Reverse-map canonical temperature identities to exact raw labels.
+
+    ``AdaptiveThrottle`` observes pre-bind readings, so canonical IDs and
+    broad regexes are unsafe there.  Each requested identity must have exactly
+    one non-observational raw emitted binding; the returned expressions are
+    full-string escaped labels suitable for ``fullmatch``.
+    """
+    bindings = descriptor_catalog._bindings
+    resolved: set[str] = set()
+    for canonical_id in canonical_ids:
+        candidates = sorted(
+            emitted
+            for (_instrument, emitted), bound_id in bindings.items()
+            if bound_id == canonical_id and not bound_id.endswith(".raw") and not emitted.endswith("_raw")
+        )
+        if len(candidates) != 1:
+            raise HousekeepingConfigError(
+                f"canonical safety identity {canonical_id!r} must resolve to exactly one emitted label; "
+                f"got {candidates!r}"
+            )
+        resolved.add(rf"^{re.escape(candidates[0])}$")
+    return resolved
+
+
 @dataclass
 class _ThrottleState:
     last_seen_value: float
@@ -230,9 +266,7 @@ class _ThrottleState:
 
 
 class AdaptiveThrottle:
-    def __init__(
-        self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None
-    ) -> None:
+    def __init__(self, config: dict[str, Any] | None = None, *, protected_patterns: list[str] | None = None) -> None:
         cfg = config or {}
         self.enabled = bool(cfg.get("enabled", False))
         self._include = [re.compile(str(item)) for item in cfg.get("include_patterns", [])]
@@ -243,9 +277,7 @@ class AdaptiveThrottle:
         self._transition_holdoff_s = float(cfg.get("transition_holdoff_s", 30.0))
         delta_cfg = cfg.get("absolute_delta", {})
         self._default_delta = float(delta_cfg.get("default", 0.05))
-        self._delta_by_unit = {
-            str(key): float(value) for key, value in delta_cfg.items() if key != "default"
-        }
+        self._delta_by_unit = {str(key): float(value) for key, value in delta_cfg.items() if key != "default"}
         self._state: dict[str, _ThrottleState] = {}
         self._active_alarm_count = 0
         self._transition_until: datetime | None = None
@@ -261,16 +293,12 @@ class AdaptiveThrottle:
             self._active_alarm_count = max(0, int(round(reading.value)))
             return
         if channel.startswith("analytics/keithley_channel_state/"):
-            self._transition_until = reading.timestamp + timedelta(
-                seconds=self._transition_holdoff_s
-            )
+            self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
             return
         if channel == "analytics/safety_state":
             state = str(reading.metadata.get("state", "")).lower()
             if state != "running":
-                self._transition_until = reading.timestamp + timedelta(
-                    seconds=self._transition_holdoff_s
-                )
+                self._transition_until = reading.timestamp + timedelta(seconds=self._transition_holdoff_s)
 
     def filter_for_archive(self, readings: list[Reading]) -> list[Reading]:
         if not self.enabled:
@@ -368,22 +396,63 @@ class HousekeepingService:
         self._skip_daily_db_compression = bool(skip_daily_db_compression)
         self._running = False
         self._task: asyncio.Task[None] | None = None
+        self._stopping = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._executor_admission_open = True
+        self._executor_futures: set[asyncio.Task[Any]] = set()
+
+    def _lifecycle_transition_lock(self) -> asyncio.Lock:
+        """Return the single owner that serializes start/stop generations."""
+
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            # Compatibility for partially constructed owners used by terminal
+            # settlement and recovery paths.  Creation is atomic on one loop.
+            lock = asyncio.Lock()
+            self._lifecycle_lock = lock
+        return lock
 
     async def start(self) -> None:
         if not self._enabled:
             return
-        self._running = True
-        self._task = asyncio.create_task(self._loop(), name="housekeeping_service")
+        async with self._lifecycle_transition_lock():
+            if self._stopping:
+                raise RuntimeError("housekeeping cannot start while shutdown is settling")
+            retained = self._task
+            if self._running and retained is not None and not retained.done():
+                return
+            self._running = False
+            if retained is not None:
+                settlement = await cancel_and_settle_tasks((retained,))
+                self._task = None
+                settlement.raise_if_unsuccessful()
+            retained_executors = tuple(self._executor_futures)
+            executor_settlement = await _settle_without_cancelling(retained_executors)
+            self._executor_futures.clear()
+            executor_settlement.raise_if_unsuccessful()
+            self._executor_admission_open = True
+            self._running = True
+            self._task = asyncio.create_task(self._loop(), name="housekeeping_service")
 
     async def stop(self) -> None:
-        self._running = False
-        if self._task:
-            self._task.cancel()
+        async with self._lifecycle_transition_lock():
+            self._stopping = True
+            self._executor_admission_open = False
+            self._running = False
+            combined: CancelledTaskSettlement | None = None
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+                task = self._task
+                executor_futures = tuple(getattr(self, "_executor_futures", ()))
+                task_settlement = await cancel_and_settle_tasks(() if task is None else (task,))
+                executor_settlement = await _settle_without_cancelling(executor_futures)
+                self._task = None
+                if hasattr(self, "_executor_futures"):
+                    self._executor_futures.clear()
+                combined = combine_settlements(task_settlement, executor_settlement)
+            finally:
+                self._stopping = False
+            assert combined is not None
+            combined.raise_if_unsuccessful()
 
     async def _loop(self) -> None:
         try:
@@ -397,9 +466,32 @@ class HousekeepingService:
         actions = self.plan_actions(now=now)
         if self._dry_run:
             return actions
-        for action in actions:
-            await asyncio.to_thread(self._apply, action)
+        for index, action in enumerate(actions):
+            await self._run_owned_executor(self._apply, action)
+            if not self._executor_admission_open and index + 1 < len(actions):
+                raise RuntimeError("housekeeping stopped before all planned actions were applied")
         return actions
+
+    async def _run_owned_executor[ExecutorResult](
+        self,
+        function: Callable[..., ExecutorResult],
+        /,
+        *args: Any,
+    ) -> ExecutorResult:
+        if not self._executor_admission_open:
+            raise RuntimeError("housekeeping is stopping; new executor work is rejected")
+        loop = asyncio.get_running_loop()
+        operation = loop.run_in_executor(None, function, *args)
+        owner = asyncio.create_task(
+            settle_executor_operation(operation),
+            name="housekeeping-executor-owner",
+        )
+        self._executor_futures.add(owner)
+        try:
+            return await await_executor_owner(owner)
+        finally:
+            if owner.done():
+                self._executor_futures.discard(owner)
 
     def plan_actions(self, *, now: datetime | None = None) -> list[HousekeepingAction]:
         current = now or datetime.now(UTC)

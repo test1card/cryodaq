@@ -10,6 +10,7 @@ Spec deviation (documented in handoff): spec calls for methods on AlarmEngine,
 but alarm_v2.py has no AlarmEngine class. Methods added to AlarmStateManager,
 which is the class that owns active alarm state and history.
 """
+
 from __future__ import annotations
 
 from cryodaq.core.alarm_v2 import AlarmStateManager
@@ -35,7 +36,10 @@ def test_publish_diagnostic_alarm_creates_alarm_event() -> None:
 
     active = mgr.get_active()
     assert "diag:T1" in active
-    assert active["diag:T1"] is event
+    assert active["diag:T1"] == event
+    assert active["diag:T1"] is not event
+    assert active["diag:T1"].channels is not event.channels
+    assert active["diag:T1"].values is not event.values
 
     history = mgr.get_history()
     triggered = [e for e in history if e["alarm_id"] == "diag:T1" and e["transition"] == "TRIGGERED"]

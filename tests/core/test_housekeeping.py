@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +20,10 @@ from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+
+async def _wait_thread_event(event: threading.Event, *, timeout_s: float = 2.0) -> None:
+    assert await asyncio.to_thread(event.wait, timeout_s), "worker thread did not reach the expected barrier"
 
 
 class StableDriver(InstrumentDriver):
@@ -68,9 +73,7 @@ async def test_adaptive_throttle_reduces_stable_non_safety_writes(tmp_path: Path
             "transition_holdoff_s": 0.0,
         }
     )
-    sched = Scheduler(
-        broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle
-    )
+    sched = Scheduler(broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle)
     sched.add(InstrumentConfig(driver=StableDriver([4.0] * 20), poll_interval_s=0.01))
 
     await sched.start()
@@ -114,9 +117,7 @@ async def test_protected_channels_are_not_throttled(tmp_path: Path) -> None:
         },
         protected_patterns=["TEMP_A"],
     )
-    sched = Scheduler(
-        broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle
-    )
+    sched = Scheduler(broker, safety_broker=safety_broker, sqlite_writer=writer, adaptive_throttle=throttle)
     sched.add(InstrumentConfig(driver=StableDriver([4.0] * 10), poll_interval_s=0.01))
 
     await sched.start()
@@ -211,6 +212,96 @@ async def test_housekeeping_compresses_old_unlinked_db(tmp_path: Path) -> None:
 
     assert not old_unlinked.exists()
     assert old_unlinked.with_suffix(".db.gz").exists()
+
+
+async def test_housekeeping_double_start_retains_one_task_owner_and_stop_settles_it(
+    tmp_path: Path,
+) -> None:
+    """Repeated start cannot orphan a first retention loop behind a new handle."""
+    data_dir = tmp_path / "data"
+    artifacts = data_dir / "experiments"
+    artifacts.mkdir(parents=True)
+    service = HousekeepingService(
+        data_dir,
+        artifacts,
+        config={"enabled": True, "interval_s": 3600.0},
+    )
+
+    await service.start()
+    await asyncio.sleep(0)
+    first = service._task
+    assert first is not None and not first.done()
+
+    await service.start()
+    assert service._task is first
+
+    await service.stop()
+    assert service._task is None
+    assert first.done()
+    assert service._running is False
+    assert service._executor_futures == set()
+
+
+async def test_housekeeping_restart_replaces_an_unexpectedly_dead_loop_owner(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    artifacts = data_dir / "experiments"
+    artifacts.mkdir(parents=True)
+    service = HousekeepingService(
+        data_dir,
+        artifacts,
+        config={"enabled": True, "interval_s": 3600.0},
+    )
+
+    await service.start()
+    first = service._task
+    assert first is not None
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    await service.start()
+    replacement = service._task
+    assert replacement is not None and replacement is not first
+    assert not replacement.done()
+
+    await service.stop()
+
+
+async def test_housekeeping_stop_waits_for_real_thread_after_wrapper_cancellation(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    artifacts = data_dir / "experiments"
+    artifacts.mkdir(parents=True)
+    service = HousekeepingService(data_dir, artifacts, config={"enabled": True})
+    entered = threading.Event()
+    release = threading.Event()
+    mutated = threading.Event()
+
+    def _blocked_mutation() -> None:
+        entered.set()
+        assert release.wait(timeout=2.0)
+        mutated.set()
+
+    owner = asyncio.create_task(service._run_owned_executor(_blocked_mutation))
+    await _wait_thread_event(entered)
+    tracked = next(iter(service._executor_futures))
+    tracked.cancel()
+    await asyncio.sleep(0)
+
+    stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0.02)
+    assert not stop.done()
+    assert not mutated.is_set()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    await asyncio.wait_for(stop, timeout=2.0)
+    assert mutated.is_set()
+    assert service._executor_futures == set()
 
 
 # ---------------------------------------------------------------------------

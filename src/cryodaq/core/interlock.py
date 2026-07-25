@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 
 
@@ -100,15 +101,13 @@ class InterlockCondition:
     def __post_init__(self) -> None:
         if self.comparison not in (">", "<"):
             raise ValueError(
-                f"Блокировка '{self.name}': недопустимый оператор сравнения "
-                f"'{self.comparison}'. Допустимы: '>' и '<'."
+                f"Блокировка '{self.name}': недопустимый оператор сравнения '{self.comparison}'. Допустимы: '>' и '<'."
             )
         try:
             self._pattern = re.compile(self.channel_pattern)
         except re.error as exc:
             raise ValueError(
-                f"Блокировка '{self.name}': некорректный channel_pattern "
-                f"'{self.channel_pattern}': {exc}"
+                f"Блокировка '{self.name}': некорректный channel_pattern '{self.channel_pattern}': {exc}"
             ) from exc
 
     def matches_channel(self, channel: str) -> bool:
@@ -289,20 +288,15 @@ class InterlockEngine:
             with config_path.open(encoding="utf-8") as fh:
                 raw: dict[str, Any] = yaml.safe_load(fh)
         except yaml.YAMLError as exc:
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: YAML parse error — {exc}"
-            ) from exc
+            raise InterlockConfigError(f"interlocks.yaml at {config_path}: YAML parse error — {exc}") from exc
 
         if not isinstance(raw, dict):
-            raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: expected mapping, got {type(raw).__name__}"
-            )
+            raise InterlockConfigError(f"interlocks.yaml at {config_path}: expected mapping, got {type(raw).__name__}")
 
         entries = raw.get("interlocks", [])
         if not isinstance(entries, list):
             raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: 'interlocks' must be a list, "
-                f"got {type(entries).__name__}"
+                f"interlocks.yaml at {config_path}: 'interlocks' must be a list, got {type(entries).__name__}"
             )
 
         loaded = 0
@@ -321,8 +315,7 @@ class InterlockEngine:
                 loaded += 1
             except (KeyError, ValueError, TypeError, re.error) as exc:
                 raise InterlockConfigError(
-                    f"interlocks.yaml at {config_path}: invalid interlock entry — "
-                    f"{type(exc).__name__}: {exc}"
+                    f"interlocks.yaml at {config_path}: invalid interlock entry — {type(exc).__name__}: {exc}"
                 ) from exc
 
         self._load_nonusable_escalation(raw, config_path)
@@ -352,8 +345,7 @@ class InterlockEngine:
             min_samples = int(block.get("min_samples", _DEFAULT_NONUSABLE_MIN_SAMPLES))
         except (ValueError, TypeError) as exc:
             raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: invalid nonusable_escalation value — "
-                f"{type(exc).__name__}: {exc}"
+                f"interlocks.yaml at {config_path}: invalid nonusable_escalation value — {type(exc).__name__}: {exc}"
             ) from exc
         if not math.isfinite(min_duration_s) or min_duration_s <= 0 or min_samples <= 0:
             raise InterlockConfigError(
@@ -388,8 +380,7 @@ class InterlockEngine:
             )
         self._interlocks[condition.name] = _InterlockRecord(condition=condition)
         logger.info(
-            "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | "
-            "действие: '%s' | кулдаун: %.1f с.",
+            "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | действие: '%s' | кулдаун: %.1f с.",
             condition.name,
             condition.channel_pattern,
             condition.comparison,
@@ -427,16 +418,19 @@ class InterlockEngine:
 
         Отменяет задачу проверки и отписывается от DataBroker.
         """
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-        await self._broker.unsubscribe(_SUBSCRIPTION_NAME)
-        self._queue = None
+        task = self._task
+        settlement = await cancel_and_settle_tasks(() if task is None else (task,))
+        self._task = None
+        queue = self._queue
+        if queue is not None:
+            removed = await self._broker.unsubscribe(
+                _SUBSCRIPTION_NAME,
+                expected_queue=queue,
+            )
+            if removed is not True:
+                raise RuntimeError("interlock broker did not release the exact queue owner")
+            self._queue = None
+        settlement.raise_if_unsuccessful()
         logger.info("InterlockEngine остановлен.")
 
     # ------------------------------------------------------------------
@@ -466,8 +460,7 @@ class InterlockEngine:
         matching = [
             record
             for record in self._interlocks.values()
-            if record.state == InterlockState.ARMED
-            and record.condition.matches_channel(reading.channel)
+            if record.state == InterlockState.ARMED and record.condition.matches_channel(reading.channel)
         ]
 
         # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на
@@ -480,9 +473,7 @@ class InterlockEngine:
         if matching:
             if reading.is_usable():
                 self._nonusable_windows.pop(reading.channel, None)
-            elif math.isinf(reading.value) and any(
-                record.condition.is_triggered(reading.value) for record in matching
-            ):
+            elif math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
                 # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
                 # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
                 # -inf (pegged LOW) satisfies any below-threshold ('<') interlock.
@@ -513,8 +504,7 @@ class InterlockEngine:
                 in_cooldown = (
                     condition.cooldown_s > 0
                     and record.last_trip_time is not None
-                    and (datetime.now(UTC) - record.last_trip_time).total_seconds()
-                    < condition.cooldown_s
+                    and (datetime.now(UTC) - record.last_trip_time).total_seconds() < condition.cooldown_s
                 )
                 await self._trip(record, reading, suppress_notification=in_cooldown)
 
@@ -549,9 +539,7 @@ class InterlockEngine:
         )
         if self._alarm_publisher is not None:
             try:
-                self._alarm_publisher.publish_diagnostic_alarm(
-                    reading.channel, "critical", span_s
-                )
+                self._alarm_publisher.publish_diagnostic_alarm(reading.channel, "critical", span_s)
             except Exception as exc:
                 logger.error(
                     "Interlock: alarm-v2 publish failed for '%s': %s",

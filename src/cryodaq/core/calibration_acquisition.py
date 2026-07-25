@@ -183,5 +183,7 @@ class CalibrationAcquisitionService:
 
         to_write, pending_state = self.prepare_srdg_readings(krdg, srdg)
         if to_write:
-            await self._writer.write_immediate(to_write)
-            self.on_srdg_persisted(len(to_write), pending_state)
+            # Проглоченный отказ записи (disk-full/locked) возвращает False —
+            # непersisted точки не засчитываются (persistence-first).
+            if await self._writer.write_immediate(to_write):
+                self.on_srdg_persisted(len(to_write), pending_state)

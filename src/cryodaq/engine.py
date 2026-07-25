@@ -6,7 +6,7 @@
 
 Загружает конфигурации, создаёт и связывает все подсистемы:
     drivers → DataBroker →
-    [SQLiteWriter, ZMQPublisher, AlarmEngine, InterlockEngine, PluginPipeline]
+    [SQLiteWriter, ZMQPublisher, AlarmEngineV2, InterlockEngine, PluginPipeline]
 
 Корректное завершение по SIGINT / SIGTERM (Unix) или Ctrl+C (Windows).
 """
@@ -14,31 +14,58 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import functools
+import hashlib
+import inspect
+import json
 import logging
 import math
 import os
+import secrets
 import signal
+import stat
 import sys
 import time
+from collections.abc import Awaitable, Callable, MutableMapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
-from cryodaq.agents.assistant.live.context_builder import ContextBuilder
-from cryodaq.agents.assistant.live.output_router import OutputRouter
-from cryodaq.agents.assistant.shared.audit import AuditLogger
-from cryodaq.agents.assistant.shared.ollama_client import OllamaClient
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
 from cryodaq.analytics.vacuum_trend import VacuumTrendPredictor
-from cryodaq.core.alarm import AlarmEngine
-from cryodaq.core.alarm_config import AlarmConfigError, load_alarm_config
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_ABORT_TERMINAL_CODES as _ALARM_ACK_ABORT_TERMINAL_CODES,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_COMMIT_KEYS as _ALARM_ACK_COMMIT_KEYS,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_COMMIT_SCHEMA as _ALARM_ACK_COMMIT_SCHEMA,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_EVENT_KEYS as _ALARM_ACK_EVENT_KEYS,
+)
+from cryodaq.core.alarm_ack_codec import (
+    ALARM_ACK_EVENT_SCHEMA as _ALARM_ACK_EVENT_SCHEMA,
+)
+from cryodaq.core.alarm_ack_codec import (
+    alarm_ack_request_fingerprint,
+    deterministic_safety_audio_ack_request_id,
+    is_canonical_engine_instance_id,
+    is_canonical_source_activation_id,
+    safety_audio_ack_request_fingerprint,
+)
+from cryodaq.core.alarm_config import AlarmConfig, AlarmConfigError, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager, tick_alarm
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmStateManager
+from cryodaq.core.annunciation import AnnunciationProjectionUnavailable, AnnunciationRegistry
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
@@ -46,11 +73,23 @@ from cryodaq.core.calibration_acquisition import (
 )
 from cryodaq.core.channel_manager import ChannelConfigError, get_channel_manager
 from cryodaq.core.channel_state import ChannelStateTracker
+from cryodaq.core.command_authority import (
+    ENGINE_MUTATION_CAPABILITY,
+    MUTATION_ENVELOPE_KEYS,
+    MUTATION_PROTOCOL_MAJOR,
+    MUTATION_RECEIPT_SCHEMA,
+    is_exact_safe_direction_envelope,
+    is_mutation,
+    is_ordinary_command_endpoint_admitted,
+    requires_compatibility,
+    strip_mutation_envelope,
+    valid_capability_token,
+)
 from cryodaq.core.cooldown_alarm import CooldownAlarm
 from cryodaq.core.disk_monitor import DiskMonitor
 from cryodaq.core.event_bus import EngineEvent, EventBus
 from cryodaq.core.event_logger import EventLogger
-from cryodaq.core.experiment import ExperimentManager, ExperimentStatus
+from cryodaq.core.experiment import ExperimentIdentityMismatchError, ExperimentManager, ExperimentStatus
 from cryodaq.core.housekeeping import (
     AdaptiveThrottle,
     HousekeepingConfigError,
@@ -60,35 +99,126 @@ from cryodaq.core.housekeeping import (
     load_protected_channel_patterns,
 )
 from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
-from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.core.operator_log import (
+    OperatorLogCommitResult,
+    OperatorLogEntry,
+    OperatorLogIdempotencyConflictError,
+    OperatorLogIdempotencyUnavailableError,
+)
 from cryodaq.core.path_jail import resolve_within
 from cryodaq.core.physical_alarms_config import (
-    load_channel_landmarks,
-    load_physical_alarms_config,
+    load_production_physical_alarms_config,
 )
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
-from cryodaq.core.scheduler import InstrumentConfig, Scheduler
+from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
+from cryodaq.core.scheduler import (
+    InstrumentConfig,
+    ReviewedSourceSettlementIncomplete,
+    Scheduler,
+)
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
+from cryodaq.core.shutdown_settlement import ShutdownOwnerSettledError, await_executor_owner
 from cryodaq.core.smu_channel import normalize_smu_channel
 from cryodaq.core.vacuum_guard import VacuumGuard
-from cryodaq.core.zmq_bridge import ZMQCommandServer, ZMQPublisher
-from cryodaq.drivers.base import Reading
+from cryodaq.core.zmq_bridge import (
+    DEFAULT_CMD_ADDR,
+    DEFAULT_PUB_ADDR,
+    DEFAULT_SAFE_CMD_ADDR,
+    PERIODIC_BARRIER_SCHEMA,
+    PERIODIC_QUERY_SCHEMA,
+    PROTOCOL_VERSION,
+    CommandAuthorityRegistry,
+    ZMQCommandIngressPair,
+    ZMQCommandIngressTerminalError,
+    ZMQCommandIngressTerminalFailure,
+    ZMQCommandServer,
+    ZMQPublisher,
+    _bounded_action_label,
+    encode_periodic_command_reply,
+)
+from cryodaq.drivers.base import InstrumentDriver, Reading
+from cryodaq.drivers.contracts import (
+    ControlledSource,
+    DriverTrustClass,
+    VerifiedOffSource,
+    is_issued_runtime_binding,
+)
+from cryodaq.drivers.registry import (
+    KEITHLEY_2604B_SOURCE_BINDING,
+    REVIEWED_SOURCE_SPECS,
+    DriverConstructionContext,
+    DriverRegistryError,
+    ReviewedSourceBinding,
+    ValidatedInstrumentConfig,
+    construct_driver,
+    validate_instrument_entries,
+)
+from cryodaq.engine_wiring.operator_snapshot_production import build_operator_snapshot_publication_service
+from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
+from cryodaq.engine_wiring.runtime_tasks import (
+    _alarm_ring_buffer_loop,
+    _alarm_v2_feed_loop,
+    _AlarmRingBuffer,
+    _format_diag_telegram_messages,
+    alarm_ring_feed,
+    alarm_v2_feed_readings,
+    alarm_v2_tick,
+    assistant_event_relay_loop,
+    cold_rotation_scheduler,
+    cooldown_alarm_tick_loop,
+    leak_rate_feed,
+    sensor_diag_feed,
+    sensor_diag_tick,
+    track_runtime_signals,
+    vacuum_guard_tick_loop,
+    vacuum_trend_feed,
+    vacuum_trend_tick,
+)
+from cryodaq.engine_wiring.supervision import (
+    _SAFETY_TASK_MAX_RESTARTS,
+    _SUPERVISE_BACKOFF_BASE_S,
+    _SUPERVISE_BACKOFF_MAX_S,
+    _SUPERVISE_RESET_WINDOW_S,
+    TaskSupervisor,
+    _handle_supervised_task_exit,
+    install_loop_exception_backstop,
+    stop_safety_manager_with_hold,
+)
+from cryodaq.instance_lock import try_acquire_lock
 from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
 from cryodaq.notifications.escalation import EscalationService
-from cryodaq.notifications.periodic_report import PeriodicReporter
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
-from cryodaq.reporting.generator import ReportGenerator
-from cryodaq.storage.cold_rotation import (
-    build_cold_rotation_service,
-    normalize_schedule_time,
-    seconds_until_next,
+from cryodaq.report_process import ReportProcessError, ReportProcessRunner
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorStorageError,
+    load_live_channel_descriptor_catalog,
 )
-from cryodaq.storage.sqlite_writer import SQLiteWriter
+from cryodaq.storage.cold_rotation import build_cold_rotation_service, normalize_schedule_time
+from cryodaq.storage.sqlite_writer import (
+    AlarmAckOutboxAbortDisposition,
+    AlarmAckOutboxRecord,
+    OperatorLogCommitOutcomeUnknownError,
+    OperatorLogPublicationOutboxRecord,
+    SQLiteWriter,
+)
 
 logger = logging.getLogger("cryodaq.engine")
+
+# Compatibility re-exports for tests and callers that import moved helpers
+# from ``cryodaq.engine``. Referenced here so linters keep the imports.
+_ = (
+    _alarm_ring_buffer_loop,
+    _alarm_v2_feed_loop,
+    _format_diag_telegram_messages,
+    _SAFETY_TASK_MAX_RESTARTS,
+    _SUPERVISE_BACKOFF_BASE_S,
+    _SUPERVISE_BACKOFF_MAX_S,
+    _SUPERVISE_RESET_WINDOW_S,
+    _handle_supervised_task_exit,
+)
 
 # ---------------------------------------------------------------------------
 # Пути по умолчанию (относительно корня проекта)
@@ -103,42 +233,195 @@ _DATA_DIR = get_data_dir()
 _WATCHDOG_INTERVAL_S = 30.0
 _LOG_GET_TIMEOUT_S = 5.0
 _EXPERIMENT_STATUS_TIMEOUT_S = 5.0
+_ENGINE_INSTANCE_ID_ENV = "CRYODAQ_ENGINE_INSTANCE_ID"
+_ENGINE_SHUTDOWN_CAPABILITY_ENV = "CRYODAQ_ENGINE_SHUTDOWN_CAPABILITY"
+_ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
+_CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
+_ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
+_ENGINE_READY_WIRE_PREFIX = b"CRYODAQ_ENGINE_READY_V2 "
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v1"
+_OPERATOR_LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
+_OPERATOR_LOG_SUCCESS_KEYS = frozenset(
+    {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt"}
+)
+_OPERATOR_LOG_COMMAND_REQUIRED_KEYS = frozenset({"cmd", "request_id", "message", "author", "source"})
+_OPERATOR_LOG_COMMAND_ALLOWED_KEYS = _OPERATOR_LOG_COMMAND_REQUIRED_KEYS | {
+    "tags",
+    "experiment_id",
+    "experiment_unbound",
+}
+_OPERATOR_LOG_UNTRUSTED_SOURCES = frozenset({"dashboard", "gui", "rest", "telegram", "zmq"})
+_OPERATOR_LOG_RESERVED_ACTORS = frozenset({"system", "auto", "machine"})
+_OPERATOR_LOG_RESERVED_TAGS = frozenset(
+    {
+        "ai",
+        "auto",
+        "alarm",
+        "alarm_ack",
+        "safety_fault",
+        "phase",
+        "phase_transition",
+        "experiment",
+        "calibration",
+        "system",
+        "machine",
+    }
+)
 
 
-async def _periodic_report_tick(
-    agent_config: AssistantConfig,
-    event_bus: EventBus,
-    experiment_manager: ExperimentManager,
-    *,
-    sleep=asyncio.sleep,
-) -> None:
-    """Publish periodic_report_request events on the assistant schedule."""
-    interval_s = float(agent_config.get_periodic_report_interval_s())
-    if interval_s <= 0:
-        logger.info("Periodic assistant reports disabled (interval=0)")
-        return
+def _consume_engine_shutdown_authority(
+    environment: MutableMapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Remove inherited shutdown secrets before any engine child can spawn."""
 
-    window_minutes = int(agent_config.periodic_report_interval_minutes)
-    while True:
-        await sleep(interval_s)
-        try:
-            experiment_id = getattr(experiment_manager, "active_experiment_id", None)
-            if experiment_id is None:
-                active = getattr(experiment_manager, "active_experiment", None)
-                experiment_id = getattr(active, "experiment_id", None) if active else None
-            await event_bus.publish(
-                EngineEvent(
-                    event_type="periodic_report_request",
-                    timestamp=datetime.now(UTC),
-                    payload={
-                        "window_minutes": window_minutes,
-                        "trigger": "scheduled",
-                    },
-                    experiment_id=experiment_id,
-                )
-            )
-        except Exception as exc:
-            logger.error("Periodic assistant report tick error: %s", exc)
+    target = os.environ if environment is None else environment
+    absent = object()
+    instance_id = target.pop(_ENGINE_INSTANCE_ID_ENV, absent)
+    capability = target.pop(_ENGINE_SHUTDOWN_CAPABILITY_ENV, absent)
+    if instance_id is absent and capability is absent:
+        return "", ""
+    valid = (
+        type(instance_id) is str
+        and len(instance_id) == 32
+        and all(ch in "0123456789abcdef" for ch in instance_id)
+        and type(capability) is str
+        and len(capability) == 64
+        and all(ch in "0123456789abcdef" for ch in capability)
+    )
+    if not valid:
+        raise RuntimeError("launcher shutdown authority is invalid")
+    return instance_id, capability
+
+
+def _canonical_engine_instance_id(supplied: object) -> str:
+    """Validate launcher identity or generate exactly once for direct mode."""
+
+    if type(supplied) is str and supplied == "":
+        return secrets.token_hex(16)
+    if type(supplied) is not str or len(supplied) != 32 or any(char not in "0123456789abcdef" for char in supplied):
+        raise ValueError("engine_instance_id must be exactly 32 lowercase hexadecimal characters")
+    return supplied
+
+
+def _consume_engine_ready_nonce(environment: MutableMapping[str, str] | None = None) -> str:
+    """Consume the launcher's one-use readiness challenge before child spawn."""
+
+    target = os.environ if environment is None else environment
+    absent = object()
+    nonce = target.pop(_ENGINE_READY_NONCE_ENV, absent)
+    if nonce is absent:
+        return ""
+    if type(nonce) is str and len(nonce) == 64 and all(char in "0123456789abcdef" for char in nonce):
+        return nonce
+    raise RuntimeError("launcher readiness nonce is invalid")
+
+
+def _consume_child_ready_channel(environment: MutableMapping[str, str] | None = None) -> int | None:
+    """Consume and de-inherit the launcher's one-child readiness pipe.
+
+    The launcher passes only the write end.  It is converted to a CRT file
+    descriptor on Windows, verified as a pipe, and made non-inheritable before
+    any engine-owned subprocess can be constructed.
+    """
+
+    target = os.environ if environment is None else environment
+    absent = object()
+    encoded = target.pop(_CHILD_READY_CHANNEL_ENV, absent)
+    if encoded is absent:
+        return None
+    descriptor: int | None = None
+    try:
+        if type(encoded) is not str:
+            raise ValueError("readiness channel descriptor is not text")
+        if sys.platform == "win32":
+            import msvcrt
+
+            prefix = "handle:"
+            suffix = encoded[len(prefix) :] if encoded.startswith(prefix) else ""
+            if not (1 <= len(suffix) <= 20 and suffix.isascii() and suffix.isdecimal()):
+                raise ValueError("invalid readiness channel handle")
+            handle = int(suffix)
+            if handle <= 0:
+                raise ValueError("invalid readiness channel handle")
+            standard_handles: set[int] = set()
+            for standard_descriptor in (0, 1, 2):
+                try:
+                    standard_handle = msvcrt.get_osfhandle(standard_descriptor)
+                except OSError:
+                    continue
+                if standard_handle > 0:
+                    standard_handles.add(standard_handle)
+            if handle in standard_handles:
+                raise ValueError("unsafe readiness channel handle")
+            descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+            if not stat.S_ISFIFO(os.fstat(descriptor).st_mode):
+                raise ValueError("readiness channel is not a pipe")
+        else:
+            prefix = "fd:"
+            suffix = encoded[len(prefix) :] if encoded.startswith(prefix) else ""
+            if not (1 <= len(suffix) <= 20 and suffix.isascii() and suffix.isdecimal()):
+                raise ValueError("invalid readiness channel descriptor")
+            candidate = int(suffix)
+            if candidate <= 2:
+                raise ValueError("unsafe readiness channel descriptor")
+            if not stat.S_ISFIFO(os.fstat(candidate).st_mode):
+                raise ValueError("readiness channel is not a pipe")
+            descriptor = candidate
+        os.set_inheritable(descriptor, False)
+        return descriptor
+    except (OSError, ValueError) as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise RuntimeError("launcher readiness channel is invalid") from exc
+
+
+def _consume_engine_launch_authority(
+    environment: MutableMapping[str, str] | None = None,
+) -> tuple[str, str, str, int | None]:
+    """Consume exactly one complete launcher envelope or direct-mode absence."""
+
+    target = os.environ if environment is None else environment
+    absent = object()
+    raw_channel = target.pop(_CHILD_READY_CHANNEL_ENV, absent)
+    raw_nonce = target.pop(_ENGINE_READY_NONCE_ENV, absent)
+    raw_instance_id = target.pop(_ENGINE_INSTANCE_ID_ENV, absent)
+    raw_shutdown_capability = target.pop(_ENGINE_SHUTDOWN_CAPABILITY_ENV, absent)
+    channel_environment = {} if raw_channel is absent else {_CHILD_READY_CHANNEL_ENV: raw_channel}
+    nonce_environment = {} if raw_nonce is absent else {_ENGINE_READY_NONCE_ENV: raw_nonce}
+    shutdown_environment = {}
+    if raw_instance_id is not absent:
+        shutdown_environment[_ENGINE_INSTANCE_ID_ENV] = raw_instance_id
+    if raw_shutdown_capability is not absent:
+        shutdown_environment[_ENGINE_SHUTDOWN_CAPABILITY_ENV] = raw_shutdown_capability
+
+    ready_channel_fd: int | None = None
+    try:
+        # Acquire the descriptor first so every later envelope rejection can
+        # settle the one-use handle rather than leaking launcher authority.
+        ready_channel_fd = _consume_child_ready_channel(channel_environment)
+        ready_nonce = _consume_engine_ready_nonce(nonce_environment)
+        instance_id, shutdown_capability = _consume_engine_shutdown_authority(shutdown_environment)
+        components_present = (
+            bool(instance_id),
+            bool(shutdown_capability),
+            bool(ready_nonce),
+            ready_channel_fd is not None,
+        )
+        if all(components_present):
+            return instance_id, shutdown_capability, ready_nonce, ready_channel_fd
+        if not any(components_present):
+            return "", "", "", None
+        raise RuntimeError("launcher engine authority envelope is incomplete")
+    except BaseException:
+        if ready_channel_fd is not None:
+            try:
+                os.close(ready_channel_fd)
+            except OSError:
+                pass
+        raise
 
 
 def _coerce_finite_setpoint(raw: Any, name: str) -> float:
@@ -169,8 +452,13 @@ async def _run_keithley_command(
             p = _coerce_finite_setpoint(cmd.get("p_target", 0), "p_target")
             v = _coerce_finite_setpoint(cmd.get("v_comp", 40), "v_comp")
             i = _coerce_finite_setpoint(cmd.get("i_comp", 1.0), "i_comp")
-        except (TypeError, ValueError, OverflowError) as exc:
-            return {"ok": False, "channel": smu_channel, "error": str(exc)}
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "channel": smu_channel,
+                "error_code": "keithley_parameters_invalid",
+                "error": "Keithley command parameters are invalid.",
+            }
         return await safety_manager.request_run(p, v, i, channel=smu_channel)
 
     if action == "keithley_stop":
@@ -178,6 +466,10 @@ async def _run_keithley_command(
         return await safety_manager.request_stop(channel=smu_channel)
 
     if action == "keithley_emergency_off":
+        # Preserve omitted channel as the literal global scope.  Normalizing
+        # None would silently turn a global OFF request into smua-only.
+        if channel is None:
+            return await safety_manager.emergency_off(channel=None)
         smu_channel = normalize_smu_channel(channel)
         return await safety_manager.emergency_off(channel=smu_channel)
 
@@ -185,25 +477,27 @@ async def _run_keithley_command(
         smu_channel = normalize_smu_channel(cmd.get("channel"))
         try:
             p = _coerce_finite_setpoint(cmd.get("p_target", 0), "p_target")
-        except (TypeError, ValueError, OverflowError) as exc:
-            return {"ok": False, "channel": smu_channel, "error": str(exc)}
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "channel": smu_channel,
+                "error_code": "keithley_parameters_invalid",
+                "error": "Keithley command parameters are invalid.",
+            }
         return await safety_manager.update_target(p, channel=smu_channel)
 
     if action == "keithley_set_limits":
         smu_channel = normalize_smu_channel(cmd.get("channel"))
         try:
-            v = (
-                _coerce_finite_setpoint(cmd["v_comp"], "v_comp")
-                if cmd.get("v_comp") is not None
-                else None
-            )
-            i = (
-                _coerce_finite_setpoint(cmd["i_comp"], "i_comp")
-                if cmd.get("i_comp") is not None
-                else None
-            )
-        except (TypeError, ValueError, OverflowError) as exc:
-            return {"ok": False, "channel": smu_channel, "error": str(exc)}
+            v = _coerce_finite_setpoint(cmd["v_comp"], "v_comp") if cmd.get("v_comp") is not None else None
+            i = _coerce_finite_setpoint(cmd["i_comp"], "i_comp") if cmd.get("i_comp") is not None else None
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "channel": smu_channel,
+                "error_code": "keithley_parameters_invalid",
+                "error": "Keithley command parameters are invalid.",
+            }
         return await safety_manager.update_limits(channel=smu_channel, v_comp=v, i_comp=i)
 
     raise ValueError(f"Unsupported Keithley command: {action}")
@@ -242,9 +536,8 @@ def _load_experiment_metadata_sync(meta_path: Path) -> dict:
         return _json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         logger.warning(
-            "F31: metadata.json read failed (%s): %s",
-            meta_path.parent.name,
-            exc,
+            "Engine metadata read failed: phase=f31_metadata exception=%s",
+            type(exc).__name__,
         )
         return {}
 
@@ -267,6 +560,171 @@ async def _publish_operator_log_entry(
     )
 
 
+async def _publish_operator_log_publication(
+    writer: SQLiteWriter,
+    broker: DataBroker | None,
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    event: dict[str, Any],
+    receipt: dict[str, Any],
+) -> OperatorLogPublicationOutboxRecord:
+    """Publish one durable intent at least once, then mark that exact intent."""
+
+    if broker is None:
+        raise RuntimeError("operator-log publication broker is unavailable")
+    event_copy, _receipt_copy = SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event=event,
+        receipt=receipt,
+    )
+    entry = event_copy["entry"]
+    metadata = {
+        **entry,
+        "request_id": request_id,
+        "publication_schema": event_copy["schema"],
+    }
+    publish_required = getattr(broker, "publish_required", None)
+    validates_required = getattr(broker, "validates_required_publication", None)
+    if not callable(publish_required) or not callable(validates_required):
+        raise RuntimeError("operator-log required publisher is unavailable")
+    publication_receipt = await publish_required(
+        Reading(
+            timestamp=datetime.fromisoformat(entry["timestamp"]),
+            instrument_id="operator_log",
+            channel="analytics/operator_log_entry",
+            value=float(entry["id"]),
+            unit="",
+            metadata=metadata,
+        ),
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+    )
+    if (
+        validates_required(
+            publication_receipt,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        is not True
+    ):
+        raise RuntimeError("operator-log required publisher receipt is invalid")
+    published = await writer.publish_operator_log_publication_outbox(
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+    )
+    state = _validated_operator_log_publication_record(
+        published,
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    if state != "published":
+        raise RuntimeError("operator-log publication settlement is incomplete")
+    return published
+
+
+async def _reconcile_operator_log_publication_outbox(
+    writer: SQLiteWriter,
+    broker: DataBroker | None,
+) -> None:
+    """Reconstruct crash-stranded intents and replay them with stable keys."""
+
+    if broker is None:
+        raise RuntimeError("operator-log publication broker is unavailable")
+    pending = await writer.reconcile_missing_operator_log_publication_outbox()
+    for publication in pending:
+        await _publish_operator_log_publication(
+            writer,
+            broker,
+            request_id=publication.request_id,
+            request_fingerprint=publication.request_fingerprint,
+            event=publication.event,
+            receipt=publication.receipt,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _CommandIngressRecoveryProof:
+    """Exact retained-state settlement completed before REP admission."""
+
+    engine_instance_id: str
+    operator_log_initialized: bool
+    operator_log_reconciled: bool
+    alarm_ack_dispositions: tuple[AlarmAckOutboxAbortDisposition, ...]
+    _authority_capability: object | None = field(default=None, repr=False, compare=False)
+
+
+class _CommandIngressRecoveryAuthority:
+    """One-use owner that makes retained recovery a prerequisite for REP."""
+
+    def __init__(
+        self,
+        *,
+        writer: SQLiteWriter,
+        broker: DataBroker | None,
+        engine_instance_id: str,
+    ) -> None:
+        if not is_canonical_engine_instance_id(engine_instance_id):
+            raise ValueError("engine_instance_id must be exactly 32 lowercase hexadecimal characters")
+        self._writer = writer
+        self._broker = broker
+        self._engine_instance_id = engine_instance_id
+        self.__capability = object()
+        self.__issued_proof: _CommandIngressRecoveryProof | None = None
+        self._settlement_attempted = False
+        self._start_attempted = False
+        self._proof: _CommandIngressRecoveryProof | None = None
+
+    @property
+    def proof(self) -> _CommandIngressRecoveryProof | None:
+        return self._proof
+
+    async def settle(self) -> _CommandIngressRecoveryProof:
+        """Initialize, reconcile, abort stale ACKs, then replay committed ACKs."""
+
+        if self._settlement_attempted:
+            raise RuntimeError("command ingress recovery settlement is one-use")
+        self._settlement_attempted = True
+        await self._writer.initialize_operator_log_idempotency()
+        await _reconcile_operator_log_publication_outbox(self._writer, self._broker)
+        dispositions = await _settle_alarm_ack_outbox_startup(
+            self._writer,
+            self._broker,
+            self._engine_instance_id,
+        )
+        proof = _CommandIngressRecoveryProof(
+            engine_instance_id=self._engine_instance_id,
+            operator_log_initialized=True,
+            operator_log_reconciled=True,
+            alarm_ack_dispositions=dispositions,
+            _authority_capability=self.__capability,
+        )
+        self.__issued_proof = proof
+        self._proof = proof
+        return proof
+
+    async def start(self, command_server: ZMQCommandIngressPair) -> None:
+        """Open REP exactly once and only after this owner retained its proof."""
+
+        if self._start_attempted:
+            raise RuntimeError("command ingress start is one-use")
+        self._start_attempted = True
+        proof = self._proof
+        if (
+            type(proof) is not _CommandIngressRecoveryProof
+            or proof is not self.__issued_proof
+            or proof._authority_capability is not self.__capability
+            or proof.engine_instance_id != self._engine_instance_id
+            or proof.operator_log_initialized is not True
+            or proof.operator_log_reconciled is not True
+            or type(proof.alarm_ack_dispositions) is not tuple
+        ):
+            raise RuntimeError("command ingress recovery proof is unavailable")
+        await command_server.start()
+
+
 async def _run_operator_log_command(
     action: str,
     cmd: dict[str, Any],
@@ -274,26 +732,6 @@ async def _run_operator_log_command(
     experiment_manager: ExperimentManager,
     broker: DataBroker | None = None,
 ) -> dict[str, Any]:
-    if action == "log_entry":
-        message = str(cmd.get("message", "")).strip()
-        if not message:
-            raise ValueError("Operator log message must not be empty.")
-
-        experiment_id = cmd.get("experiment_id")
-        if experiment_id is None and cmd.get("current_experiment", True):
-            experiment_id = experiment_manager.active_experiment_id
-
-        entry = await writer.append_operator_log(
-            message=message,
-            author=str(cmd.get("author", "")).strip(),
-            source=str(cmd.get("source", "")).strip() or "command",
-            experiment_id=str(experiment_id) if experiment_id is not None else None,
-            tags=cmd.get("tags"),
-            timestamp=_parse_log_time(cmd.get("timestamp")),
-        )
-        await _publish_operator_log_entry(broker, entry)
-        return {"ok": True, "entry": entry.to_payload()}
-
     if action == "log_get":
         experiment_id = cmd.get("experiment_id")
         if experiment_id is None and cmd.get("current_experiment", False):
@@ -318,62 +756,56 @@ async def _run_operator_log_command(
     raise ValueError(f"Unsupported operator log command: {action}")
 
 
-async def _handle_assistant_query_command(
-    query_agent: Any,
-    cmd: dict[str, Any],
-    *,
-    timeout_s: float = 50.0,  # H7: bumped from 25s for Ollama cold-start
-) -> dict[str, Any]:
-    """Dispatch ``assistant.query`` GUI/Telegram command to AssistantQueryAgent.
+class _RemoteAssistantQueryProxy:
+    """Forwards Telegram free-text chat to the cryodaq-assistant process.
 
-    F34: extracted as a module-level helper so the dispatch logic is unit-
-    testable without spinning up the full engine. Mirrors the exception
-    hierarchy of :class:`AssistantQueryAgent.handle_query` (never raises;
-    returns a Russian error string-shaped dict on every failure path).
-
-    Default ``timeout_s`` (50 s) is chosen to absorb Ollama cold-start
-    on the first query after engine boot: loading gemma4:e2b takes
-    20–40 s, and the previous 25 s ceiling fired before the model had
-    finished loading, surfacing a Russian "Запрос обрабатывался слишком
-    долго" error on the operator's first GUI query. The surrounding
-    transport budget is bumped in lockstep and nests strictly: ZMQ slow
-    envelope ``HANDLER_TIMEOUT_SLOW_S`` is 55 s (``core/zmq_bridge.py``)
-    < subprocess REQ socket ``SUBPROCESS_REQ_TIMEOUT_S`` 60 s
-    (``core/zmq_subprocess.py``) < GUI client reply timeout
-    ``_CMD_REPLY_TIMEOUT_S`` 65 s (``gui/zmq_client.py``); Telegram path
-    stays at 60 s via ``telegram_commands.py`` (it does not flow through
-    the ZMQ REP server). Subsequent warm-cache queries land well under 5 s.
+    B1: ``TelegramCommandBot._handle_text`` (notifications/telegram_commands.py)
+    calls ``self._query_agent.handle_query(text, chat_id=chat_id)`` for any
+    non-command message. That used to be the in-process
+    ``AssistantQueryAgent``; now it's this proxy, which sends the exact
+    same request to the assistant process's own REP socket
+    (``tcp://127.0.0.1:5557``, ``{"cmd": "assistant.query", ...}``) and
+    returns its answer. This is the engine calling OUT to the assistant
+    for a read-only answer — the opposite direction from (and unrelated
+    to) the no-write-path-into-the-engine constraint on the assistant
+    process itself.
     """
-    query = str(cmd.get("query", "")).strip()
-    chat_id = cmd.get("chat_id", "gui")
-    if not query:
-        return {"ok": False, "error": "Пустой запрос."}
-    if query_agent is None:
-        return {
-            "ok": False,
-            "error": (
-                "AssistantQueryAgent не сконфигурирован "
-                "(query_enabled=false в agent.yaml)."
-            ),
-        }
-    try:
-        response = await asyncio.wait_for(
-            query_agent.handle_query(query, chat_id=chat_id),
-            timeout=timeout_s,
-        )
-        return {"ok": True, "response": response}
-    except TimeoutError:
-        return {
-            "ok": False,
-            "error": (
-                f"Запрос обрабатывался слишком долго (>{timeout_s:g}s). "
-                "Попробуй ещё раз — модель уже прогрелась — "
-                "или используй Telegram-бота для длинных вопросов."
-            ),
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.error("assistant.query error: %s", exc, exc_info=True)
-        return {"ok": False, "error": str(exc)}
+
+    def __init__(
+        self,
+        address: str = "tcp://127.0.0.1:5557",
+        *,
+        timeout_s: float = 55.0,
+    ) -> None:
+        self._address = address
+        self._timeout_ms = int(timeout_s * 1000)
+
+    async def handle_query(self, query: str, *, chat_id: Any) -> str:
+        import json as _json  # noqa: PLC0415
+
+        import zmq  # noqa: PLC0415
+        import zmq.asyncio  # noqa: PLC0415
+
+        ctx = zmq.asyncio.Context.instance()
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
+        try:
+            sock.connect(self._address)
+            await sock.send_string(_json.dumps({"cmd": "assistant.query", "query": query, "chat_id": chat_id}))
+            reply = _json.loads(await sock.recv_string())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Assistant query transport failed: exception=%s",
+                type(exc).__name__,
+            )
+            return "🤖 Гемма: ассистент недоступен."
+        finally:
+            sock.close(linger=0)
+        if reply.get("ok"):
+            return str(reply.get("response", ""))
+        return str(reply.get("error", "Ассистент вернул ошибку."))
 
 
 def _leak_rate_volume_warning(chamber_cfg: dict[str, Any]) -> str | None:
@@ -429,18 +861,31 @@ async def _handle_leak_rate_command(
             leak_rate_estimator.start_measurement(window_s=window_s)
             return {"ok": True, "action": "leak_rate_start"}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)}
+            logger.error(
+                "Leak-rate start failed: exception=%s",
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error_code": "leak_rate_start_failed",
+                "error": "Leak-rate measurement could not be started.",
+            }
     if action == "leak_rate_stop":
         try:
             from dataclasses import asdict as _asdict  # noqa: PLC0415
+
             result = leak_rate_estimator.finalize()
             await event_logger.log_event(
                 "leak_rate",
                 f"Leak rate: {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
             )
             return {"ok": True, "action": "leak_rate_stop", "measurement": _asdict(result)}
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+        except ValueError:
+            return {
+                "ok": False,
+                "error_code": "leak_rate_stop_invalid",
+                "error": "Leak-rate measurement is not ready to stop.",
+            }
     return None
 
 
@@ -459,24 +904,125 @@ async def _drain_dispatch_tasks(
     timeout (previously the hardcoded 10 s) surfaced as a parameter so the
     warning text reports the actual cap.
     """
-    if tasks:
+    if not tasks:
+        return
+    owners = tuple(tasks)
+
+    async def settle() -> BaseException | None:
         logger_.info(
             "Draining %d in-flight dispatch task(s) before shutdown",
-            len(tasks),
+            len(owners),
         )
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout,
-            )
-        except TimeoutError:
+        _done, pending = await asyncio.wait(owners, timeout=timeout)
+        if pending:
             logger_.warning(
                 "Sink drain timed out (%ss); cancelling %d remaining",
                 timeout,
-                len(tasks),
+                len(pending),
             )
-            for t in tasks:
-                t.cancel()
+            for task in pending:
+                task.cancel()
+        results = await asyncio.gather(*owners, return_exceptions=True)
+        return next(
+            (
+                result
+                for result in results
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+            ),
+            None,
+        )
+
+    settlement = asyncio.create_task(settle(), name="engine-dispatch-task-settlement")
+    cancellation_seen = False
+    while not settlement.done():
+        try:
+            await asyncio.shield(settlement)
+        except asyncio.CancelledError:
+            cancellation_seen = True
+    failure = settlement.result()
+    if failure is not None:
+        raise _EngineShutdownSettledFailure(failure)
+    if cancellation_seen:
+        raise asyncio.CancelledError
+
+
+# ───────────────────────── Task supervision (A2) ──────────────────────────
+# Политика надзора (TaskSupervisor + решающее ядро
+# _handle_supervised_task_exit + константы бэкоффа) вынесена в
+# engine_wiring.supervision и импортируется выше. Тихая смерть долгоживущей
+# задачи — риск №1 в ночную смену; ядро тестируется в изоляции.
+
+
+# ─────────────────────────── Audible faults (A3) ──────────────────────────
+# Safety faults and a dead sensor outside RUNNING used to be log-only — an
+# operator had to be staring at the log to notice. The helpers below reuse
+# the SAME alarm_fired/Telegram dispatch channel alarm-v2, cooldown-alarm,
+# vacuum-guard and the task supervisor already use (no new channel
+# invented), extracted as importable module-level functions so they are
+# unit-testable without bringing up the full engine (same rationale as
+# ``_drain_dispatch_tasks``).
+
+
+async def _dispatch_alarm_notification(
+    event_bus: EventBus,
+    alarm_dispatch_tasks: set[asyncio.Task[Any]],
+    *,
+    alarm_id: str,
+    level: str,
+    message: str,
+    experiment_id: str | None,
+    telegram_bot: Any | None = None,
+    channel: str = "",
+    value: float = 0.0,
+) -> None:
+    """Publish ``alarm_fired`` (sound/GUI) and, if a notifier is configured,
+    dispatch the same message to Telegram — fire-and-forget, tracked in
+    *alarm_dispatch_tasks* so it survives GC and drains cleanly on shutdown
+    (see ``_drain_dispatch_tasks``).
+    """
+    if telegram_bot is not None:
+        t = asyncio.create_task(
+            telegram_bot._send_to_all(f"⚠ [{level}] {alarm_id}\n{message}"),
+            name=f"{alarm_id}_tg",
+        )
+        alarm_dispatch_tasks.add(t)
+        t.add_done_callback(alarm_dispatch_tasks.discard)
+    await event_bus.publish(
+        EngineEvent(
+            event_type="alarm_fired",
+            timestamp=datetime.now(UTC),
+            payload={
+                "alarm_id": alarm_id,
+                "level": level,
+                "message": message,
+                "channels": [channel] if channel else [],
+                "values": [value] if channel else [],
+            },
+            experiment_id=experiment_id,
+        )
+    )
+
+
+def _should_dispatch_dead_channel_alarm(key: str, escalated: bool, already_sent: set[str]) -> bool:
+    """Once-per-episode edge-trigger for the outside-RUNNING dead-channel alert.
+
+    ``on_interlock_dead_channel`` stays log-only outside RUNNING by design
+    (SafetyManager's decision, unchanged) and — also by design — is retried
+    on every subsequent non-usable sample so the fault still latches the
+    moment RUNNING begins (see interlock.py's ``_NonUsableWindow.escalated``
+    docstring). Dispatching sound on every one of those retries would beep
+    on every poll; fire at most once per continuous decline episode, and
+    clear once escalation succeeds (RUNNING began / fault latched — that
+    path gets its own CRITICAL alarm via ``_safety_fault_log_callback``) so
+    a later, distinct dead episode still alerts.
+    """
+    if escalated:
+        already_sent.discard(key)
+        return False
+    if key in already_sent:
+        return False
+    already_sent.add(key)
+    return True
 
 
 def _build_experiment_export(
@@ -519,111 +1065,6 @@ def _build_experiment_export(
     )
 
 
-def _format_diag_telegram_messages(
-    new_events: list[Any],
-    aggregation_threshold: int = 3,
-) -> list[tuple[str, str]]:
-    """Build the Telegram dispatch ``(task_name, message)`` pairs for a batch
-    of sensor-diagnostic events.
-
-    F10/F20: extracted from the ``_sensor_diag_tick`` closure so the message
-    formatting — including the F20 aggregation rule (more than
-    *aggregation_threshold* simultaneous events collapse into one batch
-    summary; otherwise one message per event) — is unit-testable without the
-    engine loop. Returns pairs in dispatch order (empty when nothing to send).
-    Behaviour-preserving, including the asyncio task names.
-    """
-    if not new_events:
-        return []
-    if len(new_events) > aggregation_threshold:
-        criticals = [e for e in new_events if e.level == "CRITICAL"]
-        warnings = [e for e in new_events if e.level == "WARNING"]
-        parts: list[str] = []
-        if criticals:
-            names = ", ".join(
-                e.channels[0] if e.channels else e.alarm_id for e in criticals
-            )
-            parts.append(f"{len(criticals)} channels critical: {names}")
-        if warnings:
-            names = ", ".join(
-                e.channels[0] if e.channels else e.alarm_id for e in warnings
-            )
-            parts.append(f"{len(warnings)} channels warning: {names}")
-        return [("diag_tg_batch", "⚠ Diagnostic alarm batch:\n" + "\n".join(parts))]
-    return [
-        (
-            f"diag_tg_{event.alarm_id}",
-            f"⚠ [{event.level}] {event.alarm_id}\n{event.message}",
-        )
-        for event in new_events
-    ]
-
-
-async def _handle_rag_search_command(
-    rag_searcher: Any,
-    cmd: dict[str, Any],
-    *,
-    timeout_s: float = 30.0,
-) -> dict[str, Any]:
-    """Dispatch ``rag.search`` GUI command to the F32 RagSearcher.
-
-    Module-level helper mirrors :func:`_handle_assistant_query_command` so
-    the v0.55.6 knowledge-base overlay's dispatch path is unit-testable
-    without spinning up the engine. Returns a serialised list of
-    SearchResult dicts on success or a Russian error string-shaped dict
-    on every failure (missing index, empty query, timeout, exception).
-    """
-    if rag_searcher is None:
-        return {
-            "ok": False,
-            "error": "RAG индекс не построен. Запустите cryodaq-rag-index.",
-        }
-    query = str(cmd.get("query", "")).strip()
-    if not query:
-        return {"ok": False, "error": "Пустой запрос."}
-    top_k = int(cmd.get("limit", cmd.get("top_k", 10)))
-    raw_filter = cmd.get("source_kind_filter")
-    if raw_filter is None:
-        source_kind_filter: list[str] | None = None
-    elif isinstance(raw_filter, list):
-        source_kind_filter = [str(x) for x in raw_filter]
-    else:
-        source_kind_filter = [str(raw_filter)]
-    try:
-        results = await asyncio.wait_for(
-            rag_searcher.search(
-                query,
-                top_k=top_k,
-                source_kind_filter=source_kind_filter,
-            ),
-            timeout=timeout_s,
-        )
-        return {
-            "ok": True,
-            "results": [
-                {
-                    "chunk_id": r.chunk_id,
-                    "source_kind": r.source_kind,
-                    "source_id": r.source_id,
-                    "text": r.text,
-                    "metadata": r.metadata,
-                    "score": r.score,
-                }
-                for r in results
-            ],
-        }
-    except TimeoutError:
-        return {
-            "ok": False,
-            "error": (
-                f"RAG-поиск занял больше {timeout_s:g}с — возможно Ollama зависла."
-            ),
-        }
-    except Exception as exc:  # noqa: BLE001
-        logger.error("rag.search error: %s", exc, exc_info=True)
-        return {"ok": False, "error": str(exc)}
-
-
 async def _handle_multiline_set_channels_command(
     cmd: dict[str, Any],
     *,
@@ -658,38 +1099,42 @@ async def _handle_multiline_set_channels_command(
 
     name = str(cmd.get("name", "")).strip()
     if not name:
-        ml_names = [
-            n
-            for n, d in drivers_by_name.items()
-            if d.__class__.__name__ == "MultiLineDriver"
-        ]
+        ml_names = [n for n, d in drivers_by_name.items() if d.__class__.__name__ == "MultiLineDriver"]
         if len(ml_names) == 1:
             name = ml_names[0]
         else:
             return {
                 "ok": False,
-                "error": (
-                    "MultiLine instance not specified and multiple drivers "
-                    "are configured"
-                ),
+                "error": ("MultiLine instance not specified and multiple drivers are configured"),
             }
 
     driver = drivers_by_name.get(name)
     if driver is None or driver.__class__.__name__ != "MultiLineDriver":
-        return {"ok": False, "error": f"MultiLine driver '{name}' not found"}
+        return {
+            "ok": False,
+            "error_code": "multiline_driver_unavailable",
+            "error": "The requested MultiLine driver is unavailable.",
+        }
 
     try:
         applied = await driver.reconfigure_channels(channels)
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 — surface the message to GUI
+    except ValueError:
+        return {
+            "ok": False,
+            "error_code": "multiline_channels_invalid",
+            "error": "The requested MultiLine channel set is invalid.",
+        }
+    except Exception as exc:  # noqa: BLE001
         logger.error(
-            "multiline.set_channels reconfigure failed for '%s': %s",
-            name,
-            exc,
-            exc_info=True,
+            "multiline.set_channels reconfigure failed: driver=%s exception=%s",
+            _bounded_action_label(name),
+            type(exc).__name__,
         )
-        return {"ok": False, "error": f"reconfigure failed: {exc}"}
+        return {
+            "ok": False,
+            "error_code": "multiline_reconfigure_failed",
+            "error": "MultiLine channel reconfiguration failed.",
+        }
 
     persist_warning: str | None = None
     try:
@@ -703,12 +1148,12 @@ async def _handle_multiline_set_channels_command(
         )
     except Exception as exc:  # noqa: BLE001 — non-fatal; runtime change stuck
         logger.warning(
-            "multiline.set_channels persist failed for '%s': %s — "
-            "change is runtime-only and will revert on engine restart",
-            name,
-            exc,
+            "multiline.set_channels persistence failed: driver=%s exception=%s; "
+            "the runtime change will revert on engine restart",
+            _bounded_action_label(name),
+            type(exc).__name__,
         )
-        persist_warning = f"persist failed: {exc}"
+        persist_warning = "Channel selection persistence failed; the change is runtime-only."
 
     return {
         "ok": True,
@@ -751,12 +1196,8 @@ def _persist_multiline_channels_to_local_yaml(
     if local_path.exists():
         local_raw = _yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
 
-    base_instruments = [
-        e for e in (base_raw.get("instruments") or []) if isinstance(e, dict)
-    ]
-    local_instruments = [
-        e for e in (local_raw.get("instruments") or []) if isinstance(e, dict)
-    ]
+    base_instruments = [e for e in (base_raw.get("instruments") or []) if isinstance(e, dict)]
+    local_instruments = [e for e in (local_raw.get("instruments") or []) if isinstance(e, dict)]
 
     # Merge by (type, name) — local entries override base entries with
     # the same identity. Order: local first (preserves operator
@@ -776,10 +1217,7 @@ def _persist_multiline_channels_to_local_yaml(
 
     matched = False
     for entry in merged:
-        if (
-            str(entry.get("type")) == "etalon_multiline"
-            and str(entry.get("name")) == instrument_name
-        ):
+        if str(entry.get("type")) == "etalon_multiline" and str(entry.get("name")) == instrument_name:
             entry["channels"] = list(channels)
             matched = True
             break
@@ -848,34 +1286,36 @@ async def _handle_multiline_burst_command(
     if not name:
         # Default to the first MultiLine driver if exactly one is
         # configured — keeps the GUI single-instrument case ergonomic.
-        ml_names = [
-            n
-            for n, d in drivers_by_name.items()
-            if d.__class__.__name__ == "MultiLineDriver"
-        ]
+        ml_names = [n for n, d in drivers_by_name.items() if d.__class__.__name__ == "MultiLineDriver"]
         if len(ml_names) == 1:
             name = ml_names[0]
         else:
             return {
                 "ok": False,
-                "error": (
-                    "MultiLine instance not specified and "
-                    f"{len(ml_names)} configured — pass `name` explicitly."
-                ),
+                "error": (f"MultiLine instance not specified and {len(ml_names)} configured — pass `name` explicitly."),
             }
     driver = drivers_by_name.get(name)
     if driver is None or driver.__class__.__name__ != "MultiLineDriver":
         return {
             "ok": False,
-            "error": f"MultiLine driver '{name}' не сконфигурирован.",
+            "error_code": "multiline_driver_unavailable",
+            "error": "The requested MultiLine driver is unavailable.",
         }
 
     if action == "multiline.burst_status":
         try:
             return {"ok": True, **driver.burst_status()}
         except Exception as exc:  # noqa: BLE001
-            logger.error("multiline.burst_status error: %s", exc, exc_info=True)
-            return {"ok": False, "error": str(exc)}
+            logger.error(
+                "multiline.burst_status failed: driver=%s exception=%s",
+                _bounded_action_label(name),
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error_code": "multiline_burst_status_failed",
+                "error": "MultiLine burst status is unavailable.",
+            }
 
     if action == "multiline.burst_start":
         duration_s = cmd.get("duration_s")
@@ -896,8 +1336,12 @@ async def _handle_multiline_burst_command(
                 active_id = None
         try:
             await driver.burst_start(experiment_id=active_id)
-        except RuntimeError as exc:
-            return {"ok": False, "error": str(exc)}
+        except RuntimeError:
+            return {
+                "ok": False,
+                "error_code": "multiline_burst_start_failed",
+                "error": "MultiLine burst capture could not be started.",
+            }
         if duration is not None and auto_stop_tasks is not None:
             # The auto-stop task lives on the engine event loop; the
             # caller schedules it because asyncio.create_task here would
@@ -918,236 +1362,33 @@ async def _handle_multiline_burst_command(
         try:
             path = await driver.burst_stop(experiments_root=experiments_root)
         except Exception as exc:  # noqa: BLE001
-            logger.error("multiline.burst_stop error: %s", exc, exc_info=True)
-            return {"ok": False, "error": str(exc)}
+            logger.error(
+                "multiline.burst_stop failed: driver=%s exception=%s",
+                _bounded_action_label(name),
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error_code": "multiline_burst_stop_failed",
+                "error": "MultiLine burst capture could not be stopped.",
+            }
         if path is None:
             return {"ok": True, "path": None, "saved": False}
         if auto_stop_tasks is not None:
             auto_stop_tasks.pop(name, None)
         return {"ok": True, "path": str(path), "saved": True}
 
-    return {"ok": False, "error": f"unknown burst action: {action}"}
-
-
-# v0.55.7.1 — rag.rebuild_index command state machine. Single-instance:
-# concurrent rebuild is rejected с a Russian error string. State is
-# module-level rather than per-engine because the rebuild is also
-# operator-facing (GUI poll), and idle/running/complete/failed maps
-# directly к the panel's status label states. The accompanying task
-# ref is also held here; engine startup constructs both fresh.
-_rag_rebuild_state: dict[str, Any] = {
-    "state": "idle",
-    "started_at": None,
-    "finished_at": None,
-    "chunks_indexed": 0,
-    "error": None,
-}
-_rag_rebuild_task: asyncio.Task[None] | None = None
-
-
-def _rag_rebuild_status_snapshot() -> dict[str, Any]:
-    """Return a JSON-serialisable copy of the rebuild state."""
     return {
-        "ok": True,
-        "state": _rag_rebuild_state["state"],
-        "started_at": _rag_rebuild_state["started_at"],
-        "finished_at": _rag_rebuild_state["finished_at"],
-        "chunks_indexed": _rag_rebuild_state["chunks_indexed"],
-        "error": _rag_rebuild_state["error"],
+        "ok": False,
+        "error_code": "multiline_burst_action_invalid",
+        "error": "MultiLine burst action is invalid.",
     }
 
 
-async def _run_rag_rebuild(
-    *,
-    db_path: Path,
-    embeddings_client: Any,
-    knowledge_dir: Path,
-    experiments_dir: Path,
-    sqlite_path: Path | None,
-    repo_root: Path,
-) -> None:
-    """Body of the manual rebuild task.
-
-    Updates ``_rag_rebuild_state`` in-place across the lifecycle so
-    poll responses always reflect the latest state. Failures populate
-    ``error`` field rather than re-raising; the engine task wrapper
-    discards the task ref после completion.
-    """
-    try:
-        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
-
-        stats = await build_index(
-            experiments_dir=experiments_dir,
-            vault_dir=None,
-            sqlite_path=sqlite_path,
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            pdf_dir=knowledge_dir / "equipment_manuals",
-            procedures_dir=knowledge_dir / "procedures",
-            reference_root=repo_root,
-        )
-        _rag_rebuild_state.update(
-            {
-                "state": "complete",
-                "finished_at": time.time(),
-                "chunks_indexed": int(stats.get("indexed", 0)),
-                "error": None,
-            }
-        )
-        logger.info(
-            "RAG manual rebuild complete: %d chunks indexed в %s",
-            stats.get("indexed", 0),
-            db_path,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _rag_rebuild_state.update(
-            {
-                "state": "failed",
-                "finished_at": time.time(),
-                "error": str(exc),
-            }
-        )
-        logger.error("RAG manual rebuild failed: %s", exc, exc_info=True)
-
-
-async def _handle_rag_rebuild_command(
-    action: str,
-    cmd: dict[str, Any],
-    *,
-    db_path: Path | None,
-    embeddings_client: Any | None,
-    knowledge_dir: Path | None,
-    experiments_dir: Path | None,
-    sqlite_path: Path | None,
-    repo_root: Path | None,
-) -> dict[str, Any]:
-    """Dispatch ``rag.rebuild_index`` / ``rag.rebuild_status`` GUI commands.
-
-    Module-level helper (mirrors ``_handle_assistant_query_command``)
-    so the closure inside ``_handle_gui_command`` is a one-line delegate
-    and tests can exercise the dispatch path without spinning up an
-    engine. Concurrent rebuilds rejected — operator must wait for the
-    current run to finish before re-clicking the GUI button.
-    """
-    global _rag_rebuild_task
-
-    if action == "rag.rebuild_status":
-        return _rag_rebuild_status_snapshot()
-
-    if action != "rag.rebuild_index":
-        return {"ok": False, "error": f"unknown rebuild action: {action}"}
-
-    if _rag_rebuild_state["state"] == "running":
-        return {
-            "ok": False,
-            "error": "Rebuild уже идёт — дождитесь завершения.",
-        }
-    if (
-        embeddings_client is None
-        or db_path is None
-        or knowledge_dir is None
-        or experiments_dir is None
-        or repo_root is None
-    ):
-        return {
-            "ok": False,
-            "error": "RAG не сконфигурирован (config/rag.yaml отсутствует?).",
-        }
-
-    # Reset state — operator-clicked start always wins over a stale
-    # complete/failed status from a previous run.
-    _rag_rebuild_state.update(
-        {
-            "state": "running",
-            "started_at": time.time(),
-            "finished_at": None,
-            "chunks_indexed": 0,
-            "error": None,
-        }
-    )
-    _rag_rebuild_task = asyncio.create_task(
-        _run_rag_rebuild(
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            knowledge_dir=knowledge_dir,
-            experiments_dir=experiments_dir,
-            sqlite_path=sqlite_path,
-            repo_root=repo_root,
-        ),
-        name="rag_manual_rebuild",
-    )
-    return {
-        "ok": True,
-        "state": "running",
-        "started_at": _rag_rebuild_state["started_at"],
-    }
-
-
-async def _bootstrap_rag_index_if_empty(
-    *,
-    db_path: Path,
-    embeddings_client: Any,
-    knowledge_dir: Path,
-    experiments_dir: Path,
-    sqlite_path: Path | None,
-    repo_root: Path,
-) -> None:
-    """Build the RAG index из bundled corpus if it's empty.
-
-    F-KnowledgeBaseExpansion (v0.55.7.1): operator demos на свежем
-    клон должны видеть базу знаний без manual ``cryodaq-rag-index``
-    step. The engine fires this as ``asyncio.create_task`` — the
-    bootstrap progresses в фоне; engine ``ready`` signal is NOT
-    awaited on it. Failures are logged but never propagated; operator
-    briefly sees empty KnowledgeBasePanel, then it populates без
-    restart once embeddings finish.
-
-    Idempotent: probes the index с a 1-result search; non-empty
-    response → skip. Pre-existing tables therefore safe to leave
-    alone (e.g. RAGIndexSink built one earlier in this engine's
-    lifetime, or a manual ``cryodaq-rag-index`` run).
-    """
-    try:
-        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
-
-        searcher = RagSearcher(
-            db_path=db_path, embeddings_client=embeddings_client
-        )
-        sample = await searcher.search("test", top_k=1)
-        if sample:
-            logger.info(
-                "RAG index already populated (%d sample), skipping bootstrap",
-                len(sample),
-            )
-            return
-    except Exception as exc:  # noqa: BLE001
-        # Probe failure is expected on the very first run (table missing).
-        # Log at INFO — that path IS the bootstrap's reason for existing.
-        logger.info("RAG index probe failed, proceeding with bootstrap: %s", exc)
-
-    logger.info("RAG bootstrap starting from bundled sources в %s", knowledge_dir)
-    try:
-        from cryodaq.agents.rag.indexer import build_index  # noqa: PLC0415
-
-        stats = await build_index(
-            experiments_dir=experiments_dir,
-            vault_dir=None,  # vault не bundled
-            sqlite_path=sqlite_path,
-            db_path=db_path,
-            embeddings_client=embeddings_client,
-            pdf_dir=knowledge_dir / "equipment_manuals",
-            procedures_dir=knowledge_dir / "procedures",
-            reference_root=repo_root,
-        )
-        logger.info(
-            "RAG bootstrap complete: %d chunks indexed в %s",
-            stats.get("indexed", 0),
-            db_path,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error("RAG bootstrap failed: %s", exc, exc_info=True)
-
-
+# B1 (2026-07): live index mutation and bootstrap-on-empty were removed.
+# index logic below moved to cryodaq.agents.assistant_main — the standalone
+# assistant process now owns the RAG index end-to-end (own REP command
+# surface at tcp://127.0.0.1:5557). See scratchpad/montana/exec/impl_b1.md.
 def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
@@ -1166,9 +1407,7 @@ def _run_calibration_command(
     if action == "calibration_curve_list":
         return {
             "ok": True,
-            "curves": calibration_store.list_curves(
-                sensor_id=str(cmd.get("sensor_id", "")).strip() or None
-            ),
+            "curves": calibration_store.list_curves(sensor_id=str(cmd.get("sensor_id", "")).strip() or None),
             "assignments": calibration_store.list_assignments(),
         }
 
@@ -1216,9 +1455,7 @@ def _run_calibration_command(
             policy=str(cmd.get("policy", "")).strip(),
             sensor_id=str(cmd.get("sensor_id", "")).strip() or None,
             curve_id=str(cmd.get("curve_id", "")).strip() or None,
-            runtime_apply_ready=(
-                bool(cmd.get("runtime_apply_ready")) if "runtime_apply_ready" in cmd else None
-            ),
+            runtime_apply_ready=(bool(cmd.get("runtime_apply_ready")) if "runtime_apply_ready" in cmd else None),
         )
         return {"ok": True, **result}
 
@@ -1341,13 +1578,17 @@ def _try_activate_calibration_acquisition(
         if reference and targets:
             service.activate(reference, targets)
         else:
-            logger.warning(
-                "Calibration experiment missing reference_channel/target_channels in custom_fields"
-            )
-    except CalibrationCommandError as e:
-        logger.error("Calibration activation rejected: %s", e)
-    except Exception:
-        logger.warning("Failed to activate calibration acquisition", exc_info=True)
+            logger.warning("Calibration experiment missing reference_channel/target_channels in custom_fields")
+    except CalibrationCommandError as exc:
+        logger.error(
+            "Calibration activation rejected: exception=%s",
+            type(exc).__name__,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Calibration activation failed: exception=%s",
+            type(exc).__name__,
+        )
 
 
 async def _run_cooldown_history_command(
@@ -1378,19 +1619,13 @@ async def _run_cooldown_history_command(
         try:
             # Offload the per-file metadata read off the engine loop (no
             # blocking I/O on the loop). json parse of a small file stays inline.
-            raw_meta = await asyncio.to_thread(
-                entry.metadata_path.read_text, encoding="utf-8"
-            )
+            raw_meta = await asyncio.to_thread(entry.metadata_path.read_text, encoding="utf-8")
             payload = _json.loads(raw_meta)
         except Exception:
             continue
         phases: list[dict] = payload.get("phases", [])
         cooldown_phase = next(
-            (
-                p
-                for p in phases
-                if p.get("phase") == "cooldown" and p.get("ended_at") is not None
-            ),
+            (p for p in phases if p.get("phase") == "cooldown" and p.get("ended_at") is not None),
             None,
         )
         if cooldown_phase is None:
@@ -1402,9 +1637,7 @@ async def _run_cooldown_history_command(
         try:
             started_dt = datetime.fromisoformat(cooldown_started_at).astimezone(UTC)
             ended_dt = datetime.fromisoformat(cooldown_ended_at).astimezone(UTC)
-            duration_hours = round(
-                (ended_dt - started_dt).total_seconds() / 3600, 3
-            )
+            duration_hours = round((ended_dt - started_dt).total_seconds() / 3600, 3)
         except Exception:
             continue
         start_t: float | None = None
@@ -1433,9 +1666,7 @@ async def _run_cooldown_history_command(
                 "start_T_kelvin": start_t,
                 "end_T_kelvin": end_t,
                 "phase_transitions": [
-                    {"phase": p.get("phase"), "ts": p.get("started_at")}
-                    for p in phases
-                    if p.get("started_at")
+                    {"phase": p.get("phase"), "ts": p.get("started_at")} for p in phases if p.get("started_at")
                 ],
             }
         )
@@ -1551,7 +1782,6 @@ def _run_experiment_command(
             custom_fields=_normalize_custom_fields_payload(cmd.get("custom_fields")),
             end_time=_parse_experiment_time(cmd.get("end_time")),
         )
-        # Report is generated inside finalize_experiment() by ExperimentManager.
         return {"ok": True, "experiment": info.to_payload()}
 
     if action == "experiment_abort":
@@ -1585,11 +1815,7 @@ def _run_experiment_command(
             source_run_id=str(cmd.get("source_run_id", "")).strip() or None,
             parameters=_normalize_dict_payload(cmd.get("parameters")),
             result_summary=_normalize_dict_payload(cmd.get("result_summary")),
-            artifact_paths=[
-                str(item).strip()
-                for item in list(cmd.get("artifact_paths") or [])
-                if str(item).strip()
-            ],
+            artifact_paths=[str(item).strip() for item in list(cmd.get("artifact_paths") or []) if str(item).strip()],
         )
         return {
             "ok": True,
@@ -1616,25 +1842,94 @@ def _run_experiment_command(
         experiment_id = str(cmd.get("experiment_id", "")).strip()
         if not experiment_id:
             raise ValueError("experiment_id is required for report generation.")
-        generator = ReportGenerator(experiment_manager.data_dir)
-        result = generator.generate(experiment_id)
+        raw_force = cmd.get("force", False)
+        if type(raw_force) is not bool:
+            return {
+                "ok": False,
+                "error_code": "invalid_force",
+                "error": "force must be an exact JSON boolean",
+            }
+        force = raw_force is True
+        force_context = cmd.get("force_context")
+        operator = cmd.get("operator")
+        if not force and ("force_context" in cmd or "operator" in cmd):
+            return {
+                "ok": False,
+                "error_code": "invalid_force",
+                "error": "force_context/operator require force=true",
+            }
+        if force:
+            if (
+                not isinstance(force_context, str)
+                or len(force_context) != 64
+                or any(char not in "0123456789abcdef" for char in force_context)
+                or not isinstance(operator, str)
+                or not (1 <= len(operator) <= 128)
+                or operator != operator.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in operator)
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "invalid_force",
+                    "error": "force_context/operator are invalid",
+                }
+        runner = ReportProcessRunner(experiment_manager.data_dir)
+        try:
+            if force:
+                report, generation_id = runner.generate_experiment_detailed(
+                    experiment_id,
+                    force=True,
+                    force_context=force_context,
+                    operator=operator,
+                )
+            else:
+                report = runner.generate_experiment(experiment_id)
+                generation_id = None
+        except ReportProcessError as exc:
+            return {
+                "ok": False,
+                "error_code": exc.error_code,
+                "error": exc.error_text,
+            }
         return {
             "ok": True,
-            "report": {
-                "docx_path": str(result.docx_path),
-                "pdf_path": str(result.pdf_path) if result.pdf_path else None,
-                "assets_dir": str(result.assets_dir),
-                "sections": list(result.sections),
-                "skipped": result.skipped,
-                "reason": result.reason,
-            },
+            "report": report,
+            "forced": force,
+            "audit_id": generation_id,
         }
 
     if action == "experiment_advance_phase":
+        expected_experiment_id = cmd.get("experiment_id")
+        if type(expected_experiment_id) is not str or not expected_experiment_id:
+            return {
+                "ok": False,
+                "error_code": "experiment_id_required",
+                "error": "experiment_id must identify the experiment that owns this phase command",
+            }
+        if "expected_experiment_id" in cmd and cmd.get("expected_experiment_id") != expected_experiment_id:
+            return {
+                "ok": False,
+                "error_code": "experiment_identity_conflict",
+                "error": "expected_experiment_id must exactly match experiment_id",
+                "retry_safe": False,
+                "experiment_id": expected_experiment_id,
+            }
         phase = str(cmd.get("phase", "")).strip()
         operator = str(cmd.get("operator", "")).strip()
-        entry = experiment_manager.advance_phase(phase, operator)
-        return {"ok": True, "phase": entry}
+        try:
+            entry = experiment_manager.advance_phase(
+                phase,
+                operator,
+                expected_experiment_id=expected_experiment_id,
+            )
+        except ExperimentIdentityMismatchError:
+            return {
+                "ok": False,
+                "error_code": "stale_experiment_command",
+                "error": "Experiment identity changed before the command could commit.",
+                "experiment_id": expected_experiment_id,
+            }
+        return {"ok": True, "phase": entry, "experiment_id": expected_experiment_id}
 
     if action == "experiment_phase_status":
         current = experiment_manager.get_current_phase()
@@ -1648,13 +1943,16 @@ def _run_experiment_command(
                 elapsed = (_dt.now(UTC) - started.astimezone(UTC)).total_seconds()
             except Exception as exc:
                 logger.warning(
-                    "Не удалось вычислить elapsed_in_phase_s из started_at=%r: %s — "
-                    "возвращаю 0.0 (display-only)",
-                    history[-1].get("started_at"),
-                    exc,
+                    "Experiment phase elapsed-time projection failed: exception=%s",
+                    type(exc).__name__,
                 )
         return {
             "ok": True,
+            "experiment_id": (
+                experiment_manager.active_experiment.experiment_id
+                if experiment_manager.active_experiment is not None
+                else None
+            ),
             "current_phase": current,
             "phases": history,
             "elapsed_in_phase_s": elapsed,
@@ -1766,129 +2064,116 @@ def _get_memory_mb() -> float:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class DriverLoadResult:
+    """Atomically constructed scheduler inputs with reviewed provenance.
+
+    ``validated_configs`` preserves the exact canonical registry specs used to
+    construct ``instrument_configs``.  Source authority is recorded while
+    those pairs are still together; downstream code must not rediscover it
+    from driver names, methods, or structural protocol conformance.
+    """
+
+    instrument_configs: tuple[InstrumentConfig, ...]
+    validated_configs: tuple[ValidatedInstrumentConfig, ...]
+    reviewed_source: InstrumentDriver | None
+    reviewed_source_binding: ReviewedSourceBinding | None
+
+
 def _load_drivers(
     config_path: Path,
     *,
     mock: bool,
     calibration_store: CalibrationStore | None = None,
-) -> list[InstrumentConfig]:
-    """Загрузить драйверы из config/instruments.yaml.
+    data_dir: Path | None = None,
+) -> DriverLoadResult:
+    """Validate and atomically construct the configured built-in drivers."""
 
-    Возвращает список InstrumentConfig, готовых к регистрации в Scheduler.
-    """
-    with config_path.open(encoding="utf-8") as fh:
-        raw: dict[str, Any] = yaml.safe_load(fh)
+    try:
+        with config_path.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError) as exc:
+        raise DriverRegistryError(f"{config_path}: unable to decode instrument config") from exc
 
-    configs: list[InstrumentConfig] = []
+    if not isinstance(raw, dict):
+        raise DriverRegistryError(f"{config_path}: root config must be a mapping")
+    if any(not isinstance(key, str) for key in raw):
+        raise DriverRegistryError(f"{config_path}: root config keys must be strings")
 
-    for entry in raw.get("instruments", []):
-        itype = entry["type"]
-        name = entry["name"]
-        resource = entry.get("resource", "")
-        poll_interval_s = float(entry.get("poll_interval_s", 1.0))
-        channels = entry.get("channels", {})
-
-        if itype == "lakeshore_218s":
-            from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
-
-            channel_labels = {int(k): v for k, v in channels.items()}
-            driver = LakeShore218S(
-                name,
-                resource,
-                channel_labels=channel_labels,
-                mock=mock,
-                calibration_store=calibration_store,
-            )
-        elif itype == "keithley_2604b":
-            from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
-
-            wdog_cfg = raw.get("keithley", {}).get("watchdog", {})
-            # Operator-selected mode (off|best_effort|required) wins; else fall
-            # back to the legacy strict-bool ``enabled`` alias. An unknown mode
-            # string makes the driver raise ValueError → engine config load
-            # fails (fail-closed).
-            if "mode" in wdog_cfg:
-                wdog_mode = wdog_cfg["mode"]
-                wdog_enabled = None
-            else:
-                wdog_mode = None
-                # Strict-bool, fail-closed: a quoted YAML string ("false") is
-                # truthy in Python and would arm this safety path on a config
-                # typo. Only the literal boolean True enables it.
-                wdog_enabled = wdog_cfg.get("enabled", False) is True
-            wdog_timeout_s = float(wdog_cfg.get("timeout_s", 5.0))
-            # Spurious-trip guard: pets ride the poll loop, so a firmware
-            # deadline shorter than ~2 poll intervals risks a false trip on a
-            # single slow poll. Warn (do not fail, do not clamp) — the operator
-            # owns the trade-off.
-            _armed_mode = (wdog_mode not in (None, "off")) or bool(wdog_enabled)
-            if _armed_mode and wdog_timeout_s < 2.0 * poll_interval_s:
-                logger.warning(
-                    "Keithley watchdog timeout_s=%.2f is < 2×poll_interval_s=%.2f "
-                    "— a single slow poll may spurious-trip the firmware watchdog",
-                    wdog_timeout_s,
-                    poll_interval_s,
-                )
-            driver = Keithley2604B(
-                name,
-                resource,
-                mock=mock,
-                watchdog_mode=wdog_mode,
-                watchdog_enabled=wdog_enabled,
-                watchdog_timeout_s=wdog_timeout_s,
-            )
-        elif itype == "thyracont_vsp63d":
-            from cryodaq.drivers.instruments.thyracont_vsp63d import ThyracontVSP63D
-
-            baudrate = int(entry.get("baudrate", 9600))
-            validate_checksum = bool(entry.get("validate_checksum", True))
-            driver = ThyracontVSP63D(
-                name, resource, baudrate=baudrate, validate_checksum=validate_checksum, mock=mock
-            )
-        elif itype == "etalon_multiline":
-            from cryodaq.drivers.instruments.etalon_multiline import MultiLineDriver
-
-            # v0.55.6.1: accept either explicit ``channels`` list or the
-            # convenience ``channel_count`` integer (1..32). Driver
-            # validates the resolved set; failure raises ValueError and
-            # the engine drops the entry with the existing logger path.
-            # v0.55.11: also pass ``mode`` (averaged|continuous) and
-            # ``target_rate_hz`` so continuous-mode deployments can
-            # opt-in via config without code changes. Burst dir defaults
-            # to ``<DATA_DIR>/multiline_bursts`` so the fallback path
-            # (no active experiment) lands inside the data root rather
-            # than CWD.
-            _ml_channels = entry.get("channels")
-            _ml_channel_count = entry.get("channel_count")
-            driver = MultiLineDriver(
-                name,
-                host=str(entry.get("host", "localhost")),
-                port=int(entry.get("port", 2001)),
-                channel_numbers=list(_ml_channels) if _ml_channels else None,
-                channel_count=(int(_ml_channel_count) if _ml_channel_count else None),
-                connect_timeout_s=float(entry.get("connect_timeout_s", 5.0)),
-                read_timeout_s=float(entry.get("read_timeout_s", 10.0)),
-                mode=str(entry.get("mode", "averaged")),
-                target_rate_hz=float(entry.get("target_rate_hz", 1.0)),
-                burst_dir=_DATA_DIR / "multiline_bursts",
-                mock=mock,
-            )
-        else:
-            logger.warning("Неизвестный тип прибора '%s', пропущен", itype)
-            continue
-
-        configs.append(
-            InstrumentConfig(driver=driver, poll_interval_s=poll_interval_s, resource_str=resource)
+    try:
+        context = DriverConstructionContext.from_root_config(
+            raw,
+            mock=mock,
+            calibration_store=calibration_store,
+            data_dir=_DATA_DIR if data_dir is None else data_dir,
         )
+        validated = validate_instrument_entries(raw.get("instruments", []))
+    except DriverRegistryError as exc:
+        raise DriverRegistryError(f"{config_path}: {exc}") from exc
+
+    canonical_source_spec = REVIEWED_SOURCE_SPECS["keithley_2604b"]
+    reviewed_configs = tuple(config for config in validated if config.spec is canonical_source_spec)
+    if len(reviewed_configs) > 1:
+        names = ", ".join(config.name for config in reviewed_configs)
+        raise DriverRegistryError(
+            f"{config_path}: instruments define multiple reviewed sources ({names}); "
+            "SafetyManager supports exactly zero or one"
+        )
+
+    instrument_configs: list[InstrumentConfig] = []
+    reviewed_source: InstrumentDriver | None = None
+    reviewed_binding: ReviewedSourceBinding | None = None
+    for index, config in enumerate(validated):
+        try:
+            driver = construct_driver(config, context)
+        except Exception as exc:
+            raise DriverRegistryError(
+                f"{config_path}: instruments[{index}] ({config.name!r}, "
+                f"type {config.spec.type_name!r}) construction failed"
+            ) from exc
+
+        values = config.values
+        poll_interval_s = values["poll_interval_s"]
+        assert isinstance(poll_interval_s, float)
+        resource = values.get("resource", "")
+        assert isinstance(resource, str)
+        instrument_configs.append(
+            InstrumentConfig(
+                driver=driver,
+                poll_interval_s=poll_interval_s,
+                resource_str=resource,
+            )
+        )
+
+        if config.spec is canonical_source_spec:
+            binding = config.spec.reviewed_source_binding
+            if (
+                binding is not KEITHLEY_2604B_SOURCE_BINDING
+                or not isinstance(driver, ControlledSource)
+                or not isinstance(driver, VerifiedOffSource)
+            ):
+                raise DriverRegistryError(
+                    f"{config_path}: instruments[{index}] ({config.name!r}, "
+                    "type 'keithley_2604b') violates the reviewed source contract"
+                )
+            reviewed_source = driver
+            reviewed_binding = binding
+
+    for config, scheduler_config in zip(validated, instrument_configs, strict=True):
         logger.info(
             "Прибор сконфигурирован: %s (%s), ресурс=%s, интервал=%.2f с",
-            name,
-            itype,
-            resource,
-            poll_interval_s,
+            config.name,
+            config.spec.type_name,
+            scheduler_config.resource_str,
+            scheduler_config.poll_interval_s,
         )
 
-    return configs
+    return DriverLoadResult(
+        instrument_configs=tuple(instrument_configs),
+        validated_configs=validated,
+        reviewed_source=reviewed_source,
+        reviewed_source_binding=reviewed_binding,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1941,20 +2226,4149 @@ async def _watchdog(
 # ---------------------------------------------------------------------------
 
 
-async def _run_engine(*, mock: bool = False) -> None:
+def _set_safety_task_ref(safety_manager: Any, role: str, task: asyncio.Task[Any]) -> None:
+    """on_spawn-хук для safety_collect/safety_monitor: синхронизирует ссылку на
+    перезапущенную задачу в SafetyManager, чтобы stop() и sweep завершения
+    видели живую задачу (раньше — вложенная lambda в _run_engine)."""
+    safety_manager.replace_operator_child(role, task)
+
+
+def _engine_config_path(name: str) -> Path:
+    """Resolve a config, preferring the machine-local override."""
+    local = _CONFIG_DIR / f"{name}.local.yaml"
+    return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
+
+
+async def _load_live_descriptor_authority(
+    instruments_cfg: Path,
+    driver_load: DriverLoadResult,
+):
+    """Load and validate production descriptor authority off the event loop."""
+
+    descriptor_base = _CONFIG_DIR / "channel_descriptors.yaml"
+    descriptor_local = (
+        _CONFIG_DIR / "channel_descriptors.local.yaml" if instruments_cfg.name == "instruments.local.yaml" else None
+    )
+    owner = await asyncio.to_thread(
+        load_live_channel_descriptor_catalog,
+        descriptor_base,
+        local_path=descriptor_local,
+    )
+    owner.require_exact_instruments(tuple(config.name for config in driver_load.validated_configs))
+    return owner
+
+
+@dataclass(slots=True)
+class _SafetyFaultLogContext:
+    writer: Any
+    broker: Any
+    alarm_dispatch_tasks: set[asyncio.Task[Any]]
+    event_bus: Any | None = None
+    experiment_manager: Any | None = None
+    telegram_bot: Any | None = None
+
+
+async def _safety_fault_log_callback(
+    source: str,
+    message: str,
+    channel: str = "",
+    value: float = 0.0,
+    *,
+    context: _SafetyFaultLogContext,
+) -> None:
+    """Persist and publish a SafetyManager fault through the existing paths."""
+    entry = await context.writer.append_operator_log(
+        message=message,
+        author=source,
+        source="machine",
+        tags=("safety_fault", channel) if channel else ("safety_fault",),
+    )
+    try:
+        await _publish_operator_log_entry(context.broker, entry)
+    except Exception as exc:
+        logger.error(
+            "Safety fault operator-log publication failed: exception=%s",
+            type(exc).__name__,
+        )
+
+    try:
+        await _dispatch_alarm_notification(
+            context.event_bus,
+            context.alarm_dispatch_tasks,
+            alarm_id=f"safety_fault_{source}" if source else "safety_fault",
+            level="CRITICAL",
+            message=message,
+            experiment_id=context.experiment_manager.active_experiment_id,
+            telegram_bot=context.telegram_bot,
+            channel=channel,
+            value=value,
+        )
+    except Exception as exc:
+        logger.error(
+            "Safety fault notification dispatch failed: exception=%s",
+            type(exc).__name__,
+        )
+
+
+@dataclass(slots=True)
+class _InterlockHandlerContext:
+    safety_manager: Any
+    alarm_dispatch_tasks: set[asyncio.Task[Any]]
+    dead_channel_alarm_sent: set[str]
+    event_bus: Any | None = None
+    experiment_manager: Any | None = None
+
+
+async def _interlock_noop() -> None:
+    return None
+
+
+async def _interlock_trip_handler(
+    condition: Any,
+    reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> None:
+    """Route an interlock trip to SafetyManager, failing closed on errors."""
+    try:
+        await context.safety_manager.on_interlock_trip(
+            interlock_name=condition.name,
+            channel=reading.channel,
+            value=float(reading.value) if reading.value is not None else 0.0,
+            action=condition.action,
+        )
+    except Exception as exc:
+        logger.critical(
+            "Interlock trip handler failed; action=%s exception=%s; escalating to fault",
+            _bounded_action_label(condition.action),
+            type(exc).__name__,
+        )
+        try:
+            await context.safety_manager.latch_fault(
+                reason=f"interlock_trip_handler_failed:{type(exc).__name__}",
+                source="interlock",
+                channel=reading.channel,
+                value=float(reading.value) if reading.value is not None else 0.0,
+            )
+        except Exception as exc2:
+            logger.critical(
+                "Interlock fault escalation failed: exception=%s; instrument state is unknown",
+                type(exc2).__name__,
+            )
+
+
+async def _interlock_dead_channel_handler(
+    condition: Any,
+    reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> bool:
+    """Route a persistently unusable protected channel, preserving retry policy."""
+    try:
+        escalated = await context.safety_manager.on_interlock_dead_channel(
+            condition.name,
+            reading.channel,
+            value=float(reading.value) if reading.value is not None else float("nan"),
+        )
+    except Exception as exc:
+        logger.critical(
+            "Interlock dead-channel handler failed: exception=%s; escalating to fault",
+            type(exc).__name__,
+        )
+        try:
+            await context.safety_manager.latch_fault(
+                reason=f"interlock_dead_channel_handler_failed:{type(exc).__name__}",
+                source="interlock",
+                channel=reading.channel,
+            )
+            return True
+        except Exception as exc2:
+            logger.critical(
+                "Interlock dead-channel escalation failed: exception=%s",
+                type(exc2).__name__,
+            )
+            return False
+
+    key = f"{condition.name}:{reading.channel}"
+    if _should_dispatch_dead_channel_alarm(key, escalated, context.dead_channel_alarm_sent):
+        try:
+            await _dispatch_alarm_notification(
+                context.event_bus,
+                context.alarm_dispatch_tasks,
+                alarm_id=f"dead_channel_{reading.channel}",
+                level="WARNING",
+                message=(
+                    f"Интерлок-канал {reading.channel} ('{condition.name}') "
+                    "устойчиво непригоден, источник неактивен — fault не "
+                    "латчится, но требуется внимание оператора."
+                ),
+                experiment_id=context.experiment_manager.active_experiment_id,
+                channel=reading.channel,
+                value=float(reading.value) if reading.value is not None else float("nan"),
+            )
+        except Exception as exc:
+            logger.error(
+                "Dead-channel notification dispatch failed: exception=%s",
+                type(exc).__name__,
+            )
+    return escalated
+
+
+async def _multiline_burst_auto_stop(
+    driver_name: str,
+    delay_s: float,
+    *,
+    drivers_by_name: dict[str, Any],
+    experiments_root: Path,
+    auto_stop_tasks: dict[str, asyncio.Task[None]],
+) -> None:
+    """Stop a timed MultiLine burst and remove its task bookkeeping entry."""
+    try:
+        await asyncio.sleep(delay_s)
+        driver = drivers_by_name.get(driver_name)
+        if driver is None:
+            return
+        try:
+            path = await driver.burst_stop(experiments_root=experiments_root)
+            logger.info(
+                "MultiLine '%s' burst auto-stopped after %.1fs → %s",
+                driver_name,
+                delay_s,
+                path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "MultiLine auto-stop failed: driver=%s exception=%s",
+                _bounded_action_label(driver_name),
+                type(exc).__name__,
+            )
+    finally:
+        auto_stop_tasks.pop(driver_name, None)
+
+
+def _request_shutdown(shutdown_event: asyncio.Event, *_signal_args: Any) -> None:
+    logger.info("Получен сигнал завершения")
+    shutdown_event.set()
+
+
+_EXPERIMENT_MUTATION_ACTIONS = frozenset(
+    {
+        "set_app_mode",
+        "experiment_start",
+        "experiment_create",
+        "experiment_update",
+        "experiment_finalize",
+        "experiment_stop",
+        "experiment_abort",
+        "experiment_attach_run_record",
+        "experiment_create_retroactive",
+        "experiment_generate_report",
+        "experiment_advance_phase",
+    }
+)
+_EXPERIMENT_READ_ACTIONS = frozenset(
+    {
+        "get_app_mode",
+        "experiment_templates",
+        "experiment_archive_list",
+        "experiment_list_archive",
+        "experiment_get_active",
+        "experiment_get_archive_item",
+        "experiment_phase_status",
+    }
+)
+_MAX_PENDING_EXPERIMENT_READS = 4
+_MAX_PENDING_OPERATOR_LOG_ENTRIES = 4
+_MAX_PENDING_ALARM_ACK_ENTRIES = 4
+_OPERATOR_LOG_RECONCILE_BACKOFF_BASE_S = 0.05
+_OPERATOR_LOG_RECONCILE_BACKOFF_MAX_S = 2.0
+_ALARM_ACK_RECONCILE_BACKOFF_BASE_S = 0.05
+_ALARM_ACK_RECONCILE_BACKOFF_MAX_S = 2.0
+_MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS = 4096
+_MUTATION_PROTOCOL_MAJOR = MUTATION_PROTOCOL_MAJOR
+_MUTATION_CAPABILITY = ENGINE_MUTATION_CAPABILITY
+_MUTATION_RECEIPT_SCHEMA = MUTATION_RECEIPT_SCHEMA
+_MUTATION_ENVELOPE_KEYS = MUTATION_ENVELOPE_KEYS
+
+
+@dataclass(slots=True)
+class EngineCommandContext:
+    safety_manager: Any
+    event_logger: Any
+    sink_registry: Any
+    interlock_engine: Any
+    leak_rate_estimator: Any
+    leak_cfg: dict[str, Any]
+    alarm_v2_state_mgr: Any
+    alarm_ring: Any
+    broker: Any
+    experiment_manager: Any
+    calibration_acquisition: Any
+    event_bus: Any
+    cooldown_alarm: Any
+    vacuum_guard: Any
+    alarm_dispatch_tasks: set[asyncio.Task[Any]]
+    calibration_store: Any
+    writer: Any
+    drivers_by_name: dict[str, Any]
+    sensor_diag: Any
+    vacuum_trend: Any
+    alarm_v2_state_tracker: Any
+    multiline_burst_auto_stop_meta: dict[str, dict[str, Any]]
+    multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]]
+    shutdown_event: asyncio.Event | None = None
+    engine_instance_id: str = ""
+    shutdown_capability: str = ""
+    engine_ready_nonce: str = ""
+    engine_ready_channel_fd: int | None = None
+    engine_ready_pid: int = 0
+    engine_ready_advertised: bool = False
+    escalation_service: Any = None
+    cooldown_service: Any = None
+    zmq_publisher: ZMQPublisher | None = None
+    recording_lifecycle_feed: RecordingLifecycleFeed | None = None
+    annunciation_registry: AnnunciationRegistry | None = None
+    experiment_command_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    experiment_command_tasks: set[asyncio.Task[dict[str, Any]]] = field(default_factory=set)
+    experiment_read_tasks: set[asyncio.Task[dict[str, Any]]] = field(default_factory=set)
+    experiment_status_task: asyncio.Task[dict[str, Any]] | None = None
+    experiment_commands_accepting: bool = True
+    mutation_capability_token: str | None = None
+    operator_log_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    operator_log_reconciliation_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    operator_log_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+    alarm_ack_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    alarm_ack_reconciliation_tasks: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = field(default_factory=dict)
+    alarm_ack_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+    alarm_ack_activation_owners: dict[tuple[str, str], asyncio.Future[None]] = field(default_factory=dict)
+    shutdown_request_id: str | None = None
+    shutdown_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    shutdown_receipt: dict[str, Any] | None = None
+
+
+def _engine_ready_receipt(context: EngineCommandContext) -> dict[str, Any] | None:
+    nonce = context.engine_ready_nonce
+    instance_id = context.engine_instance_id
+    pid = context.engine_ready_pid
+    if (
+        not context.engine_ready_advertised
+        or type(nonce) is not str
+        or len(nonce) != 64
+        or any(char not in "0123456789abcdef" for char in nonce)
+        or type(instance_id) is not str
+        or len(instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in instance_id)
+        or type(pid) is not int
+        or pid <= 0
+    ):
+        return None
+    return {
+        "schema": _ENGINE_READY_SCHEMA,
+        "nonce": nonce,
+        "engine_instance_id": instance_id,
+        "mode": "live",
+        "pid": pid,
+        "pub_addr": DEFAULT_PUB_ADDR,
+        "cmd_addr": DEFAULT_CMD_ADDR,
+        "safe_cmd_addr": DEFAULT_SAFE_CMD_ADDR,
+    }
+
+
+def _engine_ready_response(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    """Answer only one exact launcher-owned startup challenge."""
+
+    if type(cmd) is not dict or cmd.get("cmd") != "engine_ready":
+        return {"ok": False, "error_code": "engine_ready_invalid"}
+    receipt = _engine_ready_receipt(context)
+    if receipt is None:
+        return {"ok": False, "error_code": "engine_ready_unavailable"}
+    expected_keys = {"cmd", "nonce", "engine_instance_id", "pid", "pub_addr", "cmd_addr", "safe_cmd_addr"}
+    if set(cmd) != expected_keys:
+        return {"ok": False, "error_code": "engine_ready_invalid"}
+    expected_values = {
+        "nonce": receipt["nonce"],
+        "engine_instance_id": receipt["engine_instance_id"],
+        "pid": receipt["pid"],
+        "pub_addr": receipt["pub_addr"],
+        "cmd_addr": receipt["cmd_addr"],
+        "safe_cmd_addr": receipt["safe_cmd_addr"],
+    }
+    for key, expected in expected_values.items():
+        value = cmd.get(key)
+        if type(value) is not type(expected) or value != expected:
+            return {"ok": False, "error_code": "engine_ready_mismatch"}
+    return {"ok": True, **receipt}
+
+
+def _safe_engine_command_is_admitted(
+    cmd: dict[str, Any],
+    *,
+    context: EngineCommandContext,
+) -> bool:
+    """Admit only one exact readiness proof or one exact safe direction."""
+
+    if type(cmd) is not dict:
+        return False
+    if cmd.get("cmd") == "engine_ready":
+        return _engine_ready_response(cmd, context).get("ok") is True
+    return is_exact_safe_direction_envelope(cmd)
+
+
+def _emit_engine_ready_receipt(context: EngineCommandContext) -> None:
+    """Emit one machine-only receipt and permanently close its private pipe."""
+
+    if context.engine_ready_advertised:
+        raise RuntimeError("engine readiness was already advertised")
+    descriptor = context.engine_ready_channel_fd
+    if type(descriptor) is not int or descriptor <= 2:
+        raise RuntimeError("engine readiness channel is unavailable")
+    try:
+        # Build with a temporary flag so validation and serialization use the
+        # same exact receipt that the REP challenge will expose after
+        # publication.
+        context.engine_ready_advertised = True
+        receipt = _engine_ready_receipt(context)
+        context.engine_ready_advertised = False
+        if receipt is None:
+            raise RuntimeError("engine readiness authority is unavailable")
+        payload = json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        wire = _ENGINE_READY_WIRE_PREFIX + payload + b"\n"
+        if len(wire) > 1024:
+            raise RuntimeError("engine readiness receipt exceeds wire bound")
+        offset = 0
+        while offset < len(wire):
+            written = os.write(descriptor, wire[offset:])
+            if written <= 0:
+                raise OSError("engine readiness pipe write made no progress")
+            offset += written
+    finally:
+        context.engine_ready_channel_fd = None
+        os.close(descriptor)
+    context.engine_ready_advertised = True
+
+
+def _is_mutating_command(action: object) -> bool:
+    return is_mutation(action)
+
+
+def _valid_mutation_capability_token(token: object) -> bool:
+    return valid_capability_token(token)
+
+
+def _mutation_protocol_failure(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any] | None:
+    if not requires_compatibility(cmd.get("cmd")):
+        return None
+    token = context.mutation_capability_token
+    major = cmd.get("protocol_major")
+    capability = cmd.get("mutation_capability")
+    presented_token = cmd.get("capability_token")
+    compatible = (
+        _valid_mutation_capability_token(token)
+        and type(major) is int
+        and major == _MUTATION_PROTOCOL_MAJOR
+        and capability == _MUTATION_CAPABILITY
+        and type(presented_token) is str
+        and secrets.compare_digest(presented_token, token)
+    )
+    if compatible:
+        return None
+    return {
+        "ok": False,
+        "error_code": "mutation_protocol_incompatible",
+        "error": "mutating command refused; perform mutation_capabilities discovery and retry explicitly",
+        "delivery_state": "dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": True,
+        "compatibility_receipt": {
+            "schema": _MUTATION_RECEIPT_SCHEMA,
+            "accepted": False,
+            "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "required_capability": _MUTATION_CAPABILITY,
+        },
+    }
+
+
+def _operator_log_command_admission(cmd: dict[str, Any]) -> tuple[Any, str]:
+    """Validate one untrusted command and fingerprint the persisted tuple."""
+
+    keys = set(cmd)
+    if not _OPERATOR_LOG_COMMAND_REQUIRED_KEYS.issubset(keys) or not keys.issubset(_OPERATOR_LOG_COMMAND_ALLOWED_KEYS):
+        raise RuntimeError("operator-log command schema is invalid")
+    if cmd.get("cmd") != "log_entry":
+        raise RuntimeError("operator-log command action is invalid")
+    if "tags" in cmd and (type(cmd["tags"]) is not list or any(type(tag) is not str for tag in cmd["tags"])):
+        raise RuntimeError("operator-log tags must be an exact string list")
+    if "experiment_id" in cmd:
+        if "experiment_unbound" in cmd:
+            raise RuntimeError("operator-log experiment binding conflicts")
+        experiment_id = cmd["experiment_id"]
+    else:
+        if cmd.get("experiment_unbound") is not True:
+            raise RuntimeError("operator-log experiment binding is ambiguous")
+        experiment_id = None
+    admission = SQLiteWriter.validate_operator_log_publication_admission(
+        request_id=cmd["request_id"],
+        message=cmd["message"],
+        author=cmd["author"],
+        source=cmd["source"],
+        experiment_id=experiment_id,
+        tags=cmd.get("tags"),
+    )
+    if admission.source not in _OPERATOR_LOG_UNTRUSTED_SOURCES:
+        raise RuntimeError("operator-log source is not an untrusted ingress role")
+    if admission.author.casefold() in _OPERATOR_LOG_RESERVED_ACTORS:
+        raise RuntimeError("operator-log author impersonates a reserved actor")
+    if any(tag.casefold() in _OPERATOR_LOG_RESERVED_TAGS for tag in admission.tags):
+        raise RuntimeError("operator-log tags impersonate an internal event")
+    semantic = {
+        "schema": "operator_log_request_v1",
+        "experiment_id": admission.experiment_id,
+        "author": admission.author,
+        "source": admission.source,
+        "message": admission.message,
+        "tags": list(admission.tags),
+    }
+    canonical = json.dumps(
+        semantic,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return admission, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _operator_log_entry_matches_admission(entry: object, admission: Any) -> bool:
+    return (
+        type(entry) is OperatorLogEntry
+        and entry.experiment_id == admission.experiment_id
+        and entry.author == admission.author
+        and entry.source == admission.source
+        and entry.message == admission.message
+        and entry.tags == admission.tags
+    )
+
+
+def _operator_log_success(entry: OperatorLogEntry, request_id: str) -> dict[str, Any]:
+    payload = entry.to_payload()
+    receipt = {
+        "schema": _OPERATOR_LOG_COMMIT_SCHEMA,
+        "request_id": request_id,
+        "entry_id": entry.id,
+        "experiment_id": entry.experiment_id,
+        "committed": True,
+    }
+    event_copy, receipt_copy = SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event={"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": payload},
+        receipt=receipt,
+    )
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "entry": event_copy["entry"],
+        "commit_receipt": receipt_copy,
+    }
+
+
+def _operator_log_committed_pending(entry: OperatorLogEntry, request_id: str) -> dict[str, Any]:
+    success = _operator_log_success(entry, request_id)
+    return {
+        "ok": False,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "pending",
+        "error_code": "committed_reconciliation_failed",
+        "error": "operator log committed, but required publication remains pending",
+        "entry": success["entry"],
+        "commit_receipt": success["commit_receipt"],
+    }
+
+
+def _strict_operator_log_success(result: object, request_id: str) -> dict[str, Any] | None:
+    """Detach only one exact, published, fully bound success receipt."""
+
+    if type(result) is not dict or set(result) != _OPERATOR_LOG_SUCCESS_KEYS:
+        return None
+    if (
+        result.get("ok") is not True
+        or result.get("committed") is not True
+        or result.get("retry_safe") is not False
+        or result.get("publication_state") != "published"
+    ):
+        return None
+    entry = result.get("entry")
+    receipt = result.get("commit_receipt")
+    try:
+        event_copy, receipt_copy = SQLiteWriter.validate_operator_log_publication(
+            request_id=request_id,
+            event={"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": entry},
+            receipt=receipt,
+        )
+    except RuntimeError:
+        return None
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "entry": event_copy["entry"],
+        "commit_receipt": receipt_copy,
+    }
+
+
+async def _await_retained_operator_log(operation: Awaitable[Any], *, name: str) -> Any:
+    """Retain one persistence/publication owner through caller cancellation.
+
+    Delegates to the canonical ``shutdown_settlement.await_executor_owner``: a
+    terminal operation failure outranks caller cancellation so a caller cannot
+    turn a failed persistence/publication mutation into an apparently harmless
+    cancel. See ``cryodaq.core.shutdown_settlement`` and
+    ``cryodaq.core.housekeeping`` for the sibling owners of this same
+    settlement primitive.
+    """
+
+    task = asyncio.create_task(operation, name=name)
+    return await await_executor_owner(task)
+
+
+async def _settle_operator_log_publication(
+    *,
+    context: EngineCommandContext,
+    entry: OperatorLogEntry,
+    request_id: str,
+    request_fingerprint: str,
+    publication: object | None = None,
+) -> None:
+    payload = entry.to_payload()
+    receipt = {
+        "schema": _OPERATOR_LOG_COMMIT_SCHEMA,
+        "request_id": request_id,
+        "entry_id": entry.id,
+        "experiment_id": entry.experiment_id,
+        "committed": True,
+    }
+    event = {"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": payload}
+    if publication is None:
+        publication = await _await_retained_operator_log(
+            context.writer.prepare_operator_log_publication_outbox(
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+                event=event,
+                receipt=receipt,
+            ),
+            name=f"operator_log_intent_reconcile_{request_id[:8]}",
+        )
+    state = _validated_operator_log_publication_record(
+        publication,
+        request_id=request_id,
+        request_fingerprint=request_fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    if state == "published":
+        return
+    if state != "intent":
+        raise RuntimeError("operator-log publication intent state is invalid")
+    await _await_retained_operator_log(
+        _publish_operator_log_publication(
+            context.writer,
+            context.broker,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+            event=event,
+            receipt=receipt,
+        ),
+        name=f"operator_log_required_publish_{request_id[:8]}",
+    )
+
+
+def _operator_log_publication_identity(
+    entry: OperatorLogEntry,
+    request_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    success = _operator_log_success(entry, request_id)
+    event = {"schema": _OPERATOR_LOG_COMMIT_SCHEMA, "entry": success["entry"]}
+    receipt = success["commit_receipt"]
+    return SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event=event,
+        receipt=receipt,
+    )
+
+
+def _validated_operator_log_publication_record(
+    publication: object,
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    event: dict[str, Any],
+    receipt: dict[str, Any],
+) -> str:
+    if type(publication) is not OperatorLogPublicationOutboxRecord:
+        raise RuntimeError("operator-log reconciliation record type is invalid")
+    if (
+        publication.request_id != request_id
+        or publication.request_fingerprint != request_fingerprint
+        or publication.event != event
+        or publication.receipt != receipt
+        or publication.state not in {"intent", "published"}
+    ):
+        raise RuntimeError("operator-log reconciliation authority changed")
+    event_copy, receipt_copy = SQLiteWriter.validate_operator_log_publication(
+        request_id=request_id,
+        event=publication.event,
+        receipt=publication.receipt,
+    )
+    if event_copy != event or receipt_copy != receipt:
+        raise RuntimeError("operator-log reconciliation payload changed")
+    return publication.state
+
+
+async def _run_operator_log_publication_reconciliation(
+    context: EngineCommandContext,
+    entry: OperatorLogEntry,
+    request_id: str,
+    request_fingerprint: str,
+) -> dict[str, Any]:
+    event, receipt = _operator_log_publication_identity(entry, request_id)
+    delay = _OPERATOR_LOG_RECONCILE_BACKOFF_BASE_S
+    while context.experiment_commands_accepting:
+        await asyncio.sleep(delay)
+        if not context.experiment_commands_accepting:
+            break
+        try:
+            publication = await _await_retained_operator_log(
+                context.writer.prepare_operator_log_publication_outbox(
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    event=event,
+                    receipt=receipt,
+                ),
+                name=f"operator_log_background_prepare_{request_id[:8]}",
+            )
+            state = _validated_operator_log_publication_record(
+                publication,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+                event=event,
+                receipt=receipt,
+            )
+            if state == "intent":
+                await _await_retained_operator_log(
+                    _publish_operator_log_publication(
+                        context.writer,
+                        context.broker,
+                        request_id=request_id,
+                        request_fingerprint=request_fingerprint,
+                        event=event,
+                        receipt=receipt,
+                    ),
+                    name=f"operator_log_background_publish_{request_id[:8]}",
+                )
+                publication = await _await_retained_operator_log(
+                    context.writer.prepare_operator_log_publication_outbox(
+                        request_id=request_id,
+                        request_fingerprint=request_fingerprint,
+                        event=event,
+                        receipt=receipt,
+                    ),
+                    name=f"operator_log_background_verify_{request_id[:8]}",
+                )
+                state = _validated_operator_log_publication_record(
+                    publication,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    event=event,
+                    receipt=receipt,
+                )
+            if state != "published":
+                raise RuntimeError("operator-log background publication is incomplete")
+            result = _operator_log_success(entry, request_id)
+            if _strict_operator_log_success(result, request_id) is None:
+                raise RuntimeError("operator-log background success receipt is invalid")
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Operator-log background publication retry failed: request=%s exception=%s",
+                request_id,
+                type(exc).__name__,
+            )
+            delay = min(delay * 2.0, _OPERATOR_LOG_RECONCILE_BACKOFF_MAX_S)
+    return _operator_log_committed_pending(entry, request_id)
+
+
+def _remember_operator_log_receipt(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    result: object,
+) -> None:
+    validated = _strict_operator_log_success(result, request_id)
+    if validated is None:
+        return
+    context.operator_log_receipts[request_id] = (fingerprint, copy.deepcopy(validated))
+    while len(context.operator_log_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
+        context.operator_log_receipts.pop(next(iter(context.operator_log_receipts)))
+
+
+def _owned_operator_log_reconciliation_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.operator_log_reconciliation_tasks.get(request_id)
+    owns_mapping = current is not None and current[0] == fingerprint and current[1] is task
+    if owns_mapping:
+        del context.operator_log_reconciliation_tasks[request_id]
+    if task.cancelled():
+        logger.critical("Operator-log reconciliation owner was cancelled: %s", request_id)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Operator-log reconciliation owner failed: request=%s exception=%s",
+            request_id,
+            type(exception).__name__,
+        )
+        return
+    if owns_mapping:
+        _remember_operator_log_receipt(context, request_id, fingerprint, task.result())
+
+
+def _ensure_operator_log_publication_reconciliation(
+    context: EngineCommandContext,
+    entry: OperatorLogEntry,
+    request_id: str,
+    request_fingerprint: str,
+) -> asyncio.Task[dict[str, Any]] | None:
+    _operator_log_publication_identity(entry, request_id)
+    current = context.operator_log_reconciliation_tasks.get(request_id)
+    if current is not None:
+        if current[0] != request_fingerprint:
+            raise RuntimeError("operator-log reconciliation identity conflict")
+        return current[1]
+    if not context.experiment_commands_accepting:
+        return None
+    active_ids = set(context.operator_log_tasks) | set(context.operator_log_reconciliation_tasks)
+    if request_id not in active_ids and len(active_ids) >= _MAX_PENDING_OPERATOR_LOG_ENTRIES:
+        raise RuntimeError("operator-log reconciliation lane is full")
+    task = asyncio.create_task(
+        _run_operator_log_publication_reconciliation(
+            context,
+            entry,
+            request_id,
+            request_fingerprint,
+        ),
+        name=f"operator_log_reconcile_{request_id[:8]}",
+    )
+    context.operator_log_reconciliation_tasks[request_id] = (request_fingerprint, task)
+    task.add_done_callback(
+        functools.partial(
+            _owned_operator_log_reconciliation_done,
+            context,
+            request_id,
+            request_fingerprint,
+        )
+    )
+    return task
+
+
+async def _execute_owned_operator_log_entry(
+    *,
+    request_id: str,
+    request_fingerprint: str,
+    admission: Any,
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    try:
+        find_request = getattr(context.writer, "find_operator_log_request", None)
+        if not callable(find_request):
+            raise OperatorLogIdempotencyUnavailableError("durable operator-log lookup is unavailable")
+        retained = await _await_retained_operator_log(
+            find_request(
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            ),
+            name=f"operator_log_lookup_{request_id[:8]}",
+        )
+        if retained is not None:
+            if not _operator_log_entry_matches_admission(retained.entry, admission):
+                raise OperatorLogIdempotencyConflictError("retained operator-log payload does not match request")
+            try:
+                await _settle_operator_log_publication(
+                    context=context,
+                    entry=retained.entry,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - committed intent stays pending
+                logger.error(
+                    "Committed operator log reconciliation failed: request=%s exception=%s",
+                    request_id,
+                    type(exc).__name__,
+                )
+                _ensure_operator_log_publication_reconciliation(
+                    context,
+                    retained.entry,
+                    request_id,
+                    request_fingerprint,
+                )
+                return _operator_log_committed_pending(retained.entry, request_id)
+            return _operator_log_success(retained.entry, request_id)
+
+        atomic_append = getattr(context.writer, "append_operator_log_with_publication_intent", None)
+        if not callable(atomic_append):
+            raise OperatorLogIdempotencyUnavailableError(
+                "atomic operator-log append and publication intent API is unavailable"
+            )
+
+        async def append_and_settle() -> dict[str, Any]:
+            atomic_result = await _await_retained_operator_log(
+                atomic_append(
+                    message=admission.message,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    author=admission.author,
+                    source=admission.source,
+                    experiment_id=admission.experiment_id,
+                    tags=admission.tags,
+                ),
+                name=f"operator_log_atomic_append_{request_id[:8]}",
+            )
+            if type(atomic_result) is not tuple or len(atomic_result) != 2:
+                raise OperatorLogIdempotencyUnavailableError("atomic operator-log result is malformed")
+            commit, publication = atomic_result
+            entry = getattr(commit, "entry", None)
+            if not _operator_log_entry_matches_admission(entry, admission):
+                raise OperatorLogIdempotencyUnavailableError("atomic operator-log result lost payload binding")
+            try:
+                await _settle_operator_log_publication(
+                    context=context,
+                    entry=entry,
+                    request_id=request_id,
+                    request_fingerprint=request_fingerprint,
+                    publication=publication,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - atomic commit is already durable
+                logger.error(
+                    "Committed operator log publication failed: request=%s exception=%s",
+                    request_id,
+                    type(exc).__name__,
+                )
+                _ensure_operator_log_publication_reconciliation(
+                    context,
+                    entry,
+                    request_id,
+                    request_fingerprint,
+                )
+                return _operator_log_committed_pending(entry, request_id)
+            return _operator_log_success(entry, request_id)
+
+        expected_experiment_id = admission.experiment_id
+        if expected_experiment_id is None:
+            return await append_and_settle()
+        try:
+            reservation = context.experiment_manager.experiment_cas(expected_experiment_id)
+            reservation.__enter__()
+        except RuntimeError:
+            if context.experiment_manager.active_experiment_id != expected_experiment_id:
+                return {
+                    "ok": False,
+                    "committed": False,
+                    "error_code": "stale_experiment_command",
+                    "error": "Experiment identity changed before the operator log could commit.",
+                    "retry_safe": False,
+                    "request_id": request_id,
+                }
+            return {
+                "ok": False,
+                "committed": False,
+                "error_code": "operator_log_busy",
+                "error": "another durable experiment mutation is still authoritative",
+                "retry_safe": True,
+                "request_id": request_id,
+            }
+        try:
+            context.experiment_manager.assert_experiment_cas(expected_experiment_id)
+            settled = await append_and_settle()
+        except BaseException:
+            reservation.__exit__(*sys.exc_info())
+            raise
+        reservation.__exit__(None, None, None)
+        return settled
+    except OperatorLogIdempotencyConflictError:
+        return {
+            "ok": False,
+            "committed": False,
+            "error_code": "idempotency_key_conflict",
+            "error": "request_id was already committed with different content",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except OperatorLogCommitOutcomeUnknownError:
+        return {
+            "ok": False,
+            "error_code": "operator_log_commit_outcome_unknown",
+            "error": "operator log commit outcome is unknown; reconcile this exact request key",
+            "commit_state": "unknown",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except OperatorLogIdempotencyUnavailableError as exc:
+        logger.error(
+            "Operator-log idempotency registry unavailable: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
+        return {
+            "ok": False,
+            "error_code": "operator_log_idempotency_unavailable",
+            "error": "operator log idempotency state is unavailable",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except Exception as exc:  # noqa: BLE001 - atomic commit outcome is not proven
+        logger.error(
+            "Operator log persistence failed: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
+        return {
+            "ok": False,
+            "error_code": "operator_log_persistence_failed",
+            "error": "operator log persistence outcome is unknown; reconcile this exact request key",
+            "commit_state": "unknown",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+
+
+def _owned_operator_log_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.operator_log_tasks.get(request_id)
+    owns_mapping = current is not None and current[0] == fingerprint and current[1] is task
+    if owns_mapping:
+        del context.operator_log_tasks[request_id]
+    if task.cancelled():
+        logger.critical("Operator log owner was cancelled: %s", request_id)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Operator log owner failed after submission: request=%s exception=%s",
+            request_id,
+            type(exception).__name__,
+        )
+        return
+    if not owns_mapping:
+        return
+    _remember_operator_log_receipt(context, request_id, fingerprint, task.result())
+
+
+async def _submit_operator_log_entry(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    if not context.experiment_commands_accepting:
+        return {
+            "ok": False,
+            "committed": False,
+            "error_code": "engine_shutting_down",
+            "error": "operator log submissions are frozen for shutdown",
+            "retry_safe": True,
+        }
+    request_id = cmd.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+    ):
+        return {
+            "ok": False,
+            "committed": False,
+            "error_code": "operator_log_request_id_invalid",
+            "error": "request_id must be exactly 32 lowercase hexadecimal characters",
+            "retry_safe": True,
+        }
+    try:
+        admission, fingerprint = _operator_log_command_admission(cmd)
+    except RuntimeError:
+        return {
+            "ok": False,
+            "committed": False,
+            "error_code": "operator_log_admission_invalid",
+            "error": "Operator-log command or publication fields are invalid.",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+    completed = context.operator_log_receipts.get(request_id)
+    if completed is not None:
+        if completed[0] != fingerprint:
+            return {
+                "ok": False,
+                "committed": False,
+                "error_code": "idempotency_key_conflict",
+                "error": "request_id was already committed with different content",
+                "retry_safe": False,
+            }
+        return copy.deepcopy(completed[1])
+    pending = context.operator_log_tasks.get(request_id)
+    if pending is not None:
+        if pending[0] != fingerprint:
+            return {
+                "ok": False,
+                "committed": False,
+                "error_code": "idempotency_key_conflict",
+                "error": "request_id is already in flight with different content",
+                "retry_safe": False,
+            }
+        return copy.deepcopy(await asyncio.shield(pending[1]))
+    reconciliation = context.operator_log_reconciliation_tasks.get(request_id)
+    if reconciliation is not None:
+        if reconciliation[0] != fingerprint:
+            return {
+                "ok": False,
+                "committed": False,
+                "error_code": "idempotency_key_conflict",
+                "error": "request_id is reconciling different committed content",
+                "retry_safe": False,
+            }
+        return copy.deepcopy(await asyncio.shield(reconciliation[1]))
+    active_request_ids = set(context.operator_log_tasks) | set(context.operator_log_reconciliation_tasks)
+    if len(active_request_ids) >= _MAX_PENDING_OPERATOR_LOG_ENTRIES:
+        return {
+            "ok": False,
+            "committed": False,
+            "error_code": "operator_log_busy",
+            "error": "the bounded operator log commit lane is full",
+            "retry_safe": True,
+        }
+    task = asyncio.create_task(
+        _execute_owned_operator_log_entry(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+            admission=admission,
+            context=context,
+        ),
+        name=f"operator_log_{request_id[:8]}",
+    )
+    context.operator_log_tasks[request_id] = (fingerprint, task)
+    task.add_done_callback(functools.partial(_owned_operator_log_done, context, request_id, fingerprint))
+    return copy.deepcopy(await asyncio.shield(task))
+
+
+def _validated_alarm_ack_outbox(
+    outbox: AlarmAckOutboxRecord,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate the exact durable/public ACK identity before any side effect."""
+
+    if type(outbox) is not AlarmAckOutboxRecord:
+        raise RuntimeError("alarm ACK outbox record type is invalid")
+    event = outbox.event
+    receipt = outbox.receipt
+    if type(event) is not dict or set(event) != _ALARM_ACK_EVENT_KEYS:
+        raise RuntimeError("alarm ACK durable event schema is invalid")
+    if type(receipt) is not dict or set(receipt) != _ALARM_ACK_COMMIT_KEYS:
+        raise RuntimeError("alarm ACK durable receipt schema is invalid")
+    acknowledged_at = event.get("acknowledged_at")
+    identity = {
+        "request_id": outbox.request_id,
+        "request_fingerprint": outbox.request_fingerprint,
+        "alarm_name": outbox.alarm_name,
+        "activation_id": outbox.activation_id,
+        "engine_instance_id": outbox.engine_instance_id,
+        "source_activation_id": outbox.source_activation_id,
+    }
+    if (
+        event.get("schema") != _ALARM_ACK_EVENT_SCHEMA
+        or receipt.get("schema") != _ALARM_ACK_COMMIT_SCHEMA
+        or any(type(value) is not str or not value for value in identity.values())
+        or any(event.get(key) != value for key, value in identity.items())
+        or any(receipt.get(key) != value for key, value in identity.items())
+        or type(acknowledged_at) is not float
+        or not math.isfinite(acknowledged_at)
+        or acknowledged_at <= 0.0
+        or receipt.get("acknowledged_at") != acknowledged_at
+        or type(event.get("operator")) is not str
+        or not event["operator"]
+        or type(event.get("reason")) is not str
+        or not event["reason"]
+        or receipt.get("committed") is not True
+    ):
+        raise RuntimeError("alarm ACK durable identity is invalid")
+    return dict(event), dict(receipt)
+
+
+def _alarm_ack_published_result(outbox: AlarmAckOutboxRecord) -> dict[str, Any]:
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "published":
+        raise RuntimeError("alarm ACK publication is not settled")
+    return {
+        "ok": True,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "published",
+        "event_emitted": True,
+        "alarm_name": event["alarm_name"],
+        "activation_id": event["activation_id"],
+        "engine_instance_id": event["engine_instance_id"],
+        "source_activation_id": event["source_activation_id"],
+        "request_id": event["request_id"],
+        "commit_receipt": receipt,
+    }
+
+
+def _alarm_ack_publication_pending(outbox: AlarmAckOutboxRecord) -> dict[str, Any]:
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK pending result is not durably committed")
+    return {
+        "ok": False,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "pending",
+        "event_emitted": False,
+        "error_code": "alarm_ack_publication_pending",
+        "error": "alarm acknowledgement is committed; publication settlement is pending",
+        "alarm_name": event["alarm_name"],
+        "activation_id": event["activation_id"],
+        "engine_instance_id": event["engine_instance_id"],
+        "source_activation_id": event["source_activation_id"],
+        "request_id": event["request_id"],
+        "commit_receipt": receipt,
+    }
+
+
+def _alarm_ack_aborted_result(outbox: AlarmAckOutboxRecord) -> dict[str, Any]:
+    """Return a terminal non-commit result without exposing intent receipts."""
+
+    event, _receipt = _validated_alarm_ack_outbox(outbox)
+    terminal_code = outbox.terminal_code
+    terminal_engine_instance_id = outbox.terminal_engine_instance_id
+    if (
+        outbox.state != "aborted"
+        or type(terminal_code) is not str
+        or terminal_code not in _ALARM_ACK_ABORT_TERMINAL_CODES
+        or type(terminal_engine_instance_id) is not str
+        or len(terminal_engine_instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in terminal_engine_instance_id)
+        or (
+            terminal_code == "activation_changed_before_ack_commit"
+            and terminal_engine_instance_id != outbox.engine_instance_id
+        )
+        or (
+            terminal_code == "engine_restart_before_ack_commit"
+            and terminal_engine_instance_id == outbox.engine_instance_id
+        )
+    ):
+        raise RuntimeError("alarm ACK terminal disposition is invalid")
+    return {
+        "ok": False,
+        "committed": False,
+        "retry_safe": False,
+        "publication_state": "aborted",
+        "event_emitted": False,
+        "error_code": "alarm_ack_aborted",
+        "error": "alarm acknowledgement was terminally aborted before durable commit",
+        "alarm_name": event["alarm_name"],
+        "activation_id": event["activation_id"],
+        "engine_instance_id": event["engine_instance_id"],
+        "source_activation_id": event["source_activation_id"],
+        "request_id": event["request_id"],
+        "request_fingerprint": event["request_fingerprint"],
+        "terminal_code": terminal_code,
+        "terminal_engine_instance_id": terminal_engine_instance_id,
+    }
+
+
+def _validate_alarm_ack_abort_disposition(
+    disposition: AlarmAckOutboxAbortDisposition,
+    *,
+    expected_request_id: str | None = None,
+    expected_fingerprint: str | None = None,
+    expected_activation_id: str | None = None,
+    expected_source_activation_id: str | None = None,
+    expected_prior_engine_instance_id: str | None = None,
+    expected_terminal_code: str,
+    expected_recovery_engine_instance_id: str,
+) -> None:
+    request_id = getattr(disposition, "request_id", None)
+    request_fingerprint = getattr(disposition, "request_fingerprint", None)
+    prior_engine_instance_id = getattr(disposition, "prior_engine_instance_id", None)
+    activation_id = getattr(disposition, "activation_id", None)
+    source_activation_id = getattr(disposition, "source_activation_id", None)
+    recovery_engine_instance_id = getattr(disposition, "recovery_engine_instance_id", None)
+    if (
+        type(disposition) is not AlarmAckOutboxAbortDisposition
+        or disposition.schema != "alarm_ack_abort_disposition_v1"
+        or disposition.state != "aborted"
+        or type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+        or type(request_fingerprint) is not str
+        or len(request_fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in request_fingerprint)
+        or type(prior_engine_instance_id) is not str
+        or len(prior_engine_instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in prior_engine_instance_id)
+        or type(activation_id) is not str
+        or not activation_id
+        or not activation_id.isprintable()
+        or not is_canonical_source_activation_id(source_activation_id)
+        or type(recovery_engine_instance_id) is not str
+        or len(recovery_engine_instance_id) != 32
+        or any(char not in "0123456789abcdef" for char in recovery_engine_instance_id)
+        or disposition.terminal_code != expected_terminal_code
+        or disposition.recovery_engine_instance_id != expected_recovery_engine_instance_id
+        or (
+            expected_terminal_code == "engine_restart_before_ack_commit"
+            and disposition.recovery_engine_instance_id == disposition.prior_engine_instance_id
+        )
+        or (
+            expected_terminal_code == "activation_changed_before_ack_commit"
+            and disposition.recovery_engine_instance_id != disposition.prior_engine_instance_id
+        )
+        or type(disposition.disposed_at) is not float
+        or not math.isfinite(disposition.disposed_at)
+        or disposition.disposed_at <= 0.0
+        or (expected_request_id is not None and disposition.request_id != expected_request_id)
+        or (expected_fingerprint is not None and disposition.request_fingerprint != expected_fingerprint)
+        or (expected_activation_id is not None and disposition.activation_id != expected_activation_id)
+        or (
+            expected_source_activation_id is not None
+            and disposition.source_activation_id != expected_source_activation_id
+        )
+        or (
+            expected_prior_engine_instance_id is not None
+            and disposition.prior_engine_instance_id != expected_prior_engine_instance_id
+        )
+    ):
+        raise RuntimeError("alarm ACK abort disposition is invalid")
+
+
+async def _abort_prepared_alarm_ack(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> dict[str, Any]:
+    """Durably terminalize one known PREPARED loser and re-read authority."""
+
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "prepared":
+        raise RuntimeError("alarm ACK abort requires a prepared intent")
+    disposition = await context.writer.abort_alarm_ack_outbox(
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+        engine_instance_id=outbox.engine_instance_id,
+        activation_id=outbox.activation_id,
+        source_activation_id=outbox.source_activation_id,
+        event=event,
+        receipt=receipt,
+    )
+    _validate_alarm_ack_abort_disposition(
+        disposition,
+        expected_request_id=outbox.request_id,
+        expected_fingerprint=outbox.request_fingerprint,
+        expected_activation_id=outbox.activation_id,
+        expected_source_activation_id=outbox.source_activation_id,
+        expected_prior_engine_instance_id=outbox.engine_instance_id,
+        expected_terminal_code="activation_changed_before_ack_commit",
+        expected_recovery_engine_instance_id=outbox.engine_instance_id,
+    )
+    find_outbox = getattr(context.writer, "find_alarm_ack_outbox", None)
+    if not callable(find_outbox):
+        raise RuntimeError("alarm ACK durable lookup is unavailable")
+    aborted = await find_outbox(
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+    )
+    if (
+        type(aborted) is not AlarmAckOutboxRecord
+        or aborted.request_id != outbox.request_id
+        or aborted.request_fingerprint != outbox.request_fingerprint
+        or aborted.alarm_name != outbox.alarm_name
+        or aborted.activation_id != outbox.activation_id
+        or aborted.engine_instance_id != outbox.engine_instance_id
+        or aborted.source_activation_id != outbox.source_activation_id
+        or aborted.operator_name != outbox.operator_name
+        or aborted.reason != outbox.reason
+        or aborted.event != outbox.event
+        or aborted.receipt != outbox.receipt
+    ):
+        raise RuntimeError("alarm ACK aborted authority changed immutable identity")
+    return _alarm_ack_aborted_result(aborted)
+
+
+async def _publish_committed_alarm_ack(
+    writer: SQLiteWriter,
+    broker: DataBroker,
+    outbox: AlarmAckOutboxRecord,
+) -> AlarmAckOutboxRecord:
+    """Settle one exact ACK publication, then CAS its durable state."""
+
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state == "published":
+        return outbox
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK cannot publish before durable commit")
+    publication_receipt = await broker.publish_required(
+        Reading(
+            timestamp=datetime.fromtimestamp(event["acknowledged_at"], UTC),
+            instrument_id="alarm_v2",
+            channel="alarm_v2/acknowledged",
+            value=event["acknowledged_at"],
+            unit="",
+            # Transport is explicitly at-least-once. These stable identities
+            # let every consumer collapse a late send plus an exact retry.
+            metadata=event,
+        ),
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+    )
+    if not broker.validates_required_publication(
+        publication_receipt,
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+    ):
+        raise RuntimeError("alarm ACK required publisher receipt is invalid")
+    published = await writer.publish_alarm_ack_outbox(
+        request_id=outbox.request_id,
+        request_fingerprint=outbox.request_fingerprint,
+        event=event,
+        receipt=receipt,
+    )
+    _validated_alarm_ack_outbox(published)
+    if published.state != "published":
+        raise RuntimeError("alarm ACK publication settlement is incomplete")
+    return published
+
+
+async def _reconcile_committed_alarm_ack_outbox(
+    writer: SQLiteWriter,
+    broker: DataBroker,
+) -> None:
+    """Replay every committed ACK before exposing command ingress."""
+
+    for outbox in await writer.committed_alarm_ack_outbox():
+        await _publish_committed_alarm_ack(writer, broker, outbox)
+
+
+def _remember_alarm_ack_receipt(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    result: dict[str, Any],
+) -> None:
+    """Retain only one exact terminal publication receipt under a hard cap."""
+
+    if not (
+        result.get("ok") is True
+        and result.get("committed") is True
+        and result.get("publication_state") == "published"
+        and result.get("event_emitted") is True
+    ):
+        return
+    context.alarm_ack_receipts[request_id] = (fingerprint, dict(result))
+    while len(context.alarm_ack_receipts) > _MAX_OPERATOR_LOG_IDEMPOTENCY_RECEIPTS:
+        context.alarm_ack_receipts.pop(next(iter(context.alarm_ack_receipts)))
+
+
+async def _run_alarm_ack_publication_reconciliation(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> dict[str, Any]:
+    """Retry one durable COMMITTED ACK independently of its REP/GUI waiter."""
+
+    _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK reconciliation requires a committed outbox")
+    delay = _ALARM_ACK_RECONCILE_BACKOFF_BASE_S
+    while context.experiment_commands_accepting:
+        await asyncio.sleep(delay)
+        if not context.experiment_commands_accepting:
+            break
+        try:
+            retained = await context.writer.find_alarm_ack_outbox(
+                request_id=outbox.request_id,
+                request_fingerprint=outbox.request_fingerprint,
+            )
+            if (
+                type(retained) is not AlarmAckOutboxRecord
+                or retained.request_id != outbox.request_id
+                or retained.request_fingerprint != outbox.request_fingerprint
+                or retained.alarm_name != outbox.alarm_name
+                or retained.activation_id != outbox.activation_id
+                or retained.engine_instance_id != outbox.engine_instance_id
+                or retained.source_activation_id != outbox.source_activation_id
+                or retained.operator_name != outbox.operator_name
+                or retained.reason != outbox.reason
+                or retained.event != outbox.event
+                or retained.receipt != outbox.receipt
+            ):
+                raise RuntimeError("alarm ACK reconciliation authority changed")
+            _validated_alarm_ack_outbox(retained)
+            if retained.state == "published":
+                return _alarm_ack_published_result(retained)
+            if retained.state != "committed":
+                raise RuntimeError("alarm ACK reconciliation state is invalid")
+            published = await _publish_committed_alarm_ack(
+                context.writer,
+                context.broker,
+                retained,
+            )
+            return _alarm_ack_published_result(published)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - durable intent remains authoritative
+            logger.warning(
+                "Alarm ACK background publication retry failed: request=%s exception=%s",
+                outbox.request_id,
+                type(exc).__name__,
+            )
+            delay = min(delay * 2.0, _ALARM_ACK_RECONCILE_BACKOFF_MAX_S)
+    return _alarm_ack_publication_pending(outbox)
+
+
+def _owned_alarm_ack_reconciliation_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.alarm_ack_reconciliation_tasks.get(request_id)
+    if current is not None and current[1] is task:
+        del context.alarm_ack_reconciliation_tasks[request_id]
+    if task.cancelled():
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Alarm ACK background reconciler failed: request=%s exception=%s",
+            request_id,
+            type(exception).__name__,
+        )
+        return
+    _remember_alarm_ack_receipt(context, request_id, fingerprint, task.result())
+
+
+def _ensure_alarm_ack_publication_reconciliation(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> asyncio.Task[dict[str, Any]] | None:
+    """Own one exact bounded same-process reconciler for a committed ACK."""
+
+    _validated_alarm_ack_outbox(outbox)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK reconciliation requires a committed outbox")
+    current = context.alarm_ack_reconciliation_tasks.get(outbox.request_id)
+    if current is not None:
+        if current[0] != outbox.request_fingerprint:
+            raise RuntimeError("alarm ACK reconciliation identity conflict")
+        return current[1]
+    if not context.experiment_commands_accepting:
+        return None
+    task = asyncio.create_task(
+        _run_alarm_ack_publication_reconciliation(context, outbox),
+        name=f"alarm_ack_reconcile_{outbox.request_id[:8]}",
+    )
+    context.alarm_ack_reconciliation_tasks[outbox.request_id] = (outbox.request_fingerprint, task)
+    task.add_done_callback(
+        functools.partial(
+            _owned_alarm_ack_reconciliation_done,
+            context,
+            outbox.request_id,
+            outbox.request_fingerprint,
+        )
+    )
+    return task
+
+
+async def _settle_alarm_ack_outbox_startup(
+    writer: SQLiteWriter,
+    broker: DataBroker,
+    engine_instance_id: str,
+) -> tuple[AlarmAckOutboxAbortDisposition, ...]:
+    """Abort every PREPARED intent, then replay COMMITTED before REP opens."""
+
+    dispositions = await writer.abort_prepared_alarm_ack_outbox(
+        recovery_engine_instance_id=engine_instance_id,
+    )
+    if type(dispositions) is not tuple:
+        raise RuntimeError("alarm ACK startup disposition inventory is invalid")
+    for disposition in dispositions:
+        _validate_alarm_ack_abort_disposition(
+            disposition,
+            expected_terminal_code="engine_restart_before_ack_commit",
+            expected_recovery_engine_instance_id=engine_instance_id,
+        )
+    await _reconcile_committed_alarm_ack_outbox(writer, broker)
+    return dispositions
+
+
+async def _claim_alarm_ack_activation(
+    context: EngineCommandContext,
+    *,
+    engine_instance_id: str,
+    activation_id: str,
+) -> tuple[tuple[str, str], asyncio.Future[None]]:
+    """Serialize durable commits for one exact alarm activation."""
+
+    key = (engine_instance_id, activation_id)
+    while True:
+        predecessor = context.alarm_ack_activation_owners.get(key)
+        if predecessor is None:
+            capability = asyncio.get_running_loop().create_future()
+            context.alarm_ack_activation_owners[key] = capability
+            return key, capability
+        await asyncio.shield(predecessor)
+
+
+def _release_alarm_ack_activation(
+    context: EngineCommandContext,
+    key: tuple[str, str],
+    capability: asyncio.Future[None],
+) -> None:
+    """Release only the exact activation-owner capability that was issued."""
+
+    if context.alarm_ack_activation_owners.get(key) is not capability:
+        raise RuntimeError("alarm ACK activation ownership changed")
+    del context.alarm_ack_activation_owners[key]
+    if capability.done():
+        raise RuntimeError("alarm ACK activation capability was already settled")
+    capability.set_result(None)
+
+
+def _apply_committed_alarm_ack_state(
+    context: EngineCommandContext,
+    outbox: AlarmAckOutboxRecord,
+) -> None:
+    """Apply one COMMITTED ACK to the matching live activation, never earlier."""
+
+    event, _receipt = _validated_alarm_ack_outbox(outbox)
+    if outbox.state not in {"committed", "published"}:
+        raise RuntimeError("alarm ACK live transition requires durable commit")
+    registry_engine_instance_id = getattr(context.annunciation_registry, "engine_instance_id", None)
+    context_engine_instance_id = context.engine_instance_id
+    if is_canonical_engine_instance_id(context_engine_instance_id):
+        live_engine_instance_id = context_engine_instance_id
+        if (
+            is_canonical_engine_instance_id(registry_engine_instance_id)
+            and registry_engine_instance_id != live_engine_instance_id
+        ):
+            raise RuntimeError("alarm ACK live incarnation authorities disagree")
+    elif is_canonical_engine_instance_id(registry_engine_instance_id):
+        live_engine_instance_id = registry_engine_instance_id
+    else:
+        raise RuntimeError("alarm ACK live incarnation authority is unavailable")
+    if outbox.engine_instance_id != live_engine_instance_id:
+        return
+
+    source_activation_id = int(outbox.source_activation_id)
+    active = context.alarm_v2_state_mgr.get_active()
+    current = active.get(outbox.alarm_name) if type(active) is dict else None
+    if current is None or getattr(current, "activation_id", None) != source_activation_id:
+        # A cleared/replaced activation must never transfer its durable ACK to
+        # the current alarm incarnation.
+        return
+    if context.alarm_v2_state_mgr.acknowledgement_matches(
+        outbox.alarm_name,
+        operator=outbox.operator_name,
+        reason=outbox.reason,
+        request_id=outbox.request_id,
+        expected_activation_id=source_activation_id,
+        acknowledged_at=event["acknowledged_at"],
+    ):
+        return
+    if getattr(current, "acknowledged", None) is not False:
+        raise RuntimeError("alarm ACK durable authority conflicts with live acknowledgement")
+    ack_event = context.alarm_v2_state_mgr.acknowledge(
+        outbox.alarm_name,
+        operator=outbox.operator_name,
+        reason=outbox.reason,
+        expected_activation_id=source_activation_id,
+        acknowledged_at=event["acknowledged_at"],
+        request_id=outbox.request_id,
+    )
+    if ack_event != {
+        "alarm_id": outbox.alarm_name,
+        "acknowledged_at": event["acknowledged_at"],
+        "operator": outbox.operator_name,
+        "reason": outbox.reason,
+        "request_id": outbox.request_id,
+    }:
+        raise RuntimeError("alarm ACK committed live transition is not exact")
+
+
+async def _execute_owned_alarm_ack(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+) -> dict[str, Any]:
+    alarm_name = cmd["alarm_name"]
+    activation_id = cmd["activation_id"]
+    engine_instance_id = cmd["engine_instance_id"]
+    operator = cmd["operator"]
+    reason = cmd["reason"]
+    target = None
+
+    try:
+        find_outbox = getattr(context.writer, "find_alarm_ack_outbox", None)
+        if not callable(find_outbox):
+            raise RuntimeError("alarm ACK durable lookup is unavailable")
+        outbox = await find_outbox(
+            request_id=request_id,
+            request_fingerprint=fingerprint,
+        )
+        if outbox is None:
+            if context.annunciation_registry is None:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            try:
+                context.annunciation_registry.sync(
+                    context.alarm_v2_state_mgr.get_active(),
+                    context.safety_manager.get_status(),
+                )
+            except AnnunciationProjectionUnavailable:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            target = context.annunciation_registry.resolve(engine_instance_id, activation_id)
+            if target is None or target.source != "alarm_v2" or target.source_key != alarm_name:
+                return {
+                    "ok": False,
+                    "error_code": "stale_or_unknown_activation",
+                    "error": "alarm activation is stale or unknown",
+                    "retry_safe": False,
+                    "request_id": request_id,
+                }
+            source_activation_id = str(target.source_activation_id)
+            acknowledged_at = time.time()
+            if type(acknowledged_at) is not float or not math.isfinite(acknowledged_at) or acknowledged_at <= 0.0:
+                raise RuntimeError("alarm ACK clock authority is invalid")
+            event = {
+                "schema": _ALARM_ACK_EVENT_SCHEMA,
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "alarm_name": alarm_name,
+                "activation_id": activation_id,
+                "engine_instance_id": engine_instance_id,
+                "source_activation_id": source_activation_id,
+                "acknowledged_at": acknowledged_at,
+                "operator": operator,
+                "reason": reason,
+            }
+            receipt = {
+                "schema": _ALARM_ACK_COMMIT_SCHEMA,
+                "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "alarm_name": alarm_name,
+                "activation_id": activation_id,
+                "engine_instance_id": engine_instance_id,
+                "source_activation_id": source_activation_id,
+                "acknowledged_at": acknowledged_at,
+                "committed": True,
+            }
+            outbox = await context.writer.prepare_alarm_ack_outbox(
+                request_id=request_id,
+                request_fingerprint=fingerprint,
+                alarm_name=alarm_name,
+                activation_id=activation_id,
+                engine_instance_id=engine_instance_id,
+                source_activation_id=source_activation_id,
+                operator_name=operator,
+                reason=reason,
+                event=event,
+                receipt=receipt,
+            )
+    except OperatorLogIdempotencyConflictError:
+        return {
+            "ok": False,
+            "error_code": "idempotency_key_conflict",
+            "error": "request_id was already committed with different content",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    except Exception as exc:
+        logger.error(
+            "Alarm ACK outbox intent failed: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
+        return {
+            "ok": False,
+            "error_code": "alarm_ack_persistence_failed",
+            "error": "alarm acknowledgement persistence failed",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+
+    event, receipt = _validated_alarm_ack_outbox(outbox)
+    if (
+        outbox.request_id != request_id
+        or outbox.request_fingerprint != fingerprint
+        or outbox.alarm_name != alarm_name
+        or outbox.activation_id != activation_id
+        or outbox.engine_instance_id != engine_instance_id
+        or outbox.operator_name != operator
+        or outbox.reason != reason
+    ):
+        return {
+            "ok": False,
+            "error_code": "idempotency_key_conflict",
+            "error": "request_id was already retained with different content",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    if outbox.state == "aborted":
+        return _alarm_ack_aborted_result(outbox)
+    if outbox.state == "published":
+        _apply_committed_alarm_ack_state(context, outbox)
+        return _alarm_ack_published_result(outbox)
+
+    if outbox.state == "prepared":
+        owner_key, owner_capability = await _claim_alarm_ack_activation(
+            context,
+            engine_instance_id=engine_instance_id,
+            activation_id=activation_id,
+        )
+        try:
+            if context.annunciation_registry is None:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            try:
+                context.annunciation_registry.sync(
+                    context.alarm_v2_state_mgr.get_active(),
+                    context.safety_manager.get_status(),
+                )
+            except AnnunciationProjectionUnavailable:
+                return {
+                    "ok": False,
+                    "error_code": "alarm_activation_unavailable",
+                    "error": "alarm activation authority is unavailable",
+                    "retry_safe": True,
+                    "request_id": request_id,
+                }
+            target = context.annunciation_registry.resolve(engine_instance_id, activation_id)
+            if (
+                target is None
+                or target.source != "alarm_v2"
+                or target.source_key != alarm_name
+                or str(target.source_activation_id) != outbox.source_activation_id
+                or target.acknowledged is not False
+            ):
+                try:
+                    return await _abort_prepared_alarm_ack(context, outbox)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "Alarm ACK stale intent disposition failed: request=%s exception=%s",
+                        request_id,
+                        type(exc).__name__,
+                    )
+                    return {
+                        "ok": False,
+                        "error_code": "alarm_ack_persistence_failed",
+                        "error": "alarm acknowledgement persistence failed",
+                        "retry_safe": True,
+                        "request_id": request_id,
+                    }
+            # Persistence is the authority boundary. No AlarmStateManager or
+            # annunciation-visible acknowledgement exists before this await
+            # returns one exact COMMITTED record.
+            outbox = await context.writer.commit_alarm_ack_outbox(
+                request_id=request_id,
+                request_fingerprint=fingerprint,
+                event=event,
+                receipt=receipt,
+            )
+            _validated_alarm_ack_outbox(outbox)
+            if outbox.state not in {"committed", "published"}:
+                raise RuntimeError("alarm ACK durable commit state is invalid")
+            _apply_committed_alarm_ack_state(context, outbox)
+        finally:
+            _release_alarm_ack_activation(context, owner_key, owner_capability)
+    if outbox.state != "committed":
+        raise RuntimeError("alarm ACK outbox state is invalid")
+    _apply_committed_alarm_ack_state(context, outbox)
+    if context.annunciation_registry is not None:
+        try:
+            context.annunciation_registry.sync(
+                context.alarm_v2_state_mgr.get_active(),
+                context.safety_manager.get_status(),
+            )
+        except AnnunciationProjectionUnavailable:
+            logger.error("Alarm acknowledgement projection refresh failed")
+    try:
+        published = await _publish_committed_alarm_ack(
+            context.writer,
+            context.broker,
+            outbox,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - exact committed intent remains retryable
+        logger.error(
+            "Alarm ACK publication remains pending: request=%s exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
+        _ensure_alarm_ack_publication_reconciliation(context, outbox)
+        return _alarm_ack_publication_pending(outbox)
+    return _alarm_ack_published_result(published)
+
+
+def _owned_alarm_ack_done(
+    context: EngineCommandContext,
+    request_id: str,
+    fingerprint: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    current = context.alarm_ack_tasks.get(request_id)
+    if current is not None and current[1] is task:
+        del context.alarm_ack_tasks[request_id]
+    if task.cancelled() or task.exception() is not None:
+        return
+    _remember_alarm_ack_receipt(context, request_id, fingerprint, task.result())
+
+
+async def _submit_alarm_ack(cmd: dict[str, Any], context: EngineCommandContext) -> dict[str, Any]:
+    request_id = cmd.get("request_id")
+    if (
+        type(request_id) is not str
+        or len(request_id) != 32
+        or any(char not in "0123456789abcdef" for char in request_id)
+    ):
+        return {
+            "ok": False,
+            "error_code": "alarm_ack_request_id_invalid",
+            "error": "request_id must be exactly 32 lowercase hexadecimal characters",
+            "retry_safe": True,
+        }
+    if any(type(cmd.get(field)) is not str or cmd[field] != cmd[field].strip() for field in ("operator", "reason")):
+        return {
+            "ok": False,
+            "error_code": "invalid_alarm_ack_command",
+            "error": "alarm acknowledgement attribution must be canonical",
+            "retry_safe": True,
+        }
+    try:
+        fingerprint = alarm_ack_request_fingerprint(cmd)
+    except ValueError:
+        return {
+            "ok": False,
+            "error_code": "invalid_alarm_ack_command",
+            "error": "alarm acknowledgement command is invalid",
+            "retry_safe": True,
+        }
+    completed = context.alarm_ack_receipts.get(request_id)
+    if completed is not None:
+        if completed[0] != fingerprint:
+            return {"ok": False, "error_code": "idempotency_key_conflict", "retry_safe": False}
+        return dict(completed[1])
+    pending = context.alarm_ack_tasks.get(request_id)
+    if pending is not None:
+        if pending[0] != fingerprint:
+            return {"ok": False, "error_code": "idempotency_key_conflict", "retry_safe": False}
+        return await asyncio.shield(pending[1])
+    reconciliation = context.alarm_ack_reconciliation_tasks.get(request_id)
+    if reconciliation is not None:
+        if reconciliation[0] != fingerprint:
+            return {"ok": False, "error_code": "idempotency_key_conflict", "retry_safe": False}
+        return await asyncio.shield(reconciliation[1])
+    if not context.experiment_commands_accepting:
+        return {
+            "ok": False,
+            "error_code": "engine_shutting_down",
+            "error": "alarm acknowledgement submissions are frozen for shutdown",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+    active_request_ids = set(context.alarm_ack_tasks) | set(context.alarm_ack_reconciliation_tasks)
+    if len(active_request_ids) >= _MAX_PENDING_ALARM_ACK_ENTRIES:
+        return {
+            "ok": False,
+            "error_code": "alarm_ack_busy",
+            "error": "the bounded alarm acknowledgement lane is full",
+            "retry_safe": True,
+            "request_id": request_id,
+        }
+    task = asyncio.create_task(
+        _execute_owned_alarm_ack(cmd, context, request_id, fingerprint),
+        name=f"alarm_ack_{request_id[:8]}",
+    )
+    context.alarm_ack_tasks[request_id] = (fingerprint, task)
+    task.add_done_callback(functools.partial(_owned_alarm_ack_done, context, request_id, fingerprint))
+    return await asyncio.shield(task)
+
+
+def _feed_recording_experiment_lifecycle(
+    context: EngineCommandContext,
+    action: str,
+    result: dict[str, Any],
+) -> str | None:
+    """Reflect an already-committed experiment result into the dark feed."""
+
+    feed = context.recording_lifecycle_feed
+    if feed is None:
+        return None
+    try:
+        snapshot = context.experiment_manager.snapshot_operator_experiment()
+        if action in {"experiment_finalize", "experiment_stop", "experiment_abort"}:
+            experiment_id = result.get("experiment", {}).get("experiment_id")
+            if type(experiment_id) is not str or not experiment_id or snapshot.experiment_id is not None:
+                raise ValueError("terminal experiment result does not match inactive manager truth")
+            if action == "experiment_abort":
+                feed.experiment_aborted(snapshot.revision, experiment_id)
+            else:
+                feed.experiment_finalized(snapshot.revision, experiment_id)
+            return None
+
+        result_experiment = result.get("experiment") or result.get("active_experiment")
+        result_id = (
+            snapshot.experiment_id
+            if action == "experiment_advance_phase"
+            else (result_experiment or {}).get("experiment_id")
+        )
+        if (
+            type(result_id) is not str
+            or result_id != snapshot.experiment_id
+            or type(snapshot.experiment_name) is not str
+        ):
+            raise ValueError("active experiment result does not match manager truth")
+        feed.experiment_active(
+            snapshot.revision,
+            result_id,
+            snapshot.experiment_name,
+            snapshot.phase,
+        )
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning(
+            "Recording lifecycle feed unavailable: action=%s exception=%s",
+            _bounded_action_label(action),
+            type(exc).__name__,
+        )
+        return "recording_lifecycle_feed"
+    return None
+
+
+def _seed_recording_lifecycle(
+    feed: RecordingLifecycleFeed,
+    experiment_manager: ExperimentManager,
+) -> None:
+    snapshot = experiment_manager.snapshot_operator_experiment()
+    if snapshot.experiment_id is None:
+        feed.experiment_inactive(snapshot.revision)
+    elif type(snapshot.experiment_name) is str:
+        feed.experiment_active(
+            snapshot.revision,
+            snapshot.experiment_id,
+            snapshot.experiment_name,
+            snapshot.phase,
+        )
+    else:
+        raise ValueError("active experiment snapshot has no exact name")
+
+
+async def _start_scheduler_with_recording_feed(
+    scheduler: Scheduler,
+    feed: RecordingLifecycleFeed,
+    sequence: int,
+) -> int:
+    epoch_id = secrets.token_hex(16)
+    try:
+        feed.persistence_started(epoch_id)
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning(
+            "Recording persistence feed unavailable: phase=before_scheduler_start exception=%s",
+            type(exc).__name__,
+        )
+        try:
+            feed.persistence_ambiguous()
+        except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
+            logger.warning(
+                "Recording persistence feed terminalization failed: exception=%s",
+                type(terminal_exc).__name__,
+            )
+    try:
+        await scheduler.start()
+    except BaseException:
+        try:
+            feed.persistence_ambiguous()
+        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+            logger.warning(
+                "Recording persistence feed unavailable: phase=scheduler_start_failure exception=%s",
+                type(exc).__name__,
+            )
+        sequence += 1
+        try:
+            feed.acquisition_unavailable(sequence)
+        except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+            logger.warning(
+                "Recording acquisition feed unavailable: phase=scheduler_start_failure exception=%s",
+                type(exc).__name__,
+            )
+        raise
+    sequence += 1
+    try:
+        feed.acquisition_running(sequence, epoch_id)
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning(
+            "Recording acquisition feed unavailable: phase=after_scheduler_start exception=%s",
+            type(exc).__name__,
+        )
+    return sequence
+
+
+async def _stop_scheduler_with_recording_feed(
+    scheduler: Scheduler,
+    feed: RecordingLifecycleFeed,
+    sequence: int,
+    *,
+    retry_delay_s: float = 0.1,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> int:
+    requested_delay = float(retry_delay_s)
+    bounded_retry_delay_s = min(max(0.0, requested_delay), 1.0) if math.isfinite(requested_delay) else 0.1
+    while True:
+        try:
+            await scheduler.stop()
+            break
+        except ReviewedSourceSettlementIncomplete as exc:
+            try:
+                feed.persistence_ambiguous()
+            except Exception as feed_exc:  # noqa: BLE001 - settlement retry must continue
+                logger.warning(
+                    "Recording persistence feed unavailable: phase=reviewed_source_settlement exception=%s",
+                    type(feed_exc).__name__,
+                )
+            sequence += 1
+            try:
+                feed.acquisition_unavailable(sequence)
+            except Exception as feed_exc:  # noqa: BLE001 - settlement retry must continue
+                logger.warning(
+                    "Recording acquisition feed unavailable: phase=reviewed_source_settlement exception=%s",
+                    type(feed_exc).__name__,
+                )
+            logger.critical(
+                "Scheduler stop retains reviewed-source authority: retry_s=%.3f exception=%s",
+                bounded_retry_delay_s,
+                type(exc).__name__,
+            )
+            await sleep(bounded_retry_delay_s)
+        except BaseException:
+            try:
+                feed.persistence_ambiguous()
+            except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+                logger.warning(
+                    "Recording persistence feed unavailable: phase=scheduler_stop_failure exception=%s",
+                    type(exc).__name__,
+                )
+            sequence += 1
+            try:
+                feed.acquisition_unavailable(sequence)
+            except Exception as exc:  # noqa: BLE001 - preserve the scheduler failure
+                logger.warning(
+                    "Recording acquisition feed unavailable: phase=scheduler_stop_failure exception=%s",
+                    type(exc).__name__,
+                )
+            raise
+    sequence += 1
+    try:
+        feed.acquisition_stopped(sequence)
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning(
+            "Recording acquisition feed unavailable: phase=after_scheduler_stop exception=%s",
+            type(exc).__name__,
+        )
+        sequence += 1
+        try:
+            feed.acquisition_unavailable(sequence)
+        except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
+            logger.warning(
+                "Recording acquisition feed terminalization failed: exception=%s",
+                type(terminal_exc).__name__,
+            )
+    try:
+        feed.persistence_stopped()
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning(
+            "Recording persistence feed unavailable: phase=after_scheduler_stop exception=%s",
+            type(exc).__name__,
+        )
+        try:
+            feed.persistence_ambiguous()
+        except Exception as terminal_exc:  # noqa: BLE001 - observational bridge is fail-dark
+            logger.warning(
+                "Recording persistence feed terminalization failed: exception=%s",
+                type(terminal_exc).__name__,
+            )
+    return sequence
+
+
+def _periodic_query_failure(error_code: str) -> dict[str, Any]:
+    return encode_periodic_command_reply(
+        {
+            "ok": False,
+            "schema": PERIODIC_QUERY_SCHEMA,
+            "error_code": error_code,
+        }
+    )
+
+
+def _periodic_barrier_failure(error_code: str) -> dict[str, Any]:
+    return encode_periodic_command_reply(
+        {
+            "ok": False,
+            "schema": PERIODIC_BARRIER_SCHEMA,
+            "error_code": error_code,
+        }
+    )
+
+
+def _periodic_snapshot_response(context: EngineCommandContext) -> dict[str, Any]:
+    try:
+        snapshot = context.alarm_v2_state_mgr.snapshot_active_canonical()
+        response = {
+            "ok": True,
+            "schema": PERIODIC_QUERY_SCHEMA,
+            "state_revision": snapshot.state_revision,
+            "state_token": snapshot.state_token,
+            "active": snapshot.active,
+        }
+        encoded = encode_periodic_command_reply(response)
+        if len(encoded.wire) > 60 * 1024:
+            return _periodic_query_failure("snapshot_unavailable")
+        return encoded
+    except Exception:
+        return _periodic_query_failure("snapshot_unavailable")
+
+
+async def _execute_owned_experiment_read(
+    action: str,
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    """Run one retained read after earlier lifecycle mutations settle."""
+
+    async with context.experiment_command_lock:
+        return await asyncio.to_thread(
+            _run_experiment_command,
+            action,
+            cmd,
+            context.experiment_manager,
+        )
+
+
+def _owned_experiment_read_done(
+    context: EngineCommandContext,
+    action: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    context.experiment_read_tasks.discard(task)
+    action_label = _bounded_action_label(action)
+    if task.cancelled():
+        logger.critical("Experiment read owner was cancelled: action=%s", action_label)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Experiment read owner failed after submission: action=%s exception=%s",
+            action_label,
+            type(exception).__name__,
+        )
+
+
+def _owned_experiment_status_done(
+    context: EngineCommandContext,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    if context.experiment_status_task is task:
+        context.experiment_status_task = None
+    if task.cancelled():
+        logger.critical("Experiment status owner was cancelled")
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Experiment status owner failed after submission: exception=%s",
+            type(exception).__name__,
+        )
+
+
+async def _drain_experiment_command_tasks(
+    context: EngineCommandContext,
+    logger_: logging.Logger,
+    timeout: float = 30.0,  # noqa: ASYNC109 - internal shutdown gate
+) -> bool:
+    """Freeze submissions and settle experiment owners before teardown.
+
+    The monotonic timeout is an escalation boundary, never a cancellation
+    boundary. If it expires, shutdown is held fail-closed until the retained
+    owners settle so a worker cannot commit after its reconciliation resources
+    have been dismantled. ``False`` means the visible deadline was exceeded.
+    """
+
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be numeric")
+    timeout_s = float(timeout)
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("timeout must be positive and finite")
+    context.experiment_commands_accepting = False
+    pending = set(context.experiment_command_tasks)
+    pending.update(context.experiment_read_tasks)
+    pending.update(task for _fingerprint, task in context.operator_log_tasks.values())
+    pending.update(task for _fingerprint, task in getattr(context, "operator_log_reconciliation_tasks", {}).values())
+    pending.update(task for _fingerprint, task in context.alarm_ack_tasks.values())
+    pending.update(task for _fingerprint, task in getattr(context, "alarm_ack_reconciliation_tasks", {}).values())
+    if context.experiment_status_task is not None:
+        pending.add(context.experiment_status_task)
+    pending = {task for task in pending if not task.done()}
+    if not pending:
+        return True
+
+    logger_.info("Draining %d retained experiment command task(s) before shutdown", len(pending))
+    drain = asyncio.gather(*pending, return_exceptions=True)
+
+    async def settle() -> bool:
+        try:
+            await asyncio.wait_for(asyncio.shield(drain), timeout=timeout_s)
+            return True
+        except TimeoutError:
+            logger_.critical(
+                "Experiment command drain exceeded %.3fs; shutdown remains blocked until authority settles",
+                timeout_s,
+            )
+            await drain
+            return False
+
+    settlement = asyncio.create_task(settle(), name="engine-retained-command-settlement")
+    cancellation_seen = False
+    while not settlement.done():
+        try:
+            await asyncio.shield(settlement)
+        except asyncio.CancelledError:
+            cancellation_seen = True
+    completed_within_deadline = settlement.result()
+    if cancellation_seen:
+        raise asyncio.CancelledError
+    return completed_within_deadline
+
+
+def _note_experiment_reconciliation_failure(
+    failures: list[str],
+    step: str,
+    exc: BaseException,
+) -> None:
+    failures.append(step)
+    logger.error(
+        "Committed experiment command reconciliation failed; step=%s exception=%s",
+        step,
+        type(exc).__name__,
+    )
+
+
+def _attempt_experiment_reconciliation_sync(
+    failures: list[str],
+    step: str,
+    operation: Callable[[], Any],
+) -> Any | None:
+    try:
+        return operation()
+    except Exception as exc:  # noqa: BLE001 - classify committed partial outcome
+        _note_experiment_reconciliation_failure(failures, step, exc)
+        return None
+
+
+async def _attempt_experiment_reconciliation_async(
+    failures: list[str],
+    step: str,
+    operation: Callable[[], Awaitable[Any]],
+) -> Any | None:
+    try:
+        return await operation()
+    except Exception as exc:  # noqa: BLE001 - classify committed partial outcome
+        _note_experiment_reconciliation_failure(failures, step, exc)
+        return None
+
+
+def _experiment_commit_receipt(
+    action: str,
+    cmd: dict[str, Any],
+    result: dict[str, Any],
+    manager: ExperimentManager,
+) -> dict[str, Any]:
+    experiment = result.get("experiment") or result.get("active_experiment") or {}
+    experiment_id = result.get("experiment_id") or experiment.get("experiment_id") or cmd.get("experiment_id")
+    snapshot = manager.snapshot_operator_experiment()
+    return {
+        "schema": "experiment_command_commit_v1",
+        "action": action,
+        "experiment_id": experiment_id if type(experiment_id) is str else None,
+        "manager_revision": snapshot.revision,
+        "committed": True,
+    }
+
+
+async def _execute_owned_experiment_command(
+    action: str,
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    """Own a lifecycle command through commit and every completion side effect.
+
+    The task running this function is retained by ``EngineCommandContext`` and
+    shielded from a timed-out/cancelled reply waiter. A timeout therefore means
+    outcome unknown to the caller, while the single serialized owner still
+    completes reconciliation and side effects exactly once.
+    """
+
+    async with context.experiment_command_lock:
+        experiment_manager = context.experiment_manager
+        experiment_call = asyncio.to_thread(
+            _run_experiment_command,
+            action,
+            cmd,
+            experiment_manager,
+        )
+        result = await experiment_call
+
+        if not result.get("ok"):
+            return result
+        reconciliation_failures: list[str] = []
+        try:
+            receipt = _experiment_commit_receipt(action, cmd, result, experiment_manager)
+        except Exception as exc:  # noqa: BLE001 - state is already committed
+            _note_experiment_reconciliation_failure(
+                reconciliation_failures,
+                "commit_receipt_generation",
+                exc,
+            )
+            experiment = result.get("experiment") or result.get("active_experiment") or {}
+            experiment_id = result.get("experiment_id") or experiment.get("experiment_id") or cmd.get("experiment_id")
+            receipt = {
+                "schema": "experiment_command_commit_v1",
+                "action": action,
+                "experiment_id": experiment_id if type(experiment_id) is str else None,
+                "manager_revision": None,
+                "committed": True,
+            }
+
+        if action in {
+            "experiment_start",
+            "experiment_create",
+            "experiment_update",
+            "experiment_finalize",
+            "experiment_stop",
+            "experiment_abort",
+            "experiment_advance_phase",
+        }:
+            feed_failure = _feed_recording_experiment_lifecycle(context, action, result)
+            if feed_failure is not None:
+                reconciliation_failures.append(feed_failure)
+
+        if action in {"experiment_start", "experiment_create"}:
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "calibration_acquisition_activate",
+                lambda: asyncio.to_thread(
+                    _try_activate_calibration_acquisition,
+                    context.calibration_acquisition,
+                    experiment_manager,
+                    cmd,
+                ),
+            )
+            name = cmd.get("name") or cmd.get("title") or "?"
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_log_experiment_start",
+                lambda: context.event_logger.log_event("experiment", f"Эксперимент начат: {name}"),
+            )
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_bus_experiment_start",
+                lambda: context.event_bus.publish(
+                    EngineEvent(
+                        event_type="experiment_start",
+                        timestamp=datetime.now(UTC),
+                        payload={"name": name, "experiment_id": result.get("experiment_id")},
+                        experiment_id=result.get("experiment_id"),
+                    )
+                ),
+            )
+        elif action in {
+            "experiment_finalize",
+            "experiment_stop",
+            "experiment_abort",
+        }:
+            _attempt_experiment_reconciliation_sync(
+                reconciliation_failures,
+                "calibration_acquisition_deactivate",
+                context.calibration_acquisition.deactivate,
+            )
+            if action == "experiment_abort":
+                message = "⚠ Эксперимент прерван"
+            else:
+                message = "Эксперимент завершён"
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_log_experiment_terminal",
+                lambda: context.event_logger.log_event("experiment", message),
+            )
+            exp_info = result.get("experiment", {})
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_bus_experiment_terminal",
+                lambda: context.event_bus.publish(
+                    EngineEvent(
+                        event_type=action,
+                        timestamp=datetime.now(UTC),
+                        payload={"action": action, "experiment": exp_info},
+                        experiment_id=exp_info.get("experiment_id"),
+                    )
+                ),
+            )
+            if context.cooldown_alarm is not None:
+                _attempt_experiment_reconciliation_sync(
+                    reconciliation_failures,
+                    "cooldown_alarm_experiment_finalized",
+                    context.cooldown_alarm.notify_experiment_finalized,
+                )
+
+            if context.sink_registry.sinks:
+
+                async def dispatch_export() -> None:
+                    experiment_id = exp_info.get("experiment_id") or ""
+                    metadata: dict = {}
+                    if experiment_id:
+                        metadata_path = experiment_manager.data_dir / "experiments" / experiment_id / "metadata.json"
+                        metadata = await asyncio.to_thread(_load_experiment_metadata_sync, metadata_path)
+                    export = _build_experiment_export(exp_info, metadata)
+                    task = asyncio.create_task(
+                        context.sink_registry.dispatch(export),
+                        name=f"sinks_dispatch_{(experiment_id or 'noid')[:8]}",
+                    )
+                    context.alarm_dispatch_tasks.add(task)
+                    task.add_done_callback(context.alarm_dispatch_tasks.discard)
+
+                await _attempt_experiment_reconciliation_async(
+                    reconciliation_failures,
+                    "sink_dispatch_setup",
+                    dispatch_export,
+                )
+        elif action == "experiment_advance_phase":
+            phase = cmd.get("phase", "?")
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_log_phase_transition",
+                lambda: context.event_logger.log_event("phase", f"Фаза: → {phase}"),
+            )
+            active = experiment_manager.active_experiment
+            await _attempt_experiment_reconciliation_async(
+                reconciliation_failures,
+                "event_bus_phase_transition",
+                lambda: context.event_bus.publish(
+                    EngineEvent(
+                        event_type="phase_transition",
+                        timestamp=datetime.now(UTC),
+                        payload={"phase": phase, "entry": result.get("phase", {})},
+                        experiment_id=active.experiment_id if active else None,
+                    )
+                ),
+            )
+            cooldown_alarm = context.cooldown_alarm
+            if cooldown_alarm is not None:
+                _attempt_experiment_reconciliation_sync(
+                    reconciliation_failures,
+                    "cooldown_alarm_phase_change",
+                    lambda: cooldown_alarm.notify_phase_change(phase),
+                )
+            if phase == "cooldown" and cooldown_alarm is not None and cooldown_alarm.is_auto_arm_enabled:
+                armed = _attempt_experiment_reconciliation_sync(
+                    reconciliation_failures,
+                    "cooldown_alarm_arm",
+                    cooldown_alarm.arm,
+                )
+                if armed is not None:
+                    if not armed and cooldown_alarm.cold_start_skipped:
+                        logger.info("CooldownAlarm: auto-arm skipped — cold-start detected")
+                    else:
+                        logger.info(
+                            "CooldownAlarm: auto-arm на phase=cooldown → %s",
+                            "ARMED" if armed else "FAILED (no model)",
+                        )
+
+        result = dict(result)
+        result["committed"] = True
+        result["commit_receipt"] = receipt
+        result["retry_safe"] = False
+        if reconciliation_failures:
+            result.update(
+                {
+                    "ok": False,
+                    "committed": True,
+                    "error_code": "committed_reconciliation_failed",
+                    "error": "experiment state committed, but one or more completion steps failed",
+                    "reconciliation_failures": tuple(reconciliation_failures),
+                }
+            )
+        return result
+
+
+def _owned_experiment_task_done(
+    context: EngineCommandContext,
+    action: str,
+    task: asyncio.Task[dict[str, Any]],
+) -> None:
+    context.experiment_command_tasks.discard(task)
+    action_label = _bounded_action_label(action)
+    if task.cancelled():
+        logger.critical("Experiment command owner was cancelled: action=%s", action_label)
+        return
+    exception = task.exception()
+    if exception is not None:
+        logger.error(
+            "Experiment command owner failed after submission: action=%s exception=%s",
+            action_label,
+            type(exception).__name__,
+        )
+
+
+def _request_teardown_after_shutdown_receipt(
+    context: EngineCommandContext,
+    cmd: dict[str, Any],
+    reply: dict[str, Any],
+) -> None:
+    """Release engine teardown only after the exact receipt reached REP."""
+
+    receipt = context.shutdown_receipt
+    expected_wire_receipt = None if receipt is None else {**receipt, "proto": PROTOCOL_VERSION}
+    if (
+        cmd.get("cmd") == "launcher_shutdown"
+        and receipt is not None
+        and reply == expected_wire_receipt
+        and reply.get("engine_instance_id") == context.engine_instance_id
+        and reply.get("global_off_verified") is True
+        and reply.get("teardown_requested") is True
+        and context.shutdown_event is not None
+    ):
+        context.shutdown_event.set()
+
+
+def _shutdown_command_identity(cmd: dict[str, Any]) -> tuple[str, str, str] | None:
+    required = {"cmd", "engine_instance_id", "request_id", "shutdown_capability"}
+    instance_id = cmd.get("engine_instance_id")
+    request_id = cmd.get("request_id")
+    capability = cmd.get("shutdown_capability")
+    if not (
+        set(cmd) == required
+        and cmd.get("cmd") == "launcher_shutdown"
+        and type(instance_id) is str
+        and len(instance_id) == 32
+        and all(ch in "0123456789abcdef" for ch in instance_id)
+        and type(request_id) is str
+        and len(request_id) == 32
+        and all(ch in "0123456789abcdef" for ch in request_id)
+        and type(capability) is str
+        and len(capability) == 64
+        and all(ch in "0123456789abcdef" for ch in capability)
+    ):
+        return None
+    return instance_id, request_id, capability
+
+
+def _shutdown_latch_failure(
+    cmd: dict[str, Any],
+    context: EngineCommandContext,
+) -> dict[str, Any] | None:
+    """Reject every post-latch state change except exact safety reconciliation."""
+
+    request_id = context.shutdown_request_id
+    if request_id is None:
+        return None
+    action = cmd.get("cmd")
+    if not _is_mutating_command(action):
+        return None
+    if action == "keithley_emergency_off" and set(cmd) == {"cmd"}:
+        return None
+    if action == "launcher_shutdown":
+        identity = _shutdown_command_identity(cmd)
+        if (
+            identity is not None
+            and identity[1] == request_id
+            and secrets.compare_digest(identity[0], context.engine_instance_id)
+            and secrets.compare_digest(identity[2], context.shutdown_capability)
+        ):
+            return None
+        if (
+            identity is not None
+            and secrets.compare_digest(identity[0], context.engine_instance_id)
+            and secrets.compare_digest(identity[2], context.shutdown_capability)
+        ):
+            return {
+                "ok": False,
+                "error_code": "launcher_shutdown_already_requested",
+                "error": "a different shutdown request already owns this engine incarnation",
+                "delivery_state": "dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": False,
+            }
+    return {
+        "ok": False,
+        "error_code": "engine_shutdown_latched",
+        "error": "engine shutdown owns mutation admission; later state changes are refused",
+        "delivery_state": "dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": False,
+    }
+
+
+async def _handle_gui_command(
+    cmd: dict[str, Any],
+    *,
+    context: EngineCommandContext,
+) -> dict[str, Any]:
+    safety_manager = context.safety_manager
+    event_logger = context.event_logger
+    sink_registry = context.sink_registry
+    interlock_engine = context.interlock_engine
+    leak_rate_estimator = context.leak_rate_estimator
+    _leak_cfg = context.leak_cfg
+    alarm_v2_state_mgr = context.alarm_v2_state_mgr
+    annunciation_registry = context.annunciation_registry
+    _alarm_ring = context.alarm_ring
+    broker = context.broker
+    experiment_manager = context.experiment_manager
+    calibration_acquisition = context.calibration_acquisition
+    event_bus = context.event_bus
+    _cooldown_alarm = context.cooldown_alarm
+    _vacuum_guard = context.vacuum_guard
+    _alarm_dispatch_tasks = context.alarm_dispatch_tasks
+    calibration_store = context.calibration_store
+    writer = context.writer
+    drivers_by_name = context.drivers_by_name
+    sensor_diag = context.sensor_diag
+    vacuum_trend = context.vacuum_trend
+    _alarm_v2_state_tracker = context.alarm_v2_state_tracker
+    _multiline_burst_auto_stop_meta = context.multiline_burst_auto_stop_meta
+    _multiline_burst_auto_stop_tasks = context.multiline_burst_auto_stop_tasks
+    escalation_service = context.escalation_service
+    cooldown_service = context.cooldown_service
+    action = cmd.get("cmd", "")
+    if action == "engine_ready":
+        return _engine_ready_response(cmd, context)
+    if action == "mutation_capabilities":
+        token = context.mutation_capability_token
+        accepted = _valid_mutation_capability_token(token)
+        receipt: dict[str, Any] = {
+            "schema": _MUTATION_RECEIPT_SCHEMA,
+            "accepted": accepted,
+            "server_protocol_major": _MUTATION_PROTOCOL_MAJOR,
+            "required_capability": _MUTATION_CAPABILITY,
+        }
+        if accepted:
+            receipt["capability_token"] = token
+        return {
+            "ok": True,
+            "compatibility_receipt": receipt,
+        }
+    protocol_failure = _mutation_protocol_failure(cmd, context)
+    if protocol_failure is not None:
+        return protocol_failure
+    # Compatibility material is transport metadata, never handler input.  This
+    # also strips a forged envelope from direct read and safe-direction calls.
+    cmd = strip_mutation_envelope(cmd)
+    shutdown_latch_failure = _shutdown_latch_failure(cmd, context)
+    if shutdown_latch_failure is not None:
+        return shutdown_latch_failure
+    try:
+        if action == "launcher_shutdown":
+            identity = _shutdown_command_identity(cmd)
+            if identity is None:
+                return {
+                    "ok": False,
+                    "error_code": "launcher_shutdown_invalid",
+                    "error": "launcher shutdown requires one exact typed authority envelope",
+                    "delivery_state": "dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
+            instance_id, request_id, capability = identity
+            if not (
+                secrets.compare_digest(instance_id, context.engine_instance_id)
+                and secrets.compare_digest(capability, context.shutdown_capability)
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "launcher_shutdown_authority_mismatch",
+                    "error": "launcher shutdown authority does not match this engine incarnation",
+                    "delivery_state": "dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": False,
+                }
+            async with context.shutdown_lock:
+                if context.shutdown_request_id is None:
+                    context.shutdown_request_id = request_id
+                elif context.shutdown_request_id != request_id:
+                    return {
+                        "ok": False,
+                        "error_code": "launcher_shutdown_already_requested",
+                        "error": "a different shutdown request already owns this engine incarnation",
+                        "delivery_state": "dispatched",
+                        "commit_state": "not_committed",
+                        "retry_safe": False,
+                    }
+                prior = context.shutdown_receipt
+                if prior is not None:
+                    return dict(prior)
+                off_result = await _run_keithley_command(
+                    "keithley_emergency_off", {"cmd": "keithley_emergency_off"}, safety_manager
+                )
+                if off_result.get("ok") is not True or off_result.get("active_channels") != []:
+                    return {
+                        "ok": False,
+                        "error_code": "launcher_shutdown_global_off_unverified",
+                        "error": "launcher shutdown is held because exact global OFF was not verified",
+                        "delivery_state": "dispatched",
+                        "commit_state": "not_committed",
+                        "retry_safe": True,
+                    }
+                receipt = {
+                    "ok": True,
+                    "schema": _ENGINE_SHUTDOWN_RECEIPT_SCHEMA,
+                    "engine_instance_id": instance_id,
+                    "request_id": request_id,
+                    "global_off_verified": True,
+                    "teardown_requested": True,
+                    "delivery_state": "dispatched",
+                    "commit_state": "committed",
+                }
+                context.shutdown_receipt = receipt
+                return dict(receipt)
+        if action == "periodic_subscription_barrier":
+            if set(cmd) != {"cmd", "schema", "nonce"}:
+                return _periodic_barrier_failure("barrier_invalid")
+            if cmd.get("schema") != PERIODIC_QUERY_SCHEMA:
+                return _periodic_barrier_failure("barrier_invalid")
+            if context.zmq_publisher is None:
+                return _periodic_barrier_failure("barrier_unavailable")
+            nonce = cmd.get("nonce")
+            if type(nonce) is not str or len(nonce) != 32 or any(ch not in "0123456789abcdef" for ch in nonce):
+                return _periodic_barrier_failure("barrier_invalid")
+            return encode_periodic_command_reply(await context.zmq_publisher.barrier(nonce))
+        if action == "periodic_alarm_snapshot":
+            if set(cmd) != {"cmd", "schema"} or cmd.get("schema") != PERIODIC_QUERY_SCHEMA:
+                return _periodic_query_failure("snapshot_unavailable")
+            return _periodic_snapshot_response(context)
+        if action == "keithley_emergency_off":
+            invalid_keys = set(cmd) - {"cmd", "channel"}
+            channel = cmd.get("channel")
+            if invalid_keys or ("channel" in cmd and (type(channel) is not str or not channel.strip())):
+                return {
+                    "ok": False,
+                    "error_code": "safe_direction_command_invalid",
+                    "error": "emergency-OFF accepts only cmd and an optional non-empty string channel",
+                    "delivery_state": "dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
+            try:
+                normalize_smu_channel(channel)
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "error_code": "safe_direction_command_invalid",
+                    "error": "Safe-direction channel identity is invalid.",
+                    "delivery_state": "dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
+        if action in {
+            "keithley_emergency_off",
+            "keithley_stop",
+            "keithley_start",
+            "keithley_set_target",
+            "keithley_set_limits",
+        }:
+            result = await _run_keithley_command(action, cmd, safety_manager)
+            if result.get("ok"):
+                ch = cmd.get("channel", "?")
+                if action == "keithley_start":
+                    await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
+                elif action == "keithley_stop":
+                    await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
+                elif action == "keithley_emergency_off":
+                    await event_logger.log_event("keithley", f"\u26a0 Keithley {ch}: аварийное отключение")
+                    if escalation_service is not None:
+                        await escalation_service.escalate(
+                            "emergency",
+                            f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
+                        )
+            return result
+        if action == "safety_status":
+            return {
+                "ok": True,
+                **safety_manager.get_status(),
+                "engine_instance_id": context.engine_instance_id,
+            }
+        if action == "annunciation_status":
+            if set(cmd) != {"cmd"}:
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            if annunciation_registry is None:
+                return {"ok": False, "error": "annunciation_unavailable"}
+            try:
+                annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
+            except AnnunciationProjectionUnavailable:
+                logger.error("Annunciation projection unavailable")
+                return {"ok": False, "error": "annunciation_unavailable"}
+            return {"ok": True, **annunciation_registry.snapshot()}
+        if action == "annunciation_ack":
+            required = {"cmd", "engine_instance_id", "activation_id", "operator", "reason", "request_id"}
+            if set(cmd) != required or not all(
+                type(cmd[key]) is str and len(cmd[key]) <= 256 for key in required - {"cmd"}
+            ):
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            if not cmd["engine_instance_id"] or not cmd["activation_id"]:
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            if any(
+                not cmd[key].strip() or cmd[key] != cmd[key].strip() or not cmd[key].isprintable()
+                for key in ("operator", "reason")
+            ):
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            try:
+                request_fingerprint = safety_audio_ack_request_fingerprint(cmd)
+            except ValueError:
+                return {"ok": False, "error": "invalid_annunciation_command"}
+            expected_request_id = deterministic_safety_audio_ack_request_id(
+                engine_instance_id=cmd["engine_instance_id"],
+                activation_id=cmd["activation_id"],
+                operator=cmd["operator"],
+                reason=cmd["reason"],
+            )
+            if cmd["request_id"] != expected_request_id:
+                return {"ok": False, "error": "invalid_annunciation_request_identity"}
+            if annunciation_registry is None:
+                return {"ok": False, "error": "annunciation_unavailable"}
+            try:
+                annunciation_registry.sync(alarm_v2_state_mgr.get_active(), safety_manager.get_status())
+            except AnnunciationProjectionUnavailable:
+                logger.error("Annunciation projection unavailable")
+                return {"ok": False, "error": "annunciation_unavailable"}
+            target = annunciation_registry.resolve(
+                cmd["engine_instance_id"],
+                cmd["activation_id"],
+            )
+            if target is None:
+                return {"ok": False, "error": "stale_or_unknown_activation"}
+            if target.source == "alarm_v2":
+                return {
+                    "ok": False,
+                    "error_code": "canonical_alarm_ack_required",
+                    "error": "alarm acknowledgements require the durable alarm_v2_ack command",
+                }
+            if target.source == "safety_fault":
+                message = json.dumps(
+                    {
+                        "activation_id": target.activation_id,
+                        "engine_instance_id": cmd["engine_instance_id"],
+                        "event": "safety_audio_ack_request",
+                        "reason": cmd["reason"].strip(),
+                        "source_activation_id": str(target.source_activation_id),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                try:
+                    audit_commit = await writer.append_operator_log_idempotent(
+                        message=message,
+                        author=cmd["operator"].strip(),
+                        source="operator",
+                        experiment_id=None,
+                        tags=("safety_audio_ack", "safety_fault"),
+                        request_id=cmd["request_id"],
+                        request_fingerprint=request_fingerprint,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Safety-audio acknowledgement audit persistence failed: exception=%s",
+                        type(exc).__name__,
+                    )
+                    return {"ok": False, "error": "audit_persistence_failed"}
+                if (
+                    type(audit_commit) is not OperatorLogCommitResult
+                    or audit_commit.entry.message != message
+                    or audit_commit.entry.author != cmd["operator"].strip()
+                    or audit_commit.entry.source != "operator"
+                    or audit_commit.entry.experiment_id is not None
+                    or audit_commit.entry.tags != ("safety_audio_ack", "safety_fault")
+                ):
+                    return {"ok": False, "error": "audit_receipt_invalid"}
+                if not annunciation_registry.acknowledge_safety_audio(target.activation_id):
+                    return {"ok": False, "error": "activation_changed"}
+                return {
+                    "ok": True,
+                    "engine_instance_id": cmd["engine_instance_id"],
+                    "activation_id": target.activation_id,
+                    "request_id": cmd["request_id"],
+                    "snapshot_revision": annunciation_registry.snapshot()["snapshot_revision"],
+                    "audit_receipt": {
+                        "schema": "safety_audio_ack_v1",
+                        "request_id": cmd["request_id"],
+                        "request_fingerprint": request_fingerprint,
+                        "engine_instance_id": cmd["engine_instance_id"],
+                        "activation_id": target.activation_id,
+                        "source_activation_id": str(target.source_activation_id),
+                        "entry_id": audit_commit.entry.id,
+                        "committed": True,
+                    },
+                }
+            return {"ok": False, "error": "stale_or_unknown_activation"}
+        if action == "sinks_status":
+            return {
+                "ok": True,
+                "results": [
+                    {
+                        "sink": r.sink_name,
+                        "success": r.success,
+                        "target": r.target,
+                        "error": r.error,
+                        "timestamp": r.timestamp.isoformat(),
+                    }
+                    for r in sink_registry.recent_results[-20:]
+                ],
+            }
+        if action == "safety_acknowledge":
+            reason = cmd.get("reason", "")
+            return await safety_manager.acknowledge_fault(reason)
+        if action == "interlock_acknowledge":
+            # F24: re-arm a tripped interlock after operator clears the condition.
+            name = cmd.get("interlock_name", "")
+            try:
+                interlock_engine.acknowledge(name)
+                return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
+            except KeyError:
+                return {
+                    "ok": False,
+                    "error_code": "interlock_unknown",
+                    "error": "The requested interlock is unknown.",
+                }
+        _leak_resp = await _handle_leak_rate_command(action, cmd, leak_rate_estimator, _leak_cfg, event_logger)
+        if _leak_resp is not None:
+            return _leak_resp
+        if action == "alarm_v2_status":
+            if annunciation_registry is None:
+                return {"ok": False, "error": "annunciation_unavailable"}
+            active = alarm_v2_state_mgr.get_active()
+            try:
+                annunciation_registry.sync(active, safety_manager.get_status())
+                annunciation = annunciation_registry.snapshot()
+            except Exception:
+                logger.error("Alarm activation projection unavailable")
+                return {"ok": False, "error": "alarm_activation_unavailable"}
+            activations = annunciation.get("activations") if isinstance(annunciation, dict) else None
+            valid_activations = isinstance(activations, list) and all(
+                isinstance(item, dict)
+                and type(item.get("activation_id")) is str
+                and bool(item["activation_id"])
+                and type(item.get("source")) is str
+                and bool(item["source"])
+                and type(item.get("source_key")) is str
+                and bool(item["source_key"])
+                and type(item.get("severity")) is str
+                and bool(item["severity"])
+                and type(item.get("activated_at")) in (int, float)
+                and math.isfinite(float(item["activated_at"]))
+                and type(item.get("acknowledged")) is bool
+                for item in activations or []
+            )
+            alarm_activations = (
+                [item for item in activations if item["source"] == "alarm_v2"] if valid_activations else []
+            )
+            activation_keys = {item["source_key"] for item in alarm_activations}
+            if (
+                not valid_activations
+                or len(alarm_activations) != len(activation_keys)
+                or activation_keys != set(active)
+            ):
+                logger.error("Alarm activation projection unavailable")
+                return {"ok": False, "error": "alarm_activation_unavailable"}
+            activation_by_alarm = {item["source_key"]: item["activation_id"] for item in alarm_activations}
+            return {
+                "ok": True,
+                "engine_instance_id": annunciation["engine_instance_id"],
+                "snapshot_revision": annunciation["snapshot_revision"],
+                "active": {
+                    k: {
+                        "level": v.level,
+                        "message": v.message,
+                        "triggered_at": v.triggered_at,
+                        "channels": v.channels,
+                        "acknowledged": v.acknowledged,
+                        "acknowledged_at": v.acknowledged_at,
+                        "acknowledged_by": v.acknowledged_by,
+                        "activation_id": activation_by_alarm[k],
+                    }
+                    for k, v in active.items()
+                },
+                "history": alarm_v2_state_mgr.get_history(limit=20),
+            }
+        if action == "recent_alarms":
+            # A3b: GUI sound poller — same (lack of) auth as alarm_v2_status.
+            since_seq = int(cmd.get("since_seq", 0) or 0)
+            return {"ok": True, **_alarm_ring.since(since_seq)}
+        if action == "alarm_v2_history":
+            # IV.4 F11: time-range slice of the existing alarm-v2
+            # history deque. Used by the shift-end dialog to fill
+            # the «Тревоги за смену» section; the state manager's
+            # own 1000-entry ring buffer is the source of truth
+            # (no persistence layer for alarm transitions yet).
+            raw_start = cmd.get("start_ts")
+            raw_end = cmd.get("end_ts")
+            try:
+                start_ts = float(raw_start) if raw_start is not None else None
+                end_ts = float(raw_end) if raw_end is not None else None
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "start_ts / end_ts must be numeric"}
+            limit = int(cmd.get("limit", 500))
+            history = alarm_v2_state_mgr.get_history(limit=1000)
+            filtered: list[dict[str, Any]] = []
+            for entry in history:
+                at = float(entry.get("at", 0.0) or 0.0)
+                if start_ts is not None and at < start_ts:
+                    continue
+                if end_ts is not None and at > end_ts:
+                    continue
+                filtered.append(entry)
+            return {
+                "ok": True,
+                "history": filtered[:limit],
+            }
+        if action == "alarm_v2_ack":
+            required = {
+                "cmd",
+                "alarm_name",
+                "engine_instance_id",
+                "activation_id",
+                "operator",
+                "reason",
+                "request_id",
+            }
+            if set(cmd) != required or not all(
+                type(cmd[key]) is str and len(cmd[key]) <= 256 for key in required - {"cmd"}
+            ):
+                return {"ok": False, "error": "invalid_alarm_ack_command"}
+            if not cmd["alarm_name"] or not cmd["engine_instance_id"] or not cmd["activation_id"]:
+                return {"ok": False, "error": "invalid_alarm_ack_command"}
+            if any(
+                not cmd[key].strip() or cmd[key] != cmd[key].strip() or not cmd[key].isprintable()
+                for key in ("operator", "reason")
+            ):
+                return {"ok": False, "error": "invalid_alarm_ack_command"}
+            return await _submit_alarm_ack(cmd, context)
+        if action in _EXPERIMENT_MUTATION_ACTIONS:
+            if not context.experiment_commands_accepting:
+                return {
+                    "ok": False,
+                    "error_code": "engine_shutting_down",
+                    "error": "experiment command submissions are frozen for shutdown",
+                }
+            if context.experiment_command_tasks:
+                return {
+                    "ok": False,
+                    "error_code": "experiment_command_pending",
+                    "error": "a prior experiment mutation is still authoritative; reconcile before retry",
+                    "retry_safe": False,
+                }
+            owner_task = asyncio.create_task(
+                _execute_owned_experiment_command(action, cmd, context),
+                name=f"experiment_command_{_bounded_action_label(action)}",
+            )
+            context.experiment_command_tasks.add(owner_task)
+            owner_task.add_done_callback(functools.partial(_owned_experiment_task_done, context, action))
+            try:
+                return await asyncio.shield(owner_task)
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Experiment command reply cancelled (action=%s): outcome unknown; "
+                    "authoritative owner continues and automatic retry is unsafe",
+                    _bounded_action_label(action),
+                )
+                raise
+        if action == "experiment_status":
+            if not context.experiment_commands_accepting:
+                return {
+                    "ok": False,
+                    "error_code": "engine_shutting_down",
+                    "error": "experiment command submissions are frozen for shutdown",
+                }
+            status_task = context.experiment_status_task
+            if status_task is None or status_task.done():
+                status_task = asyncio.create_task(
+                    _execute_owned_experiment_read(action, cmd, context),
+                    name="experiment_status_coalesced",
+                )
+                context.experiment_status_task = status_task
+                status_task.add_done_callback(functools.partial(_owned_experiment_status_done, context))
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(status_task),
+                    timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
+                )
+            except TimeoutError:
+                return {
+                    "ok": False,
+                    "error_code": "experiment_status_timeout",
+                    "error": f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)",
+                }
+        if action in _EXPERIMENT_READ_ACTIONS:
+            if not context.experiment_commands_accepting:
+                return {
+                    "ok": False,
+                    "error_code": "engine_shutting_down",
+                    "error": "experiment command submissions are frozen for shutdown",
+                }
+            if len(context.experiment_read_tasks) >= _MAX_PENDING_EXPERIMENT_READS:
+                return {
+                    "ok": False,
+                    "error_code": "experiment_read_busy",
+                    "error": "the bounded experiment read lane is full",
+                }
+            read_task = asyncio.create_task(
+                _execute_owned_experiment_read(action, cmd, context),
+                name=f"experiment_read_{_bounded_action_label(action)}",
+            )
+            context.experiment_read_tasks.add(read_task)
+            read_task.add_done_callback(functools.partial(_owned_experiment_read_done, context, action))
+            return await asyncio.shield(read_task)
+        if action == "calibration_acquisition_status":
+            return {"ok": True, **calibration_acquisition.stats}
+        if action in {
+            "calibration_v2_extract",
+            "calibration_v2_fit",
+            "calibration_v2_coverage",
+        }:
+            return await asyncio.to_thread(
+                _run_calibration_v2_command,
+                action,
+                cmd,
+                calibration_store,
+            )
+        if action == "readings_history":
+            channels_raw = cmd.get("channels")
+            channels = list(channels_raw) if channels_raw else None
+            from_ts = cmd.get("from_ts")
+            to_ts = cmd.get("to_ts")
+            limit = int(cmd.get("limit_per_channel", 3600))
+            data = await writer.read_readings_history(
+                channels=channels,
+                from_ts=float(from_ts) if from_ts is not None else None,
+                to_ts=float(to_ts) if to_ts is not None else None,
+                limit_per_channel=limit,
+            )
+            # Serialize: {channel: [[ts, value], ...]}
+            return {
+                "ok": True,
+                "data": {ch: pts for ch, pts in data.items()},
+            }
+        if action == "cooldown_history_get":
+            return await _run_cooldown_history_command(cmd, experiment_manager, writer)
+        if action == "log_entry":
+            return await _submit_operator_log_entry(cmd, context)
+        if action == "log_get":
+            log_scope = cmd.get("log_scope")
+            requested_experiment = cmd.get("experiment_id")
+            if log_scope == "experiment":
+                if type(requested_experiment) is not str or not requested_experiment:
+                    return {
+                        "ok": False,
+                        "error_code": "operator_log_scope_invalid",
+                        "error": "log_scope=experiment requires a non-empty experiment_id",
+                    }
+                experiment_id = requested_experiment
+            elif log_scope == "all":
+                if requested_experiment is not None:
+                    return {
+                        "ok": False,
+                        "error_code": "operator_log_scope_invalid",
+                        "error": "log_scope=all cannot name an experiment_id",
+                    }
+                experiment_id = None
+            else:
+                return {
+                    "ok": False,
+                    "error_code": "operator_log_scope_invalid",
+                    "error": "log_get requires explicit log_scope=experiment or log_scope=all",
+                }
+            scoped_cmd = {
+                key: value
+                for key, value in cmd.items()
+                if key not in {"log_scope", "current_experiment", "experiment_id"}
+            }
+            if experiment_id is not None:
+                scoped_cmd["experiment_id"] = experiment_id
+            result = await _run_operator_log_command(
+                action,
+                scoped_cmd,
+                writer,
+                experiment_manager,
+                broker,
+            )
+            result["scope_receipt"] = {
+                "schema": "operator_log_read_scope_v1",
+                "log_scope": log_scope,
+                "experiment_id": experiment_id,
+            }
+            return result
+        if action in {
+            "calibration_curve_evaluate",
+            "calibration_curve_list",
+            "calibration_curve_get",
+            "calibration_curve_lookup",
+            "calibration_curve_assign",
+            "calibration_runtime_status",
+            "calibration_runtime_set_global",
+            "calibration_runtime_set_channel_policy",
+            "calibration_curve_export",
+            "calibration_curve_import",
+        }:
+            return await asyncio.to_thread(
+                _run_calibration_command,
+                action,
+                cmd,
+                calibration_store=calibration_store,
+                experiment_manager=experiment_manager,
+                drivers_by_name=drivers_by_name,
+            )
+        if action == "get_sensor_diagnostics":
+            if sensor_diag is None:
+                return {"ok": False, "error": "SensorDiagnostics отключён"}
+            from dataclasses import asdict
+
+            diag = sensor_diag.get_diagnostics()
+            summary = sensor_diag.get_summary()
+            return {
+                "ok": True,
+                "channels": {k: asdict(v) for k, v in diag.items()},
+                "summary": asdict(summary),
+            }
+        if action == "get_vacuum_trend":
+            if vacuum_trend is None:
+                return {"ok": False, "error": "VacuumTrendPredictor отключён"}
+            from dataclasses import asdict
+
+            pred = vacuum_trend.get_prediction()
+            if pred is None:
+                return {"ok": True, "status": "no_data"}
+            return {"ok": True, **asdict(pred)}
+        if action == "shift_handover_summary":
+            _sh_active = experiment_manager.active_experiment
+            await event_bus.publish(
+                EngineEvent(
+                    event_type="shift_handover_request",
+                    timestamp=datetime.now(UTC),
+                    payload={
+                        "requested_by": cmd.get("operator", ""),
+                        "shift_duration_h": int(cmd.get("shift_duration_h", 8)),
+                    },
+                    experiment_id=_sh_active.experiment_id if _sh_active else None,
+                )
+            )
+            return {"ok": True, "status": "queued"}
+        if action == "cooldown_alarm.arm":
+            if _cooldown_alarm is None:
+                return {"ok": False, "error": "CooldownAlarm не инициализирован"}
+            ok = _cooldown_alarm.arm()
+            return {"ok": ok, "state": _cooldown_alarm.state.name}
+        if action == "cooldown_alarm.disarm":
+            if _cooldown_alarm is None:
+                return {"ok": False, "error": "CooldownAlarm не инициализирован"}
+            _cooldown_alarm.disarm()
+            return {"ok": True, "state": "DISARMED"}
+        if action == "cooldown_alarm.status":
+            if _cooldown_alarm is None:
+                return {"state": "UNAVAILABLE"}
+            _t_cold_state = _alarm_v2_state_tracker.get(_cooldown_alarm._cold_ch)
+            _t_cold_val = _t_cold_state.value if _t_cold_state is not None and not _t_cold_state.is_stale else None
+            return {
+                "state": _cooldown_alarm.state.name,
+                "eta_h": _cooldown_alarm.current_eta_h,
+                "progress": _cooldown_alarm.current_progress,
+                "t_cold": _t_cold_val,
+            }
+        if action == "vacuum_guard.status":
+            if _vacuum_guard is None:
+                return {"state": "UNAVAILABLE"}
+            return {"state": _vacuum_guard.state.name}
+        if action == "multiline.set_channels":
+            # v0.55.16.0.1 (smoke hotfix): operator picks 1..32
+            # channels via the panel selector dialog.
+            return await _handle_multiline_set_channels_command(
+                cmd,
+                drivers_by_name=drivers_by_name,
+                config_dir=_CONFIG_DIR,
+            )
+        if action.startswith("multiline.burst_"):
+            # v0.55.11 (F-MultiLineContinuous): GUI burst-capture
+            # button + status poll + manual stop.
+            response = await _handle_multiline_burst_command(
+                action,
+                cmd,
+                drivers_by_name=drivers_by_name,
+                experiment_manager=experiment_manager,
+                experiments_root=_DATA_DIR / "experiments",
+                auto_stop_tasks=_multiline_burst_auto_stop_meta,
+            )
+            # Schedule auto-stop on the engine loop if duration_s
+            # was set — the helper records intent in the meta dict;
+            # this site materialises the task so it runs on the
+            # right loop and gets cleaned up automatically.
+            if response.get("ok") and action == "multiline.burst_start" and response.get("duration_s") is not None:
+                target_name = response.get("name", "")
+                duration_s = float(response["duration_s"])
+
+                _t = asyncio.create_task(
+                    _multiline_burst_auto_stop(
+                        target_name,
+                        duration_s,
+                        drivers_by_name=drivers_by_name,
+                        experiments_root=_DATA_DIR / "experiments",
+                        auto_stop_tasks=_multiline_burst_auto_stop_tasks,
+                    ),
+                    name=f"multiline_burst_auto_stop_{_bounded_action_label(target_name)}",
+                )
+                # Cancel any pre-existing auto-stop for the same
+                # driver — operator restarting the timer wins.
+                prev = _multiline_burst_auto_stop_tasks.get(target_name)
+                if prev is not None and not prev.done():
+                    prev.cancel()
+                _multiline_burst_auto_stop_tasks[target_name] = _t
+            return response
+        if action == "cooldown_eta_get":
+            # B1 (2026-07): additive read-only command — exposes the
+            # same CooldownService.last_prediction() the old in-process
+            # CooldownAdapter read directly, now for the assistant
+            # process's ZMQ-based CooldownAdapter (agents/assistant/
+            # query/adapters/cooldown_adapter.py). Never a write path.
+            if cooldown_service is None:
+                return {"ok": True, "prediction": None}
+            return {"ok": True, "prediction": cooldown_service.last_prediction()}
+        return {
+            "ok": False,
+            "error_code": "command_unknown",
+            "error": "Command is not supported.",
+            "delivery_state": "dispatched",
+            "commit_state": "not_committed",
+            "retry_safe": False,
+        }
+    except Exception as exc:
+        logger.error(
+            "Engine command failed: action=%s exception=%s",
+            _bounded_action_label(action),
+            type(exc).__name__,
+        )
+        if _is_mutating_command(action):
+            return {
+                "ok": False,
+                "error_code": "command_execution_failed",
+                "error": "command execution failed",
+                "delivery_state": "dispatched",
+                "commit_state": "unknown",
+                "retry_safe": False,
+            }
+        return {"ok": False, "error": "command execution failed"}
+
+
+def _zmq_publisher_drop_count(broker: DataBroker) -> int:
+    """Return the current publisher drop counter without nested wiring logic."""
+
+    return int(broker.stats["zmq_publisher"]["dropped"])
+
+
+class _EngineStartupRollback:
+    """Retain reverse-order cleanup authority until live REP is acquired."""
+
+    def __init__(self) -> None:
+        self._callbacks: list[tuple[str, Callable[[], Any]]] = []
+        self._settled = False
+        self._rollback_started = False
+        self._rollback_task: asyncio.Task[None] | None = None
+
+    def add(self, label: str, callback: Callable[[], Any]) -> None:
+        if self._settled or self._rollback_started:
+            raise RuntimeError("engine startup transaction is already settled")
+        self._callbacks.append((label, callback))
+
+    async def acquire(
+        self,
+        operation: Awaitable[Any],
+        *,
+        label: str,
+        rollback: Callable[[], Any],
+    ) -> Any:
+        # Register first: a start method may acquire a partial resource and
+        # then raise, so its stop path must still run.
+        self.add(label, rollback)
+        return await self.guard(operation)
+
+    async def call(self, operation: Callable[[], Any]) -> Any:
+        try:
+            result = operation()
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        except BaseException:
+            await self.rollback()
+            raise
+
+    async def guard(self, operation: Awaitable[Any]) -> Any:
+        try:
+            return await operation
+        except BaseException:
+            await self.rollback()
+            raise
+
+    async def rollback(self) -> None:
+        if self._settled:
+            return
+        self._rollback_started = True
+        task = self._rollback_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._rollback_until_settled(), name="engine-startup-rollback")
+            self._rollback_task = task
+
+        cancellation_seen = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # The acquired resources outlive the cancelled caller. Keep
+                # awaiting the retained cleanup task through every repeated
+                # cancellation, then propagate cancellation after settlement.
+                cancellation_seen = True
+        task.result()
+        if cancellation_seen:
+            raise asyncio.CancelledError
+
+    async def _rollback_until_settled(self) -> None:
+        """Retry retained cleanup until no startup owner remains."""
+
+        while not self._settled:
+            try:
+                await self._rollback_once()
+            except BaseException as exc:  # noqa: BLE001 - retained owner stays in HOLD
+                logger.critical(
+                    "Engine startup rollback retained owners; exception=%s",
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(0.05)
+
+    async def _rollback_once(self) -> None:
+        failed: list[tuple[str, Callable[[], Any], BaseException]] = []
+        while self._callbacks:
+            label, callback = self._callbacks.pop()
+            try:
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
+            except BaseException as exc:  # noqa: BLE001 - continue complete rollback
+                failed.append((label, callback, exc))
+                logger.error(
+                    "Engine startup rollback failed: owner=%s exception=%s",
+                    label,
+                    type(exc).__name__,
+                )
+        if failed:
+            # Preserve only unsettled owners, in their original registration
+            # order, so a later rollback attempt retries them in reverse order.
+            self._callbacks.extend((label, callback) for label, callback, _exc in reversed(failed))
+            labels = ", ".join(label for label, _callback, _exc in failed)
+            raise RuntimeError(f"engine startup rollback incomplete: {labels}") from failed[0][2]
+        self._settled = True
+
+    def commit(self) -> None:
+        if self._settled or self._rollback_started:
+            raise RuntimeError("engine startup transaction is already settled")
+        self._settled = True
+        self._callbacks.clear()
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineShutdownOwner:
+    """One retained shutdown callback with a stable, non-secret label."""
+
+    label: str
+    stop: Callable[[], Any]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.label) is not str
+            or not self.label
+            or len(self.label) > 64
+            or not self.label.isascii()
+            or not all(char.isalnum() or char in {"_", "-"} for char in self.label)
+            or not callable(self.stop)
+        ):
+            raise ValueError("engine shutdown owner is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineShutdownLayer:
+    """One dependency layer whose owners are true settlement peers."""
+
+    label: str
+    owners: tuple[_EngineShutdownOwner, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.label) is not str
+            or not self.label
+            or len(self.label) > 64
+            or not self.label.isascii()
+            or not all(char.isalnum() or char in {"_", "-"} for char in self.label)
+            or type(self.owners) is not tuple
+            or not self.owners
+        ):
+            raise ValueError("engine shutdown layer is invalid")
+
+
+class _EngineShutdownSettledFailure(ShutdownOwnerSettledError):
+    """A terminal task owner settled, but its terminal result was failure."""
+
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__(failure)
+
+
+async def _invoke_engine_shutdown_owner(owner: _EngineShutdownOwner) -> None:
+    result = owner.stop()
+    if inspect.isawaitable(result):
+        result = await result
+    if result is not None:
+        raise RuntimeError("shutdown callback did not return exact success")
+
+
+async def _run_engine_shutdown_phase(
+    owners: tuple[_EngineShutdownOwner, ...],
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float,
+    sleep: Callable[[float], Awaitable[None]],
+) -> tuple[tuple[str, BaseException], ...]:
+    """Attempt all retained peers per pass and retry failures without a cap."""
+
+    remaining = list(owners)
+    first_failures: list[tuple[str, BaseException]] = []
+    failed_labels: set[str] = set()
+    while remaining:
+        tasks = tuple(
+            asyncio.create_task(
+                _invoke_engine_shutdown_owner(owner),
+                name=f"engine-shutdown-{owner.label}",
+            )
+            for owner in remaining
+        )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        retry: list[_EngineShutdownOwner] = []
+        for owner, result in zip(remaining, results, strict=True):
+            if result is None:
+                logger_.info("Engine shutdown owner settled: owner=%s", owner.label)
+                continue
+            if isinstance(result, ShutdownOwnerSettledError):
+                if owner.label not in failed_labels:
+                    failed_labels.add(owner.label)
+                    first_failures.append((owner.label, result.failure))
+                logger_.error(
+                    "Engine shutdown terminal owner failed after settlement: owner=%s exception=%s",
+                    owner.label,
+                    type(result.failure).__name__,
+                )
+                continue
+            assert isinstance(result, BaseException)
+            if owner.label not in failed_labels:
+                failed_labels.add(owner.label)
+                first_failures.append((owner.label, result))
+            logger_.error(
+                "Engine shutdown owner retained for retry: owner=%s exception=%s",
+                owner.label,
+                type(result).__name__,
+            )
+            retry.append(owner)
+        remaining = retry
+        if remaining:
+            await sleep(retry_delay_s)
+    return tuple(first_failures)
+
+
+async def _settle_engine_shutdown_phase(
+    owners: tuple[_EngineShutdownOwner, ...],
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float = 0.1,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> tuple[tuple[str, BaseException], ...]:
+    """Retain one attempt-all phase through repeated caller cancellation."""
+
+    if len({owner.label for owner in owners}) != len(owners):
+        raise ValueError("engine shutdown owner labels must be unique")
+    requested_delay = float(retry_delay_s)
+    bounded_delay = min(max(requested_delay, 0.0), 1.0) if math.isfinite(requested_delay) else 0.1
+    settlement = asyncio.create_task(
+        _run_engine_shutdown_phase(
+            owners,
+            logger_,
+            retry_delay_s=bounded_delay,
+            sleep=sleep,
+        ),
+        name="engine-shutdown-phase-settlement",
+    )
+    cancellation: asyncio.CancelledError | None = None
+    while not settlement.done():
+        try:
+            await asyncio.shield(settlement)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    failures = settlement.result()
+    if cancellation is None:
+        return failures
+    return (("phase_wait", cancellation), *failures)
+
+
+async def _settle_engine_shutdown_plan(
+    layers: tuple[_EngineShutdownLayer, ...],
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float = 0.1,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> tuple[tuple[str, BaseException], ...]:
+    """Settle dependency layers sequentially and true peers concurrently."""
+
+    if type(layers) is not tuple:
+        raise TypeError("engine shutdown plan must be a tuple")
+    if len({layer.label for layer in layers}) != len(layers):
+        raise ValueError("engine shutdown layer labels must be unique")
+    owner_labels = tuple(owner.label for layer in layers for owner in layer.owners)
+    if len(set(owner_labels)) != len(owner_labels):
+        raise ValueError("engine shutdown owner labels must be globally unique")
+
+    failures: list[tuple[str, BaseException]] = []
+    for layer in layers:
+        logger_.info("Engine shutdown layer starting: layer=%s", layer.label)
+        layer_failures = await _settle_engine_shutdown_phase(
+            layer.owners,
+            logger_,
+            retry_delay_s=retry_delay_s,
+            sleep=sleep,
+        )
+        failures.extend((f"{layer.label}.{owner_label}", failure) for owner_label, failure in layer_failures)
+        logger_.info("Engine shutdown layer settled: layer=%s", layer.label)
+    return tuple(failures)
+
+
+async def _drain_retained_command_tasks_owner(
+    context: EngineCommandContext,
+    logger_: logging.Logger,
+) -> None:
+    """Normalize the retained-command deadline result for strict shutdown."""
+
+    completed_within_deadline = await _drain_experiment_command_tasks(context, logger_)
+    if completed_within_deadline is not True:
+        raise _EngineShutdownSettledFailure(TimeoutError("retained command settlement exceeded its visible deadline"))
+
+
+async def _stop_scheduler_shutdown_owner(
+    scheduler: Scheduler,
+    feed: RecordingLifecycleFeed,
+    sequence: int,
+) -> None:
+    await _stop_scheduler_with_recording_feed(scheduler, feed, sequence)
+
+
+async def _stop_terminal_task_owner(task: asyncio.Task[Any]) -> None:
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    except BaseException as exc:  # noqa: BLE001 - task ownership is terminal
+        raise _EngineShutdownSettledFailure(exc) from None
+
+
+async def _request_and_settle_terminal_task_owner(
+    request_stop: Callable[[], Any],
+    task: asyncio.Task[Any] | None,
+) -> None:
+    result = request_stop()
+    if inspect.isawaitable(result):
+        result = await result
+    if result is not None:
+        raise RuntimeError("shutdown request did not return exact success")
+    if task is None:
+        return
+    try:
+        await task
+    except BaseException as exc:  # noqa: BLE001 - task ownership is terminal
+        raise _EngineShutdownSettledFailure(exc) from None
+
+
+async def _settle_command_server_before_safety(
+    command_server: Any,
+    safety_manager: Any,
+    logger_: logging.Logger,
+    *,
+    retry_delay_s: float = 1.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> tuple[BaseException, ...]:
+    """Freeze mutation ingress and retain teardown until global OFF is final.
+
+    A command-server failure must never bypass the safety owner.  After every
+    failed/cancelled server-stop attempt we prove global OFF, retain the
+    process, and retry server settlement.  Once every command owner is settled,
+    global OFF is proved one final time so no late mutation can invalidate it.
+    Earlier failures are returned for deferred reporting after the remaining
+    teardown owners have been attempted.
+    """
+
+    command_server.freeze_admission()
+    failures: list[BaseException] = []
+    while True:
+        settlement = asyncio.create_task(
+            command_server.stop(),
+            name="command-server-shutdown-owner",
+        )
+        # Attempt OFF immediately, before waiting on an intentionally
+        # cancellation-resistant mutation owner. While such an owner remains,
+        # periodically reassert OFF; the process and all dependencies stay
+        # retained until the command owner terminally settles.
+        while not settlement.done():
+            await stop_safety_manager_with_hold(safety_manager, logger_)
+            if settlement.done():
+                break
+            retry_timer = asyncio.create_task(
+                sleep(retry_delay_s),
+                name="command-server-shutdown-safety-retry",
+            )
+            while not settlement.done() and not retry_timer.done():
+                try:
+                    await asyncio.wait(
+                        {settlement, retry_timer},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError as cancel_exc:
+                    failures.append(cancel_exc)
+            if not retry_timer.done():
+                retry_timer.cancel()
+            try:
+                await retry_timer
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            settlement.result()
+        except BaseException as exc:  # noqa: BLE001 - safety settlement must still run
+            failures.append(exc)
+            logger_.critical(
+                "Command-server shutdown incomplete; retaining process through safety settlement: %s",
+                type(exc).__name__,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            await stop_safety_manager_with_hold(safety_manager, logger_)
+            continue
+        break
+
+    # The final OFF proof starts only after the last command owner is known to
+    # be terminal, covering a mutation that settled after an earlier proof.
+    await stop_safety_manager_with_hold(safety_manager, logger_)
+    return tuple(failures)
+
+
+class _EngineTeardownState(Enum):
+    """Monotonic engine teardown checkpoints."""
+
+    NEW = "new"
+    INGRESS_OFF_SETTLED = "ingress_off_settled"
+    PLAN_SETTLED = "plan_settled"
+
+
+class _EngineTeardownSequence:
+    """Own ordered teardown settlement and its single final disposition."""
+
+    def __init__(
+        self,
+        *,
+        command_ingress: ZMQCommandIngressPair,
+        safety_manager: Any,
+        logger_: logging.Logger,
+        ingress_terminal_failure: ZMQCommandIngressTerminalFailure | None,
+    ) -> None:
+        self._command_ingress = command_ingress
+        self._safety_manager = safety_manager
+        self._logger = logger_
+        self._initial_ingress_terminal_failure = ingress_terminal_failure
+        self._state = _EngineTeardownState.NEW
+        self._ingress_failures: tuple[BaseException, ...] = ()
+        self._plan_failures: tuple[tuple[str, BaseException], ...] = ()
+
+    @property
+    def state(self) -> _EngineTeardownState:
+        return self._state
+
+    async def settle_ingress_off(self) -> None:
+        if self._state is not _EngineTeardownState.NEW:
+            raise RuntimeError("engine teardown ingress/OFF settlement is out of sequence")
+        self._ingress_failures = await _settle_command_server_before_safety(
+            self._command_ingress,
+            self._safety_manager,
+            self._logger,
+        )
+        self._state = _EngineTeardownState.INGRESS_OFF_SETTLED
+
+    async def settle_plan(self, layers: tuple[_EngineShutdownLayer, ...]) -> None:
+        if self._state is not _EngineTeardownState.INGRESS_OFF_SETTLED:
+            raise RuntimeError("engine teardown plan settlement is out of sequence")
+        self._plan_failures = await _settle_engine_shutdown_plan(layers, self._logger)
+        self._state = _EngineTeardownState.PLAN_SETTLED
+
+    def finalize(self) -> None:
+        if self._state is not _EngineTeardownState.PLAN_SETTLED:
+            raise RuntimeError("engine teardown cannot finalize before the shutdown plan settles")
+        shutdown_failures = (
+            tuple(("command_server", failure) for failure in self._ingress_failures) + self._plan_failures
+        )
+        ingress_terminal_failure = self._command_ingress.terminal_failure or self._initial_ingress_terminal_failure
+        if ingress_terminal_failure is not None:
+            self._logger.error(
+                "Engine command ingress terminated; endpoint=%s stage=%s failure=%s",
+                ingress_terminal_failure.endpoint,
+                ingress_terminal_failure.stage,
+                ingress_terminal_failure.failure_type,
+            )
+            if shutdown_failures:
+                self._logger.error(
+                    "Engine ingress failure teardown recovered owner failures: owners=%s",
+                    ",".join(label for label, _failure in shutdown_failures),
+                )
+            raise ZMQCommandIngressTerminalError(ingress_terminal_failure) from None
+        if shutdown_failures:
+            failure_labels = ",".join(label for label, _failure in shutdown_failures)
+            first_label, first_failure = shutdown_failures[0]
+            if isinstance(first_failure, asyncio.CancelledError):
+                raise first_failure
+            raise RuntimeError(
+                f"engine shutdown settled after recovered owner failures: first={first_label}; owners={failure_labels}"
+            ) from first_failure
+
+
+async def _rollback_supervisor(supervisor: TaskSupervisor) -> None:
+    """Stop restart authority and settle non-safety tasks during failed boot."""
+
+    supervisor.stop()
+    tasks = tuple(
+        task
+        for name, task in supervisor.supervised_tasks.items()
+        if name not in {"safety_collect", "safety_monitor"} and not task.done()
+    )
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _rollback_scheduler_startup(
+    scheduler: Scheduler,
+    recording_lifecycle_feed: RecordingLifecycleFeed,
+    rollback_state: dict[str, Any],
+) -> None:
+    """Settle a scheduler whose startup transaction reached its start attempt."""
+
+    if rollback_state["attempted"] is True:
+        await _stop_scheduler_with_recording_feed(
+            scheduler,
+            recording_lifecycle_feed,
+            rollback_state["sequence"],
+        )
+
+
+def _engine_startup_summary(
+    driver_configs: tuple[InstrumentConfig, ...],
+    alarm_configs: list[AlarmConfig],
+    interlock_engine: InterlockEngine,
+) -> tuple[int, int, int]:
+    """Return the bounded startup counts logged after all owners are live."""
+
+    return (
+        len(driver_configs),
+        len(alarm_configs),
+        len(interlock_engine.get_state()),
+    )
+
+
+def _install_engine_signal_handlers(shutdown_event: asyncio.Event) -> Callable[[], None]:
+    """Install shutdown ownership and return its exact rollback action."""
+
+    loop = asyncio.get_running_loop()
+    request_shutdown = functools.partial(_request_shutdown, shutdown_event)
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGINT, request_shutdown)
+        try:
+            loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+        except BaseException:
+            loop.remove_signal_handler(signal.SIGINT)
+            raise
+
+        def remove() -> None:
+            loop.remove_signal_handler(signal.SIGTERM)
+            loop.remove_signal_handler(signal.SIGINT)
+
+        return remove
+
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, request_shutdown)
+
+    def remove() -> None:
+        signal.signal(signal.SIGINT, previous)
+
+    return remove
+
+
+async def _commit_engine_command_ingress_startup(
+    *,
+    command_ingress: ZMQCommandIngressPair,
+    command_context: EngineCommandContext,
+    startup: _EngineStartupRollback,
+) -> None:
+    """Commit READY inside one synchronous health/emit/health boundary."""
+
+    try:
+        health_result = command_ingress.require_healthy()
+        _require_exact_synchronous_none(
+            health_result,
+            boundary="engine command ingress health check",
+        )
+        if command_context.engine_ready_nonce:
+            ready_result = _emit_engine_ready_receipt(command_context)
+            _require_exact_synchronous_none(
+                ready_result,
+                boundary="engine READY emitter",
+            )
+        health_result = command_ingress.require_healthy()
+        _require_exact_synchronous_none(
+            health_result,
+            boundary="engine command ingress health check",
+        )
+        command_context.experiment_commands_accepting = True
+        startup.commit()
+    except BaseException:
+        await startup.rollback()
+        raise
+
+
+def _require_exact_synchronous_none(result: object, *, boundary: str) -> None:
+    """Reject and settle an unexpected awaitable without yielding to it."""
+
+    if result is None:
+        return
+    if inspect.isawaitable(result):
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        elif isinstance(result, asyncio.Future):
+            result.cancel()
+    raise TypeError(f"{boundary} must return exactly None")
+
+
+async def _wait_for_engine_shutdown_or_ingress_failure(
+    shutdown_event: asyncio.Event,
+    command_ingress: ZMQCommandIngressPair,
+) -> ZMQCommandIngressTerminalFailure | None:
+    """Wait for normal shutdown or sticky ingress failure, prioritizing failure."""
+
+    shutdown_waiter = asyncio.create_task(shutdown_event.wait(), name="engine-shutdown-signal-waiter")
+    ingress_waiter = asyncio.create_task(
+        command_ingress.wait_terminal_failure(),
+        name="engine-command-ingress-terminal-waiter",
+    )
+    failure: ZMQCommandIngressTerminalFailure | None = None
+    try:
+        await asyncio.wait(
+            {shutdown_waiter, ingress_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Read the sticky pair authority after the wait returns and before any
+        # further suspension. If both events are ready, ingress failure wins.
+        failure = command_ingress.terminal_failure
+        if failure is None and ingress_waiter.done():
+            failure = ingress_waiter.result()
+    finally:
+        for waiter in (shutdown_waiter, ingress_waiter):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(shutdown_waiter, ingress_waiter, return_exceptions=True)
+    # Include a failure that latched while the losing waiter was being settled.
+    # This closes the normal-signal/fatal-callback boundary race.
+    return command_ingress.terminal_failure or failure
+
+
+async def _run_engine(
+    *,
+    mock: bool = False,
+    engine_instance_id: str = "",
+    shutdown_capability: str = "",
+    engine_ready_nonce: str = "",
+    engine_ready_channel_fd: int | None = None,
+) -> None:
     """Инициализировать и запустить все подсистемы engine."""
+    engine_instance_id = _canonical_engine_instance_id(engine_instance_id)
     start_ts = time.monotonic()
+    shutdown_event = asyncio.Event()
     logger.info("═══ CryoDAQ Engine запускается ═══")
 
     # --- Конфигурация путей (*.local.yaml приоритетнее *.yaml) ---
-    def _cfg(name: str) -> Path:
-        local = _CONFIG_DIR / f"{name}.local.yaml"
-        return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
-
-    instruments_cfg = _cfg("instruments")
-    alarms_cfg = _cfg("alarms")
-    interlocks_cfg = _cfg("interlocks")
-    housekeeping_cfg = _cfg("housekeeping")
+    instruments_cfg = _engine_config_path("instruments")
+    interlocks_cfg = _engine_config_path("interlocks")
+    housekeeping_cfg = _engine_config_path("housekeeping")
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
 
     # --- Создать основные компоненты ---
@@ -1967,32 +6381,49 @@ async def _run_engine(*, mock: bool = False) -> None:
         calibration_store.load_curves(curves_dir)
 
     # Драйверы
-    driver_configs = _load_drivers(instruments_cfg, mock=mock, calibration_store=calibration_store)
+    driver_load = _load_drivers(
+        instruments_cfg,
+        mock=mock,
+        calibration_store=calibration_store,
+        data_dir=_DATA_DIR,
+    )
+    driver_configs = driver_load.instrument_configs
     drivers_by_name = {cfg.driver.name: cfg.driver for cfg in driver_configs}
-
-    # Keithley driver (нужен для SafetyManager)
-    keithley_driver = None
-    for cfg in driver_configs:
-        if hasattr(cfg.driver, "emergency_off"):
-            keithley_driver = cfg.driver
-            break
+    reviewed_source_runtime_binding = None
+    if driver_load.reviewed_source is not None:
+        reviewed_source_runtime_binding = next(
+            (cfg.runtime_binding for cfg in driver_configs if cfg.driver is driver_load.reviewed_source),
+            None,
+        )
+        if (
+            reviewed_source_runtime_binding is None
+            or not is_issued_runtime_binding(reviewed_source_runtime_binding)
+            or reviewed_source_runtime_binding.driver is not driver_load.reviewed_source
+            or reviewed_source_runtime_binding.trust_class is not DriverTrustClass.REVIEWED_SOURCE
+        ):
+            raise DriverRegistryError("reviewed source lacks exact sealed runtime binding")
 
     # SafetyManager — создаётся ПЕРВЫМ
-    safety_cfg = _cfg("safety")
+    safety_cfg = _engine_config_path("safety")
     safety_manager = SafetyManager(
         safety_broker,
-        keithley_driver=keithley_driver,
+        keithley_driver=driver_load.reviewed_source,
+        reviewed_source_runtime_binding=reviewed_source_runtime_binding,
         mock=mock,
         data_broker=broker,
     )
     safety_manager.load_config(safety_cfg)
 
+    # F35: descriptor identity is mandatory production startup authority.
+    # A machine-local instrument configuration requires a complete local
+    # descriptor replacement; it never falls back to the tracked base.
+    live_descriptor_catalog = await _load_live_descriptor_authority(instruments_cfg, driver_load)
+
     housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
-    # Merge legacy alarms.yaml/interlocks.yaml protection
-    # patterns with the modern alarms_v3.yaml critical channels. Without this
-    # the throttle thins critical channels even though alarms_v3 marks them
-    # CRITICAL.
-    legacy_patterns = load_protected_channel_patterns(alarms_cfg, interlocks_cfg)
+    # Merge legacy interlocks.yaml protection patterns with the modern
+    # alarms_v3.yaml critical channels. Without this the throttle thins
+    # critical channels even though alarms_v3 marks them CRITICAL.
+    legacy_patterns = load_protected_channel_patterns(interlocks_cfg)
     alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
     v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
     merged_patterns = list({*legacy_patterns, *v3_patterns})
@@ -2002,14 +6433,23 @@ async def _run_engine(*, mock: bool = False) -> None:
         len(v3_patterns),
         len(merged_patterns),
     )
+    # F-1 startup diagnostic: resolve every canonical protected expression to
+    # one exact raw emitted label before AdaptiveThrottle is constructed.  A
+    # missing, ambiguous, or colliding binding is a startup configuration
+    # error; do not boot with an optimistic/raw-substring fallback.
+    merged_patterns = validate_safety_pattern_liveness(
+        descriptor_catalog=live_descriptor_catalog,
+        interlocks_config_path=interlocks_cfg,
+        safety_manager=safety_manager,
+        adaptive_throttle_patterns=merged_patterns,
+    )
     adaptive_throttle = AdaptiveThrottle(
         housekeeping_raw.get("adaptive_throttle", {}),
         protected_patterns=merged_patterns,
     )
 
     # SQLite — persistence-first: writer создаётся ДО scheduler
-    writer = SQLiteWriter(_DATA_DIR)
-    await writer.start_immediate()
+    writer = SQLiteWriter(_DATA_DIR, channel_catalog=live_descriptor_catalog)
     # Disk-full graceful degradation (Phase 2a H.1): wire writer to the
     # engine event loop and SafetyManager so a disk-full error in the
     # writer thread can latch a safety fault via run_coroutine_threadsafe.
@@ -2019,28 +6459,34 @@ async def _run_engine(*, mock: bool = False) -> None:
     writer.set_event_loop(asyncio.get_running_loop())
     writer.set_persistence_failure_callback(safety_manager.on_persistence_failure)
     safety_manager.set_persistence_failure_clear(writer.clear_disk_full)
-
-    # H.6: wire safety fault → operator_log machine event
-    async def _safety_fault_log_callback(
-        source: str,
-        message: str,
-        channel: str = "",
-        value: float = 0.0,
-    ) -> None:
-        entry = await writer.append_operator_log(
-            message=message,
-            author=source,
-            source="machine",
-            tags=("safety_fault", channel) if channel else ("safety_fault",),
+    persistence_freshness_s = min(
+        259_200.0,
+        max(1.0, 3.0 * max((config.poll_interval_s for config in driver_configs), default=10.0)),
+    )
+    try:
+        recording_lifecycle_feed = RecordingLifecycleFeed(
+            writer,
+            persistence_freshness_s=persistence_freshness_s,
         )
-        # Publish to broker so live consumers (GUI, web)
-        # see safety faults without waiting for SQLite refresh.
-        try:
-            await _publish_operator_log_entry(broker, entry)
-        except Exception as exc:
-            logger.error("Failed to publish safety fault operator_log entry: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - observational bridge is fail-dark
+        logger.warning(
+            "Engine boot degraded; owner=recording_lifecycle_feed exception=%s",
+            type(exc).__name__,
+        )
+        recording_lifecycle_feed = RecordingLifecycleFeed()
 
-    safety_manager._fault_log_callback = _safety_fault_log_callback
+    # H.6: wire safety fault → operator_log machine event. Dependencies that
+    # are created later are filled on this stable context before manager start.
+    _alarm_dispatch_tasks: set[asyncio.Task[Any]] = set()
+    safety_fault_context = _SafetyFaultLogContext(
+        writer=writer,
+        broker=broker,
+        alarm_dispatch_tasks=_alarm_dispatch_tasks,
+    )
+    safety_manager._fault_log_callback = functools.partial(
+        _safety_fault_log_callback,
+        context=safety_fault_context,
+    )
 
     # Calibration acquisition — continuous SRDG during calibration experiments
     calibration_acquisition = CalibrationAcquisitionService(
@@ -2055,21 +6501,29 @@ async def _run_engine(*, mock: bool = False) -> None:
         sqlite_writer=writer,
         adaptive_throttle=adaptive_throttle,
         calibration_acquisition=calibration_acquisition,
+        reviewed_source_connect_begin=safety_manager.begin_reviewed_source_connect,
+        reviewed_source_connect_complete=safety_manager.complete_reviewed_source_connect,
+        reviewed_source_uncertain=safety_manager.mark_reviewed_source_uncertain,
+        reviewed_source_connect_abandon=safety_manager.abandon_reviewed_source_connect,
+        reviewed_source_disconnect=safety_manager.disconnect_reviewed_source,
         drain_timeout_s=safety_manager._config.scheduler_drain_timeout_s,
+        persistence_commit_observer=recording_lifecycle_feed.persistence_committed,
+        persistence_rejection_observer=recording_lifecycle_feed.persistence_rejected,
+        persistence_ambiguity_observer=recording_lifecycle_feed.persistence_ambiguous,
     )
     for cfg in driver_configs:
         scheduler.add(cfg)
 
     # ZMQ PUB
-    zmq_queue = await broker.subscribe("zmq_publisher")
+    # F35 D4: only the ZMQ publisher path opts in to the descriptor envelope
+    # companion — every other subscriber (writer, alarms, safety broker,
+    # sound-carrier, assistant relay) stays on the default bare-Reading path.
+    zmq_queue = await broker.subscribe(
+        "zmq_publisher",
+        wants_descriptor_envelope=True,
+        required_publisher=True,
+    )
     zmq_pub = ZMQPublisher()
-
-    # Alarm Engine
-    alarm_engine = AlarmEngine(broker)
-    if alarms_cfg.exists():
-        alarm_engine.load_config(alarms_cfg)
-    else:
-        logger.warning("Файл тревог не найден: %s", alarms_cfg)
 
     # Interlock Engine — действия делегируются SafetyManager.
     # The actions-dict callables are kept as no-ops for
@@ -2077,98 +6531,28 @@ async def _run_engine(*, mock: bool = False) -> None:
     # the REAL safety routing happens via trip_handler which receives the
     # full (condition, reading) context. Without this the action name and
     # channel would be discarded and stop_source would behave as emergency_off.
-    async def _interlock_noop() -> None:
-        return None
-
     interlock_actions: dict[str, Any] = {
         "emergency_off": _interlock_noop,
         "stop_source": _interlock_noop,
     }
 
-    async def _interlock_trip_handler(condition: Any, reading: Any) -> None:
-        # SAFETY: the actions-dict callables are no-ops,
-        # so this handler is the SOLE path that triggers a SafetyManager
-        # response. If anything raises here, InterlockEngine._trip will
-        # log-and-swallow → fail-open. We catch ourselves and escalate to
-        # a guaranteed _fault as a last resort. _fault is unlocked and
-        # idempotent on the Keithley side (verified Phase 1).
-        try:
-            await safety_manager.on_interlock_trip(
-                interlock_name=condition.name,
-                channel=reading.channel,
-                value=float(reading.value) if reading.value is not None else 0.0,
-                action=condition.action,
-            )
-        except Exception as exc:
-            logger.critical(
-                "INTERLOCK trip_handler FAILED for '%s' (action=%s): %s — "
-                "escalating to guaranteed fault.",
-                condition.name,
-                condition.action,
-                exc,
-                exc_info=True,
-            )
-            try:
-                # v0.55.12 — public latch_fault() replaces the private
-                # _fault() call.
-                await safety_manager.latch_fault(
-                    reason=f"Interlock trip_handler failed: {condition.name}: {exc}",
-                    source="interlock",
-                    channel=reading.channel,
-                    value=float(reading.value) if reading.value is not None else 0.0,
-                )
-            except Exception as exc2:
-                logger.critical(
-                    "INTERLOCK escalation _fault FAILED for '%s': %s — "
-                    "instrument state UNKNOWN, immediate operator intervention!",
-                    condition.name,
-                    exc2,
-                    exc_info=True,
-                )
-
-    async def _interlock_dead_channel_handler(condition: Any, reading: Any) -> bool:
-        # P2-5: a persistently non-usable reading on an interlock-protected
-        # channel. SafetyManager gates the fault on RUNNING (sole authority);
-        # this handler only forwards. Failures escalate to a guaranteed fault.
-        # S1: return True iff a fault is now latched — the InterlockEngine marks
-        # the debounce window escalated ONLY on True, so a declined escalation
-        # (not RUNNING) is retried on the next non-usable sample (fail-closed).
-        try:
-            return await safety_manager.on_interlock_dead_channel(
-                condition.name,
-                reading.channel,
-                value=float(reading.value) if reading.value is not None else float("nan"),
-            )
-        except Exception as exc:
-            logger.critical(
-                "INTERLOCK dead_channel_handler FAILED for '%s' channel '%s': %s — "
-                "escalating to guaranteed fault.",
-                condition.name,
-                reading.channel,
-                exc,
-                exc_info=True,
-            )
-            try:
-                await safety_manager.latch_fault(
-                    reason=f"Interlock dead_channel handler failed: {condition.name}: {exc}",
-                    source="interlock",
-                    channel=reading.channel,
-                )
-                return True
-            except Exception as exc2:
-                logger.critical(
-                    "INTERLOCK dead-channel escalation _fault FAILED for '%s': %s",
-                    condition.name,
-                    exc2,
-                    exc_info=True,
-                )
-                return False
+    interlock_handler_context = _InterlockHandlerContext(
+        safety_manager=safety_manager,
+        alarm_dispatch_tasks=_alarm_dispatch_tasks,
+        dead_channel_alarm_sent=set(),
+    )
 
     interlock_engine = InterlockEngine(
         broker,
         actions=interlock_actions,
-        trip_handler=_interlock_trip_handler,
-        dead_channel_handler=_interlock_dead_channel_handler,
+        trip_handler=functools.partial(
+            _interlock_trip_handler,
+            context=interlock_handler_context,
+        ),
+        dead_channel_handler=functools.partial(
+            _interlock_dead_channel_handler,
+            context=interlock_handler_context,
+        ),
     )
     interlock_engine.load_config(interlocks_cfg)
 
@@ -2178,6 +6562,14 @@ async def _run_engine(*, mock: bool = False) -> None:
         instruments_config=instruments_cfg,
         templates_dir=_CONFIG_DIR / "experiment_templates",
     )
+    try:
+        _seed_recording_lifecycle(recording_lifecycle_feed, experiment_manager)
+    except Exception as exc:  # noqa: BLE001 - dark presentation cannot block engine boot
+        logger.warning(
+            "Engine boot degraded; owner=recording_lifecycle_seed exception=%s",
+            type(exc).__name__,
+        )
+    acquisition_lifecycle_sequence = 0
 
     # F31: sinks foundation (vault + webhooks). Local override beats base.
     from cryodaq.sinks import SinkRegistry  # local import keeps engine cold-start fast
@@ -2189,6 +6581,13 @@ async def _run_engine(*, mock: bool = False) -> None:
     sink_registry.load_config(_sink_cfg_path)
 
     event_bus = EventBus()
+    safety_fault_context.event_bus = event_bus
+    safety_fault_context.experiment_manager = experiment_manager
+    interlock_handler_context.event_bus = event_bus
+    interlock_handler_context.experiment_manager = experiment_manager
+    # A3b: engine-side ring buffer of alarm_fired events for the GUI's
+    # recent_alarms poll (sound) — see _alarm_ring_feed()/_AlarmRingBuffer.
+    _alarm_ring = _AlarmRingBuffer()
     event_logger = EventLogger(writer, experiment_manager, event_bus=event_bus)
 
     # --- F13: Leak rate estimator ---
@@ -2216,13 +6615,13 @@ async def _run_engine(*, mock: bool = False) -> None:
         min_points=_alarm_v2_engine_cfg.rate_min_points,
     )
     _alarm_v2_phase = ExperimentPhaseProvider(experiment_manager)
-    _alarm_v2_setpoint = ExperimentSetpointProvider(
-        experiment_manager, _alarm_v2_engine_cfg.setpoints
-    )
-    alarm_v2_evaluator = AlarmEvaluator(
-        _alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint
-    )
+    _alarm_v2_setpoint = ExperimentSetpointProvider(experiment_manager, _alarm_v2_engine_cfg.setpoints)
+    alarm_v2_evaluator = AlarmEvaluator(_alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint)
     alarm_v2_state_mgr = AlarmStateManager()
+    zmq_pub.configure_periodic_authority(
+        reading_drop_count=functools.partial(_zmq_publisher_drop_count, broker),
+        alarm_snapshot=alarm_v2_state_mgr.snapshot_active_canonical,
+    )
     # P2-5: interlock non-usable readings emit alarm-v2 events via the same
     # AlarmStateManager the sensor-diagnostics engine uses (built after the
     # InterlockEngine, so wired here by setter).
@@ -2234,29 +6633,23 @@ async def _run_engine(*, mock: bool = False) -> None:
         # the engine), so this branch is reached only when the file exists and
         # parses but defines zero alarms — the message must reflect that.
         logger.info(
-            "Alarm Engine v2: config/alarms_v3.yaml не содержит определений "
-            "алармов — v2-движку нечего оценивать"
+            "Alarm Engine v2: config/alarms_v3.yaml не содержит определений алармов — v2-движку нечего оценивать"
         )
 
     # --- Physical alarms (F-X v3): CooldownAlarm + VacuumGuard ---
     _phys_alarms_yaml = _CONFIG_DIR / "physical_alarms.yaml"
-    _cooldown_cfg, _vacuum_cfg = load_physical_alarms_config(_phys_alarms_yaml)
+    _cooldown_cfg, _vacuum_cfg, _landmarks = load_production_physical_alarms_config(_phys_alarms_yaml)
 
     # F-ChannelLandmarks: install hardware-pinned landmark map (Т11/Т12 with
     # operator-phrasing aliases) on the shared ChannelManager. The query
     # agent's IntentClassifier reads it via channel_manager.get_landmarks()
     # to resolve phrases like "азотная плита" to the correct channel even
     # when an experiment-level alias has drifted onto another channel.
-    try:
-        _landmarks = load_channel_landmarks(_phys_alarms_yaml)
-        get_channel_manager().set_landmarks(_landmarks)
-        if _landmarks:
-            logger.info(
-                "ChannelLandmarks: загружены для каналов %s",
-                ", ".join(sorted(_landmarks)),
-            )
-    except Exception as exc:
-        logger.warning("ChannelLandmarks: ошибка загрузки — %s", exc, exc_info=True)
+    get_channel_manager().set_landmarks(_landmarks)
+    logger.info(
+        "ChannelLandmarks: загружены для каналов %s",
+        ", ".join(sorted(_landmarks)),
+    )
 
     # Resolve model path relative to project root (not process cwd)
     _model_path_str = _cooldown_cfg.get("predictor_model_path", "model/predictor_model.json")
@@ -2291,19 +6684,18 @@ async def _run_engine(*, mock: bool = False) -> None:
                 # bool, fail-closed like the wdog gate — pass the handle only on
                 # an explicit `escalate_to_safety: true`; default keeps None
                 # (alarm-only, byte-identical to prior behavior).
-                safety_manager=(
-                    safety_manager
-                    if _vacuum_cfg.get("escalate_to_safety") is True
-                    else None
-                ),
+                safety_manager=(safety_manager if _vacuum_cfg.get("escalate_to_safety") is True else None),
             )
         except Exception as exc:
-            logger.warning("VacuumGuard: ошибка инициализации, отключён — %s", exc)
+            logger.warning(
+                "Engine boot degraded: owner=vacuum_guard exception=%s",
+                type(exc).__name__,
+            )
     else:
         logger.info("VacuumGuard: отключён в конфиге")
 
     # --- Sensor Diagnostics Engine ---
-    _plugins_cfg_path = _cfg("plugins")
+    _plugins_cfg_path = _engine_config_path("plugins")
     _plugins_raw: dict[str, Any] = {}
     if _plugins_cfg_path.exists():
         with _plugins_cfg_path.open(encoding="utf-8") as fh:
@@ -2314,11 +6706,7 @@ async def _run_engine(*, mock: bool = False) -> None:
     if _sd_enabled:
         _ch_mgr = get_channel_manager()
         # Build correlation groups from config; channel ids use display prefix (Т1→T1)
-        _sd_alarm_publisher = (
-            alarm_v2_state_mgr
-            if _sd_cfg.get("alarm_publishing_enabled", True)
-            else None
-        )
+        _sd_alarm_publisher = alarm_v2_state_mgr if _sd_cfg.get("alarm_publishing_enabled", True) else None
         sensor_diag = SensorDiagnosticsEngine(
             config=_sd_cfg,
             alarm_publisher=_sd_alarm_publisher,
@@ -2326,17 +6714,12 @@ async def _run_engine(*, mock: bool = False) -> None:
             critical_duration_s=float(_sd_cfg.get("critical_duration_s", 900.0)),
         )
         # Set display names from channel_manager
-        sensor_diag.set_channel_names(
-            {ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()}
-        )
+        sensor_diag.set_channel_names({ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()})
         # v0.55.2 A4: tell the engine which channels are cryogenic so warm
         # references (calibration, flange, vacuum case, structural) don't
         # get scored against cryogenic noise/drift thresholds.
         sensor_diag.set_channel_cold_map(
-            {
-                ch_id: bool(info.get("is_cold", True))
-                for ch_id, info in _ch_mgr.get_all().items()
-            }
+            {ch_id: bool(info.get("is_cold", True)) for ch_id, info in _ch_mgr.get_all().items()}
         )
         logger.info(
             "SensorDiagnostics: enabled, update_interval=%ds, groups=%d, alarm_publishing=%s",
@@ -2368,9 +6751,7 @@ async def _run_engine(*, mock: bool = False) -> None:
         # F1a: while rotation is enabled, retention must not gzip daily readings
         # DBs — rotation owns their lifecycle, and a .db.gz is invisible to
         # every reader (the day-14 gzip starved the day-30 rotation).
-        skip_daily_db_compression=(
-            (housekeeping_raw.get("cold_rotation", {}) or {}).get("enabled") is True
-        ),
+        skip_daily_db_compression=((housekeeping_raw.get("cold_rotation", {}) or {}).get("enabled") is True),
     )
 
     # Cold rotation: aged daily SQLite → Parquet cold storage, once per day at
@@ -2391,775 +6772,85 @@ async def _run_engine(*, mock: bool = False) -> None:
     # rotation silently. normalize_schedule_time falls back to 03:00 + ERROR log.
     cold_rotation_schedule = normalize_schedule_time(str(cold_cfg.get("schedule_time", "03:00")))
 
-    async def _cold_rotation_scheduler() -> None:
-        """Run rotation once per day at cold_rotation.schedule_time."""
-        assert cold_rotation_service is not None
-        while True:
-            await asyncio.sleep(seconds_until_next(cold_rotation_schedule, datetime.now(UTC)))
-            try:
-                rotated = await cold_rotation_service.run_once()
-                if rotated:
-                    logger.info(
-                        "ColdRotation: вытеснено %d суточных файлов в холодное хранилище",
-                        len(rotated),
-                    )
-            except Exception:
-                logger.exception("ColdRotation: проход ротации завершился ошибкой")
-
-    async def _track_runtime_signals() -> None:
-        queue = await broker.subscribe("adaptive_throttle_runtime", maxsize=2000)
-        try:
-            while True:
-                adaptive_throttle.observe_runtime_signal(await queue.get())
-        except asyncio.CancelledError:
-            return
-
-    async def _alarm_v2_feed_readings() -> None:
-        """Подписаться на DataBroker и кормить v2 channel_state + rate_estimator."""
-        queue = await broker.subscribe("alarm_v2_state_feed", maxsize=2000)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                _alarm_v2_state_tracker.update(reading)
-                # NaN-доктрина (HI-2): годно ⇔ статус OK-класса И значение
-                # конечно; не годное показание (flapping sensor: NaN/inf или
-                # статус ошибки) не отравляет OLS-окно rate-оценщика.
-                if reading.is_usable():
-                    _alarm_v2_rate.push(
-                        reading.channel,
-                        reading.timestamp.timestamp(),
-                        reading.value,
-                    )
-        except asyncio.CancelledError:
-            return
-
-    # Strong-ref set for fire-and-forget Telegram dispatch tasks.
-    # Without this the loop only weak-refs tasks and GC can drop a pending
-    # alarm notification mid-flight. See DEEP_AUDIT_CC.md A.1/A.2/I.2.
-    _alarm_dispatch_tasks: set[asyncio.Task] = set()
-
-    async def _alarm_v2_tick() -> None:
-        """Периодически вычислять алармы v2 и диспетчеризировать события."""
-        poll_s = _alarm_v2_engine_cfg.poll_interval_s
-        while True:
-            await asyncio.sleep(poll_s)
-            if not _alarm_v2_configs:
-                continue
-            current_phase = _alarm_v2_phase.get_current_phase()
-            for alarm_cfg in _alarm_v2_configs:
-                try:
-                    # Phase-filter -> evaluate -> process. Shared with tests via
-                    # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
-                    # by the real production logic. Out-of-phase returns
-                    # (None, None) after clearing, so nothing dispatches below.
-                    event, transition = tick_alarm(
-                        alarm_cfg, current_phase, alarm_v2_evaluator, alarm_v2_state_mgr
-                    )
-                    if transition == "TRIGGERED" and event is not None:
-                        # GUI polls via alarm_v2_status command; optionally notify via Telegram
-                        if "telegram" in alarm_cfg.notify and telegram_bot is not None:
-                            msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
-                            t = asyncio.create_task(
-                                telegram_bot._send_to_all(msg),
-                                name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
-                            )
-                            _alarm_dispatch_tasks.add(t)
-                            t.add_done_callback(_alarm_dispatch_tasks.discard)
-                        await event_bus.publish(
-                            EngineEvent(
-                                event_type="alarm_fired",
-                                timestamp=datetime.now(UTC),
-                                payload={
-                                    "alarm_id": event.alarm_id,
-                                    "level": event.level,
-                                    "message": event.message,
-                                    "channels": event.channels,
-                                    "values": event.values,
-                                },
-                                experiment_id=experiment_manager.active_experiment_id,
-                            )
-                        )
-                    elif transition == "CLEARED":
-                        await event_bus.publish(
-                            EngineEvent(
-                                event_type="alarm_cleared",
-                                timestamp=datetime.now(UTC),
-                                payload={"alarm_id": alarm_cfg.alarm_id},
-                                experiment_id=experiment_manager.active_experiment_id,
-                            )
-                        )
-                except Exception as exc:
-                    logger.error("Alarm v2 tick error %s: %s", alarm_cfg.alarm_id, exc)
-
-    # --- Sensor diagnostics feed + tick tasks ---
-    async def _sensor_diag_feed() -> None:
-        """Feed readings into SensorDiagnosticsEngine buffers."""
-        if sensor_diag is None:
-            return
-        queue = await broker.subscribe("sensor_diag_feed", maxsize=2000)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно;
-                # не годное показание не отравляет буферы диагностики.
-                if reading.is_usable():
-                    sensor_diag.push(
-                        reading.channel,
-                        reading.timestamp.timestamp(),
-                        reading.value,
-                    )
-        except asyncio.CancelledError:
-            return
-
-    async def _sensor_diag_tick() -> None:
-        """Periodically recompute sensor diagnostics and dispatch alarm notifications."""
-        if sensor_diag is None:
-            return
-        interval = _sd_cfg.get("update_interval_s", 10)
-        # v0.55.5: default False — sensor-health alarms route to GUI only
-        # by policy; the hourly periodic_report carries a digest section.
-        _notify_telegram = _sd_cfg.get("notify_telegram", False)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                new_events = sensor_diag.update()
-                if _notify_telegram and telegram_bot is not None and new_events:
-                    aggregation_threshold = _sd_cfg.get("aggregation_threshold", 3)
-                    # F20 aggregation handled by _format_diag_telegram_messages.
-                    for _tg_name, _tg_msg in _format_diag_telegram_messages(
-                        new_events, aggregation_threshold
-                    ):
-                        t = asyncio.create_task(
-                            telegram_bot._send_to_all(_tg_msg),
-                            name=_tg_name,
-                        )
-                        _alarm_dispatch_tasks.add(t)
-                        t.add_done_callback(_alarm_dispatch_tasks.discard)
-                for _sd_ev in new_events:
-                    if _sd_ev.level.upper() == "CRITICAL":
-                        await event_bus.publish(
-                            EngineEvent(
-                                event_type="sensor_anomaly_critical",
-                                timestamp=datetime.now(UTC),
-                                payload={
-                                    "alarm_id": _sd_ev.alarm_id,
-                                    "level": _sd_ev.level,
-                                    "channels": _sd_ev.channels,
-                                    "values": _sd_ev.values,
-                                    "message": _sd_ev.message,
-                                },
-                                experiment_id=experiment_manager.active_experiment_id,
-                            )
-                        )
-            except Exception as exc:
-                logger.error("SensorDiagnostics tick error: %s", exc)
-
-    # --- Vacuum trend feed + tick tasks ---
-    async def _vacuum_trend_feed() -> None:
-        """Feed pressure readings into VacuumTrendPredictor."""
-        if vacuum_trend is None:
-            return
-        pressure_channel = _vt_cfg.get("pressure_channel", "")
-        queue = await broker.subscribe("vacuum_trend_feed", maxsize=2000)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                # Accept readings from the pressure channel or any mbar-unit reading
-                if pressure_channel and reading.channel != pressure_channel:
-                    if reading.unit != "mbar":
-                        continue
-                elif not pressure_channel and reading.unit != "mbar":
-                    continue
-                # NaN-доктрина: годно ⇔ статус OK-класса И значение конечно.
-                # push сохраняет свою доменную защиту P <= 0 (log₁₀ не определён).
-                if reading.is_usable():
-                    vacuum_trend.push(reading.timestamp.timestamp(), reading.value)
-        except asyncio.CancelledError:
-            return
-
-    async def _vacuum_trend_tick() -> None:
-        """Periodically recompute vacuum trend prediction."""
-        if vacuum_trend is None:
-            return
-        interval = _vt_cfg.get("update_interval_s", 30)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                vacuum_trend.update()
-            except Exception as exc:
-                logger.error("VacuumTrendPredictor tick error: %s", exc)
-
-    async def _leak_rate_feed() -> None:
-        """Feed pressure readings into LeakRateEstimator; auto-finalize on window expiry."""
-        pressure_channel = _vt_cfg.get("pressure_channel", "")
-        queue = await broker.subscribe("leak_rate_feed", maxsize=500)
-        try:
-            while True:
-                reading: Reading = await queue.get()
-                if pressure_channel and reading.channel != pressure_channel:
-                    continue
-                if reading.unit != "mbar":
-                    continue
-                if not leak_rate_estimator.is_active:
-                    continue
-                leak_rate_estimator.add_sample(reading.timestamp, reading.value)
-                if leak_rate_estimator.should_finalize():
-                    try:
-                        result = leak_rate_estimator.finalize()
-                        await event_logger.log_event(
-                            "leak_rate",
-                            f"Leak rate (auto): {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
-                        )
-                    except (ValueError, Exception) as exc:  # noqa: BLE001
-                        logger.error("Leak rate auto-finalize failed: %s", exc)
-        except asyncio.CancelledError:
-            return
-
     # v0.55.11 — auto-stop bookkeeping for multiline.burst_start. The
     # meta dict is populated by the helper (intent); the tasks dict is
     # populated at the dispatch site (materialised on the engine loop).
     _multiline_burst_auto_stop_meta: dict[str, dict[str, Any]] = {}
     _multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]] = {}
 
-    # Обработчик команд от GUI — через SafetyManager
-    async def _handle_gui_command(cmd: dict[str, Any]) -> dict[str, Any]:
-        action = cmd.get("cmd", "")
-        try:
-            if action in {
-                "keithley_emergency_off",
-                "keithley_stop",
-                "keithley_start",
-                "keithley_set_target",
-                "keithley_set_limits",
-            }:
-                result = await _run_keithley_command(action, cmd, safety_manager)
-                if result.get("ok"):
-                    ch = cmd.get("channel", "?")
-                    if action == "keithley_start":
-                        await event_logger.log_event("keithley", f"Keithley {ch}: запуск")
-                    elif action == "keithley_stop":
-                        await event_logger.log_event("keithley", f"Keithley {ch}: остановка")
-                    elif action == "keithley_emergency_off":
-                        await event_logger.log_event(
-                            "keithley", f"\u26a0 Keithley {ch}: аварийное отключение"
-                        )
-                        if escalation_service is not None:
-                            await escalation_service.escalate(
-                                "emergency",
-                                f"\u26a0 CryoDAQ: аварийное отключение Keithley {ch}",
-                            )
-                return result
-            if action == "safety_status":
-                return {"ok": True, **safety_manager.get_status()}
-            if action == "sinks_status":
-                return {
-                    "ok": True,
-                    "results": [
-                        {
-                            "sink": r.sink_name,
-                            "success": r.success,
-                            "target": r.target,
-                            "error": r.error,
-                            "timestamp": r.timestamp.isoformat(),
-                        }
-                        for r in sink_registry.recent_results[-20:]
-                    ],
-                }
-            if action == "safety_acknowledge":
-                reason = cmd.get("reason", "")
-                return await safety_manager.acknowledge_fault(reason)
-            if action == "alarm_acknowledge":
-                name = cmd.get("alarm_name", "")
-                try:
-                    await alarm_engine.acknowledge(name)
-                    return {"ok": True, "action": "alarm_acknowledge"}
-                except (KeyError, ValueError) as exc:
-                    return {"ok": False, "error": str(exc)}
-            if action == "interlock_acknowledge":
-                # F24: re-arm a tripped interlock after operator clears the condition.
-                name = cmd.get("interlock_name", "")
-                try:
-                    interlock_engine.acknowledge(name)
-                    return {"ok": True, "action": "interlock_acknowledge", "interlock_name": name}
-                except KeyError as exc:
-                    return {"ok": False, "error": str(exc)}
-            _leak_resp = await _handle_leak_rate_command(
-                action, cmd, leak_rate_estimator, _leak_cfg, event_logger
-            )
-            if _leak_resp is not None:
-                return _leak_resp
-            if action == "alarm_v2_status":
-                active = alarm_v2_state_mgr.get_active()
-                return {
-                    "ok": True,
-                    "active": {
-                        k: {
-                            "level": v.level,
-                            "message": v.message,
-                            "triggered_at": v.triggered_at,
-                            "channels": v.channels,
-                            "acknowledged": v.acknowledged,
-                            "acknowledged_at": v.acknowledged_at,
-                            "acknowledged_by": v.acknowledged_by,
-                        }
-                        for k, v in active.items()
-                    },
-                    "history": alarm_v2_state_mgr.get_history(limit=20),
-                }
-            if action == "alarm_v2_history":
-                # IV.4 F11: time-range slice of the existing alarm-v2
-                # history deque. Used by the shift-end dialog to fill
-                # the «Тревоги за смену» section; the state manager's
-                # own 1000-entry ring buffer is the source of truth
-                # (no persistence layer for alarm transitions yet).
-                raw_start = cmd.get("start_ts")
-                raw_end = cmd.get("end_ts")
-                try:
-                    start_ts = float(raw_start) if raw_start is not None else None
-                    end_ts = float(raw_end) if raw_end is not None else None
-                except (TypeError, ValueError):
-                    return {"ok": False, "error": "start_ts / end_ts must be numeric"}
-                limit = int(cmd.get("limit", 500))
-                history = alarm_v2_state_mgr.get_history(limit=1000)
-                filtered: list[dict[str, Any]] = []
-                for entry in history:
-                    at = float(entry.get("at", 0.0) or 0.0)
-                    if start_ts is not None and at < start_ts:
-                        continue
-                    if end_ts is not None and at > end_ts:
-                        continue
-                    filtered.append(entry)
-                return {
-                    "ok": True,
-                    "history": filtered[:limit],
-                }
-            if action == "alarm_v2_ack":
-                name = cmd.get("alarm_name", "")
-                operator = cmd.get("operator", "")
-                reason = cmd.get("reason", "")
-                ack_event = alarm_v2_state_mgr.acknowledge(
-                    name,
-                    operator=operator,
-                    reason=reason,
-                )
-                if ack_event is not None:
-                    await broker.publish(
-                        Reading(
-                            timestamp=datetime.now(UTC),
-                            instrument_id="alarm_v2",
-                            channel="alarm_v2/acknowledged",
-                            value=ack_event["acknowledged_at"],
-                            unit="",
-                            metadata=ack_event,
-                        )
-                    )
-                return {
-                    "ok": ack_event is not None or name in alarm_v2_state_mgr.get_active(),
-                    "alarm_name": name,
-                    "event_emitted": ack_event is not None,
-                }
-            if action in {
-                "get_app_mode",
-                "set_app_mode",
-                "experiment_templates",
-                "experiment_status",
-                "experiment_archive_list",
-                "experiment_list_archive",
-                "experiment_start",
-                "experiment_create",
-                "experiment_get_active",
-                "experiment_update",
-                "experiment_finalize",
-                "experiment_stop",
-                "experiment_abort",
-                "experiment_get_archive_item",
-                "experiment_attach_run_record",
-                "experiment_create_retroactive",
-                "experiment_generate_report",
-                "experiment_advance_phase",
-                "experiment_phase_status",
-            }:
-                experiment_call = asyncio.to_thread(
-                    _run_experiment_command,
-                    action,
-                    cmd,
-                    experiment_manager,
-                )
-                if action == "experiment_status":
-                    # NOTE: asyncio.wait_for on an asyncio.to_thread() call times out the AWAIT,
-                    # not the worker thread. If get_status_payload() is pathologically slow, the
-                    # background thread keeps running until it returns naturally. This is an
-                    # accepted residual risk — REP is still protected by the outer 2.0s handler
-                    # timeout envelope in ZMQCommandServer._run_handler(); this inner 1.5s wrapper
-                    # only gives faster client feedback and frees the REP loop earlier. There is
-                    # no safe way to terminate a Python thread mid-call, so Option C
-                    # ("actually interrupt") is not available.
-                    try:
-                        result = await asyncio.wait_for(
-                            experiment_call,
-                            timeout=_EXPERIMENT_STATUS_TIMEOUT_S,
-                        )
-                    except TimeoutError as exc:
-                        raise TimeoutError(
-                            f"experiment_status timeout ({_EXPERIMENT_STATUS_TIMEOUT_S:g}s)"
-                        ) from exc
-                else:
-                    result = await experiment_call
-                # Hook calibration acquisition on experiment lifecycle
-                if result.get("ok") and action in {"experiment_start", "experiment_create"}:
-                    await asyncio.to_thread(
-                        _try_activate_calibration_acquisition,
-                        calibration_acquisition,
-                        experiment_manager,
-                        cmd,
-                    )
-                    name = cmd.get("name") or cmd.get("title") or "?"
-                    await event_logger.log_event("experiment", f"Эксперимент начат: {name}")
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="experiment_start",
-                            timestamp=datetime.now(UTC),
-                            payload={"name": name, "experiment_id": result.get("experiment_id")},
-                            experiment_id=result.get("experiment_id"),
-                        )
-                    )
-                elif result.get("ok") and action in {
-                    "experiment_finalize",
-                    "experiment_stop",
-                    "experiment_abort",
-                }:
-                    calibration_acquisition.deactivate()
-                    if action == "experiment_abort":
-                        await event_logger.log_event("experiment", "\u26a0 Эксперимент прерван")
-                    else:
-                        await event_logger.log_event("experiment", "Эксперимент завершён")
-                    _exp_info = result.get("experiment", {})
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type=action,
-                            timestamp=datetime.now(UTC),
-                            payload={"action": action, "experiment": _exp_info},
-                            experiment_id=_exp_info.get("experiment_id"),
-                        )
-                    )
-                    if _cooldown_alarm is not None:
-                        _cooldown_alarm.notify_experiment_finalized()
+    command_context = EngineCommandContext(
+        safety_manager=safety_manager,
+        event_logger=event_logger,
+        sink_registry=sink_registry,
+        interlock_engine=interlock_engine,
+        leak_rate_estimator=leak_rate_estimator,
+        leak_cfg=_leak_cfg,
+        alarm_v2_state_mgr=alarm_v2_state_mgr,
+        alarm_ring=_alarm_ring,
+        broker=broker,
+        experiment_manager=experiment_manager,
+        calibration_acquisition=calibration_acquisition,
+        event_bus=event_bus,
+        cooldown_alarm=_cooldown_alarm,
+        vacuum_guard=_vacuum_guard,
+        alarm_dispatch_tasks=_alarm_dispatch_tasks,
+        calibration_store=calibration_store,
+        writer=writer,
+        drivers_by_name=drivers_by_name,
+        sensor_diag=sensor_diag,
+        vacuum_trend=vacuum_trend,
+        alarm_v2_state_tracker=_alarm_v2_state_tracker,
+        multiline_burst_auto_stop_meta=_multiline_burst_auto_stop_meta,
+        multiline_burst_auto_stop_tasks=_multiline_burst_auto_stop_tasks,
+        shutdown_event=shutdown_event,
+        engine_instance_id=engine_instance_id,
+        shutdown_capability=shutdown_capability,
+        engine_ready_nonce=engine_ready_nonce,
+        engine_ready_channel_fd=engine_ready_channel_fd,
+        engine_ready_pid=os.getpid(),
+        zmq_publisher=zmq_pub,
+        recording_lifecycle_feed=recording_lifecycle_feed,
+        annunciation_registry=AnnunciationRegistry(engine_instance_id=engine_instance_id),
+        mutation_capability_token=secrets.token_urlsafe(32),
+    )
+    handle_gui_command = functools.partial(
+        _handle_gui_command,
+        context=command_context,
+    )
 
-                    # F31: dispatch experiment export to sinks (fire-and-forget,
-                    # strong-ref against GC via _alarm_dispatch_tasks).
-                    if sink_registry.sinks:
-                        try:
-                            _exp_id = _exp_info.get("experiment_id") or ""
-                            _metadata: dict = {}
-                            if _exp_id:
-                                _meta_path = (
-                                    experiment_manager.data_dir
-                                    / "experiments"
-                                    / _exp_id
-                                    / "metadata.json"
-                                )
-                                # H2: offload metadata read to thread.
-                                _metadata = await asyncio.to_thread(
-                                    _load_experiment_metadata_sync, _meta_path
-                                )
-                            # F31 H1: build the sink export via the extracted
-                            # helper — summary comes from the canonical
-                            # "summary_metadata" metadata key, not the empty
-                            # bare "summary" key.
-                            _export = _build_experiment_export(_exp_info, _metadata)
-                            _t = asyncio.create_task(
-                                sink_registry.dispatch(_export),
-                                name=f"sinks_dispatch_{(_exp_id or 'noid')[:8]}",
-                            )
-                            _alarm_dispatch_tasks.add(_t)
-                            _t.add_done_callback(_alarm_dispatch_tasks.discard)
-                        except Exception as _exc:  # noqa: BLE001 — fire-and-forget
-                            logger.warning(
-                                "F31: sink dispatch setup failed: %s", _exc, exc_info=True
-                            )
-                elif result.get("ok") and action == "experiment_advance_phase":
-                    phase = cmd.get("phase", "?")
-                    await event_logger.log_event("phase", f"Фаза: → {phase}")
-                    _active = experiment_manager.active_experiment
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="phase_transition",
-                            timestamp=datetime.now(UTC),
-                            payload={"phase": phase, "entry": result.get("phase", {})},
-                            experiment_id=_active.experiment_id if _active else None,
-                        )
-                    )
-                    # v0.55.12 — feed every phase transition into the
-                    # CooldownAlarm so it can disarm itself when the
-                    # operator advances away from cooldown and clear
-                    # its cold-start flag
-                    # on a fresh cooldown entry (finding 1.5). Runs
-                    # BEFORE the auto-arm path so a phase=cooldown call
-                    # always sees a cleared flag.
-                    if _cooldown_alarm is not None:
-                        try:
-                            _cooldown_alarm.notify_phase_change(phase)
-                        except Exception as _exc:
-                            logger.warning(
-                                "CooldownAlarm: notify_phase_change ошибка: %s",
-                                _exc,
-                                exc_info=True,
-                            )
-                    # v0.55.4 A1 — auto-arm CooldownAlarm on cooldown phase
-                    # entry. Operator can still disarm manually via the
-                    # alarm panel footer button. Idempotent: arm() is a
-                    # no-op if already armed.
-                    if (
-                        phase == "cooldown"
-                        and _cooldown_alarm is not None
-                        and _cooldown_alarm.is_auto_arm_enabled
-                    ):
-                        try:
-                            armed = _cooldown_alarm.arm()
-                            if not armed and _cooldown_alarm.cold_start_skipped:
-                                # v0.55.12 — surface the skip explicitly so
-                                # the operator log shows why auto-arm
-                                # didn't engage on this phase entry.
-                                logger.info(
-                                    "CooldownAlarm: auto-arm skipped — "
-                                    "cold-start detected"
-                                )
-                            else:
-                                logger.info(
-                                    "CooldownAlarm: auto-arm на phase=cooldown → %s",
-                                    "ARMED" if armed else "FAILED (no model)",
-                                )
-                        except Exception as _exc:
-                            logger.warning(
-                                "CooldownAlarm: auto-arm ошибка: %s", _exc, exc_info=True
-                            )
-                return result
-            if action == "calibration_acquisition_status":
-                return {"ok": True, **calibration_acquisition.stats}
-            if action in {
-                "calibration_v2_extract",
-                "calibration_v2_fit",
-                "calibration_v2_coverage",
-            }:
-                return await asyncio.to_thread(
-                    _run_calibration_v2_command,
-                    action,
-                    cmd,
-                    calibration_store,
-                )
-            if action == "readings_history":
-                channels_raw = cmd.get("channels")
-                channels = list(channels_raw) if channels_raw else None
-                from_ts = cmd.get("from_ts")
-                to_ts = cmd.get("to_ts")
-                limit = int(cmd.get("limit_per_channel", 3600))
-                data = await writer.read_readings_history(
-                    channels=channels,
-                    from_ts=float(from_ts) if from_ts is not None else None,
-                    to_ts=float(to_ts) if to_ts is not None else None,
-                    limit_per_channel=limit,
-                )
-                # Serialize: {channel: [[ts, value], ...]}
-                return {
-                    "ok": True,
-                    "data": {ch: pts for ch, pts in data.items()},
-                }
-            if action == "cooldown_history_get":
-                return await _run_cooldown_history_command(
-                    cmd, experiment_manager, writer
-                )
-            if action in {"log_entry", "log_get"}:
-                return await _run_operator_log_command(
-                    action,
-                    cmd,
-                    writer,
-                    experiment_manager,
-                    broker,
-                )
-            if action in {
-                "calibration_curve_evaluate",
-                "calibration_curve_list",
-                "calibration_curve_get",
-                "calibration_curve_lookup",
-                "calibration_curve_assign",
-                "calibration_runtime_status",
-                "calibration_runtime_set_global",
-                "calibration_runtime_set_channel_policy",
-                "calibration_curve_export",
-                "calibration_curve_import",
-            }:
-                return await asyncio.to_thread(
-                    _run_calibration_command,
-                    action,
-                    cmd,
-                    calibration_store=calibration_store,
-                    experiment_manager=experiment_manager,
-                    drivers_by_name=drivers_by_name,
-                )
-            if action == "get_sensor_diagnostics":
-                if sensor_diag is None:
-                    return {"ok": False, "error": "SensorDiagnostics отключён"}
-                from dataclasses import asdict
-
-                diag = sensor_diag.get_diagnostics()
-                summary = sensor_diag.get_summary()
-                return {
-                    "ok": True,
-                    "channels": {k: asdict(v) for k, v in diag.items()},
-                    "summary": asdict(summary),
-                }
-            if action == "get_vacuum_trend":
-                if vacuum_trend is None:
-                    return {"ok": False, "error": "VacuumTrendPredictor отключён"}
-                from dataclasses import asdict
-
-                pred = vacuum_trend.get_prediction()
-                if pred is None:
-                    return {"ok": True, "status": "no_data"}
-                return {"ok": True, **asdict(pred)}
-            if action == "shift_handover_summary":
-                _sh_active = experiment_manager.active_experiment
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="shift_handover_request",
-                        timestamp=datetime.now(UTC),
-                        payload={
-                            "requested_by": cmd.get("operator", ""),
-                            "shift_duration_h": int(cmd.get("shift_duration_h", 8)),
-                        },
-                        experiment_id=_sh_active.experiment_id if _sh_active else None,
-                    )
-                )
-                return {"ok": True, "status": "queued"}
-            if action == "cooldown_alarm.arm":
-                if _cooldown_alarm is None:
-                    return {"ok": False, "error": "CooldownAlarm не инициализирован"}
-                ok = _cooldown_alarm.arm()
-                return {"ok": ok, "state": _cooldown_alarm.state.name}
-            if action == "cooldown_alarm.disarm":
-                if _cooldown_alarm is None:
-                    return {"ok": False, "error": "CooldownAlarm не инициализирован"}
-                _cooldown_alarm.disarm()
-                return {"ok": True, "state": "DISARMED"}
-            if action == "cooldown_alarm.status":
-                if _cooldown_alarm is None:
-                    return {"state": "UNAVAILABLE"}
-                _t_cold_state = _alarm_v2_state_tracker.get(_cooldown_alarm._cold_ch)
-                _t_cold_val = (
-                    _t_cold_state.value
-                    if _t_cold_state is not None and not _t_cold_state.is_stale
-                    else None
-                )
-                return {
-                    "state": _cooldown_alarm.state.name,
-                    "eta_h": _cooldown_alarm.current_eta_h,
-                    "progress": _cooldown_alarm.current_progress,
-                    "t_cold": _t_cold_val,
-                }
-            if action == "vacuum_guard.status":
-                if _vacuum_guard is None:
-                    return {"state": "UNAVAILABLE"}
-                return {"state": _vacuum_guard.state.name}
-            if action == "assistant.query":
-                # F34: Гемма chat overlay reuses F30 AssistantQueryAgent.
-                return await _handle_assistant_query_command(_query_agent, cmd)
-            if action == "rag.search":
-                # v0.55.6 — knowledge-base GUI overlay calls this from
-                # ZmqCommandWorker. Helper extracted for unit-testing.
-                return await _handle_rag_search_command(_rag_searcher, cmd)
-            if action == "multiline.set_channels":
-                # v0.55.16.0.1 (smoke hotfix): operator picks 1..32
-                # channels via the panel selector dialog.
-                return await _handle_multiline_set_channels_command(
-                    cmd,
-                    drivers_by_name=drivers_by_name,
-                    config_dir=_CONFIG_DIR,
-                )
-            if action.startswith("multiline.burst_"):
-                # v0.55.11 (F-MultiLineContinuous): GUI burst-capture
-                # button + status poll + manual stop.
-                response = await _handle_multiline_burst_command(
-                    action,
-                    cmd,
-                    drivers_by_name=drivers_by_name,
-                    experiment_manager=experiment_manager,
-                    experiments_root=_DATA_DIR / "experiments",
-                    auto_stop_tasks=_multiline_burst_auto_stop_meta,
-                )
-                # Schedule auto-stop on the engine loop if duration_s
-                # was set — the helper records intent in the meta dict;
-                # this site materialises the task so it runs on the
-                # right loop and gets cleaned up automatically.
-                if (
-                    response.get("ok")
-                    and action == "multiline.burst_start"
-                    and response.get("duration_s") is not None
-                ):
-                    target_name = response.get("name", "")
-                    duration_s = float(response["duration_s"])
-
-                    async def _auto_stop(driver_name: str = target_name,
-                                         delay_s: float = duration_s) -> None:
-                        try:
-                            await asyncio.sleep(delay_s)
-                            d = drivers_by_name.get(driver_name)
-                            if d is None:
-                                return
-                            try:
-                                path = await d.burst_stop(
-                                    experiments_root=_DATA_DIR / "experiments",
-                                )
-                                logger.info(
-                                    "MultiLine '%s' burst auto-stopped after %.1fs → %s",
-                                    driver_name, delay_s, path,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.error(
-                                    "MultiLine '%s' auto-stop failed: %s",
-                                    driver_name, exc, exc_info=True,
-                                )
-                        finally:
-                            _multiline_burst_auto_stop_tasks.pop(driver_name, None)
-
-                    _t = asyncio.create_task(
-                        _auto_stop(),
-                        name=f"multiline_burst_auto_stop_{target_name}",
-                    )
-                    # Cancel any pre-existing auto-stop for the same
-                    # driver — operator restarting the timer wins.
-                    prev = _multiline_burst_auto_stop_tasks.get(target_name)
-                    if prev is not None and not prev.done():
-                        prev.cancel()
-                    _multiline_burst_auto_stop_tasks[target_name] = _t
-                return response
-            if action in ("rag.rebuild_index", "rag.rebuild_status"):
-                # v0.55.7.1 PHASE 8 — operator-driven «Обновить индекс»
-                # in KnowledgeBasePanel. Single-instance enforced inside
-                # the helper; concurrent click rejected. State machine
-                # exposed via rag.rebuild_status poll.
-                return await _handle_rag_rebuild_command(
-                    action,
-                    cmd,
-                    db_path=_rag_rebuild_db_path,
-                    embeddings_client=_rag_rebuild_embeddings,
-                    knowledge_dir=_rag_rebuild_knowledge_dir,
-                    experiments_dir=_DATA_DIR / "experiments",
-                    sqlite_path=None,
-                    repo_root=_PROJECT_ROOT,
-                )
-            return {"ok": False, "error": f"unknown command: {action}"}
-        except Exception as exc:
-            logger.error("Ошибка выполнения команды '%s': %s", action, exc)
-            return {"ok": False, "error": str(exc)}
-
-    cmd_server = ZMQCommandServer(handler=_handle_gui_command)
+    command_authority_registry = CommandAuthorityRegistry()
+    cmd_server = ZMQCommandServer(
+        DEFAULT_CMD_ADDR,
+        handler=handle_gui_command,
+        reply_sent_callback=functools.partial(
+            _request_teardown_after_shutdown_receipt,
+            command_context,
+        ),
+        authority_registry=command_authority_registry,
+        accepted_command_predicate=is_ordinary_command_endpoint_admitted,
+    )
+    safe_cmd_server = ZMQCommandServer(
+        DEFAULT_SAFE_CMD_ADDR,
+        handler=handle_gui_command,
+        reply_sent_callback=functools.partial(
+            _request_teardown_after_shutdown_receipt,
+            command_context,
+        ),
+        authority_registry=command_authority_registry,
+        accepted_actions=frozenset({"engine_ready", "keithley_emergency_off", "launcher_shutdown"}),
+        accepted_command_predicate=functools.partial(
+            _safe_engine_command_is_admitted,
+            context=command_context,
+        ),
+    )
+    command_ingress = ZMQCommandIngressPair(ordinary=cmd_server, safe=safe_cmd_server)
 
     # Plugin Pipeline
     plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
 
     # --- CooldownService (прогноз охлаждения) ---
     cooldown_service: Any = None
-    cooldown_cfg_path = _cfg("cooldown")
+    cooldown_cfg_path = _engine_config_path("cooldown")
     if cooldown_cfg_path.exists():
         try:
             with cooldown_cfg_path.open(encoding="utf-8") as fh:
@@ -3176,24 +6867,34 @@ async def _run_engine(*, mock: bool = False) -> None:
                     event_bus=event_bus,
                     # A2: read-only history reader for ultimate_vacuum enrichment.
                     reader=writer,
+                    # P0 fail-open fix (PR2-T3): the same SafetyManager instance
+                    # constructed above (line ~6414, "создаётся ПЕРВЫМ") and used
+                    # as the engine's sole source authority throughout this
+                    # function. CooldownService reports predictor model health
+                    # through it in _start_locked(), so a missing/malformed/
+                    # zero-curve model blocks request_run() via the existing
+                    # SafetyManager._check_preconditions() gate instead of
+                    # silently reporting available.
+                    safety_manager=safety_manager,
                 )
                 logger.info("CooldownService создан")
                 # v0.55.4 A2: hand the cooldown_service-owned
                 # SteadyStatePredictor to CooldownAlarm so its WATCHING
                 # path can short-circuit when the system is quasi-steady.
                 if _cooldown_alarm is not None:
-                    _cooldown_alarm.set_steady_state_predictor(
-                        cooldown_service._ss_predictor
-                    )
+                    _cooldown_alarm.set_steady_state_predictor(cooldown_service._ss_predictor)
         except Exception as exc:
-            logger.error("Ошибка создания CooldownService: %s", exc)
+            logger.error(
+                "Engine boot degraded: owner=cooldown_service exception=%s",
+                type(exc).__name__,
+            )
+    command_context.cooldown_service = cooldown_service
 
     # --- Уведомления (один раз разбираем YAML) ---
-    periodic_reporter: PeriodicReporter | None = None
     telegram_bot: TelegramCommandBot | None = None
     _photo_handler: CompositionPhotoHandler | None = None
     escalation_service: EscalationService | None = None
-    notifications_cfg = _cfg("notifications")
+    notifications_cfg = _engine_config_path("notifications")
     if notifications_cfg.exists():
         try:
             with notifications_cfg.open(encoding="utf-8") as fh:
@@ -3204,27 +6905,11 @@ async def _run_engine(*, mock: bool = False) -> None:
             token_valid = bot_token and bot_token != "YOUR_BOT_TOKEN_HERE"
             verify_ssl = bool(tg_cfg.get("verify_ssl", True))
 
-            # PeriodicReporter
-            pr_cfg = notif_raw.get("periodic_report", {})
-            if pr_cfg.get("enabled", False) and token_valid:
-                periodic_reporter = PeriodicReporter(
-                    broker,
-                    alarm_engine,
-                    bot_token=bot_token,
-                    chat_id=tg_cfg.get("chat_id", 0),
-                    report_interval_s=float(pr_cfg.get("report_interval_s", 1800)),
-                    chart_hours=float(pr_cfg.get("chart_hours", 2.0)),
-                    include_channels=pr_cfg.get("include_channels"),
-                )
-                logger.info("PeriodicReporter создан")
-
             # TelegramCommandBot
             cmd_cfg = notif_raw.get("commands", {})
             commands_enabled = bool(cmd_cfg.get("enabled", False)) and token_valid
             if commands_enabled:
-                allowed_raw = (
-                    tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
-                )
+                allowed_raw = tg_cfg.get("allowed_chat_ids") or cmd_cfg.get("allowed_chat_ids") or []
                 allowed_ids = [int(x) for x in allowed_raw]
                 # TelegramCommandBot raises on empty list,
                 # so refuse to enable cleanly here with a config-error log
@@ -3239,11 +6924,11 @@ async def _run_engine(*, mock: bool = False) -> None:
                 else:
                     telegram_bot = TelegramCommandBot(
                         broker,
-                        alarm_engine,
+                        alarm_v2_state_mgr,
                         bot_token=bot_token,
                         allowed_chat_ids=allowed_ids,
                         poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
-                        command_handler=_handle_gui_command,
+                        command_handler=handle_gui_command,
                         verify_ssl=verify_ssl,
                     )
                     logger.info(
@@ -3276,414 +6961,393 @@ async def _run_engine(*, mock: bool = False) -> None:
             if not token_valid:
                 logger.info("Telegram-уведомления отключены (bot_token не настроен)")
         except Exception as exc:
-            logger.error("Ошибка загрузки конфигурации уведомлений: %s", exc)
+            logger.error(
+                "Engine boot degraded: owner=notification_config exception=%s",
+                type(exc).__name__,
+            )
     else:
         logger.info("Файл конфигурации уведомлений не найден: %s", notifications_cfg)
+    command_context.escalation_service = escalation_service
+    safety_fault_context.telegram_bot = telegram_bot
 
-    # --- AssistantLiveAgent (Гемма local LLM agent) ---
-    _agent_cfg_path = _CONFIG_DIR / "agent.yaml"
-    _gemma_config: AssistantConfig | None = None
-    gemma_agent: AssistantLiveAgent | None = None
-    if _agent_cfg_path.exists():
-        try:
-            _gemma_config = AssistantConfig.from_yaml_path(_agent_cfg_path)
-            if _gemma_config.enabled:
-                _gemma_ollama = OllamaClient(
-                    base_url=_gemma_config.ollama_base_url,
-                    default_model=_gemma_config.default_model,
-                    timeout_s=_gemma_config.timeout_s,
-                )
-                # v0.55.5 — pass a lazy snapshot fn so the hourly periodic
-                # report can include a sensor-health digest without coupling
-                # ContextBuilder to the SensorDiagnosticsEngine instance.
-                _sd_for_ctx = sensor_diag
-                _gemma_ctx = ContextBuilder(
-                    writer,
-                    experiment_manager,
-                    sensor_diag_provider=(
-                        _sd_for_ctx.get_summary if _sd_for_ctx is not None else None
-                    ),
-                )
-                _gemma_audit = AuditLogger(
-                    _DATA_DIR / "agents" / "assistant" / "audit",
-                    enabled=_gemma_config.audit_enabled,
-                    retention_days=_gemma_config.audit_retention_days,
-                )
-                _gemma_router = OutputRouter(
-                    telegram_bot=telegram_bot,
-                    event_logger=event_logger,
-                    event_bus=event_bus,
-                    brand_name=_gemma_config.brand_name,
-                    brand_emoji=_gemma_config.brand_emoji,
-                )
-                gemma_agent = AssistantLiveAgent(
-                    config=_gemma_config,
-                    event_bus=event_bus,
-                    ollama_client=_gemma_ollama,
-                    context_builder=_gemma_ctx,
-                    audit_logger=_gemma_audit,
-                    output_router=_gemma_router,
-                )
-                logger.info(
-                    "AssistantLiveAgent (Гемма): инициализирован, модель=%s",
-                    _gemma_config.default_model,
-                )
-        except Exception as _gemma_exc:
-            logger.warning("AssistantLiveAgent: ошибка инициализации — %s", _gemma_exc, exc_info=True)  # noqa: E501 — single RU log call, splitting hurts grep-ability
-    else:
-        logger.info("AssistantLiveAgent: config/agent.yaml не найден, агент отключён")
+    # --- B1 (2026-07): Гемма (AssistantLiveAgent), RAG searcher, and
+    # AssistantQueryAgent (F30 live chat) all moved to the standalone
+    # cryodaq-assistant process (agents/assistant_main.py) — the engine no
+    # longer imports agents/ at all. The engine keeps only:
+    #  - the events relay below (publishes the EngineEvent types Гемма
+    #    reacts to onto the ZMQ "events" topic — see core/zmq_bridge.py);
+    #  - a read-only proxy so Telegram free-text chat (previously
+    #    ``telegram_bot._query_agent = <in-process AssistantQueryAgent>``)
+    #    still resolves, by forwarding to the assistant process's own
+    #    REP (:5557) instead of calling an in-process object.
+    # See scratchpad/montana/exec/impl_b1.md for the full design.
+    if telegram_bot is not None:
+        telegram_bot._query_agent = _RemoteAssistantQueryProxy()
 
-    # --- F32 RAG searcher (relocated from post-QueryAdapters in v0.55.7 so
-    #     the AssistantQueryAgent KNOWLEDGE_QUERY adapter can wrap the same
-    #     RagSearcher instance the GUI knowledge-base overlay already uses).
-    _rag_searcher: Any = None
-    # v0.55.7.1: handles for the rebuild dispatch helper. Populated
-    # below when the searcher block successfully resolves config.
-    _rag_rebuild_db_path: Path | None = None
-    _rag_rebuild_embeddings: Any | None = None
-    _rag_rebuild_knowledge_dir: Path | None = None
-    try:
-        from cryodaq.agents.rag.embeddings import EmbeddingsClient  # noqa: PLC0415
-        from cryodaq.agents.rag.searcher import RagSearcher  # noqa: PLC0415
+    # B1: relay the EngineEvent types the assistant process's
+    # AssistantLiveAgent reacts to onto the ZMQ "events" topic (additive —
+    # existing GUI subscribers only subscribe to the "readings" topic and
+    # never see this). Generic forwarder, not agents/-specific: it does
+    # not know what Гемма does with these events, only that these are the
+    # event types worth shipping across the process boundary.
+    _ASSISTANT_RELAY_EVENT_TYPES = frozenset(
+        {
+            "alarm_fired",
+            "alarm_cleared",
+            "experiment_finalize",
+            "experiment_stop",
+            "experiment_abort",
+            "sensor_anomaly_critical",
+            "shift_handover_request",
+            "periodic_report_request",
+        }
+    )
 
-        # v0.55.14 — config-resolution
-        # priority: rag.local.yaml → rag.yaml → rag.yaml.example.
-        # The v0.55.7 ship report claimed an example fallback existed
-        # but the code didn't implement it; now it does. The example
-        # ships in-repo so RAG defaults are always available.
-        _rag_cfg_path = _CONFIG_DIR / "rag.local.yaml"
-        _rag_cfg_source = "rag.local.yaml"
-        if not _rag_cfg_path.exists():
-            _rag_cfg_path = _CONFIG_DIR / "rag.yaml"
-            _rag_cfg_source = "rag.yaml"
-        if not _rag_cfg_path.exists():
-            _rag_cfg_path = _CONFIG_DIR / "rag.yaml.example"
-            _rag_cfg_source = "rag.yaml.example (defaults)"
-        if _rag_cfg_path.exists():
-            import yaml as _yaml  # noqa: PLC0415
-
-            _rag_raw = _yaml.safe_load(_rag_cfg_path.read_text(encoding="utf-8")) or {}
-            _rag_cfg = _rag_raw.get("rag", {})
-            _rag_db_path = Path(str(_rag_cfg.get("db_path", "data/rag_index"))).expanduser()  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
-            _rag_table = str(_rag_cfg.get("table_name", "cryodaq_corpus"))
-            _rag_emb_url = str(_rag_cfg.get("ollama_base_url", "http://localhost:11434"))
-            # v0.55.7.1: default fallback aligned с modernized stack —
-            # qwen3-embedding:0.6b (1024d). Older v0.55.7 default
-            # multilingual-e5-small (384d) deprecated due к Ollama
-            # 0.23+ runtime incompatibility for community uploads.
-            _rag_emb_model = str(_rag_cfg.get("embedding_model", "qwen3-embedding:0.6b"))
-            _rag_knowledge_dir = Path(  # noqa: ASYNC240 — .expanduser() does no I/O; one-time startup config load
-                str(_rag_cfg.get("knowledge_dir", _DATA_DIR / "knowledge"))
-            ).expanduser()
-            # v0.55.7.1: create searcher unconditionally — LanceDB
-            # connects lazily on the first .search() call, so an
-            # absent db_path is fine. Bootstrap (below) will populate
-            # the index from the bundled corpus в фоне; the searcher
-            # itself returns [] from search() until the table exists.
-            _rag_db_path.mkdir(parents=True, exist_ok=True)
-            _rag_emb = EmbeddingsClient(
-                base_url=_rag_emb_url,
-                model=_rag_emb_model,
-            )
-            _rag_searcher = RagSearcher(
-                db_path=_rag_db_path,
-                embeddings_client=_rag_emb,
-                table_name=_rag_table,
-            )
-            # Hand off resolved paths к the rebuild dispatch helper.
-            _rag_rebuild_db_path = _rag_db_path
-            _rag_rebuild_embeddings = _rag_emb
-            _rag_rebuild_knowledge_dir = _rag_knowledge_dir
-            logger.info(
-                "RAG searcher: инициализирован (config=%s, db=%s, table=%s, knowledge=%s)",
-                _rag_cfg_source,
-                _rag_db_path,
-                _rag_table,
-                _rag_knowledge_dir,
-            )
-            # v0.55.7.1 PHASE 6: fire-and-forget bootstrap. Engine
-            # ready signal does NOT await this; the operator may
-            # briefly see empty KnowledgeBasePanel during first boot
-            # of a fresh deploy, then it populates без restart.
-            asyncio.create_task(
-                _bootstrap_rag_index_if_empty(
-                    db_path=_rag_db_path,
-                    embeddings_client=_rag_emb,
-                    knowledge_dir=_rag_knowledge_dir,
-                    experiments_dir=_DATA_DIR / "experiments",
-                    sqlite_path=None,
-                    repo_root=_PROJECT_ROOT,
-                ),
-                name="rag_bootstrap",
-            )
-        else:
-            logger.info(
-                "RAG searcher: ни rag.local.yaml/rag.yaml/rag.yaml.example "
-                "не найдены — RAG отключён"
-            )
-    except Exception as _rag_exc:
-        logger.warning("RAG searcher: ошибка инициализации — %s", _rag_exc)
-        _rag_searcher = None
-
-    # --- AssistantQueryAgent (F30 Live Query) ---
-    _query_agent: Any = None
-    _q_broker_snap: Any = None
-    if _gemma_config is not None and _gemma_config.query_enabled:
-        try:
-            from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
-            from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
-            from cryodaq.agents.assistant.query.adapters.broker_snapshot import BrokerSnapshot
-            from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
-            from cryodaq.agents.assistant.query.adapters.cooldown_adapter import CooldownAdapter
-            from cryodaq.agents.assistant.query.adapters.experiment_adapter import ExperimentAdapter
-            from cryodaq.agents.assistant.query.adapters.rag_adapter import RAGAdapter
-            from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
-            from cryodaq.agents.assistant.query.adapters.vacuum_adapter import VacuumAdapter
-            from cryodaq.agents.assistant.query.agent import AssistantQueryAgent
-            from cryodaq.agents.assistant.query.schemas import QueryAdapters
-
-            try:
-                _q_ollama = _gemma_ollama
-                _q_audit = _gemma_audit
-            except NameError:
-                _q_ollama = OllamaClient(
-                    base_url=_gemma_config.ollama_base_url,
-                    default_model=_gemma_config.default_model,
-                    timeout_s=_gemma_config.timeout_s,
-                )
-                _q_audit = AuditLogger(
-                    _DATA_DIR / "agents" / "assistant" / "audit",
-                    enabled=_gemma_config.audit_enabled,
-                )
-
-            _q_broker_snap = BrokerSnapshot(broker, channel_manager=get_channel_manager())
-            await _q_broker_snap.start()
-
-            _q_cooldown = CooldownAdapter(cooldown_service)
-            _q_vacuum = VacuumAdapter(vacuum_trend)
-            _q_sqlite = SQLiteAdapter(writer)
-            _q_alarms = AlarmAdapter(alarm_engine)
-            _q_experiment = ExperimentAdapter(experiment_manager)
-            _q_archive = ArchiveAdapter(experiment_manager, alarm_v2_state_mgr)
-            _q_rag = RAGAdapter(_rag_searcher)
-            _q_composite = CompositeAdapter(
-                broker_snapshot=_q_broker_snap,
-                cooldown=_q_cooldown,
-                vacuum=_q_vacuum,
-                alarms=_q_alarms,
-                experiment=_q_experiment,
-            )
-
-            from cryodaq.agents.assistant.query.chart_dispatcher import (
-                ChartDispatcher,  # noqa: PLC0415
-            )
-
-            _q_chart_dispatcher: ChartDispatcher | None = None
-            if telegram_bot is not None:
-                _q_chart_dispatcher = ChartDispatcher(
-                    send_photo=telegram_bot.send_photo
-                )
-
-            _query_agent = AssistantQueryAgent(
-                ollama_client=_q_ollama,
-                audit_logger=_q_audit,
-                config=_gemma_config,
-                adapters=QueryAdapters(
-                    broker_snapshot=_q_broker_snap,
-                    cooldown=_q_cooldown,
-                    vacuum=_q_vacuum,
-                    sqlite=_q_sqlite,
-                    alarms=_q_alarms,
-                    experiment=_q_experiment,
-                    composite=_q_composite,
-                    archive=_q_archive,
-                    rag=_q_rag,
-                ),
-                intent_model=_gemma_config.query_intent_model,
-                format_model=_gemma_config.query_format_model,
-                intent_temperature=_gemma_config.query_intent_temperature,
-                format_temperature=_gemma_config.query_format_temperature,
-                intent_timeout_s=_gemma_config.query_intent_timeout_s,
-                format_timeout_s=_gemma_config.query_format_timeout_s,
-                max_queries_per_chat_per_hour=_gemma_config.query_max_per_chat_per_hour,
-                channel_manager=get_channel_manager(),
-                chart_dispatcher=_q_chart_dispatcher,
-            )
-
-            if telegram_bot is not None:
-                telegram_bot._query_agent = _query_agent
-            logger.info("AssistantQueryAgent (F30): инициализирован")
-        except Exception as _q_exc:
-            logger.warning(
-                "AssistantQueryAgent: ошибка инициализации — %s", _q_exc, exc_info=True
-            )
+    _assistant_relay_queue = await event_bus.subscribe("assistant_zmq_relay", maxsize=1000)
 
     # --- Запуск всех подсистем ---
-    await safety_manager.start()
+    startup = _EngineStartupRollback()
+    startup.add(
+        "assistant_event_relay_subscription",
+        functools.partial(event_bus.unsubscribe, "assistant_zmq_relay"),
+    )
+    await startup.acquire(
+        writer.start_immediate(),
+        label="sqlite_writer",
+        rollback=writer.stop,
+    )
+    await startup.acquire(
+        safety_manager.start(),
+        label="safety_manager",
+        rollback=functools.partial(stop_safety_manager_with_hold, safety_manager, logger),
+    )
     logger.info("SafetyManager запущен: состояние=%s", safety_manager.state.value)
-    # writer уже запущен через start_immediate() выше
-    await zmq_pub.start(zmq_queue)
-    await cmd_server.start()
-    await alarm_engine.start()
-    await interlock_engine.start()
-    await plugin_pipeline.start()
-    if cooldown_service is not None:
-        await cooldown_service.start()
-    if periodic_reporter is not None:
-        await periodic_reporter.start()
-    if telegram_bot is not None:
-        await telegram_bot.start()
-    if _photo_handler is not None:
-        await _photo_handler.start()
-    if gemma_agent is not None:
-        try:
-            await gemma_agent.start()
-        except Exception as _gemma_start_exc:
-            logger.warning("AssistantLiveAgent: ошибка запуска — %s. Агент отключён.", _gemma_start_exc)  # noqa: E501 — single RU log call, splitting hurts grep-ability
-            gemma_agent = None
-    periodic_report_tick_task: asyncio.Task | None = None
-    if _gemma_config is not None and _gemma_config.periodic_report_enabled:
-        periodic_report_tick_task = asyncio.create_task(
-            _periodic_report_tick(_gemma_config, event_bus, experiment_manager),
-            name="periodic_report_tick",
+
+    # ─────────────────── Надзор за долгоживущими задачами (A2) ────────────────
+    # Каждая долгоживущая задача движка регистрируется в TaskSupervisor. Если её
+    # корутина неожиданно падает, done-callback пишет CRITICAL, поднимает
+    # оператору тревогу по штатному каналу событий и перезапускает задачу с
+    # экспоненц. выдержкой. safety_collect/safety_monitor создаёт SafetyManager;
+    # движок надзирает за ними снаружи и после _SAFETY_TASK_MAX_RESTARTS
+    # неудачных перезапусков латчит FAULT вместо бесконечного цикла. Политика
+    # надзора вынесена в engine_wiring.supervision.TaskSupervisor.
+    supervisor = await startup.call(
+        functools.partial(
+            TaskSupervisor,
+            event_bus=event_bus,
+            experiment_manager=experiment_manager,
+            safety_manager=safety_manager,
+            alarm_dispatch_tasks=_alarm_dispatch_tasks,
+            logger_=logger,
         )
-    await scheduler.start()
-    throttle_task = asyncio.create_task(_track_runtime_signals(), name="adaptive_throttle_runtime")
-    alarm_v2_feed_task = asyncio.create_task(_alarm_v2_feed_readings(), name="alarm_v2_feed")
+    )
+    startup.add("task_supervisor_restart_authority", supervisor.stop)
+    operator_snapshot_service = None
+    try:
+        operator_snapshot_service = build_operator_snapshot_publication_service(
+            safety_owner=safety_manager,
+            recording_feed=recording_lifecycle_feed,
+            publisher=zmq_pub,
+            data_root=_DATA_DIR,
+        )
+    except Exception as exc:  # noqa: BLE001 - observational publication is fail-dark
+        logger.warning(
+            "Engine boot degraded; owner=operator_snapshot_publication exception=%s",
+            type(exc).__name__,
+        )
+
+    # safety_collect/safety_monitor уже созданы SafetyManager.start(); надзираем
+    # за ними снаружи, не трогая safety_manager.py. Перезапуск повторно запускает
+    # ту же петлю и синхронизирует ссылку в SafetyManager, чтобы stop() и sweep
+    # завершения видели живую задачу.
+    for _sname, _srole, _sattr in (
+        ("safety_collect", "collect", "_collect_task"),
+        ("safety_monitor", "monitor", "_monitor_task"),
+    ):
+        _stask = getattr(safety_manager, _sattr, None)
+        if _stask is not None:
+            _loop_fn = getattr(safety_manager, f"_{_sname.split('_', 1)[1]}_loop")
+            await startup.call(
+                functools.partial(
+                    supervisor.register,
+                    _sname,
+                    _stask,
+                    _loop_fn,
+                    safety_critical=True,
+                    on_spawn=functools.partial(_set_safety_task_ref, safety_manager, _srole),
+                )
+            )
+
+    await startup.call(
+        functools.partial(
+            install_loop_exception_backstop,
+            asyncio.get_running_loop(),
+            logger,
+        )
+    )
+
+    # writer уже запущен через start_immediate() выше
+    await startup.acquire(
+        zmq_pub.start(zmq_queue),
+        label="zmq_publisher",
+        rollback=zmq_pub.stop,
+    )
+    # Keyed operator-log mutations remain unavailable until the complete
+    # retained registry is proven and every durable publication intent has
+    # been replayed. Cancellation or failure therefore leaves REP unopened.
+    # SQLiteWriter already retains its executor owner through cancellation.
+    # Await that owner directly so a cancelled startup cannot abandon an outer
+    # shield task while rollback concurrently settles the writer.
+    command_ingress_recovery = _CommandIngressRecoveryAuthority(
+        writer=writer,
+        broker=broker,
+        engine_instance_id=engine_instance_id,
+    )
+    await startup.guard(command_ingress_recovery.settle())
+    await startup.acquire(
+        interlock_engine.start(),
+        label="interlock_engine",
+        rollback=interlock_engine.stop,
+    )
+    await startup.acquire(
+        plugin_pipeline.start(),
+        label="plugin_pipeline",
+        rollback=plugin_pipeline.stop,
+    )
+    if cooldown_service is not None:
+        await startup.acquire(
+            cooldown_service.start(),
+            label="cooldown_service",
+            rollback=cooldown_service.stop,
+        )
+    if telegram_bot is not None:
+        await startup.acquire(
+            telegram_bot.start(),
+            label="telegram_bot",
+            rollback=telegram_bot.stop,
+        )
+    if _photo_handler is not None:
+        await startup.acquire(
+            _photo_handler.start(),
+            label="composition_photo_handler",
+            rollback=_photo_handler.stop,
+        )
+    scheduler_rollback: dict[str, Any] = {
+        "attempted": False,
+        "sequence": acquisition_lifecycle_sequence,
+    }
+
+    startup.add(
+        "scheduler",
+        functools.partial(
+            _rollback_scheduler_startup,
+            scheduler,
+            recording_lifecycle_feed,
+            scheduler_rollback,
+        ),
+    )
+    startup.add(
+        "task_supervisor",
+        functools.partial(_rollback_supervisor, supervisor),
+    )
+    # B1: relay EngineEvents to the assistant process over ZMQ (see the
+    # wiring comment above _assistant_relay_queue for what this replaces).
+    assistant_event_relay_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "assistant_event_relay",
+            functools.partial(
+                assistant_event_relay_loop,
+                _assistant_relay_queue,
+                zmq_pub,
+                _ASSISTANT_RELAY_EVENT_TYPES,
+            ),
+        )
+    )
+    scheduler_rollback["attempted"] = True
+    acquisition_lifecycle_sequence = await startup.guard(
+        _start_scheduler_with_recording_feed(
+            scheduler,
+            recording_lifecycle_feed,
+            acquisition_lifecycle_sequence,
+        )
+    )
+    scheduler_rollback["sequence"] = acquisition_lifecycle_sequence
+    if operator_snapshot_service is not None:
+        await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "operator_snapshot_publication",
+                operator_snapshot_service.run,
+            )
+        )
+        startup.add(
+            "operator_snapshot_stop_signal",
+            operator_snapshot_service.request_stop,
+        )
+    throttle_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "adaptive_throttle_runtime",
+            functools.partial(track_runtime_signals, broker, adaptive_throttle),
+        )
+    )
+    alarm_v2_feed_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "alarm_v2_feed",
+            functools.partial(
+                alarm_v2_feed_readings,
+                broker,
+                _alarm_v2_state_tracker,
+                _alarm_v2_rate,
+            ),
+        )
+    )
+    alarm_ring_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "alarm_ring_buffer_feed",
+            functools.partial(alarm_ring_feed, event_bus, _alarm_ring),
+        )
+    )
     alarm_v2_tick_task: asyncio.Task | None = None
     if _alarm_v2_configs:
-        alarm_v2_tick_task = asyncio.create_task(_alarm_v2_tick(), name="alarm_v2_tick")
-
-    async def _cooldown_alarm_tick_loop() -> None:
-        """Independent tick for CooldownAlarm at its own configured cadence (F-X v3)."""
-        interval = float(_cooldown_cfg.get("eval_interval_s", 30))
-        _last_triggered_id = "cooldown_alarm"
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                transition = await _cooldown_alarm.tick()  # type: ignore[union-attr]
-            except Exception as exc:
-                logger.error("CooldownAlarm tick error: %s", exc)
-                continue
-            if transition == "TRIGGERED":
-                _active = alarm_v2_state_mgr.get_active()
-                # CooldownAlarm fires under "cooldown_alarm" OR "cooldown_watchdog"
-                _ev = _active.get("cooldown_alarm") or _active.get("cooldown_watchdog")
-                if _ev is not None:
-                    _last_triggered_id = _ev.alarm_id
-                    if telegram_bot is not None:
-                        _pt = asyncio.create_task(
-                            telegram_bot._send_to_all(
-                                f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
-                            ),
-                            name=f"phys_alarm_tg_{_ev.alarm_id}",
-                        )
-                        _alarm_dispatch_tasks.add(_pt)
-                        _pt.add_done_callback(_alarm_dispatch_tasks.discard)
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="alarm_fired",
-                            timestamp=datetime.now(UTC),
-                            payload={
-                                "alarm_id": _ev.alarm_id,
-                                "level": _ev.level,
-                                "message": _ev.message,
-                                "channels": _ev.channels,
-                                "values": _ev.values,
-                            },
-                            experiment_id=experiment_manager.active_experiment_id,
-                        )
-                    )
-            elif transition == "CLEARED":
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_cleared",
-                        timestamp=datetime.now(UTC),
-                        payload={"alarm_id": _last_triggered_id},
-                        experiment_id=experiment_manager.active_experiment_id,
-                    )
-                )
-
-    async def _vacuum_guard_tick_loop() -> None:
-        """Independent tick for VacuumGuard at its own configured cadence (F-X v3)."""
-        interval = float(_vacuum_cfg.get("eval_interval_s", 30))
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                transition = await _vacuum_guard.tick()  # type: ignore[union-attr]
-            except Exception as exc:
-                logger.error("VacuumGuard tick error: %s", exc)
-                continue
-            if transition == "TRIGGERED":
-                _active = alarm_v2_state_mgr.get_active()
-                _ev = _active.get("vacuum_guard")
-                if _ev is not None:
-                    if telegram_bot is not None:
-                        _pt = asyncio.create_task(
-                            telegram_bot._send_to_all(
-                                f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
-                            ),
-                            name="phys_alarm_tg_vacuum_guard",
-                        )
-                        _alarm_dispatch_tasks.add(_pt)
-                        _pt.add_done_callback(_alarm_dispatch_tasks.discard)
-                    await event_bus.publish(
-                        EngineEvent(
-                            event_type="alarm_fired",
-                            timestamp=datetime.now(UTC),
-                            payload={
-                                "alarm_id": _ev.alarm_id,
-                                "level": _ev.level,
-                                "message": _ev.message,
-                                "channels": _ev.channels,
-                                "values": _ev.values,
-                            },
-                            experiment_id=experiment_manager.active_experiment_id,
-                        )
-                    )
-            elif transition == "CLEARED":
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_cleared",
-                        timestamp=datetime.now(UTC),
-                        payload={"alarm_id": "vacuum_guard"},
-                        experiment_id=experiment_manager.active_experiment_id,
-                    )
-                )
+        alarm_v2_tick_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "alarm_v2_tick",
+                functools.partial(
+                    alarm_v2_tick,
+                    engine_cfg=_alarm_v2_engine_cfg,
+                    configs=_alarm_v2_configs,
+                    phase_provider=_alarm_v2_phase,
+                    evaluator=alarm_v2_evaluator,
+                    state_mgr=alarm_v2_state_mgr,
+                    broker=broker,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
+        )
 
     cooldown_alarm_task: asyncio.Task | None = None
     vacuum_guard_task: asyncio.Task | None = None
     if _cooldown_alarm is not None:
-        cooldown_alarm_task = asyncio.create_task(
-            _cooldown_alarm_tick_loop(), name="cooldown_alarm_tick"
+        cooldown_alarm_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "cooldown_alarm_tick",
+                functools.partial(
+                    cooldown_alarm_tick_loop,
+                    cooldown_cfg=_cooldown_cfg,
+                    cooldown_alarm=_cooldown_alarm,
+                    state_mgr=alarm_v2_state_mgr,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
         )
     if _vacuum_guard is not None:
-        vacuum_guard_task = asyncio.create_task(
-            _vacuum_guard_tick_loop(), name="vacuum_guard_tick"
+        vacuum_guard_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "vacuum_guard_tick",
+                functools.partial(
+                    vacuum_guard_tick_loop,
+                    vacuum_cfg=_vacuum_cfg,
+                    vacuum_guard=_vacuum_guard,
+                    state_mgr=alarm_v2_state_mgr,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
         )
 
     sd_feed_task: asyncio.Task | None = None
     sd_tick_task: asyncio.Task | None = None
     if sensor_diag is not None:
-        sd_feed_task = asyncio.create_task(_sensor_diag_feed(), name="sensor_diag_feed")
-        sd_tick_task = asyncio.create_task(_sensor_diag_tick(), name="sensor_diag_tick")
+        sd_feed_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "sensor_diag_feed",
+                functools.partial(sensor_diag_feed, sensor_diag, broker),
+            )
+        )
+        sd_tick_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "sensor_diag_tick",
+                functools.partial(
+                    sensor_diag_tick,
+                    sensor_diag=sensor_diag,
+                    sd_cfg=_sd_cfg,
+                    telegram_bot=telegram_bot,
+                    alarm_dispatch_tasks=_alarm_dispatch_tasks,
+                    event_bus=event_bus,
+                    experiment_manager=experiment_manager,
+                ),
+            )
+        )
         # v0.55.5 — anchor the cold-start grace at the moment the feed
         # and tick tasks are actually live. Doing this here (rather than
         # in the constructor) avoids counting the engine bootstrap
         # window as part of the grace.
-        sensor_diag.mark_engine_started()
+        await startup.call(sensor_diag.mark_engine_started)
     vt_feed_task: asyncio.Task | None = None
     vt_tick_task: asyncio.Task | None = None
     if vacuum_trend is not None:
-        vt_feed_task = asyncio.create_task(_vacuum_trend_feed(), name="vacuum_trend_feed")
-        vt_tick_task = asyncio.create_task(_vacuum_trend_tick(), name="vacuum_trend_tick")
-    leak_rate_feed_task = asyncio.create_task(_leak_rate_feed(), name="leak_rate_feed")
-    await housekeeping_service.start()
+        vt_feed_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "vacuum_trend_feed",
+                functools.partial(vacuum_trend_feed, vacuum_trend, _vt_cfg, broker),
+            )
+        )
+        vt_tick_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "vacuum_trend_tick",
+                functools.partial(vacuum_trend_tick, vacuum_trend, _vt_cfg),
+            )
+        )
+    leak_rate_feed_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "leak_rate_feed",
+            functools.partial(
+                leak_rate_feed,
+                vt_cfg=_vt_cfg,
+                broker=broker,
+                leak_rate_estimator=leak_rate_estimator,
+                event_logger=event_logger,
+            ),
+        )
+    )
+    await startup.acquire(
+        housekeeping_service.start(),
+        label="housekeeping_service",
+        rollback=housekeeping_service.stop,
+    )
 
     cold_rotation_task: asyncio.Task | None = None
     if cold_rotation_service is not None:
-        cold_rotation_task = asyncio.create_task(
-            _cold_rotation_scheduler(), name="cold_rotation_scheduler"
+        cold_rotation_task = await startup.call(
+            functools.partial(
+                supervisor.spawn,
+                "cold_rotation_scheduler",
+                functools.partial(
+                    cold_rotation_scheduler,
+                    cold_rotation_service,
+                    cold_rotation_schedule,
+                ),
+            )
         )
         logger.info(
             "ColdRotationService запущен: archive=%s, age_days=%d, schedule=%s",
@@ -3695,191 +7359,262 @@ async def _run_engine(*, mock: bool = False) -> None:
         logger.info("ColdRotationService отключён (cold_rotation.enabled != true)")
 
     # Watchdog
-    watchdog_task = asyncio.create_task(
-        _watchdog(broker, scheduler, writer, start_ts),
-        name="engine_watchdog",
+    watchdog_task = await startup.call(
+        functools.partial(
+            supervisor.spawn,
+            "engine_watchdog",
+            functools.partial(_watchdog, broker, scheduler, writer, start_ts),
+        )
     )
 
     # DiskMonitor — also wires the writer so disk-recovery can clear the
     # _disk_full flag (Phase 2a H.1).
-    disk_monitor = DiskMonitor(data_dir=_DATA_DIR, broker=broker, sqlite_writer=writer)
-    await disk_monitor.start()
+    disk_monitor = await startup.call(
+        functools.partial(
+            DiskMonitor,
+            data_dir=_DATA_DIR,
+            broker=broker,
+            sqlite_writer=writer,
+        )
+    )
+    await startup.acquire(
+        disk_monitor.start(),
+        label="disk_monitor",
+        rollback=disk_monitor.stop,
+    )
+
+    startup_summary = await startup.call(
+        functools.partial(
+            _engine_startup_summary,
+            driver_configs,
+            _alarm_v2_configs,
+            interlock_engine,
+        )
+    )
+
+    remove_signal_handlers = await startup.call(functools.partial(_install_engine_signal_handlers, shutdown_event))
+    startup.add("signal_handlers", remove_signal_handlers)
+
+    # REP is the final startup acquisition. No external command surface exists
+    # while any dependency or retained operator-log intent is unsettled.
+    command_context.experiment_commands_accepting = False
+    await startup.acquire(
+        command_ingress_recovery.start(command_ingress),
+        label="command_ingress",
+        rollback=command_ingress.stop,
+    )
+    await _commit_engine_command_ingress_startup(
+        command_ingress=command_ingress,
+        command_context=command_context,
+        startup=startup,
+    )
 
     logger.info(
         "═══ CryoDAQ Engine запущен ═══ | приборов=%d | тревог=%d | блокировок=%d | mock=%s",
-        len(driver_configs),
-        len(alarm_engine.get_state()),
-        len(interlock_engine.get_state()),
+        *startup_summary,
         mock,
     )
 
     # --- Ожидание сигнала завершения ---
-    shutdown_event = asyncio.Event()
-
-    def _request_shutdown() -> None:
-        logger.info("Получен сигнал завершения")
-        shutdown_event.set()
-
-    # Регистрация обработчиков сигналов
-    loop = asyncio.get_running_loop()
-    if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGINT, _request_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, _request_shutdown)
-    else:
-        # Windows: signal.signal работает только в главном потоке
-        signal.signal(signal.SIGINT, lambda *_: _request_shutdown())
-
-    await shutdown_event.wait()
+    ingress_terminal_failure = await _wait_for_engine_shutdown_or_ingress_failure(
+        shutdown_event,
+        command_ingress,
+    )
+    teardown_sequence = _EngineTeardownSequence(
+        command_ingress=command_ingress,
+        safety_manager=safety_manager,
+        logger_=logger,
+        ingress_terminal_failure=ingress_terminal_failure,
+    )
 
     # --- Корректное завершение ---
     logger.info("═══ Завершение CryoDAQ Engine ═══")
 
-    # F31 H3: drain in-flight sink dispatches before downstream teardown.
-    # _alarm_dispatch_tasks holds vault-write and webhook-POST tasks
-    # that are mid-flight at SIGTERM time; cancelling them mid-flight
-    # corrupts vault notes and aborts webhook POSTs. Cap at 10s.
-    await _drain_dispatch_tasks(_alarm_dispatch_tasks, logger)
+    # Freeze the command ingress before draining retained owners. Stopping the
+    # REP task may cancel a reply waiter, but shielded experiment owners remain
+    # authoritative and are settled below before any dependent resource stops.
+    command_context.experiment_commands_accepting = False
+    # A2: гасим надзор до отмены задач — иначе done-callback перезапустит
+    # только что отменённую задачу прямо во время завершения.
+    supervisor.stop()
 
-    watchdog_task.cancel()
-    try:
-        await watchdog_task
-    except asyncio.CancelledError:
-        pass
-
-    throttle_task.cancel()
-    try:
-        await throttle_task
-    except asyncio.CancelledError:
-        pass
-
-    alarm_v2_feed_task.cancel()
-    try:
-        await alarm_v2_feed_task
-    except asyncio.CancelledError:
-        pass
-    if alarm_v2_tick_task is not None:
-        alarm_v2_tick_task.cancel()
-        try:
-            await alarm_v2_tick_task
-        except asyncio.CancelledError:
-            pass
-
-    if sd_feed_task is not None:
-        sd_feed_task.cancel()
-        try:
-            await sd_feed_task
-        except asyncio.CancelledError:
-            pass
-    if sd_tick_task is not None:
-        sd_tick_task.cancel()
-        try:
-            await sd_tick_task
-        except asyncio.CancelledError:
-            pass
-    if cooldown_alarm_task is not None:
-        cooldown_alarm_task.cancel()
-        try:
-            await cooldown_alarm_task
-        except asyncio.CancelledError:
-            pass
-    if vacuum_guard_task is not None:
-        vacuum_guard_task.cancel()
-        try:
-            await vacuum_guard_task
-        except asyncio.CancelledError:
-            pass
-
-    if vt_feed_task is not None:
-        vt_feed_task.cancel()
-        try:
-            await vt_feed_task
-        except asyncio.CancelledError:
-            pass
-    if vt_tick_task is not None:
-        vt_tick_task.cancel()
-        try:
-            await vt_tick_task
-        except asyncio.CancelledError:
-            pass
-    if periodic_report_tick_task is not None:
-        periodic_report_tick_task.cancel()
-        try:
-            await periodic_report_tick_task
-        except asyncio.CancelledError:
-            pass
-    leak_rate_feed_task.cancel()
-    try:
-        await leak_rate_feed_task
-    except asyncio.CancelledError:
-        pass
-
-    # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
-    await scheduler.stop()
-    logger.info("Планировщик остановлен")
-
-    await plugin_pipeline.stop()
-    logger.info("Пайплайн плагинов остановлен")
-
-    if cooldown_service is not None:
-        await cooldown_service.stop()
-        logger.info("CooldownService остановлен")
-
-    if periodic_reporter is not None:
-        await periodic_reporter.stop()
-        logger.info("PeriodicReporter остановлен")
-
-    if gemma_agent is not None:
-        await gemma_agent.stop()
-        logger.info("AssistantLiveAgent (Гемма) остановлен")
-
-    if _q_broker_snap is not None:
-        await _q_broker_snap.stop()
-        logger.info("QueryAgent BrokerSnapshot остановлен")
-
-    if _photo_handler is not None:
-        await _photo_handler.stop()
-        logger.info("CompositionPhotoHandler остановлен")
-
-    if telegram_bot is not None:
-        await telegram_bot.stop()
-        logger.info("TelegramCommandBot остановлен")
-
-    await alarm_engine.stop()
-    logger.info("Движок тревог остановлен")
-
-    await interlock_engine.stop()
-    logger.info("Движок блокировок остановлен")
-
-    await safety_manager.stop()
-    logger.info("SafetyManager остановлен: состояние=%s", safety_manager.state.value)
-
-    await disk_monitor.stop()
-    logger.info("DiskMonitor остановлен")
-
-    await housekeeping_service.stop()
-    logger.info("HousekeepingService остановлен")
-
-    if cold_rotation_task is not None:
-        cold_rotation_task.cancel()
-        try:
-            await cold_rotation_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("ColdRotationService остановлен")
-
-    await writer.stop()
-    logger.info("SQLite записано: %d", writer.stats.get("total_written", 0))
-
-    await cmd_server.stop()
+    # Synchronously freeze admission, settle every retained command owner, and
+    # prove final global OFF. A REP teardown failure/cancellation is retained
+    # and retried; it can neither bypass safety nor invalidate OFF later.
+    await teardown_sequence.settle_ingress_off()
     logger.info("ZMQ CommandServer остановлен")
 
-    await zmq_pub.stop()
-    logger.info("ZMQ Publisher остановлен")
+    # Build one explicit dependency plan. Owners inside a layer are true peers;
+    # layers settle in order so no producer can enqueue behind a completed
+    # dispatch drain and no persistence/transport dependency closes early.
+    runtime_producer_owners: list[_EngineShutdownOwner] = []
+    known_quiesce_tasks: set[asyncio.Task[Any]] = set()
+    logger.info("SafetyManager остановлен: состояние=%s", safety_manager.state.value)
+
+    if operator_snapshot_service is not None:
+        operator_snapshot_task = supervisor.supervised_tasks.get("operator_snapshot_publication")
+        if operator_snapshot_task is not None:
+            known_quiesce_tasks.add(operator_snapshot_task)
+        runtime_producer_owners.append(
+            _EngineShutdownOwner(
+                "operator_snapshot_publication",
+                functools.partial(
+                    _request_and_settle_terminal_task_owner,
+                    operator_snapshot_service.request_stop,
+                    operator_snapshot_task,
+                ),
+            )
+        )
+
+    terminal_task_specs = (
+        ("watchdog_task", watchdog_task),
+        ("throttle_task", throttle_task),
+        ("alarm_v2_feed_task", alarm_v2_feed_task),
+        ("alarm_ring_task", alarm_ring_task),
+        ("alarm_v2_tick_task", alarm_v2_tick_task),
+        ("sensor_diagnostic_feed_task", sd_feed_task),
+        ("sensor_diagnostic_tick_task", sd_tick_task),
+        ("cooldown_alarm_task", cooldown_alarm_task),
+        ("vacuum_guard_task", vacuum_guard_task),
+        ("vacuum_trend_feed_task", vt_feed_task),
+        ("vacuum_trend_tick_task", vt_tick_task),
+        ("assistant_event_relay_task", assistant_event_relay_task),
+        ("leak_rate_feed_task", leak_rate_feed_task),
+    )
+    for label, task in terminal_task_specs:
+        if task is None:
+            continue
+        known_quiesce_tasks.add(task)
+        runtime_producer_owners.append(
+            _EngineShutdownOwner(
+                label,
+                functools.partial(_stop_terminal_task_owner, task),
+            )
+        )
+
+    # A2: подметаем перезапущенные надзором задачи — их именованные ссылки
+    # выше могут указывать на уже мёртвый оригинал, а живой перезапуск висит
+    # только в _supervised_tasks. safety_collect/safety_monitor исключаем:
+    # их снимает safety_manager.stop() последними (ссылки синхронизированы при
+    # перезапуске), чтобы мониторинг безопасности жил до конца завершения.
+    for index, (name, task) in enumerate(sorted(supervisor.supervised_tasks.items())):
+        if name in {"safety_collect", "safety_monitor"} or task in known_quiesce_tasks or task.done():
+            continue
+        known_quiesce_tasks.add(task)
+        runtime_producer_owners.append(
+            _EngineShutdownOwner(
+                f"supervised_task_{index}",
+                functools.partial(_stop_terminal_task_owner, task),
+            )
+        )
+
+    shutdown_layers: list[_EngineShutdownLayer] = [
+        _EngineShutdownLayer(
+            "retained_mutations",
+            (
+                _EngineShutdownOwner(
+                    "retained_command_tasks",
+                    functools.partial(
+                        _drain_retained_command_tasks_owner,
+                        command_context,
+                        logger,
+                    ),
+                ),
+            ),
+        ),
+        _EngineShutdownLayer(
+            "scheduler",
+            (
+                _EngineShutdownOwner(
+                    "scheduler",
+                    functools.partial(
+                        _stop_scheduler_shutdown_owner,
+                        scheduler,
+                        recording_lifecycle_feed,
+                        acquisition_lifecycle_sequence,
+                    ),
+                ),
+            ),
+        ),
+        _EngineShutdownLayer(
+            "plugin_pipeline",
+            (_EngineShutdownOwner("plugin_pipeline", plugin_pipeline.stop),),
+        ),
+    ]
+    if runtime_producer_owners:
+        shutdown_layers.append(_EngineShutdownLayer("runtime_producers", tuple(runtime_producer_owners)))
+
+    # Порядок: scheduler → plugins → alarms → interlocks → writer → zmq
+    producer_service_owners: list[_EngineShutdownOwner] = []
+    if cooldown_service is not None:
+        producer_service_owners.append(_EngineShutdownOwner("cooldown_service", cooldown_service.stop))
+
+    producer_service_owners.append(_EngineShutdownOwner("interlock_engine", interlock_engine.stop))
+    producer_service_owners.append(_EngineShutdownOwner("disk_monitor", disk_monitor.stop))
+    producer_service_owners.append(_EngineShutdownOwner("housekeeping_service", housekeeping_service.stop))
+
+    if cold_rotation_task is not None:
+        producer_service_owners.append(
+            _EngineShutdownOwner(
+                "cold_rotation_task",
+                functools.partial(_stop_terminal_task_owner, cold_rotation_task),
+            )
+        )
+
+    shutdown_layers.append(_EngineShutdownLayer("producer_services", tuple(producer_service_owners)))
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "event_relay_cutover",
+            (
+                _EngineShutdownOwner(
+                    "assistant_event_subscription",
+                    functools.partial(event_bus.unsubscribe, "assistant_zmq_relay"),
+                ),
+            ),
+        )
+    )
+    if _photo_handler is not None:
+        shutdown_layers.append(
+            _EngineShutdownLayer(
+                "composition_photo_handler",
+                (_EngineShutdownOwner("composition_photo_handler", _photo_handler.stop),),
+            )
+        )
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "alarm_dispatch_drain",
+            (
+                _EngineShutdownOwner(
+                    "alarm_dispatch_tasks",
+                    functools.partial(_drain_dispatch_tasks, _alarm_dispatch_tasks, logger),
+                ),
+            ),
+        )
+    )
+    if telegram_bot is not None:
+        shutdown_layers.append(
+            _EngineShutdownLayer(
+                "downstream_notifications",
+                (_EngineShutdownOwner("telegram_bot", telegram_bot.stop),),
+            )
+        )
 
     from cryodaq.drivers.transport.gpib import GPIBTransport
 
-    GPIBTransport.close_all_managers()
-    logger.info("GPIB ResourceManagers закрыты")
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "terminal_dependencies",
+            (
+                _EngineShutdownOwner("sqlite_writer", writer.stop),
+                _EngineShutdownOwner("zmq_publisher", zmq_pub.stop),
+                _EngineShutdownOwner("gpib_managers", GPIBTransport.close_all_managers),
+                _EngineShutdownOwner("signal_handlers", remove_signal_handlers),
+            ),
+        )
+    )
+    await teardown_sequence.settle_plan(tuple(shutdown_layers))
+    logger.info("SQLite shutdown settled: total_written=%d", writer.stats.get("total_written", 0))
+    teardown_sequence.finalize()
 
     uptime = time.monotonic() - start_ts
     logger.info(
@@ -3895,118 +7630,51 @@ async def _run_engine(*, mock: bool = False) -> None:
 _LOCK_FILE = get_data_dir() / ".engine.lock"
 
 
-def _is_pid_alive(pid: int) -> bool:
-    """Check if process with given PID exists."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
-            return False
-        else:
-            os.kill(pid, 0)
-            return True
-    except (OSError, ProcessLookupError):
-        return False
-
-
 def _acquire_engine_lock() -> int:
-    """Acquire exclusive engine lock via flock/msvcrt. Returns fd.
+    """Acquire the exclusive engine lock on one persistent lock-file inode.
 
-    If lock is held by a dead process, auto-cleans and retries.
-    Shows helpful error with PID and kill command if lock is live.
+    Kernel lock ownership is authoritative. Keeping one validated inode at
+    the stable path prevents two contenders from holding locks on different
+    files after an unlink/recreate race.
     """
-    _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        # Lock held by another process (flock/msvcrt is authoritative)
-        os.close(fd)
+    fd = try_acquire_lock(_LOCK_FILE.name, lock_dir=_LOCK_FILE.parent)
+    if fd is None:
         logger.error(
             "CryoDAQ engine уже запущен (lock: %s).\n"
-            "  Для принудительного запуска: cryodaq-engine --force\n"
-            "  Или завершите процесс через Диспетчер задач (python/pythonw).",
+            "  Автоматическое завершение процесса без проверяемой инкарнации запрещено.\n"
+            "  Завершите подтверждённый процесс через launcher или Диспетчер задач.",
             _LOCK_FILE,
         )
         raise SystemExit(1)
-
-    os.ftruncate(fd, 0)
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, f"{os.getpid()}\n".encode())
     return fd
 
 
 def _force_kill_existing() -> None:
-    """Force-kill any running engine and remove lock."""
-    if not _LOCK_FILE.exists():
-        return
-    # Read PID via os.open — works even when file is locked by msvcrt
-    pid = None
-    fd = None
-    try:
-        fd = os.open(str(_LOCK_FILE), os.O_RDONLY)
-        raw = os.read(fd, 64).decode().strip()
-        pid = int(raw)
-    except (OSError, ValueError):
-        pass
-    finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-    if pid is None:
-        try:
-            _LOCK_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return
-    if _is_pid_alive(pid):
-        logger.warning("Принудительная остановка engine (PID %d)...", pid)
-        try:
-            if sys.platform == "win32":
-                import subprocess
+    """Refuse unauthenticated termination while tolerating a free stale record.
 
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=5)
-            else:
-                os.kill(pid, 9)  # SIGKILL
-        except Exception as exc:
-            logger.error("Не удалось завершить PID %d: %s", pid, exc)
-            raise SystemExit(1)
-        for _ in range(20):
-            time.sleep(0.25)
-            if not _is_pid_alive(pid):
-                break
-        else:
-            logger.error("PID %d не завершился после 5с", pid)
-            raise SystemExit(1)
-    try:
-        _LOCK_FILE.unlink(missing_ok=True)
-    except OSError:
-        logger.debug("Lock file busy (will be released by OS)")
-    logger.info("Старый engine остановлен, lock очищен")
+    A PID and executable name cannot bind a live process to this data-root lock:
+    the PID may have been reused, and another CryoDAQ installation has the same
+    command line.  Therefore ``--force`` may only prove that no owner exists;
+    a held lock requires operator-controlled shutdown of the actual incumbent.
+    """
+
+    probe_fd = try_acquire_lock(_LOCK_FILE.name, lock_dir=_LOCK_FILE.parent)
+    if probe_fd is not None:
+        _release_engine_lock(probe_fd)
+        logger.info("Engine lock is free; no forced termination is required")
+        return
+    logger.error(
+        "Refusing unauthenticated forced termination: the engine lock is held "
+        "but its owning process incarnation cannot be proven"
+    )
+    raise SystemExit(1)
 
 
 def _release_engine_lock(fd: int) -> None:
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-    try:
-        _LOCK_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # The persistent path is intentionally retained. Closing is the only
+    # ownership transition, so no successor-created lock can be deleted in a
+    # close/unlink gap and every contender continues to address one inode.
+    os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -4020,12 +7688,18 @@ ENGINE_CONFIG_ERROR_EXIT_CODE = 2
 
 def main() -> None:
     """Точка входа cryodaq-engine."""
+    engine_instance_id, shutdown_capability, engine_ready_nonce, engine_ready_channel_fd = (
+        _consume_engine_launch_authority()
+    )
     import argparse
-    import traceback
 
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")
     parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
-    parser.add_argument("--force", action="store_true", help="Kill existing engine and take over")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Proceed only when the engine lock is free; never kill an unauthenticated owner",
+    )
     args = parser.parse_args()
 
     from cryodaq.logging_setup import resolve_log_level, setup_logging
@@ -4049,9 +7723,25 @@ def main() -> None:
                 # WindowsSelectorEventLoopPolicy (the policy system is deprecated
                 # in Python 3.14+ and warns on import).
                 with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-                    runner.run(_run_engine(mock=mock))
+                    runner.run(
+                        _run_engine(
+                            mock=mock,
+                            engine_instance_id=engine_instance_id,
+                            shutdown_capability=shutdown_capability,
+                            engine_ready_nonce=engine_ready_nonce,
+                            engine_ready_channel_fd=engine_ready_channel_fd,
+                        )
+                    )
             else:
-                asyncio.run(_run_engine(mock=mock))
+                asyncio.run(
+                    _run_engine(
+                        mock=mock,
+                        engine_instance_id=engine_instance_id,
+                        shutdown_capability=shutdown_capability,
+                        engine_ready_nonce=engine_ready_nonce,
+                        engine_ready_channel_fd=engine_ready_channel_fd,
+                    )
+                )
         except KeyboardInterrupt:
             logger.info("Прервано оператором (Ctrl+C)")
         except yaml.YAMLError as exc:
@@ -4059,18 +7749,16 @@ def main() -> None:
             # unrecoverable by retry — exit with a distinct code so the
             # launcher refuses to spin in a tight restart loop.
             logger.critical(
-                "CONFIG ERROR (YAML parse): %s\n%s",
-                exc,
-                traceback.format_exc(),
+                "Engine startup config failed: phase=yaml exception=%s",
+                type(exc).__name__,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except FileNotFoundError as exc:
             # Missing required config file at startup is also a config
             # error: same exit code.
             logger.critical(
-                "CONFIG ERROR (file not found): %s\n%s",
-                exc,
-                traceback.format_exc(),
+                "Engine startup config failed: phase=file_missing exception=%s",
+                type(exc).__name__,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except (
@@ -4079,20 +7767,26 @@ def main() -> None:
             InterlockConfigError,
             HousekeepingConfigError,
             ChannelConfigError,
+            ChannelDescriptorStorageError,
+            DriverRegistryError,
         ) as exc:
-            labels = {
-                SafetyConfigError: "safety",
-                AlarmConfigError: "alarm",
-                InterlockConfigError: "interlock",
-                HousekeepingConfigError: "housekeeping",
-                ChannelConfigError: "channel",
-            }
-            label = labels.get(type(exc), "config")
+            labels = (
+                (SafetyConfigError, "safety"),
+                (AlarmConfigError, "alarm"),
+                (InterlockConfigError, "interlock"),
+                (HousekeepingConfigError, "housekeeping"),
+                (ChannelConfigError, "channel"),
+                (ChannelDescriptorStorageError, "channel descriptor"),
+                (DriverRegistryError, "driver registry"),
+            )
+            label = next(
+                (label for error_type, label in labels if isinstance(exc, error_type)),
+                "config",
+            )
             logger.critical(
-                "CONFIG ERROR (%s config): %s\n%s",
+                "CONFIG ERROR (%s config): exception=%s",
                 label,
-                exc,
-                traceback.format_exc(),
+                type(exc).__name__,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
     finally:

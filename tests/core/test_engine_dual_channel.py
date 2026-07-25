@@ -47,21 +47,26 @@ async def test_run_engine_initializes_calibration_store_before_loading_drivers(
         pass
 
     config_dir = tmp_path / "config"
-    data_dir = tmp_path / "data"
+    expected_data_dir = tmp_path / "data"
     config_dir.mkdir()
-    data_dir.mkdir()
+    expected_data_dir.mkdir()
 
     def _fake_load_drivers(
-        config_path: Path, *, mock: bool, calibration_store: CalibrationStore | None = None
+        config_path: Path,
+        *,
+        mock: bool,
+        calibration_store: CalibrationStore | None = None,
+        data_dir: Path | None = None,
     ):
         assert mock is True
         assert config_path == config_dir / "instruments.yaml"
         assert calibration_store is not None
         assert isinstance(calibration_store, CalibrationStore)
+        assert data_dir is expected_data_dir
         raise _StopStartup()
 
     monkeypatch.setattr("cryodaq.engine._CONFIG_DIR", config_dir)
-    monkeypatch.setattr("cryodaq.engine._DATA_DIR", data_dir)
+    monkeypatch.setattr("cryodaq.engine._DATA_DIR", expected_data_dir)
     monkeypatch.setattr("cryodaq.engine._load_drivers", _fake_load_drivers)
 
     with pytest.raises(_StopStartup):

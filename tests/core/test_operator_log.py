@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
-from cryodaq.core.broker import DataBroker
+from cryodaq.core.broker import DataBroker, RequiredPublication
 from cryodaq.core.experiment import ExperimentManager
-from cryodaq.engine import _run_operator_log_command
+from cryodaq.engine import EngineCommandContext, _handle_gui_command, _run_operator_log_command
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 
@@ -64,42 +67,102 @@ async def test_operator_log_persists_in_sqlite(tmp_path: Path) -> None:
     assert row["tags"] == '["ops", "nitrogen"]'
 
 
-async def test_log_entry_command_uses_active_experiment(
+async def test_log_entry_command_uses_authoritative_owned_path_and_settles_publication(
     tmp_path: Path,
     experiment_manager: ExperimentManager,
 ) -> None:
     writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.initialize_operator_log_idempotency()
     broker = DataBroker()
-    queue = await broker.subscribe("operator_log_test")
+    queue = await broker.subscribe("operator_log_test", required_publisher=True)
     exp_id = experiment_manager.start_experiment("Cooldown", "Petrov")
-
-    result = await _run_operator_log_command(
-        "log_entry",
-        {
-            "message": "Reached stable pressure",
-            "author": "petrov",
-            "source": "gui",
-            "tags": ["pressure"],
-        },
-        writer,
-        experiment_manager,
-        broker,
+    request_id = "a" * 32
+    context = EngineCommandContext(
+        safety_manager=None,
+        event_logger=MagicMock(),
+        sink_registry=SimpleNamespace(sinks=[]),
+        interlock_engine=None,
+        leak_rate_estimator=None,
+        leak_cfg={},
+        alarm_v2_state_mgr=None,
+        alarm_ring=None,
+        broker=broker,
+        experiment_manager=experiment_manager,
+        calibration_acquisition=MagicMock(),
+        event_bus=MagicMock(),
+        cooldown_alarm=None,
+        vacuum_guard=None,
+        alarm_dispatch_tasks=set(),
+        calibration_store=None,
+        writer=writer,
+        drivers_by_name={},
+        sensor_diag=None,
+        vacuum_trend=None,
+        alarm_v2_state_tracker=None,
+        multiline_burst_auto_stop_meta={},
+        multiline_burst_auto_stop_tasks={},
+        mutation_capability_token="test-mutation-token-1",
     )
 
-    reading = await queue.get()
-    await writer.stop()
+    async def settle_required_publication() -> RequiredPublication:
+        publication = await queue.get()
+        try:
+            assert type(publication) is RequiredPublication
+            publication.claim()
+            publication.acknowledge()
+            return publication
+        finally:
+            queue.task_done()
 
+    command = {
+        "cmd": "log_entry",
+        "request_id": request_id,
+        "experiment_id": exp_id,
+        "message": "Reached stable pressure",
+        "author": "petrov",
+        "source": "gui",
+        "tags": ["pressure"],
+        "protocol_major": 1,
+        "mutation_capability": "cryodaq_mutation_v1",
+        "capability_token": "test-mutation-token-1",
+    }
+    publisher = asyncio.create_task(settle_required_publication())
+    try:
+        result = await _handle_gui_command(command, context=context)
+        publication = await publisher
+        replay = await _handle_gui_command(command, context=context)
+        pending_outbox = await writer.pending_operator_log_publication_outbox()
+    finally:
+        if not publisher.done():
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)
+        await writer.stop()
+
+    assert result == replay
     assert result["ok"] is True
+    assert result["committed"] is True
+    assert result["commit_receipt"] == {
+        "schema": "operator_log_commit_v1",
+        "request_id": request_id,
+        "entry_id": result["entry"]["id"],
+        "experiment_id": exp_id,
+        "committed": True,
+    }
     assert result["entry"]["experiment_id"] == exp_id
     assert result["entry"]["source"] == "gui"
-    assert reading.channel == "analytics/operator_log_entry"
-    assert reading.metadata["message"] == "Reached stable pressure"
-    assert reading.metadata["experiment_id"] == exp_id
+    assert publication.request_id == request_id
+    assert len(publication.request_fingerprint) == 64
+    assert publication.reading.channel == "analytics/operator_log_entry"
+    assert publication.reading.metadata["request_id"] == request_id
+    assert publication.reading.metadata["publication_schema"] == "operator_log_commit_v1"
+    assert publication.reading.metadata["message"] == "Reached stable pressure"
+    assert publication.reading.metadata["experiment_id"] == exp_id
+    assert pending_outbox == ()
+    assert queue.empty()
 
 
-async def test_log_get_filters_by_time_range(
-    tmp_path: Path, experiment_manager: ExperimentManager
-) -> None:
+async def test_log_get_filters_by_time_range(tmp_path: Path, experiment_manager: ExperimentManager) -> None:
     writer = SQLiteWriter(tmp_path)
     start_ts = datetime(2026, 3, 16, 8, 0, tzinfo=UTC)
     middle_ts = start_ts + timedelta(hours=1)

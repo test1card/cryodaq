@@ -289,9 +289,7 @@ async def test_sqlite_overrange_inf_persists(tmp_path) -> None:
 
     from cryodaq.storage.sentinel import SENTINEL, decode
 
-    assert rows[0][1] == SENTINEL, (
-        f"Persisted value must be the sentinel, got {rows[0][1]}"
-    )
+    assert rows[0][1] == SENTINEL, f"Persisted value must be the sentinel, got {rows[0][1]}"
     assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
@@ -330,9 +328,7 @@ async def test_sqlite_underrange_neg_inf_persists(tmp_path) -> None:
 
     from cryodaq.storage.sentinel import SENTINEL, decode
 
-    assert rows[0][1] == SENTINEL, (
-        f"Persisted value must be the sentinel, got {rows[0][1]}"
-    )
+    assert rows[0][1] == SENTINEL, f"Persisted value must be the sentinel, got {rows[0][1]}"
     assert math.isnan(decode(rows[0][1], rows[0][2]))
 
 
@@ -365,13 +361,13 @@ def test_gpib_resource_closed_on_clear_failure() -> None:
     transport._bus_prefix = "GPIB0"
 
     mock_res = MagicMock()
-    mock_res.clear.side_effect = Exception("IFC not supported")
+    mock_res.clear.side_effect = RuntimeError("IFC not supported")
 
     mock_rm = MagicMock()
     mock_rm.open_resource.return_value = mock_res
 
     with patch.object(GPIBTransport, "_get_rm", return_value=mock_rm):
-        with pytest.raises(Exception, match="IFC not supported"):
+        with pytest.raises(RuntimeError, match="IFC not supported"):
             transport._blocking_connect()
 
     # Resource must have been closed despite clear() failure
@@ -426,20 +422,44 @@ def test_finite_error_status_reading_never_reaches_rate_estimator() -> None:
 def test_usable_readings_feed_rate_estimator_nan_dropped() -> None:
     """Fed through the doctrine gate, usable readings accumulate and a
     mid-stream non-finite (NaN, error status) reading is dropped, so the
-    estimator still yields the correct rate afterward."""
+    estimator still yields the correct rate afterward.
+
+    Timestamps are deterministic (not Reading.now()): a wall-clock tight
+    loop can collapse onto one clock tick on a fast/coarse-clock CI runner,
+    zeroing the OLS time-variance denominator and making get_rate()
+    legitimately return None (rate_estimator.py's den==0 guard is correct
+    production behavior — the flake was in the test's timing, not the code).
+    """
     from cryodaq.core.rate_estimator import RateEstimator
 
     est = RateEstimator(window_s=120.0, min_points=5)
+    base_ts = 1_700_000_000.0
+    step_s = 2.0
+
+    def _reading(i: int, value: float, **kwargs: object) -> Reading:
+        return Reading(
+            timestamp=datetime.fromtimestamp(base_ts + i * step_s, tz=UTC),
+            instrument_id="test",
+            channel="T1",
+            value=value,
+            unit="K",
+            **kwargs,
+        )
+
     for i in range(5):
-        assert _feed(est.push, Reading.now("T1", 300.0 - i, "K")) is True
+        assert _feed(est.push, _reading(i, 300.0 - i)) is True
     # SENSOR_ERROR / TIMEOUT reading arrives as NaN
-    dropped = Reading.now("T1", float("nan"), "K", status=ChannelStatus.SENSOR_ERROR)
+    dropped = _reading(5, float("nan"), status=ChannelStatus.SENSOR_ERROR)
     assert _feed(est.push, dropped) is False
     for i in range(6, 11):
-        assert _feed(est.push, Reading.now("T1", 300.0 - i, "K")) is True
+        assert _feed(est.push, _reading(i, 300.0 - i)) is True
 
-    # timestamps are wall-clock (Reading.now); rate is finite and computed
-    assert est.get_rate("T1") is not None
+    # value = 300 - i and timestamp = base_ts + i*step_s are both exactly
+    # affine in i, so the OLS fit is exact regardless of the dropped point:
+    # dv/dt = -1/step_s K/s = -60/step_s K/min = -30 K/min.
+    rate = est.get_rate("T1")
+    assert rate is not None
+    assert rate == pytest.approx(-30.0)
 
 
 def test_vacuum_trend_push_rejects_nonfinite_independently() -> None:
@@ -461,8 +481,11 @@ def test_vacuum_trend_push_rejects_nonfinite_independently() -> None:
 
 
 def test_engine_feed_sites_gate_on_is_usable() -> None:
-    """All three estimator feed loops in _run_engine gate on the doctrine
-    predicate; the old float-only _push_if_finite helper is gone."""
+    """All estimator feed loops gate on the doctrine predicate.
+
+    The loops live in importable runtime-task functions, so inspect those
+    production functions directly.
+    """
     import inspect
     import re
 
@@ -470,10 +493,29 @@ def test_engine_feed_sites_gate_on_is_usable() -> None:
 
     assert not hasattr(engine, "_push_if_finite")
 
-    src = re.sub(r"\s+", "", inspect.getsource(engine._run_engine))
-    assert "_alarm_v2_rate.push(" in src
+    from cryodaq.engine_wiring import runtime_tasks
+
+    src = re.sub(
+        r"\s+",
+        "",
+        "\n".join(
+            inspect.getsource(fn)
+            for fn in (
+                runtime_tasks.sensor_diag_feed,
+                runtime_tasks.vacuum_trend_feed,
+                runtime_tasks._alarm_v2_feed_loop,
+            )
+        ),
+    )
     assert "sensor_diag.push(" in src
     assert "vacuum_trend.push(" in src
     # Every feed loop is guarded by the doctrine predicate; no _push_if_finite.
     assert "_push_if_finite" not in src
     assert "ifreading.is_usable():" in src
+
+    # A2: the alarm-v2 feed loop was extracted to _alarm_v2_feed_loop; the
+    # doctrine gate on the rate estimator moved with it and must remain.
+    feed_src = re.sub(r"\s+", "", inspect.getsource(engine._alarm_v2_feed_loop))
+    assert "rate_estimator.push(" in feed_src
+    assert "ifreading.is_usable():" in feed_src
+    assert "_push_if_finite" not in feed_src

@@ -168,10 +168,10 @@ async def test_ordering_guarantee_write_before_zmq(tmp_path: Path, monkeypatch) 
 
     original_write_immediate = writer.write_immediate
 
-    async def gated_write_immediate(batch: list) -> None:
+    async def gated_write_immediate(batch: list) -> bool:
         write_started.set()           # signal: write has been entered
         await write_gate.wait()       # block until test releases
-        await original_write_immediate(batch)
+        return await original_write_immediate(batch)
 
     writer.write_immediate = gated_write_immediate  # type: ignore[method-assign]
 
@@ -303,6 +303,51 @@ async def test_start_immediate_creates_data_dir(tmp_path: Path, monkeypatch) -> 
 # ---------------------------------------------------------------------------
 # 7. Scheduler with sqlite_writer=None still publishes (backward compat)
 # ---------------------------------------------------------------------------
+
+
+async def test_locked_db_swallowed_failure_does_not_publish(tmp_path: Path, monkeypatch) -> None:
+    """F1 (Phase A gate, CRITICAL): a locked/busy write that write_immediate
+    swallows (no re-raise, per A6) must still suppress publication to BOTH
+    brokers — the scheduler's only prior guard was ``is_disk_full``, which a
+    locked-DB failure never sets. R1 (Phase A recheck): the drop is signalled
+    via write_immediate()'s per-call return value, not shared writer state.
+    """
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    from cryodaq.core.safety_broker import SafetyBroker
+
+    broker = DataBroker()
+    test_queue = await broker.subscribe("test_consumer", maxsize=100)
+    safety_broker = SafetyBroker()
+    safety_queue = safety_broker.subscribe("test_safety_consumer", maxsize=100)
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+
+    driver = MockDriver()
+    sched = Scheduler(broker, sqlite_writer=writer, safety_broker=safety_broker)
+    sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.05))
+
+    def fake_write_batch(batch: list) -> bool:
+        # Mirrors _write_day_batch's locked-DB swallow: no raise, but the
+        # batch was never durably persisted — reported via the return value
+        # (R1, Phase A recheck), not shared writer state.
+        return False
+
+    with patch.object(writer, "_write_batch", side_effect=fake_write_batch):
+        await sched.start()
+        await asyncio.sleep(0.3)
+        await sched.stop()
+
+    assert test_queue.empty(), (
+        "Locked-DB swallow marked the batch dropped, but a reading still "
+        "reached the DataBroker subscriber — persistence-first violated (F1)"
+    )
+    assert safety_queue.empty(), (
+        "Locked-DB swallow marked the batch dropped, but a reading still "
+        "reached the SafetyBroker subscriber — persistence-first violated (F1)"
+    )
+
+    await writer.stop()
 
 
 async def test_scheduler_without_writer_still_publishes(tmp_path: Path) -> None:

@@ -2,11 +2,13 @@
 
 import asyncio
 import logging
+import math
 import shutil
 from pathlib import Path
 from typing import Any
 
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
@@ -55,13 +57,10 @@ class DiskMonitor:
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        task = self._task
+        settlement = await cancel_and_settle_tasks(() if task is None else (task,))
+        self._task = None
+        settlement.raise_if_unsuccessful()
         logger.info("DiskMonitor остановлен")
 
     async def _check_loop(self) -> None:
@@ -74,19 +73,25 @@ class DiskMonitor:
 
     async def _check_once(self) -> None:
         try:
-            usage = shutil.disk_usage(str(self._data_dir))
+            # to_thread keeps the event loop responsive; cancellation does not
+            # terminate the OS query, so this is not a bounded-settlement claim.
+            usage = await asyncio.to_thread(shutil.disk_usage, str(self._data_dir))
             free_gb = usage.free / (1024**3)
         except Exception as exc:
             logger.error("Ошибка проверки диска: %s", exc)
             return
 
+        if not math.isfinite(free_gb) or free_gb < 0:
+            logger.error("Disk monitor returned invalid free-space evidence")
+            return
+        state = "fault" if free_gb < self._crit_gb else "caution" if free_gb < self._warn_gb else "ok"
         # Publish as Reading for StatusStrip and alarms
         reading = Reading.now(
             channel="system/disk_free_gb",
             value=round(free_gb, 1),
             unit="GB",
             instrument_id="system",
-            metadata={"source": "disk_monitor"},
+            metadata={"source": "disk_monitor", "operator_state": state},
         )
         await self._broker.publish(reading)
 

@@ -23,7 +23,7 @@ from cryodaq.core.safety_manager import SafetyManager, SafetyState
 async def mgr():
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock()
+    keithley.emergency_off = AsyncMock(return_value=True)
     keithley.start_source = AsyncMock()
     keithley.stop_source = AsyncMock()
 

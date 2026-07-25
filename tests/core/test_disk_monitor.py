@@ -87,6 +87,7 @@ async def test_disk_monitor_publishes_reading(tmp_path: Path) -> None:
     assert r.channel == "system/disk_free_gb"
     assert r.unit == "GB"
     assert r.value > 0, "disk free should be > 0"
+    assert r.metadata == {"source": "disk_monitor", "operator_state": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +148,7 @@ async def test_disk_monitor_warning_threshold(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_disk_monitor_critical_threshold(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_disk_monitor_critical_threshold(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """When free space is below 2 GB, a CRITICAL log message must be emitted."""
     broker = DataBroker()
     await broker.subscribe("test_sub", maxsize=100)

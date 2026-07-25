@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 
 def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
     """Engine main() must catch yaml.YAMLError and sys.exit(2) so launcher
@@ -16,9 +18,7 @@ def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
     (tmp_path / "logs").mkdir()
 
     # Bad YAML for instruments.yaml — unbalanced bracket
-    (config_dir / "instruments.yaml").write_text(
-        "instruments:\n  - type: [unbalanced\n", encoding="utf-8"
-    )
+    (config_dir / "instruments.yaml").write_text("instruments:\n  - type: [unbalanced\n", encoding="utf-8")
     # Provide minimal stubs for the other files engine looks for so the
     # YAML error is the first thing that fails.
     (config_dir / "safety.yaml").write_text(
@@ -46,12 +46,50 @@ def test_engine_exits_code_2_on_corrupted_yaml(tmp_path):
         timeout=60,
     )
 
-    assert result.returncode == 2, (
-        f"Expected exit 2, got {result.returncode}\nstderr: {result.stderr[-2000:]}"
-    )
+    assert result.returncode == 2, f"Expected exit 2, got {result.returncode}\nstderr: {result.stderr[-2000:]}"
 
 
 def test_engine_exit_code_constant_exposed():
     from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
 
     assert ENGINE_CONFIG_ERROR_EXIT_CODE == 2
+
+
+def test_engine_exits_code_2_on_descriptor_config_error(monkeypatch, caplog: pytest.LogCaptureFixture):
+    import cryodaq.engine as engine
+    from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError
+
+    secret = "descriptor manifest unavailable\r\nTOP-SECRET"
+
+    async def fail_descriptor_startup(
+        *,
+        mock: bool = False,
+        engine_instance_id: str = "",
+        shutdown_capability: str = "",
+        engine_ready_nonce: str = "",
+        engine_ready_channel_fd: int | None = None,
+    ) -> None:
+        assert mock is True
+        assert engine_instance_id == ""
+        assert shutdown_capability == ""
+        assert engine_ready_nonce == ""
+        assert engine_ready_channel_fd is None
+        raise ChannelDescriptorStorageError(secret)
+
+    monkeypatch.setattr(engine, "_run_engine", fail_descriptor_startup)
+    monkeypatch.setattr(engine, "_acquire_engine_lock", lambda: 1)
+    monkeypatch.setattr(engine, "_release_engine_lock", lambda _fd: None)
+    monkeypatch.setattr("cryodaq.logging_setup.setup_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.delenv("CRYODAQ_ENGINE_INSTANCE_ID", raising=False)
+    monkeypatch.delenv("CRYODAQ_ENGINE_SHUTDOWN_CAPABILITY", raising=False)
+    monkeypatch.delenv("CRYODAQ_ENGINE_READY_NONCE", raising=False)
+    monkeypatch.delenv("CRYODAQ_CHILD_READY_CHANNEL", raising=False)
+    monkeypatch.setattr(sys, "argv", ["cryodaq-engine", "--mock"])
+
+    with pytest.raises(SystemExit) as raised:
+        engine.main()
+
+    assert raised.value.code == engine.ENGINE_CONFIG_ERROR_EXIT_CODE
+    assert "CONFIG ERROR (channel descriptor config): exception=ChannelDescriptorStorageError" in caplog.text
+    assert secret not in caplog.text
+    assert "TOP-SECRET" not in caplog.text

@@ -49,10 +49,7 @@ def _batch(
 ) -> list[Reading]:
     ts = ts or datetime.now(UTC)
     return [
-        _reading(
-            channel=f"CH{i % 8 + 1}", value=4.0 + i * 0.001, ts=ts, instrument_id=instrument_id
-        )
-        for i in range(n)
+        _reading(channel=f"CH{i % 8 + 1}", value=4.0 + i * 0.001, ts=ts, instrument_id=instrument_id) for i in range(n)
     ]
 
 
@@ -401,9 +398,7 @@ async def test_writer_rejects_sentinel_valued_row_with_ok_status(tmp_path: Path)
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
-    good = Reading.now(
-        channel="Т2 Экран", value=77.0, unit="K", instrument_id="ls218s", status=ChannelStatus.OK
-    )
+    good = Reading.now(channel="Т2 Экран", value=77.0, unit="K", instrument_id="ls218s", status=ChannelStatus.OK)
     poison = Reading.now(
         channel="Т1 Криостат верх",
         value=SENTINEL,  # sentinel value...
@@ -416,9 +411,7 @@ async def test_writer_rejects_sentinel_valued_row_with_ok_status(tmp_path: Path)
     db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     assert db_files
     conn = sqlite3.connect(str(db_files[0]))
-    poison_rows = conn.execute(
-        "SELECT * FROM readings WHERE channel='Т1 Криостат верх'"
-    ).fetchall()
+    poison_rows = conn.execute("SELECT * FROM readings WHERE channel='Т1 Криостат верх'").fetchall()
     good_rows = conn.execute("SELECT * FROM readings WHERE channel='Т2 Экран'").fetchall()
     conn.close()
     assert len(poison_rows) == 0, "sentinel+OK row must be rejected"
@@ -443,9 +436,7 @@ async def test_sensor_error_nan_persists_as_sentinel(tmp_path: Path) -> None:
     db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     assert db_files
     conn = sqlite3.connect(str(db_files[0]))
-    rows = conn.execute(
-        "SELECT value, status FROM readings WHERE channel='Т3 Радиатор 1'"
-    ).fetchall()
+    rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т3 Радиатор 1'").fetchall()
     conn.close()
     assert len(rows) == 1, "SENSOR_ERROR NaN must persist (not be dropped)"
     assert rows[0][0] == SENTINEL
@@ -470,9 +461,7 @@ async def test_timeout_nan_persists_as_sentinel(tmp_path: Path) -> None:
     db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     assert db_files
     conn = sqlite3.connect(str(db_files[0]))
-    rows = conn.execute(
-        "SELECT value, status FROM readings WHERE channel='Т4 Радиатор 2'"
-    ).fetchall()
+    rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т4 Радиатор 2'").fetchall()
     conn.close()
     assert len(rows) == 1
     assert rows[0][0] == SENTINEL
@@ -497,9 +486,7 @@ async def test_underrange_negative_inf_persists_as_sentinel(tmp_path: Path) -> N
     db_files = list(tmp_path.glob("data_*.db"))  # noqa: ASYNC240
     assert db_files
     conn = sqlite3.connect(str(db_files[0]))
-    rows = conn.execute(
-        "SELECT value, status FROM readings WHERE channel='Т5 Экран 77К'"
-    ).fetchall()
+    rows = conn.execute("SELECT value, status FROM readings WHERE channel='Т5 Экран 77К'").fetchall()
     conn.close()
     assert len(rows) == 1
     assert rows[0][0] == SENTINEL
@@ -554,9 +541,15 @@ def test_sqlite_writer_raises_when_wal_unavailable(tmp_path: Path, monkeypatch) 
                 def fetchone(self):
                     return (mode,) if mode is not None else None
 
+                def close(self):
+                    pass
+
             return _Cur()
 
         def commit(self):
+            pass
+
+        def rollback(self):
             pass
 
         def close(self):
@@ -564,8 +557,9 @@ def test_sqlite_writer_raises_when_wal_unavailable(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: _FakeConn())
 
-    with pytest.raises(RuntimeError, match="WAL"):
+    with pytest.raises(RuntimeError, match="daily database authority is unavailable"):
         writer._ensure_connection(date.today())
+    assert writer._conn is None
 
 
 # ---------------------------------------------------------------------------
