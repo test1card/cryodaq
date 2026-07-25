@@ -49,6 +49,13 @@ by inference from code or tests.
 - `ROADMAP.md`: public forward product plan. `CHANGELOG.md` is shipped history.
 - `PROJECT_STATUS.md`: release-boundary system state and physical invariants.
 - `docs/architecture.md`: tracked architecture overview.
+- `docs/DECISIONS.md`: durable log of decisions that shaped this repository, each
+  marked with who made it — `[Owner]` (direction, scope, product behaviour: question
+  with evidence, never silently reverse) or `[Coordinator]` (engineering and review
+  calls: revisable on evidence). **Read it before changing something that looks
+  arbitrary** — most entries exist because the obvious alternative was tried and
+  failed, or because a measurement contradicted a widely-held assumption. Append-only;
+  supersede by adding an entry, never by editing history.
 - `docs/design-system/`: canonical UI design system and governance.
 - `governance/agent_preventions.yaml`: machine-readable confirmed-mistake,
   prevention-rule, guard, CI, and immutable-evidence registry.
