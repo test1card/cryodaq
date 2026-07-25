@@ -241,6 +241,14 @@ def test_private_child_ready_pipe_cannot_be_retained_by_a_descendant() -> None:
         if child is not None and child.poll() is None:
             child.kill()
             child.wait(timeout=5.0)
+        if child is not None and child.stderr is not None:
+            # stderr=PIPE hands back a BufferedReader this test owns. Leaving
+            # it to the garbage collector raises ResourceWarning from the
+            # finalizer, which pytest promotes to
+            # PytestUnraisableExceptionWarning and charges to whichever test is
+            # running when the collection fires. That is why it failed only
+            # inside a long partition and never in isolation.
+            child.stderr.close()
         if grandchild_pid is not None:
             try:
                 grandchild = psutil.Process(grandchild_pid)

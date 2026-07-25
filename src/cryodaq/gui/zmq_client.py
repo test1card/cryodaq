@@ -331,6 +331,9 @@ class ZmqBridge:
         self._safe_reply_queue = safe_ipc.parent_reply_receiver
         self._safe_reply_child_sender = safe_ipc.child_reply_sender
         self._safe_ipc_retired_closed = False
+        # Closed child endpoint copies whose semaphores must outlive
+        # Process.start(); see _close_child_safe_endpoint_copies_locked.
+        self._child_endpoint_retention: list[Any] = []
         self._restart_queue_closure_proofs: set[str] = set()
         self._restart_queue_candidates: dict[str, Any] = {}
         self._restart_safe_ipc_candidate: Any | None = None
@@ -488,7 +491,25 @@ class ZmqBridge:
         )
 
     def _close_child_safe_endpoint_copies_locked(self) -> None:
-        """Close child-only endpoint copies retained by the parent process."""
+        """Close child-only endpoint copies retained by the parent process.
+
+        The pipe handles are released immediately: the parent must not keep
+        the child's receiving end open, or the child never observes EOF when
+        the parent dies.
+
+        The closed endpoint object itself is *retained* until the generation
+        is finalized, because it owns that endpoint's POSIX semaphores. Under
+        the ``fork`` start method dropping it here was safe -- the child is a
+        complete copy the instant ``Process.start()`` returns. Under ``spawn``
+        and ``forkserver`` (the Linux default from Python 3.14, and what
+        Windows always uses) ``start()`` only *writes* the pickle; the child
+        rebuilds each semaphore later, by name. Releasing the last parent
+        reference here runs the finalizer, ``sem_unlink`` removes the name,
+        and the child's ``SemLock._rebuild`` raises FileNotFoundError before
+        the bridge runs a single line. Windows never showed this: there the
+        handle is duplicated into the child at pickle time, so the child
+        performs no name lookup.
+        """
 
         for attribute in (
             "_safe_cmd_child_receiver",
@@ -498,7 +519,18 @@ class ZmqBridge:
             if endpoint is None:
                 continue
             endpoint.close()
+            self._child_endpoint_retention.append(endpoint)
             setattr(self, attribute, None)
+
+    def _release_child_endpoint_retention_locked(self) -> None:
+        """Drop closed child endpoint copies once the generation is finalized.
+
+        Sound only where the parent has stopped managing the child process: by
+        then the child has either rebuilt its semaphores or died, so the names
+        are no longer needed by anyone.
+        """
+
+        self._child_endpoint_retention.clear()
 
     def _close_safe_ipc_locked(self) -> None:
         """Close every endpoint of the retired parent-side channel bundle."""
@@ -781,6 +813,9 @@ class ZmqBridge:
         self._reply_consumer_started = False
         self._safe_reply_consumer_started = False
         self._process_started = False
+        # The parent has stopped managing this child; its semaphore names may
+        # now be reclaimed.
+        self._release_child_endpoint_retention_locked()
         return exit_code
 
     def _start_locked(self) -> None:

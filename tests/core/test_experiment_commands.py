@@ -125,6 +125,16 @@ class _EventBus:
         }
 
 
+# Liveness budget for the operator-log reconciliation waits below. These are
+# safety nets, not latency assertions: each guards a step that completes as
+# soon as the test releases it, and every ordering claim is asserted
+# separately with `not ...done()` before the release. The former 1.0s literal
+# was 120x tighter than the suite's own --timeout and expired on loaded
+# Windows CI runners, turning a passing test into a TimeoutError. If work
+# genuinely wedges, pytest's --timeout still reports it.
+_RECONCILIATION_WAIT_S = 30.0
+
+
 class _RecoveringEventBus(_EventBus):
     """Fail one required publish, then expose a controlled recovery send."""
 
@@ -1350,7 +1360,7 @@ async def test_committed_operator_log_reconciles_without_client_resubmission(
         assert first["publication_state"] == "pending"
         assert first["error_code"] == "committed_reconciliation_failed"
 
-        await asyncio.wait_for(broker.retry_entered.wait(), timeout=1.0)
+        await asyncio.wait_for(broker.retry_entered.wait(), timeout=_RECONCILIATION_WAIT_S)
         fingerprint, owner = context.operator_log_reconciliation_tasks[request_id]
         assert len(fingerprint) == 64
         assert not owner.done()
@@ -1358,7 +1368,7 @@ async def test_committed_operator_log_reconciles_without_client_resubmission(
         assert broker.events == []
 
         broker.release_retry.set()
-        result = await asyncio.wait_for(asyncio.shield(owner), timeout=1.0)
+        result = await asyncio.wait_for(asyncio.shield(owner), timeout=_RECONCILIATION_WAIT_S)
         await asyncio.sleep(0)
 
         assert result["ok"] is True
@@ -1404,7 +1414,7 @@ async def test_operator_log_reconciliation_survives_waiter_cancel_and_shutdown_d
         first = await _handle_gui_command(command, context=context)
         assert first["committed"] is True
         assert first["publication_state"] == "pending"
-        await asyncio.wait_for(broker.retry_entered.wait(), timeout=1.0)
+        await asyncio.wait_for(broker.retry_entered.wait(), timeout=_RECONCILIATION_WAIT_S)
         _fingerprint, owner = context.operator_log_reconciliation_tasks[request_id]
 
         waiter = asyncio.create_task(_handle_gui_command(command, context=context))
@@ -1419,7 +1429,7 @@ async def test_operator_log_reconciliation_survives_waiter_cancel_and_shutdown_d
             _drain_experiment_command_tasks(
                 context,
                 logging.getLogger("test.operator-log-reconciliation"),
-                timeout=1.0,
+                timeout=_RECONCILIATION_WAIT_S,
             )
         )
         await asyncio.sleep(0)
@@ -1427,8 +1437,8 @@ async def test_operator_log_reconciliation_survives_waiter_cancel_and_shutdown_d
         assert not owner.done()
 
         broker.release_retry.set()
-        assert await asyncio.wait_for(drain, timeout=1.0) is True
-        result = await asyncio.wait_for(asyncio.shield(owner), timeout=1.0)
+        assert await asyncio.wait_for(drain, timeout=_RECONCILIATION_WAIT_S) is True
+        result = await asyncio.wait_for(asyncio.shield(owner), timeout=_RECONCILIATION_WAIT_S)
         await asyncio.sleep(0)
         assert result["ok"] is True
         assert result["publication_state"] == "published"

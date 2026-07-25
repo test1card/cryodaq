@@ -51,11 +51,20 @@ _PAYLOAD_FIELDS = frozenset(
         "warnings",
     }
 )
+# Guards that interrogate the Git index (`git ls-files`, `git check-ignore`)
+# rather than the file tree. The exported candidate is a sealed copy with no
+# `.git`, so these cannot run there -- they run against the exact checkout
+# instead, in the workflow's active-remaining step, and are excluded from the
+# exported suite below. Adding an entry here without adding it to
+# .github/workflows/main.yml fails test_ci_candidate_evidence.py, which
+# asserts every selection appears literally in that step.
 ACTIVE_CHECKOUT_REMAINING_FILES = (
     "tests/docs/test_docs_freshness.py",
+    "tests/governance/test_agent_formatter_gate.py",
     "tests/test_claudemd_index.py",
 )
 ACTIVE_CHECKOUT_REMAINING_NODES = (
+    "tests/governance/test_agent_preventions.py::test_generated_candidate_and_test_evidence_prefixes_are_ignored",
     "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six",
     "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six",
 )

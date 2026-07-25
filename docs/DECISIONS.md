@@ -125,6 +125,53 @@ files that could not pass their own tests in isolation.
 
 **Consequence:** the registry lands *with* the product, never after it.
 
+## [Coordinator] Reproduce a CI failure under CI's own process and import conditions
+
+Two defaults differ between a developer machine and this repository's CI, and both have silently
+invalidated local "green" runs:
+
+- **Multiprocessing start method.** Linux CI runs Python 3.14, where the default became
+  `forkserver`; a developer on 3.12 gets `fork`. Under `fork` a child is a complete copy the
+  instant `Process.start()` returns, so releasing a parent-side handle straight afterwards is
+  safe. Under `forkserver` and `spawn`, `start()` only *writes* the pickle — the child rebuilds
+  named POSIX semaphores later — so the same release unlinks the name out from under it. A bug of
+  this shape is invisible on `fork` and unconditional on `forkserver`. Force the method
+  (`multiprocessing.set_start_method("forkserver", force=True)` via a `-p` plugin) rather than
+  waiting twenty minutes for CI to tell you.
+- **Which `cryodaq` is imported.** A second worktree does not get its own editable install. Tests
+  run from it import the *primary* checkout's package unless `PYTHONPATH=<worktree>/src` is set,
+  so a source fix appears to do nothing and an unrelated tree's bugs appear to be yours. Check
+  `python -c "import cryodaq; print(cryodaq.__file__)"` before trusting any result from a
+  worktree.
+
+**Why it is stated here:** each produced a confident, wrong local verdict before it was caught,
+and neither announces itself — the failure looks like a flake or a mystery.
+
+## [Coordinator] A test-only fake must not silently absorb the behaviour it stands in for
+
+A frozen test clock whose `sleep()` waits on an `Event` that is never set is a good unit-test
+fake: any path that sleeps deadlocks loudly instead of passing by accident. It is a trap for a
+test that drives a *real* coordinator loop, where sleeping is the normal steady state.
+
+**What it cost:** two crash-recovery tests hooked a persistence seam the delivery path never
+reaches, so the simulated crash never fired. Nothing failed. The loop simply reconciled, slept,
+and hung — taking the whole `remaining` partition down with it, on both operating systems, with
+no failure summary. A test that cannot fail and a test that hangs are one defect seen from two
+sides.
+
+**Consequence:** when a test names a seam ("crash before the success commit"), prove the seam is
+on the path — assert the hook ran, or watch the test fail with the hook removed.
+
+## [Coordinator] Guards that read the Git index run against the checkout, never the sealed candidate
+
+The exported candidate tree has no `.git`. A guard calling `git ls-files` or `git check-ignore`
+cannot run there and must be listed in `ACTIVE_CHECKOUT_REMAINING_FILES`/`_NODES`, which both
+excludes it from the exported suite and requires it in the workflow's exact-checkout step.
+
+**Why not let such a guard skip when `.git` is absent:** a skip is indistinguishable from a pass
+in the evidence bundle — exactly the false-green surface the sealed-candidate design exists to
+remove.
+
 ## [Coordinator] Regenerate frozen snapshots from the staged index, last
 
 Artifacts embedding a hash of the file inventory must be regenerated **after** all content is final

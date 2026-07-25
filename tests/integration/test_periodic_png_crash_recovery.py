@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import cryodaq.agents.assistant.periodic_png as periodic_png_module
 import cryodaq.periodic_state as periodic_state_module
 from cryodaq.agents.assistant.periodic_delivery import PeriodicDeliveryReceipt
 from cryodaq.agents.assistant.periodic_png import PeriodicPngCoordinator
@@ -775,21 +776,31 @@ async def test_crash_during_upload_or_response_is_unknown(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_crash_after_telegram_accept_before_success_commit_is_unknown(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """H3-CRASH-010: accepted externally but uncommitted becomes unknown once."""
 
     _ready(tmp_path)
     telegram = CountingTelegram()
     crashed = _coordinator(tmp_path, CountingRunner(tmp_path), telegram)
-    original_persist = crashed._persist
 
-    async def crash_before_success(before: Any, candidate: Any) -> None:
-        active = candidate.payload["active"]
-        if isinstance(active, dict) and active["status"] == "SUCCEEDED":
-            raise SimulatedCrash("after Telegram accept")
-        await original_persist(before, candidate)
+    # The delivery outcome is committed by the module-level
+    # ``_persist_delivery_result``, not by the coordinator's ``_persist``
+    # method, so this is the only seam that sits between the Telegram accept
+    # and the durable success record -- which is exactly the window this test
+    # names. Hooking ``_persist`` instead (as this test first did) never fired:
+    # that method only ever sees the DELIVERING record and the later terminal
+    # rotation, so no crash was simulated, ``reconcile_once()`` returned
+    # normally, and the coordinator loop then slept forever on the frozen test
+    # clock -- hanging ``wait()`` and, with it, the whole test partition.
+    def crash_before_success(*_args: object, **_kwargs: object) -> None:
+        raise SimulatedCrash("after Telegram accept")
 
-    crashed._persist = crash_before_success  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        periodic_png_module,
+        "_persist_delivery_result",
+        crash_before_success,
+    )
     await crashed.start()
     try:
         with pytest.raises(SimulatedCrash):
@@ -839,6 +850,7 @@ async def test_crash_after_succeeded_never_resends(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_crash_while_persisting_known_rejection_is_conservative_unknown(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """H3-CRASH-012: lost 429 commit reloads DELIVERING as unknown, no retry."""
 
@@ -853,21 +865,21 @@ async def test_crash_while_persisting_known_rejection_is_conservative_unknown(
     )
     telegram = CountingTelegram(rejection)
     crashed = _coordinator(tmp_path, CountingRunner(tmp_path), telegram)
-    original_persist = crashed._persist
 
-    async def crash_before_rejection(before: Any, candidate: Any) -> None:
-        previous = before.payload["active"]
-        active = candidate.payload["active"]
-        if (
-            isinstance(previous, dict)
-            and previous["status"] == "DELIVERING"
-            and isinstance(active, dict)
-            and active["status"] == "FAILED"
-        ):
-            raise SimulatedCrash("while committing known rejection")
-        await original_persist(before, candidate)
+    # Every delivery outcome -- accepted, rejected, unknown -- is committed by
+    # the module-level ``_persist_delivery_result``, so that is the seam where
+    # a lost rejection commit lives. The coordinator's ``_persist`` method
+    # never observes the DELIVERING -> FAILED transition this test named, so
+    # hooking it raised nothing, the loop slept on the frozen test clock, and
+    # ``wait()`` hung. See the sibling H3-CRASH-010 test.
+    def crash_before_rejection(*_args: object, **_kwargs: object) -> None:
+        raise SimulatedCrash("while committing known rejection")
 
-    crashed._persist = crash_before_rejection  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        periodic_png_module,
+        "_persist_delivery_result",
+        crash_before_rejection,
+    )
     await crashed.start()
     try:
         with pytest.raises(SimulatedCrash):
