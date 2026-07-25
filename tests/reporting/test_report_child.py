@@ -114,11 +114,14 @@ def test_automatic_child_rechecks_current_manifest_under_lock(
     second_result = result_file_path(tmp_path, "generation-token-0002")
 
     assert child._run_experiment(_args(), tmp_path, first_result) == 0
-    assert child._run_experiment(
-        _args("generation-token-0002", automatic=True),
-        tmp_path,
-        second_result,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args("generation-token-0002", automatic=True),
+            tmp_path,
+            second_result,
+        )
+        == 3
+    )
 
     assert read_result_file(second_result)["error_code"] == "already_current"
     assert calls == ["generation-token-0001"]
@@ -143,9 +146,7 @@ def test_automatic_child_rejects_still_active_experiment_before_fingerprint(
     monkeypatch.setattr(
         child,
         "compute_source_fingerprint",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("active experiment must not be fingerprinted")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("active experiment must not be fingerprinted")),
     )
     result_path = result_file_path(tmp_path, "generation-token-0001")
 
@@ -297,37 +298,46 @@ def test_poison_requires_explicit_force_and_writes_audit_under_lock(
     _patch_fast_generator(monkeypatch, calls)
     automatic_result = result_file_path(tmp_path, "generation-token-0001")
 
-    assert child._run_experiment(
-        _args(automatic=True),
-        tmp_path,
-        automatic_result,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(automatic=True),
+            tmp_path,
+            automatic_result,
+        )
+        == 3
+    )
     assert read_result_file(automatic_result)["error_code"] == "poisoned"
     assert calls == []
 
     manual_result = result_file_path(tmp_path, "generation-token-0002")
     before_bytes = (root / "report_state.json").read_bytes()
-    assert child._run_experiment(
-        _args("generation-token-0002"),
-        tmp_path,
-        manual_result,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args("generation-token-0002"),
+            tmp_path,
+            manual_result,
+        )
+        == 3
+    )
     assert read_result_file(manual_result)["error_code"] == "force_required"
     assert (root / "report_state.json").read_bytes() == before_bytes
     assert calls == []
 
     context = report_force_context(failed, None)
     forced_result = result_file_path(tmp_path, "generation-token-0003")
-    assert child._run_experiment(
-        _args(
-            "generation-token-0003",
-            force=True,
-            force_context=context,
-            operator="Operator",
-        ),
-        tmp_path,
-        forced_result,
-    ) == 0
+    assert (
+        child._run_experiment(
+            _args(
+                "generation-token-0003",
+                force=True,
+                force_context=context,
+                operator="Operator",
+            ),
+            tmp_path,
+            forced_result,
+        )
+        == 0
+    )
     state = load_report_state(root)
     assert state is not None
     assert state["status"] == "SUCCEEDED"
@@ -362,15 +372,18 @@ def test_force_rejects_stale_context_without_mutating_poison(
     original = (root / "report_state.json").read_bytes()
     result_path = result_file_path(tmp_path, "generation-token-0001")
 
-    assert child._run_experiment(
-        _args(
-            force=True,
-            force_context="0" * 64,
-            operator="Operator",
-        ),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(
+                force=True,
+                force_context="0" * 64,
+                operator="Operator",
+            ),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     assert read_result_file(result_path)["error_code"] == "force_conflict"
     assert (root / "report_state.json").read_bytes() == original
     assert not (root / "reports" / "audit").exists()
@@ -450,15 +463,18 @@ def test_force_audit_write_failure_preserves_poison(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("audit disk fault")),
     )
     result_path = result_file_path(tmp_path, "generation-token-0001")
-    assert child._run_experiment(
-        _args(
-            force=True,
-            force_context=report_force_context(failed, None),
-            operator="Operator",
-        ),
-        tmp_path,
-        result_path,
-    ) == 1
+    assert (
+        child._run_experiment(
+            _args(
+                force=True,
+                force_context=report_force_context(failed, None),
+                operator="Operator",
+            ),
+            tmp_path,
+            result_path,
+        )
+        == 1
+    )
     assert (root / "report_state.json").read_bytes() == original
 
 
@@ -492,15 +508,18 @@ def test_force_completion_audit_failure_is_visible_after_successful_render(
     monkeypatch.setattr(child, "write_report_force_audit", fail_after_audit)
     result_path = result_file_path(tmp_path, "generation-token-0001")
 
-    assert child._run_experiment(
-        _args(
-            force=True,
-            force_context=report_force_context(failed, None),
-            operator="Operator",
-        ),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(
+                force=True,
+                force_context=report_force_context(failed, None),
+                operator="Operator",
+            ),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     result = read_result_file(result_path)
     assert result["error_code"] == "force_audit_incomplete"
     state = load_report_state(root)
@@ -513,16 +532,19 @@ def test_force_completion_audit_failure_is_visible_after_successful_render(
 def test_child_rejects_automatic_force_combination(tmp_path: Path) -> None:
     _experiment(tmp_path)
     result_path = result_file_path(tmp_path, "generation-token-0001")
-    assert child._run_experiment(
-        _args(
-            automatic=True,
-            force=True,
-            force_context="a" * 64,
-            operator="Operator",
-        ),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(
+                automatic=True,
+                force=True,
+                force_context="a" * 64,
+                operator="Operator",
+            ),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     assert read_result_file(result_path)["error_code"] == "invalid_force"
 
 
@@ -550,21 +572,22 @@ def test_force_cas_conflict_leaves_before_audit_and_poison(
     monkeypatch.setattr(
         child,
         "write_report_state_if_unchanged",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            child.ReportContractError("changed")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(child.ReportContractError("changed")),
     )
     result_path = result_file_path(tmp_path, "generation-token-0001")
 
-    assert child._run_experiment(
-        _args(
-            force=True,
-            force_context=report_force_context(failed, None),
-            operator="Operator",
-        ),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(
+                force=True,
+                force_context=report_force_context(failed, None),
+                operator="Operator",
+            ),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     assert read_result_file(result_path)["error_code"] == "force_conflict"
     assert (root / "report_state.json").read_bytes() == original
     audit = root / "reports" / "audit" / "report_force"
@@ -578,15 +601,18 @@ def test_force_rejects_corrupt_state_without_repairing_bytes(tmp_path: Path) -> 
     state_path.write_bytes(b"{broken")
     result_path = result_file_path(tmp_path, "generation-token-0001")
 
-    assert child._run_experiment(
-        _args(
-            force=True,
-            force_context="a" * 64,
-            operator="Operator",
-        ),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(
+                force=True,
+                force_context="a" * 64,
+                operator="Operator",
+            ),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     assert read_result_file(result_path)["error_code"] == "force_conflict"
     assert state_path.read_bytes() == b"{broken"
 
@@ -610,16 +636,17 @@ def test_force_rejects_active_experiment_before_fingerprint(
     monkeypatch.setattr(
         child,
         "compute_source_fingerprint",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("active force must not fingerprint")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("active force must not fingerprint")),
     )
     result_path = result_file_path(tmp_path, "generation-token-0001")
-    assert child._run_experiment(
-        _args(force=True, force_context="a" * 64, operator="Operator"),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(force=True, force_context="a" * 64, operator="Operator"),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     assert read_result_file(result_path)["error_code"] == "force_conflict"
 
 
@@ -660,16 +687,19 @@ def test_forced_render_failure_preserves_prior_selected_manifest(
     )
     context = report_force_context(failed, first_manifest)
     forced_result = result_file_path(tmp_path, "generation-token-0002")
-    assert child._run_experiment(
-        _args(
-            "generation-token-0002",
-            force=True,
-            force_context=context,
-            operator="Operator",
-        ),
-        tmp_path,
-        forced_result,
-    ) == 1
+    assert (
+        child._run_experiment(
+            _args(
+                "generation-token-0002",
+                force=True,
+                force_context=context,
+                operator="Operator",
+            ),
+            tmp_path,
+            forced_result,
+        )
+        == 1
+    )
     assert read_result_file(forced_result)["error_code"] == "render_failed"
     current = load_current_manifest(root)
     assert current is not None
@@ -724,11 +754,14 @@ def test_automatic_child_free_lock_marks_running_attempt_failed_immediately(
     _patch_fast_generator(monkeypatch, calls)
     result_path = result_file_path(tmp_path, "generation-token-0001")
 
-    assert child._run_experiment(
-        _args(automatic=True),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(automatic=True),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     assert read_result_file(result_path)["error_code"] == "stale_running"
     assert calls == []
     state = load_report_state(root)
@@ -774,11 +807,14 @@ def test_stale_running_at_attempt_limit_becomes_poison_under_lock(
     _patch_fast_generator(monkeypatch, calls)
     result_path = result_file_path(tmp_path, "generation-token-0001")
 
-    assert child._run_experiment(
-        _args(automatic=True),
-        tmp_path,
-        result_path,
-    ) == 3
+    assert (
+        child._run_experiment(
+            _args(automatic=True),
+            tmp_path,
+            result_path,
+        )
+        == 3
+    )
     assert read_result_file(result_path)["error_code"] == "poisoned"
     state = load_report_state(root)
     assert state is not None

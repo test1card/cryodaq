@@ -30,8 +30,7 @@ def _run_check(snippet: str) -> str:
         timeout=30,
     )
     assert result.returncode == 0, (
-        f"subprocess check failed (exit {result.returncode}):\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        f"subprocess check failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     return result.stdout
 
@@ -86,9 +85,7 @@ def test_engine_module_source_has_no_agents_import_statement() -> None:
     offenders: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            offenders.extend(
-                alias.name for alias in node.names if alias.name.startswith("cryodaq.agents")
-            )
+            offenders.extend(alias.name for alias in node.names if alias.name.startswith("cryodaq.agents"))
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             if module.startswith("cryodaq.agents"):

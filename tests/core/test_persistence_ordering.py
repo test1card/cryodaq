@@ -95,9 +95,7 @@ async def test_write_immediate_persists_before_return(tmp_path: Path, monkeypatc
     # No sleep — if write_immediate truly awaits the commit, rows exist NOW.
     db_path = _db_path_for_writer(writer, batch[0].timestamp)
     assert db_path.exists(), f"DB file not created: {db_path}"
-    assert _count_rows(db_path) == 5, (
-        f"Expected 5 rows immediately after write_immediate, found {_count_rows(db_path)}"
-    )
+    assert _count_rows(db_path) == 5, f"Expected 5 rows immediately after write_immediate, found {_count_rows(db_path)}"
 
     await writer.stop()
 
@@ -128,9 +126,7 @@ async def test_write_immediate_failure_does_not_publish(tmp_path: Path, monkeypa
         await sched.stop()
 
     # The subscriber queue must be empty: no unpersisted data may be published.
-    assert test_queue.empty(), (
-        f"Expected empty queue after write failure, but got {test_queue.qsize()} items"
-    )
+    assert test_queue.empty(), f"Expected empty queue after write failure, but got {test_queue.qsize()} items"
 
     await writer.stop()
 
@@ -169,8 +165,8 @@ async def test_ordering_guarantee_write_before_zmq(tmp_path: Path, monkeypatch) 
     original_write_immediate = writer.write_immediate
 
     async def gated_write_immediate(batch: list) -> bool:
-        write_started.set()           # signal: write has been entered
-        await write_gate.wait()       # block until test releases
+        write_started.set()  # signal: write has been entered
+        await write_gate.wait()  # block until test releases
         return await original_write_immediate(batch)
 
     writer.write_immediate = gated_write_immediate  # type: ignore[method-assign]
@@ -242,9 +238,7 @@ async def test_write_immediate_timeout_handling(tmp_path: Path, monkeypatch) -> 
 
     db_path = _db_path_for_writer(writer, batch[0].timestamp)
     assert db_path.exists(), "DB file must exist after slow write_immediate"
-    assert _count_rows(db_path) == 10, (
-        f"Expected 10 rows after slow write, found {_count_rows(db_path)}"
-    )
+    assert _count_rows(db_path) == 10, f"Expected 10 rows after slow write, found {_count_rows(db_path)}"
 
     await writer.stop()
 
@@ -273,9 +267,7 @@ async def test_backward_compat_queue_mode(tmp_path: Path, monkeypatch) -> None:
 
     db_path = _db_path_for_writer(writer, batch[0].timestamp)
     assert db_path.exists(), "DB file must be created by queue-mode writer"
-    assert _count_rows(db_path) == 3, (
-        f"Expected 3 rows after queue flush, found {_count_rows(db_path)}"
-    )
+    assert _count_rows(db_path) == 3, f"Expected 3 rows after queue flush, found {_count_rows(db_path)}"
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +284,7 @@ async def test_start_immediate_creates_data_dir(tmp_path: Path, monkeypatch) -> 
     writer = SQLiteWriter(non_existent)
     await writer.start_immediate()
 
-    assert non_existent.exists(), (
-        f"start_immediate() must create data_dir, but {non_existent} was not created"
-    )
+    assert non_existent.exists(), f"start_immediate() must create data_dir, but {non_existent} was not created"
     assert writer._running is True, "start_immediate() must set _running = True"
 
     await writer.stop()

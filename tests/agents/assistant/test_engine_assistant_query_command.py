@@ -62,9 +62,7 @@ def test_returns_error_when_agent_none():
 
 def test_returns_error_on_empty_query():
     agent = AsyncMock()
-    result = _run(
-        _handle_assistant_query_command(agent, {"query": "   ", "chat_id": "gui"}, timeout_s=5.0)
-    )
+    result = _run(_handle_assistant_query_command(agent, {"query": "   ", "chat_id": "gui"}, timeout_s=5.0))
 
     assert result == {"ok": False, "error": "Пустой запрос."}
     agent.handle_query.assert_not_called()
@@ -127,8 +125,7 @@ def test_default_timeout_fires_inside_server_envelope():
     # H7: bumped 25 → 50 to absorb Ollama cold-start (20-40s).
     assert default == 50.0
     assert default < HANDLER_TIMEOUT_SLOW_S, (
-        f"helper timeout {default}s must be < server slow envelope "
-        f"{HANDLER_TIMEOUT_SLOW_S}s"
+        f"helper timeout {default}s must be < server slow envelope {HANDLER_TIMEOUT_SLOW_S}s"
     )
 
 

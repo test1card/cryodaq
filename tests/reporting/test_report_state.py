@@ -189,10 +189,13 @@ def test_force_context_binds_complete_poison_identity_and_manifest() -> None:
     changed = dict(state)
     changed["owner_token"] = "owner-token-valid-0002"
     assert report_force_context(changed, None) != base
-    assert report_force_context(
-        state,
-        {"generation_id": "manifest-token-0001"},
-    ) != base
+    assert (
+        report_force_context(
+            state,
+            {"generation_id": "manifest-token-0001"},
+        )
+        != base
+    )
 
 
 def test_force_audit_is_immutable_bounded_and_excludes_secret_state(

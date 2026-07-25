@@ -48,9 +48,7 @@ def test_load_experiment_metadata_walks_directory(tmp_path):
             {
                 "description": "Test description",
                 "notes": "Test notes",
-                "phases": [
-                    {"phase": "preparation", "started_at": "2026-05-07T10:00:00Z"}
-                ],
+                "phases": [{"phase": "preparation", "started_at": "2026-05-07T10:00:00Z"}],
             }
         )
     )
@@ -88,16 +86,7 @@ def test_load_experiment_metadata_skips_corrupt_json(tmp_path, caplog):
 
 
 def test_load_vault_notes_parses_frontmatter(tmp_path):
-    md = (
-        "---\n"
-        "experiment_id: abc12345\n"
-        "sample: S-001\n"
-        "---\n"
-        "\n"
-        "# Тестовый эксперимент\n"
-        "\n"
-        "Body content here.\n"
-    )
+    md = "---\nexperiment_id: abc12345\nsample: S-001\n---\n\n# Тестовый эксперимент\n\nBody content here.\n"
     (tmp_path / "test.md").write_text(md, encoding="utf-8")
     chunks = load_vault_notes(tmp_path)
     assert len(chunks) >= 1

@@ -134,9 +134,7 @@ def test_telegram_notifier_no_plain_token_in_attrs():
     )
 
     plain_values = list(_walk_plain_strings(notifier))
-    assert _SENTINEL not in plain_values, (
-        f"TelegramNotifier stores raw token in a plain attribute: {plain_values}"
-    )
+    assert _SENTINEL not in plain_values, f"TelegramNotifier stores raw token in a plain attribute: {plain_values}"
 
     # The token must materialise correctly when building the URL on demand.
     url = notifier._build_api_url("sendMessage")
@@ -165,9 +163,7 @@ def test_telegram_command_bot_no_plain_token_in_attrs():
     )
 
     plain_values = list(_walk_plain_strings(bot))
-    assert _SENTINEL not in plain_values, (
-        f"TelegramCommandBot stores raw token in a plain attribute: {plain_values}"
-    )
+    assert _SENTINEL not in plain_values, f"TelegramCommandBot stores raw token in a plain attribute: {plain_values}"
 
     # Token must appear in the URL built on demand.
     api_url = bot._api  # property calls get_secret_value()
@@ -197,9 +193,7 @@ def test_periodic_reporter_no_plain_token_in_attrs():
     )
 
     plain_values = list(_walk_plain_strings(reporter))
-    assert _SENTINEL not in plain_values, (
-        f"PeriodicReporter stores raw token in a plain attribute: {plain_values}"
-    )
+    assert _SENTINEL not in plain_values, f"PeriodicReporter stores raw token in a plain attribute: {plain_values}"
 
 
 def test_telegram_notifier_constructed_with_secret_str():

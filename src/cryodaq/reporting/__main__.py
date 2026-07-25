@@ -91,9 +91,7 @@ def _periodic_argv_has_duplicate_authority(argv: list[str]) -> bool:
     if not argv or argv[0] != "periodic":
         return False
     for option in ("--generation-id", "--deadline-epoch", "--max-input-bytes"):
-        occurrences = sum(
-            item == option or item.startswith(option + "=") for item in argv[1:]
-        )
+        occurrences = sum(item == option or item.startswith(option + "=") for item in argv[1:])
         if occurrences > 1:
             return True
     return False
@@ -212,9 +210,7 @@ def _run_experiment(args: argparse.Namespace, data_dir: Path, result_path: Path)
                 ),
             )
             return 3
-        active_experiment_id = (
-            load_active_experiment_id(data_dir) if automatic or force else None
-        )
+        active_experiment_id = load_active_experiment_id(data_dir) if automatic or force else None
         if force and active_experiment_id == experiment_id:
             _write_result(
                 result_path,
@@ -370,9 +366,7 @@ def _run_experiment(args: argparse.Namespace, data_dir: Path, result_path: Path)
                 )
                 return 3
             force_before = report_state_summary(previous)
-            force_manifest_generation = (
-                current_manifest["generation_id"] if current_manifest is not None else None
-            )
+            force_manifest_generation = current_manifest["generation_id"] if current_manifest is not None else None
             write_report_force_audit(
                 experiment_root,
                 generation_id,
@@ -657,10 +651,7 @@ def _write_periodic_side_failure(data_dir: Path, snapshot, *, code: str, text: s
         )
         path = periodic_failure_result_path(data_dir, snapshot.generation_id)
         payload = _periodic_failure_payload(snapshot, code=code, text=text)
-        raw = (
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            + "\n"
-        ).encode("utf-8")
+        raw = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         if len(raw) > MAX_RESULT_BYTES:
             return
         _publish_periodic_side_failure_atomic(path, raw)
@@ -678,11 +669,7 @@ def _publish_periodic_side_failure_atomic(path: Path, raw: bytes) -> None:
     temp_info: os.stat_result | None = None
     try:
         temp_info = temporary.lstat()
-        if (
-            stat.S_ISLNK(temp_info.st_mode)
-            or not stat.S_ISREG(temp_info.st_mode)
-            or temp_info.st_nlink != 1
-        ):
+        if stat.S_ISLNK(temp_info.st_mode) or not stat.S_ISREG(temp_info.st_mode) or temp_info.st_nlink != 1:
             raise PeriodicInputError("periodic failure temporary is unsafe")
         os.replace(temporary, path)
         published = path.lstat()
@@ -736,11 +723,7 @@ def _clear_staging_bounded(staging: Path) -> None:
             entries.append(quarantine / item.name)
     for item in entries:
         item_info = item.lstat()
-        if (
-            stat.S_ISLNK(item_info.st_mode)
-            or not stat.S_ISREG(item_info.st_mode)
-            or item_info.st_nlink != 1
-        ):
+        if stat.S_ISLNK(item_info.st_mode) or not stat.S_ISREG(item_info.st_mode) or item_info.st_nlink != 1:
             raise PeriodicInputError("periodic staging contains an unsafe entry")
         if item_info.st_size > 10 * 1024 * 1024:
             raise PeriodicInputError("periodic staging entry is oversized")
@@ -757,9 +740,7 @@ def _run_periodic(args: argparse.Namespace, data_dir: Path) -> int:
     cap = _periodic_cap(args.max_input_bytes)
     deadline_monotonic = _periodic_deadline(args.deadline_epoch)
     input_path = periodic_input_path(data_dir, generation)
-    snapshot, input_fence = read_periodic_input_file_fenced(
-        input_path, expected_max_input_bytes=cap
-    )
+    snapshot, input_fence = read_periodic_input_file_fenced(input_path, expected_max_input_bytes=cap)
     if snapshot.generation_id != generation:
         raise PeriodicInputError("periodic input generation does not match argv")
     _require_rendering_state_fence(
@@ -846,10 +827,9 @@ def _run_periodic(args: argparse.Namespace, data_dir: Path) -> int:
             },
             require_success=True,
         )
-        result_raw = (
-            json.dumps(success, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            + "\n"
-        ).encode("utf-8")
+        result_raw = (json.dumps(success, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
         if len(result_raw) > MAX_RESULT_BYTES:
             raise PeriodicInputError("periodic result exceeds its byte cap")
         _write_exclusive_fsynced(staging / "result.json", result_raw)
@@ -871,9 +851,7 @@ def _run_periodic(args: argparse.Namespace, data_dir: Path) -> int:
         _fsync_dir(generations_parent)
         return 0
     except TimeoutError:
-        _write_periodic_side_failure(
-            data_dir, snapshot, code="deadline", text="periodic render deadline expired"
-        )
+        _write_periodic_side_failure(data_dir, snapshot, code="deadline", text="periodic render deadline expired")
         return 3
     except (PeriodicInputError, ReportProcessError):
         _write_periodic_side_failure(

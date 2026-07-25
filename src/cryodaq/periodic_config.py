@@ -239,9 +239,7 @@ def _load_selected_mapping(path: Path) -> dict[str, Any]:
             raw = _read_bounded(fd, _MAX_CONFIG_BYTES)
             finished = os.fstat(fd)
             if _stat_snapshot(finished) != snapshot:
-                raise _ConfigError(
-                    "unsafe_config", "selected notifications file changed while reading"
-                )
+                raise _ConfigError("unsafe_config", "selected notifications file changed while reading")
             if finished.st_mtime > time.time() + _MAX_FUTURE_SKEW_S:
                 raise _ConfigError("future_config", "selected notifications file is future-dated")
         finally:
@@ -272,9 +270,7 @@ def _load_selected_mapping(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def _validate_enabled_config(
-    payload: dict[str, Any], periodic: dict[str, Any]
-) -> PeriodicPngConfig:
+def _validate_enabled_config(payload: dict[str, Any], periodic: dict[str, Any]) -> PeriodicPngConfig:
     unknown = set(periodic) - _PERIODIC_KEYS
     if unknown:
         raise _ConfigError("unknown_periodic_key", "periodic_report contains an unknown field")
@@ -289,9 +285,7 @@ def _validate_enabled_config(
     total = _exact_int(periodic, "max_total_points", 100_000, 2, 500_000)
     if total < per_channel:
         raise _ConfigError("invalid_max_total_points", "max_total_points is below the per-channel cap")
-    max_input_bytes = _exact_int(
-        periodic, "max_input_bytes", 8 * 1024 * 1024, 65_536, 33_554_432
-    )
+    max_input_bytes = _exact_int(periodic, "max_input_bytes", 8 * 1024 * 1024, 65_536, 33_554_432)
     render_timeout = _finite_number(periodic, "render_timeout_s", 120.0, 5.0, 600.0)
     max_render_attempts = _exact_int(periodic, "max_render_attempts", 5, 1, 10)
     max_delivery_attempts = _exact_int(periodic, "max_delivery_attempts", 5, 1, 10)
@@ -331,9 +325,12 @@ def _validate_enabled_config(
         "telegram_timeout_s": telegram_timeout,
         "telegram_verify_ssl": verify_ssl,
     }
-    fingerprint = "sha256:" + hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    ).hexdigest()
+    fingerprint = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        ).hexdigest()
+    )
     return PeriodicPngConfig(
         enabled=True,
         interval_s=interval_s,
@@ -355,9 +352,7 @@ def _validate_enabled_config(
     )
 
 
-def _exact_int(
-    mapping: dict[str, Any], field: str, default: int, minimum: int, maximum: int
-) -> int:
+def _exact_int(mapping: dict[str, Any], field: str, default: int, minimum: int, maximum: int) -> int:
     value = mapping.get(field, default)
     if type(value) is not int or not minimum <= value <= maximum:
         raise _ConfigError(f"invalid_{field}", f"{field} must be an integer in range")
@@ -379,9 +374,7 @@ def _finite_number(
     try:
         result = float(value)
     except (OverflowError, ValueError):
-        raise _ConfigError(
-            f"invalid_{field}", f"{prefix}{field} must be a finite number in range"
-        ) from None
+        raise _ConfigError(f"invalid_{field}", f"{prefix}{field} must be a finite number in range") from None
     if not math.isfinite(result) or not minimum <= result <= maximum:
         raise _ConfigError(f"invalid_{field}", f"{prefix}{field} must be a finite number in range")
     return result
@@ -393,9 +386,7 @@ def _chart_window(value: object) -> int:
     try:
         number = float(value)
     except (OverflowError, ValueError):
-        raise _ConfigError(
-            "invalid_chart_hours", "chart_hours must be a finite number in range"
-        ) from None
+        raise _ConfigError("invalid_chart_hours", "chart_hours must be a finite number in range") from None
     if not math.isfinite(number) or not (1 / 60) <= number <= 168:
         raise _ConfigError("invalid_chart_hours", "chart_hours must be a finite number in range")
     seconds = number * 3600.0
@@ -415,9 +406,7 @@ def _channels(value: object) -> tuple[str, ...] | None:
     for item in value:
         if not isinstance(item, str) or not _CHANNEL_NAME.search(item):
             raise _ConfigError("invalid_include_channels", "include_channels contains an invalid name")
-        encoded = _utf8_bytes(
-            item, "invalid_include_channels", "include_channels contains invalid UTF-8"
-        )
+        encoded = _utf8_bytes(item, "invalid_include_channels", "include_channels contains invalid UTF-8")
         if len(encoded) > 256 or item in seen:
             raise _ConfigError("invalid_include_channels", "include_channels contains a duplicate or oversized name")
         seen.add(item)

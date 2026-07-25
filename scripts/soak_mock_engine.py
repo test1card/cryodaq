@@ -81,12 +81,7 @@ class SoakResult:
 
     @property
     def ok(self) -> bool:
-        return (
-            self.alive_before_shutdown
-            and self.clean_shutdown
-            and self.exit_code == 0
-            and not self.violations
-        )
+        return self.alive_before_shutdown and self.clean_shutdown and self.exit_code == 0 and not self.violations
 
 
 def _default_cmd() -> list[str]:

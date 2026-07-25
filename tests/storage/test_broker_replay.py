@@ -121,10 +121,7 @@ async def test_replay_speed_zero(tmp_path: Path) -> None:
 async def test_replay_count(tmp_path: Path) -> None:
     n = 20
     _fixed_ts(10)
-    readings = [
-        _reading(f"CH{i % 8 + 1}", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC))
-        for i in range(n)
-    ]
+    readings = [_reading(f"CH{i % 8 + 1}", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC)) for i in range(n)]
     db_path = _make_db(tmp_path, readings)
 
     broker = DataBroker()
@@ -166,9 +163,7 @@ async def test_replay_stop(tmp_path: Path, monkeypatch) -> None:
     import cryodaq.storage.broker_replay as replay_module
 
     n = 10
-    readings = [
-        _reading("CH1", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC)) for i in range(n)
-    ]
+    readings = [_reading("CH1", float(i), ts=datetime(2026, 3, 14, 10, 0, i, tzinfo=UTC)) for i in range(n)]
     db_path = _make_db(tmp_path, readings)
 
     sleep_started = asyncio.Event()
@@ -204,9 +199,7 @@ async def test_replay_stop(tmp_path: Path, monkeypatch) -> None:
     count = await asyncio.wait_for(play_task, timeout=5.0)
 
     # Replay emitted the first row (before sleeping), then stopped — count < n
-    assert 0 < count < n, (
-        f"stop() while parked in sleep must limit emitted count; got count={count} (n={n})"
-    )
+    assert 0 < count < n, f"stop() while parked in sleep must limit emitted count; got count={count} (n={n})"
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +270,7 @@ async def test_play_directory_replays_rotated_day(tmp_path: Path) -> None:
 
     svc = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
     await svc.run_once(now=_ARCHIVE_TODAY)
-    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists(), (
-        "old day must have been rotated + deleted"
-    )
+    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists(), "old day must have been rotated + deleted"
 
     broker = DataBroker()
     queue = await broker.subscribe("sub", maxsize=100)

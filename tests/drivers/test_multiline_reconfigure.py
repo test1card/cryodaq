@@ -89,11 +89,7 @@ def test_reconfigure_takes_effect_next_poll_in_averaged_mode() -> None:
     assert driver._channel_numbers == [5, 6, 7]
     # Mock readings reflect the new set
     readings = driver._mock_readings()
-    length_channels = sorted(
-        int(r.channel.split("_ch")[-1])
-        for r in readings
-        if "/length_ch" in r.channel
-    )
+    length_channels = sorted(int(r.channel.split("_ch")[-1]) for r in readings if "/length_ch" in r.channel)
     assert length_channels == [5, 6, 7]
 
 
@@ -258,9 +254,7 @@ def test_set_channels_command_persists_to_local_yaml(tmp_path: Path) -> None:
     matched = [
         e
         for e in instruments
-        if isinstance(e, dict)
-        and e.get("type") == "etalon_multiline"
-        and e.get("name") == "MultiLine_test"
+        if isinstance(e, dict) and e.get("type") == "etalon_multiline" and e.get("name") == "MultiLine_test"
     ]
     assert len(matched) == 1
     assert matched[0]["channels"] == [3, 7, 11]
@@ -319,10 +313,7 @@ def test_persist_appends_stub_when_no_existing_match(tmp_path: Path) -> None:
         channels=[5, 10],
     )
     raw = yaml.safe_load((tmp_path / "instruments.local.yaml").read_text(encoding="utf-8"))
-    matched = [
-        e for e in raw["instruments"]
-        if isinstance(e, dict) and e.get("name") == "MultiLine_42"
-    ]
+    matched = [e for e in raw["instruments"] if isinstance(e, dict) and e.get("name") == "MultiLine_42"]
     assert len(matched) == 1
     assert matched[0]["channels"] == [5, 10]
 
@@ -346,10 +337,7 @@ def test_persist_overwrites_existing_local_entry(tmp_path: Path) -> None:
         channels=[5, 6, 7],
     )
     raw = yaml.safe_load(local.read_text(encoding="utf-8"))
-    matched = [
-        e for e in raw["instruments"]
-        if isinstance(e, dict) and e.get("name") == "MultiLine_1"
-    ]
+    matched = [e for e in raw["instruments"] if isinstance(e, dict) and e.get("name") == "MultiLine_1"]
     assert len(matched) == 1
     assert matched[0]["channels"] == [5, 6, 7]
 
@@ -471,11 +459,7 @@ def test_persist_merges_base_when_local_has_only_other_instruments(tmp_path: Pat
     )
 
     raw = yaml.safe_load(local.read_text(encoding="utf-8"))
-    instruments = {
-        (e["type"], e["name"]): e
-        for e in raw["instruments"]
-        if isinstance(e, dict)
-    }
+    instruments = {(e["type"], e["name"]): e for e in raw["instruments"] if isinstance(e, dict)}
     # Lakeshore local override preserved
     assert instruments[("lakeshore_218s", "LS_1")]["channels"] == [1, 2, 3]
     # MultiLine entry is the BASE merged in, not a minimal stub —

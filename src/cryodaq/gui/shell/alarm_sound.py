@@ -27,9 +27,7 @@ class AlarmSoundPlan:
     new_levels: tuple[str, ...]
 
 
-def plan_from_response(
-    resp: dict[str, Any], last_seq: int, *, have_baseline: bool
-) -> AlarmSoundPlan:
+def plan_from_response(resp: dict[str, Any], last_seq: int, *, have_baseline: bool) -> AlarmSoundPlan:
     """Turn a ``recent_alarms`` reply into a beep plan.
 
     ``have_baseline`` is False only for the very first successful poll after

@@ -76,9 +76,7 @@ class OverlayPanelBase:
         self._connected = False
         self._workers = []
 
-    def _register_worker(
-        self, worker: _Worker, on_result: Callable[[dict], None]
-    ) -> None:
+    def _register_worker(self, worker: _Worker, on_result: Callable[[dict], None]) -> None:
         """Track ``worker``, start it, prune finished workers on completion.
 
         Centralizes the ``self._workers.append(worker); worker.start()``
@@ -115,9 +113,7 @@ class OverlayPanelBase:
         return True
 
 
-def is_stale(
-    last_update_ts: float | None, timeout_s: float, *, now: float | None = None
-) -> bool:
+def is_stale(last_update_ts: float | None, timeout_s: float, *, now: float | None = None) -> bool:
     """True if more than ``timeout_s`` has elapsed since ``last_update_ts``.
 
     ``last_update_ts=None`` means "never had data yet" — per

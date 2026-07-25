@@ -67,9 +67,7 @@ class TelegramOutcome(StrEnum):
 
 
 _OUTCOME_ERROR_CODES = {
-    TelegramOutcome.REJECTED: frozenset(
-        {"telegram_retryable_rejection", "telegram_permanent_rejection"}
-    ),
+    TelegramOutcome.REJECTED: frozenset({"telegram_retryable_rejection", "telegram_permanent_rejection"}),
     TelegramOutcome.NOT_SENT: frozenset(
         {
             "invalid_photo",

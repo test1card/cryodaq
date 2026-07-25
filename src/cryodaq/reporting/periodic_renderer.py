@@ -87,9 +87,7 @@ def render_periodic_png(
         figure, temp_axes = plt.subplots(1, 1, figsize=(12, 6))
         pressure_axes = None
     try:
-        figure.suptitle(
-            f"CryoDAQ | {snapshot.render.display_time}", fontsize=13, fontweight="bold"
-        )
+        figure.suptitle(f"CryoDAQ | {snapshot.render.display_time}", fontsize=13, fontweight="bold")
         _plot_axes(temp_axes, temperatures, "Температура, К", alarmed=alarmed)
         if pressure_axes is not None:
             _plot_axes(
@@ -228,9 +226,7 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
             suffix = rendered_unit if rendered_unit is not None else item.unit
             line_prefix = "  "
             line_suffix = f": {row.value:.4g} {_escape(suffix)}"
-            lines.append(
-                (line_prefix + _escape(item.label) + line_suffix, item.label, line_prefix, line_suffix)
-            )
+            lines.append((line_prefix + _escape(item.label) + line_suffix, item.label, line_prefix, line_suffix))
         if lines:
             groups.append((heading, lines))
 
@@ -255,11 +251,7 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
             if omitted:
                 _full, raw_token, line_prefix, line_suffix = lines[count]
                 remaining_after_partial = omitted - 1
-                tail = (
-                    [f"  … (+{remaining_after_partial} каналов)"]
-                    if remaining_after_partial
-                    else []
-                )
+                tail = [f"  … (+{remaining_after_partial} каналов)"] if remaining_after_partial else []
                 partial = _shortened_dynamic_line(
                     raw_token,
                     prefix=line_prefix,
@@ -283,9 +275,7 @@ def _build_caption(snapshot: ValidatedPeriodicInput, series: list[_Series]) -> s
     return validate_caption_html(caption)
 
 
-def _alarm_tail(
-    alarms: tuple[PeriodicAlarmSnapshot, ...], complete: bool, reserved: list[str]
-) -> list[str]:
+def _alarm_tail(alarms: tuple[PeriodicAlarmSnapshot, ...], complete: bool, reserved: list[str]) -> list[str]:
     warning = ["⚠ Состояние тревог недоступно"] if not complete else []
     if not alarms:
         return [*([] if not complete else ["Тревог нет ✓"]), *warning]

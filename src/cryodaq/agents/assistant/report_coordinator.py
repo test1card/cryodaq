@@ -45,9 +45,7 @@ from cryodaq.report_state import (
 
 logger = logging.getLogger("cryodaq.assistant.report_coordinator")
 
-_TERMINAL_EVENTS = frozenset(
-    {"experiment_finalize", "experiment_stop", "experiment_abort"}
-)
+_TERMINAL_EVENTS = frozenset({"experiment_finalize", "experiment_stop", "experiment_abort"})
 _CURSOR_SCHEMA = 1
 _CURSOR_MAX_BYTES = 4_096
 _CONFIG_MAX_BYTES = 64 * 1024
@@ -117,27 +115,13 @@ class ReportCoordinatorConfig:
         values: dict[str, Any] = {}
         validators = {
             "automatic_enabled": lambda value: _boolean(value, field="automatic_enabled"),
-            "batch_size": lambda value: _integer(
-                value, field="scan_batch_size", minimum=1, maximum=256
-            ),
-            "scan_interval_s": lambda value: _number(
-                value, field="reconcile_interval_s", minimum=5, maximum=3_600
-            ),
-            "child_timeout_s": lambda value: _number(
-                value, field="automatic_timeout_s", minimum=5, maximum=3_600
-            ),
-            "max_attempts": lambda value: _integer(
-                value, field="max_attempts", minimum=1, maximum=20
-            ),
-            "base_backoff_s": lambda value: _number(
-                value, field="backoff_base_s", minimum=1, maximum=3_600
-            ),
-            "max_backoff_s": lambda value: _number(
-                value, field="backoff_cap_s", minimum=1, maximum=86_400
-            ),
-            "jitter_fraction": lambda value: _number(
-                value, field="jitter_fraction", minimum=0, maximum=1
-            ),
+            "batch_size": lambda value: _integer(value, field="scan_batch_size", minimum=1, maximum=256),
+            "scan_interval_s": lambda value: _number(value, field="reconcile_interval_s", minimum=5, maximum=3_600),
+            "child_timeout_s": lambda value: _number(value, field="automatic_timeout_s", minimum=5, maximum=3_600),
+            "max_attempts": lambda value: _integer(value, field="max_attempts", minimum=1, maximum=20),
+            "base_backoff_s": lambda value: _number(value, field="backoff_base_s", minimum=1, maximum=3_600),
+            "max_backoff_s": lambda value: _number(value, field="backoff_cap_s", minimum=1, maximum=86_400),
+            "jitter_fraction": lambda value: _number(value, field="jitter_fraction", minimum=0, maximum=1),
         }
         for field, validator in validators.items():
             if field not in raw:
@@ -147,9 +131,7 @@ class ReportCoordinatorConfig:
             except ValueError as exc:
                 logger.warning("Invalid reporting setting %s; using default: %s", field, exc)
                 values[field] = getattr(defaults, field)
-        if values.get("max_backoff_s", defaults.max_backoff_s) < values.get(
-            "base_backoff_s", defaults.base_backoff_s
-        ):
+        if values.get("max_backoff_s", defaults.max_backoff_s) < values.get("base_backoff_s", defaults.base_backoff_s):
             logger.warning("backoff_cap_s is below backoff_base_s; using default cap")
             values["max_backoff_s"] = defaults.max_backoff_s
         return cls(**values)
@@ -330,9 +312,7 @@ class ReportCoordinator:
             raise ReportContractError("reporting state directory must not be a symlink")
         if create_parent:
             directory.mkdir(parents=False, exist_ok=True)
-        if directory.exists() and (
-            not directory.is_dir() or directory.resolve().parent != self._data_dir
-        ):
+        if directory.exists() and (not directory.is_dir() or directory.resolve().parent != self._data_dir):
             raise ReportContractError("reporting state directory escapes the data root")
         path = directory / "reconcile_cursor.json"
         if path.is_symlink():
@@ -504,13 +484,9 @@ class ReportCoordinator:
                 logger.warning("Current report manifest is invalid: %s", experiment_root)
                 manifest = None
             if manifest is not None and manifest["source_fingerprint"] == fingerprint:
-                await asyncio.to_thread(
-                    self._record_manifest_success, experiment_root, fingerprint, manifest
-                )
+                await asyncio.to_thread(self._record_manifest_success, experiment_root, fingerprint, manifest)
                 return
-            if not await asyncio.to_thread(
-                self._needs_render, experiment_root, fingerprint, time.time()
-            ):
+            if not await asyncio.to_thread(self._needs_render, experiment_root, fingerprint, time.time()):
                 return
             if not await asyncio.to_thread(self._prepare_pending, experiment_root, fingerprint):
                 return
@@ -537,9 +513,7 @@ class ReportCoordinator:
                             fingerprint,
                             str(exc),
                         )
-                    logger.warning(
-                        "Automatic report attempt failed for %s: %s", experiment_root.name, exc
-                    )
+                    logger.warning("Automatic report attempt failed for %s: %s", experiment_root.name, exc)
         except ReportIOError as exc:
             logger.warning("Automatic report state/source is temporarily unreadable: %s", exc)
         except ReportContractError as exc:
@@ -560,9 +534,7 @@ class ReportCoordinator:
         if state["status"] == "RUNNING":
             return True
         if state["status"] == "FAILED":
-            if int(state["attempt_count"]) >= min(
-                int(state["max_attempts"]), self._config.max_attempts
-            ):
+            if int(state["attempt_count"]) >= min(int(state["max_attempts"]), self._config.max_attempts):
                 return False
             return now >= float(state["not_before"])
         if state["status"] == "PENDING":
@@ -589,8 +561,7 @@ class ReportCoordinator:
             try:
                 text = f"{type(error).__name__}:{error}"[:2_048]
                 fingerprint = source_fingerprint or (
-                    "sha256:"
-                    + hashlib.sha256(f"contract:{experiment_id}:{text}".encode()).hexdigest()
+                    "sha256:" + hashlib.sha256(f"contract:{experiment_id}:{text}".encode()).hexdigest()
                 )
                 try:
                     state = load_report_state(root)

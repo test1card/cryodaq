@@ -44,9 +44,7 @@ def test_rag_search_returns_results() -> None:
     assert first["chunk_id"] == "c1"
     assert first["source_kind"] == "vault"
     assert first["score"] == 0.42
-    searcher.search.assert_awaited_once_with(
-        "охлаждение", top_k=5, source_kind_filter=None
-    )
+    searcher.search.assert_awaited_once_with("охлаждение", top_k=5, source_kind_filter=None)
 
 
 def test_rag_search_when_searcher_unavailable_returns_error() -> None:
@@ -66,18 +64,14 @@ def test_rag_search_default_limit_is_ten() -> None:
     searcher = AsyncMock()
     searcher.search.return_value = []
     _run(_handle_rag_search_command(searcher, {"query": "manual"}))
-    searcher.search.assert_awaited_once_with(
-        "manual", top_k=10, source_kind_filter=None
-    )
+    searcher.search.assert_awaited_once_with("manual", top_k=10, source_kind_filter=None)
 
 
 def test_rag_search_top_k_alias_accepted() -> None:
     searcher = AsyncMock()
     searcher.search.return_value = []
     _run(_handle_rag_search_command(searcher, {"query": "manual", "top_k": 3}))
-    searcher.search.assert_awaited_once_with(
-        "manual", top_k=3, source_kind_filter=None
-    )
+    searcher.search.assert_awaited_once_with("manual", top_k=3, source_kind_filter=None)
 
 
 def test_rag_search_source_kind_filter_listified() -> None:
@@ -89,9 +83,7 @@ def test_rag_search_source_kind_filter_listified() -> None:
             {"query": "x", "source_kind_filter": "vault"},
         )
     )
-    searcher.search.assert_awaited_once_with(
-        "x", top_k=10, source_kind_filter=["vault"]
-    )
+    searcher.search.assert_awaited_once_with("x", top_k=10, source_kind_filter=["vault"])
 
 
 def test_rag_search_source_kind_filter_list_passthrough() -> None:
@@ -103,9 +95,7 @@ def test_rag_search_source_kind_filter_list_passthrough() -> None:
             {"query": "x", "source_kind_filter": ["vault", "operator_log"]},
         )
     )
-    searcher.search.assert_awaited_once_with(
-        "x", top_k=10, source_kind_filter=["vault", "operator_log"]
-    )
+    searcher.search.assert_awaited_once_with("x", top_k=10, source_kind_filter=["vault", "operator_log"])
 
 
 def test_rag_search_timeout_returns_russian_error() -> None:

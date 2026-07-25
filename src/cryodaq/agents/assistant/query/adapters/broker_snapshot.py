@@ -99,9 +99,7 @@ class BrokerSnapshot:
             if not self._latest:
                 return None
             now = datetime.now(UTC)
-            return max(
-                (now - r.timestamp).total_seconds() for r in self._latest.values()
-            )
+            return max((now - r.timestamp).total_seconds() for r in self._latest.values())
 
     def display_name(self, channel: str) -> str:
         """Return display name for channel from ChannelManager, or channel itself."""

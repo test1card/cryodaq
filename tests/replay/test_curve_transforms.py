@@ -1,4 +1,5 @@
 """Unit tests for replay curve transforms (Stage 2, v0.53.0)."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -36,6 +37,7 @@ def test_curve_to_sqlite_writes_lowercase_ok_status(tmp_path: Path) -> None:
         conn.close()
     assert statuses == {ChannelStatus.OK.value}
     assert statuses == {"ok"}
+
 
 # ---------------------------------------------------------------------------
 # Shared fixture curve (~100 points, valid cooldown shape)

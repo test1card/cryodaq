@@ -91,9 +91,7 @@ def _row(ts: float, iid: str, channel: str, value: float | None, unit: str) -> d
     return {"ts": ts, "iid": iid, "ch": channel, "v": value, "u": unit, "st": "ok"}
 
 
-def test_temperature_only_matches_legacy_semantics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_temperature_only_matches_legacy_semantics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = _validated(
         _payload(
             [
@@ -140,9 +138,7 @@ def test_temperature_pressure_layout_and_log_filter_match_legacy(
         assert list(pressure.lines[0].get_ydata()) == [1e-6, 1e-4]
 
 
-def test_channel_order_labels_alarm_styles_and_legend_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_channel_order_labels_alarm_styles_and_legend_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     readings = [
         _row(7_000 + index, "ls", channel, float(index + 1), "K")
         for index, channel in enumerate(["Т10", "Т2", "Т1", "a/same", "b/same"])
@@ -197,12 +193,8 @@ def test_caption_short_exact_contract(tmp_path: Path) -> None:
 
 
 def test_caption_completeness_truth_is_mandatory(tmp_path: Path) -> None:
-    snapshot = _validated(
-        _payload([], history_complete=False, alarm_state_complete=False, dropped=4, bad=2)
-    )
-    result = render_periodic_png(
-        snapshot, tmp_path, deadline_monotonic=__import__("time").monotonic() + 10
-    )
+    snapshot = _validated(_payload([], history_complete=False, alarm_state_complete=False, dropped=4, bad=2))
+    result = render_periodic_png(snapshot, tmp_path, deadline_monotonic=__import__("time").monotonic() + 10)
     for line in (
         "⚠ История данных неполна",
         "⚠ Пропущено точек: 4",
@@ -215,10 +207,7 @@ def test_caption_completeness_truth_is_mandatory(tmp_path: Path) -> None:
 
 
 def test_caption_aggregate_64_channel_128_alarm_overflow(tmp_path: Path) -> None:
-    readings = [
-        _row(7_000 + index, "ls", f"rack/{index:02d}-{'<&' * 40}", float(index), "K")
-        for index in range(64)
-    ]
+    readings = [_row(7_000 + index, "ls", f"rack/{index:02d}-{'<&' * 40}", float(index), "K") for index in range(64)]
     alarms = [
         {
             "id": f"alarm-{index:03d}-{'<&' * 40}",
@@ -312,26 +301,19 @@ def test_caption_budget_boundaries_are_inclusive() -> None:
         validate_caption_html("😀" * 1_025)
 
 
-def test_png_dimensions_reads_only_bounded_header(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_png_dimensions_reads_only_bounded_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import cryodaq.reporting.periodic_renderer as module
 
     png = tmp_path / "header.png"
     png.write_bytes(
-        b"\x89PNG\r\n\x1a\n"
-        + b"\x00\x00\x00\rIHDR"
-        + b"\x00\x00\x02\x80\x00\x00\x01\xe0"
-        + b"x" * 1_000_000
+        b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00\x00\x02\x80\x00\x00\x01\xe0" + b"x" * 1_000_000
     )
     monkeypatch.setattr(Path, "read_bytes", lambda _self: pytest.fail("unbounded read"))
 
     assert module._png_dimensions(png) == (640, 480)
 
 
-def test_empty_other_only_and_all_invalid_pressure_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_empty_other_only_and_all_invalid_pressure_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = _validated(
         _payload(
             [
@@ -361,9 +343,7 @@ def test_newest_unit_null_row_omits_older_unit_from_chart_and_caption(
         )
     )
     with _capture_render(monkeypatch, snapshot, tmp_path) as (result, capture):
-        assert [line.get_label() for line in capture["figure"].axes[0].lines] == [
-            "stable"
-        ]
+        assert [line.get_label() for line in capture["figure"].axes[0].lines] == ["stable"]
         assert "mixed" not in result.caption
         assert "stable: 5 К" in result.caption
 
@@ -389,15 +369,11 @@ def test_figure_cleanup_on_success(tmp_path: Path) -> None:
 
     snapshot = _validated(_payload([_row(7_000, "ls", "T", 4.0, "K")]))
     before = module.plt.get_fignums()
-    render_periodic_png(
-        snapshot, tmp_path, deadline_monotonic=module.time.monotonic() + 10
-    )
+    render_periodic_png(snapshot, tmp_path, deadline_monotonic=module.time.monotonic() + 10)
     assert module.plt.get_fignums() == before
 
 
-def test_figure_cleanup_on_success_and_save_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_figure_cleanup_on_success_and_save_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from matplotlib.figure import Figure
 
     import cryodaq.reporting.periodic_renderer as module

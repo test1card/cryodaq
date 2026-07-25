@@ -146,11 +146,7 @@ def automatic_report_eligible(
             raise ValueError("non-finite timestamp")
     except (OverflowError, ValueError) as exc:
         raise ReportContractError("terminal metadata end_time is invalid") from exc
-    enabled = (
-        experiment["report_enabled"]
-        if "report_enabled" in experiment
-        else template.get("report_enabled")
-    )
+    enabled = experiment["report_enabled"] if "report_enabled" in experiment else template.get("report_enabled")
     if type(enabled) is not bool:
         raise ReportContractError("report_enabled must be a boolean")
     if enabled is False:
@@ -470,11 +466,7 @@ def validate_report_state(payload: Mapping[str, Any]) -> dict[str, Any]:
     times: dict[str, float] = {}
     for field in ("not_before", "started_at", "updated_at"):
         value = payload.get(field)
-        if (
-            type(value) not in (int, float)
-            or not math.isfinite(float(value))
-            or float(value) < 0
-        ):
+        if type(value) not in (int, float) or not math.isfinite(float(value)) or float(value) < 0:
             raise ReportContractError(f"invalid {field}")
         times[field] = float(value)
     if times["started_at"] > times["updated_at"]:
@@ -601,11 +593,7 @@ def report_state_summary(state: Mapping[str, Any]) -> dict[str, Any]:
         "attempt_count": validated["attempt_count"],
         "max_attempts": validated["max_attempts"],
         "updated_at": validated["updated_at"],
-        "error_code": (
-            str(validated["error_code"])[:128]
-            if validated["error_code"] is not None
-            else None
-        ),
+        "error_code": (str(validated["error_code"])[:128] if validated["error_code"] is not None else None),
     }
 
 
@@ -673,11 +661,7 @@ def write_report_force_audit(
         raise ReportContractError("force audit before status is invalid")
     before_attempt = before.get("attempt_count")
     before_max = before.get("max_attempts")
-    if (
-        type(before_attempt) is not int
-        or type(before_max) is not int
-        or not (1 <= before_attempt == before_max <= 20)
-    ):
+    if type(before_attempt) is not int or type(before_max) is not int or not (1 <= before_attempt == before_max <= 20):
         raise ReportContractError("force audit before attempts are invalid")
     before_updated = before.get("updated_at")
     if (
@@ -687,9 +671,7 @@ def write_report_force_audit(
     ):
         raise ReportContractError("force audit before timestamp is invalid")
     before_error = before.get("error_code")
-    if before_error is not None and (
-        not isinstance(before_error, str) or len(before_error) > 128
-    ):
+    if before_error is not None and (not isinstance(before_error, str) or len(before_error) > 128):
         raise ReportContractError("force audit before error code is invalid")
     if record.get("event") == "report_force_confirmed":
         if phase != "before" or record.get("outcome") != "accepted" or record.get("after") is not None:
@@ -716,9 +698,7 @@ def write_report_force_audit(
         ):
             raise ReportContractError("force audit after timestamp is invalid")
         after_error = after.get("error_code")
-        if after_error is not None and (
-            not isinstance(after_error, str) or len(after_error) > 128
-        ):
+        if after_error is not None and (not isinstance(after_error, str) or len(after_error) > 128):
             raise ReportContractError("force audit after error code is invalid")
     else:
         raise ReportContractError("force audit event is invalid")

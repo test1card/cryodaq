@@ -86,9 +86,7 @@ def cmd_drift(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="CryoDAQ: кросс-экспериментная аналитика Parquet-архива"
-    )
+    parser = argparse.ArgumentParser(description="CryoDAQ: кросс-экспериментная аналитика Parquet-архива")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("scan", help="Сводка по всем архивным экспериментам")

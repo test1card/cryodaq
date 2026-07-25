@@ -89,9 +89,7 @@ async def test_lexical_cursor_is_persistent_bounded_and_eventually_covers_archiv
     await restarted.stop()
 
     assert seen == ["exp-0", "exp-1", "exp-2", "exp-3", "exp-4"]
-    cursor = json.loads(
-        (tmp_path / "reporting" / "reconcile_cursor.json").read_text(encoding="utf-8")
-    )
+    cursor = json.loads((tmp_path / "reporting" / "reconcile_cursor.json").read_text(encoding="utf-8"))
     assert cursor["last_experiment_id"] is None
 
 
@@ -1084,9 +1082,7 @@ def test_readable_stale_cursor_cannot_override_fallback_after_write_error(
     cursor = tmp_path / "reporting" / "reconcile_cursor.json"
     cursor.parent.mkdir(parents=True)
     cursor.write_text(
-        json.dumps(
-            {"schema": 1, "last_experiment_id": "exp-0", "updated_at": time.time()}
-        ),
+        json.dumps({"schema": 1, "last_experiment_id": "exp-0", "updated_at": time.time()}),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -1112,9 +1108,7 @@ def test_cursor_rejects_boolean_schema(tmp_path: Path) -> None:
     cursor = tmp_path / "reporting" / "reconcile_cursor.json"
     cursor.parent.mkdir(parents=True)
     cursor.write_text(
-        json.dumps(
-            {"schema": True, "last_experiment_id": "exp-a", "updated_at": time.time()}
-        ),
+        json.dumps({"schema": True, "last_experiment_id": "exp-a", "updated_at": time.time()}),
         encoding="utf-8",
     )
     assert coordinator._load_cursor() is None
@@ -1189,10 +1183,7 @@ def test_reporting_config_rejects_string_boolean_and_out_of_bounds_values(
     from cryodaq.agents.assistant.report_coordinator import load_report_coordinator_config
 
     (tmp_path / "reporting.yaml").write_text(
-        "reporting:\n"
-        "  automatic_enabled: 'false'\n"
-        "  reconcile_interval_s: 1\n"
-        "  scan_batch_size: 1000\n",
+        "reporting:\n  automatic_enabled: 'false'\n  reconcile_interval_s: 1\n  scan_batch_size: 1000\n",
         encoding="utf-8",
     )
 

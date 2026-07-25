@@ -147,14 +147,10 @@ def _format_diag_telegram_messages(
         warnings = [e for e in new_events if e.level == "WARNING"]
         parts: list[str] = []
         if criticals:
-            names = ", ".join(
-                e.channels[0] if e.channels else e.alarm_id for e in criticals
-            )
+            names = ", ".join(e.channels[0] if e.channels else e.alarm_id for e in criticals)
             parts.append(f"{len(criticals)} channels critical: {names}")
         if warnings:
-            names = ", ".join(
-                e.channels[0] if e.channels else e.alarm_id for e in warnings
-            )
+            names = ", ".join(e.channels[0] if e.channels else e.alarm_id for e in warnings)
             parts.append(f"{len(warnings)} channels warning: {names}")
         return [("diag_tg_batch", "⚠ Diagnostic alarm batch:\n" + "\n".join(parts))]
     return [
@@ -232,9 +228,7 @@ async def _alarm_v2_tick_configs(
             # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
             # by the real production logic. Out-of-phase returns
             # (None, None) after clearing, so nothing dispatches below.
-            event, transition = tick_alarm(
-                alarm_cfg, current_phase, evaluator, state_mgr
-            )
+            event, transition = tick_alarm(alarm_cfg, current_phase, evaluator, state_mgr)
             if transition == "TRIGGERED" and event is not None:
                 # GUI polls via alarm_v2_status command; optionally notify via Telegram
                 if "telegram" in alarm_cfg.notify and telegram_bot is not None:
@@ -362,9 +356,7 @@ async def sensor_diag_tick(
             if _notify_telegram and telegram_bot is not None and new_events:
                 aggregation_threshold = sd_cfg.get("aggregation_threshold", 3)
                 # F20 aggregation handled by _format_diag_telegram_messages.
-                for _tg_name, _tg_msg in _format_diag_telegram_messages(
-                    new_events, aggregation_threshold
-                ):
+                for _tg_name, _tg_msg in _format_diag_telegram_messages(new_events, aggregation_threshold):
                     t = asyncio.create_task(
                         telegram_bot._send_to_all(_tg_msg),
                         name=_tg_name,
@@ -488,9 +480,7 @@ async def cooldown_alarm_tick_loop(
                 _last_triggered_id = _ev.alarm_id
                 if telegram_bot is not None:
                     _pt = asyncio.create_task(
-                        telegram_bot._send_to_all(
-                            f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
-                        ),
+                        telegram_bot._send_to_all(f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"),
                         name=f"phys_alarm_tg_{_ev.alarm_id}",
                     )
                     alarm_dispatch_tasks.add(_pt)
@@ -545,9 +535,7 @@ async def vacuum_guard_tick_loop(
             if _ev is not None:
                 if telegram_bot is not None:
                     _pt = asyncio.create_task(
-                        telegram_bot._send_to_all(
-                            f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"
-                        ),
+                        telegram_bot._send_to_all(f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"),
                         name="phys_alarm_tg_vacuum_guard",
                     )
                     alarm_dispatch_tasks.add(_pt)

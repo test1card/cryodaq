@@ -92,9 +92,7 @@ def test_enabled_must_be_exact_boolean(tmp_path: Path, enabled: str) -> None:
 
 
 def test_requested_invalid_config_is_distinct_from_runnable(tmp_path: Path) -> None:
-    (tmp_path / "notifications.yaml").write_text(
-        _yaml(periodic="  report_interval_s: 59\n"), encoding="utf-8"
-    )
+    (tmp_path / "notifications.yaml").write_text(_yaml(periodic="  report_interval_s: 59\n"), encoding="utf-8")
     probe = probe_periodic_png(tmp_path)
     loaded = load_periodic_png_config(tmp_path)
     assert probe.requested is True
@@ -127,9 +125,7 @@ def test_disabled_does_not_require_credentials(tmp_path: Path) -> None:
         ("  unexpected_bound: 3\n", "unknown_periodic_key"),
     ],
 )
-def test_strict_numeric_collection_and_key_validation(
-    tmp_path: Path, periodic: str, code: str
-) -> None:
+def test_strict_numeric_collection_and_key_validation(tmp_path: Path, periodic: str, code: str) -> None:
     (tmp_path / "notifications.yaml").write_text(_yaml(periodic=periodic), encoding="utf-8")
     loaded = load_periodic_png_config(tmp_path)
     assert loaded.requested is True
@@ -172,9 +168,7 @@ def test_valid_bounds_channels_and_secret_wrapper(tmp_path: Path) -> None:
 
 def test_fingerprint_is_canonical_and_excludes_token(tmp_path: Path) -> None:
     path = tmp_path / "notifications.yaml"
-    path.write_text(
-        _yaml(token=TOKEN, periodic="  include_channels: [T10, T2]\n"), encoding="utf-8"
-    )
+    path.write_text(_yaml(token=TOKEN, periodic="  include_channels: [T10, T2]\n"), encoding="utf-8")
     first = load_periodic_png_config(tmp_path)
     path.write_text(
         _yaml(
@@ -244,16 +238,10 @@ def test_yaml_failure_never_echoes_token_bearing_line(tmp_path: Path) -> None:
     [
         _yaml(periodic=f"  chart_hours: {'9' * 1_000}\n"),
         _yaml(chat="9" * 5_000),
-        "periodic_report:\n  enabled: true\n  include_channels: "
-        + "[" * 2_000
-        + "T1"
-        + "]" * 2_000
-        + "\n",
+        "periodic_report:\n  enabled: true\n  include_channels: " + "[" * 2_000 + "T1" + "]" * 2_000 + "\n",
     ],
 )
-def test_size_bounded_hostile_yaml_never_escapes_public_boundary(
-    tmp_path: Path, body: str
-) -> None:
+def test_size_bounded_hostile_yaml_never_escapes_public_boundary(tmp_path: Path, body: str) -> None:
     assert len(body.encode("utf-8")) <= 64 * 1024
     (tmp_path / "notifications.yaml").write_text(body, encoding="utf-8")
 
@@ -271,15 +259,11 @@ def test_size_bounded_hostile_yaml_never_escapes_public_boundary(
     "body",
     [
         _yaml() + "telegram: {}\n",
-        _yaml().replace(
-            "  enabled: true\n", "  enabled: true\n  enabled: false\n"
-        ),
+        _yaml().replace("  enabled: true\n", "  enabled: true\n  enabled: false\n"),
         _yaml().replace("  chat_id: -100123\n", "  chat_id: -1\n  chat_id: -2\n"),
     ],
 )
-def test_duplicate_yaml_keys_are_rejected_without_diagnostics_leak(
-    tmp_path: Path, body: str
-) -> None:
+def test_duplicate_yaml_keys_are_rejected_without_diagnostics_leak(tmp_path: Path, body: str) -> None:
     (tmp_path / "notifications.yaml").write_text(body, encoding="utf-8")
     probe = probe_periodic_png(tmp_path)
     loaded = load_periodic_png_config(tmp_path)

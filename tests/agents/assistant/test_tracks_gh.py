@@ -23,9 +23,7 @@ from cryodaq.core.channel_manager import ChannelManager
 
 
 def _make_mgr(**channels: dict) -> ChannelManager:
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
     yaml.safe_dump({"channels": channels}, tmp, allow_unicode=True)
     tmp.close()
     return ChannelManager(config_path=Path(tmp.name))
@@ -42,9 +40,7 @@ def test_classifier_prompt_no_latin_t_digit_pattern() -> None:
     stripped = re.sub(r"\{[^}]+\}", "", p.INTENT_CLASSIFIER_SYSTEM)
     # Find Latin T followed by digit — these should be Cyrillic in channel context
     latin_t_channel = re.findall(r"\bT\d+\b", stripped)
-    assert not latin_t_channel, (
-        f"Latin T<digit> in INTENT_CLASSIFIER_SYSTEM: {latin_t_channel}"
-    )
+    assert not latin_t_channel, f"Latin T<digit> in INTENT_CLASSIFIER_SYSTEM: {latin_t_channel}"
 
 
 # ---------------------------------------------------------------------------

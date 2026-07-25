@@ -18,20 +18,14 @@ def _engine_tree() -> ast.Module:
 def test_run_engine_contains_no_nested_defs_or_lambdas() -> None:
     tree = _engine_tree()
     run_engine = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_engine"
+        node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_engine"
     )
     offenders = [
         node
         for node in ast.walk(run_engine)
-        if node is not run_engine
-        and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        if node is not run_engine and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
     ]
-    rendered = [
-        f"{type(node).__name__}:{getattr(node, 'name', '<lambda>')}:{node.lineno}"
-        for node in offenders
-    ]
+    rendered = [f"{type(node).__name__}:{getattr(node, 'name', '<lambda>')}:{node.lineno}" for node in offenders]
     assert rendered == [], f"_run_engine still owns nested callables: {rendered}"
 
 
@@ -64,14 +58,10 @@ def test_runtime_helpers_remain_compatibly_importable_from_engine() -> None:
 def test_run_engine_wires_every_extracted_runtime_task() -> None:
     tree = _engine_tree()
     run_engine = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_engine"
+        node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_engine"
     )
     loaded_names = {
-        node.id
-        for node in ast.walk(run_engine)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        node.id for node in ast.walk(run_engine) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
     }
     expected = {
         "alarm_ring_feed",

@@ -89,8 +89,7 @@ async def test_safety_start_publishes_initial_state_safe_off() -> None:
         assert readings, "Expected analytics/safety_state Reading on start"
         safe_off_readings = [r for r in readings if r.metadata.get("state") == "safe_off"]
         assert safe_off_readings, (
-            f"Expected Reading with state='safe_off', got: "
-            f"{[r.metadata.get('state') for r in readings]}"
+            f"Expected Reading with state='safe_off', got: {[r.metadata.get('state') for r in readings]}"
         )
     finally:
         await mgr.stop()
@@ -117,9 +116,7 @@ async def test_safety_publishes_state_on_transition() -> None:
 
         readings = await _drain_queue(state_q, timeout=0.2)
         states = [r.metadata.get("state") for r in readings]
-        assert "running" in states, (
-            f"Expected Reading with state='running' after request_run, got states: {states}"
-        )
+        assert "running" in states, f"Expected Reading with state='running' after request_run, got states: {states}"
     finally:
         await mgr.stop()
 
@@ -154,18 +151,13 @@ async def test_safety_publish_failure_does_not_crash() -> None:
         # can lag under load — polling on the publish count too (not just the
         # state) removes the race where await_count is read before that task runs.
         deadline = asyncio.get_event_loop().time() + 2.0
-        while not (
-            mgr.state == SafetyState.READY
-            and failing_broker.publish.await_count > baseline_count
-        ):
+        while not (mgr.state == SafetyState.READY and failing_broker.publish.await_count > baseline_count):
             if asyncio.get_event_loop().time() >= deadline:
                 break
             await asyncio.sleep(0.05)
 
         # State machine must reach READY despite failing broker
-        assert mgr.state == SafetyState.READY, (
-            f"Expected READY after healthy feed, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.READY, f"Expected READY after healthy feed, got {mgr.state}"
 
         # publish must have been called BEYOND the post-start baseline,
         # proving the SAFE_OFF → READY transition triggered a publish attempt
@@ -183,9 +175,7 @@ async def test_safety_publish_failure_does_not_crash() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _make_safety_ready(
-    *, max_power_w: float = 5.0, max_voltage_v: float = 40.0, max_current_a: float = 1.0
-):
+async def _make_safety_ready(*, max_power_w: float = 5.0, max_voltage_v: float = 40.0, max_current_a: float = 1.0):
     """Create a SafetyManager in READY state with source limits configured."""
     mgr, sb = await _make_safety()
     # Configure source limits

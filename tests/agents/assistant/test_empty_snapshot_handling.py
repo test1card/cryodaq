@@ -43,9 +43,7 @@ async def _poll_until(cond, interval: float = 0.005) -> None:
 
 
 def _write_mgr(**channels: dict) -> ChannelManager:
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-    )
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
     yaml.safe_dump({"channels": channels}, tmp, allow_unicode=True)
     tmp.close()
     return ChannelManager(config_path=Path(tmp.name))
@@ -182,10 +180,11 @@ async def test_composite_adapter_snapshot_empty_when_no_data() -> None:
 
 async def test_composite_adapter_snapshot_not_empty_when_has_data() -> None:
     snapshot = MagicMock()
-    snapshot.latest_with_labels = AsyncMock(return_value={
-        "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор",
-               "timestamp": datetime.now(UTC)},
-    })
+    snapshot.latest_with_labels = AsyncMock(
+        return_value={
+            "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор", "timestamp": datetime.now(UTC)},
+        }
+    )
     snapshot.oldest_age_s = AsyncMock(return_value=2.0)
 
     cooldown = MagicMock()
@@ -211,14 +210,13 @@ async def test_composite_adapter_snapshot_not_empty_when_has_data() -> None:
 
 async def test_composite_adapter_builds_key_temps_from_k_channels() -> None:
     snapshot = MagicMock()
-    snapshot.latest_with_labels = AsyncMock(return_value={
-        "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор",
-               "timestamp": datetime.now(UTC)},
-        "Т1": {"value": 78.2, "unit": "K", "display_name": "Т1 Криостат верх",
-               "timestamp": datetime.now(UTC)},
-        "P1": {"value": 1e-6, "unit": "mbar", "display_name": "P1",
-               "timestamp": datetime.now(UTC)},
-    })
+    snapshot.latest_with_labels = AsyncMock(
+        return_value={
+            "Т7": {"value": 3.9, "unit": "K", "display_name": "Т7 Детектор", "timestamp": datetime.now(UTC)},
+            "Т1": {"value": 78.2, "unit": "K", "display_name": "Т1 Криостат верх", "timestamp": datetime.now(UTC)},
+            "P1": {"value": 1e-6, "unit": "mbar", "display_name": "P1", "timestamp": datetime.now(UTC)},
+        }
+    )
     snapshot.oldest_age_s = AsyncMock(return_value=1.0)
 
     cooldown = MagicMock()

@@ -27,6 +27,7 @@ from cryodaq.agents.assistant.query.schemas import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_reading(channel: str, value: float, unit: str = "K") -> MagicMock:
     r = MagicMock()
     r.channel = channel
@@ -372,12 +373,14 @@ async def test_composite_adapter_parallel_fetch() -> None:
         confidence=0.8,
     )
     sentinel_alarm = AlarmStatusResult(
-        active=[ActiveAlarmInfo(
-            alarm_id="ALM-1",
-            level="WARNING",
-            channels=["T_cold"],
-            triggered_at=None,
-        )]
+        active=[
+            ActiveAlarmInfo(
+                alarm_id="ALM-1",
+                level="WARNING",
+                channels=["T_cold"],
+                triggered_at=None,
+            )
+        ]
     )
     adapter, snap, cooldown, vacuum, alarms, experiment = await _make_composite_adapter(
         snapshot_all=snap_data,

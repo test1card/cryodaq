@@ -87,9 +87,7 @@ async def test_stop_source_allows_request_run_after(mgr):
         i_comp=0.1,
         channel="smua",
     )
-    assert "FAULT" not in str(result.get("error", "")), (
-        f"request_run blocked by FAULT despite stop_source: {result}"
-    )
+    assert "FAULT" not in str(result.get("error", "")), f"request_run blocked by FAULT despite stop_source: {result}"
 
 
 @pytest.mark.asyncio

@@ -29,12 +29,7 @@ _PERIODIC_GENERATION = "a" * 32
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
-    return (
-        struct.pack(">I", len(payload))
-        + kind
-        + payload
-        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
-    )
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
 
 
 def _periodic_png(*, width: int = 640, height: int = 480) -> bytes:
@@ -51,13 +46,7 @@ def _install_periodic_artifact(
     data_dir: Path, *, raw: bytes | None = None, **overrides: object
 ) -> tuple[PeriodicArtifact, Path, bytes]:
     content = _periodic_png() if raw is None else raw
-    final = (
-        data_dir
-        / "reporting"
-        / "periodic"
-        / "generations"
-        / _PERIODIC_GENERATION
-    )
+    final = data_dir / "reporting" / "periodic" / "generations" / _PERIODIC_GENERATION
     final.mkdir(parents=True)
     png = final / "periodic.png"
     png.write_bytes(content)
@@ -146,9 +135,7 @@ def test_content_file_opens_use_binary_mode_without_affecting_directory_opens(
     ]
     assert len(content_calls) == 4
     assert len(directory_calls) == (5 if has_dirfd_stat else 0)
-    assert all(
-        flags & binary_flag for flags in content_calls
-    )
+    assert all(flags & binary_flag for flags in content_calls)
     assert all(not flags & binary_flag for flags in directory_calls)
 
 
@@ -167,21 +154,15 @@ def test_content_file_opens_use_binary_mode_without_affecting_directory_opens(
         ("mime", "image/jpeg"),
     ],
 )
-def test_periodic_artifact_reader_revalidates_every_descriptor_field(
-    tmp_path: Path, field: str, value: object
-) -> None:
+def test_periodic_artifact_reader_revalidates_every_descriptor_field(tmp_path: Path, field: str, value: object) -> None:
     artifact, _png, _raw = _install_periodic_artifact(tmp_path, **{field: value})
     with pytest.raises(ReportProcessError, match="periodic artifact|periodic PNG"):
         read_periodic_artifact_bytes(tmp_path, artifact)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX link semantics")
-@pytest.mark.parametrize(
-    "attack", ["file_symlink", "file_hardlink", "generation_symlink", "periodic_symlink"]
-)
-def test_periodic_artifact_reader_rejects_linked_file_or_directory(
-    tmp_path: Path, attack: str
-) -> None:
+@pytest.mark.parametrize("attack", ["file_symlink", "file_hardlink", "generation_symlink", "periodic_symlink"])
+def test_periodic_artifact_reader_rejects_linked_file_or_directory(tmp_path: Path, attack: str) -> None:
     artifact, png, raw = _install_periodic_artifact(tmp_path)
     if attack == "file_symlink":
         outside = tmp_path / "outside.png"
@@ -326,9 +307,7 @@ def test_periodic_artifact_reader_rejects_oversized_file_before_read(
     import cryodaq.report_process as module
 
     raw = b"x" * (MAX_PNG_BYTES + 1)
-    artifact, _png, _raw = _install_periodic_artifact(
-        tmp_path, raw=raw, size=MAX_PNG_BYTES
-    )
+    artifact, _png, _raw = _install_periodic_artifact(tmp_path, raw=raw, size=MAX_PNG_BYTES)
     monkeypatch.setattr(
         module.os,
         "read",
@@ -345,9 +324,7 @@ def _assert_fixed_artifact_io_failure(error: ReportProcessError) -> None:
     assert error.__cause__ is None
 
 
-@pytest.mark.parametrize(
-    "fault", ["read", "post_read_fstat", "post_read_stat", "directory_verify", "close"]
-)
+@pytest.mark.parametrize("fault", ["read", "post_read_fstat", "post_read_stat", "directory_verify", "close"])
 @pytest.mark.skipif(
     os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd,
     reason="requires POSIX dir_fd support",
@@ -486,9 +463,7 @@ def test_periodic_artifact_reader_close_fault_preserves_existing_contract_error(
     monkeypatch.setattr(
         module.os,
         "read",
-        lambda *_args: (_ for _ in ()).throw(
-            ReportProcessError("sentinel_contract", "original contract failure")
-        ),
+        lambda *_args: (_ for _ in ()).throw(ReportProcessError("sentinel_contract", "original contract failure")),
     )
 
     def fail_close(fd: int) -> None:
@@ -506,9 +481,7 @@ def test_periodic_artifact_reader_close_fault_preserves_existing_contract_error(
 
 
 @pytest.mark.parametrize("mutation", ["trailing", "bad_crc", "missing_idat", "truncated"])
-def test_periodic_artifact_reader_rejects_invalid_full_png_contract(
-    tmp_path: Path, mutation: str
-) -> None:
+def test_periodic_artifact_reader_rejects_invalid_full_png_contract(tmp_path: Path, mutation: str) -> None:
     valid = _periodic_png()
     if mutation == "trailing":
         raw = valid + b"trailing"
@@ -518,9 +491,7 @@ def test_periodic_artifact_reader_rejects_invalid_full_png_contract(
         raw = bytes(raw)
     elif mutation == "missing_idat":
         ihdr = struct.pack(">IIBBBBB", 640, 480, 8, 2, 0, 0, 0)
-        raw = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(
-            b"IEND", b""
-        )
+        raw = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IEND", b"")
     else:
         raw = valid[:-1]
     artifact, _png, _raw = _install_periodic_artifact(tmp_path, raw=raw)
@@ -545,9 +516,7 @@ def test_frozen_command_reinvokes_bundle(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.parametrize("frozen", [False, True])
-def test_periodic_development_and_frozen_commands_are_fixed(
-    monkeypatch: pytest.MonkeyPatch, frozen: bool
-) -> None:
+def test_periodic_development_and_frozen_commands_are_fixed(monkeypatch: pytest.MonkeyPatch, frozen: bool) -> None:
     if frozen:
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr(sys, "executable", "/opt/CryoDAQ.exe")
@@ -555,9 +524,7 @@ def test_periodic_development_and_frozen_commands_are_fixed(
     else:
         monkeypatch.delattr(sys, "frozen", raising=False)
         prefix = [sys.executable, "-m", "cryodaq.reporting", "periodic"]
-    command = build_periodic_report_command(
-        "a" * 32, deadline_epoch=123.0, max_input_bytes=65_536
-    )
+    command = build_periodic_report_command("a" * 32, deadline_epoch=123.0, max_input_bytes=65_536)
     assert command[: len(prefix)] == prefix
     assert command[-3:] == [
         f"--generation-id={'a' * 32}",

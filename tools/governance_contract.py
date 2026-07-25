@@ -446,9 +446,7 @@ def validate_against_removal_baseline(payload: Mapping[str, Any], baseline: Mapp
                 f"registry baseline entry was removed without a reopened disposition: {entry_id}"
             )
         if actual_digest != expected_digest and _entry_status(payload, entry_id) != "reopened":
-            raise GovernanceContractError(
-                f"registry entry changed without a reopened disposition: {entry_id}"
-            )
+            raise GovernanceContractError(f"registry entry changed without a reopened disposition: {entry_id}")
     record_floor = baseline.get("record_count_floor", 0)
     pair_floor = baseline.get("false_green_pair_count_floor", 0)
     record_count = len(payload["records"])

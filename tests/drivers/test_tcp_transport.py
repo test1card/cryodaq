@@ -224,9 +224,7 @@ async def test_read_lines_async_handles_idle_periods():
     )
     serve_task = asyncio.create_task(server.serve_forever())
     try:
-        t = TCPTransport(
-            "127.0.0.1", port, connect_timeout_s=2.0, read_timeout_s=0.05
-        )
+        t = TCPTransport("127.0.0.1", port, connect_timeout_s=2.0, read_timeout_s=0.05)
         await t.open()
         try:
             received: list[str] = []

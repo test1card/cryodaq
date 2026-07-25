@@ -159,9 +159,7 @@ def validate_input_byte_cap(value: object) -> int:
 def read_periodic_input_file(path: Path, *, expected_max_input_bytes: int) -> ValidatedPeriodicInput:
     """Read one input through a bounded no-follow descriptor and validate it."""
 
-    snapshot, _fence = read_periodic_input_file_fenced(
-        path, expected_max_input_bytes=expected_max_input_bytes
-    )
+    snapshot, _fence = read_periodic_input_file_fenced(path, expected_max_input_bytes=expected_max_input_bytes)
     return snapshot
 
 
@@ -169,15 +167,11 @@ def read_periodic_input_file_fenced(
     path: Path, *, expected_max_input_bytes: int
 ) -> tuple[ValidatedPeriodicInput, PeriodicFileFence]:
     cap = validate_input_byte_cap(expected_max_input_bytes)
-    raw, fence = _read_regular_file_fenced(
-        Path(path), maximum=cap, label="periodic input"
-    )
+    raw, fence = _read_regular_file_fenced(Path(path), maximum=cap, label="periodic input")
     return parse_periodic_input_bytes(raw, expected_max_input_bytes=cap), fence
 
 
-def verify_periodic_file_fence(
-    path: Path, expected: PeriodicFileFence, *, label: str = "periodic input"
-) -> None:
+def verify_periodic_file_fence(path: Path, expected: PeriodicFileFence, *, label: str = "periodic input") -> None:
     try:
         current = Path(path).lstat()
     except OSError as exc:
@@ -191,9 +185,7 @@ def verify_periodic_file_fence(
         raise PeriodicInputError(f"{label} path changed after reading")
 
 
-def parse_periodic_input_bytes(
-    raw: bytes, *, expected_max_input_bytes: int
-) -> ValidatedPeriodicInput:
+def parse_periodic_input_bytes(raw: bytes, *, expected_max_input_bytes: int) -> ValidatedPeriodicInput:
     cap = validate_input_byte_cap(expected_max_input_bytes)
     if not isinstance(raw, bytes) or len(raw) > cap:
         raise PeriodicInputError("periodic input exceeds the trusted byte cap")
@@ -302,15 +294,11 @@ def validate_result_payload(payload: object, *, require_success: bool | None = N
     result["generation_id"] = validate_generation_token(result["generation_id"])
     result["owner_token"] = validate_generation_token(result["owner_token"], "owner_token")
     result["slot_id"] = validate_hash(result["slot_id"], "slot_id")
-    result["config_fingerprint"] = validate_hash(
-        result["config_fingerprint"], "config_fingerprint"
-    )
+    result["config_fingerprint"] = validate_hash(result["config_fingerprint"], "config_fingerprint")
     if result["ok"]:
         if result["error_code"] is not None or result["error_text"] != "":
             raise PeriodicInputError("successful periodic result contains failure evidence")
-        result["artifact"] = _validate_artifact_mapping(
-            result["artifact"], generation_id=result["generation_id"]
-        )
+        result["artifact"] = _validate_artifact_mapping(result["artifact"], generation_id=result["generation_id"])
         result["caption"] = validate_caption_html(result["caption"])
         if not result["caption"]:
             raise PeriodicInputError("successful periodic result caption is empty")
@@ -364,9 +352,7 @@ def _validate_render(value: object, *, expected_cap: int) -> PeriodicRenderSnaps
         maximum_bytes=256,
         field="include_channels",
     )
-    per_channel = _integer(
-        value["max_points_per_channel"], minimum=2, maximum=100_000, field="max_points_per_channel"
-    )
+    per_channel = _integer(value["max_points_per_channel"], minimum=2, maximum=100_000, field="max_points_per_channel")
     total = _integer(value["max_total_points"], minimum=2, maximum=500_000, field="max_total_points")
     if total < per_channel:
         raise PeriodicInputError("max_total_points is below the per-channel cap")
@@ -494,9 +480,7 @@ def _read_regular_file(path: Path, *, maximum: int, label: str) -> bytes:
     return raw
 
 
-def _read_regular_file_fenced(
-    path: Path, *, maximum: int, label: str
-) -> tuple[bytes, PeriodicFileFence]:
+def _read_regular_file_fenced(path: Path, *, maximum: int, label: str) -> tuple[bytes, PeriodicFileFence]:
     try:
         before = path.lstat()
     except OSError as exc:

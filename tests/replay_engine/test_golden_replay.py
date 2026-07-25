@@ -91,8 +91,7 @@ def _pressure_profile(i: int) -> float:
 def _build_fixture_db(path: Path, n: int = _N_POINTS) -> None:
     conn = sqlite3.connect(str(path))
     conn.execute(
-        "CREATE TABLE readings "
-        "(timestamp REAL, channel TEXT, value REAL, unit TEXT, status TEXT, instrument_id TEXT)"
+        "CREATE TABLE readings (timestamp REAL, channel TEXT, value REAL, unit TEXT, status TEXT, instrument_id TEXT)"
     )
     for i in range(n):
         ts = _BASE_TS + i * _STEP_S
@@ -176,9 +175,7 @@ def _run_harness(readings: list) -> dict:
             for cfg in alarms:
                 _event, transition = tick_alarm(cfg, None, evaluator, state_mgr)
                 if transition is not None:
-                    transitions.append(
-                        {"idx": idx, "alarm_id": cfg.alarm_id, "transition": transition}
-                    )
+                    transitions.append({"idx": idx, "alarm_id": cfg.alarm_id, "transition": transition})
         elif reading.channel == _PRESSURE_CH:
             if not leak_started:
                 leak.start_measurement(t0=reading.timestamp, p0_mbar=reading.value)
