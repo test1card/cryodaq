@@ -44,6 +44,16 @@ def result_outcome_unknown(result: object) -> bool:
     refused when it may actually be ON. The `_handler_timeout` flag and the
     prose fallback are kept for reply shapes that carry no structured
     settlement vocabulary at all; removing them would regress those paths.
+
+    Presence of any structured settlement key decides the question
+    outright: a value of ``True``/``"unknown"`` resolves to unknown above,
+    and any other value (e.g. ``commit_state: "not_committed"`` /
+    ``delivery_state: "not_dispatched"``, which are truthful resolved
+    refusals) resolves to *not* unknown here, without consulting the prose
+    fallback. Prose matching runs only when none of ``_handler_timeout``,
+    ``outcome_unknown``, ``commit_state``, or ``delivery_state`` is present
+    at all, so a resolved refusal whose prose happens to contain a
+    timeout-shaped substring can never be reclassified as unknown.
     """
 
     if not isinstance(result, dict):
@@ -56,5 +66,17 @@ def result_outcome_unknown(result: object) -> bool:
         return True
     if result.get("delivery_state") in _UNKNOWN_DELIVERY_STATES:
         return True
+    # Any remaining *presence* of a structured settlement key is a truthful,
+    # resolved outcome (e.g. ``commit_state: "not_committed"`` /
+    # ``delivery_state: "not_dispatched"`` refusals, or an explicit
+    # ``outcome_unknown: False`` / ``_handler_timeout: False``). Such replies
+    # must decide the question outright here and never reach the prose
+    # fallback: a resolved refusal whose prose happened to contain a
+    # timeout-shaped substring (e.g. "Admission timed out before dispatch"
+    # alongside ``not_committed``/``not_dispatched``) would otherwise be
+    # reclassified as unknown, latching a hazardous source channel for a
+    # command that never left the client.
+    if any(key in result for key in ("_handler_timeout", "outcome_unknown", "commit_state", "delivery_state")):
+        return False
     error = str(result.get("error") or "").casefold()
     return any(marker in error for marker in _PROSE_UNKNOWN_MARKERS)
