@@ -11,9 +11,15 @@ platform.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import warnings
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_engine_import_emits_no_deprecation_warning() -> None:
@@ -33,3 +39,15 @@ def test_replay_engine_main_import_emits_no_deprecation_warning() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         importlib.import_module("cryodaq.replay_engine.__main__")
+
+
+def test_test_harness_has_no_deprecated_global_event_loop_policy() -> None:
+    source = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert "set_event_loop_policy" not in source
+    assert "WindowsSelectorEventLoopPolicy" not in source
+    assert "loop_factory=asyncio.SelectorEventLoop" in source
+
+
+@pytest.mark.asyncio
+async def test_pytest_asyncio_runner_uses_selector_loop() -> None:
+    assert isinstance(asyncio.get_running_loop(), asyncio.SelectorEventLoop)

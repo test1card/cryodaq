@@ -1,7 +1,9 @@
 """Regression: keithley_overpower_interlock must stay in alarms_v3.yaml.
 
-Its channels (smua_power, smub_power) are not covered by any regex in
-config/interlocks.yaml and would lose throttle protection if removed.
+Its channels (Keithley_1/smua/power, Keithley_1/smub/power) are not covered by
+any regex in config/interlocks.yaml and would lose throttle protection if
+removed. These are the real emitted/canonical descriptor identities; the earlier
+short names (smua_power/smub_power) were dead refs that matched no channel.
 """
 
 from pathlib import Path
@@ -16,8 +18,8 @@ def test_keithley_overpower_interlock_preserved():
     interlocks = data.get("interlocks") or {}
     assert "keithley_overpower_interlock" in interlocks
     entry = interlocks["keithley_overpower_interlock"]
-    assert "smua_power" in entry.get("channels", [])
-    assert "smub_power" in entry.get("channels", [])
+    assert "Keithley_1/smua/power" in entry.get("channels", [])
+    assert "Keithley_1/smub/power" in entry.get("channels", [])
 
 
 def test_duplicate_interlocks_not_readded():
