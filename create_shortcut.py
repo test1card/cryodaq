@@ -13,6 +13,10 @@ import sys
 from pathlib import Path
 
 
+def _ps_literal(value: object) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _get_desktop_path() -> Path:
     """Получить путь к рабочему столу (корректно для OneDrive, русской локали и т.д.)."""
     if sys.platform != "win32":
@@ -20,9 +24,10 @@ def _get_desktop_path() -> Path:
 
     # PowerShell возвращает правильный путь во всех случаях
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command",
-         "[Environment]::GetFolderPath('Desktop')"],
-        capture_output=True, text=True, timeout=10,
+        ["powershell", "-NoProfile", "-Command", "[Environment]::GetFolderPath('Desktop')"],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if result.returncode == 0 and result.stdout.strip():
         return Path(result.stdout.strip())
@@ -37,12 +42,12 @@ def _get_pythonw() -> Path:
     return pythonw if pythonw.exists() else Path(sys.executable)
 
 
-def create_shortcut() -> None:
+def create_shortcut() -> int:
     """Создать ярлык на рабочем столе Windows."""
     if sys.platform != "win32":
         print("Этот скрипт предназначен только для Windows.")
         print("На Linux/macOS используйте: python -m cryodaq.launcher")
-        return
+        return 0
 
     desktop = _get_desktop_path()
     shortcut_path = desktop / "CryoDAQ.lnk"
@@ -51,23 +56,27 @@ def create_shortcut() -> None:
 
     ps_script = (
         "$ws = New-Object -ComObject WScript.Shell; "
-        f"$s = $ws.CreateShortcut('{shortcut_path}'); "
-        f"$s.TargetPath = '{pythonw}'; "
+        f"$s = $ws.CreateShortcut({_ps_literal(shortcut_path)}); "
+        f"$s.TargetPath = {_ps_literal(pythonw)}; "
         "$s.Arguments = '-m cryodaq.launcher'; "
-        f"$s.WorkingDirectory = '{project_root}'; "
+        f"$s.WorkingDirectory = {_ps_literal(project_root)}; "
         "$s.Description = 'CryoDAQ'; "
         "$s.Save()"
     )
 
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", ps_script],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if result.returncode == 0:
         print(f"Ярлык создан: {shortcut_path}")
+        return 0
     else:
         print(f"Ошибка создания ярлыка: {result.stderr}")
+        return 1
 
 
 if __name__ == "__main__":
-    create_shortcut()
+    raise SystemExit(create_shortcut())

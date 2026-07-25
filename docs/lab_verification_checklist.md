@@ -1,13 +1,127 @@
 # Чек-лист лабораторной верификации CryoDAQ
 
-Проверки, которые **невозможно** выполнить без физического доступа к
-приборам и лабораторным ПК (Ubuntu-движок, Windows-операторская станция,
-криостат Millimetron / АКЦ ФИАН). Каждый раздел: цель → команды →
-ожидаемый результат → что записать обратно в репозиторий при успехе.
+Turnkey-процедуры для обязательной software prequalification и последующих
+проверок, которые **невозможно** выполнить без физического доступа к приборам
+и лабораторным ПК (Ubuntu-движок, Windows-операторская станция, криостат
+Millimetron / АКЦ ФИАН). Каждый раздел: цель → команды → ожидаемый результат →
+что записать обратно в репозиторий при успехе.
 
 Общее правило: любую проверку с источником мощности вести на **безопасном
 низком уровне** и на **макетной (dummy) нагрузке**, а не на нагревателе
 криостата.
+
+---
+
+## Software qualification перед лабораторией: exact-SHA WSL short soak
+
+Эта проверка не требует приборов, но обязательна перед переносом кандидата в
+лабораторию. Qualification выполняется в отдельном WSL-клоне на нативной
+Linux-файловой системе (`ext4`), а не в `/mnt/c` (`drvfs`/`9p`). На `drvfs`
+разрешены быстрые developer-проверки (lint, docs и focused tests), но они не
+сертифицируют POSIX filesystem/process semantics и не заменяют этот гейт.
+Native-ext4 проверка доказывает lifecycle,
+process ownership, restart, persistence и локальную доставку периодического PNG
+для изолированного пассивного mock-стека. Она **не** проверяет production-набор
+alarm/interlock/physical-alarm правил и не закрывает hardware-гейты ниже.
+
+**Граница fixture.** Ровно один `LS218_1` с passive-measurement authority,
+mock transport/driver, 16 canonical descriptors, 16 bindings и 8 readings за
+опрос. Production alarms, interlocks и physical alarms намеренно отключены.
+Полная топология и SHA-256 каждого сгенерированного config-файла записываются в
+manifest и повторно проверяются после остановки процессов.
+
+**Подготовка на Windows.** Зафиксировать полный SHA кандидата и создать новый
+клон внутри выбранного WSL-дистрибутива:
+
+```powershell
+$sha = (git rev-parse HEAD).Trim()
+$distro = "<WSL_DISTRO_NAME>"
+$source = (wsl -d $distro -- wslpath -a (Resolve-Path .).Path).Trim()
+$dest = "/home/<WSL_USER>/cryodaq-final-$sha"
+wsl -d $distro -- bash -lc "git clone --no-local --no-checkout '$source' '$dest' && git -C '$dest' -c core.autocrlf=false checkout --detach '$sha'"
+```
+
+**Проверка среды внутри WSL.** Пути и имя дистрибутива адаптировать к машине,
+но не менять выбранный SHA или lock-файл:
+
+```bash
+set -euo pipefail
+repo=/home/<WSL_USER>/cryodaq-final-<FULL40>
+cd "$repo"
+test "$(git rev-parse HEAD)" = "<FULL40>"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+findmnt -no FSTYPE -T "$repo" | grep -E '^ext4$'
+
+# Подключить заранее проверенный dedicated runtime, не копируя site-packages
+# в tracked tree. .venv остаётся ignored и должен ссылаться только на него.
+mkdir .venv
+ln -s /root/cryodaq-soak-py313/bin .venv/bin
+ln -s /root/cryodaq-soak-py313/lib .venv/lib
+ln -s /root/cryodaq-soak-py313/pyvenv.cfg .venv/pyvenv.cfg
+
+.venv/bin/python --version
+.venv/bin/python -c "import sqlite3,sys; print(sys.executable); print(sqlite3.sqlite_version)"
+.venv/bin/python -c "import psutil; assert psutil.__version__ == '7.2.2'"
+.venv/bin/python -m pip check
+.venv/bin/python scripts/check_lock_drift.py
+.venv/bin/python -m pip install --dry-run --no-index --no-deps \
+  -r requirements-lock.txt
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+```
+
+Перед запуском сохранить вне evidence-каталога: `/etc/os-release`, `uname -a`,
+`findmnt`, `pwd`, полный SHA, `sys.executable`, `sys.prefix`, Python, выбранную
+SQLite, psutil, `pip freeze`, SHA-256 интерпретатора и точную команду. Этот
+companion record нельзя добавлять внутрь уже sealed evidence topology.
+
+Минимальная воспроизводимая фиксация неизменности runtime до и после soak:
+
+```bash
+companion=/root/cryodaq-soak-companion-<FULL40>
+mkdir -m 700 "$companion"
+cp /etc/os-release "$companion/os-release"
+uname -a > "$companion/uname.txt"
+findmnt -T "$repo" > "$companion/findmnt.txt"
+printf '%s\n' "$repo" "$(git rev-parse HEAD)" > "$companion/source.txt"
+.venv/bin/python -c "import sqlite3,sys; print(sys.executable); print(sys.prefix); print(sys.version); print(sqlite3.sqlite_version)" \
+  > "$companion/runtime-before.txt"
+.venv/bin/python -c "import psutil; print(psutil.__version__)" \
+  >> "$companion/runtime-before.txt"
+.venv/bin/python -m pip freeze --all > "$companion/pip-freeze-before.txt"
+sha256sum "$(readlink -f .venv/bin/python)" > "$companion/interpreter-before.sha256"
+```
+
+**Запуск.** Evidence directory должен быть новым и пустым:
+
+```bash
+PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
+  --profile short \
+  --evidence-dir "artifacts/mock-stack-soak/final-<FULL40>"
+
+.venv/bin/python -m pip freeze --all > "$companion/pip-freeze-after.txt"
+cmp "$companion/pip-freeze-before.txt" "$companion/pip-freeze-after.txt"
+sha256sum "$(readlink -f .venv/bin/python)" > "$companion/interpreter-after.sha256"
+cmp "$companion/interpreter-before.sha256" "$companion/interpreter-after.sha256"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+```
+
+**Критерии PASS.** Код возврата 0; `summary.json` имеет `status=PASS` и
+`state=PASS`; manifest указывает exact clean SHA и sealed passive fixture;
+exact-six содержит ровно 6 passed без skip/deselect; присутствуют и согласованы
+`samples.jsonl`, `faults.jsonl`, `shutdown.json`, `log_capture.json`,
+`periodic-delivery-result.json`, ровно две canonical receipt-записи и два
+content-addressed PNG. Первый receipt относится к latest completed slot,
+выделенному при старте; второй — к единственной следующей динамически выровненной
+границе после замены assistant. Ledger/manifest/artifact hashes пересчитываются,
+после запуска Git tree остаётся чистым, Python/runtime hash и `pip freeze` не
+изменились, живых или zombie descendants нет.
+
+**Записать при успехе.** Полный SHA, дистрибутив/kernel, filesystem, Python,
+SQLite, psutil, команды, длительность, список шести реально выполненных exact-six
+node IDs и отсутствие skip/deselect в их pytest-выводе, SHA-256 companion record,
+summary, ledger и evidence tree. Сам `exact_six` — артефакт со списком узлов и
+хешами вывода, а не источник выдуманного числового поля `passed`. Не переносить
+результат на более новый commit.
 
 ---
 
@@ -21,10 +135,12 @@ WAL-reset **`[3.7.0, 3.51.3)`** (март-2026).
 **Команды.**
 
 ```bash
-# Авторитетная проверка — ВЫБРАННАЯ реализация sqlite3 (та, что реально
-# используется движком: stdlib или fallback pysqlite3). Гейт проверяет именно
-# её, а не сырой stdlib:
-.venv/bin/python -c "from cryodaq.storage._sqlite import sqlite_version_info; print(sqlite_version_info())"
+# Создать/обновить поддерживаемый runtime с фиксированным безопасным SQLite:
+conda env update --file environment.yml --prune
+conda activate cryodaq
+
+# Авторитетная проверка — реализация sqlite3, реально используемая движком:
+python -c "from cryodaq.storage._sqlite import sqlite_version_info; print(sqlite_version_info())"
 
 # Дополнительная диагностика — сырой stdlib sqlite3 (до возможного fallback):
 python -c "import sqlite3; print(sqlite3.sqlite_version)"
@@ -37,16 +153,14 @@ sqlite3 --version
 
 - Безопасно: выбранная реализация сообщает `≥ 3.51.3` **или**
   backport-safe `3.44.6` / `3.50.7`.
-- В диапазоне `[3.7.0, 3.51.3)`: на Linux гейт **самовосстанавливается** —
-  `storage/_sqlite.py` при импорте прозрачно переключается на bundled
-  `pysqlite3-binary` (базовая зависимость с маркером `sys_platform == "linux"`),
-  и движок пишет как обычно.
+- В диапазоне `[3.7.0, 3.51.3)` запуск **запрещён**: обновить tracked Conda
+  environment и повторить проверку. Небезопасный runtime нельзя выдавать за
+  пройденный software gate.
 
-**Если версия плохая.** Ручное вмешательство нужно **только если небезопасны/
-отсутствуют ОБА** — и stdlib, и fallback `pysqlite3` (на Linux — установлен ли
-пакет из lock/`pip install`). На не-Linux платформах fallback-зависимость не
-ставится; если выбранный stdlib SQLite попал в опасный диапазон, поставить
-Python, слинкованный с безопасным SQLite, и запускать движок им.
+**Если версия плохая.** Пересоздать runtime строго из `environment.yml` и
+проверить, что активирован именно `cryodaq`. Опциональный сторонний fallback
+допустим только если выбранная им версия сама проходит F25; по умолчанию такой
+пакет не устанавливается.
 `CRYODAQ_ALLOW_BROKEN_SQLITE=1` — только крайняя мера-подтверждение
 (осознанный обход), **не** исправление.
 
@@ -110,55 +224,124 @@ REP-сокет не завис. `diag_zmq_direct_req.py` — 180 с без за�
 
 ---
 
-## 4. Стендовый проход watchdog Keithley TSP (armed-mode)
+## 4. Keithley: отдельные гейты A8a–A8e
 
-**Цель.** Проверить прошивочный dead-man бэкстоп Keithley 2604B на реальном
-железе (`tsp/cryodaq_wdog.lua`, `src/cryodaq/drivers/instruments/keithley_2604b.py`,
-CHANGELOG `[0.62.0]`). **Только на макетной нагрузке и безопасном низком уровне
-источника — НИКОГДА на нагревателе криостата.**
+**Safety boundary.** Все тесты с подачей выполнять только на dummy-нагрузке,
+с безопасными пассивно обоснованными V/I и физической кнопкой отключения.
+Никогда не начинать с нагревателя криостата. Внутренний status/readback SMU —
+диагностика, а не независимый oracle отсутствия энергии.
 
-**Настройка.** В `config/instruments.local.yaml`:
+Текущий `tsp/cryodaq_wdog.lua` v3 намеренно неавтономен. Он проверяет дедлайн
+только когда приходит следующий `pet`; поэтому покрывает stall-then-recover,
+но не полную смерть хоста. Удалённый прежний timer-код был документированно
+некорректным, а не просто непроверенным. `required` должен отказать с v3,
+поскольку `cryodaq_wdog_autonomous == 0`; для A8a/A8b использовать
+`best_effort` и ожидать один CRITICAL о деградации.
 
-```yaml
-keithley:
-  watchdog:
-    mode: best_effort     # arm on connect, fail-open на слое watchdog
+`timeout_s` должен быть конечным числом в диапазоне 1–300 s и не меньше двух
+интервалов опроса. TSP `os.time()` имеет секундную гранулярность, а условие
+строго `elapsed > timeout`; при точном равенстве trip наступит не раньше
+следующей целой секунды. Учитывать это в критерии A8b/A8d и записывать
+фактический измеренный trip time, а не вычисленный номинал.
+
+### A8-0 — грамматика nonce-bound OFF на реальном 2604B (НЕ ПРОЙДЕНО)
+
+До переноса software proof в лабораторный claim нужно на реальном Keithley
+2604B, его фактической firmware и штатном Windows USBTMC/VISA path подтвердить,
+что прибор принимает ровно однострочную ASCII-команду вида
+
+```text
+print(string.format("CRYODAQ_OFF_V1|<nonce>|%g", smuX.source.output))
 ```
 
-**Проход (armed-mode).**
+для `smua` и `smub`, где `<nonce>` — свежие 32 lowercase hexadecimal symbols,
+и возвращает ровно одну строку
 
-1. Поднять движок, источник на **безопасном низком уровне** на dummy-нагрузке.
-2. Убедиться, что регулярные `pet` (на каждом опросе) **не мешают** штатному
-   поллингу — поток данных ровный.
-3. Форсировать сталл: приостановить процесс движка **дольше `timeout_s`**
-   (по умолчанию 5.0 с), пока идёт подача:
-   ```bash
-   kill -STOP <pid_engine>   # подождать > timeout_s
-   kill -CONT <pid_engine>
-   ```
-4. Проверить: оба выхода SMU ушли в OFF; на переподключении latch
-   `cryodaq_wdog_tripped` читается как **CRITICAL**; `SafetyManager`
-   при reconcile уходит в путь **FAULT** (`FAULT_LATCHED`).
+```text
+CRYODAQ_OFF_V1|<тот-же-32-lowercase-hex-nonce>|0
+```
 
-**Ожидаемый результат.** Выходы убиты по пропущенному дедлайну, latch поднят и
-считан на следующем connect, SafetyManager залатчил FAULT.
+без префикса, суффикса, дополнительной строки, Unicode-подстановки или иной
+числовой формы. Проверку выполнять только при уже подтверждённом OFF и без
+подачи мощности. Сохранить сырые TX/RX bytes, модель/serial/firmware/VISA
+backend, оба канала, commit SHA и UTC timestamp. Любое отличие означает FAIL:
+software должен остаться fail-closed, а протокол — быть исправлен и заново
+проверен. До этого evidence нельзя заявлять restart-durable или физически
+подтверждённый OFF только на основании mock/unit/Windows CI.
 
-**Именованный апгрейд — автономный dead-man (trigger.timer).** Текущий
-механизм (см. шапку `tsp/cryodaq_wdog.lua`) покрывает только STALL-THEN-RECOVER:
-дедлайн проверяется **внутри `pet`**, который вызывает хост. Полная смерть хоста
-(перестал петтить совсем) в прошивке не переоценивается — TSP однопоточный,
-`cryodaq_wdog_run()` лишь взводит и возвращает управление, не крутит цикл.
-Верифицировать проект автономного механизма на `trigger.timer`, который срабатывает
-без вызовов хоста, — единственный оставшийся стендовый апгрейд. До него
-host-side force-OFF на следующем connect остаётся бэкстопом смерти хоста.
+### A8a — заливка, версия и честный контракт (автоматизировано)
 
-**Записать при успехе.** Снять пометку ручного гейта «TSP watchdog go-live»
-в CHANGELOG `[0.62.0]` (`### Known Issues` / Phase 5) и зафиксировать
-результат прохода в `docs/instruments.md`.
+Проверяет version stamp v3, `autonomous == 0`, software-active/tripped state и
+командный verified-OFF. Это не физический host-death тест.
+
+```bash
+CRYODAQ_KEITHLEY_RESOURCE="USB0::0x05E6::0x2604::04052028::INSTR" \
+  .venv/bin/pytest -m smoke tests/drivers/test_keithley_watchdog_smoke.py
+```
+
+### A8b — late-pet stall recovery (автоматизировано с подачей)
+
+Скрипт подаёт безопасный низкий уровень, ждёт дольше `timeout_s`, затем
+посылает поздний pet. Только этот более поздний command выполняет проверку и
+переводит оба выхода в OFF, поднимая latch.
+
+```bash
+CRYODAQ_KEITHLEY_RESOURCE="USB0::0x05E6::0x2604::04052028::INSTR" \
+  CRYODAQ_SMOKE_ALLOW_SOURCE=1 \
+  .venv/bin/pytest -m smoke tests/drivers/test_keithley_watchdog_smoke.py
+```
+
+### A8c — настоящая смерть хоста без последующей команды (НЕ ПРОЙДЕНО)
+
+1. Запустить отдельный операторский host process и подать безопасный уровень.
+2. Записать точный PID, monotonic start и watchdog timeout.
+3. Убить host/engine так, чтобы после kill ни один процесс CryoDAQ не отправил
+   Keithley следующую команду; launcher auto-restart тоже отключить.
+4. Не подключаться повторно до окончания окна измерения.
+
+Pass допускается только если выход отключился в допустимое физически выведенное
+время без более поздней команды. Текущая v3 ожидаемо этот тест не проходит;
+результат нельзя подменять A8b или force-OFF при reconnect.
+
+### A8d — независимый terminal V/I/P и trip time (НЕ ПРОЙДЕНО)
+
+Параллельно A8c независимые DMM/осциллограф/шунт регистрируют напряжение,
+ток, мощность и время отключения на клеммах. Записать приборы, серийные номера,
+калибровку/uncertainty, sample rate, нагрузку, wiring и сырые traces. Проверить
+не только `source.output`, но и реальную остаточную энергию. `SOURCE_IDLE` —
+возврат к idle level, не открытие реле и не доказательство OFF.
+
+5 W — только host-side target cap. После смерти хоста instrument compliance
+ограничивает рабочую точку применимым envelope `limitv`, `limiti`, нагрузки и
+самого прибора (в текущей конфигурации до 40 V и 1 A), но не гарантирует ≤5 W
+и не ограничивает накопленную энергию при длительной подаче.
+
+### A8e — независимый interlock/cutout и common-cause (НЕ ПРОЙДЕНО)
+
+Предпочтительная архитектура — внешний защёлкивающийся de-energize-to-trip
+cutout, не зависящий от host scheduler, USB, TSP, SMU output stage, GUI, БД и
+сети. Reference manual категоричен: output-enable/digital-I/O facility
+2601B/2602B/2604B **не подходит для safety circuits и не должна использоваться
+для управления safety interlock**. Нужна отдельная схема, соответствующая
+требованиям применения. Документировать питание, разрывную
+способность, normally-safe state, welded-contact detection, reset policy,
+shared power/wiring/environment failures и end-to-end proof test. Внутренний
+SMU timer prototype разрешён только как документированная bench-гипотеза, не
+как независимый финальный элемент.
+
+### Срок действия доказательств
+
+Повторить A8a–A8e и считать прежний PASS недействительным после изменения
+firmware, TSP-скрипта/version, driver protocol, wiring, нагрузки, interlock,
+compliance/offmode, измерительного oracle или power topology. Для каждого PASS
+сохранить commit SHA, версии firmware/script, wiring photo/schematic, конфиг,
+сырые traces, оператора/свидетеля, UTC+monotonic timestamps и критерий pass/fail.
+
+До прохождения A8c–A8e Phase C остаётся заблокированной.
 
 ---
 
-## 5. Smoke frozen-сборки на Windows
+## 5. Smoke source-установки и ярлыка на Windows
 
 **Цель.** Проверить установку и запуск на операторской Windows-станции
 (`install.bat`, `create_shortcut.py`).
@@ -169,10 +352,14 @@ host-side force-OFF на следующем connect остаётся бэкст�
 install.bat
 ```
 
-`install.bat` проверяет Python ≥ 3.12, ставит зависимости
-(`pip install -e ".[dev,web,archive]"`) и вызывает `create_shortcut.py`,
+`install.bat` проверяет Python ≥ 3.12, выполняет
+`python -m pip install -r requirements-lock.txt`, затем
+`python -m pip install -e . --no-deps --no-build-isolation` и вызывает
+`create_shortcut.py`,
 который создаёт на рабочем столе ярлык `CryoDAQ.lnk`, запускающий
 `pythonw -m cryodaq.launcher` без окна терминала.
+Batch-файл использует ASCII-only диагностические сообщения для штатного
+`cmd.exe`; русские инструкции оператора находятся в `docs/quickstart.md`.
 
 **Что кликнуть и что ожидать.**
 
@@ -181,6 +368,28 @@ install.bat
 - Двойной клик по ярлыку запускает лаунчер (без консольного окна).
 - Проверка без приборов: `cryodaq-engine --mock`.
 
-**Записать при успехе.** Отметить прохождение Windows frozen-build smoke
-в CHANGELOG (снять ручной гейт из `### Known Issues`) и, если менялись шаги,
-обновить `docs/deployment.md`.
+**Граница доказательства.** Этот editable source-install smoke проверяет только
+`install.bat`, ярлык и source launcher. Он **не** является ONEDIR/frozen-build
+доказательством и не снимает frozen gate.
+
+**Записать при успехе.** Зафиксировать source-install/shortcut smoke отдельно и,
+если менялись шаги, обновить `docs/deployment.md`.
+
+---
+
+## 6. Настоящий Windows ONEDIR/frozen smoke (НЕ ПРОЙДЕНО)
+
+**Цель.** Проверить точный собранный ONEDIR-артефакт на операторской
+Windows-станции без authority от source tree или ambient Python.
+
+**Обязательные условия.** Записать commit SHA и digest артефакта; запустить
+packaged launcher при недоступном source tree; подтвердить packaged allowlist
+драйверов, mock POD/bridge startup, engine/bridge restart, отложенный выбор темы
+без остановки process tree и bounded shutdown без оставшихся дочерних
+процессов/потоков/IPC-очередей, с удержанием launcher lock до возврата Qt loop;
+сохранить логи и скриншоты. Любая зависимость от editable checkout, ambient
+`.venv`/Python или отсутствующий allowlisted driver означает FAIL.
+
+**Записать при успехе.** Только этот отдельный прогон может снять ручной
+Windows ONEDIR/frozen gate. Он не закрывает dummy-load, independent-final-element
+или другие physical gates.

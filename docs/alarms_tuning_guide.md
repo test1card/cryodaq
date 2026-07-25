@@ -1,6 +1,8 @@
 # CryoDAQ — Alarm / Interlock / Safety Tuning Guide
 
-> Живой документ. Обновлён 2026-07-08 по текущему дереву v0.64.0.
+> Живой документ. Обновлён 2026-07-17 для активного Montana candidate поверх
+> релизной основы v0.64.1. Candidate defaults не являются уже выпущенным
+> поведением и требуют гейтов из `PROJECT_STATUS.md`.
 >
 > **Цель:** дать инженеру установки понимание трёх слоёв защиты
 > CryoDAQ, где какие пороги живут, и какие значения предстоит подогнать
@@ -30,13 +32,16 @@
 
 Отдельно живут **physical alarms** (`config/physical_alarms.yaml`):
 `CooldownAlarm` и `VacuumGuard`. Это не entries в `alarms_v3.yaml`, а
-отдельные сервисы движка. `VacuumGuard` может дополнительно латчить
-SafetyManager через `vacuum.escalate_to_safety: true` (по умолчанию
-`false`, alarm-only).
+отдельные сервисы движка. `VacuumGuard` дополнительно латчит
+SafetyManager через `vacuum.escalate_to_safety` (в Montana candidate по
+умолчанию `true`; в v0.64.1 было opt-in/`false`) —
+эскалация включена для необслуживаемых/холодных прогонов; выставь
+`false` для attended/debug-прогонов, где достаточно alarm-only).
 
-Ещё есть **Alarm Engine v1** (`config/alarms.yaml`) — legacy path с
-несколькими старыми threshold-правилами (`enabled` по умолчанию `true`).
-Не добавляй туда новые алармы; новые правила идут в v3 / physical alarms.
+Alarm Engine v1 (конфиг config/alarms.yaml тоже удалён) выведен из
+проекта (B2, миграция v1→v2 завершена) — все его правила либо уже
+дублировались в `alarms_v3.yaml`,
+либо были перенесены туда. Один синтаксис правил, один конфиг.
 
 ---
 
@@ -52,17 +57,17 @@ SafetyManager через `vacuum.escalate_to_safety: true` (по умолчан�
   ┌──────────────────────────────────────────────────────────────┐
   │              DataBroker (engine, asyncio)                    │
   │  persistence-first: SQLite WAL commit → затем subscribers    │
-  └──┬────────────────┬─────────────────┬─────────────────┬──────┘
-     │                │                 │                 │
-     ▼                ▼                 ▼                 ▼
-  ┌──────┐     ┌──────────┐     ┌──────────────┐   ┌──────────┐
-  │Safety│     │Interlock │     │ Alarm v2     │   │ Alarm v1 │
-  │Mgr   │     │Engine    │     │ Evaluator    │   │ Engine   │
-  │(fsm) │     │          │     │ + State Mgr  │   │ (legacy) │
-  └──┬───┘     └────┬─────┘     └──────┬───────┘   └────┬─────┘
-     │              │                  │                │
-     ▼              ▼                  ▼                ▼
-  блокирует    emergency_off /    GUI badge +       (отключено)
+  └──┬────────────────┬─────────────────┬─────────────────────────┘
+     │                │                 │
+     ▼                ▼                 ▼
+  ┌──────┐     ┌──────────┐     ┌──────────────┐
+  │Safety│     │Interlock │     │ Alarm v2     │
+  │Mgr   │     │Engine    │     │ Evaluator    │
+  │(fsm) │     │          │     │ + State Mgr  │
+  └──┬───┘     └────┬─────┘     └──────┬───────┘
+     │              │                  │
+     ▼              ▼                  ▼
+  блокирует    emergency_off /    GUI badge +
   запуск       stop_source        Telegram +
   источника                       звук
 ```
@@ -126,8 +131,8 @@ scheduler_drain_timeout_s: 5.0
 | `stale_timeout_s` | 10.0 | LakeShore опрос 2с = 5 poll'ов. Если шум GPIB вызывает ложные timeouts, подними до 15-20с. |
 | `heartbeat_timeout_s` | 15.0 | Keithley USBTMC обычно отвечает <1с. 15с достаточно. |
 | `max_dT_dt_K_per_min` | 5.0 | Консервативно. Mock и calibration runs могут выдать больше. Отслеживай — если false positives, подними до 8-10. |
-| `max_power_w` | 5.0 | Проверь по datasheet Keithley 2604B (100W per channel) и по thermal budget твоего нагревателя (обычно 100-500 mW). 5W — разумный cap. |
-| `max_voltage_v` / `max_current_a` | 40 / 1.0 | 40V × 1A = 40W > 5W max_power_w. Это OK (защита многослойная). Можно ужесточить: если I<100 mA нормально, поставь 0.2A. |
+| `max_power_w` | 5.0 | Только host-side target cap: вывести из thermal budget нагревателя/криостата. Он исчезает при смерти хоста и не является автономным energy bound. |
+| `max_voltage_v` / `max_current_a` | 40 / 1.0 | Instrument compliance ограничивает применимый envelope нагрузки/прибора, но не гарантирует 5 W и не ограничивает накопленную энергию после смерти хоста. Ужесточить по реальному V/I диапазону. |
 | `require_keithley_for_run` | true | В mock должен быть false, в production — true. |
 
 ### Что **не** менять без физического обоснования
@@ -334,8 +339,11 @@ all_temp:      [Т1..Т20 без Т4, Т8]
 
 **1.2 `keithley_overpower`**
 ```yaml
-# Сейчас: 4W alarm, 4.5W interlock, 5W hardcap
+# Сейчас: 4W host alarm, 4.5W host interlock, 5W host target hardcap
 ```
+Все три порога реализованы на хосте и не переживают полную смерть процесса;
+это operating guards, а не независимый host-death cutout.
+
 **Что учесть:** для P=const feedback на маленьком нагревателе (типично
 30-100 mW) порог 4W никогда не сработает. Подгони под реальный
 рабочий диапазон: если рабочая мощность <200 mW, alarm на 500 mW.
@@ -467,8 +475,7 @@ doc. Это снимет "магические числа" для следующ
 
 - `config/safety.yaml` — инварианты запуска, rate-limit, source cap
 - `config/interlocks.yaml` — жёсткие отключения
-- `config/alarms.yaml` — **legacy, не трогать**
-- `config/alarms_v3.yaml` — основная alarm система
+- `config/alarms_v3.yaml` — основная и единственная alarm система
 - `config/physical_alarms.yaml` — CooldownAlarm + VacuumGuard
 - `config/experiment_templates/*.yaml` — setpoints через custom_fields
 - `config/notifications.yaml` — Telegram bot token, chat IDs
@@ -481,7 +488,6 @@ doc. Это снимет "магические числа" для следующ
 
 - `src/cryodaq/core/safety_manager.py` — FSM + preconditions
 - `src/cryodaq/core/interlock.py` — Interlock Engine
-- `src/cryodaq/core/alarm.py` — Alarm Engine v1 (legacy)
 - `src/cryodaq/core/alarm_v2.py` — AlarmEvaluator + StateManager
 - `src/cryodaq/core/alarm_config.py` — загрузчик YAML v3
 - `src/cryodaq/core/alarm_providers.py` — ExperimentPhaseProvider,

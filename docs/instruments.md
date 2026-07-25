@@ -121,36 +121,68 @@ print('Found:', dev.serial_number if dev else None)
 **Host-side P=const режим:** текущая реализация держит `P = const`
 программным циклом на хосте.
 
-**TSP dead-man watchdog (firmware backstop):** прошивочный бэкстоп
+**TSP late-pet watchdog:** программная TSP-проверка дедлайна
 под host SafetyManager, выбирается оператором через
 `config/instruments.yaml` → `keithley.watchdog.mode`:
 
 | mode | поведение на connect | покрытие |
 |------|----------------------|----------|
-| `off` (по умолчанию) | TSP-скрипт не загружается; host SafetyManager — единственный авторитет; байт-идентичный поток команд | только host |
-| `best_effort` | взвести на connect; при неудаче взвода — лог CRITICAL и продолжить host-only (fail-OPEN на слое watchdog) | stall-recovery + latch + reconcile |
-| `required` | взвести на connect; при неудаче взвода — `connect()` бросает исключение → прибор недоступен → держится SAFE_OFF (fail-CLOSED) | stall-recovery + latch + reconcile |
+| `off` (дефолт драйвера) | TSP-скрипт не загружается; host SafetyManager — единственный авторитет; байт-идентичный поток команд | только host |
+| `best_effort` | активировать на connect; CRITICAL сообщает, что автономной защиты нет | late-pet stall-recovery + latch + reconcile |
+| `required` | требует `cryodaq_wdog_autonomous == 1`; v3 сообщает 0, поэтому `connect()` бросает → прибор недоступен → SAFE_OFF | зарезервирован для доказанной автономной реализации |
 
 Легаси-алиас: `enabled: true` → `best_effort`, `enabled: false` → `off`
 (при наличии обоих ключей выигрывает `mode`).
 
 Иерархия покрытия (честно):
 - `off` — защита только на хосте.
-- `best_effort` / `required` (текущий механизм) — бэкстоп на
+- `best_effort` (текущий механизм) — проверка
   **stall-recovery** (запоздавший pet убивает выходы + защёлкивает
   trip для reconcile). Полную смерть хоста этот механизм **не**
   покрывает: `cryodaq_wdog_run()` только взводит и возвращается (не
   крутит цикл — иначе занял бы single-threaded FIFO), а дедлайн
   проверяется внутри `cryodaq_wdog_pet()` на каждом polling-тике.
-- Полноценный dead-man (автономный цикл / trigger.timer, срабатывающий
-  без вызовов хоста) — единственный оставшийся **bench-verified**
-  апгрейд. До него host-death прикрыт crash-recovery force-OFF на
-  следующем connect (`keithley_2604b.py`).
+- `required` не принимает активный late-pet checker за автономную защиту:
+  он читает отдельный bit и fail-closed отказывает с v3.
+- Предыдущий вариант автономного таймера был не «непроверенным», а
+  документированно некорректным: использовал отсутствующий атрибут timer,
+  нулевой stimulus и неподходящий `SOURCE_IDLE` в source action. Он удалён.
+- Полный host-death остаётся без автономного TSP-покрытия. Force-OFF при
+  следующем connect — восстановление, а не защита во время смерти хоста.
+  Предпочтительный финальный элемент — независимый защёлкивающийся cutout/
+  interlock с анализом общих отказов. Внутренний SMU-прототип допустим только
+  как гипотеза по документированному API и требует стендового доказательства.
+  Output-enable/digital-I/O facility 2604B по reference manual не подходит для
+  safety circuits и не должна управлять safety interlock; нужен отдельный
+  application-appropriate safety circuit.
 
-Автономный механизм прошивки (например, `trigger.timer`, срабатывающий
-без вызовов хоста) **ещё не реализован и не проверен на стенде**;
-`required` гейтит только на host-наблюдаемых взводе и latched-trip, не
-на доказанном поведении firmware-таймера.
+`SOURCE_IDLE` возвращает источник к idle level и не равен открытию реле/OFF.
+Ни внутренний status bit, ни `source.output` не являются независимым
+доказательством отсутствия энергии на клеммах.
+
+Лимит 5 W — host-only target cap и исчезает вместе с хостом. Приборные
+`limitv=40 V` и `limiti=1 A` ограничивают рабочую точку применимым envelope
+нагрузки и прибора, но не гарантируют ≤5 W и не ограничивают накопленную
+энергию при длительной подаче после смерти хоста.
+
+`watchdog.timeout_s` принимает только конечное число от 1 до 300 секунд
+(boolean, строка, NaN/Inf и значения вне диапазона валят загрузку конфига).
+TSP `os.time()` имеет секундную гранулярность; сравнение строгое `elapsed >
+timeout`, поэтому равенство дедлайну ещё не trip. Практический timeout должен
+быть не меньше `2 * poll_interval_s`; меньший безопасно отклоняется не всегда,
+но даёт явный warning о возможном ложном late-pet trip.
+
+Version/active/tripped/autonomous readback принимают только конечные точные
+protocol-значения (version 3; flags 0/1). До upload только буквальный TSP
+`nil` означает свежий прибор; malformed/NaN/Inf/out-of-domain сохраняют
+неизвестную latch-улику и запрещают upload. Найденный latch также не стирается
+на connect: RUN блокируется сразу, SafetyManager латчит FAULT, а operator fault
+ack после повторного verified both-output OFF явно потребляет latch и
+реактивирует late-pet check. Если прибор power-cycle вернул `nil`, сохранённый
+host pending-bit разрешает тот же audited ack/re-upload path. В `required`
+текущий v3 реактивировать нельзя: выбрать `best_effort` и явно переподключить
+прибор. `off` допустим только как осознанное отключение всего TSP-path после
+фиксации evidence, а не как способ «успешно» consume latch.
 
 **Disconnect требует emergency_off first** — автоматизировано в
 engine, но при ручном вытаскивании USB-кабеля лучше сначала

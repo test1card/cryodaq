@@ -1,0 +1,9 @@
+name: cryodaq
+channels:
+  - conda-forge
+dependencies:
+  # Python's sqlite3 extension is linked to this pinned safe SQLite version.
+  # SQLite 3.51.3 fixed the March-2026 WAL-reset corruption bug.
+  - python=3.14
+  - sqlite=3.53.2
+  - pip

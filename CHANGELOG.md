@@ -7,6 +7,95 @@
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Активирован end-to-end контракт авторитетного operator snapshot: отдельный
+  observational PUB topic `operator.snapshot`, ровно два bytes-frame и
+  канонический UTF-8 JSON строгой схемы snapshot v1. Единственный engine-owned
+  publisher формирует complete common-cut; launcher/standalone GUI используют
+  bounded ingress и GUI-thread Store. Pure replay session совместим с той же
+  схемой и conservative unavailable semantics, но production `ReplayEngine`
+  wiring остаётся открытым reviewed slice. Кодек ограничивает payload до 8 MiB
+  и не выдаёт instrument/control authority.
+- Добавлена каноническая descriptor authority для стабильной идентичности
+  приборов и каналов от acquisition и SQLite до archive/replay/report/GUI.
+  Machine-local manifest является whole-file replacement, проходит строгую
+  roster/binding validation и блокирует startup при неполной или противоречивой
+  конфигурации. Passive extension registry и ASC reference driver не могут
+  приобрести hazardous source authority через duck typing.
+- Добавлена точная Linux source-mode qualification для короткого mock-stack:
+  sealed exact-SHA source/config snapshot, один пассивный LS218 fixture,
+  locked process observer, subreaper-owned cleanup, bounded launcher log и две
+  соседние periodic deliveries через замену assistant с joined durable
+  receipts. Эта software evidence не заменяет Windows ONEDIR, 12/72-hour или
+  physical-hardware gates.
+- Добавлены полный отчёт Montana, воспроизводимые detailed/important
+  architecture SVG и расширенный лабораторный checklist с явной границей между
+  CI/mock/WSL, real-Windows, dummy-load и физической приёмкой.
+- Добавлено версионирование ZMQ/REST-протокола (`PROTOCOL_VERSION = 1`):
+  каждый REP-ответ получает дополнительное поле `proto`; read-only команда
+  `protocol_version` возвращает `{ok, proto, server, app_version}`, а
+  `GET /api/version` — `{proto, server, app_version}`. Роль REP-сервера задаётся
+  явно и не зависит от настраиваемого адреса. GUI умеет запрашивать версию
+  engine и assistant, один раз за время жизни клиента предупреждает о более
+  новой версии сервера и никогда не блокирует оператора. Политика совместимости
+  описана в `docs/protocol.md`.
+
+### Changed
+
+- Montana перераспределяет lifecycle и persistence authority из крупных
+  composition roots в узкие проверяемые владельцы: persistence-before-
+  publication, exact process identity, bounded cancellation/teardown,
+  fail-closed configuration и verified-OFF остаются обязательными. Report и
+  periodic-delivery workers являются observational, изолированы от engine event
+  loop и не могут управлять приборами.
+- GUI остаётся панорамной operator-centric поверхностью: summary/POD только
+  дополняет dashboard, acknowledged active hazards сохраняются в evidence,
+  stale/disconnected truth не превращается в optimistic green, а все новые UI
+  изменения проходят co-versioned `docs/design-system/` gate.
+
+- Квитирование Alarm Engine v2 переведено на точную идентичность отдельного
+  срабатывания. `GET /api/v1/alarms` теперь возвращает
+  `engine_instance_id`, `snapshot_revision` и `active[*].activation_id`
+  (поле `acknowledged_by` по-прежнему удаляется), а
+  `POST /api/v1/alarms/{id}/ack` требует JSON с `engine_instance_id` и
+  `activation_id`; опциональный `reason` ограничен 256 символами. Это
+  намеренно несовместимое изменение REST-клиента: идентичность надо брать из
+  принятого GET-снимка и передавать без подстановки «текущего» срабатывания.
+  Запоздалый запрос, прежний экземпляр движка и name-only ACK отказывают
+  fail-closed, поэтому повторное срабатывание нельзя квитировать старым
+  действием. ACK меняет только операторскую/звуковую ответственность за
+  внимание: он не снимает hazard, не выполняет safety recovery и не выдаёт
+  управляющую команду; строка свидетельств остаётся видимой до авторитетного
+  сброса условия.
+- TSP watchdog v3 исправляет safety-описание и поведение: удалён прежний
+  автономный timer-path, использовавший недопустимые по reference manual
+  атрибуты/action. Скрипт теперь явно сообщает `cryodaq_wdog_autonomous=0` и
+  реализует только late-pet stall-recovery. `required` fail-closed отказывает
+  с v3; `best_effort` один раз пишет CRITICAL о нулевом full-host-death
+  покрытии. Полный host-death OFF, независимое измерение terminal V/I/P и
+  внешний latching cutout остаются физическими гейтами. 5 W уточнён как
+  host-only target cap, а не сохраняющийся после смерти хоста energy bound.
+  Все protocol readback теперь принимают только конечные точные значения
+  (version=3, flags=0/1); malformed pre-upload latch не разрешает стирающую
+  upload-операцию. Trip evidence потребляется только явным operator fault-ack
+  после повторного verified both-output OFF, затем late-pet check
+  реактивируется. До ack RUN блокируется без ожидания monitor tick; power-cycle
+  `nil` обрабатывается тем же явным recovery path.
+- Alarm Engine v1 (`src/cryodaq/core/alarm.py`, `config/alarms.yaml`) удалён.
+  `keithley_overpower` и `disk_space_warning`/`disk_space_critical` в
+  `config/alarms_v3.yaml` ссылались на несуществующие короткие имена каналов
+  (`smua_power`/`smub_power`, `system_disk_gb`) и никогда не срабатывали —
+  исправлены на реальные каналы (`Keithley_1/smua|smub/power`,
+  `system/disk_free_gb`), гистерезис перенесён из retired v1-правил без
+  изменения порогов. `PeriodicReporter`, `TelegramCommandBot`, query-agent
+  `AlarmAdapter` переведены на `AlarmStateManager` (alarm v2); движок теперь
+  republish'ит `analytics/alarm_count` из v2 на каждом тике, чтобы
+  `AdaptiveThrottle` не потерял сигнал "есть активная тревога, не
+  прореживать данные". Один синтаксис правил, один конфиг.
+
 ## [0.64.1] — 2026-07-08 — актуализация документации и гигиена репозитория
 
 Документационный patch-релиз: вся трекаемая документация приведена к
@@ -223,7 +312,7 @@ config-когерентность). Три из четырёх ревью наш
 ## [0.62.0] — 2026-07-07 — TSP watchdog: operator-selected mode (off | best_effort | required)
 
 Phase 5 распаркована без стенда: бинарный `watchdog.enabled` заменён на
-выбираемый оператором режим прошивочного dead-man бэкстопа Keithley 2604B.
+выбираемый оператором режим TSP late-pet проверки Keithley 2604B.
 Host-side семантика каждого режима полностью реализована и покрыта
 тестами; дефолт `off` байт-идентичен прежнему поведению. Волна прошла
 внешнее ревью (1 HIGH найден и закрыт с re-check PASS).
@@ -262,15 +351,15 @@ Host-side семантика каждого режима полностью ре
   last_pet: опоздавший pet убивает выходы и защёлкивает trip, а не
   прощает себя). Честное покрытие задокументировано (docs/instruments.md,
   dev-индекс модулей): armed-режимы дают stall-recovery kill + latch + reconcile
-  SafetyManager; полную смерть хоста прикрывает crash-recovery force-OFF
-  на следующем connect; автономный dead-man (trigger.timer) — единственный
-  оставшийся bench-verified апгрейд.
+  SafetyManager; полную смерть хоста этот путь не покрывает. Последующий
+  crash-recovery force-OFF — восстановление, а не host-death protection.
 
 ### Known Issues
 
-- Прошивочный run-механизм не проверен на стенде; `required` гейтит на
-  host-наблюдаемых взводе и защёлке. Bench-план: docs (lab checklist,
-  Phase 7).
+- На момент релиза autonomous path ошибочно считался только bench-pending.
+  Позднейшая проверка reference manual установила, что тот timer-path был
+  документированно некорректен; исправление и новый fail-closed contract — в
+  Unreleased. Bench-план разделён на A8a–A8e.
 
 ### Test baseline
 
@@ -611,12 +700,12 @@ edge-фиксы вошли отдельными коммитами.
   через backend’овый `baseline.json`, delta к эталону; компактный verdict-badge
   (НОРМА / ДЕГРАДАЦИЯ / НЕТ ДАННЫХ) в `Аналитика`, скрыт при выключенной фиче или
   без закреплённого эталона (3ef27cb).
-- **Плумбинг Keithley TSP dead-man watchdog (inert, default-OFF).**
-  `tsp/cryodaq_wdog.lua` — чистый watchdog для обоих SMU-каналов: по пропущенному
+- **Плумбинг Keithley TSP late-pet watchdog (inert, default-OFF).**
+  `tsp/cryodaq_wdog.lua` — проверка для обоих SMU-каналов: поздний pet после
   deadline гасит оба выхода и латчит `cryodaq_wdog_tripped`. Драйвер получает
   arm-on-connect / pet-on-poll / disarm-on-stop под флагом
   `keithley.watchdog.enabled` (default false); при выключенном флаге поток команд
-  байт-в-байт идентичен прежнему (test-proven). SafetyManager сверяет firmware-trip
+  байт-в-байт идентичен прежнему (test-proven). SafetyManager сверяет TSP-trip
   в `FAULT_LATCHED`, так что сработавший watchdog нельзя молча пере-взвести.
   Аппаратного взаимодействия нет; go-live — отдельная bench-фаза (195f6f0).
 
@@ -678,10 +767,10 @@ edge-фиксы вошли отдельными коммитами.
 - **Windows frozen-build smoke для регенерированного lock — manual gate pending.**
   Проверка RAG lancedb-import + parquet `tz=UTC` на замороженной Windows-сборке
   ещё не прогнана; закрыть до следующего релиза.
-- **TSP-watchdog inert за `keithley.watchdog.enabled=false`.** Go-live bench-gated:
-  run-loop владеет однопоточным TSP-интерпретатором, pet’ы нельзя обслужить из
-  того же FIFO — нужна `trigger.timer` / background-script переработка
-  (задокументирована в header `tsp/cryodaq_wdog.lua`).
+- **TSP-watchdog inert за `keithley.watchdog.enabled=false`.** Полный host-death
+  OFF не был реализован. Позднейшая проверка reference manual отвергла прежний
+  timer-проект; актуальный documented-API redesign и внешний final element
+  описаны в Unreleased и lab checklist.
 - **Hardlink-escape на truncating csv / `.340` экспортах — принято.** Экспортный
   каталог operator-controlled; риск ограничен доверенным периметром.
 
