@@ -11,10 +11,18 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 import uvicorn
-from playwright.sync_api import Browser, sync_playwright
 
 import cryodaq.web.server as server
 from cryodaq.drivers.base import ChannelStatus, Reading
+
+# Playwright is not a declared dependency and is absent from CI, so importing it
+# at module scope turned this file into a collection error on every partition.
+# Skipping keeps the harness usable where a browser exists; the contract itself
+# is held everywhere by tests/web/test_dashboard_unavailable_contract.py.
+sync_playwright = pytest.importorskip(
+    "playwright.sync_api",
+    reason="browser harness (DEFERRED-BROWSER-01); contract guarded by test_dashboard_unavailable_contract.py",
+).sync_playwright
 
 
 @asynccontextmanager
@@ -93,7 +101,7 @@ def dashboard_payload(monkeypatch) -> None:
 
 
 @contextmanager
-def _browser() -> Browser:
+def _browser():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
