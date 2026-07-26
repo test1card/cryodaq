@@ -146,13 +146,12 @@ from cryodaq.drivers.contracts import (
     is_issued_runtime_binding,
 )
 from cryodaq.drivers.registry import (
-    KEITHLEY_2604B_SOURCE_BINDING,
-    REVIEWED_SOURCE_SPECS,
     DriverConstructionContext,
     DriverRegistryError,
     ReviewedSourceBinding,
     ValidatedInstrumentConfig,
     construct_driver,
+    is_reviewed_source_binding,
     validate_instrument_entries,
 )
 from cryodaq.engine_wiring.operator_snapshot_production import build_operator_snapshot_publication_service
@@ -2111,13 +2110,12 @@ def _load_drivers(
     except DriverRegistryError as exc:
         raise DriverRegistryError(f"{config_path}: {exc}") from exc
 
-    canonical_source_spec = REVIEWED_SOURCE_SPECS["keithley_2604b"]
-    reviewed_configs = tuple(config for config in validated if config.spec is canonical_source_spec)
+    reviewed_configs = tuple(config for config in validated if config.spec.reviewed_source_binding is not None)
     if len(reviewed_configs) > 1:
         names = ", ".join(config.name for config in reviewed_configs)
         raise DriverRegistryError(
             f"{config_path}: instruments define multiple reviewed sources ({names}); "
-            "SafetyManager supports exactly zero or one"
+            "SafetyManager supports exactly zero or one reviewed source"
         )
 
     instrument_configs: list[InstrumentConfig] = []
@@ -2145,16 +2143,17 @@ def _load_drivers(
             )
         )
 
-        if config.spec is canonical_source_spec:
-            binding = config.spec.reviewed_source_binding
+        binding = config.spec.reviewed_source_binding
+        if binding is not None:
             if (
-                binding is not KEITHLEY_2604B_SOURCE_BINDING
+                not is_reviewed_source_binding(binding)
+                or binding.driver_type != config.spec.type_name
                 or not isinstance(driver, ControlledSource)
                 or not isinstance(driver, VerifiedOffSource)
             ):
                 raise DriverRegistryError(
                     f"{config_path}: instruments[{index}] ({config.name!r}, "
-                    "type 'keithley_2604b') violates the reviewed source contract"
+                    f"type {config.spec.type_name!r}) violates the reviewed source contract"
                 )
             reviewed_source = driver
             reviewed_binding = binding

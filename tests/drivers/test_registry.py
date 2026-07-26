@@ -128,7 +128,7 @@ def test_reviewed_source_requires_explicit_binding() -> None:
 
 def test_reviewed_source_rejects_arbitrary_nonempty_binding() -> None:
     fake = ReviewedSourceBinding("source", "some.module", "Adapter", 1)
-    with pytest.raises(ValueError, match="exact typed Keithley safety binding"):
+    with pytest.raises(ValueError, match="binding from the reviewed-source roster"):
         DriverSpec(
             type_name="source",
             module="cryodaq.drivers.instruments.source",
@@ -149,7 +149,7 @@ def test_reviewed_source_rejects_arbitrary_nonempty_binding() -> None:
 
 def test_reviewed_source_rejects_equal_but_unreviewed_binding_copy() -> None:
     binding_copy = replace(KEITHLEY_2604B_SOURCE_BINDING)
-    with pytest.raises(ValueError, match="exact typed Keithley safety binding"):
+    with pytest.raises(ValueError, match="binding from the reviewed-source roster"):
         replace(
             REVIEWED_SOURCE_SPECS["keithley_2604b"],
             reviewed_source_binding=binding_copy,

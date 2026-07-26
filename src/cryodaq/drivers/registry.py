@@ -2,7 +2,7 @@
 
 The registry is an allowlist: it performs no entry-point, filesystem, or
 module-name discovery.  Structural protocol conformance never grants source
-authority; only the exact reviewed binding below can do so.
+authority; only a binding on the reviewed-source roster below can do so.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeGuard
 
 from cryodaq.drivers.base import InstrumentDriver
 from cryodaq.drivers.contracts import (
@@ -129,6 +129,24 @@ KEITHLEY_2604B_SOURCE_BINDING: Final = ReviewedSourceBinding(
     adapter_class="SafetyManager",
     contract_version=1,
 )
+
+# The explicit roster of bindings that passed hazardous-source review.  A lab
+# adopts another actuator by putting its binding through the same review and
+# adding it here; no identity comparison anywhere else has to be relaxed.
+REVIEWED_SOURCE_BINDINGS: Final[Mapping[str, ReviewedSourceBinding]] = MappingProxyType(
+    {binding.driver_type: binding for binding in (KEITHLEY_2604B_SOURCE_BINDING,)}
+)
+
+
+def is_reviewed_source_binding(binding: object) -> TypeGuard[ReviewedSourceBinding]:
+    """Report roster membership by identity.
+
+    Membership is deliberately ``is``-based: a binding that merely compares
+    equal to a rostered one was never itself reviewed and never inherits the
+    authority of the object that was.
+    """
+
+    return any(binding is member for member in REVIEWED_SOURCE_BINDINGS.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,8 +266,10 @@ class DriverSpec:
         if not source_capabilities.issubset(capabilities):
             raise ValueError("reviewed source requires controlled-source and verified-OFF capabilities")
         binding = self.reviewed_source_binding
-        if binding is not KEITHLEY_2604B_SOURCE_BINDING or binding.driver_type != self.type_name:
-            raise ValueError("reviewed source requires the exact typed Keithley safety binding")
+        if not is_reviewed_source_binding(binding):
+            raise ValueError("reviewed source requires a binding from the reviewed-source roster")
+        if binding.driver_type != self.type_name:
+            raise ValueError("reviewed source requires a roster binding for its own driver type")
 
 
 def _identity_normalizer(values: dict[str, object], _path: str) -> dict[str, object]:
