@@ -2313,7 +2313,9 @@ false_green_pairs:
     runtime_prevention_id: ALARM-UNKNOWN-AS-CLEAR-033
     guard: tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive
     ci_partition: core
-    red_evidence: the_real_shipped_config_reproduction_exercised_the_composite_evaluator_only_so_a_green_instance_guard_would_not_prove_that_threshold_rate_stale_phase_and_all_composite_exception_paths_cannot_turn_unknown_into_clear_pending_immutable_candidate_capture
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json
+      sha256: sha256:52f86f79f11b3329af0f7040d62971be70a6b0b594855486923b450d3a69e576
     green_evidence: pending
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
     status: closed
@@ -2322,8 +2324,8 @@ false_green_pairs:
     guard: tests/core/test_alarm_config_validation.py::test_composite_sub_condition_phase_elapsed_s_below_raises
     ci_partition: core
     red_evidence:
-      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
-      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+      locator: red-reproduction:governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json
+      sha256: sha256:d4940d7e155450a6e089de024d3f700f40d2f6ee44947e4c2afb58e2dedefd99
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -2339,8 +2341,8 @@ false_green_pairs:
     guard: tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises
     ci_partition: core
     red_evidence:
-      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
-      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+      locator: red-reproduction:governance/red_reproductions/alarm_mixed_selector_027.json
+      sha256: sha256:54e278102b95c6a4e9e2a7da81dd2420fcbf6e4524bfef85a887fb594ba1dd94
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -4199,8 +4201,8 @@ records:
       - node: tests/core/test_alarm_config_validation.py::test_rate_additional_condition_phase_elapsed_s_above_still_loads
         ci_partition: core
     red_evidence:
-      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
-      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+      locator: red-reproduction:governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json
+      sha256: sha256:d4940d7e155450a6e089de024d3f700f40d2f6ee44947e4c2afb58e2dedefd99
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -4234,8 +4236,8 @@ records:
       - node: tests/core/test_alarm_config_validation.py::test_single_explicit_channels_selector_still_loads
         ci_partition: core
     red_evidence:
-      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
-      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+      locator: red-reproduction:governance/red_reproductions/alarm_mixed_selector_027.json
+      sha256: sha256:54e278102b95c6a4e9e2a7da81dd2420fcbf6e4524bfef85a887fb594ba1dd94
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -4757,5 +4759,7 @@ records:
       historical narrative and local red-before reproduction are not immutable closure evidence. Capturing a sealed red
       artifact now would require deliberately publishing a failing candidate, so this runtime record and its linked
       false-green pair must remain open.
-    red_evidence: historical_ef9b81ec_reproduced_a_CRITICAL_shipped_vacuum_loss_cold_alarm_clearing_after_an_evaluator_exception_while_c1ff8597_and_a3859772_record_the_prior_threshold_and_composite_NaN_instances_pending_immutable_candidate_capture
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_033.json
+      sha256: sha256:63feae2296aeddd53acb553244a4ad653c2a1e6064b3969e9c1df99a93188a75
     green_evidence: pending

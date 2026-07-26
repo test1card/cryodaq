@@ -794,6 +794,23 @@ def test_expected_receipt_count_rejects_disagreeing_totals() -> None:
         _expected_receipt_count(output, suite="gui")
 
 
+def _reopen_history_bound_closures(registry_path: Path) -> None:
+    """Reopen entries whose red evidence names Git history a fixture cannot hold."""
+
+    payload = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
+    for group, key in (("records", "red_evidence"), ("false_green_pairs", "red_evidence")):
+        for entry in payload.get(group, ()):
+            evidence = entry.get(key)
+            locator = evidence.get("locator") if isinstance(evidence, dict) else None
+            if isinstance(locator, str) and locator.startswith("red-reproduction:"):
+                entry["status"] = "open"
+                entry[key] = "fixture_local_reopened_pending_immutable_capture"
+                entry["green_evidence"] = "pending"
+                entry.pop("guard_source_blobs", None)
+                entry.pop("closure_semantics_sha256", None)
+    registry_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 def test_exported_candidate_runner_emits_structural_failure_receipt_after_environment_sanitization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -807,10 +824,22 @@ def test_exported_candidate_runner_emits_structural_failure_receipt_after_enviro
         "tools/ci_guard_execution.py",
         "tools/governance_contract.py",
         "governance/agent_preventions.yaml",
+        "governance/red_reproductions/alarm_mixed_selector_027.json",
+        "governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json",
+        "governance/red_reproductions/alarm_unknown_as_clear_033.json",
+        "governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json",
     ):
         destination = repository / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes((ROOT / relative).read_bytes())
+
+    # The production registry closes records on red-reproduction receipts that name
+    # THIS project's Git history. That history cannot exist in a fresh fixture repo,
+    # so those closures are unverifiable here by construction. Reopen them in the
+    # fixture only: this test is about the runner emitting a structural failure
+    # receipt, not about the governance corpus, and a registry it cannot validate
+    # would mask the behaviour under test.
+    _reopen_history_bound_closures(repository / "governance" / "agent_preventions.yaml")
     failure = repository / "tests" / "path with whitespace" / "test_failure.py"
     failure.parent.mkdir(parents=True)
     failure.write_text(

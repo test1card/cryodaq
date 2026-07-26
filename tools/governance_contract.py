@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,11 @@ _PENDING = {"pending", "pending_immutable_capture"}
 _PLATFORMS = {"posix", "windows"}
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT_OBJECT_ID = re.compile(r"[0-9a-f]{40}")
-_IMMUTABLE_LOCATOR = re.compile(r"(?:git|tree|github-run|artifact|bundle):\S+")
+_IMMUTABLE_LOCATOR = re.compile(r"(?:git|tree|github-run|artifact|bundle|red-reproduction):\S+")
+_RED_REPRODUCTION_LOCATOR = re.compile(
+    r"red-reproduction:governance/red_reproductions/[A-Za-z0-9][A-Za-z0-9_.-]*\.json"
+)
+_RED_REPRODUCTION_PROVENANCE = "local-executed-red-reproduction; lower provenance than sealed hosted CI"
 _EXPECTED_STATUS_DEFINITIONS = {
     "open": "Required correction or evidence is incomplete.",
     "reopened": "A previously disposed invariant lost, weakened, skipped, or misbound enforcement.",
@@ -281,6 +287,206 @@ def _git_blob_id(raw: bytes) -> str:
 
     framed = f"blob {len(raw)}\0".encode("ascii") + raw
     return hashlib.sha1(framed).hexdigest()
+
+
+def _git_object_id(root: Path, revision: str, *, kind: str, field: str) -> str:
+    """Resolve one locally available Git object or fail without trusting a claim."""
+
+    revision_to_resolve = revision if ":" in revision else f"{revision}^{{{kind}}}"
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", revision_to_resolve],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=False,
+    )
+    resolved = completed.stdout.decode("ascii", errors="replace").strip()
+    if completed.returncode != 0 or _GIT_OBJECT_ID.fullmatch(resolved) is None:
+        raise GovernanceContractError(f"{field} does not resolve to a local Git {kind} object")
+    typed = subprocess.run(
+        ["git", "cat-file", "-e", f"{resolved}^{{{kind}}}"],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        check=False,
+    )
+    if typed.returncode != 0:
+        raise GovernanceContractError(f"{field} does not resolve to a local Git {kind} object")
+    return resolved
+
+
+def _decode_receipt_bytes(value: Any, digest: Any, field: str) -> bytes:
+    if not isinstance(value, str) or not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+        raise GovernanceContractError(f"{field} bytes or SHA-256 digest is invalid")
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise GovernanceContractError(f"{field} bytes are not valid base64") from exc
+    actual = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+    if actual != digest:
+        raise GovernanceContractError(f"{field} digest does not match its recorded bytes")
+    return raw
+
+
+def _validate_red_reproduction_evidence(
+    value: Any,
+    *,
+    entry_id: str,
+    guard_nodes: set[str],
+    root: Path,
+) -> None:
+    """Validate an executed local red receipt bound to Git and current guard bytes.
+
+    This is intentionally a local-execution provenance tier, not a substitute
+    for the sealed hosted-CI green artifact required to close a prevention.
+    """
+
+    if not isinstance(value, Mapping) or not isinstance(value.get("locator"), str):
+        return
+    locator = value["locator"]
+    if not locator.startswith("red-reproduction:"):
+        return
+    if _RED_REPRODUCTION_LOCATOR.fullmatch(locator) is None:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction locator is invalid")
+    if set(value) != {"locator", "sha256"}:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction evidence shape is not exact")
+    digest = value["sha256"]
+    if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt digest is invalid")
+    receipt_path = root / locator.removeprefix("red-reproduction:")
+    try:
+        receipt_bytes = receipt_path.read_bytes()
+    except OSError as exc:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt is unavailable") from exc
+    if f"sha256:{hashlib.sha256(receipt_bytes).hexdigest()}" != digest:
+        raise GovernanceContractError(f"{entry_id}.red_evidence receipt bytes digest does not match its locator")
+    try:
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt is not valid JSON") from exc
+
+    required = {
+        "schema_version",
+        "record_ids",
+        "provenance",
+        "defective_commit",
+        "defective_tree",
+        "defective_source_blobs",
+        "guard_blobs",
+        "command",
+        "environment",
+        "python_version",
+        "exit_code",
+        "guard_nodes",
+        "failed_nodes",
+        "failure_signatures",
+        "stdout_bytes_base64",
+        "stdout_sha256",
+        "stderr_bytes_base64",
+        "stderr_sha256",
+    }
+    if not isinstance(receipt, Mapping) or set(receipt) != required or receipt["schema_version"] != 1:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt shape is not exact")
+    record_ids = receipt["record_ids"]
+    if (
+        not isinstance(record_ids, list)
+        or record_ids != sorted(set(record_ids))
+        or any(not isinstance(item, str) or _ID.fullmatch(item) is None for item in record_ids)
+        or entry_id not in record_ids
+    ):
+        raise GovernanceContractError(f"{entry_id}.red_evidence receipt is not bound to this prevention id")
+    if receipt["provenance"] != _RED_REPRODUCTION_PROVENANCE:
+        raise GovernanceContractError(f"{entry_id}.red_evidence receipt provenance is not explicitly local-executed")
+    commit = receipt["defective_commit"]
+    tree = receipt["defective_tree"]
+    if not isinstance(commit, str) or not isinstance(tree, str) or _GIT_OBJECT_ID.fullmatch(commit) is None:
+        raise GovernanceContractError(f"{entry_id}.red_evidence defective commit is invalid")
+    resolved_commit = _git_object_id(root, commit, kind="commit", field=f"{entry_id}.red_evidence defective commit")
+    resolved_tree = _git_object_id(root, resolved_commit, kind="tree", field=f"{entry_id}.red_evidence defective tree")
+    if tree != resolved_tree:
+        raise GovernanceContractError(f"{entry_id}.red_evidence defective tree does not match its defective commit")
+        raise GovernanceContractError(f"{entry_id}.red_evidence defective tree does not match its defective commit")
+    source_blobs = receipt["defective_source_blobs"]
+    if not isinstance(source_blobs, Mapping) or not source_blobs:
+        raise GovernanceContractError(f"{entry_id}.red_evidence defective source blobs are missing")
+    for path, blob in source_blobs.items():
+        if (
+            not isinstance(path, str)
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or not isinstance(blob, str)
+            or _GIT_OBJECT_ID.fullmatch(blob) is None
+        ):
+            raise GovernanceContractError(f"{entry_id}.red_evidence defective source blob binding is invalid")
+        resolved_blob = _git_object_id(
+            root,
+            f"{resolved_commit}:{path}",
+            kind="blob",
+            field=f"{entry_id}.red_evidence defective source blob {path}",
+        )
+        if blob != resolved_blob:
+            raise GovernanceContractError(f"{entry_id}.red_evidence defective source blob does not match its tree")
+    receipt_guard_blobs = receipt["guard_blobs"]
+    expected_paths = {node.split("::", 1)[0] for node in guard_nodes}
+    if not isinstance(receipt_guard_blobs, Mapping) or set(receipt_guard_blobs) != expected_paths:
+        raise GovernanceContractError(f"{entry_id}.red_evidence receipt guard blobs do not bind its guard files")
+    for path, expected_blob in receipt_guard_blobs.items():
+        if not isinstance(expected_blob, str) or _GIT_OBJECT_ID.fullmatch(expected_blob) is None:
+            raise GovernanceContractError(f"{entry_id}.red_evidence receipt guard blob is invalid")
+        try:
+            actual_blob = _git_blob_id((root / path).read_bytes())
+        except OSError as exc:
+            raise GovernanceContractError(f"{entry_id}.red_evidence registry guard file is unavailable") from exc
+        if actual_blob != expected_blob:
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
+            )
+    command = receipt["command"]
+    environment = receipt["environment"]
+    if (
+        not isinstance(command, list)
+        or not command
+        or any(not isinstance(item, str) or not item for item in command)
+        or not isinstance(environment, Mapping)
+        or not environment
+        or any(not isinstance(key, str) or not isinstance(item, str) for key, item in environment.items())
+        or not isinstance(environment.get("PYTHONPATH"), str)
+        or not isinstance(receipt["python_version"], str)
+        or not receipt["python_version"].strip()
+    ):
+        raise GovernanceContractError(f"{entry_id}.red_evidence command or environment is not exact")
+    if not isinstance(receipt["exit_code"], int) or receipt["exit_code"] == 0:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red reproduction exit code indicates success")
+    receipt_nodes = receipt["guard_nodes"]
+    failed_nodes = receipt["failed_nodes"]
+    if (
+        not isinstance(receipt_nodes, list)
+        or receipt_nodes != sorted(set(receipt_nodes))
+        or not receipt_nodes
+        or not set(receipt_nodes) <= guard_nodes
+        or failed_nodes != receipt_nodes
+    ):
+        raise GovernanceContractError(
+            f"{entry_id}.red_evidence failure signatures do not name selected registered guard nodes"
+        )
+    stdout = _decode_receipt_bytes(receipt["stdout_bytes_base64"], receipt["stdout_sha256"], f"{entry_id}.stdout")
+    stderr = _decode_receipt_bytes(receipt["stderr_bytes_base64"], receipt["stderr_sha256"], f"{entry_id}.stderr")
+    signatures = receipt["failure_signatures"]
+    output = (stdout + stderr).decode("utf-8", errors="replace")
+    if not isinstance(signatures, Mapping) or set(signatures) != set(receipt_nodes):
+        raise GovernanceContractError(
+            f"{entry_id}.red_evidence failure signatures do not include registered guard nodes"
+        )
+    for node, lines in signatures.items():
+        if (
+            not isinstance(lines, list)
+            or not lines
+            or any(
+                not isinstance(line, str) or not line.startswith("FAILED ") or node not in line or line not in output
+                for line in lines
+            )
+        ):
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence failure signatures do not include registered guard nodes"
+            )
 
 
 def _validate_guard_source_blobs(
@@ -552,6 +758,12 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
                 _nonempty(record.get(field), f"{record_id}.{field}")
         elif "expires_when" in record or "expiry_disposition" in record:
             raise GovernanceContractError("durable records cannot use campaign expiry")
+        _validate_red_reproduction_evidence(
+            record["red_evidence"],
+            entry_id=record_id,
+            guard_nodes=set(owned_nodes),
+            root=root,
+        )
         if record["status"] in {"closed", "expired"}:
             if "automation_limit" in record:
                 raise GovernanceContractError(f"{record_id} cannot close while its automation_limit remains")
@@ -645,6 +857,12 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
             raise GovernanceContractError(f"{pair_id} guard is absent from its runtime prevention")
         if pair.get("platform") != runtime_guards[pair["guard"]]:
             raise GovernanceContractError(f"{pair_id} platform differs from its runtime guard")
+        _validate_red_reproduction_evidence(
+            pair["red_evidence"],
+            entry_id=pair_id,
+            guard_nodes={pair["guard"]},
+            root=root,
+        )
         if pair["status"] in {"closed", "expired"}:
             if runtime["status"] not in {"closed", "expired"}:
                 raise GovernanceContractError(f"{pair_id} closes before its runtime prevention")

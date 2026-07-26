@@ -4,6 +4,7 @@ import ast
 import copy
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ CANONICAL_ARTIFACTS = (
     "tools/ci_guard_execution.py",
     "tools/governance_contract.py",
     "tools/montana_candidate_gate.py",
+    "tools/red_reproduction.py",
 )
 SQLITE_DBAPI_MODULES = frozenset({"pysqlite3", "pysqlite3.dbapi2", "sqlite3"})
 SQLITE_WRAPPER_MODULES = frozenset({"cryodaq.storage._sqlite"})
@@ -64,6 +66,11 @@ def _required_governance_artifacts(payload: dict) -> tuple[str, ...]:
     references = list(payload["policy_refs"])
     references.extend(reference for record in payload["records"] for reference in record["rule_refs"])
     paths.update(reference.split("#", 1)[0] for reference in references)
+    for collection in ("records", "false_green_pairs"):
+        for entry in payload[collection]:
+            evidence = entry["red_evidence"]
+            if isinstance(evidence, dict) and str(evidence.get("locator", "")).startswith("red-reproduction:"):
+                paths.add(evidence["locator"].removeprefix("red-reproduction:"))
     return tuple(sorted(paths))
 
 
@@ -625,6 +632,11 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     sealed_guard = tmp_path / source_path
     sealed_guard.parent.mkdir(parents=True)
     sealed_guard.write_bytes((ROOT / source_path).read_bytes())
+    integration_path = "tests/core/test_alarm_v2_integration.py"
+    sealed_integration = tmp_path / integration_path
+    sealed_integration.parent.mkdir(parents=True, exist_ok=True)
+    sealed_integration.write_bytes((ROOT / integration_path).read_bytes())
+    shutil.copytree(ROOT / "governance" / "red_reproductions", tmp_path / "governance" / "red_reproductions")
     validate_registry(payload, root=tmp_path)
 
     weakened = sealed_guard.read_text(encoding="utf-8").replace(
@@ -635,11 +647,12 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     assert "assert True" in weakened
     sealed_guard.write_text(weakened, encoding="utf-8")
 
-    with pytest.raises(GovernanceContractError, match="covered guard source changed"):
+    with pytest.raises(GovernanceContractError, match="receipt guard blob does not match registry guard file"):
         validate_registry(payload, root=tmp_path)
 
     for entry in closed_entries:
         entry["status"] = "reopened"
+        entry["red_evidence"] = "pending"
         entry.pop("guard_source_blobs")
         entry.pop("closure_semantics_sha256")
     validate_registry(payload, root=tmp_path)
@@ -728,17 +741,17 @@ def test_unknown_as_clear_class_record_keeps_all_three_instances_and_both_real_g
             "test_every_evaluator_exception_holds_active_and_never_fires_inactive"
         ),
         "ci_partition": "core",
-        "red_evidence": (
-            "the_real_shipped_config_reproduction_exercised_the_composite_evaluator_only_so_a_green_instance_guard_"
-            "would_not_prove_that_threshold_rate_stale_phase_and_all_composite_exception_paths_cannot_turn_unknown_"
-            "into_clear_pending_immutable_candidate_capture"
-        ),
+        "red_evidence": {
+            "locator": "red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json",
+            "sha256": "sha256:52f86f79f11b3329af0f7040d62971be70a6b0b594855486923b450d3a69e576",
+        },
         "green_evidence": "pending",
     }
 
     incomplete = copy.deepcopy(payload)
     record = next(record for record in incomplete["records"] if record["id"] == "ALARM-UNKNOWN-AS-CLEAR-033")
     record["guards"] = record["guards"][1:]
+    record["red_evidence"] = "pending"
     with pytest.raises(GovernanceContractError, match="unknown-as-clear runtime class guards"):
         validate_registry(incomplete)
 
@@ -747,6 +760,7 @@ def test_unknown_as_clear_class_record_keeps_all_three_instances_and_both_real_g
         pair for pair in misbound["false_green_pairs"] if pair["id"] == "ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201"
     )
     pair["guard"] = "tests/core/test_alarm_v2_integration.py::test_shipped_vacuum_loss_cold_holds_when_evaluator_raises"
+    pair["red_evidence"] = "pending"
     with pytest.raises(GovernanceContractError, match="unknown-as-clear false-green"):
         validate_registry(misbound)
 
