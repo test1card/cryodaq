@@ -18,7 +18,6 @@ from cryodaq.drivers.base import Reading
 from cryodaq.engine_wiring.runtime_tasks import _alarm_v2_tick_configs
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
-
 _CHANNEL = "T12"
 
 
