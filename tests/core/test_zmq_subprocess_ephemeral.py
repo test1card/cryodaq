@@ -23,6 +23,13 @@ _TEST_PUB_ADDR = "tcp://127.0.0.1:61000"
 _TEST_CMD_ADDR = "tcp://127.0.0.1:61001"
 _TEST_SAFE_CMD_ADDR = "tcp://127.0.0.1:61002"
 
+# ``_run_cmd_forward`` builds its fake zmq module with ``setattr(fake_zmq, attr, attr)``,
+# so ``zmq.REQ`` is the string ``"REQ"`` and ``zmq.SUB`` is ``"SUB"``. The socket factory
+# records the requested type on each mock, which lets tests select a socket by what it
+# *is* rather than by the order in which the bridge's independent threads happened to
+# create it.
+_FAKE_REQ_SOCKET_TYPE = "REQ"
+
 
 def _make_mock_context(
     sockets: list[MagicMock],
@@ -37,18 +44,38 @@ def _make_mock_context(
     behaviour per call.
     """
     ctx = MagicMock(name="zmq_context")
+    # sub_drain and the command forwarders call ``ctx.socket`` from independently
+    # started threads, so the factory itself must be serialised before it reads
+    # ``sockets`` to derive the REQ ordinal below.
+    factory_lock = threading.Lock()
 
-    def _make_socket(*_args, **_kwargs):
-        sock = MagicMock(name=f"zmq_socket_{len(sockets)}")
-        # Per-call defaults: send returns None, recv_string returns a
-        # canonical success reply. Individual tests override via
-        # side_effect on the returned mock.
-        sock.send_string.return_value = None
-        sock.recv_string.return_value = '{"ok": true}'
-        reply_index = len(sockets) - 1
-        if reply_payloads is not None and 0 <= reply_index < len(reply_payloads):
-            sock.recv_string.return_value = reply_payloads[reply_index]
-        sockets.append(sock)
+    def _make_socket(*args, **kwargs):
+        # Intrinsic identity: remember which socket type the production code
+        # asked for. Creation *order* is not stable — sub_drain and the command
+        # forwarders run on independently started threads.
+        socket_type = args[0] if args else kwargs.get("socket_type")
+        with factory_lock:
+            sock = MagicMock(name=f"zmq_socket_{len(sockets)}")
+            sock.created_socket_type = socket_type
+            # Per-call defaults: send returns None, recv_string returns a
+            # canonical success reply. Individual tests override via
+            # side_effect on the returned mock.
+            sock.send_string.return_value = None
+            sock.recv_string.return_value = '{"ok": true}'
+            # ``reply_payloads`` is indexed by REQ ordinal, never by raw creation
+            # ordinal: "the socket right after the SUB" is a race. REQ sockets are
+            # created sequentially by a single forwarder thread, so *their*
+            # relative order is deterministic and one payload per command holds.
+            request_index = sum(
+                1 for created in sockets if getattr(created, "created_socket_type", None) == _FAKE_REQ_SOCKET_TYPE
+            )
+            if (
+                reply_payloads is not None
+                and socket_type == _FAKE_REQ_SOCKET_TYPE
+                and request_index < len(reply_payloads)
+            ):
+                sock.recv_string.return_value = reply_payloads[request_index]
+            sockets.append(sock)
         return sock
 
     ctx.socket.side_effect = _make_socket
@@ -176,6 +203,68 @@ def _run_cmd_forward(
     return replies, control
 
 
+def _select_req_sockets(sockets: list[MagicMock]) -> list[MagicMock]:
+    """Return every socket the production code asked for as a REQ socket.
+
+    Selection is by the socket type captured at ``ctx.socket(...)`` time, never
+    by position: ``zmq_bridge_main`` starts ``zmq-sub-drain`` and the command
+    forwarders as separate threads, so the SUB socket can land at *any* index.
+    REQ sockets are returned in creation order, which is stable because a single
+    forwarder thread creates them one command at a time.
+
+    Use this (rather than ``_select_command_req_socket``) when the test asserts
+    on *which address* the request socket connected to — matching on the address
+    as well would make that assertion tautological.
+    """
+    return [socket for socket in sockets if getattr(socket, "created_socket_type", None) == _FAKE_REQ_SOCKET_TYPE]
+
+
+def _select_req_socket(sockets: list[MagicMock]) -> MagicMock:
+    """Return the one and only REQ socket created during the run."""
+    matches = _select_req_sockets(sockets)
+    assert len(matches) == 1, (
+        f"expected exactly one REQ socket, got {len(matches)} out of {len(sockets)} sockets with types "
+        f"{[getattr(socket, 'created_socket_type', None) for socket in sockets]}"
+    )
+    return matches[0]
+
+
+def _select_command_req_sockets(
+    sockets: list[MagicMock],
+    *,
+    command_addr: str = _TEST_CMD_ADDR,
+) -> list[MagicMock]:
+    """Return every REQ socket the command lane connected to ``command_addr``.
+
+    Selection is by two intrinsic properties recorded on the socket itself —
+    the ``ctx.socket(...)`` type argument and the address passed to
+    ``connect()`` — never by position in ``sockets``. ``zmq_bridge_main``
+    starts ``zmq-sub-drain`` and ``zmq-cmd-forward`` as separate threads, so
+    the SUB socket can be created before *or* after the first REQ socket and
+    any ordinal index is a race.
+    """
+    return [
+        socket
+        for socket in _select_req_sockets(sockets)
+        if any(call[0] == "connect" and call.args[:1] == (command_addr,) for call in socket.method_calls)
+    ]
+
+
+def _select_command_req_socket(
+    sockets: list[MagicMock],
+    *,
+    command_addr: str = _TEST_CMD_ADDR,
+) -> MagicMock:
+    """Return the one REQ socket connected to ``command_addr``."""
+    matches = _select_command_req_sockets(sockets, command_addr=command_addr)
+    assert len(matches) == 1, (
+        f"expected exactly one REQ socket connected to {command_addr}, got {len(matches)} "
+        f"out of {len(sockets)} sockets with types "
+        f"{[getattr(socket, 'created_socket_type', None) for socket in sockets]}"
+    )
+    return matches[0]
+
+
 @pytest.fixture()
 def _sockets() -> list[MagicMock]:
     return []
@@ -202,8 +291,9 @@ def test_cmd_forward_closes_socket_after_success(_sockets):
     replies, _control = _run_cmd_forward(cmds, sockets=_sockets)
 
     assert len(replies) == 1
-    # sockets[0] = SUB (sub_drain_loop), sockets[1] = REQ for cmd #1.
-    req_socket = _sockets[1]
+    # Select the command-lane REQ socket by type + connect address; its index in
+    # _sockets depends on how sub_drain and cmd_forward interleaved.
+    req_socket = _select_command_req_socket(_sockets)
     req_socket.close.assert_called()
 
 
@@ -549,7 +639,9 @@ def test_req_reply_size_cap_is_installed_before_connect(_sockets) -> None:
     )
 
     assert replies == [{"ok": True, "_rid": "cap"}]
-    request = _sockets[1]
+    # Never index by ordinal: sub_drain and cmd_forward are independent threads,
+    # so a SUB socket can legitimately occupy _sockets[1].
+    request = _select_command_req_socket(_sockets)
     calls = request.method_calls
     cap_index = next(
         index
@@ -592,8 +684,11 @@ def test_invalid_reply_is_correlated_and_next_command_still_succeeds(
         {"ok": True, "_rid": "valid-follow-up"},
     ]
     assert len(_sockets) == 3
-    _sockets[1].close.assert_called_once()
-    _sockets[2].close.assert_called_once()
+    # Both per-command REQ sockets must be closed; their positions in _sockets
+    # depend on when sub_drain's SUB socket happened to be created.
+    first_request, second_request = _select_command_req_sockets(_sockets)
+    first_request.close.assert_called_once()
+    second_request.close.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -768,7 +863,9 @@ def test_assistant_protocol_discovery_routes_and_normalizes_command(_sockets):
     replies, _control = _run_cmd_forward(commands, sockets=_sockets)
 
     assert replies == [{"ok": True, "_rid": "version-1"}]
-    request = _sockets[1]
+    # Select by socket type only — the connect address is what this test asserts
+    # on, so it must not also be the matching criterion.
+    request = _select_req_socket(_sockets)
     request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
     wire_payload = request.send_string.call_args.args[0]
     assert json.loads(wire_payload) == {"cmd": "protocol_version"}
@@ -791,7 +888,9 @@ def test_assistant_reads_route_only_to_assistant_endpoint(_sockets, command):
 
     assert replies == [{"ok": True, "_rid": request_id}]
     assert len(_sockets) == 2
-    request = _sockets[1]
+    # Select by socket type only — the assistant endpoint is the assertion here,
+    # so it must not double as the matcher.
+    request = _select_req_socket(_sockets)
     request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
     assert json.loads(request.send_string.call_args.args[0]) == command
 
@@ -898,14 +997,15 @@ def test_cmd_forward_closes_socket_after_zmq_error(_sockets):
                 shutdown,
             )
 
-        # Patch the socket factory to mark the *second* socket (the REQ
-        # for our single command — sub_drain's SUB is created first)
-        # as raising on recv_string.
+        # Patch the socket factory to make the REQ socket (the one created for
+        # our single command) raise on recv_string. Keyed on the requested
+        # socket type, not on creation order: sub_drain's SUB is not guaranteed
+        # to be created first.
         original_side_effect = fake_zmq.Context.return_value.socket.side_effect
 
         def _factory(*args, **kwargs):
             sock = original_side_effect(*args, **kwargs)
-            if len(_sockets) == 2:  # the REQ socket we care about
+            if sock.created_socket_type == _FAKE_REQ_SOCKET_TYPE:
                 sock.recv_string.side_effect = _FakeZMQError("Resource temporarily unavailable")
             return sock
 
@@ -926,7 +1026,7 @@ def test_cmd_forward_closes_socket_after_zmq_error(_sockets):
         thread.join(timeout=5.0)
 
     assert reply is not None and reply.get("ok") is False
-    req_socket = _sockets[1]
+    req_socket = _select_command_req_socket(_sockets)
     req_socket.close.assert_called()
 
 
@@ -969,7 +1069,9 @@ def test_cmd_timeout_emits_structured_message(_sockets):
 
         def _factory(*args, **kwargs):
             sock = original_side_effect(*args, **kwargs)
-            if len(_sockets) == 2:
+            # Keyed on socket type, not creation order — the SUB socket is not
+            # guaranteed to be created before the command REQ socket.
+            if sock.created_socket_type == _FAKE_REQ_SOCKET_TYPE:
                 sock.recv_string.side_effect = _FakeZMQError("failure\r\nsecret=TOP-SECRET-DO-NOT-LEAK")
             return sock
 
@@ -1041,7 +1143,9 @@ def test_cmd_forward_no_req_relaxed_no_tcp_keepalive(_sockets):
     cmds = [{"cmd": "safety_status", "_rid": "r1"}]
     _replies, _control = _run_cmd_forward(cmds, sockets=_sockets)
 
-    req_socket = _sockets[1]  # sockets[0] = SUB, sockets[1] = first REQ
+    # The SUB socket legitimately sets TCP_KEEPALIVE*, so picking it up by
+    # ordinal would both hide and invert this assertion.
+    req_socket = _select_command_req_socket(_sockets)
     setsockopt_args = [call.args for call in req_socket.setsockopt.call_args_list]
     option_names = [args[0] for args in setsockopt_args if args]
 
@@ -1098,8 +1202,9 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
 
         def _factory(*args, **kwargs):
             sock = original_side_effect(*args, **kwargs)
-            # Every REQ socket (all after the initial SUB) raises on recv.
-            if len(_sockets) >= 2:
+            # Every REQ socket raises on recv. Selected by requested socket type
+            # so it holds regardless of when the SUB socket is created.
+            if sock.created_socket_type == _FAKE_REQ_SOCKET_TYPE:
                 sock.recv_string.side_effect = _FakeZMQError("Resource temporarily unavailable")
             return sock
 
@@ -1136,8 +1241,8 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
     assert len(replies) == 3, (
         f"expected 3 replies across 3 timeouts, got {len(replies)} — shared-state poisoning across ephemeral sockets"
     )
-    # 1 SUB + 3 REQ (one per command).
-    req_sockets = _sockets[1:]
+    # 1 SUB + 3 REQ (one per command); the SUB is not necessarily _sockets[0].
+    req_sockets = _select_command_req_sockets(_sockets)
     assert len(req_sockets) == 3
     # Count cmd_timeout envelopes.
     cmd_timeouts = []
