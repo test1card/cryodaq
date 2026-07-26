@@ -666,9 +666,11 @@ padding:10px 12px;margin-bottom:8px}
 .temp-card .name{font-size:10px;color:#8b949e}
 .temp-card .val{font-size:16px;font-weight:bold}
 .cold{color:#58a6ff} .mid{color:#c9d1d9} .warm{color:#f0883e} .hot{color:#f85149}
+.unavailable{color:#8b949e}
 .log-entry{font-size:12px;color:#8b949e;padding:2px 0;border-bottom:1px solid #21262d}
 .log-entry .ts{color:#58a6ff}
 #updated{font-size:11px;color:#484f58;text-align:right;padding:4px}
+body.dashboard-stale #updated{color:#f0883e;font-weight:bold}
 </style>
 </head>
 <body>
@@ -692,11 +694,22 @@ function escapeHtml(s){if(s==null)return '';return String(s)
  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
  .replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function tempColor(v){if(v<10)return'cold';if(v<100)return'mid';if(v<250)return'warm';return'hot'}
+function isUsableReading(r){return r&&typeof r.value==='number'&&Number.isFinite(r.value)}
+function displayChannelCount(value){return typeof value==='number'&&Number.isFinite(value)?value+' каналов':'— каналов'}
+async function fetchJson(url){const response=await fetch(url);
+ if(!response.ok)throw new Error('HTTP '+response.status);
+ return response.json()}
+function markRefreshStale(error){
+ document.body.classList.add('dashboard-stale');
+ document.getElementById('updated').textContent='Данные устарели: '
+  +(error.message||'нет связи')+'. Показаны последние полученные значения.';
+}
 async function refresh(){
  try{
-  const r=await fetch('/api/status');const d=await r.json();
+  const[d,ld]=await Promise.all([fetchJson('/api/status'),fetchJson('/api/log?limit=5')]);
+  if(!ld.ok)throw new Error('журнал недоступен');
   document.getElementById('uptime').textContent='Аптайм: '+(d.uptime||'--');
-  document.getElementById('channels').textContent=(d.channels||0)+' каналов';
+  document.getElementById('channels').textContent=displayChannelCount(d.channels);
   // Safety state
   const safety=d.safety;
   if(safety&&safety.state){
@@ -714,14 +727,16 @@ async function refresh(){
   let temps='',pressure='—',kA='ВЫКЛ',kB='ВЫКЛ';
   const sorted=Object.entries(readings).sort((a,b)=>a[0].localeCompare(b[0]));
   for(const[ch,r]of sorted){
-   if(r.unit==='K'&&ch.match(/^\\u0422|^T/)){
-    const c=tempColor(r.value);
+   const usable=isUsableReading(r);
+   if(r&&r.unit==='K'&&ch.match(/^\\u0422|^T/)){
+    const c=usable?tempColor(r.value):'unavailable';
+    const value=usable?r.value.toFixed(2):'—';
     temps+=`<div class="temp-card"><div class="name">${escapeHtml(ch.split(' ')[0])}</div>`+
-      `<div class="val ${c}">${r.value.toFixed(2)}</div></div>`;
+      `<div class="val ${c}"${usable?'':' title="Нет данных"'}>${value}</div></div>`;
    }
-   if(r.unit==='mbar')pressure=r.value.toExponential(2)+' mbar';
-   if(ch.includes('/smua/'))kA=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kA;
-   if(ch.includes('/smub/'))kB=ch.endsWith('power')?'ВКЛ '+r.value.toFixed(1)+'W':kB;
+   if(r&&r.unit==='mbar')pressure=usable?r.value.toExponential(2)+' mbar':'— mbar';
+   if(ch.includes('/smua/'))kA=ch.endsWith('power')?(usable?'ВКЛ '+r.value.toFixed(1)+'W':'НЕИЗВЕСТНО'):kA;
+   if(ch.includes('/smub/'))kB=ch.endsWith('power')?(usable?'ВКЛ '+r.value.toFixed(1)+'W':'НЕИЗВЕСТНО'):kB;
   }
   document.getElementById('temps').innerHTML=temps||'Нет данных';
   document.getElementById('pressure').textContent=pressure;
@@ -733,10 +748,6 @@ async function refresh(){
    const phase=exp.current_phase?' ['+exp.current_phase+']':'';
    document.getElementById('experiment').textContent=(e.name||'—')+phase;
   }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
- }catch(e){document.getElementById('updated').textContent='Ошибка: '+e.message}
- // Log
- try{
-  const lr=await fetch('/api/log?limit=5');const ld=await lr.json();
   let html='';
   for(const e of(ld.entries||[])){
    const ts=(e.timestamp||'').split('T')[1]||'';
@@ -744,8 +755,9 @@ async function refresh(){
      `[${escapeHtml(e.author||e.source||'?')}] ${escapeHtml(e.message||'')}</div>`;
   }
   document.getElementById('log').innerHTML=html||'Нет записей';
- }catch(e){}
+  document.body.classList.remove('dashboard-stale');
  document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();
+ }catch(e){markRefreshStale(e)}
 }
 refresh();setInterval(refresh,5000);
 </script>

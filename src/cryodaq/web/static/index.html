@@ -420,6 +420,15 @@ function pushPoint(buffers, channel, ts, value) {
     }
 }
 
+function finiteNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function displayMetric(value) {
+    const numeric = finiteNumber(value);
+    return numeric === null ? '—' : numeric;
+}
+
 function esc(str) {
     const d = document.createElement('div');
     d.textContent = String(str);
@@ -468,7 +477,10 @@ function makeChartOptions(yOptions = {}) {
                         if (!ts) return '';
                         return new Date(ts).toLocaleString('ru-RU');
                     },
-                    label: (item) => ` ${item.dataset.label}: ${Number(item.parsed.y).toPrecision(6)}`,
+                    label: (item) => {
+                        const value = finiteNumber(item.parsed?.y);
+                        return ` ${item.dataset.label}: ${value === null ? '—' : value.toPrecision(6)}`;
+                    },
                 },
             },
         },
@@ -581,7 +593,7 @@ setInterval(updateCharts, CHART_UPDATE_MS);
 function handleReading(msg) {
     const ts = new Date(msg.timestamp).getTime();
     const ch = msg.channel;
-    const val = Number(msg.value);
+    const val = finiteNumber(msg.value);
     const unit = msg.unit || '';
 
     readingsThisSecond++;
@@ -692,7 +704,7 @@ function renderAlarms() {
         return `<div class="alarm-badge ${esc(cls)}">
             <span class="alarm-level">${lvlText}</span>
             <span class="alarm-channel">${esc(a.channel || '')}</span>
-            <span class="alarm-value">${esc(a.value !== undefined ? Number(a.value).toPrecision(5) : '')} ${esc(a.unit || '')}</span>
+            <span class="alarm-value">${esc(a.value !== undefined ? (finiteNumber(a.value) === null ? '—' : finiteNumber(a.value).toPrecision(5)) : '')} ${esc(a.unit || '')}</span>
         </div>`;
     }).join('');
     container.innerHTML = html;
@@ -717,7 +729,7 @@ function renderInstruments(instruments) {
         const lastSeen = inst.last_seen
             ? new Date(inst.last_seen).toLocaleTimeString('ru-RU')
             : '—';
-        const total = inst.total_readings || 0;
+        const total = displayMetric(inst.total_readings);
 
         return `<div class="inst-card">
             <div class="inst-card-header">
@@ -736,11 +748,14 @@ function renderInstruments(instruments) {
 async function fetchStatus() {
     try {
         const resp = await fetch('/status');
-        if (!resp.ok) return;
+        if (!resp.ok) {
+            markStatusUnavailable();
+            return;
+        }
         const data = await resp.json();
         document.getElementById('hd-uptime').textContent   = data.uptime || '--:--:--';
-        document.getElementById('hd-channels').textContent = data.channels || 0;
-        document.getElementById('hd-readings').textContent = data.total_readings || 0;
+        document.getElementById('hd-channels').textContent = displayMetric(data.channels);
+        document.getElementById('hd-readings').textContent = displayMetric(data.total_readings);
 
         if (data.instruments) renderInstruments(data.instruments);
 
@@ -751,7 +766,13 @@ async function fetchStatus() {
             }
             renderAlarms();
         }
-    } catch (_) { /* игнорируем */ }
+    } catch (_) { markStatusUnavailable(); }
+}
+
+function markStatusUnavailable() {
+    document.getElementById('hd-uptime').textContent = '— (данные устарели)';
+    document.getElementById('hd-channels').textContent = '—';
+    document.getElementById('hd-readings').textContent = '—';
 }
 
 setInterval(fetchStatus, STATUS_POLL_MS);
@@ -774,7 +795,7 @@ async function loadHistory() {
 
             for (const p of points) {
                 const ts  = new Date(p.t).getTime();
-                const val = Number(p.v);
+                const val = finiteNumber(p.v);
                 if (isTemp) {
                     pushPoint(tempBuffers, ch, ts, val);
                 } else if (isPressure) {
