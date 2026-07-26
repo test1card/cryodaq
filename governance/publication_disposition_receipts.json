@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "receipts": [
+    {
+      "id": "MONTANA-PUBLICATION-DISPOSITION-001",
+      "disposition": "not_approved",
+      "attestation": {
+        "subject": "montana/review-history candidate bbe3011d",
+        "independent_contexts": true
+      },
+      "reviewers": [
+        {
+          "identity": "gpt-5.6-sol",
+          "mandate": "depth-and-delta",
+          "distinct_context": true,
+          "verdict": "do_not_approve",
+          "disagreements": []
+        },
+        {
+          "identity": "Kimi k3",
+          "mandate": "BREADTH",
+          "distinct_context": true,
+          "verdict": "do_not_approve",
+          "disagreements": [
+            {
+              "subject": "evaluator-exception variant of the vacuum_loss_cold unknown-as-clear defect",
+              "reviewer_assessment": "non_blocking",
+              "disposition_assessment": "blocking"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

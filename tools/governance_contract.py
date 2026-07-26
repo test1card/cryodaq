@@ -74,6 +74,11 @@ _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS = {
     "guard_removed_skipped_xfailed_deselected_or_nondefault": "reopen",
 }
 _CLASSIFICATION_CORPUS_REPEAT_THRESHOLD = 2
+_PUBLICATION_DISPOSITION_RECEIPTS_PATH = Path("governance/publication_disposition_receipts.json")
+_PUBLICATION_DISPOSITIONS = frozenset({"approved", "not_approved"})
+_PUBLICATION_REVIEW_MANDATES = frozenset({"depth-and-delta", "BREADTH"})
+_PUBLICATION_REVIEW_VERDICTS = frozenset({"approved", "do_not_approve"})
+_PUBLICATION_REVIEWER_FIELDS = frozenset({"identity", "mandate", "distinct_context", "verdict", "disagreements"})
 
 
 class GovernanceContractError(ValueError):
@@ -314,6 +319,104 @@ def _validate_guard_source_blobs(
             raise GovernanceContractError(
                 f"{entry_id} covered guard source changed since its attested closure; reopen it"
             )
+
+
+def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
+    """Validate typed, fail-closed publication-review dispositions.
+
+    Receipts are intentionally separate from the prevention registry: registry
+    records are durable rules, while a receipt is a changing fact about one
+    publication candidate.  Keeping them separate prevents a new candidate
+    from changing a prevention rule merely to record its review outcome.
+    """
+
+    path = root / _PUBLICATION_DISPOSITION_RECEIPTS_PATH
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GovernanceContractError("publication disposition receipts are unavailable or invalid JSON") from exc
+    if not isinstance(payload, Mapping) or set(payload) != {"schema_version", "receipts"}:
+        raise GovernanceContractError("publication disposition receipts top-level schema is not exact")
+    if payload["schema_version"] != 1 or not isinstance(payload["receipts"], list) or not payload["receipts"]:
+        raise GovernanceContractError("publication disposition receipts are missing or invalid")
+
+    receipt_ids: set[str] = set()
+    for receipt in payload["receipts"]:
+        if not isinstance(receipt, Mapping) or set(receipt) != {
+            "id",
+            "disposition",
+            "attestation",
+            "reviewers",
+        }:
+            raise GovernanceContractError("publication disposition receipt shape is not exact")
+        receipt_id = _nonempty(receipt["id"], "publication disposition receipt id")
+        if _ID.fullmatch(receipt_id) is None or receipt_id in receipt_ids:
+            raise GovernanceContractError("publication disposition receipt id is invalid or duplicate")
+        receipt_ids.add(receipt_id)
+        disposition = receipt["disposition"]
+        if disposition not in _PUBLICATION_DISPOSITIONS:
+            raise GovernanceContractError(f"{receipt_id}.disposition is invalid")
+        attestation = receipt["attestation"]
+        if not isinstance(attestation, Mapping) or set(attestation) != {"subject", "independent_contexts"}:
+            raise GovernanceContractError(f"{receipt_id}.attestation shape is not exact")
+        _nonempty(attestation["subject"], f"{receipt_id}.attestation.subject")
+        if attestation["independent_contexts"] is not True:
+            raise GovernanceContractError(f"{receipt_id}.attestation.independent_contexts must be true")
+
+        reviewers = receipt["reviewers"]
+        if not isinstance(reviewers, list) or len(reviewers) < 2:
+            raise GovernanceContractError(f"{receipt_id} requires at least two reviewers")
+        identities: list[str] = []
+        mandates: set[str] = set()
+        verdicts: list[str] = []
+        for index, reviewer in enumerate(reviewers):
+            field = f"{receipt_id}.reviewers[{index}]"
+            if (
+                not isinstance(reviewer, Mapping)
+                or not set(reviewer) <= _PUBLICATION_REVIEWER_FIELDS
+                or _PUBLICATION_REVIEWER_FIELDS - set(reviewer) not in (set(), {"verdict"})
+            ):
+                raise GovernanceContractError(
+                    f"{field} must name identity, mandate, distinct_context, verdict, and disagreements"
+                )
+            identity = _nonempty(reviewer["identity"], f"{field}.identity")
+            identities.append(identity.casefold())
+            mandate = reviewer["mandate"]
+            if mandate not in _PUBLICATION_REVIEW_MANDATES:
+                raise GovernanceContractError(f"{field}.mandate is missing or unknown")
+            mandates.add(mandate)
+            if reviewer["distinct_context"] is not True:
+                raise GovernanceContractError(f"{field}.distinct_context must attest true")
+            verdict = reviewer.get("verdict")
+            if verdict not in _PUBLICATION_REVIEW_VERDICTS:
+                raise GovernanceContractError(f"{field}.verdict is missing or invalid")
+            verdicts.append(verdict)
+            disagreements = reviewer["disagreements"]
+            if not isinstance(disagreements, list):
+                raise GovernanceContractError(f"{field}.disagreements must be a list")
+            for disagreement_index, disagreement in enumerate(disagreements):
+                disagreement_field = f"{field}.disagreements[{disagreement_index}]"
+                if not isinstance(disagreement, Mapping) or set(disagreement) != {
+                    "subject",
+                    "reviewer_assessment",
+                    "disposition_assessment",
+                }:
+                    raise GovernanceContractError(f"{disagreement_field} shape is not exact")
+                _nonempty(disagreement["subject"], f"{disagreement_field}.subject")
+                assessments = {"blocking", "non_blocking"}
+                if (
+                    disagreement["reviewer_assessment"] not in assessments
+                    or disagreement["disposition_assessment"] not in assessments
+                    or disagreement["reviewer_assessment"] == disagreement["disposition_assessment"]
+                ):
+                    raise GovernanceContractError(f"{disagreement_field} must record differing assessments")
+        if len(identities) != len(set(identities)):
+            raise GovernanceContractError(f"{receipt_id} reviewers are not distinct")
+        if mandates != _PUBLICATION_REVIEW_MANDATES:
+            raise GovernanceContractError(f"{receipt_id} requires depth-and-delta and BREADTH mandates")
+        if disposition == "approved" and any(verdict != "approved" for verdict in verdicts):
+            raise GovernanceContractError(f"{receipt_id} cannot authorise approval while a reviewer does not approve")
+    return dict(payload)
 
 
 def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, Any]:
@@ -565,6 +668,10 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
         elif "closure_semantics_sha256" in pair or "guard_source_blobs" in pair:
             raise GovernanceContractError(f"{pair_id} has premature closure evidence")
     _validate_alarm_unknown_as_clear_class(record_by_id, pairs)
+    # ``root`` supports fixture guard-source binding below; the published
+    # receipt is a single canonical governance artifact and is always read
+    # from this contract's repository, not a fixture's synthetic source root.
+    validate_publication_disposition_receipts(Path(__file__).resolve().parent.parent)
     return payload
 
 

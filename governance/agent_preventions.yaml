@@ -4723,7 +4723,7 @@ records:
     guards:
       - node: tests/governance/test_agent_preventions.py::test_publication_dual_review_independence_cannot_close_without_named_reviewer_receipt
         ci_partition: remaining
-    automation_limit: The registry records disposition_owner only as the single role "reviewer" and never a named identity, a reviewer count, a distinct-context attestation, or a mandate label (depth-and-delta versus BREADTH); no typed publication-disposition receipt records two named distinct reviewers and their verdicts anywhere the validator can see. Such a receipt structure, validated by this contract, is required before independence can be mechanically enforced rather than reviewer-asserted.
+    automation_limit: A typed receipt is now contract-validated, but no immutable sealed review transcripts or candidate-bound review evidence exist for this receipt. The recorded receipt correctly says not_approved because both reviewers returned do_not_approve, so it cannot supply approval or green closure evidence; immutable evidence for a reviewed, approved candidate remains required before this prevention can close.
     red_evidence: prose_only_two_independent_review_publication_rule_in_AGENTS_md_mistake_to_enforcement_section_without_registry_record_or_named_distinct_reviewer_disposition_receipt_2026_07_26
     green_evidence: pending
 

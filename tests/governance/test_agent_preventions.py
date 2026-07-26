@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -17,11 +18,13 @@ from tools.governance_contract import (
     GovernanceContractError,
     _git_blob_id,
     closure_semantics_sha256,
+    validate_publication_disposition_receipts,
     validate_registry,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = ROOT / "governance" / "agent_preventions.yaml"
+PUBLICATION_RECEIPTS_PATH = ROOT / "governance" / "publication_disposition_receipts.json"
 CANONICAL_ARTIFACTS = (
     ".github/workflows/main.yml",
     "AGENTS.md",
@@ -404,15 +407,7 @@ def test_guard_dependency_neutralization_cannot_close_without_execution_manifest
 
 
 def test_publication_dual_review_independence_cannot_close_without_named_reviewer_receipt() -> None:
-    """The two-independent-review debt cannot be papered over with closure.
-
-    No typed disposition receipt records two named distinct reviewers, their
-    distinct contexts, their mandates (depth-and-delta versus BREADTH), or
-    their verdicts anywhere the validator can see: the registry carries only
-    a single ``disposition_owner: reviewer`` role, never an identity, count,
-    or mandate.  Its declared automation_limit is therefore a hard closure
-    block, not a decorative note an author can drop to claim the rule is met.
-    """
+    """Typed review facts do not replace the immutable closure evidence gate."""
 
     payload = _registry()
     record = next(record for record in payload["records"] if record["id"] == "PUBLICATION-DUAL-REVIEW-INDEPENDENCE-032")
@@ -420,6 +415,82 @@ def test_publication_dual_review_independence_cannot_close_without_named_reviewe
 
     with pytest.raises(GovernanceContractError, match="automation_limit"):
         validate_registry(payload)
+
+
+def _publication_receipts() -> dict:
+    return json.loads(PUBLICATION_RECEIPTS_PATH.read_text(encoding="utf-8"))
+
+
+def _validate_publication_receipts(tmp_path: Path, payload: dict) -> None:
+    path = tmp_path / "governance" / "publication_disposition_receipts.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    validate_publication_disposition_receipts(tmp_path)
+
+
+def test_publication_receipt_records_real_nonapproval_and_disagreement() -> None:
+    receipts = _publication_receipts()
+    receipt = receipts["receipts"][0]
+
+    assert receipt["disposition"] == "not_approved"
+    assert [reviewer["identity"] for reviewer in receipt["reviewers"]] == ["gpt-5.6-sol", "Kimi k3"]
+    assert [reviewer["verdict"] for reviewer in receipt["reviewers"]] == ["do_not_approve", "do_not_approve"]
+    assert receipt["reviewers"][1]["disagreements"] == [
+        {
+            "subject": "evaluator-exception variant of the vacuum_loss_cold unknown-as-clear defect",
+            "reviewer_assessment": "non_blocking",
+            "disposition_assessment": "blocking",
+        }
+    ]
+
+
+def test_publication_receipt_refuses_fewer_than_two_reviewers(tmp_path: Path) -> None:
+    receipts = _publication_receipts()
+    receipts["receipts"][0]["reviewers"].pop()
+
+    with pytest.raises(GovernanceContractError, match="at least two reviewers"):
+        _validate_publication_receipts(tmp_path, receipts)
+
+
+def test_publication_receipt_refuses_non_distinct_reviewer_identities(tmp_path: Path) -> None:
+    receipts = _publication_receipts()
+    reviewers = receipts["receipts"][0]["reviewers"]
+    reviewers[1]["identity"] = reviewers[0]["identity"].upper()
+
+    with pytest.raises(GovernanceContractError, match="reviewers are not distinct"):
+        _validate_publication_receipts(tmp_path, receipts)
+
+
+def test_publication_receipt_refuses_missing_or_unknown_mandate(tmp_path: Path) -> None:
+    receipts = _publication_receipts()
+    receipts["receipts"][0]["reviewers"][1]["mandate"] = "independent"
+
+    with pytest.raises(GovernanceContractError, match="mandate is missing or unknown"):
+        _validate_publication_receipts(tmp_path, receipts)
+
+
+def test_publication_receipt_refuses_missing_mandate(tmp_path: Path) -> None:
+    receipts = _publication_receipts()
+    receipts["receipts"][0]["reviewers"][1].pop("mandate")
+
+    with pytest.raises(GovernanceContractError, match="mandate"):
+        _validate_publication_receipts(tmp_path, receipts)
+
+
+def test_publication_receipt_refuses_missing_verdict(tmp_path: Path) -> None:
+    receipts = _publication_receipts()
+    receipts["receipts"][0]["reviewers"][1].pop("verdict")
+
+    with pytest.raises(GovernanceContractError, match="verdict"):
+        _validate_publication_receipts(tmp_path, receipts)
+
+
+def test_publication_receipt_refuses_approval_when_a_reviewer_does_not_approve(tmp_path: Path) -> None:
+    receipts = _publication_receipts()
+    receipts["receipts"][0]["disposition"] = "approved"
+
+    with pytest.raises(GovernanceContractError, match="cannot authorise approval"):
+        _validate_publication_receipts(tmp_path, receipts)
 
 
 def test_campaign_records_require_expiry_and_cannot_be_summarized_as_universal() -> None:
