@@ -95,6 +95,7 @@ def _handler_payload(
                 "acknowledged": acknowledged,
                 "acknowledged_at": time.time() if acknowledged else 0.0,
                 "acknowledged_by": "operator-a" if acknowledged else "",
+                "evaluator_error": False,
             }
         }
     return {
@@ -268,6 +269,22 @@ def test_update_renders_complete_v2_evidence_and_count(app):
     assert panel._v2_table.item(0, 1).text() == "cold"
     assert panel._v2_table.item(0, 2).text() == "plate hot"
     assert panel._v2_table.item(0, 3).text() == "T11"
+
+
+def test_update_marks_alarm_held_by_evaluator_failure(app):
+    panel = AlarmPanel()
+    try:
+        payload = _payload()
+        payload["active"]["cold"]["evaluator_error"] = True
+        panel.update_v2_status(payload)
+
+        message = panel._v2_table.item(0, 2).text()
+        assert "ОШИБКА ОЦЕНКИ" in message
+        assert "удерживается" in message
+        assert "plate hot" in message
+        assert theme.STATUS_FAULT in panel._v2_table.item(0, 2).foreground().color().name()
+    finally:
+        _dispose_panel(panel, app)
 
 
 def test_poll_accepts_only_the_real_zmq_encoded_status_envelope(app):

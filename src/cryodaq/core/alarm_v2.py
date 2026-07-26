@@ -49,6 +49,9 @@ class AlarmEvent:
     acknowledged_reason: str = ""
     acknowledgement_request_id: str = ""
     activation_id: int = 0
+    # This distinguishes a held alarm with a broken evaluator from a normally
+    # evaluated active hazard on operator-facing surfaces.
+    evaluator_error: bool = False
 
 
 class AlarmSnapshotUnavailableError(RuntimeError):
@@ -89,6 +92,7 @@ def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
         acknowledged_reason=event.acknowledged_reason,
         acknowledgement_request_id=event.acknowledgement_request_id,
         activation_id=event.activation_id,
+        evaluator_error=event.evaluator_error,
     )
 
 
@@ -166,7 +170,7 @@ class AlarmEvaluator:
         is_active: bool = False,
         active_channels: frozenset[str] | None = None,
     ) -> AlarmEvent | None:
-        """Проверить одну alarm-конфигурацию. None = не сработал.
+        """Проверить одну alarm-конфигурацию. None = no event for an inactive alarm.
 
         Parameters
         ----------
@@ -201,10 +205,22 @@ class AlarmEvaluator:
             elif alarm_type == "stale":
                 return self._eval_stale(alarm_id, alarm_config)
             else:
-                logger.warning("Неизвестный alarm_type=%r для %s", alarm_type, alarm_id)
-                return None
+                raise ValueError(f"unknown alarm_type={alarm_type!r}")
         except Exception as exc:
             logger.error("Ошибка evaluate %s: %s", alarm_id, exc, exc_info=True)
+            # A broken evaluator is unknown, never evidence that the physical
+            # condition resolved. An inactive alarm must not fire on ignorance;
+            # an active alarm gets a tagged keep-active event instead.
+            if is_active:
+                return AlarmEvent(
+                    alarm_id=alarm_id,
+                    level=str(alarm_config.get("level", "WARNING")),
+                    message=str(alarm_config.get("message", f"Alarm {alarm_id}")),
+                    triggered_at=time.time(),
+                    channels=[],
+                    values={},
+                    evaluator_error=True,
+                )
             return None
 
     # ------------------------------------------------------------------
@@ -302,8 +318,7 @@ class AlarmEvaluator:
             setpoint = self._setpoint.get(cfg["setpoint_source"])
             return abs(value - setpoint) > cfg["threshold"], value
         else:
-            logger.warning("Неизвестный threshold check=%r", check)
-            return False, value
+            raise ValueError(f"unknown threshold check={check!r}")
 
     # ------------------------------------------------------------------
     # composite
@@ -322,8 +337,7 @@ class AlarmEvaluator:
         elif operator == "OR":
             fired = self._or_conditions(results)
         else:
-            logger.warning("Неизвестный composite operator=%r", operator)
-            return None
+            raise ValueError(f"unknown composite operator={operator!r}")
 
         # ``None`` is an unknown input, never a false condition. It cannot
         # activate an inactive alarm, but it must preserve an active alarm's
@@ -457,8 +471,7 @@ class AlarmEvaluator:
             return abs(rate) < rate_threshold if self._is_finite(rate) else None
 
         else:
-            logger.warning("Неизвестный composite condition check=%r", check)
-            return False
+            raise ValueError(f"unknown composite condition check={check!r}")
 
     # ------------------------------------------------------------------
     # rate
@@ -474,6 +487,8 @@ class AlarmEvaluator:
     ) -> AlarmEvent | None:
         channels = self._resolve_channels(cfg)
         check = cfg.get("check", "rate_above")
+        if check not in {"rate_above", "rate_below", "rate_near_zero", "relative_rate_near_zero"}:
+            raise ValueError(f"unknown rate check={check!r}")
         window = cfg.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
         level = cfg.get("level", "WARNING")
         message_tmpl = cfg.get("message", f"Alarm {alarm_id}")
@@ -648,6 +663,26 @@ class AlarmStateManager:
         """
         sustained_s = config.get("sustained_s")
         hysteresis = config.get("hysteresis")
+
+        # An evaluator exception is a third state: neither a known trigger nor
+        # a known clear. It must not start an inactive alarm and must not clear
+        # an active one. Retain its explicit status on the original event so
+        # acknowledgement and annunciation identity remain stable.
+        if event is not None and event.evaluator_error:
+            active_event = self._active.get(alarm_id)
+            if active_event is not None and not active_event.evaluator_error:
+                active_event.evaluator_error = True
+                self._mark_active_mutation()
+            return None
+
+        # A successful fresh event removes the error marker without creating a
+        # duplicate activation or notification.
+        if event is not None and alarm_id in self._active:
+            active_event = self._active[alarm_id]
+            if active_event.evaluator_error:
+                active_event.evaluator_error = False
+                self._mark_active_mutation()
+            return None
 
         # --- Условие сработало ---
         if event is not None:

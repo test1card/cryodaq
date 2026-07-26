@@ -76,6 +76,7 @@ _V2_ACTIVE_ROW_KEYS = frozenset(
         "acknowledged_at",
         "acknowledged_by",
         "activation_id",
+        "evaluator_error",
     }
 )
 _V2_LEVELS = frozenset({"INFO", "WARNING", "CRITICAL"})
@@ -684,6 +685,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
                 triggered_at = info.get("triggered_at")
                 acknowledged = info.get("acknowledged")
                 activation_id = info.get("activation_id")
+                evaluator_error = info.get("evaluator_error")
                 acknowledged_by = info.get("acknowledged_by", "")
                 acknowledged_at = info.get("acknowledged_at")
                 if (
@@ -697,6 +699,7 @@ class AlarmPanel(OverlayPanelBase, QWidget):
                     or not math.isfinite(float(triggered_at))
                     or float(triggered_at) < 0
                     or type(acknowledged) is not bool
+                    or type(evaluator_error) is not bool
                     or not _valid_v2_text(activation_id)
                     or activation_id in activation_ids
                     or not _valid_v2_text(acknowledged_by, allow_empty=True)
@@ -810,7 +813,10 @@ class AlarmPanel(OverlayPanelBase, QWidget):
         for row_idx, (alarm_id, info) in enumerate(sorted_items):
             level = str(info.get("level", "INFO")).upper()
             full_message = str(info.get("message", ""))
-            message = full_message
+            evaluator_error = bool(info.get("evaluator_error", False))
+            evaluation_notice = "ОШИБКА ОЦЕНКИ: тревога удерживается"
+            display_message = f"{evaluation_notice} — {full_message}" if evaluator_error else full_message
+            message = display_message
             if len(message) > _V2_MESSAGE_MAX_CHARS:
                 message = message[: _V2_MESSAGE_MAX_CHARS - 1] + "…"
             channels_raw = info.get("channels") or []
@@ -831,7 +837,9 @@ class AlarmPanel(OverlayPanelBase, QWidget):
             self._v2_table.setCellWidget(row_idx, 0, chip)
             self._v2_table.setItem(row_idx, 1, _cell(str(alarm_id), mono_font=True))
             message_item = _cell(message)
-            message_item.setToolTip(plain_text_tooltip(full_message))
+            message_item.setToolTip(plain_text_tooltip(display_message))
+            if evaluator_error:
+                message_item.setForeground(QColor(theme.STATUS_FAULT))
             self._v2_table.setItem(row_idx, 2, message_item)
             self._v2_table.setItem(row_idx, 3, _cell(channels_text))
             self._v2_table.setItem(row_idx, 4, _cell(time_text))

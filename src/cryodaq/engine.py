@@ -5349,6 +5349,7 @@ async def _handle_gui_command(
                         "acknowledged_at": v.acknowledged_at,
                         "acknowledged_by": v.acknowledged_by,
                         "activation_id": activation_by_alarm[k],
+                        "evaluator_error": v.evaluator_error,
                     }
                     for k, v in active.items()
                 },
