@@ -618,17 +618,28 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     """A sealed tree must reject an in-place ``assert True`` guard weakening."""
 
     payload = _registry()
-    closed_entries = [
-        *[record for record in payload["records"] if record["status"] == "closed"],
-        *[pair for pair in payload["false_green_pairs"] if pair["status"] == "closed"],
-    ]
-    assert {entry["id"] for entry in closed_entries} == {
-        "ALARM-PHASE-ELAPSED-SUBCONDITION-026",
-        "ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198",
-        "ALARM-MIXED-SELECTOR-027",
-        "ALARM-MIXED-SELECTOR-FALSE-GREEN-199",
-    }
     source_path = "tests/core/test_alarm_config_validation.py"
+    # This proof needs a CLOSED entry carrying guard_source_blobs. Reading one out
+    # of the live registry made the test hostage to registry state: the moment the
+    # four alarm entries were reopened, the selection went empty and the whole
+    # weakening proof became vacuous while still reporting green. So the closed
+    # entry is CONSTRUCTED here instead, from entries that really do own this guard
+    # file, and the blob is computed from the file rather than pinned to a literal
+    # that would silently rot.
+    closed_entries = [
+        *[
+            record
+            for record in payload["records"]
+            if any(guard["node"].split("::", 1)[0] == source_path for guard in record["guards"])
+        ],
+        *[pair for pair in payload["false_green_pairs"] if pair["guard"].split("::", 1)[0] == source_path],
+    ]
+    assert closed_entries, "no entry owns the guard file this weakening proof needs"
+    guard_blob = _git_blob_id((ROOT / source_path).read_bytes())
+    for entry in closed_entries:
+        entry["status"] = "closed"
+        entry["guard_source_blobs"] = {source_path: guard_blob}
+        entry["closure_semantics_sha256"] = closure_semantics_sha256(entry)
     sealed_guard = tmp_path / source_path
     sealed_guard.parent.mkdir(parents=True)
     sealed_guard.write_bytes((ROOT / source_path).read_bytes())

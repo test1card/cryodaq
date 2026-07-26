@@ -73,6 +73,17 @@ ACTIVE_CHECKOUT_REMAINING_NODES = tuple(
             *GIT_INDEX_CHECKOUT_GUARD_NODES,
             "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six",
             "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six",
+            # These two mutations prove the receipt validator REFUSES a defective
+            # commit that does not resolve and a tree that does not match its
+            # commit. Both refusals are Git OBJECT RESOLUTION, and the receipts
+            # name real historical commits that exist only in the actual
+            # repository -- so the proof is impossible in an exported candidate
+            # with no `.git`, however the fixture is built. They are RELOCATED to
+            # the exact checkout rather than skipped, per docs/DECISIONS.md:165-173.
+            # Every OTHER mutation in that parametrisation needs no Git and stays
+            # in the sealed suite, where it now runs.
+            "tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[missing-defective-commit]",
+            "tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[wrong-defective-tree]",
         }
         # The two formatter-gate nodes are the whole of their file, which is
         # already ignored wholesale above; deselecting a node inside an ignored

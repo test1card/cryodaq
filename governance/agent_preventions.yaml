@@ -2318,7 +2318,7 @@ false_green_pairs:
       sha256: sha256:c69145dee1f90c53ffe8f0f3a3fdf089ed93eeee5d5294665fbebcd132aec62a
     green_evidence: pending
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
-    status: closed
+    status: reopened
     scope: product_contract
     runtime_prevention_id: ALARM-PHASE-ELAPSED-SUBCONDITION-026
     guard: tests/core/test_alarm_config_validation.py::test_composite_sub_condition_phase_elapsed_s_below_raises
@@ -2331,11 +2331,8 @@ false_green_pairs:
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
       tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
       suite: core
-    guard_source_blobs:
-      tests/core/test_alarm_config_validation.py: 874f549ec38babc348e152bda229cd3e478f8f9c
-    closure_semantics_sha256: sha256:fc0bd9cc00c4d02af63a1008ea1a802fb08adab6e97dd232dd203c556ac4d8ba
   - id: ALARM-MIXED-SELECTOR-FALSE-GREEN-199
-    status: closed
+    status: reopened
     scope: product_contract
     runtime_prevention_id: ALARM-MIXED-SELECTOR-027
     guard: tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises
@@ -2348,9 +2345,6 @@ false_green_pairs:
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
       tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
       suite: core
-    guard_source_blobs:
-      tests/core/test_alarm_config_validation.py: 874f549ec38babc348e152bda229cd3e478f8f9c
-    closure_semantics_sha256: sha256:7b14c537868a9a80e3fbb4b53c95d4ec2d319d60f1bef10126e2d47f4c8d9e09
   - id: TEST-LIVE-RUNTIME-PROOF-FALSE-GREEN-166
     status: open
     scope: repository
@@ -4178,7 +4172,7 @@ records:
     green_evidence: pending
 
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-026
-    status: closed
+    status: reopened
     scope: product_contract
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     applies_to: Alarm configuration composite conditions and rate additional conditions that select phase_elapsed_s.
@@ -4208,12 +4202,9 @@ records:
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
       tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
       suite: core
-    guard_source_blobs:
-      tests/core/test_alarm_config_validation.py: 874f549ec38babc348e152bda229cd3e478f8f9c
-    closure_semantics_sha256: sha256:ac3dd5d58ac8df1f243a657e9c3d3d5b84249830693ac63c957292a247d2c371
 
   - id: ALARM-MIXED-SELECTOR-027
-    status: closed
+    status: reopened
     scope: product_contract
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     applies_to: Alarm configuration top-level selectors, composite conditions, and rate additional conditions containing channel_group.
@@ -4243,9 +4234,6 @@ records:
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
       tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
       suite: core
-    guard_source_blobs:
-      tests/core/test_alarm_config_validation.py: 874f549ec38babc348e152bda229cd3e478f8f9c
-    closure_semantics_sha256: sha256:84507501d2799d3ec981941f5818123b369739c7287e59cbe2c61db806b421fa
 
   - id: COMMAND-REPLY-BOUNDS-016
     status: open

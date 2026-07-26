@@ -97,6 +97,8 @@ jobs:
             tests/governance/test_agent_preventions.py::test_generated_candidate_and_test_evidence_prefixes_are_ignored \
             tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six \
             tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six \
+            'tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[missing-defective-commit]' \
+            'tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[wrong-defective-tree]' \
             --tb=short -v --timeout=120 --timeout-method=thread
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA:?}"
           git diff --quiet

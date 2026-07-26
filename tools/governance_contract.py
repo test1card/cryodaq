@@ -414,13 +414,22 @@ def _validate_red_reproduction_evidence(
     tree = receipt["defective_tree"]
     if not isinstance(commit, str) or not isinstance(tree, str) or _GIT_OBJECT_ID.fullmatch(commit) is None:
         raise GovernanceContractError(f"{entry_id}.red_evidence defective commit is invalid")
-    if not _repository_has_git_metadata():
-        return
-    resolved_commit = _git_object_id(root, commit, kind="commit", field=f"{entry_id}.red_evidence defective commit")
-    resolved_tree = _git_object_id(root, resolved_commit, kind="tree", field=f"{entry_id}.red_evidence defective tree")
-    if tree != resolved_tree:
-        raise GovernanceContractError(f"{entry_id}.red_evidence defective tree does not match its defective commit")
-        raise GovernanceContractError(f"{entry_id}.red_evidence defective tree does not match its defective commit")
+    # Only OBJECT RESOLUTION needs Git. Every other fact in this receipt -- exit
+    # code, node equality, failure signatures, output digests, guard bytes -- is
+    # verifiable from the receipt and the tree alone, and MUST be enforced in a
+    # sealed candidate, which has no `.git`. An earlier revision returned here
+    # when Git was absent and silently skipped all of it, so the sealed candidate
+    # accepted a forged receipt. That is the failure mode docs/DECISIONS.md:165-173
+    # forbids by name: a Git-dependent check is RELOCATED, never turned into a pass.
+    resolvable = _repository_has_git_metadata()
+    resolved_commit = None
+    if resolvable:
+        resolved_commit = _git_object_id(root, commit, kind="commit", field=f"{entry_id}.red_evidence defective commit")
+        resolved_tree = _git_object_id(
+            root, resolved_commit, kind="tree", field=f"{entry_id}.red_evidence defective tree"
+        )
+        if tree != resolved_tree:
+            raise GovernanceContractError(f"{entry_id}.red_evidence defective tree does not match its defective commit")
     source_blobs = receipt["defective_source_blobs"]
     if not isinstance(source_blobs, Mapping) or not source_blobs:
         raise GovernanceContractError(f"{entry_id}.red_evidence defective source blobs are missing")
@@ -433,6 +442,8 @@ def _validate_red_reproduction_evidence(
             or _GIT_OBJECT_ID.fullmatch(blob) is None
         ):
             raise GovernanceContractError(f"{entry_id}.red_evidence defective source blob binding is invalid")
+        if resolved_commit is None:
+            continue
         resolved_blob = _git_object_id(
             root,
             f"{resolved_commit}:{path}",
