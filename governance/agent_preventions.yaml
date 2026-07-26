@@ -4751,6 +4751,11 @@ records:
         ci_partition: core
       - node: tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive
         ci_partition: core
-    automation_limit: Immutable sealed-candidate red-before and green-after core-suite evidence, bound to these exact shipped-config and nine-evaluator invocations and independently disposed for this runtime class and its false-green pair, is unavailable. The historical commit narrative and local runs are not closure evidence; on capture, bind exact guard source blobs before computing closure_semantics_sha256.
+    automation_limit: >-
+      The two registered guards postdate the evaluator-exception defect: both were introduced in ef9b81ec together
+      with its correction. No sealed CI candidate executed either guard against the defective pre-ef9b81ec code; the
+      historical narrative and local red-before reproduction are not immutable closure evidence. Capturing a sealed red
+      artifact now would require deliberately publishing a failing candidate, so this runtime record and its linked
+      false-green pair must remain open.
     red_evidence: historical_ef9b81ec_reproduced_a_CRITICAL_shipped_vacuum_loss_cold_alarm_clearing_after_an_evaluator_exception_while_c1ff8597_and_a3859772_record_the_prior_threshold_and_composite_NaN_instances_pending_immutable_candidate_capture
     green_evidence: pending
