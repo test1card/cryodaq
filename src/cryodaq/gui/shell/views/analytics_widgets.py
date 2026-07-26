@@ -686,17 +686,6 @@ class VacuumPredictionWidget(QWidget):
 
     @Slot(dict)
     def _on_trend_result(self, result: dict) -> None:
-        # D2 INSTRUMENTATION — remove before fix commit
-        import logging as _dbg_log
-
-        _dbglog = _dbg_log.getLogger("cryodaq.dbg.vacuum")
-        _dbglog.warning(
-            "[D2] _on_trend_result: ok=%s status=%s extrap_t_n=%d residual_std=%s",
-            result.get("ok"),
-            result.get("status"),
-            len(result.get("extrapolation_t") or []),
-            result.get("residual_std"),
-        )
         if not result.get("ok") or result.get("status") == "no_data":
             # Clear any previously-rendered forecast so no stale overlay persists
             # after a bridge restart, disabled predictor, or empty buffer.
