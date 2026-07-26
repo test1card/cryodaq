@@ -17,6 +17,7 @@ from tools.candidate_evidence import execute_exported_candidate
 from tools.ci_candidate_evidence import (
     FAILURE_RECEIPT_PREFIX,
     CiCandidateEvidenceError,
+    _expected_receipt_count,
     _failure_receipt_nodes,
     canonical_failure_receipt,
     emit_failure_summary,
@@ -607,6 +608,110 @@ def test_failed_candidate_summary_uses_labelled_legacy_fallback_when_receipt_is_
     output = capsys.readouterr().out
     assert "Structural failure receipt unavailable; using labelled legacy prose fallback." in output
     assert f"FAILED NODE (legacy fallback): {nodeid}" in output
+
+
+def test_partial_receipt_from_one_subprocess_does_not_silently_drop_sibling_failures(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    node_a = "tests/gui/test_app_palette.py::test_palette"
+    node_b = "tests/gui/shell/views/test_operator_display.py::test_display"
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "gui"}\n', encoding="utf-8")
+    receipt_a = canonical_failure_receipt({"failed_nodeids": [node_a], "schema_version": 1, "suite": "gui"})
+    stdout_lines = [
+        "candidate-suite=gui compiled-sources=1",
+        "candidate-suite=gui command=1/2",
+        "collected 1 item",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_a}",
+        "candidate-suite=gui command=2/2",
+        "collected 1 item",
+        f"FAILED {node_b} - AssertionError: subprocess crashed before emitting its receipt",
+    ]
+    (bundle / "stdout.bin").write_text("\n".join(stdout_lines) + "\n", encoding="utf-8")
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle, max_nodes=20)
+
+    output = capsys.readouterr().out
+    assert f"FAILED NODE: {node_a}" in output
+    assert f"FAILED NODE (legacy fallback): {node_b}" in output
+    assert "expected 2" in output
+    assert "found 1" in output
+
+
+def test_complete_receipt_coverage_emits_no_warning_or_legacy_fallback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    node_a = "tests/gui/test_app_palette.py::test_palette"
+    node_b = "tests/gui/shell/views/test_operator_display.py::test_display"
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "gui"}\n', encoding="utf-8")
+    receipt_a = canonical_failure_receipt({"failed_nodeids": [node_a], "schema_version": 1, "suite": "gui"})
+    receipt_b = canonical_failure_receipt({"failed_nodeids": [node_b], "schema_version": 1, "suite": "gui"})
+    stdout_lines = [
+        "candidate-suite=gui command=1/2",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_a}",
+        "candidate-suite=gui command=2/2",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_b}",
+    ]
+    (bundle / "stdout.bin").write_text("\n".join(stdout_lines) + "\n", encoding="utf-8")
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle, max_nodes=20)
+
+    output = capsys.readouterr().out
+    assert f"FAILED NODE: {node_a}" in output
+    assert f"FAILED NODE: {node_b}" in output
+    assert "legacy fallback" not in output
+    assert "WARNING" not in output
+
+
+def test_missing_receipt_with_no_prose_fallback_warns_and_reports_unavailable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "gui"}\n', encoding="utf-8")
+    stdout_lines = [
+        "candidate-suite=gui command=1/2",
+        "collected 0 items",
+        "candidate-suite=gui command=2/2",
+        "Segmentation fault (core dumped)",
+    ]
+    (bundle / "stdout.bin").write_text("\n".join(stdout_lines) + "\n", encoding="utf-8")
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle, max_nodes=20)
+
+    output = capsys.readouterr().out
+    assert "WARNING" in output
+    assert "expected 2" in output
+    assert "found 0" in output
+    assert "FAILED NODE: unavailable" in output
+
+
+def test_expected_receipt_count_parses_runner_announcements() -> None:
+    assert (
+        _expected_receipt_count(
+            "candidate-suite=gui command=1/3\ncandidate-suite=gui command=2/3\ncandidate-suite=gui command=3/3\n",
+            suite="gui",
+        )
+        == 3
+    )
+    assert _expected_receipt_count("candidate-suite=core command=1/1\n", suite="core") == 1
+    assert _expected_receipt_count("no announcements here\n", suite="gui") is None
+    assert _expected_receipt_count("candidate-suite=core command=1/1\n", suite="gui") is None
+
+
+def test_expected_receipt_count_rejects_disagreeing_totals() -> None:
+    output = "candidate-suite=gui command=1/2\ncandidate-suite=gui command=2/3\n"
+    with pytest.raises(CiCandidateEvidenceError, match="disagree"):
+        _expected_receipt_count(output, suite="gui")
 
 
 def test_exported_candidate_runner_emits_structural_failure_receipt_after_environment_sanitization(

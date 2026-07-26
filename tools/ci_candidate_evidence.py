@@ -24,6 +24,10 @@ _FAILURE_RECEIPT_PAYLOAD_FIELDS = frozenset({"failed_nodeids", "schema_version",
 _FAILURE_RECEIPT_SUITES = frozenset({"agents", "core", "gui", "remaining"})
 _FAILURE_RECEIPT_ACTIVE_STATE: _FailureReceiptState | None = None
 _LEGACY_PYTEST_FAILURE_PREFIX = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+?)\r?$", re.MULTILINE)
+_COMMAND_ANNOUNCEMENT_RE = re.compile(
+    r"^candidate-suite=(?P<suite>[a-z]+) command=\d+/(?P<total>\d+)\r?$",
+    re.MULTILINE,
+)
 
 
 class CiCandidateEvidenceError(ValueError):
@@ -353,8 +357,16 @@ def _attest(args: argparse.Namespace) -> int:
     return 0
 
 
-def _failure_receipt_nodes(output: str, *, suite: str) -> tuple[str, ...]:
-    receipts: list[str] = []
+def _extract_failure_receipt_payloads(output: str, *, suite: str) -> list[dict[str, Any]]:
+    """Extract and validate every structural failure receipt payload from output.
+
+    Returns one validated payload mapping per ``FAILURE_RECEIPT_PREFIX`` line,
+    preserving announcement order.  Raises ``CiCandidateEvidenceError`` for any
+    envelope, digest, schema, suite, or node-ID violation so that a tampered or
+    truncated receipt can never silently reduce coverage.
+    """
+
+    raw_receipts: list[str] = []
     offset = 0
     while True:
         start = output.find(FAILURE_RECEIPT_PREFIX, offset)
@@ -364,13 +376,10 @@ def _failure_receipt_nodes(output: str, *, suite: str) -> tuple[str, ...]:
         end = output.find("\n", payload_start)
         if end < 0:
             end = len(output)
-        receipts.append(output[payload_start:end].rstrip("\r"))
+        raw_receipts.append(output[payload_start:end].rstrip("\r"))
         offset = end + 1
-    if not receipts:
-        return ()
-    nodes: list[str] = []
-    seen: set[str] = set()
-    for raw in receipts:
+    payloads: list[dict[str, Any]] = []
+    for raw in raw_receipts:
         try:
             envelope = json.loads(raw)
         except (json.JSONDecodeError, UnicodeError) as exc:
@@ -391,7 +400,42 @@ def _failure_receipt_nodes(output: str, *, suite: str) -> tuple[str, ...]:
             or len(failed_nodeids) != len(set(failed_nodeids))
         ):
             raise CiCandidateEvidenceError("candidate failure receipt schema, suite, or node IDs are invalid")
-        for nodeid in failed_nodeids:
+        payloads.append(payload)
+    return payloads
+
+
+def _expected_receipt_count(output: str, *, suite: str) -> int | None:
+    """Return the number of pytest subprocesses the candidate runner announced.
+
+    The runner prints ``candidate-suite={suite} command={index}/{total}`` before
+    each pytest subprocess; ``total`` is the subprocess count for one suite and
+    each subprocess emits exactly one structural failure receipt at session
+    finish.  Returns ``None`` when no announcement lines survive (the runner died
+    before starting any pytest subprocess), and raises when announcements
+    disagree about the total.
+    """
+
+    totals: set[int] = set()
+    for match in _COMMAND_ANNOUNCEMENT_RE.finditer(output):
+        if match.group("suite") == suite:
+            totals.add(int(match.group("total")))
+    if not totals:
+        return None
+    if len(totals) > 1:
+        raise CiCandidateEvidenceError(
+            f"candidate command-count announcements disagree for suite {suite!r}: {sorted(totals)!r}"
+        )
+    return totals.pop()
+
+
+def _failure_receipt_nodes(output: str, *, suite: str) -> tuple[str, ...]:
+    """Return the ordered union of failed node IDs across all structural receipts."""
+
+    payloads = _extract_failure_receipt_payloads(output, suite=suite)
+    nodes: list[str] = []
+    seen: set[str] = set()
+    for payload in payloads:
+        for nodeid in payload["failed_nodeids"]:
             if nodeid not in seen:
                 seen.add(nodeid)
                 nodes.append(nodeid)
@@ -426,7 +470,16 @@ def _legacy_failure_nodes(output: str) -> tuple[str, ...]:
 
 
 def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
-    """Print a bounded candidate-failure summary without replacing its bundle."""
+    """Print a bounded candidate-failure summary without replacing its bundle.
+
+    The candidate runner executes several pytest subprocesses per suite, each
+    emitting one structural failure receipt at session finish.  When every
+    receipt survives, the union of their nodes is the authoritative summary.
+    When a subprocess dies before emitting its receipt, that portion's failures
+    are visible only as prose ``FAILED``/``ERROR`` lines; this function detects
+    the coverage gap, prints a visible warning, and recovers those nodes from
+    the labelled legacy fallback so they cannot vanish silently.
+    """
 
     if not 1 <= max_nodes <= 100:
         raise CiCandidateEvidenceError("candidate failure summary limit must be between 1 and 100")
@@ -440,22 +493,44 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     suite = execution.get("suite")
     if not isinstance(suite, str) or suite not in _FAILURE_RECEIPT_SUITES:
         raise CiCandidateEvidenceError("candidate failure summary requires an exact candidate suite")
-    nodes = _failure_receipt_nodes(output, suite=suite)
+    payloads = _extract_failure_receipt_payloads(output, suite=suite)
+    structural_nodes: list[str] = []
+    seen: set[str] = set()
+    for payload in payloads:
+        for nodeid in payload["failed_nodeids"]:
+            if nodeid not in seen:
+                seen.add(nodeid)
+                structural_nodes.append(nodeid)
+    receipt_count = len(payloads)
+    expected_count = _expected_receipt_count(output, suite=suite)
+    receipts_missing = expected_count is not None and receipt_count < expected_count
     print(f"Exact candidate failed (exit {returncode}); failing pytest node IDs follow (max {max_nodes}).")
-    if not nodes:
-        nodes = _legacy_failure_nodes(output)
-        if nodes:
-            print("Structural failure receipt unavailable; using labelled legacy prose fallback.")
-            prefix = "FAILED NODE (legacy fallback): "
-        else:
-            print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
-            return
-    else:
-        prefix = "FAILED NODE: "
-    for node in nodes[:max_nodes]:
-        print(f"{prefix}{node}")
-    if len(nodes) > max_nodes:
-        print(f"FAILED NODE: ... {len(nodes) - max_nodes} additional node IDs are in the candidate artifact.")
+    if receipts_missing:
+        print(
+            f"WARNING: structural failure receipt coverage is incomplete for suite "
+            f"'{suite}': expected {expected_count} pytest subprocess receipt(s), found "
+            f"{receipt_count}. Some pytest failures may be unreported by the structural "
+            f"receipt. Recovering from legacy prose fallback where possible; inspect "
+            f"preserved stdout.bin and stderr.bin in the candidate artifact for the "
+            f"complete record."
+        )
+    reported: list[tuple[str, str]] = [(node, "") for node in structural_nodes]
+    if not structural_nodes or receipts_missing:
+        legacy_nodes = _legacy_failure_nodes(output)
+        if legacy_nodes:
+            if not structural_nodes:
+                print("Structural failure receipt unavailable; using labelled legacy prose fallback.")
+            for node in legacy_nodes:
+                if node not in seen:
+                    seen.add(node)
+                    reported.append((node, " (legacy fallback)"))
+    if not reported:
+        print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
+        return
+    for node, label in reported[:max_nodes]:
+        print(f"FAILED NODE{label}: {node}")
+    if len(reported) > max_nodes:
+        print(f"FAILED NODE: ... {len(reported) - max_nodes} additional node IDs are in the candidate artifact.")
 
 
 def _summarize(args: argparse.Namespace) -> int:
