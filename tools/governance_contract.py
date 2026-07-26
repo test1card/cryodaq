@@ -668,10 +668,12 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
         elif "closure_semantics_sha256" in pair or "guard_source_blobs" in pair:
             raise GovernanceContractError(f"{pair_id} has premature closure evidence")
     _validate_alarm_unknown_as_clear_class(record_by_id, pairs)
-    # ``root`` supports fixture guard-source binding below; the published
-    # receipt is a single canonical governance artifact and is always read
-    # from this contract's repository, not a fixture's synthetic source root.
-    validate_publication_disposition_receipts(Path(__file__).resolve().parent.parent)
+    # Publication receipts are NOT validated here. This validator runs inside
+    # exported sealed candidates and synthetic fixture trees, where the receipt
+    # file legitimately does not exist -- coupling the two made a minimal export
+    # die before it could emit its own failure receipt. Receipts are a fact about
+    # a candidate, so the publication gate validates them alongside the candidate;
+    # see validate_publication_disposition_receipts and its governance tests.
     return payload
 
 
