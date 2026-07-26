@@ -1426,3 +1426,371 @@ def test_wellformed_phase_container_still_loads(tmp_path: Path) -> None:
     _, alarms = load_alarm_config(p)
     found = next(a for a in alarms if a.alarm_id == "excessive_cooling_rate")
     assert found.phase_filter == ["cooldown"]
+
+
+# ---------------------------------------------------------------------------
+# fail-OPEN gap (round 5), reproduced by an external reviewer:
+#
+#   P1. `phase_elapsed_s` was accepted as the `channel` selector for EVERY
+#       member of the single-channel sub-condition family (above / below /
+#       rate_above / rate_below / rate_near_zero), but alarm_v2._eval_condition
+#       special-cases the pseudo-channel in exactly ONE branch — `above`
+#       (alarm_v2.py:348-350), which routes it to PhaseProvider. The other four
+#       branches query ordinary channel data the pseudo-channel has none of:
+#         below (L358)  → self._state.get("phase_elapsed_s") → None → False
+#         rate_* (L366/374/382) → self._rate.get_rate_custom_window(...) → None
+#                                 → False
+#       A composite alarm containing `channel: phase_elapsed_s, check: below,
+#       threshold: 3600` therefore loaded cleanly and then held its AND-gate
+#       shut forever, suppressing the ENCLOSING alarm — a dead annunciator that
+#       looks configured. (The top-level form is a different code path and was
+#       already refused; see
+#       test_threshold_top_level_phase_elapsed_s_channel_raises.)
+#
+#   P2. A condition supplying BOTH an explicit channel selector
+#       (`channels` / `channel`) AND a `channel_group` had the explicit one
+#       SILENTLY OVERWRITTEN by _expand_channel_group (`cfg["channels"] =
+#       list(members)`). An alarm whose YAML reads `channels: [T1]` then
+#       evaluates the group's members instead — the config says one thing and
+#       the runtime monitors another, with no error and no log.
+# ---------------------------------------------------------------------------
+
+
+def test_composite_sub_condition_phase_elapsed_s_below_raises(tmp_path: Path) -> None:
+    """P1, the shape the reviewer reproduced: check=below on the pseudo-channel.
+
+    alarm_v2._eval_condition's `below` branch (L354-359) does
+    `self._state.get("phase_elapsed_s")`; ChannelStateTracker is keyed by
+    published Reading channel names and never holds that key, so the
+    sub-condition is False even when the phase provider reports 10 s — and an
+    AND-composite gated on it can never fire.
+    """
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          phase_short_enough:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channel: phase_elapsed_s
+                check: below
+                threshold: 3600
+              - channel: P1
+                check: above
+                threshold: 1.0e-4
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="phase_elapsed_s"):
+        load_alarm_config(p)
+
+
+@pytest.mark.parametrize("check", ["rate_above", "rate_below", "rate_near_zero"])
+def test_composite_sub_condition_phase_elapsed_s_rate_checks_raise(tmp_path: Path, check: str) -> None:
+    """P1, rate family: the same gap admits all three rate checks.
+
+    alarm_v2._eval_condition's rate branches (L361-384) call
+    `self._rate.get_rate_custom_window("phase_elapsed_s", window)`. No sample is
+    ever pushed for the pseudo-channel, so the estimator returns None and every
+    one of these returns False forever.
+    """
+    p = _write_yaml(
+        tmp_path,
+        f"""
+        global_alarms:
+          phase_rate:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channel: phase_elapsed_s
+                check: {check}
+                threshold: 1.0
+              - channel: P1
+                check: above
+                threshold: 1.0e-4
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="phase_elapsed_s"):
+        load_alarm_config(p)
+
+
+def test_rate_additional_condition_phase_elapsed_s_below_raises(tmp_path: Path) -> None:
+    """P1 on the additional_condition path — the same sub-condition shape, the
+    same _eval_condition consumer, so it must be refused the same way."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vacuum_stall:
+            alarm_type: rate
+            channel: P1
+            check: relative_rate_near_zero
+            rate_threshold: 0.01
+            additional_condition:
+              channel: phase_elapsed_s
+              check: below
+              threshold: 3600
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="phase_elapsed_s"):
+        load_alarm_config(p)
+
+
+def test_phase_elapsed_s_rejection_names_alarm_context_check_and_value(tmp_path: Path) -> None:
+    """The rejection must be actionable without reading source: it names the
+    alarm id, the sub-condition context, the check and the offending value."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          phase_short_enough:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channel: P1
+                check: above
+                threshold: 1.0e-4
+              - channel: phase_elapsed_s
+                check: below
+                threshold: 3600
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError) as excinfo:
+        load_alarm_config(p)
+    msg = str(excinfo.value)
+    assert "phase_short_enough" in msg
+    assert "conditions[1]" in msg
+    assert "below" in msg
+    assert "phase_elapsed_s" in msg
+
+
+def test_rate_additional_condition_phase_elapsed_s_above_still_loads(tmp_path: Path) -> None:
+    """Keep-good guard for P1: `above` is the ONE check alarm_v2 re-routes to
+    the phase provider (L348-350), and it must keep loading on the
+    additional_condition path too — the P1 rule must not over-reach."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vacuum_stall:
+            alarm_type: rate
+            channel: P1
+            check: relative_rate_near_zero
+            rate_threshold: 0.01
+            additional_condition:
+              channel: phase_elapsed_s
+              check: above
+              threshold: 3600
+            level: WARNING
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    found = next(a for a in alarms if a.alarm_id == "vacuum_stall")
+    assert found.config["additional_condition"]["channel"] == "phase_elapsed_s"
+
+
+def test_phase_elapsed_s_below_is_dead_at_runtime(tmp_path: Path) -> None:
+    """Evidence for P1, read off the runtime rather than asserted from the spec.
+
+    This exercises alarm_v2 directly (unchanged by this fix) to show WHY the
+    loader must refuse the shape: with the phase provider reporting 10 s, an
+    `above 3600` sub-condition is correctly False and a `below 3600`
+    sub-condition — which SHOULD be True — is ALSO False, because it never
+    reaches the phase provider at all.
+
+    Passes both before and after the loader fix; it is a keep-good guard on the
+    premise, not a red test.
+    """
+    from unittest.mock import MagicMock
+
+    from cryodaq.core.alarm_v2 import AlarmEvaluator, PhaseProvider, SetpointProvider
+    from cryodaq.core.channel_state import ChannelStateTracker
+    from cryodaq.core.rate_estimator import RateEstimator
+
+    phase_provider = MagicMock(spec=PhaseProvider)
+    phase_provider.get_current_phase.return_value = "cooldown"
+    phase_provider.get_phase_elapsed_s.return_value = 10.0
+    ev = AlarmEvaluator(
+        ChannelStateTracker(),
+        RateEstimator(window_s=120.0, min_points=2),
+        phase_provider,
+        SetpointProvider({}),
+    )
+
+    above = {"channel": "phase_elapsed_s", "check": "above", "threshold": 3600}
+    below = {"channel": "phase_elapsed_s", "check": "below", "threshold": 3600}
+    assert ev._eval_condition(above) is False, "10 s is not > 3600 s"
+    assert ev._eval_condition(below) is False, (
+        "10 s IS < 3600 s, so a working `below` would be True; it is False because "
+        "alarm_v2._eval_condition L354-359 looks the pseudo-channel up in "
+        "ChannelStateTracker instead of the phase provider — the condition is dead"
+    )
+
+
+def test_top_level_channels_and_channel_group_raises(tmp_path: Path) -> None:
+    """P2, the shape the reviewer reproduced: an explicit `channels: [T1]` next
+    to a `channel_group`. _expand_channel_group did
+    `cfg["channels"] = list(members)`, so the alarm silently stopped evaluating
+    T1 and started evaluating the group's members instead."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          g: [T2]
+        global_alarms:
+          mixed_selector:
+            alarm_type: threshold
+            channels: [T1]
+            channel_group: g
+            check: above
+            threshold: 4.0
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+def test_top_level_channel_and_channel_group_raises(tmp_path: Path) -> None:
+    """P2, scalar form: `channel: T1` + `channel_group: g`. The group becomes
+    `channels`, and alarm_v2._resolve_channels prefers `channels` (L470) over
+    `channel` (L472) — so the named channel is silently ignored."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          g: [T2]
+        global_alarms:
+          mixed_selector:
+            alarm_type: stale
+            channel: T1
+            channel_group: g
+            timeout_s: 120
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+def test_composite_sub_condition_channels_and_channel_group_raises(tmp_path: Path) -> None:
+    """P2 on the composite sub-condition path — expansion happens there too
+    (_expand_alarm conditions loop), so the same silent substitution applies."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          g: [T2]
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channels: [T1]
+                channel_group: g
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+def test_rate_additional_condition_channels_and_channel_group_raises(tmp_path: Path) -> None:
+    """P2 on the additional_condition path — the third expansion site. The rule
+    must be applied wherever channel_group is expanded, not per-site."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          g: [T2]
+        global_alarms:
+          vacuum_stall:
+            alarm_type: rate
+            channel: P1
+            check: relative_rate_near_zero
+            rate_threshold: 0.01
+            additional_condition:
+              channels: [T1]
+              channel_group: g
+              check: any_above
+              threshold: 200
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+def test_mixed_selector_rejection_names_alarm_context_and_both_keys(tmp_path: Path) -> None:
+    """The rejection must name the alarm, the context and BOTH conflicting
+    selector keys, so the operator can see which key to delete."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          g: [T2]
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+              - channels: [T1]
+                channel_group: g
+                check: any_below
+                threshold: 200
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError) as excinfo:
+        load_alarm_config(p)
+    msg = str(excinfo.value)
+    assert "vac_cold" in msg
+    assert "conditions[1]" in msg
+    assert "channel_group" in msg
+    assert "channels" in msg
+
+
+def test_single_explicit_channels_selector_still_loads(tmp_path: Path) -> None:
+    """Keep-good guard for P2: the rule must fire only on a MIXED selector. An
+    explicit `channels` with no channel_group anywhere keeps loading verbatim."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          g: [T2]
+        global_alarms:
+          explicit_only:
+            alarm_type: threshold
+            channels: [T1]
+            check: above
+            threshold: 4.0
+            level: CRITICAL
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    found = next(a for a in alarms if a.alarm_id == "explicit_only")
+    assert found.config["channels"] == ["T1"]
+
+
+def test_shipped_configs_still_load(tmp_path: Path) -> None:
+    """Shipped-config safety gate: neither P1 nor P2 may reject a config that
+    actually ships. config/alarms_v3.yaml uses `phase_elapsed_s` only with
+    check=above (vacuum_insufficient) and never mixes selectors;
+    config/physical_alarms.yaml defines no alarms at all."""
+    repo_root = Path(__file__).resolve().parents[2]
+    _, alarms = load_alarm_config(repo_root / "config" / "alarms_v3.yaml")
+    assert len(alarms) == 16
+    _, physical = load_alarm_config(repo_root / "config" / "physical_alarms.yaml")
+    assert len(physical) == 0

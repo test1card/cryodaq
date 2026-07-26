@@ -309,7 +309,9 @@ _VALID_COMPOSITE_OPERATORS = frozenset({"AND", "OR"})
 # annunciator that looks configured). PRESENCE OF THE KEY IS NOT ENOUGH: the
 # selector must also RESOLVE to at least one channel — see
 # _require_multi_channel_selector for the empty/null/mis-shaped forms that
-# satisfy `key in cfg` and still resolve to nothing.
+# satisfy `key in cfg` and still resolve to nothing. AT MOST ONE of these keys
+# may be present — two of them silently resolve in favour of one and discard the
+# other, see _reject_mixed_channel_selectors.
 _MULTI_CHANNEL_SELECTOR_KEYS = frozenset({"channels", "channel", "channel_group"})
 
 # Sub-condition checks that read their selector via _resolve_channels(cond)
@@ -327,6 +329,38 @@ _MULTI_CHANNEL_CONDITION_CHECKS = frozenset({"any_below", "any_above"})
 # "phase_elapsed_s" is legitimate for `above` (L348-350 re-routes it to the
 # phase provider) and must not be rejected.
 _SINGLE_CHANNEL_CONDITION_CHECKS = frozenset({"above", "below", "rate_above", "rate_below", "rate_near_zero"})
+
+# Sub-condition checks that can actually HONOUR the `phase_elapsed_s`
+# pseudo-channel. Derived by reading every branch of alarm_v2._eval_condition
+# (alarm_v2.py:329-388) and asking which data source each one queries:
+#
+#   above (L343-352)        → special-cases the name and calls
+#                             self._phase.get_phase_elapsed_s() (L348-350).
+#                             THE ONLY BRANCH THAT MENTIONS IT AT ALL.
+#   below (L354-359)        → self._state.get("phase_elapsed_s").
+#                             ChannelStateTracker is keyed by published Reading
+#                             channel names (channel_state.py:26) and never
+#                             holds this key → None → False forever.
+#   rate_above  (L361-367)  → self._rate.get_rate_custom_window("phase_elapsed_s", …)
+#   rate_below  (L369-375)    No sample is ever pushed for the pseudo-channel,
+#   rate_near_zero (L377-384) so the estimator returns None → False forever.
+#   any_below / any_above   → _resolve_channels(cond), which explicitly REFUSES
+#     (L333-341)              the pseudo-channel (L474) → [] → any([]) is False.
+#                             Already rejected by _require_multi_channel_selector.
+#
+# So `above` is the whole set. Accepting the pseudo-channel for the other four
+# admitted a sub-condition that loads cleanly and is then permanently False —
+# and inside an AND-composite that holds the ENCLOSING alarm shut forever
+# (reviewer-verified: `check: below, threshold: 3600` stayed False with the
+# phase provider reporting 10 s). Reject it at load instead.
+#
+# The TOP-LEVEL form (alarm_type threshold/rate/stale selecting the pseudo-
+# channel) is a different code path — _resolve_channels, which refuses it
+# outright — and is rejected separately in _require_multi_channel_selector.
+_PHASE_ELAPSED_CONDITION_CHECKS = frozenset({"above"})
+
+# The pseudo-channel name alarm_v2 re-routes to the PhaseProvider (alarm_v2.py:348).
+_PHASE_ELAPSED_CHANNEL = "phase_elapsed_s"
 
 
 def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
@@ -626,10 +660,10 @@ def _require_multi_channel_selector(alarm_id: str, cfg: dict, context: str) -> N
                               _expand_channel_group, where the resolution
                               actually happens.
 
-    Precedence follows the runtime, and the load-time rewrite that precedes it:
-    _expand_channel_group OVERWRITES ``channels`` from the group, so
-    ``channel_group`` wins when both are present; _resolve_channels then
-    prefers ``channels`` over ``channel`` (L470 before L472).
+    Exactly ONE selector key may be present: a cfg carrying ``channel_group``
+    alongside ``channels``/``channel`` is REJECTED by
+    _reject_mixed_channel_selectors before expansion, so there is no precedence
+    to reason about here (see that function for the rationale).
     """
     if not any(key in cfg for key in _MULTI_CHANNEL_SELECTOR_KEYS):
         raise AlarmConfigError(
@@ -686,7 +720,7 @@ def _require_multi_channel_selector(alarm_id: str, cfg: dict, context: str) -> N
             f"against ChannelStateTracker keys, which are str "
             f"(channel_state.py:26), so this selector can never match"
         )
-    if ch == "phase_elapsed_s":
+    if ch == _PHASE_ELAPSED_CHANNEL:
         raise AlarmConfigError(
             f"alarm {alarm_id!r} {context} selects the pseudo-channel "
             f"'phase_elapsed_s', which alarm_v2._resolve_channels explicitly "
@@ -709,7 +743,9 @@ def _validate_condition_selector(alarm_id: str, cond: dict, check: str, context:
         a scalar ``channel`` satisfies them. ``if not ch: return False``
         (L345/356/363/371/379) makes an absent/falsy channel return False
         forever — silently dead. ``phase_elapsed_s`` is legitimate for ``above``
-        (L348-350 re-routes it to the phase provider).
+        ONLY (L348-350 re-routes it to the phase provider); for the other four
+        it is a name the state tracker and the rate estimator never hold, so the
+        sub-condition is permanently False — see _PHASE_ELAPSED_CONDITION_CHECKS.
     """
     if check in _MULTI_CHANNEL_CONDITION_CHECKS:
         _require_multi_channel_selector(alarm_id, cond, context)
@@ -724,6 +760,78 @@ def _validate_condition_selector(alarm_id: str, cond: dict, check: str, context:
                 f"(alarm_v2.py:345/356/363/371/379). 'channels'/'channel_group' "
                 f"are NOT read by this check — use 'channel'."
             )
+        # The pseudo-channel is honoured by exactly ONE branch of
+        # _eval_condition. Presence of a valid-looking name is not enough: for
+        # every other check it selects data that does not exist, so the
+        # sub-condition loads cleanly and is then permanently False — and an
+        # AND-composite gated on it suppresses the ENCLOSING alarm forever.
+        if ch == _PHASE_ELAPSED_CHANNEL and check not in _PHASE_ELAPSED_CONDITION_CHECKS:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} {context} selects the pseudo-channel "
+                f"{ch!r} with check={check!r}; alarm_v2._eval_condition honours "
+                f"{_PHASE_ELAPSED_CHANNEL!r} only for "
+                f"check={sorted(_PHASE_ELAPSED_CONDITION_CHECKS)} "
+                f"(alarm_v2.py:348-350 re-routes it to the phase provider). "
+                f"check={check!r} instead queries ordinary channel data — "
+                f"ChannelStateTracker for 'below' (alarm_v2.py:358), the rate "
+                f"estimator for the rate_* checks (alarm_v2.py:366/374/382) — "
+                f"and neither ever holds {_PHASE_ELAPSED_CHANNEL!r}, so this "
+                f"sub-condition is False forever and any AND-composite "
+                f"containing it never fires"
+            )
+
+
+def _reject_mixed_channel_selectors(alarm_id: str, cfg: dict, context: str = "") -> None:
+    """Refuse a cfg/sub-condition that supplies more than one channel selector.
+
+    ``channel_group`` next to an explicit ``channels`` (or ``channel``) used to
+    be accepted and then SILENTLY RESOLVED IN FAVOUR OF THE GROUP:
+    _expand_channel_group ends with ``cfg["channels"] = list(members)``, which
+    OVERWRITES whatever the operator wrote. An alarm whose YAML reads
+    ``channels: [T1]`` therefore stopped evaluating T1 and started evaluating
+    the group's members — no error, no log, and a file that no longer describes
+    what is monitored. With ``channel`` it is the same outcome by a different
+    route: the group becomes ``channels``, and alarm_v2._resolve_channels
+    prefers ``channels`` (L470) over ``channel`` (L472).
+
+    REJECT rather than define a precedence, because:
+      - Whichever key were declared the winner, the loser is still silently
+        ignored. Precedence documents the substitution; it does not remove it.
+        The hazard is that the config text and the monitored set disagree, and
+        only rejection makes them agree again.
+      - The two keys express DIFFERENT operator intent (this exact channel vs
+        whatever this group currently contains), and nothing in the runtime can
+        honour both — unlike defect #3's unexpanded ``channel_group``, which the
+        runtime could honour perfectly once the loader finished translating it.
+        Expansion was right there; rejection is right here.
+      - A group's membership changes over time. Under precedence, editing
+        ``channel_groups`` silently re-points every mixed-selector alarm that
+        looked pinned to a literal channel — the substitution is not even
+        visible at the alarm's own definition.
+      - It is recoverable: startup fails with the alarm id, the context and both
+        keys named, and the operator deletes one line. A dead or mis-aimed
+        annunciator in a cryostat is not recoverable in the same sense.
+      - Verified against the shipped set before choosing: config/alarms_v3.yaml
+        (16 alarms) never mixes selectors, so nothing that ships is refused.
+
+    Called from _expand_channel_group so the rule holds at EVERY expansion site
+    (top-level cfg, composite conditions[i], rate additional_condition) by
+    construction — defect #3 was precisely a site that got forgotten when the
+    rule lived in the callers.
+    """
+    present = sorted(key for key in _MULTI_CHANNEL_SELECTOR_KEYS if key in cfg)
+    if len(present) < 2:
+        return
+    where = f" {context}" if context else ""
+    raise AlarmConfigError(
+        f"alarm {alarm_id!r}{where} supplies more than one channel selector "
+        f"({', '.join(repr(k) for k in present)}); exactly one of "
+        f"{sorted(_MULTI_CHANNEL_SELECTOR_KEYS)} is allowed. 'channel_group' "
+        f"expansion OVERWRITES 'channels' at load and alarm_v2._resolve_channels "
+        f"prefers 'channels' over 'channel' (alarm_v2.py:470-475), so the extra "
+        f"selector would be silently ignored and the alarm would monitor "
+        f"something other than what this file says — remove all but one"
+    )
 
 
 def _expand_channel_group(
@@ -744,7 +852,12 @@ def _expand_channel_group(
     end one indirection away: it expands to ``channels: []`` and resolves to
     nothing. Refuse it here, where the resolution actually happens — the
     selector check upstream can only see the group NAME.
+
+    A cfg carrying MORE THAN ONE selector is refused before any expansion
+    (_reject_mixed_channel_selectors): the overwrite below would otherwise
+    silently discard the operator's explicit choice.
     """
+    _reject_mixed_channel_selectors(alarm_id, cfg, context)
     group_name = cfg.pop("channel_group", None)
     if group_name is None:
         return
