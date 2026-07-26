@@ -381,6 +381,21 @@ explicitly open; never exceed current write authority.
   abstraction boundary instead of accumulating example-specific prompt prose.
   The governing layer must make recurrence harder for every later agent, not
   merely remind the current agent what happened.
+- Read the prevention record as a corpus, not as a list. Fixing instances one at
+  a time is how a failure class survives while every one of its instances is
+  closed. Before disposing a correction, check the existing `classification`
+  values for the shape you just hit: if the same shape already has records, the
+  obligation is no longer to add instance N+1 but to name the class and enforce
+  it at the boundary where all of them become unreachable. Say so explicitly
+  when you do it, and say so explicitly when you decide not to and why.
+- Record what would have made the mistake unreachable, not only what fixed it.
+  A disposition that reports the correction teaches the next agent nothing about
+  construction; a disposition that names the property the design lacked does.
+  "The fixture was narrower than the rule it verified", "the mechanism was proven
+  in-process and never on the path that runs it", "the premise was assumed rather
+  than read from the code" are reusable; "corrected the regex" is not. Where that
+  property can be asserted, it becomes a guard; where it cannot yet, it is stated
+  as open governance debt rather than left implicit.
 - In a role-separated campaign, the reviewer authors or clarifies governance
   and the implementation role authors the separately assigned test/guard. Neither
   self-certifies the combined correction. A guard may not be deleted, skipped,
