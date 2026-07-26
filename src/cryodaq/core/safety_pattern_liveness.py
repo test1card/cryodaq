@@ -10,7 +10,9 @@ runtime. The same reasoning applies to every alarm reference regardless of
 severity — a misspelled WARNING channel annunciates nothing just as silently
 as a misspelled CRITICAL one — so alarm references are checked at all
 severities (plane 5), with an explicit per-reference ``optional_channels``
-opt-out for hardware a given lab does not populate. The engine's current
+opt-out for hardware a given lab does not populate. The opt-out is limited to
+non-safety alarms, must be an exact list of unique channel strings, and cannot
+silence a required composite/rate-condition arm. The engine's current
 temporary lab-build policy catches
 only this diagnostic exception and continues after a CRITICAL log until the
 exact lab manifest has been validated.  Removing that narrow catch restores
@@ -108,6 +110,12 @@ _ALARM_PSEUDO_CHANNELS: frozenset[str] = frozenset({"phase_elapsed_s"})
 # and rejects only unknown *enum values*, not unknown keys.
 _OPTIONAL_CHANNELS_KEY = "optional_channels"
 
+# Match the existing ``load_critical_channels_from_alarms_v3`` classification:
+# ``HIGH`` is a legacy spelling that participates in the critical protection
+# path, so it must not receive a weaker liveness escape hatch. The
+# ``interlocks`` section is safety-class irrespective of a ``level`` field.
+_SAFETY_ALARM_LEVELS = frozenset({"critical", "high"})
+
 
 @dataclass(frozen=True, slots=True)
 class _DeadPattern:
@@ -162,6 +170,91 @@ def _iter_alarm_entries(data: dict) -> list[tuple[str, dict]]:
     return entries
 
 
+def _optional_channels_for_alarm(*, source_name: str, label: str, alarm: dict) -> set[str]:
+    """Validate and return one non-safety alarm's optional channel references.
+
+    ``optional_channels`` changes a liveness failure into an intentional
+    absence, so it is never valid for a CRITICAL/HIGH alarm or an alarm-v3
+    interlock. YAML mappings are iterable and must not be accepted as a
+    convenient list of keys; accepting one would silently grant the escape
+    hatch to references the operator did not explicitly declare.
+    """
+    if _OPTIONAL_CHANNELS_KEY not in alarm:
+        return set()
+
+    location = f"{source_name} alarm {label!r} key {_OPTIONAL_CHANNELS_KEY!r}"
+    level = str(alarm.get("level", "")).strip().lower()
+    if label.startswith("interlocks/") or level in _SAFETY_ALARM_LEVELS:
+        raise SafetyPatternLivenessError(
+            f"{location} is forbidden for CRITICAL/HIGH or interlock safety alarms. "
+            "Remove the key and provision or correct every referenced channel; "
+            "a safety reference must remain live."
+        )
+
+    value = alarm[_OPTIONAL_CHANNELS_KEY]
+    if type(value) is not list:
+        raise SafetyPatternLivenessError(
+            f"{location} must be an exact list of unique non-empty channel strings, "
+            f"got {type(value).__name__}. Replace it with a YAML list or remove the key "
+            "so a dangling reference fails validation."
+        )
+
+    declared: set[str] = set()
+    for index, item in enumerate(value):
+        if type(item) is not str:
+            raise SafetyPatternLivenessError(
+                f"{location} item {index} must be a channel string, got {type(item).__name__}. "
+                "Replace it with a unique channel string or remove the key so a dangling "
+                "reference fails validation."
+            )
+        channel = item.strip()
+        if not channel:
+            raise SafetyPatternLivenessError(
+                f"{location} item {index} must be a non-empty channel string. "
+                "Replace it with a unique channel string or remove the key so a dangling "
+                "reference fails validation."
+            )
+        if channel in declared:
+            raise SafetyPatternLivenessError(
+                f"{location} repeats channel {channel!r}. Use each optional channel once, "
+                "or remove the key so a dangling reference fails validation."
+            )
+        declared.add(channel)
+    return declared
+
+
+def _reject_optional_required_condition_arms(
+    *, source_name: str, label: str, alarm: dict, declared_optional: set[str]
+) -> None:
+    """Reject opt-outs that make an otherwise-required condition permanently false."""
+    if not declared_optional:
+        return
+
+    conditions: list[tuple[str, object]] = []
+    if alarm.get("alarm_type") == "composite" and alarm.get("operator", "AND") == "AND":
+        for index, condition in enumerate(alarm.get("conditions", [])):
+            conditions.append((f"AND composite condition {index}", condition))
+    if alarm.get("alarm_type") == "rate" and "additional_condition" in alarm:
+        conditions.append(("rate additional_condition", alarm["additional_condition"]))
+
+    for context, condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        refs = {
+            ref
+            for ref in _extract_channel_refs(condition)
+            if not ref.startswith("__group__:") and ref not in _ALARM_PSEUDO_CHANNELS
+        }
+        optional_refs = refs & declared_optional
+        if refs and refs <= declared_optional:
+            location = f"{source_name} alarm {label!r} key {_OPTIONAL_CHANNELS_KEY!r}"
+            raise SafetyPatternLivenessError(
+                f"{location} makes required {context} unavailable via {sorted(optional_refs)!r}. "
+                "Remove those optional declarations or redesign the alarm so unpopulated "
+                "hardware is not a required condition."
+            )
+
+
 def _collect_dead_alarm_channel_refs(
     *,
     alarms_config_path: Path,
@@ -203,11 +296,17 @@ def _collect_dead_alarm_channel_refs(
     dead: list[_DeadPattern] = []
 
     for label, alarm in _iter_alarm_entries(data):
-        declared_optional = {
-            str(item).strip()
-            for item in (alarm.get(_OPTIONAL_CHANNELS_KEY) or [])
-            if isinstance(item, str) and item.strip()
-        }
+        declared_optional = _optional_channels_for_alarm(
+            source_name=source_name,
+            label=label,
+            alarm=alarm,
+        )
+        _reject_optional_required_condition_arms(
+            source_name=source_name,
+            label=label,
+            alarm=alarm,
+            declared_optional=declared_optional,
+        )
         # ``_extract_channel_refs`` is the production ref traversal
         # (src/cryodaq/core/housekeeping.py:106) and is reused rather than
         # re-implemented so the two never drift over which nested shapes
@@ -474,7 +573,8 @@ def validate_safety_pattern_liveness(
          annunciating nothing, forever. Adding a channel alarm is the single
          most common adaptation a new lab makes, so that reference is exactly
          the one that must fail loudly rather than silently. Per-reference
-         opt-out via ``optional_channels``; see
+         opt-out via ``optional_channels`` is limited to non-CRITICAL,
+         non-HIGH, non-interlock alarms; see
          ``_collect_dead_alarm_channel_refs``.
 
     ``descriptor_catalog`` is whichever manifest the engine actually selected
@@ -602,9 +702,10 @@ def validate_safety_pattern_liveness(
             lines.append(
                 f"Dead safety/alarm channel pattern(s): {len(dead)} match NO "
                 "channel on the plane their consumer sees (F-1 silent safety kill). "
-                "An alarm reference that resolves to nothing never fires; if a "
-                f"channel is legitimately absent at this lab, declare it under "
-                f"{_OPTIONAL_CHANNELS_KEY!r} on that alarm instead of leaving it dangling."
+                "An alarm reference that resolves to nothing never fires; correct or "
+                "provision it. Only a non-CRITICAL, non-HIGH, non-interlock alarm may "
+                f"declare a legitimately absent channel under {_OPTIONAL_CHANNELS_KEY!r}; "
+                "safety references must remain live."
             )
             for d in dead:
                 lines.append(f"  - pattern={d.pattern!r} plane={d.plane} source={d.source}")

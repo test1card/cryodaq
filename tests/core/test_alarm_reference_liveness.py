@@ -226,6 +226,126 @@ def test_declared_optional_reference_is_permitted(tmp_path: Path) -> None:
     validate_safety_pattern_liveness(**_build_fixture(tmp_path, alarms))
 
 
+def test_critical_alarm_cannot_declare_optional_channels(tmp_path: Path) -> None:
+    """Safety alarms must not silence a missing reference through this opt-out."""
+    alarms = {
+        "global_alarms": {
+            "critical_optional_hardware": _alarm(
+                "critical",
+                _DEAD_CHANNEL,
+                optional_channels=[_DEAD_CHANNEL],
+            )
+        }
+    }
+
+    with pytest.raises(SafetyPatternLivenessError) as exc_info:
+        validate_safety_pattern_liveness(**_build_fixture(tmp_path, alarms))
+
+    message = str(exc_info.value)
+    assert "critical_optional_hardware" in message
+    assert "optional_channels" in message
+    assert "provision or correct" in message
+
+
+@pytest.mark.parametrize("level", ["high", "HIGH"])
+def test_high_alarm_cannot_declare_optional_channels(tmp_path: Path, level: str) -> None:
+    """HIGH is the legacy critical-equivalent protected by the throttle path."""
+    alarms = {
+        "global_alarms": {
+            "high_optional_hardware": _alarm(
+                level,
+                _DEAD_CHANNEL,
+                optional_channels=[_DEAD_CHANNEL],
+            )
+        }
+    }
+
+    with pytest.raises(SafetyPatternLivenessError, match="optional_channels"):
+        validate_safety_pattern_liveness(**_build_fixture(tmp_path, alarms))
+
+
+def test_alarm_v3_interlock_cannot_declare_optional_channels(tmp_path: Path) -> None:
+    """The alarms-v3 interlock section is safety-class without a level field."""
+    alarms = {
+        "interlocks": {
+            "source_trip": _alarm(
+                "warning",
+                _DEAD_CHANNEL,
+                optional_channels=[_DEAD_CHANNEL],
+            )
+        }
+    }
+
+    with pytest.raises(SafetyPatternLivenessError) as exc_info:
+        validate_safety_pattern_liveness(**_build_fixture(tmp_path, alarms))
+
+    message = str(exc_info.value)
+    assert "interlocks/source_trip" in message
+    assert "optional_channels" in message
+
+
+@pytest.mark.parametrize(
+    ("declared_optional", "expected_detail"),
+    [
+        ({_DEAD_CHANNEL: True}, "got dict"),
+        (_DEAD_CHANNEL, "got str"),
+        ([_DEAD_CHANNEL, [_LIVE_CHANNEL]], "item 1 must be a channel string, got list"),
+        ([_DEAD_CHANNEL, 1], "item 1 must be a channel string, got int"),
+        ([_DEAD_CHANNEL, _DEAD_CHANNEL], "repeats channel"),
+    ],
+    ids=["mapping", "bare-string", "nested-list", "non-string-item", "duplicate"],
+)
+def test_optional_channels_requires_an_exact_unique_string_list(
+    tmp_path: Path, declared_optional: object, expected_detail: str
+) -> None:
+    """A malformed opt-out must not silently iterate or discard configuration."""
+    alarms = {
+        "global_alarms": {
+            "bad_optional_schema": _alarm(
+                "warning",
+                _DEAD_CHANNEL,
+                optional_channels=declared_optional,
+            )
+        }
+    }
+
+    with pytest.raises(SafetyPatternLivenessError) as exc_info:
+        validate_safety_pattern_liveness(**_build_fixture(tmp_path, alarms))
+
+    message = str(exc_info.value)
+    assert "bad_optional_schema" in message
+    assert "optional_channels" in message
+    assert expected_detail in message
+    assert "remove the key" in message
+
+
+def test_optional_channels_cannot_silence_required_warning_composite_arm(tmp_path: Path) -> None:
+    """A missing AND arm otherwise makes a non-critical composite inert forever."""
+    alarms = {
+        "global_alarms": {
+            "warning_composite": {
+                "alarm_type": "composite",
+                "operator": "AND",
+                "conditions": [
+                    {"check": "above", "channel": _LIVE_CHANNEL, "threshold": 300.0},
+                    {"check": "above", "channel": _DEAD_CHANNEL, "threshold": 300.0},
+                ],
+                "level": "warning",
+                "message": "test alarm",
+                "optional_channels": [_DEAD_CHANNEL],
+            }
+        }
+    }
+
+    with pytest.raises(SafetyPatternLivenessError) as exc_info:
+        validate_safety_pattern_liveness(**_build_fixture(tmp_path, alarms))
+
+    message = str(exc_info.value)
+    assert "warning_composite" in message
+    assert "optional_channels" in message
+    assert "required AND composite condition" in message
+
+
 def test_optional_declaration_does_not_silence_other_references(tmp_path: Path) -> None:
     """The opt-out is per reference — it must not become a per-alarm blanket."""
     other_dead = "Т98 Вторая опечатка"
