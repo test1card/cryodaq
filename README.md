@@ -1,4 +1,19 @@
+<div align="center">
+
+<img src="docs/assets/cryodaq-lockup.png" alt="CryoDAQ" width="520">
+
+**Data acquisition, control, and safety for a cryogenics laboratory.**
+
+[![CryoDAQ CI](https://github.com/test1card/cryodaq/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/test1card/cryodaq/actions/workflows/main.yml)
+[![Docs Freshness Gate](https://github.com/test1card/cryodaq/actions/workflows/docs-gate.yml/badge.svg?branch=main)](https://github.com/test1card/cryodaq/actions/workflows/docs-gate.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+
 **English** · [Русский](README.ru.md)
+
+</div>
+
+---
 
 # CryoDAQ
 
