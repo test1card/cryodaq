@@ -75,6 +75,34 @@ def get_data_dir() -> Path:
     return d
 
 
+class ArchiveLocationMigrationRequiredError(RuntimeError):
+    """A relocated state root has an archive left at the former data root."""
+
+
+def get_archive_dir(data_dir: Path | None = None) -> Path:
+    """Return the cold archive adjacent to the authoritative hot-data directory.
+
+    A previous release placed the default cold archive below ``CRYODAQ_ROOT``
+    even when ``CRYODAQ_STATE_ROOT`` moved the hot database elsewhere. Refuse
+    to ignore a detected legacy index: migrate it before the new state-root
+    archive can become authoritative.
+    """
+    active_data_dir = get_data_dir() if data_dir is None else data_dir
+    archive_dir = active_data_dir / "archive"
+    current_data_dir = get_state_root() / "data"
+    if active_data_dir.resolve() != current_data_dir.resolve():
+        return archive_dir
+
+    legacy_archive_dir = get_project_root() / "data" / "archive"
+    if archive_dir.resolve() != legacy_archive_dir.resolve() and (legacy_archive_dir / "index.json").is_file():
+        raise ArchiveLocationMigrationRequiredError(
+            "Cold archive remains at "
+            f"{legacy_archive_dir}; move it to {archive_dir} (after backup and validation) "
+            "or restore CRYODAQ_STATE_ROOT before starting CryoDAQ."
+        )
+    return archive_dir
+
+
 def get_logs_dir() -> Path:
     """Logs dir — rotating log files. Writable."""
     d = get_state_root() / "logs"

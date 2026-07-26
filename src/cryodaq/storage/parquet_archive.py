@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from cryodaq.paths import get_archive_dir
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sentinel import decode
@@ -94,7 +95,7 @@ def export_experiment_readings_to_parquet(
     # A day whose SQLite file was rotated to cold Parquet (F17) has no daily DB;
     # its data lives only in the archive. Reuse ArchiveReader to read it back so
     # such days are exported, not silently dropped into skipped_days.
-    reader = ArchiveReader(sqlite_root, sqlite_root / "archive")
+    reader = ArchiveReader(sqlite_root, get_archive_dir(sqlite_root))
 
     # Iterate daily DB files covering the range
     current_day = start_time.date()

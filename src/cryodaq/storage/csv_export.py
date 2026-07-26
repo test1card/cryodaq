@@ -12,6 +12,7 @@ import math
 from datetime import datetime
 from pathlib import Path
 
+from cryodaq.paths import get_archive_dir
 from cryodaq.storage.archive_reader import ArchiveReader
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
@@ -45,7 +46,7 @@ class CSVExporter:
             слепнет на вытесненных днях.
         """
         self._data_dir = data_dir
-        self._archive_dir = archive_dir if archive_dir is not None else data_dir / "archive"
+        self._archive_dir = archive_dir if archive_dir is not None else get_archive_dir(data_dir)
 
     def export(
         self,

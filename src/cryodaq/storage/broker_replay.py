@@ -18,6 +18,7 @@ from typing import Any
 
 from cryodaq.core.broker import DataBroker
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.paths import get_archive_dir
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import (
     ArchiveReader,
@@ -96,7 +97,7 @@ class DescriptorReplayReader:
     def __init__(self, data_dir: Path, archive_dir: Path | None = None) -> None:
         self._reader = ArchiveReader(
             data_dir,
-            archive_dir if archive_dir is not None else data_dir / "archive",
+            archive_dir if archive_dir is not None else get_archive_dir(data_dir),
         )
 
     async def read_window(
@@ -385,7 +386,7 @@ class ReplaySource:
             raise FileNotFoundError(f"Директория не найдена: {data_dir}")
 
         db_files = sorted(data_dir.glob("data_*.db"))  # noqa: ASYNC240
-        adir = archive_dir if archive_dir is not None else data_dir / "archive"
+        adir = archive_dir if archive_dir is not None else get_archive_dir(data_dir)
         reader = ArchiveReader(data_dir, adir)
         archived = self._archived_days(reader)
         hot_days = {_day_from_db_name(p.name) for p in db_files}

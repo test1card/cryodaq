@@ -190,7 +190,7 @@ from cryodaq.instance_lock import try_acquire_lock
 from cryodaq.notifications.composition_photo_handler import CompositionPhotoHandler
 from cryodaq.notifications.escalation import EscalationService
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
-from cryodaq.paths import get_config_dir, get_data_dir, get_project_root
+from cryodaq.paths import get_archive_dir, get_config_dir, get_data_dir, get_project_root
 from cryodaq.report_process import ReportProcessError, ReportProcessRunner
 from cryodaq.storage.channel_descriptors import (
     ChannelDescriptorStorageError,
@@ -6246,6 +6246,11 @@ def _engine_startup_summary(
     )
 
 
+def _cold_rotation_project_root(data_dir: Path) -> Path:
+    """Resolve relative cold-rotation archive paths from the hot-data authority."""
+    return get_archive_dir(data_dir).parent.parent
+
+
 def _install_engine_signal_handlers(shutdown_event: asyncio.Event) -> Callable[[], None]:
     """Install shutdown ownership and return its exact rollback action."""
 
@@ -6763,7 +6768,7 @@ async def _run_engine(
     cold_rotation_service = build_cold_rotation_service(
         cold_cfg,
         data_dir=_DATA_DIR,
-        project_root=get_project_root(),
+        project_root=_cold_rotation_project_root(_DATA_DIR),
         # F1c: warns when retention compression is configured to fire before
         # rotation's age_days (starvation hazard; moot for daily DBs with F1a).
         retention_cfg=housekeeping_raw.get("retention", {}),

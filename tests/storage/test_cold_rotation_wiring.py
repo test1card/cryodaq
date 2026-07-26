@@ -21,7 +21,9 @@ import pytest
 
 pytest.importorskip("pyarrow")
 
+from cryodaq import paths  # noqa: E402
 from cryodaq.drivers.base import ChannelStatus, Reading  # noqa: E402
+from cryodaq.engine import _cold_rotation_project_root  # noqa: E402
 from cryodaq.storage.archive_reader import ArchiveReader  # noqa: E402
 from cryodaq.storage.cold_rotation import (  # noqa: E402
     ColdRotationService,
@@ -81,6 +83,48 @@ def test_build_service_enabled(tmp_path: Path) -> None:
     assert svc._age_days == 30
     # archive_dir is resolved relative to project root → tmp_path/data/archive
     assert svc._archive_dir == tmp_path / "data" / "archive"
+
+
+def test_relocated_state_root_rotates_then_reads_from_its_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine's archive resolution stays with a relocated hot-data root."""
+    application_root = tmp_path / "application"
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("CRYODAQ_ROOT", str(application_root))
+    monkeypatch.setenv("CRYODAQ_STATE_ROOT", str(state_root))
+    data_dir = paths.get_data_dir()
+    archive_dir = paths.get_archive_dir(data_dir)
+    service = build_cold_rotation_service(
+        {"enabled": True, "archive_dir": "data/archive", "age_days": 30},
+        data_dir=data_dir,
+        project_root=_cold_rotation_project_root(data_dir),
+    )
+    assert service is not None
+    assert service._archive_dir == archive_dir
+
+    old_day = TODAY - timedelta(days=40)
+    _write_day(data_dir, old_day, [_reading("T1", 70.0, old_day.replace(hour=12), ChannelStatus.OK)])
+    asyncio.run(service.run_once(now=TODAY))
+    assert not (data_dir / f"data_{old_day.date().isoformat()}.db").exists()
+
+    rows = ArchiveReader(data_dir, archive_dir).query_rows(old_day, TODAY, None, None)
+    assert [value for _ts, _instrument, _channel, value, _unit, _status in rows] == [70.0]
+
+
+def test_relocated_state_root_refuses_unmigrated_legacy_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application_root = tmp_path / "application"
+    state_root = tmp_path / "state"
+    legacy_archive = application_root / "data" / "archive"
+    legacy_archive.mkdir(parents=True)
+    (legacy_archive / "index.json").write_text('{"files": []}', encoding="utf-8")
+    monkeypatch.setenv("CRYODAQ_ROOT", str(application_root))
+    monkeypatch.setenv("CRYODAQ_STATE_ROOT", str(state_root))
+
+    with pytest.raises(paths.ArchiveLocationMigrationRequiredError, match="move it to"):
+        paths.get_archive_dir()
 
 
 @pytest.mark.parametrize("flag", [False, None, "true", 1, "yes"])

@@ -37,6 +37,7 @@ from typing import Any
 
 import h5py
 
+from cryodaq.paths import get_archive_dir
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader, FullRow, _day_from_db_name
 from cryodaq.storage.sqlite_writer import _parse_timestamp
@@ -102,7 +103,7 @@ class HDF5Exporter:
             ``data_dir / "archive"`` (совпадает с cold_rotation.archive_dir).
         """
         self._data_dir = data_dir
-        self._archive_dir = archive_dir if archive_dir is not None else data_dir / "archive"
+        self._archive_dir = archive_dir if archive_dir is not None else get_archive_dir(data_dir)
 
     def export(
         self,
@@ -189,9 +190,7 @@ class HDF5Exporter:
         data: dict[str, dict[str, _ChannelData]] = {}
         for raw_ts, inst_id, channel, value, unit, status in rows:
             ts = _parse_timestamp(raw_ts).timestamp()
-            data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(
-                ts, value, status
-            )
+            data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(ts, value, status)
 
         # Запись в HDF5
         str_dt = h5py.string_dtype()
@@ -199,9 +198,7 @@ class HDF5Exporter:
         for inst_id, channels in data.items():
             inst_group = hf.create_group(_unique_child_name(hf, _sanitize_name(inst_id)))
             for ch_name, ch_data in channels.items():
-                ch_group = inst_group.create_group(
-                    _unique_child_name(inst_group, _sanitize_name(ch_name))
-                )
+                ch_group = inst_group.create_group(_unique_child_name(inst_group, _sanitize_name(ch_name)))
                 ch_group.create_dataset(
                     "timestamp",
                     data=ch_data.timestamps,
@@ -234,8 +231,7 @@ class HDF5Exporter:
     def _export_source_data(self, conn: sqlite3.Connection, hf: h5py.File) -> int:
         """Экспортировать таблицу source_data (Keithley raw)."""
         cursor = conn.execute(
-            "SELECT timestamp, channel, voltage, current, resistance, power "
-            "FROM source_data ORDER BY timestamp;"
+            "SELECT timestamp, channel, voltage, current, resistance, power FROM source_data ORDER BY timestamp;"
         )
         rows = cursor.fetchall()
         if not rows:
@@ -257,26 +253,14 @@ class HDF5Exporter:
             powers.append(row["power"] if row["power"] is not None else float("nan"))
 
         grp = hf.require_group("source_data")
-        grp.create_dataset(
-            "timestamp", data=timestamps, chunks=True, compression="gzip", compression_opts=4
-        )
+        grp.create_dataset("timestamp", data=timestamps, chunks=True, compression="gzip", compression_opts=4)
         # h5py не поддерживает list[str] напрямую — используем variable-length
         dt = h5py.string_dtype()
-        grp.create_dataset(
-            "channel", data=channels, dtype=dt, chunks=True, compression="gzip", compression_opts=4
-        )
-        grp.create_dataset(
-            "voltage", data=voltages, chunks=True, compression="gzip", compression_opts=4
-        )
-        grp.create_dataset(
-            "current", data=currents, chunks=True, compression="gzip", compression_opts=4
-        )
-        grp.create_dataset(
-            "resistance", data=resistances, chunks=True, compression="gzip", compression_opts=4
-        )
-        grp.create_dataset(
-            "power", data=powers, chunks=True, compression="gzip", compression_opts=4
-        )
+        grp.create_dataset("channel", data=channels, dtype=dt, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("voltage", data=voltages, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("current", data=currents, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("resistance", data=resistances, chunks=True, compression="gzip", compression_opts=4)
+        grp.create_dataset("power", data=powers, chunks=True, compression="gzip", compression_opts=4)
 
         return len(rows)
 

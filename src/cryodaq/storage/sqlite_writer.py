@@ -46,6 +46,7 @@ from cryodaq.core.operator_log import (
     normalize_operator_log_tags,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.paths import get_archive_dir
 from cryodaq.storage._sqlite import (
     SQLITE_BACKPORT_SAFE,
     SQLITE_BROKEN_RANGE,
@@ -9035,7 +9036,7 @@ class SQLiteWriter:
         # reports already union the same rows via ArchiveReader.query_operator_log.
         # Thread the live path through the same reader. No archive index → skip
         # entirely so hot-only deployments stay byte-identical.
-        archive_index = self._data_dir / "archive" / "index.json"
+        archive_index = get_archive_dir(self._data_dir) / "index.json"
         if archive_index.exists():
             from cryodaq.storage.archive_reader import ArchiveReader
 
@@ -9594,7 +9595,7 @@ class SQLiteWriter:
         # newest first, under one row/byte/deadline budget for the whole request.
         # The cold end is strictly before the oldest hot day so an ordinary
         # rotation cannot make the hot and cold paths read the same source.
-        archive_index = self._data_dir / "archive" / "index.json"
+        archive_index = get_archive_dir(self._data_dir) / "index.json"
         cold_needed = (
             filtered_remaining > 0 and any(hot_deficits.values())
             if channels and hot_deficits is not None
