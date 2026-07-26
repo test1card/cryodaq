@@ -356,6 +356,23 @@ explicitly open; never exceed current write authority.
   obligations: the product/runtime failure and the false-green coverage escape.
   Both receive stable IDs and independently enforceable guards. A known
   reproduction may not remain only in reviewer notes or an ad-hoc script.
+- Specifying what a guard must falsify is a governing act, separate from
+  implementing it. Deciding that a correction is right is building work;
+  deciding what would prove it wrong is not. An agent that authored a correction
+  does not, alone, settle what its guard must catch: state the failing shape
+  explicitly and have it confirmed by whoever holds the disposition, exactly as
+  `disposition_owner` already prevents an author from closing its own record.
+  A guard written by the same agent, in the same sitting, from the same mental
+  model as the code inherits that code's blind spots; it then reads as coverage
+  while being unable to fail. This is the most common way enforcement is lost
+  here, and it is not caused by carelessness.
+- Every guard names the production invocation path it exercises, and is proven
+  against that path rather than a convenient stand-in. For any mechanism that
+  only demonstrates itself on failure, follow the environment, arguments, and
+  process boundaries all the way into whatever really runs it: in-process and
+  structural tests cannot observe a transport-level break, and a guard that
+  passes because the test supplied a condition production never supplies is a
+  false green regardless of how thoroughly it asserts.
 - Maintain a machine-readable prevention map from each open/closed prevention ID
   to its governing rule, named test or validator, required default-CI job, and
   immutable red/green evidence. Missing, skipped, xfailed, deselected, renamed,

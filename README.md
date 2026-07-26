@@ -698,6 +698,61 @@ software and laboratory checks are collected as a turnkey protocol in
 
 ## Contributor and developer-agent guidance
 
+### Two roles, not one agent
+
+This repository is built to be worked by an agent, and it distinguishes two
+roles that are easy to conflate:
+
+- **The building role.** Arranges existing blocks and creates new blocks from
+  instructions. This is ordinary implementation work, and it is what most of
+  `AGENTS.md` addresses. A mid-tier model should be able to do it.
+- **The governing role.** Decides how the blocks lie against each other and
+  whether they are well made: whether a premise is true, whether an invariant
+  is the right one, whether a guard can actually fail.
+
+The distinction matters because **a guard is governing work wearing
+implementation clothes.** A test that merely exercises code is building work. A
+guard is a claim about what could go wrong -- and that claim can only be made by
+someone who knows how the whole thing is wired.
+
+When one agent writes the code and then writes its own guard, in one sitting,
+from one mental model, the guard inherits the code's blind spots. It passes, it
+reads as coverage, and it cannot catch the defect it names. During the montana
+review this happened **five separate times**, each caught by an independent
+reviewer rather than by the guard:
+
+- a summariser guard fed itself tidy synthetic input, so four successive
+  versions of its parser shipped broken;
+- an evidence rule was verified with a single-partition fixture, so it missed
+  every multi-partition record;
+- a structurally correct pytest plugin was proven by in-process tests, while in
+  production it was silently stripped from the sealed candidate's environment
+  and never loaded at all.
+
+None of those were careless. Each was the building role being asked to do the
+governing role's job.
+
+**The operating consequence:** what a guard must falsify is *specified* by the
+governing layer; the guard is then *implemented* by the building role. Whoever
+authored a correction does not get to decide, alone, what would prove it wrong.
+This is the same separation the registry already applies to dispositions --
+`disposition_owner` exists so that no author closes its own record -- extended
+to the point where it is actually load-bearing.
+
+Two corollaries worth stating plainly:
+
+1. **A guard must be exercised against the real invocation path**, not a
+   convenient stand-in. For any mechanism that only demonstrates itself on
+   failure, follow the environment and arguments all the way into the process
+   that really runs it. In-process and structural tests cannot see a
+   transport-level break.
+2. **Documenting a trap is not preventing a trap.** Every hazard hit during the
+   montana review was already written down somewhere in this repository. The
+   goal is not more prose telling an agent what to avoid; it is a governing
+   layer that makes the failure unreachable.
+
+### Where the rules live
+
 Repository-wide engineering and safety rules live in [`AGENTS.md`](AGENTS.md).
 [`CLAUDE.md`](CLAUDE.md) contains subordinate ecosystem-specific convenience
 guidance; it cannot override `AGENTS.md` or the detailed, tool-neutral workflow
