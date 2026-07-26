@@ -20,7 +20,7 @@
 Data acquisition, control, and analysis stack for a cryogenics laboratory.
 Replaces a 3-year-old LabVIEW VI that drove the instruments and sent email alerts.
 Adds: scripted FSM campaigns, automated calibration with multi-format export,
-auto-generated DOCX reports, role-based Telegram alerts, sensor anomaly detection
+auto-generated DOCX reports, Telegram alerts with time-based escalation, sensor anomaly detection
 with an alarm pipeline, plugin analytics, a local operator-query layer with a
 knowledge base (RAG), historical-data replay mode,
 interferometric length metrology (Etalon MultiLine), and a large cross-platform
@@ -98,7 +98,8 @@ The most important changes are:
 - **Descriptor-qualified channel identity.** Canonical descriptors are carried
   through acquisition, SQLite, cold archive, replay, reports, and GUI paths.
   Startup validation of every safety/alarm/interlock pattern against that
-  authority is still temporarily fail-open and remains an acceptance gate.
+  authority fails closed: a configuration error terminates the engine with exit
+  code 2, and the launcher does not auto-restart it.
 - **Process isolation and recovery.** The launcher supervises the engine, GUI
   bridge, assistant, and bounded report children with explicit lifecycle
   machinery. The assistant is process-isolated but does not yet satisfy the
@@ -330,9 +331,10 @@ hardening are not release or physical-acceptance claims; see **Status** above.
   (`equipment_manuals` — instrument PDFs via pypdf; `procedures` — Markdown;
   `reference` — operator manual / README / CHANGELOG). The RAG module:
   loader -> LanceDB indexer -> top-K searcher; embeddings `qwen3-embedding:0.6b`
-  (1024-dim) via Ollama. CLI `cryodaq-rag-index` / `cryodaq-rag-search`,
-  ZMQ `rag.rebuild_index` / `rag.rebuild_status`, and an "Update index" button in
-  the KnowledgeBasePanel. Bootstraps on engine start when the index is empty.
+  (1024-dim) via Ollama. Indexing is offline only: run `cryodaq-rag-index` to
+  build or rebuild the index, then use `cryodaq-rag-search` to query it. The
+  running assistant exposes read-only search only; it has no rebuild commands,
+  update button, or startup bootstrap.
 - **Local operator-query service:** a local Ollama service (no external APIs)
   classifies operator intent (IntentClassifier), routes the query
   (QueryRouter), and answers from live data (BrokerSnapshot) and the knowledge
@@ -350,8 +352,9 @@ hardening are not release or physical-acceptance claims; see **Status** above.
   runtime application with a global / per-channel policy.
 - **Auto-generated reports:** templated sections; a guaranteed
   `report_editable.docx`; best-effort PDF via `soffice` / LibreOffice.
-- **Telegram alerts:** role-based filtering. Operators receive the full alarm
-  stream; managers get a curated subset with on-demand queries via bot commands.
+- **Telegram alerts:** one configured default chat target. Time-based
+  escalation sends the same message to each configured escalation chat after
+  its respective delay; there is no role-based filtering.
 - **Sensor diagnostics → alarm pipeline:** MAD-outlier + cross-channel
   correlation-drift detection. A persistent anomaly publishes an alarm: warning
   after 5 min, critical after 15 min, auto-clear on recovery. Concurrent events
@@ -359,9 +362,10 @@ hardening are not release or physical-acceptance claims; see **Status** above.
 - **Alarm engine v2:** threshold / rate / composite / phase-dependent rules; a
   hysteresis deadband; in-place severity escalation (WARNING→CRITICAL); an
   ack/clear publish path.
-- **Interlocks:** 3 hard-protection rules (cryostat / compressor / detector). A
-  trip → `emergency_off` + transition to TRIPPED. The operator acknowledges via
-  the `interlock_acknowledge` ZMQ command without a restart.
+- **Interlocks:** 3 hard-protection rules (cryostat / compressor / detector).
+  `overheat_cryostat` and `overheat_compressor` use `emergency_off`, which
+  latches `FAULT_LATCHED`. `detector_warmup` uses `stop_source`: a soft stop
+  that turns outputs off and transitions to `SAFE_OFF` without a fault latch.
 - **Fail-closed safety discipline:** Keithley output OFF is readback-verified;
   unverified OFF becomes a fault or a blocking RUN precondition instead of a
   false SAFE_OFF. `config/physical_alarms.yaml` explicitly sets
@@ -372,8 +376,9 @@ hardening are not release or physical-acceptance claims; see **Status** above.
 - **Experiment templates, lifecycle metadata, artifact archiving:** a
   `data/experiments/<id>/` directory with `metadata.json`, `reports/`, and an
   optional Parquet archive.
-- **Plugin architecture:** ABC isolation; a failing callback marks the plugin
-  degraded without crashing the engine.
+- **Plugin architecture:** ABC isolation; if a callback raises, the loader logs
+  the exception, skips that batch for the plugin, and retries it on the next
+  batch. No degraded state is recorded.
 - **Housekeeping:** adaptive throttle + retention + compression.
 - **Cold-storage rotation (F17):** enabled by default
   (`cold_rotation.enabled: true`). `ColdRotationService` is wired into the

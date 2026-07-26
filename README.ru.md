@@ -20,7 +20,7 @@
 Стек сбора данных, управления и анализа для криогенной лаборатории.
 Заменяет 3-летний LabVIEW VI, управлявший приборами и отправлявший email-алерты.
 Добавлено: скриптовые FSM-циклы экспериментов, автоматическая калибровка с мульти-форматным
-экспортом, автогенерация DOCX-отчётов, ролевые Telegram-алерты, детекция аномалий
+экспортом, автогенерация DOCX-отчётов, Telegram-алерты с эскалацией по времени, детекция аномалий
 датчиков с аларм-конвейером, plugin-аналитика, локальный слой операторских
 запросов с базой знаний (RAG), режим replay исторических данных,
 интерферометрическая метрология (Etalon MultiLine), регрессионный тест-сьют
@@ -166,9 +166,10 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
   (`equipment_manuals` — PDF приборов через pypdf; `procedures` — Markdown;
   `reference` — operator manual / README / CHANGELOG). RAG-модуль:
   loader -> LanceDB indexer -> top-K searcher; embeddings `qwen3-embedding:0.6b`
-  (1024-dim) через Ollama. CLI `cryodaq-rag-index` / `cryodaq-rag-search`,
-  ZMQ `rag.rebuild_index` / `rag.rebuild_status`, кнопка «Обновить индекс» в
-  KnowledgeBasePanel. Bootstrap при пустом индексе на старте engine.
+  (1024-dim) через Ollama. Индексация выполняется только офлайн: запустите
+  `cryodaq-rag-index`, чтобы построить или перестроить индекс, затем используйте
+  `cryodaq-rag-search` для поиска. Работающий assistant предоставляет только
+  read-only поиск; команд перестроения, кнопки обновления и bootstrap при старте нет.
 - **Локальный сервис операторских запросов:** локальный Ollama-сервис (без внешних
   API) классифицирует намерение оператора (IntentClassifier), маршрутизирует
   запрос (QueryRouter) и отвечает по live-данным (BrokerSnapshot) и базе знаний
@@ -186,8 +187,9 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
   runtime-применение с глобальной / поканальной политикой.
 - **Автогенерация отчётов:** секции по шаблону; гарантированный `report_editable.docx`;
   PDF best-effort через `soffice` / LibreOffice.
-- **Telegram-алерты:** ролевая фильтрация. Операторы получают полный аларм-поток;
-  менеджеры — курированное подмножество с on-demand запросами через бот-команды.
+- **Telegram-алерты:** один настроенный чат по умолчанию. Эскалация по времени
+  повторно отправляет то же сообщение в каждый настроенный чат эскалации после
+  соответствующей задержки; ролевой фильтрации нет.
 - **Диагностика датчиков → аларм-конвейер:** MAD-outlier + кросс-канальное
   обнаружение дрейфа корреляций. Устойчивая аномалия публикует аларм: warning
   через 5 мин, critical через 15 мин, auto-clear при восстановлении. Одновременные
@@ -196,8 +198,10 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
   гистерезисный deadband; повышение severity на месте (WARNING→CRITICAL);
   ack/clear publish-путь.
 - **Interlocks:** 3 правила жёсткой защиты (криостат / компрессор / детектор).
-  Срабатывание → `emergency_off` + переход в TRIPPED. Оператор подтверждает
-  через `interlock_acknowledge` ZMQ-команду без перезапуска.
+  `overheat_cryostat` и `overheat_compressor` используют `emergency_off`,
+  который фиксирует `FAULT_LATCHED`. `detector_warmup` использует
+  `stop_source`: мягкую остановку с выключением выходов и переходом в `SAFE_OFF`
+  без фиксации fault.
 - **Fail-closed safety discipline:** Keithley output OFF проверяется readback'ом;
   неподтверждённый OFF становится fault или блокирующим RUN-предусловием, а не
   ложным SAFE_OFF. Tracked `config/physical_alarms.yaml` явно задаёт
@@ -206,8 +210,9 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
 - **Оператор-лог:** SQLite-backed; доступ через GUI + ZMQ.
 - **Шаблоны экспериментов, lifecycle-метаданные, архивация артефактов:** каталог
   `data/experiments/<id>/` с `metadata.json`, `reports/`, опциональный Parquet-архив.
-- **Plugin-архитектура:** ABC-изоляция; сбои callback помечают плагин degraded
-  без краша engine.
+- **Plugin-архитектура:** ABC-изоляция; если callback выбрасывает исключение,
+  загрузчик пишет его в лог, пропускает этот batch для плагина и повторяет вызов
+  на следующем batch. Состояние degraded не записывается.
 - **Housekeeping:** адаптивный throttle + retention + compression.
 - **Cold-storage rotation (F17):** включена по умолчанию
   (`cold_rotation.enabled: true`). `ColdRotationService` подключён к движку и
