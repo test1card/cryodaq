@@ -599,6 +599,87 @@ def test_registry_guard_partitions_match_candidate_runner_selection() -> None:
     assert mismatches == [], f"registry guard partitions diverge from candidate runner selection: {mismatches}"
 
 
+def test_unknown_as_clear_class_record_keeps_all_three_instances_and_both_real_guards() -> None:
+    """A fourth unknown-as-clear route cannot ship as an unregistered instance."""
+
+    payload = validate_registry(_registry())
+    runtime = next(record for record in payload["records"] if record["id"] == "ALARM-UNKNOWN-AS-CLEAR-033")
+    assert runtime["status"] == "open"
+    assert runtime["classification"] == "unknown_as_clear"
+    assert runtime["scope"] == "product_contract"
+    assert (
+        "_alarm_v2_tick_configs -> tick_alarm -> AlarmEvaluator.evaluate -> AlarmStateManager.process"
+        in f"{runtime['applies_to']} {runtime['invariant']}"
+    )
+    for commit in ("c1ff8597", "a3859772", "ef9b81ec"):
+        assert commit in runtime["applies_to"]
+    assert {guard["node"] for guard in runtime["guards"]} == {
+        "tests/core/test_alarm_v2_integration.py::test_shipped_vacuum_loss_cold_holds_when_evaluator_raises",
+        "tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive",
+    }
+    assert {guard["ci_partition"] for guard in runtime["guards"]} == {"core"}
+
+    alarm_module = ast.parse((ROOT / "src/cryodaq/core/alarm_v2.py").read_text(encoding="utf-8"))
+    evaluator = next(
+        node for node in alarm_module.body if isinstance(node, ast.ClassDef) and node.name == "AlarmEvaluator"
+    )
+    evaluate = next(node for node in evaluator.body if isinstance(node, ast.FunctionDef) and node.name == "evaluate")
+    dispatched = {
+        call.func.attr
+        for call in ast.walk(evaluate)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "self"
+        and call.func.attr.startswith("_eval_")
+    }
+    sweep_module = ast.parse((ROOT / "tests/core/test_alarm_v2_integration.py").read_text(encoding="utf-8"))
+    guard_functions = {guard["node"].split("::", 1)[1] for guard in runtime["guards"]}
+    swept = {
+        value.value
+        for function in sweep_module.body
+        if isinstance(function, ast.FunctionDef) and function.name in guard_functions
+        for value in ast.walk(function)
+        if isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value.startswith("_eval_")
+    }
+    assert dispatched <= swept, (
+        f"evaluator dispatch paths missing from the class-level guard union: {sorted(dispatched - swept)}"
+    )
+
+    pair = next(pair for pair in payload["false_green_pairs"] if pair["id"] == "ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201")
+    assert pair == {
+        "id": "ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201",
+        "status": "open",
+        "scope": "product_contract",
+        "runtime_prevention_id": "ALARM-UNKNOWN-AS-CLEAR-033",
+        "guard": (
+            "tests/core/test_alarm_v2_integration.py::"
+            "test_every_evaluator_exception_holds_active_and_never_fires_inactive"
+        ),
+        "ci_partition": "core",
+        "red_evidence": (
+            "the_real_shipped_config_reproduction_exercised_the_composite_evaluator_only_so_a_green_instance_guard_"
+            "would_not_prove_that_threshold_rate_stale_phase_and_all_composite_exception_paths_cannot_turn_unknown_"
+            "into_clear_pending_immutable_candidate_capture"
+        ),
+        "green_evidence": "pending",
+    }
+
+    incomplete = copy.deepcopy(payload)
+    record = next(record for record in incomplete["records"] if record["id"] == "ALARM-UNKNOWN-AS-CLEAR-033")
+    record["guards"] = record["guards"][1:]
+    with pytest.raises(GovernanceContractError, match="unknown-as-clear runtime class guards"):
+        validate_registry(incomplete)
+
+    misbound = copy.deepcopy(payload)
+    pair = next(
+        pair for pair in misbound["false_green_pairs"] if pair["id"] == "ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201"
+    )
+    pair["guard"] = "tests/core/test_alarm_v2_integration.py::test_shipped_vacuum_loss_cold_holds_when_evaluator_raises"
+    with pytest.raises(GovernanceContractError, match="unknown-as-clear false-green"):
+        validate_registry(misbound)
+
+
 def test_registry_rejects_concrete_parameter_selectors_but_collects_base_node() -> None:
     payload = validate_registry(_registry())
     invalid = copy.deepcopy(payload)

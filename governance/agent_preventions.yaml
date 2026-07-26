@@ -2307,6 +2307,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: artifact_form_evidence_accepted_a_digest_without_the_sealed_receipt_tree_or_suite_so_unrelated_or_wrong_partition_artifacts_were_indistinguishable_2026_07_26_pending_immutable_capture
     green_evidence: pending
+  - id: ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-UNKNOWN-AS-CLEAR-033
+    guard: tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive
+    ci_partition: core
+    red_evidence: the_real_shipped_config_reproduction_exercised_the_composite_evaluator_only_so_a_green_instance_guard_would_not_prove_that_threshold_rate_stale_phase_and_all_composite_exception_paths_cannot_turn_unknown_into_clear_pending_immutable_candidate_capture
+    green_evidence: pending
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
     status: closed
     scope: product_contract
@@ -4717,4 +4725,32 @@ records:
         ci_partition: remaining
     automation_limit: The registry records disposition_owner only as the single role "reviewer" and never a named identity, a reviewer count, a distinct-context attestation, or a mandate label (depth-and-delta versus BREADTH); no typed publication-disposition receipt records two named distinct reviewers and their verdicts anywhere the validator can see. Such a receipt structure, validated by this contract, is required before independence can be mechanically enforced rather than reviewer-asserted.
     red_evidence: prose_only_two_independent_review_publication_rule_in_AGENTS_md_mistake_to_enforcement_section_without_registry_record_or_named_distinct_reviewer_disposition_receipt_2026_07_26
+    green_evidence: pending
+
+  - id: ALARM-UNKNOWN-AS-CLEAR-033
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Active and inactive AlarmEvaluator outcomes on the production path _alarm_v2_tick_configs -> tick_alarm -> AlarmEvaluator.evaluate -> AlarmStateManager.process; this class covers the threshold NaN clear fixed in c1ff8597, the composite NaN clear fixed in a3859772, and the evaluator-exception clear fixed in ef9b81ec.
+    classification: unknown_as_clear
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A CRITICAL active alarm can clear and silence GUI, Telegram, and sound notification when an evaluator cannot determine its condition, even though the physical hazard may persist.
+    invariant: >-
+      On _alarm_v2_tick_configs -> tick_alarm -> AlarmEvaluator.evaluate -> AlarmStateManager.process,
+      unknown input or an evaluator exception is never the same signal as a determined false condition:
+      an active alarm holds, an inactive alarm does not fire, and an exception-originated hold remains
+      distinguishable with evaluator_error=True. The shipped CRITICAL vacuum-loss configuration and every
+      evaluator subpath exercise that boundary.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_alarm_v2_integration.py::test_shipped_vacuum_loss_cold_holds_when_evaluator_raises
+        ci_partition: core
+      - node: tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive
+        ci_partition: core
+    automation_limit: Immutable sealed-candidate red-before and green-after core-suite evidence, bound to these exact shipped-config and nine-evaluator invocations and independently disposed for this runtime class and its false-green pair, is unavailable. The historical commit narrative and local runs are not closure evidence; on capture, bind exact guard source blobs before computing closure_semantics_sha256.
+    red_evidence: historical_ef9b81ec_reproduced_a_CRITICAL_shipped_vacuum_loss_cold_alarm_clearing_after_an_evaluator_exception_while_c1ff8597_and_a3859772_record_the_prior_threshold_and_composite_NaN_instances_pending_immutable_candidate_capture
     green_evidence: pending

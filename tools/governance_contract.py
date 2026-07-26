@@ -564,10 +564,63 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
                 raise GovernanceContractError(f"{pair_id} closure evidence is semantically stale")
         elif "closure_semantics_sha256" in pair or "guard_source_blobs" in pair:
             raise GovernanceContractError(f"{pair_id} has premature closure evidence")
+    _validate_alarm_unknown_as_clear_class(record_by_id, pairs)
     return payload
 
 
 _REMOVAL_BASELINE_PATH = Path(__file__).resolve().parent.parent / "governance" / "agent_preventions_baseline.json"
+
+_ALARM_UNKNOWN_AS_CLEAR_RUNTIME_ID = "ALARM-UNKNOWN-AS-CLEAR-033"
+_ALARM_UNKNOWN_AS_CLEAR_FALSE_GREEN_GUARD = (
+    "tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive"
+)
+_ALARM_UNKNOWN_AS_CLEAR_FALSE_GREEN_ID = "ALARM-UNKNOWN-AS-CLEAR-FALSE-GREEN-201"
+_ALARM_UNKNOWN_AS_CLEAR_CLASSIFICATION = "unknown_as_clear"
+_ALARM_UNKNOWN_AS_CLEAR_PATH = (
+    "_alarm_v2_tick_configs -> tick_alarm -> AlarmEvaluator.evaluate -> AlarmStateManager.process"
+)
+_ALARM_UNKNOWN_AS_CLEAR_GUARDS = frozenset(
+    {
+        "tests/core/test_alarm_v2_integration.py::test_shipped_vacuum_loss_cold_holds_when_evaluator_raises",
+        "tests/core/test_alarm_v2_integration.py::test_every_evaluator_exception_holds_active_and_never_fires_inactive",
+    }
+)
+
+
+def _validate_alarm_unknown_as_clear_class(record_by_id: Mapping[str, Mapping[str, Any]], pairs: list[Any]) -> None:
+    """Keep the three unknown-as-clear instances bound as one alarm class."""
+
+    runtime = record_by_id.get(_ALARM_UNKNOWN_AS_CLEAR_RUNTIME_ID)
+    matching_pairs = [pair for pair in pairs if pair.get("id") == _ALARM_UNKNOWN_AS_CLEAR_FALSE_GREEN_ID]
+    if runtime is None:
+        if not matching_pairs:
+            return
+        raise GovernanceContractError("unknown-as-clear runtime class disposition is missing")
+    if runtime["classification"] != _ALARM_UNKNOWN_AS_CLEAR_CLASSIFICATION:
+        raise GovernanceContractError("unknown-as-clear runtime class classification is missing")
+    if runtime["scope"] != "product_contract":
+        raise GovernanceContractError("unknown-as-clear runtime class scope is not product_contract")
+    if _ALARM_UNKNOWN_AS_CLEAR_PATH not in f"{runtime['applies_to']} {runtime['invariant']}":
+        raise GovernanceContractError("unknown-as-clear runtime class omits its production invocation path")
+    runtime_nodes = {guard["node"] for guard in runtime["guards"]}
+    if runtime_nodes != _ALARM_UNKNOWN_AS_CLEAR_GUARDS:
+        raise GovernanceContractError("unknown-as-clear runtime class guards are incomplete or changed")
+    if any(guard["ci_partition"] != "core" for guard in runtime["guards"]):
+        raise GovernanceContractError("unknown-as-clear runtime class guard is not in core CI")
+
+    # Whole-registry pair removal is deliberately handled by the removal
+    # baseline, whose test also needs a structurally valid pair-free payload.
+    if not matching_pairs:
+        return
+    if len(matching_pairs) != 1:
+        raise GovernanceContractError("unknown-as-clear false-green class disposition is missing or duplicated")
+    pair = matching_pairs[0]
+    if (
+        pair["runtime_prevention_id"] != _ALARM_UNKNOWN_AS_CLEAR_RUNTIME_ID
+        or pair["guard"] != _ALARM_UNKNOWN_AS_CLEAR_FALSE_GREEN_GUARD
+        or pair["ci_partition"] != "core"
+    ):
+        raise GovernanceContractError("unknown-as-clear false-green class guard is incomplete or misbound")
 
 
 def compute_removal_baseline(payload: Mapping[str, Any]) -> dict[str, str]:
