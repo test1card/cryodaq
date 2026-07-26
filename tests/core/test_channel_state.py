@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import UTC, datetime
 
 from cryodaq.core.channel_state import ChannelStateTracker
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import ChannelStatus, Reading
 
 
 def _reading(
@@ -15,6 +16,7 @@ def _reading(
     unit: str = "K",
     instrument_id: str = "LS218",
     ts: float | None = None,
+    status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
     if ts is None:
         ts = time.time()
@@ -25,6 +27,7 @@ def _reading(
         channel=channel,
         value=value,
         unit=unit,
+        status=status,
     )
 
 
@@ -99,6 +102,19 @@ def test_normal_value_no_fault() -> None:
     assert tracker.get_fault_count("T1") == 0
 
 
+def test_unusable_reading_is_immediately_stale_and_records_temperature_fault() -> None:
+    """NaN/error readings are visible as stale faults, not fresh measurements."""
+    tracker = ChannelStateTracker()
+    tracker.update(_reading("T1", math.nan, status=ChannelStatus.SENSOR_ERROR))
+
+    state = tracker.get("T1")
+    assert state is not None
+    assert math.isnan(state.value)
+    assert state.is_stale
+    assert "T1" in tracker.get_stale_channels()
+    assert tracker.get_fault_count("T1") == 1
+
+
 def test_fault_expires_after_window() -> None:
     tracker = ChannelStateTracker(fault_window_s=10.0)
     old_ts = time.time() - 20.0  # давнее время
@@ -158,18 +174,14 @@ def test_resolve_short_to_full() -> None:
     state = tracker.get("\u042212")
     assert state is not None
     assert (
-        state.channel
-        == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"  # noqa: E501
+        state.channel == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"  # noqa: E501
     )
     assert abs(state.value - 4.2) < 1e-9
     # Full name also works
-    state2 = tracker.get(
-        "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"
-    )
+    state2 = tracker.get("\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2")
     assert state2 is not None
     assert (
-        state2.channel
-        == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"  # noqa: E501
+        state2.channel == "\u042212 \u0422\u0435\u043f\u043b\u043e\u043e\u0431\u043c\u0435\u043d\u043d\u0438\u043a 2"  # noqa: E501
     )
 
 

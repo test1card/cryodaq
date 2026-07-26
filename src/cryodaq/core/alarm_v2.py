@@ -221,6 +221,22 @@ class AlarmEvaluator:
         hysteresis: float | None = cfg.get("hysteresis")
 
         for ch in channels:
+            state = self._state.get(ch)
+            if state is not None and state.is_stale:
+                # Unknown input may raise the separate stale alarm, but it is
+                # never affirmative evidence that an active threshold alarm
+                # cleared. Return a deduplicated keep-active event instead.
+                if is_active and (active_channels is None or ch in active_channels):
+                    msg = self._format_message(message_tmpl, channel=ch, value=state.value)
+                    return AlarmEvent(
+                        alarm_id=alarm_id,
+                        level=level,
+                        message=msg,
+                        triggered_at=time.time(),
+                        channels=[ch],
+                        values={ch: state.value},
+                    )
+                continue
             triggered, value = self._check_threshold_channel(ch, check, cfg)
             if triggered:
                 msg = self._format_message(message_tmpl, channel=ch, value=value)
@@ -449,7 +465,7 @@ class AlarmEvaluator:
             if state is None:
                 # Канал никогда не получал данных — тоже stale (если есть данные вообще)
                 continue
-            if (now - state.timestamp) > timeout:
+            if state.is_stale or (now - state.timestamp) > timeout:
                 msg = self._format_message(message_tmpl, channel=ch, value=0.0)
                 return AlarmEvent(
                     alarm_id=alarm_id,

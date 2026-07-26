@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -15,7 +16,7 @@ from cryodaq.core.alarm_v2 import (
 )
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import ChannelStatus, Reading
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -110,6 +111,46 @@ def test_threshold_above_not_triggered() -> None:
         "level": "WARNING",
     }
     assert ev.evaluate("test", cfg) is None
+
+
+def test_active_threshold_alarm_holds_on_unusable_reading() -> None:
+    """A sensor error may not clear an already-active threshold alarm."""
+    state = ChannelStateTracker()
+    rate = RateEstimator(window_s=120.0, min_points=2)
+    evaluator = AlarmEvaluator(state, rate, PhaseProvider(), SetpointProvider())
+    manager = AlarmStateManager()
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "T1",
+        "check": "above",
+        "threshold": 4.0,
+        "level": "CRITICAL",
+        "message": "T1 high",
+    }
+
+    state.update(_reading("T1", 5.0))
+    event = evaluator.evaluate("T1_high", cfg)
+    assert manager.process("T1_high", event, cfg) == "TRIGGERED"
+
+    state.update(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="LS218",
+            channel="T1",
+            value=math.nan,
+            unit="K",
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+    )
+    event = evaluator.evaluate(
+        "T1_high",
+        cfg,
+        is_active=True,
+        active_channels=frozenset({"T1"}),
+    )
+
+    assert manager.process("T1_high", event, cfg) is None
+    assert "T1_high" in manager.get_active()
 
 
 def test_threshold_below() -> None:
@@ -404,6 +445,24 @@ def test_stale_not_fires_fresh() -> None:
     ev = _make_evaluator([_reading("T1", 4.2)])
     cfg = {"alarm_type": "stale", "channel": "T1", "timeout_s": 30}
     assert ev.evaluate("stale", cfg) is None
+
+
+def test_stale_fires_immediately_on_unusable_reading() -> None:
+    """A fresh timestamp cannot hide a NaN/error reading from stale alarms."""
+    ev = _make_evaluator(
+        [
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="LS218",
+                channel="T1",
+                value=math.nan,
+                unit="K",
+                status=ChannelStatus.SENSOR_ERROR,
+            )
+        ]
+    )
+    cfg = {"alarm_type": "stale", "channel": "T1", "timeout_s": 30}
+    assert ev.evaluate("data_stale", cfg) is not None
 
 
 # ---------------------------------------------------------------------------

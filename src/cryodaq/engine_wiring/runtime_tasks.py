@@ -42,6 +42,9 @@ async def _alarm_v2_feed_loop(
         while True:
             reading = await queue.get()
             try:
+                # ChannelStateTracker applies the NaN doctrine pessimistically:
+                # unusable readings are retained as stale/fault data for alarm
+                # consumers rather than being represented as fresh values.
                 state_tracker.update(reading)
                 # NaN-доктрина (HI-2): годно ⇔ статус OK-класса И значение
                 # конечно; не годное показание (flapping sensor: NaN/inf или

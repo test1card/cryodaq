@@ -1,15 +1,19 @@
 """Tests for CooldownAlarm state machine — Phase B of F-X v3."""
+
 from __future__ import annotations
 
 import asyncio
+import math
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cryodaq.core.channel_state import ChannelState
+from cryodaq.core.channel_state import ChannelState, ChannelStateTracker
 from cryodaq.core.cooldown_alarm import CooldownAlarm, CooldownState
+from cryodaq.drivers.base import ChannelStatus, Reading
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -18,8 +22,12 @@ from cryodaq.core.cooldown_alarm import CooldownAlarm, CooldownState
 
 def _make_ch(ch: str, value: float, stale: bool = False) -> ChannelState:
     return ChannelState(
-        channel=ch, value=value, timestamp=time.time(),
-        unit="K", instrument_id="test", is_stale=stale,
+        channel=ch,
+        value=value,
+        timestamp=time.time(),
+        unit="K",
+        instrument_id="test",
+        is_stale=stale,
     )
 
 
@@ -88,9 +96,7 @@ def test_arm_with_model_returns_true(tmp_path):
     # gate passes, then mock the parse so we don't need a real EnsembleModel.
     (tmp_path / "predictor_model.json").write_text("{}", encoding="utf-8")
     fake = _fake_model()
-    with patch(
-        "cryodaq.analytics.cooldown_predictor.load_model", return_value=fake
-    ) as load_model_mock:
+    with patch("cryodaq.analytics.cooldown_predictor.load_model", return_value=fake) as load_model_mock:
         result = alarm.arm()
 
     assert result is True
@@ -121,6 +127,7 @@ async def test_watching_after_rate_min_elapsed():
     alarm._state = CooldownState.ARMED
 
     from cryodaq.analytics.cooldown_predictor import PredictionResult
+
     fake_pred = MagicMock(spec=PredictionResult)
     fake_pred.progress = 0.3
     fake_pred.t_remaining_hours = 50.0
@@ -141,8 +148,9 @@ async def test_on_track_no_fire():
     alarm._state = CooldownState.WATCHING
 
     from cryodaq.analytics.cooldown_predictor import PredictionResult
+
     fake_pred = MagicMock(spec=PredictionResult)
-    fake_pred.progress = 0.50   # exactly on track at t=36h
+    fake_pred.progress = 0.50  # exactly on track at t=36h
     fake_pred.t_remaining_hours = 36.0
 
     tracker.get.side_effect = lambda ch: _make_ch(ch, 50.0 if "Т11" in ch else 200.0)
@@ -164,6 +172,7 @@ async def test_plateau_fires_after_sustained():
     alarm._state = CooldownState.WATCHING
 
     from cryodaq.analytics.cooldown_predictor import PredictionResult
+
     fake_pred = MagicMock(spec=PredictionResult)
     # Expected at 36h: p≈0.5. Actual: 0.1 (stuck at 70K) → big deviation
     fake_pred.progress = 0.10
@@ -191,6 +200,7 @@ async def test_fired_recovery_returns_to_watching():
     alarm._sustained_count = 5
 
     from cryodaq.analytics.cooldown_predictor import PredictionResult
+
     fake_pred = MagicMock(spec=PredictionResult)
     fake_pred.progress = 0.49  # back on track
     fake_pred.t_remaining_hours = 37.0
@@ -215,6 +225,7 @@ async def test_auto_disarm_on_high_progress():
     alarm._current_progress = 0.96  # already at 96%
 
     from cryodaq.analytics.cooldown_predictor import PredictionResult
+
     fake_pred = MagicMock(spec=PredictionResult)
     fake_pred.progress = 0.97
     fake_pred.t_remaining_hours = 1.0
@@ -277,6 +288,30 @@ async def test_cold_channel_stale_skips_tick():
     assert alarm.state == CooldownState.WATCHING
 
 
+@pytest.mark.asyncio
+async def test_watchdog_fired_holds_on_unusable_cold_reading():
+    """A fresh NaN sample must not clear a fired cooldown watchdog."""
+    alarm, _, alarm_mgr, _ = _make_alarm(cfg_overrides={"watchdog_enabled": True})
+    tracker = ChannelStateTracker()
+    alarm._state_tracker = tracker
+    alarm._state = CooldownState.WATCHDOG_FIRED
+    tracker.update(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="Т12",
+            value=math.nan,
+            unit="K",
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+    )
+
+    await alarm.tick()
+
+    assert alarm.state == CooldownState.WATCHDOG_FIRED
+    alarm_mgr.process.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # WATCHDOG tests
 # ---------------------------------------------------------------------------
@@ -311,7 +346,7 @@ async def test_auto_disarmed_stays_terminal_when_watchdog_disabled():
     with patch("cryodaq.analytics.cooldown_predictor.predict") as mock_pred:
         mock_pred.return_value = MagicMock(progress=0.92, t_remaining_hours=2.0)
         with patch("cryodaq.core.cooldown_alarm.CooldownAlarm._publish_state_event", new_callable=AsyncMock):
-            await alarm.tick()          # WATCHING → AUTO_DISARMED
+            await alarm.tick()  # WATCHING → AUTO_DISARMED
 
     assert alarm.state == CooldownState.AUTO_DISARMED
 
@@ -325,11 +360,13 @@ async def test_auto_disarmed_stays_terminal_when_watchdog_disabled():
 @pytest.mark.asyncio
 async def test_watchdog_t_cold_in_range_does_not_fire():
     """WATCHDOG + T_cold below threshold → no alarm fired."""
-    alarm, tracker, alarm_mgr, _ = _make_alarm(cfg_overrides={
-        "watchdog_enabled": True,
-        "watchdog_margin_K": 1.0,
-        "watchdog_sustained_s": 90,
-    })
+    alarm, tracker, alarm_mgr, _ = _make_alarm(
+        cfg_overrides={
+            "watchdog_enabled": True,
+            "watchdog_margin_K": 1.0,
+            "watchdog_sustained_s": 90,
+        }
+    )
     alarm._state = CooldownState.WATCHDOG
     alarm._watchdog_sustained_count = 0
 
@@ -347,11 +384,13 @@ async def test_watchdog_t_cold_in_range_does_not_fire():
 @pytest.mark.asyncio
 async def test_watchdog_sustained_over_threshold_fires():
     """WATCHDOG + T_cold sustained above threshold for sustained_min ticks → WATCHDOG_FIRED."""
-    alarm, tracker, alarm_mgr, _ = _make_alarm(cfg_overrides={
-        "watchdog_enabled": True,
-        "watchdog_margin_K": 1.0,
-        "watchdog_sustained_s": 90,
-    })
+    alarm, tracker, alarm_mgr, _ = _make_alarm(
+        cfg_overrides={
+            "watchdog_enabled": True,
+            "watchdog_margin_K": 1.0,
+            "watchdog_sustained_s": 90,
+        }
+    )
     alarm._state = CooldownState.WATCHDOG
 
     # T_cold = 7.0 K > 6.0 K threshold
@@ -371,11 +410,13 @@ async def test_watchdog_sustained_over_threshold_fires():
 @pytest.mark.asyncio
 async def test_watchdog_fired_clears_when_t_cold_recovers():
     """WATCHDOG_FIRED + T_cold returns below threshold → WATCHDOG (alarm cleared)."""
-    alarm, tracker, alarm_mgr, _ = _make_alarm(cfg_overrides={
-        "watchdog_enabled": True,
-        "watchdog_margin_K": 1.0,
-        "watchdog_sustained_s": 90,
-    })
+    alarm, tracker, alarm_mgr, _ = _make_alarm(
+        cfg_overrides={
+            "watchdog_enabled": True,
+            "watchdog_margin_K": 1.0,
+            "watchdog_sustained_s": 90,
+        }
+    )
     alarm._state = CooldownState.WATCHDOG_FIRED
     alarm._watchdog_sustained_count = 3
 
@@ -447,8 +488,7 @@ async def test_finalize_disarms_any_active_state():
         await alarm.tick()
 
         assert alarm.state == CooldownState.DISARMED, (
-            f"Expected DISARMED after finalize from {initial_state.name}, "
-            f"got {alarm.state.name}"
+            f"Expected DISARMED after finalize from {initial_state.name}, got {alarm.state.name}"
         )
 
 
