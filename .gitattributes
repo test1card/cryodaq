@@ -1,2 +1,3 @@
 *.ttf binary
 *.otf binary
+governance/red_reproductions/*.json -text

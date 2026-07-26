@@ -2315,7 +2315,7 @@ false_green_pairs:
     ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json
-      sha256: sha256:52f86f79f11b3329af0f7040d62971be70a6b0b594855486923b450d3a69e576
+      sha256: sha256:c69145dee1f90c53ffe8f0f3a3fdf089ed93eeee5d5294665fbebcd132aec62a
     green_evidence: pending
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
     status: closed
@@ -2325,7 +2325,7 @@ false_green_pairs:
     ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json
-      sha256: sha256:d4940d7e155450a6e089de024d3f700f40d2f6ee44947e4c2afb58e2dedefd99
+      sha256: sha256:5c2f64c78dddee10b943d9b3c0645fa377550fcadfa1e88eea2adff61835cb14
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -2342,7 +2342,7 @@ false_green_pairs:
     ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_mixed_selector_027.json
-      sha256: sha256:54e278102b95c6a4e9e2a7da81dd2420fcbf6e4524bfef85a887fb594ba1dd94
+      sha256: sha256:fcdb209b1f77ee9c8f4b630492d98447723288210c184835a7a464ef14f75f22
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -4202,7 +4202,7 @@ records:
         ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json
-      sha256: sha256:d4940d7e155450a6e089de024d3f700f40d2f6ee44947e4c2afb58e2dedefd99
+      sha256: sha256:5c2f64c78dddee10b943d9b3c0645fa377550fcadfa1e88eea2adff61835cb14
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -4237,7 +4237,7 @@ records:
         ci_partition: core
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_mixed_selector_027.json
-      sha256: sha256:54e278102b95c6a4e9e2a7da81dd2420fcbf6e4524bfef85a887fb594ba1dd94
+      sha256: sha256:fcdb209b1f77ee9c8f4b630492d98447723288210c184835a7a464ef14f75f22
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
@@ -4761,5 +4761,5 @@ records:
       false-green pair must remain open.
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_033.json
-      sha256: sha256:63feae2296aeddd53acb553244a4ad653c2a1e6064b3969e9c1df99a93188a75
+      sha256: sha256:423bf8c0878c732f22f98f5bf23b6883f1bfc2d648c390c21d87a9e4434cc9ef
     green_evidence: pending
