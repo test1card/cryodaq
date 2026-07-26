@@ -28,6 +28,33 @@ regression test suite.
 
 Built for ASC LPI (the Millimetron project).
 
+## What it looks like
+
+Every screenshot below is the real interface, rendered from this repository's own code. All of them
+show the system **with no engine connected** — which is deliberate, because that is where the design
+decision that matters is visible.
+
+<img src="docs/assets/screenshot-operator-display.png" alt="Operator shift summary" width="820">
+
+The shift summary answers the questions an operator actually asks — *can we continue?*, *what needs
+attention?* — and when it cannot answer, it says so. Every card carries an explicit **НЕТ СВЯЗИ**
+badge and names the next safe step. It never renders a plausible-looking zero.
+
+<img src="docs/assets/screenshot-main-window.png" alt="Main window" width="820">
+
+The main window: sixteen sensor channels, temperature and pressure history, and an operator log.
+Unavailable channels read `—` / «Нет данных», never `0.0`.
+
+<img src="docs/assets/screenshot-keithley-panel.png" alt="Keithley source control" width="760">
+
+Hazardous source control. With the link down each channel reads **НЕИЗВЕСТНО** — *unknown* — not
+`OFF`, and the controls disable because there is no transport to command over. An operator who reads
+"OFF" walks up to hardware that may be live; this panel refuses to tell that lie.
+
+<img src="docs/assets/screenshot-calibration-panel.png" alt="Sensor calibration" width="760">
+
+Sensor calibration across three LakeShore instruments, grouped by the hardware they belong to.
+
 ## Status
 
 - **Latest release:** v0.64.1 (2026-07-08)
