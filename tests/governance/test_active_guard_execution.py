@@ -20,11 +20,17 @@ from tools.ci_guard_execution import (
 )
 from tools.governance_contract import (
     GovernanceContractError,
+    _git_blob_id,
     closure_semantics_sha256,
     validate_registry,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _guard_source_blobs(record: dict) -> dict[str, str]:
+    paths = {guard["node"].split("::", 1)[0] for guard in record["guards"]}
+    return {path: _git_blob_id((ROOT / path).read_bytes()) for path in sorted(paths)}
 
 
 def _registry(
@@ -73,6 +79,7 @@ def _registry(
             expiry_disposition="fixture no longer applies",
         )
     if status in {"closed", "expired"}:
+        record["guard_source_blobs"] = _guard_source_blobs(record)
         record["closure_semantics_sha256"] = closure_semantics_sha256(record)
     return {
         "schema_version": 2,
@@ -544,7 +551,7 @@ def test_active_guard_registry_rejects_duplicate_yaml_keys(tmp_path: Path) -> No
 
 
 def test_open_reopened_and_closed_guards_execute_while_expired_does_not(tmp_path: Path) -> None:
-    node = "tests/test_guard_cases.py::test_guard"
+    node = "tests/governance/test_active_guard_execution.py::test_active_guard_registry_rejects_duplicate_yaml_keys"
     for status in ("open", "reopened", "closed"):
         root = tmp_path / status
         _write_registry(root, node, status=status)
@@ -569,7 +576,10 @@ def test_open_reopened_and_closed_guards_execute_while_expired_does_not(tmp_path
 
 
 def test_false_green_expiry_cannot_outlive_runtime_or_expire_durable_scope() -> None:
-    node = "tests/test_guard_cases.py::test_guard"
+    node = (
+        "tests/governance/test_active_guard_execution.py"
+        "::test_active_guard_nodes_deduplicate_runtime_and_false_green_mappings"
+    )
     active_pair = {
         "id": "STRICT-GUARD-FALSE-GREEN-001",
         "status": "open",

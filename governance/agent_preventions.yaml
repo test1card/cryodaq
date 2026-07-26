@@ -4075,7 +4075,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: CI can execute one tree while hashing or uploading another, omit exact run or artifact identity, or let a registry artifact claim conceal the candidate tree and suite it attests.
-    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, and uploaded artifact digest; every registry artifact evidence claim carries the receipt tree and suite and that suite covers its registered guard partition.
+    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, and uploaded artifact digest; every registry artifact evidence claim carries the receipt tree and exact suite coverage, while a multi-partition closure requires a sealed aggregate bundle naming exactly every covered guard partition.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4113,7 +4113,7 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_artifact_evidence_requires_receipt_tree_and_suite_binding
         ci_partition: remaining
-      - node: tests/governance/test_agent_preventions.py::test_multi_partition_record_cannot_close_on_a_single_partition_artifact
+      - node: tests/governance/test_agent_preventions.py::test_multi_partition_record_requires_exact_sealed_bundle_coverage
         ci_partition: remaining
     red_evidence: ci_line_review_confirmed_misbinding_pending_hosted_artifact
     green_evidence: pending

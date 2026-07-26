@@ -134,7 +134,7 @@ def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidenc
         validate_registry(invalid)
 
     closed = copy.deepcopy(payload)
-    record = closed["records"][0]
+    record = next(record for record in closed["records"] if record["id"] == "GOVERNANCE-PREVENTION-MAP-001")
     record["status"] = "closed"
     record["red_evidence"] = {"locator": "git:" + "1" * 40, "sha256": "sha256:" + "1" * 64}
     record["green_evidence"] = {"locator": "github-run:12345", "sha256": "sha256:" + "2" * 64}
@@ -142,13 +142,24 @@ def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidenc
     record["closure_semantics_sha256"] = closure_semantics_sha256(record)
     validate_registry(closed)
 
+    missing_binding = copy.deepcopy(closed)
+    missing_binding_record = next(
+        record for record in missing_binding["records"] if record["id"] == "GOVERNANCE-PREVENTION-MAP-001"
+    )
+    del missing_binding_record["guard_source_blobs"]
+    missing_binding_record["closure_semantics_sha256"] = closure_semantics_sha256(missing_binding_record)
+    with pytest.raises(GovernanceContractError, match="guard_source_blobs"):
+        validate_registry(missing_binding)
+
     stale = copy.deepcopy(closed)
-    stale["records"][0]["invariant"] += " forged"
+    stale_record = next(record for record in stale["records"] if record["id"] == "GOVERNANCE-PREVENTION-MAP-001")
+    stale_record["invariant"] += " forged"
     with pytest.raises(GovernanceContractError, match="semantically stale"):
         validate_registry(stale)
 
     prose = copy.deepcopy(closed)
-    prose["records"][0]["red_evidence"] = "looks immutable"
+    prose_record = next(record for record in prose["records"] if record["id"] == "GOVERNANCE-PREVENTION-MAP-001")
+    prose_record["red_evidence"] = "looks immutable"
     with pytest.raises(GovernanceContractError, match="immutable evidence shape"):
         validate_registry(prose)
 
@@ -199,38 +210,52 @@ def test_artifact_evidence_requires_receipt_tree_and_suite_binding() -> None:
             validate_registry(mutation)
 
 
-def test_multi_partition_record_cannot_close_on_a_single_partition_artifact() -> None:
-    """One sealed artifact is one partition's execution, so membership is too weak.
+def test_multi_partition_record_requires_exact_sealed_bundle_coverage() -> None:
+    """A multi-partition closure needs sealed, exact per-partition coverage.
 
     A record whose guards span several partitions was closable with a single
-    artifact from any one of them, which says nothing about the rest. Sixteen
-    records in this registry span more than one partition, so the previous
-    membership check left every one of them closable on a fraction of its
-    evidence.
+    A bare aggregate locator used to bypass the artifact-only check entirely.
+    The aggregate form must name its sealed tree and exactly the partitions it
+    covers; one omitted or unrelated suite must refuse the closure.
     """
 
     payload = _registry()
-    record = next(
-        record for record in payload["records"] if len({guard["ci_partition"] for guard in record["guards"]}) > 1
-    )
+    record = next(record for record in payload["records"] if record["id"] == "FALSE-GREEN-001")
     partitions = sorted({guard["ci_partition"] for guard in record["guards"]})
     assert len(partitions) > 1, "fixture must be a genuinely multi-partition record"
 
     record["status"] = "closed"
     record["red_evidence"] = {"locator": "tree:" + "1" * 40, "sha256": "sha256:" + "1" * 64}
     record["green_evidence"] = {
-        "locator": "artifact:123",
+        "locator": "bundle:anything",
         "sha256": "sha256:" + "2" * 64,
-        "tree": "2" * 40,
-        # A real, registered partition -- but only ONE of the several this
-        # record's guards actually span.
-        "suite": partitions[0],
     }
     record["guard_source_blobs"] = _guard_source_blobs(record)
     record["closure_semantics_sha256"] = closure_semantics_sha256(record)
 
-    with pytest.raises(GovernanceContractError, match="uncovered partitions"):
+    with pytest.raises(GovernanceContractError, match="bundle evidence shape"):
         validate_registry(payload)
+
+    record["green_evidence"] = {
+        "locator": "bundle:123",
+        "sha256": "sha256:" + "2" * 64,
+        "tree": "2" * 40,
+        "suites": partitions,
+    }
+    record["closure_semantics_sha256"] = closure_semantics_sha256(record)
+    validate_registry(payload)
+
+    incomplete = copy.deepcopy(payload)
+    incomplete_record = next(record for record in incomplete["records"] if record["id"] == "FALSE-GREEN-001")
+    incomplete_record["green_evidence"]["suites"] = partitions[:-1]
+    with pytest.raises(GovernanceContractError, match="uncovered partitions"):
+        validate_registry(incomplete)
+
+    unexpected = copy.deepcopy(payload)
+    unexpected_record = next(record for record in unexpected["records"] if record["id"] == "FALSE-GREEN-001")
+    unexpected_record["green_evidence"]["suites"] = sorted(set(partitions) | {"gui"})
+    with pytest.raises(GovernanceContractError, match="unexpected partitions"):
+        validate_registry(unexpected)
 
 
 def test_invalid_registry_fixtures_fail_closed() -> None:
