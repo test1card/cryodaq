@@ -594,33 +594,67 @@ class _BridgeWatchdog:
         if not self.is_healthy(bridge):
             if not self._restart_is_due():
                 return
-            snapshot_ingress.invalidate_transport()
-            window.invalidate_descriptor_transport()
             if bridge.is_alive():
                 logger.warning("ZMQ bridge not healthy (no heartbeat), restarting...")
-                self._restart(bridge, shutdown_first=True)
+                self._restart(
+                    bridge,
+                    window,
+                    snapshot_ingress,
+                    shutdown_first=True,
+                )
             else:
                 logger.warning("ZMQ bridge died, restarting...")
-                self._restart(bridge, shutdown_first=False)
+                self._restart(
+                    bridge,
+                    window,
+                    snapshot_ingress,
+                    shutdown_first=False,
+                )
             return
         if bridge.data_flow_stalled():
             if not self._restart_is_due():
                 return
-            snapshot_ingress.invalidate_transport()
-            window.invalidate_descriptor_transport()
             logger.warning("ZMQ bridge not healthy (no readings), restarting...")
-            self._restart(bridge, shutdown_first=True)
+            self._restart(
+                bridge,
+                window,
+                snapshot_ingress,
+                shutdown_first=True,
+            )
 
     def _restart_is_due(self) -> bool:
         """Return whether a health-driven restart may allocate a new bridge."""
         return self._next_restart_at is None or self._monotonic() >= self._next_restart_at
 
-    def _restart(self, bridge: ZmqBridge, *, shutdown_first: bool) -> None:
-        if shutdown_first:
-            bridge.shutdown()
+    def _restart(
+        self,
+        bridge: ZmqBridge,
+        window: MainWindow,
+        snapshot_ingress: OperatorSnapshotIngressOwner,
+        *,
+        shutdown_first: bool,
+    ) -> None:
+        """Invalidate authority within each restart lifecycle before ``start()``."""
+        start_attempted = False
         try:
-            bridge.start()
+            if shutdown_first:
+                snapshot_ingress.invalidate_transport()
+                window.invalidate_descriptor_transport()
+                bridge.shutdown()
+                start_attempted = True
+                bridge.start()
+            else:
+                snapshot_ingress.invalidate_transport()
+                window.invalidate_descriptor_transport()
+                # The caller observed a dead bridge.  If it came back in the
+                # meantime, settle it before replacing it.
+                if bridge.is_alive():
+                    bridge.shutdown()
+                start_attempted = True
+                bridge.start()
         except Exception as exc:
+            if not start_attempted:
+                raise
             self._consecutive_failures += 1
             if self._consecutive_failures >= _BRIDGE_RESTART_ATTEMPT_LIMIT:
                 self.latched = True
