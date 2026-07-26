@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import ast
 import asyncio
-import time
-from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -55,27 +54,22 @@ from tests.agents.assistant.test_periodic_png_coordinator import (
     _config,
 )
 
-
-def _settle_attempts(seconds: float = 30.0) -> Iterator[None]:
-    """Yield settle attempts until a wall-clock budget expires.
-
-    Each polling loop below exits the moment its condition holds, so this is a
-    give-up point, never a latency assertion. It replaces a literal
-    ``range(100)`` around ``await asyncio.sleep(0.001)``, which expired on
-    loaded CI runners -- the coordinator was still DELIVERING when the test
-    demanded FAILED.
-
-    The budget is wall-clock rather than an iteration count on purpose: a
-    1 ms sleep costs ~1 ms on Linux but ~15 ms on Windows, where the default
-    timer resolution is coarse, so any fixed count means two very different
-    budgets. If work genuinely wedges, pytest's --timeout still reports it.
-    """
-
-    deadline = time.monotonic() + seconds
-    while True:
-        yield None
-        if time.monotonic() >= deadline:
-            return
+# Every wait in this module is a rendezvous with a boundary the coordinator
+# itself owns, never a wall-clock poll of an independently scheduled
+# background loop:
+#
+#   * ``await coordinator.reconcile_once()`` -- serializes behind any pass the
+#     background ``_run_loop`` already holds ``_reconcile_lock`` for, then
+#     drives a complete pass to quiescence.  When it returns, every transition
+#     the coordinator was going to make for that state has been persisted.
+#   * ``await clock.timer_armed.wait()`` on a test-local ``PulseClock`` -- the
+#     transaction heartbeat arms its next timer only after the preceding
+#     ``_refresh_periodic_authority_if_due`` has finished its durable write, so
+#     a freshly armed timer *is* the completion signal for the previous tick.
+#
+# ``test_module_never_polls_for_settlement`` below enforces this: a
+# reintroduced polling loop fails that test instead of surfacing as one more
+# ~30 s flake in a random unrelated node.
 
 
 # Separate and deliberately small: this bounds retries of a filesystem
@@ -270,11 +264,7 @@ async def test_non_bytes_artifact_reader_terminalizes_ready_without_send(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["last_terminal"] is not None:
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         terminal = (await _load_stable(tmp_path)).payload["last_terminal"]
         assert terminal["status"] == "FAILED"
         assert terminal["failure_phase"] == "scheduler"
@@ -353,11 +343,7 @@ async def test_due_delivery_failure_artifact_loss_preserves_phase_and_settles(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["last_terminal"] is not None:
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         terminal = (await _load_stable(tmp_path)).payload["last_terminal"]
         assert terminal["status"] == "FAILED"
         assert terminal["failure_phase"] == "delivery"
@@ -426,11 +412,7 @@ async def test_config_change_terminalizes_retryable_failed_without_rewriting_pha
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            state = (await _load_stable(tmp_path)).payload
-            if state["last_terminal"] is not None:
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         terminal = (await _load_stable(tmp_path)).payload["last_terminal"]
         assert terminal["failure_phase"] == "render"
         assert terminal["certainty"] == "not_applicable"
@@ -559,11 +541,10 @@ async def test_config_change_during_delivering_preserves_unknown_no_resend(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            active = (await _load_stable(tmp_path)).payload["active"]
-            if active["status"] == "DELIVERY_UNKNOWN":
-                break
-            await asyncio.sleep(0.001)
+        # Recovering a stale DELIVERING is a single transition that ends the
+        # pass (periodic_png.py:1057 deliberately returns False so the
+        # ambiguity-bearing active record survives one whole boundary).
+        await coordinator.reconcile_once()
         active = (await _load_stable(tmp_path)).payload["active"]
         assert active["status"] == "DELIVERY_UNKNOWN"
         assert active["error_code"] == "coordinator_recovered_delivering"
@@ -825,11 +806,7 @@ async def test_delivery_attempt_exhaustion_is_terminal(tmp_path: Path) -> None:
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["last_terminal"] is not None:
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         terminal = (await _load_stable(tmp_path)).payload["last_terminal"]
         assert terminal["status"] == "FAILED"
         assert terminal["certainty"] == "rejected"
@@ -865,23 +842,11 @@ async def test_sender_exception_after_invocation_becomes_delivery_unknown(
         # The DELIVERY_UNKNOWN write is dispatched via asyncio.to_thread
         # (periodic_png.py:_persist_unknown -> self._run_blocking, defaulting
         # to _to_thread at periodic_png.py:523/309-310), which lands on the
-        # event loop's shared default ThreadPoolExecutor. That executor is
-        # shared by every test in this process using the default
-        # run_blocking, so under partition-wide load the *executor dispatch*
-        # is what takes the time, not the state machine itself (diagnosed
-        # 2026-07-25: production is correct, the fixed 100-iteration/~100ms
-        # budget below was simply too short under contention -- confirmed by
-        # a red probe that reproduces the original assertion failure at this
-        # same budget when the transition is genuinely broken). Do not
-        # shrink this deadline back down without re-establishing headroom
-        # over real executor contention.
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            payload = (await _load_stable(tmp_path)).payload
-            observed = payload["last_terminal"] or payload["active"]
-            if observed is not None and observed["status"] == "DELIVERY_UNKNOWN":
-                break
-            await asyncio.sleep(0.001)
+        # event loop's shared default ThreadPoolExecutor.  No budget over that
+        # executor is the right instrument: awaiting the coordinator's own
+        # settlement boundary awaits the dispatch itself, however long the
+        # shared pool takes to pick the work up.
+        await coordinator.reconcile_once()
         payload = (await _load_stable(tmp_path)).payload
         observed = payload["last_terminal"] or payload["active"]
         assert observed["status"] == "DELIVERY_UNKNOWN"
@@ -989,6 +954,9 @@ async def test_post_construction_delivery_result_corruption_is_unknown(
 ) -> None:
     _persist_ready(tmp_path)
 
+    async def inline_blocking(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
     class CorruptDelivery(Telegram):
         async def send_artifact(self, _photo, _caption, _context):
             receipt = PeriodicDeliveryReceipt("telegram", "42", None)
@@ -1018,15 +986,16 @@ async def test_post_construction_delivery_result_corruption_is_unknown(
         expected_delivery_kind="telegram",
         artifact_reader=lambda _data, _artifact: b"authorized",
         clock=Clock(124.0),
+        run_blocking=inline_blocking,
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            observed = payload["last_terminal"] or payload["active"]
-            if observed is not None and observed["status"] == "DELIVERY_UNKNOWN":
-                break
-            await asyncio.sleep(0.001)
+        # A corrupt post-invocation result must cross this coordinator-owned
+        # settlement boundary.  Polling the background task instead lets a
+        # shared executor delay leave the untouched READY record observable.
+        await coordinator.reconcile_once()
+        payload = (await _load_stable(tmp_path)).payload
+        observed = payload["last_terminal"] or payload["active"]
         assert observed["status"] == "DELIVERY_UNKNOWN"
         assert observed["error_code"] == "delivery_internal_unknown"
         assert observed["receipt"] is None
@@ -1066,12 +1035,7 @@ async def test_retry_after_is_used_as_exact_durable_delivery_deadline(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            observed = payload["last_terminal"] or payload["active"]
-            if observed is not None and observed["status"] == "FAILED":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         payload = (await _load_stable(tmp_path)).payload
         active = payload["active"]
         assert active is not None, payload
@@ -1092,10 +1056,16 @@ async def test_blocked_sender_heartbeats_at_30_and_60_with_one_call(
         def __init__(self) -> None:
             super().__init__(124.0)
             self.sleepers: list[asyncio.Event] = []
+            # Set whenever a timer is armed.  The transaction heartbeat
+            # (periodic_png.py:_await_transaction_with_heartbeat) arms its next
+            # timer only after the previous tick's durable health write has
+            # returned, so an arming is that write's completion signal.
+            self.timer_armed = asyncio.Event()
 
         async def sleep(self, _seconds: float) -> None:
             event = asyncio.Event()
             self.sleepers.append(event)
+            self.timer_armed.set()
             await event.wait()
 
         def advance(self, seconds: float) -> None:
@@ -1136,31 +1106,22 @@ async def test_blocked_sender_heartbeats_at_30_and_60_with_one_call(
     await coordinator.start()
     try:
         await telegram.entered.wait()
+        await clock.timer_armed.wait()
         previous = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
         for tick in (30, 60):
-            for _ in _settle_attempts():
-                if clock.sleepers:
-                    break
-                await asyncio.sleep(0.001)
+            clock.timer_armed.clear()
             clock.advance(30.0)
-            for _ in _settle_attempts():
-                current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
-                if current > previous:
-                    break
-                await asyncio.sleep(0.001)
+            await clock.timer_armed.wait()
+            current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
             assert current > previous, tick
             previous = current
             assert telegram.calls == 1
         telegram.release.set()
-        deadline = asyncio.get_running_loop().time() + 5.0
-        while True:
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["last_terminal"] is not None:
-                break
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise AssertionError("blocked sender did not reach a terminal state before the deadline")
-            await asyncio.sleep(min(0.01, remaining))
+        # The background pass still holds the reconcile lock across the
+        # released delivery.  Awaiting the boundary queues behind it and
+        # returns only once that transaction has persisted and rotated.
+        await coordinator.reconcile_once()
+        payload = (await _load_stable(tmp_path)).payload
         assert payload["last_terminal"]["status"] == "SUCCEEDED"
         assert telegram.calls == 1
     finally:
@@ -1178,10 +1139,14 @@ async def test_send_return_racing_heartbeat_orders_before_success_persist(
         def __init__(self) -> None:
             super().__init__(124.0)
             self.sleepers: list[asyncio.Event] = []
+            # See the PulseClock in the heartbeat test above: an arming marks
+            # the heartbeat as parked and its previous tick as fully settled.
+            self.timer_armed = asyncio.Event()
 
         async def sleep(self, _seconds: float) -> None:
             event = asyncio.Event()
             self.sleepers.append(event)
+            self.timer_armed.set()
             await event.wait()
 
         def advance(self, seconds: float) -> None:
@@ -1217,7 +1182,7 @@ async def test_send_return_racing_heartbeat_orders_before_success_persist(
             paused_once = True
             load_entered.set()
             await load_release.wait()
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        return fn(*args, **kwargs)
 
     coordinator = PeriodicPngCoordinator(
         data_dir=tmp_path,
@@ -1237,24 +1202,17 @@ async def test_send_return_racing_heartbeat_orders_before_success_persist(
     try:
         await telegram.entered.wait()
         pause_health_load = True
-        for _ in _settle_attempts():
-            if clock.sleepers:
-                break
-            await asyncio.sleep(0.001)
+        await clock.timer_armed.wait()
         clock.advance(30.0)
         await load_entered.wait()
         telegram.release.set()
         await asyncio.sleep(0)
         load_release.set()
-        deadline = asyncio.get_running_loop().time() + 5.0
-        while True:
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["last_terminal"] is not None:
-                break
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise AssertionError("periodic recovery did not reach a terminal state before the deadline")
-            await asyncio.sleep(min(0.01, remaining))
+        # Wait behind the raced loop pass, then perform a complete deterministic
+        # reconciliation boundary rather than polling an independently scheduled
+        # background transaction.
+        await coordinator.reconcile_once()
+        payload = (await _load_stable(tmp_path)).payload
         assert payload["last_terminal"]["status"] == "SUCCEEDED"
         assert telegram.calls == 1
         assert coordinator._loop_task is not None
@@ -1370,11 +1328,7 @@ async def test_full_unknown_ledger_pauses_ready_and_never_calls_sender(tmp_path:
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["health"]["status"] == "paused_unknown_capacity":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         payload = (await _load_stable(tmp_path)).payload
         assert payload["health"]["status"] == "paused_unknown_capacity"
         assert payload["active"]["status"] == "READY"
@@ -1426,11 +1380,7 @@ async def test_newer_slot_with_full_ledger_persists_pause_without_send(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            if payload["health"]["status"] == "paused_unknown_capacity":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         payload = (await _load_stable(tmp_path)).payload
         assert payload["health"]["status"] == "paused_unknown_capacity"
         assert payload["active"]["status"] == "READY"
@@ -1808,10 +1758,14 @@ async def test_blocked_render_keeps_strict_heartbeat_and_240s_alarm_refresh(
         def __init__(self) -> None:
             super().__init__(124.0)
             self.sleepers: list[asyncio.Event] = []
+            # See the PulseClock in the heartbeat test above: an arming marks
+            # the heartbeat as parked and its previous tick as fully settled.
+            self.timer_armed = asyncio.Event()
 
         async def sleep(self, _seconds: float) -> None:
             event = asyncio.Event()
             self.sleepers.append(event)
+            self.timer_armed.set()
             await event.wait()
 
         def advance(self, seconds: float) -> None:
@@ -1862,30 +1816,29 @@ async def test_blocked_render_keeps_strict_heartbeat_and_240s_alarm_refresh(
     await coordinator.start()
     try:
         await entered.wait()
+        await clock.timer_armed.wait()
         previous = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
         baseline_snapshots = alarm.snapshots
         assert baseline_snapshots >= 1
         for tick in range(1, 9):
-            for _ in _settle_attempts():
-                if clock.sleepers:
-                    break
-                await asyncio.sleep(0.001)
+            clock.timer_armed.clear()
             clock.advance(30.0)
-            for _ in _settle_attempts():
-                current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
-                if current > previous:
-                    break
-                await asyncio.sleep(0.001)
+            await clock.timer_armed.wait()
+            current = (await _load_stable(tmp_path)).payload["health"]["updated_at"]
             assert current > previous, tick
             previous = current
         assert alarm.snapshots == baseline_snapshots + 1
         release.set()
-        for _ in _settle_attempts():
-            if not coordinator._loop_task or coordinator._loop_task.done():
-                break
-            if clock.sleepers:
-                break
-            await asyncio.sleep(0.001)
+        # Let the released render settle before teardown: the pass either
+        # finishes and parks the loop on its next interruptible wait (arming a
+        # timer) or the loop task itself completes.  Whichever lands first is
+        # the end of coordinator-owned work here; the test asserts nothing
+        # beyond it.
+        clock.timer_armed.clear()
+        assert coordinator._loop_task is not None
+        parked = asyncio.create_task(clock.timer_armed.wait())
+        await asyncio.wait({parked, coordinator._loop_task}, return_when=asyncio.FIRST_COMPLETED)
+        parked.cancel()
     finally:
         release.set()
         await coordinator.stop()
@@ -1917,11 +1870,7 @@ async def test_closed_input_publication_failure_consumes_known_render_attempt(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            active = (await _load_stable(tmp_path)).payload["active"]
-            if active["status"] == "FAILED":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         active = (await _load_stable(tmp_path)).payload["active"]
         assert active["status"] == "FAILED"
         assert active["retryable"] is True
@@ -1997,11 +1946,7 @@ async def test_existing_input_reuse_requires_every_deterministic_binding(tmp_pat
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            active = (await _load_stable(tmp_path)).payload["active"]
-            if active["status"] == "FAILED":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         active = (await _load_stable(tmp_path)).payload["active"]
         assert active["status"] == "FAILED"
         assert active["error_code"] == "periodic_input_unavailable"
@@ -2029,11 +1974,7 @@ async def test_rendering_without_live_owner_becomes_retryable_orphan_failure(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            active = (await _load_stable(tmp_path)).payload["active"]
-            if active["status"] == "FAILED":
-                break
-            await asyncio.sleep(0.001)
+        await coordinator.reconcile_once()
         active = (await _load_stable(tmp_path)).payload["active"]
         assert active["status"] == "FAILED"
         assert active["retryable"] is True
@@ -2100,3 +2041,181 @@ async def test_corrupt_state_is_preserved_and_start_fails_closed(tmp_path: Path)
     assert live.stopped == 1
     assert alarm.closed == 1
     assert telegram.closed == 1
+
+
+def _dotted_name(node: ast.expr) -> tuple[str, ...]:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ()
+    parts.append(node.id)
+    return tuple(reversed(parts))
+
+
+_WALL_CLOCK_READS = frozenset({"monotonic", "time", "perf_counter"})
+_EVENT_LOOP_FACTORIES = frozenset({"get_running_loop", "get_event_loop"})
+
+
+def _bound_names(tree: ast.Module, module: str, members: frozenset[str]) -> tuple[set[str], set[str]]:
+    """Resolve how ``module`` and its ``members`` are named in this source.
+
+    Import aliases are resolved rather than pattern-matched, so renaming the
+    import (``import time as _t``) cannot walk a poll past the guard.
+    """
+
+    module_names: set[str] = set()
+    member_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            module_names.update(alias.asname or alias.name for alias in node.names if alias.name == module)
+        elif isinstance(node, ast.ImportFrom) and node.module == module:
+            member_names.update(alias.asname or alias.name for alias in node.names if alias.name in members)
+    return module_names, member_names
+
+
+def settlement_polling_offenders(source: str) -> list[str]:
+    """Report every settlement-by-polling idiom in ``source``.
+
+    Two shapes are rejected, because each has independently produced ~30 s
+    'the condition never became true in this run' flakes here:
+
+    * a loop that re-reads durable state after a timed ``asyncio.sleep``;
+    * a wall-clock budget (``time.monotonic()``, ``loop.time()``) used to bound
+      how long a test waits for another task to make progress.
+
+    ``await asyncio.sleep(0)`` is exempt: it is a bare scheduler yield with no
+    budget attached, which is what ``_load_stable`` needs to retry the atomic
+    replacement inode fence.
+    """
+
+    offenders: dict[int, str] = {}
+    tree = ast.parse(source)
+    asyncio_names, sleep_names = _bound_names(tree, "asyncio", frozenset({"sleep"}))
+    time_names, clock_names = _bound_names(tree, "time", _WALL_CLOCK_READS)
+
+    def is_sleep(func: ast.expr) -> bool:
+        dotted = _dotted_name(func)
+        if len(dotted) == 2 and dotted[0] in asyncio_names and dotted[1] == "sleep":
+            return True
+        return len(dotted) == 1 and dotted[0] in sleep_names
+
+    def is_wall_clock_read(func: ast.expr) -> bool:
+        dotted = _dotted_name(func)
+        if len(dotted) == 2 and dotted[0] in time_names and dotted[1] in _WALL_CLOCK_READS:
+            return True
+        if len(dotted) == 1 and dotted[0] in clock_names:
+            return True
+        # ``asyncio.get_running_loop().time()`` reads the same wall clock
+        # through the loop rather than through the time module.
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == "time"
+            and isinstance(func.value, ast.Call)
+            and _dotted_name(func.value.func)[-1:] != ()
+            and _dotted_name(func.value.func)[-1] in _EVENT_LOOP_FACTORIES
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For | ast.AsyncFor | ast.While):
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Await) or not isinstance(inner.value, ast.Call):
+                continue
+            call = inner.value
+            if not is_sleep(call.func):
+                continue
+            delay = call.args[0] if call.args else None
+            if isinstance(delay, ast.Constant) and delay.value == 0:
+                continue
+            offenders[inner.lineno] = f"line {inner.lineno}: timed sleep inside a wait loop"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and is_wall_clock_read(node.func):
+            offenders[node.lineno] = f"line {node.lineno}: wall-clock settlement budget"
+    return [offenders[line] for line in sorted(offenders)]
+
+
+def test_module_never_polls_for_settlement() -> None:
+    """Make the polling flake class unreachable rather than patch it again.
+
+    Six separate one-site fixes preceded this guard. Each waited on a
+    background reconciliation loop that is scheduled independently of the
+    test, so the loser of any given run burned the full budget and failed in
+    a different node. Every wait in this module must instead rendezvous with
+    a boundary the coordinator owns -- ``reconcile_once()`` or a PulseClock
+    arming -- so 'not settled yet' cannot exist as an observable state.
+    """
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert settlement_polling_offenders(source) == []
+
+
+def test_settlement_polling_guard_detects_a_reintroduced_poll() -> None:
+    """The guard above is only worth having if it actually fires."""
+
+    reintroduced_budget_loop = """
+import asyncio, time
+
+def _settle_attempts(seconds=30.0):
+    deadline = time.monotonic() + seconds
+    while True:
+        yield None
+        if time.monotonic() >= deadline:
+            return
+
+async def test_thing(coordinator, tmp_path):
+    for _ in _settle_attempts():
+        payload = (await _load_stable(tmp_path)).payload
+        if payload["last_terminal"] is not None:
+            break
+        await asyncio.sleep(0.001)
+"""
+    assert settlement_polling_offenders(reintroduced_budget_loop) != []
+
+    reintroduced_deadline_loop = """
+import asyncio
+
+async def test_thing(tmp_path):
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while asyncio.get_running_loop().time() < deadline:
+        if (await _load_stable(tmp_path)).payload["active"] is not None:
+            break
+        await asyncio.sleep(0.01)
+"""
+    assert settlement_polling_offenders(reintroduced_deadline_loop) != []
+
+    # Renaming the import must not walk a poll past the guard.
+    aliased = """
+import asyncio as aio
+import time as _t
+from time import monotonic as _now
+
+async def test_thing(tmp_path):
+    deadline = _t.monotonic() + 5.0
+    while _now() < deadline:
+        await aio.sleep(0.001)
+"""
+    assert len(settlement_polling_offenders(aliased)) == 3
+
+    # Negative control: the deterministic idioms this module actually uses
+    # must not trip the guard, or it would be disabled the first time it
+    # cried wolf.
+    deterministic = """
+import asyncio
+
+async def _load_stable(data_dir):
+    for _ in range(100):
+        try:
+            return load_periodic_state(data_dir)
+        except PeriodicContractError:
+            await asyncio.sleep(0)
+
+async def test_thing(coordinator, clock, tmp_path):
+    await coordinator.reconcile_once()
+    for tick in (30, 60):
+        clock.timer_armed.clear()
+        clock.advance(30.0)
+        await clock.timer_armed.wait()
+"""
+    assert settlement_polling_offenders(deterministic) == []
