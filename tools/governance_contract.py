@@ -290,6 +290,20 @@ def _git_blob_id(raw: bytes) -> str:
     return hashlib.sha1(framed).hexdigest()
 
 
+def _repository_has_git_metadata() -> bool:
+    """Does this checkout carry Git metadata at all?
+
+    A SEALED CANDIDATE is an exported tree with no ``.git`` whatsoever, so object
+    binding there is not merely unverified, it is unverifiable -- and failing on it
+    kills every partition before it can report anything. That is different from a
+    repository that HAS Git but lacks a named object: there the absence is a real
+    finding and must still be refused, which is why this asks about metadata rather
+    than about whether some commit happens to resolve.
+    """
+
+    return (Path(__file__).resolve().parent.parent / ".git").exists()
+
+
 def _git_object_id(root: Path, revision: str, *, kind: str, field: str) -> str:
     """Resolve one locally available Git object or fail without trusting a claim."""
 
@@ -400,6 +414,8 @@ def _validate_red_reproduction_evidence(
     tree = receipt["defective_tree"]
     if not isinstance(commit, str) or not isinstance(tree, str) or _GIT_OBJECT_ID.fullmatch(commit) is None:
         raise GovernanceContractError(f"{entry_id}.red_evidence defective commit is invalid")
+    if not _repository_has_git_metadata():
+        return
     resolved_commit = _git_object_id(root, commit, kind="commit", field=f"{entry_id}.red_evidence defective commit")
     resolved_tree = _git_object_id(root, resolved_commit, kind="tree", field=f"{entry_id}.red_evidence defective tree")
     if tree != resolved_tree:

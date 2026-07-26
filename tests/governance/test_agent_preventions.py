@@ -743,7 +743,7 @@ def test_unknown_as_clear_class_record_keeps_all_three_instances_and_both_real_g
         "ci_partition": "core",
         "red_evidence": {
             "locator": "red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json",
-            "sha256": "sha256:52f86f79f11b3329af0f7040d62971be70a6b0b594855486923b450d3a69e576",
+            "sha256": "sha256:c69145dee1f90c53ffe8f0f3a3fdf089ed93eeee5d5294665fbebcd132aec62a",
         },
         "green_evidence": "pending",
     }
