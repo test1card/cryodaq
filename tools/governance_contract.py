@@ -101,19 +101,22 @@ def _validate_immutable_evidence(value: Any, field: str) -> None:
     locator = value.get("locator")
     digest = value.get("sha256")
     is_artifact = isinstance(locator, str) and locator.startswith("artifact:")
-    is_bundle = isinstance(locator, str) and locator.startswith("bundle:")
-    required_fields = (
-        {"locator", "sha256", "tree", "suite"}
-        if is_artifact
-        else {"locator", "sha256", "tree", "suites"}
-        if is_bundle
-        else {"locator", "sha256"}
-    )
+    if isinstance(locator, str) and locator.startswith("bundle:"):
+        # The aggregate bundle acquired a schema but never a seal. Nothing in
+        # this tree produces one, and nothing resolves or verifies its
+        # contents, so its declared tree and suite list are an assertion the
+        # validator has no way to check. Accepting it would let a record close
+        # on unverifiable evidence, which is the exact failure this registry
+        # exists to prevent. The unsupported form fails closed until a producer
+        # AND a validator for it exist.
+        raise GovernanceContractError(
+            f"{field} bundle evidence is not accepted: no aggregate-bundle producer or validator "
+            "exists in this tree, so its declared tree and suites cannot be verified"
+        )
+    required_fields = {"locator", "sha256", "tree", "suite"} if is_artifact else {"locator", "sha256"}
     if set(value) != required_fields:
         if is_artifact:
             raise GovernanceContractError(f"{field} artifact evidence shape is not exact")
-        if is_bundle:
-            raise GovernanceContractError(f"{field} bundle evidence shape is not exact")
         raise GovernanceContractError(f"{field} immutable evidence shape is not exact")
     if not isinstance(locator, str) or _IMMUTABLE_LOCATOR.fullmatch(locator) is None:
         raise GovernanceContractError(f"{field} immutable evidence locator is invalid")
@@ -124,17 +127,6 @@ def _validate_immutable_evidence(value: Any, field: str) -> None:
             raise GovernanceContractError(f"{field} artifact evidence tree is invalid")
         if value["suite"] not in _EXPECTED_DEFAULT_CI_JOBS:
             raise GovernanceContractError(f"{field} artifact evidence suite is invalid")
-    if is_bundle:
-        if not isinstance(value["tree"], str) or _GIT_OBJECT_ID.fullmatch(value["tree"]) is None:
-            raise GovernanceContractError(f"{field} bundle evidence tree is invalid")
-        suites = value["suites"]
-        if (
-            not isinstance(suites, list)
-            or not suites
-            or suites != sorted(set(suites))
-            or any(suite not in _EXPECTED_DEFAULT_CI_JOBS for suite in suites)
-        ):
-            raise GovernanceContractError(f"{field} bundle evidence suites are invalid")
 
 
 def _validate_evidence_partition(value: Any, partitions: set[str], field: str, *, required_for_closure: bool) -> None:
@@ -145,16 +137,18 @@ def _validate_evidence_partition(value: Any, partitions: set[str], field: str, *
     ``gui``/``remaining`` was satisfiable by a single ``core`` artifact, which
     says nothing about the other three. The schema allows one locator per
     entry, so a multi-partition record cannot be closed on a single artifact at
-    all -- it needs an immutable aggregate bundle whose sealed tree and exact
-    suite list explicitly cover every required partition.  Red evidence keeps
-    the old permissive treatment for non-artifact locators: it records the
-    failure reproduction, rather than claiming the green test coverage that
-    closes the record.
+    all.  Covering one would take an immutable aggregate bundle whose sealed
+    tree and exact suite list span every required partition, and this tree has
+    no producer and no validator for that form -- so a multi-partition record
+    cannot be closed at all today, and the refusal says exactly that instead of
+    accepting an assertion it cannot check.  Red evidence keeps the old
+    permissive treatment for non-artifact locators: it records the failure
+    reproduction, rather than claiming the green test coverage that closes the
+    record.
     """
 
     locator = value.get("locator") if isinstance(value, Mapping) else None
     is_artifact = isinstance(value, Mapping) and isinstance(locator, str) and locator.startswith("artifact:")
-    is_bundle = isinstance(value, Mapping) and isinstance(locator, str) and locator.startswith("bundle:")
     if is_artifact:
         suite = value["suite"]
         if partitions != {suite}:
@@ -163,20 +157,10 @@ def _validate_evidence_partition(value: Any, partitions: set[str], field: str, *
                 f"{field} artifact evidence attests only suite {suite!r} but its registered guards "
                 f"span {sorted(partitions)}; uncovered partitions: {uncovered}"
             )
-    elif is_bundle:
-        suites = set(value["suites"])
-        if partitions != suites:
-            uncovered = sorted(partitions - suites)
-            unexpected = sorted(suites - partitions)
-            raise GovernanceContractError(
-                f"{field} bundle evidence suites {sorted(suites)} do not exactly cover registered guard "
-                f"partitions {sorted(partitions)}; uncovered partitions: {uncovered}; "
-                f"unexpected partitions: {unexpected}"
-            )
     elif required_for_closure and len(partitions) > 1:
         raise GovernanceContractError(
-            f"{field} cannot close multi-partition guards {sorted(partitions)} without sealed "
-            "artifact or bundle partition coverage"
+            f"{field} cannot close multi-partition guards {sorted(partitions)}: one sealed artifact "
+            "attests one partition, and no verifiable aggregate-bundle evidence form exists"
         )
 
 

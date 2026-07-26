@@ -210,13 +210,19 @@ def test_artifact_evidence_requires_receipt_tree_and_suite_binding() -> None:
             validate_registry(mutation)
 
 
-def test_multi_partition_record_requires_exact_sealed_bundle_coverage() -> None:
-    """A multi-partition closure needs sealed, exact per-partition coverage.
+def test_aggregate_bundle_evidence_cannot_close_anything_while_it_is_unsealed() -> None:
+    """An aggregate bundle has a schema but no seal, so it must not close a record.
 
-    A record whose guards span several partitions was closable with a single
-    A bare aggregate locator used to bypass the artifact-only check entirely.
-    The aggregate form must name its sealed tree and exactly the partitions it
-    covers; one omitted or unrelated suite must refuse the closure.
+    A multi-partition record cannot be closed on one sealed artifact, because
+    one artifact attests one partition.  The aggregate ``bundle:`` form was
+    introduced to cover that case and validated only its own SYNTAX: it
+    declared a tree and a suite list that nothing in this tree produces,
+    resolves, or verifies.  A well-formed lie therefore closed the record --
+    an arbitrary digest over an arbitrary tree was accepted as green evidence.
+
+    Until a producer AND a validator exist, the unsupported form must fail
+    closed, and the honest consequence is that a multi-partition record simply
+    cannot be closed yet.  That is a refusal, not a coverage claim.
     """
 
     payload = _registry()
@@ -226,16 +232,10 @@ def test_multi_partition_record_requires_exact_sealed_bundle_coverage() -> None:
 
     record["status"] = "closed"
     record["red_evidence"] = {"locator": "tree:" + "1" * 40, "sha256": "sha256:" + "1" * 64}
-    record["green_evidence"] = {
-        "locator": "bundle:anything",
-        "sha256": "sha256:" + "2" * 64,
-    }
     record["guard_source_blobs"] = _guard_source_blobs(record)
-    record["closure_semantics_sha256"] = closure_semantics_sha256(record)
 
-    with pytest.raises(GovernanceContractError, match="bundle evidence shape"):
-        validate_registry(payload)
-
+    # The exact shape that used to close this record: syntactically perfect,
+    # naming precisely the partitions its guards span, and entirely unverifiable.
     record["green_evidence"] = {
         "locator": "bundle:123",
         "sha256": "sha256:" + "2" * 64,
@@ -243,19 +243,41 @@ def test_multi_partition_record_requires_exact_sealed_bundle_coverage() -> None:
         "suites": partitions,
     }
     record["closure_semantics_sha256"] = closure_semantics_sha256(record)
-    validate_registry(payload)
+    with pytest.raises(GovernanceContractError, match="bundle evidence is not accepted"):
+        validate_registry(payload)
 
-    incomplete = copy.deepcopy(payload)
-    incomplete_record = next(record for record in incomplete["records"] if record["id"] == "FALSE-GREEN-001")
-    incomplete_record["green_evidence"]["suites"] = partitions[:-1]
-    with pytest.raises(GovernanceContractError, match="uncovered partitions"):
-        validate_registry(incomplete)
+    # Rejection is on the locator itself, not on some incidental malformation,
+    # so no amount of tidying the declaration can talk the validator into it.
+    for mutated_suites in (partitions[:-1], sorted(set(partitions) | {"gui"})):
+        variant = copy.deepcopy(payload)
+        variant_record = next(item for item in variant["records"] if item["id"] == "FALSE-GREEN-001")
+        variant_record["green_evidence"]["suites"] = mutated_suites
+        variant_record["closure_semantics_sha256"] = closure_semantics_sha256(variant_record)
+        with pytest.raises(GovernanceContractError, match="bundle evidence is not accepted"):
+            validate_registry(variant)
 
-    unexpected = copy.deepcopy(payload)
-    unexpected_record = next(record for record in unexpected["records"] if record["id"] == "FALSE-GREEN-001")
-    unexpected_record["green_evidence"]["suites"] = sorted(set(partitions) | {"gui"})
-    with pytest.raises(GovernanceContractError, match="unexpected partitions"):
-        validate_registry(unexpected)
+    # Red evidence is a failure reproduction, not a coverage claim, but it is
+    # still evidence: an unverifiable bundle cannot stand there either.
+    red_bundle = copy.deepcopy(payload)
+    red_record = next(item for item in red_bundle["records"] if item["id"] == "FALSE-GREEN-001")
+    red_record["red_evidence"] = {
+        "locator": "bundle:123",
+        "sha256": "sha256:" + "1" * 64,
+        "tree": "1" * 40,
+        "suites": partitions,
+    }
+    red_record["closure_semantics_sha256"] = closure_semantics_sha256(red_record)
+    with pytest.raises(GovernanceContractError, match="bundle evidence is not accepted"):
+        validate_registry(red_bundle)
+
+    # And with the bypass gone, the underlying gap is stated rather than papered
+    # over: this record has nothing left that can legitimately close it.
+    without_bundle = copy.deepcopy(payload)
+    stranded = next(item for item in without_bundle["records"] if item["id"] == "FALSE-GREEN-001")
+    stranded["green_evidence"] = {"locator": "tree:" + "2" * 40, "sha256": "sha256:" + "2" * 64}
+    stranded["closure_semantics_sha256"] = closure_semantics_sha256(stranded)
+    with pytest.raises(GovernanceContractError, match="cannot close multi-partition guards"):
+        validate_registry(without_bundle)
 
 
 def test_invalid_registry_fixtures_fail_closed() -> None:
@@ -375,6 +397,27 @@ def test_guard_dependency_neutralization_cannot_close_without_execution_manifest
 
     payload = _registry()
     record = next(record for record in payload["records"] if record["id"] == "GUARD-DEPENDENCY-NEUTRALIZATION-031")
+    record["status"] = "closed"
+
+    with pytest.raises(GovernanceContractError, match="automation_limit"):
+        validate_registry(payload)
+
+
+def test_publication_dual_review_independence_cannot_close_without_named_reviewer_receipt() -> None:
+    """The two-independent-review debt cannot be papered over with closure.
+
+    No typed disposition receipt records two named distinct reviewers, their
+    distinct contexts, their mandates (depth-and-delta versus BREADTH), or
+    their verdicts anywhere the validator can see: the registry carries only
+    a single ``disposition_owner: reviewer`` role, never an identity, count,
+    or mandate.  Its declared automation_limit is therefore a hard closure
+    block, not a decorative note an author can drop to claim the rule is met.
+    """
+
+    payload = _registry()
+    record = next(
+        record for record in payload["records"] if record["id"] == "PUBLICATION-DUAL-REVIEW-INDEPENDENCE-032"
+    )
     record["status"] = "closed"
 
     with pytest.raises(GovernanceContractError, match="automation_limit"):
