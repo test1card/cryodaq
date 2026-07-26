@@ -400,6 +400,33 @@ explicitly open; never exceed current write authority.
   and the implementation role authors the separately assigned test/guard. Neither
   self-certifies the combined correction. A guard may not be deleted, skipped,
   expected-failed, or weakened merely to restore green CI.
+- Agent-agnosticism is a property of the BUILDING role, not of every role. The
+  building role -- arranging existing blocks and creating new ones from
+  instructions -- must remain dischargeable by a mid-tier model, because that is
+  what lets a lab adapt this repository to its own hardware with whatever agent it
+  has. The precision of the instructions is what makes that possible, and any
+  instruction a mid-tier model cannot follow is a defect in the instruction.
+  The GOVERNING and REVIEWING roles are capability-gated and cannot be made
+  agent-agnostic by wishing it. Adversarial review here requires holding a whole
+  subsystem in view at once, constructing mutations that attempt to disprove a
+  fix, and noticing an invariant applied in one place and omitted in another. A
+  model that cannot do that does not review badly, it reviews invisibly: it
+  produces a review-shaped artifact with nothing behind it, which is worse than no
+  second gate because it manufactures confidence. Name the frontier-class model or
+  agent used for each review. The requirement is on capability and independence,
+  never on a vendor; a lab substituting a weaker model for the reviewing role has
+  recorded a review rather than performed one.
+- A publication disposition requires TWO independent reviews, and the second must
+  not share the first's accumulated context. The second review carries
+  a BREADTH mandate -- sweep for unnamed defect classes across the whole change --
+  where the primary review carries a depth-and-delta mandate. Sustained review by
+  one reviewer converges on the failures it already knows how to look for: during
+  the montana review a primary reviewer ran nine consecutive rounds and did not
+  surface a shipped CRITICAL alarm that cleared when its sensor failed, which a
+  cold second reviewer found on its first pass. Record both verdicts, including
+  disagreement; a second reviewer that only ratifies the first has not been
+  independent, and one that manufactures findings to justify itself is worse than
+  absent. Correctly reporting that a change is sound counts as a result.
 - When automation is genuinely impossible, document why and define an exact
   human gate with inputs, decision owner, required evidence, and fail-closed
   outcome. "Use judgment" or "be careful" is not a verification gate. See

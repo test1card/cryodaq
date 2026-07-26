@@ -710,6 +710,19 @@ roles that are easy to conflate:
   whether they are well made: whether a premise is true, whether an invariant
   is the right one, whether a guard can actually fail.
 
+Only the first of those is agent-agnostic, and that asymmetry is deliberate
+rather than an omission. The building role must stay within reach of a mid-tier
+model, because that is what lets a lab adapt this repository to its own hardware
+with whatever agent it has; any instruction such a model cannot follow is a defect
+in the instruction, not in the model. The governing role is capability-gated and
+cannot be made agent-agnostic by wishing it. A model too weak to hold a subsystem
+in view, construct a mutation that tries to disprove a fix, or notice an invariant
+applied in one place and omitted in another does not review badly -- it reviews
+invisibly, producing a review-shaped artifact with nothing behind it. That is
+worse than having no second reviewer, because it manufactures confidence. Name the
+model used for each review; the constraint is capability and independence, never a
+particular vendor.
+
 The distinction matters because **a guard is governing work wearing
 implementation clothes.** A test that merely exercises code is building work. A
 guard is a claim about what could go wrong -- and that claim can only be made by
