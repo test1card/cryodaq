@@ -2061,8 +2061,11 @@ _EVENT_LOOP_FACTORIES = frozenset({"get_running_loop", "get_event_loop"})
 def _bound_names(tree: ast.Module, module: str, members: frozenset[str]) -> tuple[set[str], set[str]]:
     """Resolve how ``module`` and its ``members`` are named in this source.
 
-    Import aliases are resolved rather than pattern-matched, so renaming the
-    import (``import time as _t``) cannot walk a poll past the guard.
+    Import aliases AND ordinary rebinding are resolved, so neither renaming
+    the import (``import time as _t``) nor aliasing the callable
+    (``nap = asyncio.sleep``) can walk a poll past the guard. Assignment
+    resolution runs to a fixed point so chains (``a = asyncio.sleep;
+    b = a``) are covered too.
     """
 
     module_names: set[str] = set()
@@ -2072,6 +2075,44 @@ def _bound_names(tree: ast.Module, module: str, members: frozenset[str]) -> tupl
             module_names.update(alias.asname or alias.name for alias in node.names if alias.name == module)
         elif isinstance(node, ast.ImportFrom) and node.module == module:
             member_names.update(alias.asname or alias.name for alias in node.names if alias.name in members)
+
+    def assignment_targets(stmt: ast.Assign | ast.AnnAssign) -> list[str]:
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        names: list[str] = []
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            elif isinstance(target, ast.Tuple | ast.List):
+                names.extend(elt.id for elt in target.elts if isinstance(elt, ast.Name))
+        return names
+
+    # Fixed point: an assignment rebinds a name already known to refer to
+    # ``module`` or one of ``members`` to a fresh local name. Repeat until no
+    # new names appear, so transitive chains close.
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign | ast.AnnAssign) or node.value is None:
+                continue
+            value = node.value
+            binds_module = binds_member = False
+            if isinstance(value, ast.Name):
+                binds_module = value.id in module_names
+                binds_member = value.id in member_names
+            else:
+                dotted = _dotted_name(value)
+                if len(dotted) == 1 and dotted[0] in module_names:
+                    binds_module = True
+                elif len(dotted) == 2 and dotted[0] in module_names and dotted[1] in members:
+                    binds_member = True
+            for target in assignment_targets(node):
+                if binds_module and target not in module_names:
+                    module_names.add(target)
+                    changed = True
+                if binds_member and target not in member_names:
+                    member_names.add(target)
+                    changed = True
     return module_names, member_names
 
 
@@ -2085,9 +2126,15 @@ def settlement_polling_offenders(source: str) -> list[str]:
     * a wall-clock budget (``time.monotonic()``, ``loop.time()``) used to bound
       how long a test waits for another task to make progress.
 
-    ``await asyncio.sleep(0)`` is exempt: it is a bare scheduler yield with no
-    budget attached, which is what ``_load_stable`` needs to retry the atomic
-    replacement inode fence.
+    ``await asyncio.sleep(0)`` is exempt only inside a statically bounded
+    ``for ... in range(...)`` retry. A zero-delay yield is a legitimate breath
+    there because the loop is finite and cannot spin waiting on another task's
+    progress; that is what ``_load_stable`` needs to retry the atomic
+    replacement inode fence. Inside an unbounded loop (``while``, or any
+    ``for`` not bounded by ``range``) the same ``sleep(0)`` is a settlement
+    poll -- the loop only terminates when another task makes progress -- so it
+    is reported like any other timed sleep. The distinguishing property is the
+    loop bound, not the function name.
     """
 
     offenders: dict[int, str] = {}
@@ -2117,19 +2164,43 @@ def settlement_polling_offenders(source: str) -> list[str]:
             and _dotted_name(func.value.func)[-1] in _EVENT_LOOP_FACTORIES
         )
 
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    def enclosing_loop(node: ast.AST) -> ast.For | ast.AsyncFor | ast.While | None:
+        cursor = parents.get(id(node))
+        while cursor is not None:
+            if isinstance(cursor, ast.For | ast.AsyncFor | ast.While):
+                return cursor
+            cursor = parents.get(id(cursor))
+        return None
+
+    def is_range_bounded(loop: ast.For | ast.AsyncFor | ast.While) -> bool:
+        # A ``for ... in range(...)`` is statically finite: it runs a fixed
+        # number of iterations and cannot spin on another task's progress.
+        # That is the one shape in which a zero-delay scheduler yield is a
+        # legitimate retry breath rather than a settlement poll.
+        return (
+            isinstance(loop, ast.For | ast.AsyncFor)
+            and isinstance(loop.iter, ast.Call)
+            and _dotted_name(loop.iter.func) == ("range",)
+        )
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.For | ast.AsyncFor | ast.While):
+        if not isinstance(node, ast.Await) or not isinstance(node.value, ast.Call):
             continue
-        for inner in ast.walk(node):
-            if not isinstance(inner, ast.Await) or not isinstance(inner.value, ast.Call):
-                continue
-            call = inner.value
-            if not is_sleep(call.func):
-                continue
-            delay = call.args[0] if call.args else None
-            if isinstance(delay, ast.Constant) and delay.value == 0:
-                continue
-            offenders[inner.lineno] = f"line {inner.lineno}: timed sleep inside a wait loop"
+        call = node.value
+        if not is_sleep(call.func):
+            continue
+        loop = enclosing_loop(node)
+        if loop is None:
+            continue
+        delay = call.args[0] if call.args else None
+        if isinstance(delay, ast.Constant) and delay.value == 0 and is_range_bounded(loop):
+            continue
+        offenders[node.lineno] = f"line {node.lineno}: timed sleep inside a wait loop"
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and is_wall_clock_read(node.func):
             offenders[node.lineno] = f"line {node.lineno}: wall-clock settlement budget"
@@ -2197,6 +2268,38 @@ async def test_thing(tmp_path):
         await aio.sleep(0.001)
 """
     assert len(settlement_polling_offenders(aliased)) == 3
+
+    # Reviewer mutation (1): a zero-delay yield inside an UNBOUNDED poll. The
+    # old blanket ``sleep(0)`` exemption blessed this shape, which is exactly
+    # the unbounded background-state poll that produced the ~33 s flakes. The
+    # exemption must cover only the bounded ``range()`` retry, not this loop.
+    zero_delay_unbounded_poll = """
+import asyncio
+
+async def settled():
+    return False
+
+async def go():
+    while not await settled():
+        await asyncio.sleep(0)
+"""
+    assert settlement_polling_offenders(zero_delay_unbounded_poll) != []
+
+    # Reviewer mutation (2): the sleep callable rebound to a plain local name.
+    # Name resolution must follow ordinary assignment, not just import aliases.
+    rebound_sleep_name = """
+import asyncio
+
+nap = asyncio.sleep
+
+async def settled():
+    return False
+
+async def go():
+    while not await settled():
+        await nap(0.001)
+"""
+    assert settlement_polling_offenders(rebound_sleep_name) != []
 
     # Negative control: the deterministic idioms this module actually uses
     # must not trip the guard, or it would be disabled the first time it
