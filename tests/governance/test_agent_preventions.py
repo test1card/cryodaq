@@ -415,9 +415,7 @@ def test_publication_dual_review_independence_cannot_close_without_named_reviewe
     """
 
     payload = _registry()
-    record = next(
-        record for record in payload["records"] if record["id"] == "PUBLICATION-DUAL-REVIEW-INDEPENDENCE-032"
-    )
+    record = next(record for record in payload["records"] if record["id"] == "PUBLICATION-DUAL-REVIEW-INDEPENDENCE-032")
     record["status"] = "closed"
 
     with pytest.raises(GovernanceContractError, match="automation_limit"):
