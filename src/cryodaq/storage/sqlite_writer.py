@@ -78,9 +78,7 @@ def _operator_log_monotonic() -> float:
     return time.monotonic()
 
 
-def _operator_log_read_identity(
-    info: os.stat_result, *, directory: bool
-) -> tuple[int, int, int, int, int, int, int]:
+def _operator_log_read_identity(info: os.stat_result, *, directory: bool) -> tuple[int, int, int, int, int, int, int]:
     return (
         info.st_dev,
         info.st_ino,
@@ -176,9 +174,7 @@ def _read_posix_operator_log_bytes(
             raise OSError("operator-log authority is not a bounded single-link regular file")
         file_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
         opened = os.fstat(file_fd)
-        if _operator_log_read_identity(opened, directory=False) != _operator_log_read_identity(
-            before, directory=False
-        ):
+        if _operator_log_read_identity(opened, directory=False) != _operator_log_read_identity(before, directory=False):
             raise OSError("operator-log authority changed before reading")
         chunks: list[bytes] = []
         remaining = max_bytes + 1

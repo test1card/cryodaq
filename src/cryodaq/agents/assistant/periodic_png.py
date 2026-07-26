@@ -940,12 +940,17 @@ class PeriodicPngCoordinator:
                 and active.get("retryable") is True
             )
         )
-        if status in {
-            "ready",
-            "degraded_projection",
-            "degraded_tls",
-            "degraded_delivery_unknown",
-        } and delivery_capacity_full and delivery_ready:
+        if (
+            status
+            in {
+                "ready",
+                "degraded_projection",
+                "degraded_tls",
+                "degraded_delivery_unknown",
+            }
+            and delivery_capacity_full
+            and delivery_ready
+        ):
             status = "paused_unknown_capacity"
             code = "delivery_paused_unknown_capacity"
             text = "delivery paused because unresolved evidence capacity is full"

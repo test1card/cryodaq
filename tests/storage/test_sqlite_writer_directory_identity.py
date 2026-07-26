@@ -43,9 +43,9 @@ def test_directory_identity_survives_subdirectory_created_mid_scan() -> None:
     after = _stat_like(st_mode=directory_mode, st_nlink=3)  # one subdir appeared
 
     assert before.st_nlink != after.st_nlink, "test setup must actually change st_nlink"
-    assert _operator_log_read_identity(before, directory=True) == _operator_log_read_identity(
-        after, directory=True
-    ), "directory identity must ignore st_nlink -- it reflects contents, not identity"
+    assert _operator_log_read_identity(before, directory=True) == _operator_log_read_identity(after, directory=True), (
+        "directory identity must ignore st_nlink -- it reflects contents, not identity"
+    )
 
 
 def test_file_identity_still_honors_st_nlink() -> None:

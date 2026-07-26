@@ -401,9 +401,7 @@ def test_retention_compresses_daily_db_when_rotation_disabled(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-async def test_run_once_plan_scan_does_not_block_engine_loop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_run_once_plan_scan_does_not_block_engine_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Proof: a 10ms ticker keeps advancing while a ~250ms filesystem glob is
     monkeypatched to block during the planning scan. If `plan_actions` runs
     inline on the loop (the defect), the ticker cannot be scheduled during
