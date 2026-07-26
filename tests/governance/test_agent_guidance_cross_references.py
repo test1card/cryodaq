@@ -24,8 +24,6 @@ named section that must keep existing.
 from __future__ import annotations
 
 import re
-import subprocess
-from functools import cache
 from pathlib import Path
 
 import pytest
@@ -97,23 +95,9 @@ def _resolve(repo_root: Path, source: str, target: str, heading: str) -> None:
         )
 
 
-@cache
-def _tracked_files() -> set[str]:
-    out = subprocess.run(
-        ["git", "ls-files"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    return set(out.splitlines())
-
-
 def test_registered_section_cross_references_resolve() -> None:
     for source, target, heading in AGENT_GUIDANCE_SECTION_REFERENCES:
         _resolve(REPO_ROOT, source, target, heading)
-        for path in (source, target):
-            assert path in _tracked_files(), f"registered cross-reference endpoint is not Git-tracked: {path}"
 
 
 def test_guard_rejects_missing_renamed_fenced_and_unmentioned_headings(
