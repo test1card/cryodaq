@@ -140,6 +140,19 @@ def _display_value(raw: Any, *, empty: str = "не указано") -> str:
     return text or empty
 
 
+def _measured_value(value: float, spec: str, unit: str = "") -> str:
+    """Render a measured value, or "—" when it is unavailable.
+
+    NaN-доктрина (see reporting/data.py::_parse_archived_value): a non-finite
+    reading means "no reading", not a measurement. Never let it reach the DOCX
+    as "nan" — the operator would read a confident number where none exists.
+    """
+    if not math.isfinite(value):
+        return "—"
+    suffix = f" {unit}" if unit else ""
+    return f"{value:{spec}}{suffix}"
+
+
 def _add_kv_table(document: Document, rows: list[tuple[str, str]]) -> None:
     """Add a clean 2-column key-value table."""
     if not rows:
@@ -700,7 +713,10 @@ def render_pressure_section(document: Document, dataset: ReportDataset, assets_d
                 document,
                 [
                     ("Число точек", f"{len(pressure):,}"),
-                    ("Последнее значение", f"{pressure[-1].value:.3e} {pressure[-1].unit}"),
+                    (
+                        "Последнее значение",
+                        _measured_value(pressure[-1].value, ".3e", pressure[-1].unit),
+                    ),
                     ("Минимум", f"{min(vals):.3e} мбар"),
                     ("Максимум", f"{max(vals):.3e} мбар"),
                 ],
@@ -748,7 +764,8 @@ def render_alarms_section(document: Document, dataset: ReportDataset, _assets_di
         document.add_paragraph(
             xml_safe(
                 f"{_format_dt(item.timestamp, time_only=True)} │ "
-                f"{_reading_display(item)} = {item.value:g} {item.unit} [{item.status}]"
+                f"{_reading_display(item)} = {_measured_value(item.value, 'g', item.unit)} "
+                f"[{item.status}]"
             ),
             style="List Bullet",
         )

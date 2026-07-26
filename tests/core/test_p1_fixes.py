@@ -353,89 +353,18 @@ async def test_telegram_notifier_stores_config():
     assert notifier._timeout_s == pytest.approx(5.0)
 
 
-async def test_telegram_notifier_skips_cleared_when_disabled():
-    """TelegramNotifier must skip cleared events when send_cleared=False."""
-    from cryodaq.notifications.telegram import TelegramNotifier
-
-    notifier = TelegramNotifier(
-        bot_token="abc:TEST",
-        chat_id=12345,
-        send_cleared=False,
-    )
-
-    # Patch _send to track whether it is called
-    send_calls: list[str] = []
-
-    async def _fake_send(text: str) -> None:
-        send_calls.append(text)
-
-    notifier._send = _fake_send  # type: ignore[method-assign]
-
-    cleared_event = MagicMock()
-    cleared_event.event_type = "cleared"
-    cleared_event.severity = MagicMock()
-    cleared_event.severity.value = "warning"
-
-    await notifier(cleared_event)
-
-    assert not send_calls, "TelegramNotifier must not call _send for cleared events when send_cleared=False"
-
-
-async def test_telegram_notifier_skips_acknowledged_events():
-    """TelegramNotifier must always skip acknowledged events."""
-    from cryodaq.notifications.telegram import TelegramNotifier
-
-    notifier = TelegramNotifier(
-        bot_token="abc:TEST",
-        chat_id=12345,
-        send_cleared=True,  # even with send_cleared=True, ack events are skipped
-    )
-
-    send_calls: list[str] = []
-
-    async def _fake_send(text: str) -> None:
-        send_calls.append(text)
-
-    notifier._send = _fake_send  # type: ignore[method-assign]
-
-    ack_event = MagicMock()
-    ack_event.event_type = "acknowledged"
-
-    await notifier(ack_event)
-
-    assert not send_calls, "TelegramNotifier must not call _send for acknowledged events"
-
-
-async def test_telegram_notifier_sends_activated_event():
-    """TelegramNotifier calls _send with non-empty text for activated events."""
-    from cryodaq.notifications.telegram import TelegramNotifier
-
-    notifier = TelegramNotifier(
-        bot_token="abc:TEST",
-        chat_id=12345,
-    )
-
-    send_calls: list[str] = []
-
-    async def _fake_send(text: str) -> None:
-        send_calls.append(text)
-
-    notifier._send = _fake_send  # type: ignore[method-assign]
-
-    event = MagicMock()
-    event.event_type = "activated"
-    event.severity = MagicMock()
-    event.severity.value = "critical"
-    event.alarm_name = "overheat"
-    event.channel = "Т1 Криостат верх"
-    event.value = 350.0
-    event.threshold = 100.0
-    event.timestamp = datetime.now(UTC)
-
-    await notifier(event)
-
-    assert send_calls, "TelegramNotifier must call _send for activated events"
-    assert send_calls[0], "Message text must be non-empty"
+# The three event-dispatch tests that used to sit here
+# (skips_cleared_when_disabled / skips_acknowledged_events /
+# sends_activated_event) drove TelegramNotifier.__call__ + _send with
+# MagicMock events. That chain formatted a cryodaq.core.alarm AlarmEvent —
+# a type deleted in the alarm v1->v2 migration — and nothing in production
+# ever called it (engine.py builds TelegramNotifier only for
+# EscalationService, which uses send_message). It also rendered a non-finite
+# value as "nan". The unreachable chain was removed; the guard against its
+# return lives in tests/notifications/test_telegram.py.
+# P1-06's actual subject — session lifecycle — is still covered by
+# test_telegram_notifier_has_no_persistent_session_at_init,
+# test_telegram_notifier_stores_config and the idempotent-close test below.
 
 
 async def test_telegram_notifier_close_is_idempotent():

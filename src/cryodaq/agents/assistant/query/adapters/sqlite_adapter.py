@@ -9,6 +9,7 @@ stats client-side.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from datetime import UTC, datetime
 
@@ -47,7 +48,12 @@ class SQLiteAdapter:
             return None
 
         try:
-            values = [v for _, v in readings]
+            # Non-finite samples are "no reading", not measurements. Aggregating
+            # over them yields a confident-looking RangeStats full of nan (and a
+            # std of 0.0), which the query agent renders as a real answer.
+            values = [v for _, v in readings if isinstance(v, int | float) and math.isfinite(v)]
+            if not values:
+                return None
             return RangeStats(
                 channel=channel,
                 window_minutes=window_minutes,

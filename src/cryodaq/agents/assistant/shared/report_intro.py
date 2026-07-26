@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import urllib.error
 import urllib.request
@@ -263,14 +264,21 @@ def _format_channel_stats(dataset: Any) -> str:
         return "нет данных"
     by_channel: dict[str, list[float]] = defaultdict(list)
     for r in readings:
-        by_channel[r.channel].append(r.value)
+        # Non-finite readings mean "no reading" (NaN-доктрина, reporting/data.py).
+        # Aggregating over them puts "nan" into the prompt, from which Гемма
+        # writes a confident annotation about a value nobody measured.
+        if isinstance(r.value, int | float) and math.isfinite(r.value):
+            by_channel[r.channel].append(r.value)
+        else:
+            by_channel.setdefault(r.channel, [])
     lines: list[str] = []
     for ch, vals in sorted(by_channel.items()):
-        if not vals:
-            continue
-        mn, mx, avg = min(vals), max(vals), sum(vals) / len(vals)
         unit = next((r.unit for r in readings if r.channel == ch), "")
         unit_str = f" {unit}" if unit else ""
+        if not vals:
+            lines.append(f"- {ch}: нет данных")
+            continue
+        mn, mx, avg = min(vals), max(vals), sum(vals) / len(vals)
         lines.append(f"- {ch}: мин {mn:.4g}{unit_str} / макс {mx:.4g}{unit_str} / ср {avg:.4g}{unit_str}")
     return "\n".join(lines[:12]) if lines else "нет данных"
 

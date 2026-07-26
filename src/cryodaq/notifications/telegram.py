@@ -1,21 +1,20 @@
-"""Уведомления о тревогах через Telegram Bot API.
+"""Отправка сообщений через Telegram Bot API.
 
-TelegramNotifier — async-коллбэк для AlarmEngine.  Отправляет
-форматированные сообщения в указанный чат при активации/сбросе тревог.
+TelegramNotifier — транспорт для :class:`EscalationService`: рассылает
+готовый текст в указанный chat_id.
 
 Конфигурация (config/notifications.yaml):
 
     telegram:
       bot_token: "123456:ABC-DEF..."
       chat_id: -1001234567890
-      send_cleared: true           # отправлять ли уведомление о сбросе
+      send_cleared: true           # зарезервировано (см. EscalationService)
       timeout_s: 10.0              # таймаут HTTP-запроса
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -26,43 +25,23 @@ from cryodaq.notifications._secrets import SecretStr
 
 logger = logging.getLogger(__name__)
 
-# Эмодзи по уровню критичности
-_SEVERITY_EMOJI: dict[str, str] = {
-    "info": "ℹ️",
-    "warning": "⚠️",
-    "critical": "🚨",
-}
-
-_SEVERITY_RU: dict[str, str] = {
-    "info": "информационная",
-    "warning": "предупреждение",
-    "critical": "критическая",
-}
-
-# Эмодзи по типу события
-_EVENT_EMOJI: dict[str, str] = {
-    "activated": "🔔",
-    "cleared": "✅",
-    "acknowledged": "👁",
-}
-
 
 class TelegramNotifier:
-    """Отправка уведомлений о тревогах через Telegram.
+    """Отправка сообщений через Telegram.
 
-    Используется как notifier-коллбэк для AlarmEngine::
+    Используется как транспорт для :class:`EscalationService`::
 
         notifier = TelegramNotifier.from_config(Path("config/notifications.yaml"))
-        alarm_engine = AlarmEngine(broker, notifiers=[notifier])
+        escalation = EscalationService(notifier, notifications_config)
 
     Параметры
     ----------
     bot_token:
         Токен Telegram-бота (от @BotFather).
     chat_id:
-        ID чата или группы для отправки уведомлений.
+        ID чата или группы по умолчанию.
     send_cleared:
-        Отправлять ли уведомления при сбросе тревоги.  По умолчанию True.
+        Зарезервировано; читается из конфигурации, поведение не задаёт.
     timeout_s:
         Таймаут HTTP-запроса к Telegram API.  По умолчанию 10 с.
     """
@@ -132,66 +111,6 @@ class TelegramNotifier:
             verify_ssl=bool(tg.get("verify_ssl", True)),
         )
 
-    async def __call__(self, event: Any) -> None:
-        """Async-коллбэк для AlarmEngine.
-
-        Параметры
-        ----------
-        event:
-            Экземпляр AlarmEvent (из cryodaq.core.alarm).
-        """
-        # Пропустить cleared, если не настроено
-        if event.event_type == "cleared" and not self._send_cleared:
-            return
-
-        # Пропустить acknowledged (внутреннее событие)
-        if event.event_type == "acknowledged":
-            return
-
-        text = self._format_message(event)
-        await self._send(text)
-
-    # ------------------------------------------------------------------
-    # Форматирование сообщения
-    # ------------------------------------------------------------------
-
-    def _format_message(self, event: Any) -> str:
-        """Сформировать текст уведомления."""
-        severity_str = (
-            event.severity.value if hasattr(event.severity, "value") else str(event.severity)
-        )
-        severity_label = _SEVERITY_RU.get(severity_str, severity_str)
-        severity_emoji = _SEVERITY_EMOJI.get(severity_str, "❓")
-        event_emoji = _EVENT_EMOJI.get(event.event_type, "")
-
-        # Время в московском часовом поясе (UTC+3) — стандарт для ФИАН
-        ts = event.timestamp
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        time_str = ts.strftime("%H:%M:%S %d.%m.%Y")
-
-        if event.event_type == "activated":
-            header = f"{event_emoji} {severity_emoji} ТРЕВОГА"
-        elif event.event_type == "cleared":
-            header = f"{event_emoji} Тревога снята"
-        elif event.event_type == "acknowledged":
-            header = f"{event_emoji} Тревога подтверждена"
-        else:
-            header = f"{event_emoji} Событие тревоги"
-
-        lines = [
-            header,
-            "",
-            f"<b>{event.alarm_name}</b>",
-            f"Канал: <code>{event.channel}</code>",
-            f"Значение: <b>{event.value:.4g}</b>",
-            f"Порог: {event.threshold:.4g}",
-            f"Уровень: {severity_label}",
-            f"Время: {time_str}",
-        ]
-
-        return "\n".join(lines)
-
     # ------------------------------------------------------------------
     # Отправка HTTP-запроса
     # ------------------------------------------------------------------
@@ -224,33 +143,5 @@ class TelegramNotifier:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error("Telegram API ответил %d: %s", resp.status, body[:200])
-        except Exception as exc:
-            logger.error("Ошибка отправки Telegram-уведомления: %s", exc)
-
-    async def _send(self, text: str) -> None:
-        """Отправить сообщение через Telegram Bot API.
-
-        Использует aiohttp для асинхронной отправки.  При недоступности
-        библиотеки или ошибке сети — логирует и продолжает работу.
-        """
-        payload = {
-            "chat_id": self._chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-
-        try:
-            session = await self._get_session()
-            async with session.post(self._build_api_url("sendMessage"), json=payload) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.error(
-                        "Telegram API ответил %d: %s",
-                        resp.status,
-                        body[:200],
-                    )
-                else:
-                    logger.debug("Telegram-уведомление отправлено: %s", text[:80])
         except Exception as exc:
             logger.error("Ошибка отправки Telegram-уведомления: %s", exc)

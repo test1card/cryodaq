@@ -28,6 +28,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _UnknownValue:
+    """Substituted for ``{value}`` when the triggering value is unavailable.
+
+    Renders as "—" under any format spec, so a message template can never
+    print a confident ``0.0`` for a reading the evaluator never obtained.
+    Alarm firing is unaffected — only the rendered text changes.
+    """
+
+    __slots__ = ()
+
+    def __format__(self, format_spec: str) -> str:
+        del format_spec
+        return "—"
+
+    def __str__(self) -> str:
+        return "—"
+
+    def __repr__(self) -> str:
+        return "<unknown>"
+
+
+UNKNOWN_VALUE = _UnknownValue()
+
+
 # ---------------------------------------------------------------------------
 # AlarmEvent
 # ---------------------------------------------------------------------------
@@ -551,7 +575,9 @@ class AlarmEvaluator:
                 # Канал никогда не получал данных — тоже stale (если есть данные вообще)
                 continue
             if not state.is_usable or (now - state.timestamp) > timeout:
-                msg = self._format_message(message_tmpl, channel=ch, value=0.0)
+                # The channel is stale/unusable — there is no current value.
+                # Rendering 0.0 here told the operator the sensor read zero.
+                msg = self._format_message(message_tmpl, channel=ch, value=UNKNOWN_VALUE)
                 return AlarmEvent(
                     alarm_id=alarm_id,
                     level=level,
@@ -581,11 +607,14 @@ class AlarmEvaluator:
         channel: str,
         rate: float | None,
     ) -> AlarmEvent:
-        value = rate if self._is_finite(rate) else 0.0
+        known = self._is_finite(rate)
+        value = rate if known else 0.0
+        # ``values`` keeps the 0.0 placeholder (unchanged wire/firing contract);
+        # only the operator-facing message stops claiming the rate was 0.0.
         return AlarmEvent(
             alarm_id=alarm_id,
             level=level,
-            message=self._format_message(message_tmpl, channel=channel, value=value),
+            message=self._format_message(message_tmpl, channel=channel, value=value if known else UNKNOWN_VALUE),
             triggered_at=time.time(),
             channels=[channel],
             values={channel: value},
@@ -602,7 +631,7 @@ class AlarmEvaluator:
         return []
 
     @staticmethod
-    def _format_message(template: str, channel: str = "", value: float = 0.0) -> str:
+    def _format_message(template: str, channel: str = "", value: object = 0.0) -> str:
         try:
             return template.format(channel=channel, value=value)
         except (KeyError, ValueError):
