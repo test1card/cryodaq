@@ -3262,7 +3262,8 @@ class SQLiteWriter:
         try:
             self._control_database_lifetime_lock.acquire()
             lifetime_lock_acquired = True
-            deadline = _operator_log_monotonic() + _OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S
+            admission_started = _operator_log_monotonic()
+            deadline = admission_started + _OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S
             _SQLITE_NATIVE_AUTHORITY_ACTIVATION_LOCK.acquire()
             activation_locked = True
             authority = _ControlDatabaseAuthority(self._data_dir)
@@ -3325,7 +3326,11 @@ class SQLiteWriter:
             )
             if _operator_log_monotonic() >= deadline:
                 expired[0] = True
-                raise RuntimeError("control database initialization deadline expired during admission")
+                raise RuntimeError(
+                    "control database initialization deadline expired during admission after "
+                    f"{_operator_log_monotonic() - admission_started:.3f}s of a "
+                    f"{_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S:.3f}s budget"
+                )
             owned_connection.commit()
             raw_connection.set_progress_handler(None, 0)
             owned_connection.validate_authority()
@@ -3391,7 +3396,11 @@ class SQLiteWriter:
             raise RuntimeError("control database initialization settlement is incomplete")
         if initialization_failed:
             reason = (
-                "control database initialization deadline expired during admission"
+                (
+                    "control database initialization deadline expired during admission after "
+                    f"{_operator_log_monotonic() - admission_started:.3f}s of a "
+                    f"{_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S:.3f}s budget"
+                )
                 if expired[0]
                 else (
                     "control database authority is unavailable"
