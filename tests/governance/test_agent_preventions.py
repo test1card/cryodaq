@@ -146,6 +146,51 @@ def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidenc
         validate_registry(prose)
 
 
+def test_artifact_evidence_requires_receipt_tree_and_suite_binding() -> None:
+    payload = _registry()
+    record = next(
+        record
+        for record in payload["records"]
+        if record["status"] == "open" and any(guard["ci_partition"] == "remaining" for guard in record["guards"])
+    )
+    record_id = record["id"]
+    record["status"] = "closed"
+    record["red_evidence"] = {
+        "locator": "tree:" + "1" * 40,
+        "sha256": "sha256:" + "1" * 64,
+    }
+    record["green_evidence"] = {
+        "locator": "artifact:123",
+        "sha256": "sha256:" + "2" * 64,
+        "tree": "2" * 40,
+        "suite": "remaining",
+    }
+    record["closure_semantics_sha256"] = closure_semantics_sha256(record)
+    validate_registry(payload)
+
+    mutations = []
+    missing_tree = copy.deepcopy(payload)
+    del next(record for record in missing_tree["records"] if record["id"] == record_id)["green_evidence"]["tree"]
+    mutations.append(missing_tree)
+    invalid_tree = copy.deepcopy(payload)
+    next(record for record in invalid_tree["records"] if record["id"] == record_id)["green_evidence"]["tree"] = (
+        "tree:" + "2" * 40
+    )
+    mutations.append(invalid_tree)
+    invalid_suite = copy.deepcopy(payload)
+    invalid_suite_record = next(record for record in invalid_suite["records"] if record["id"] == record_id)
+    invalid_suite_record["green_evidence"]["suite"] = "manual"
+    mutations.append(invalid_suite)
+    mismatched_suite = copy.deepcopy(payload)
+    mismatched_suite_record = next(record for record in mismatched_suite["records"] if record["id"] == record_id)
+    mismatched_suite_record["green_evidence"]["suite"] = "core"
+    mutations.append(mismatched_suite)
+
+    for mutation in mutations:
+        with pytest.raises(GovernanceContractError, match="artifact evidence"):
+            validate_registry(mutation)
+
+
 def test_invalid_registry_fixtures_fail_closed() -> None:
     payload = _registry()
     mutations = []

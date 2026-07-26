@@ -17,6 +17,7 @@ _OWNERS = {"reviewer", "primary", "cli", "each_agent"}
 _PENDING = {"pending", "pending_immutable_capture"}
 _PLATFORMS = {"posix", "windows"}
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_GIT_OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 _IMMUTABLE_LOCATOR = re.compile(r"(?:git|tree|github-run|artifact|bundle):\S+")
 _EXPECTED_STATUS_DEFINITIONS = {
     "open": "Required correction or evidence is incomplete.",
@@ -94,14 +95,38 @@ def closure_semantics_sha256(entry: Mapping[str, Any]) -> str:
 
 
 def _validate_immutable_evidence(value: Any, field: str) -> None:
-    if not isinstance(value, Mapping) or set(value) != {"locator", "sha256"}:
+    if not isinstance(value, Mapping):
         raise GovernanceContractError(f"{field} immutable evidence shape is not exact")
-    locator = value["locator"]
-    digest = value["sha256"]
+    locator = value.get("locator")
+    digest = value.get("sha256")
+    is_artifact = isinstance(locator, str) and locator.startswith("artifact:")
+    required_fields = {"locator", "sha256", "tree", "suite"} if is_artifact else {"locator", "sha256"}
+    if set(value) != required_fields:
+        if is_artifact:
+            raise GovernanceContractError(f"{field} artifact evidence shape is not exact")
+        raise GovernanceContractError(f"{field} immutable evidence shape is not exact")
     if not isinstance(locator, str) or _IMMUTABLE_LOCATOR.fullmatch(locator) is None:
         raise GovernanceContractError(f"{field} immutable evidence locator is invalid")
     if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
         raise GovernanceContractError(f"{field} immutable evidence digest is invalid")
+    if is_artifact:
+        if not isinstance(value["tree"], str) or _GIT_OBJECT_ID.fullmatch(value["tree"]) is None:
+            raise GovernanceContractError(f"{field} artifact evidence tree is invalid")
+        if value["suite"] not in _EXPECTED_DEFAULT_CI_JOBS:
+            raise GovernanceContractError(f"{field} artifact evidence suite is invalid")
+
+
+def _validate_artifact_evidence_partition(value: Any, partitions: set[str], field: str) -> None:
+    """Require a sealed artifact's receipt suite to cover the registered guard."""
+
+    is_artifact = (
+        isinstance(value, Mapping)
+        and isinstance(value.get("locator"), str)
+        and value["locator"].startswith("artifact:")
+    )
+    if is_artifact:
+        if value["suite"] not in partitions:
+            raise GovernanceContractError(f"{field} artifact evidence suite does not cover its registered guard")
 
 
 _OPTIONAL_RECORD_FIELDS = frozenset(
@@ -308,6 +333,11 @@ def validate_registry(payload: Any) -> dict[str, Any]:
         if record["status"] in {"closed", "expired"}:
             _validate_immutable_evidence(record["red_evidence"], f"{record_id}.red_evidence")
             _validate_immutable_evidence(record["green_evidence"], f"{record_id}.green_evidence")
+            guard_partitions = {guard["ci_partition"] for guard in guards}
+            _validate_artifact_evidence_partition(record["red_evidence"], guard_partitions, f"{record_id}.red_evidence")
+            _validate_artifact_evidence_partition(
+                record["green_evidence"], guard_partitions, f"{record_id}.green_evidence"
+            )
             if record.get("closure_semantics_sha256") != closure_semantics_sha256(record):
                 raise GovernanceContractError(f"{record_id} closure evidence is semantically stale")
         elif "closure_semantics_sha256" in record:
@@ -370,6 +400,9 @@ def validate_registry(payload: Any) -> dict[str, Any]:
                 raise GovernanceContractError(f"{pair_id} closes before its runtime prevention")
             _validate_immutable_evidence(pair["red_evidence"], f"{pair_id}.red_evidence")
             _validate_immutable_evidence(pair["green_evidence"], f"{pair_id}.green_evidence")
+            pair_partitions = {pair["ci_partition"]}
+            _validate_artifact_evidence_partition(pair["red_evidence"], pair_partitions, f"{pair_id}.red_evidence")
+            _validate_artifact_evidence_partition(pair["green_evidence"], pair_partitions, f"{pair_id}.green_evidence")
             if pair.get("closure_semantics_sha256") != closure_semantics_sha256(pair):
                 raise GovernanceContractError(f"{pair_id} closure evidence is semantically stale")
         elif "closure_semantics_sha256" in pair:

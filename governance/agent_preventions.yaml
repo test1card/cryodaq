@@ -2284,7 +2284,7 @@ false_green_pairs:
       locator: artifact:8627209627
       sha256: sha256:459179daaef374dfb976f704b663916a4d7fb5eabebcd22049c9fd2622e59387
   - id: CANDIDATE-FAILURE-VISIBILITY-FALSE-GREEN-197
-    status: reopened
+    status: closed
     scope: repository
     runtime_prevention_id: CANDIDATE-FAILURE-VISIBILITY-028
     guard: tests/test_ci_candidate_evidence.py::test_failed_candidate_summary_is_bounded_and_workflow_required
@@ -2292,6 +2292,21 @@ false_green_pairs:
     red_evidence:
       locator: artifact:8626948662
       sha256: sha256:fcbcb798daa38f014db870f543e0fb94c39388d54ee4aefc89dbff0be9300fb6
+      tree: 9662e675f962034e927712c573e8f5b267596885
+      suite: remaining
+    green_evidence:
+      locator: artifact:8629210741
+      sha256: sha256:88ce24fce5c68a34d451b4eaee32c9a8073eb99354bad6ac407d87d705c5e894
+      tree: 4fb4e484a7a0d3716b6d39e8bfd4abeaf4082f32
+      suite: remaining
+    closure_semantics_sha256: sha256:3767e185b877a4cdd1e916e6598d0474f37cc726505cd27b7bb5d3c52726c216
+  - id: ARTIFACT-EVIDENCE-TREE-SUITE-FALSE-GREEN-200
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-BINDING-001
+    guard: tests/governance/test_agent_preventions.py::test_artifact_evidence_requires_receipt_tree_and_suite_binding
+    ci_partition: remaining
+    red_evidence: artifact_form_evidence_accepted_a_digest_without_the_sealed_receipt_tree_or_suite_so_unrelated_or_wrong_partition_artifacts_were_indistinguishable_2026_07_26_pending_immutable_capture
     green_evidence: pending
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
     status: closed
@@ -2305,6 +2320,8 @@ false_green_pairs:
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+      tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
+      suite: core
     closure_semantics_sha256: sha256:fff32d16700bad2fcfb38f996081264873a35f443a1173fa36e46c1a8ec25054
   - id: ALARM-MIXED-SELECTOR-FALSE-GREEN-199
     status: closed
@@ -2318,6 +2335,8 @@ false_green_pairs:
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+      tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
+      suite: core
     closure_semantics_sha256: sha256:f5a8098a52f1d9643d6af3d311a153adef0a335d6f0dad9273b720bc6b0736ee
   - id: TEST-LIVE-RUNTIME-PROOF-FALSE-GREEN-166
     status: open
@@ -4047,13 +4066,13 @@ records:
     status: open
     scope: repository
     authority_source: AGENTS.md
-    applies_to: Every local or hosted candidate, package, artifact, CI, and publication evidence receipt.
+    applies_to: Every local or hosted candidate, package, artifact, CI, publication evidence receipt, and registry artifact evidence claim.
     classification: ci_artifact_misbinding
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: CI can execute one tree while hashing or uploading another and omit exact run or artifact identity.
-    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, and uploaded artifact digest.
+    consequence: CI can execute one tree while hashing or uploading another, omit exact run or artifact identity, or let a registry artifact claim conceal the candidate tree and suite it attests.
+    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, and uploaded artifact digest; every registry artifact evidence claim carries the receipt tree and suite and that suite covers its registered guard partition.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4089,11 +4108,13 @@ records:
         ci_partition: remaining
       - node: tests/test_ci_candidate_evidence.py::test_strict_guard_receipt_parser_rejects_forged_marker_semantics
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_artifact_evidence_requires_receipt_tree_and_suite_binding
+        ci_partition: remaining
     red_evidence: ci_line_review_confirmed_misbinding_pending_hosted_artifact
     green_evidence: pending
 
   - id: CANDIDATE-FAILURE-VISIBILITY-028
-    status: reopened
+    status: closed
     scope: repository
     authority_source: AGENTS.md#integration-and-publication-discipline
     applies_to: Failed sealed-candidate GitHub Actions executions, including whitespace-bearing parametrized node IDs and collection or fixture ERROR outcomes, and their ordinary job logs.
@@ -4111,7 +4132,14 @@ records:
     red_evidence:
       locator: artifact:8626960353
       sha256: sha256:05e1a973ff9f0ad83f2207e193d340c0dd60b48b28139102959699a37498d1d5
-    green_evidence: pending
+      tree: 9662e675f962034e927712c573e8f5b267596885
+      suite: remaining
+    green_evidence:
+      locator: artifact:8629152456
+      sha256: sha256:131ef93fab51b4f6a8d44a1b9b00273a2eb4b0c18c8b7b814582bdc65a32876f
+      tree: 4fb4e484a7a0d3716b6d39e8bfd4abeaf4082f32
+      suite: remaining
+    closure_semantics_sha256: sha256:ce97d31594b994c4159c6434bcdbc2c8b399b32ce8124059cfea861a5f896a7d
 
   - id: BROKER-DELIVERY-ISOLATION-015
     status: open
@@ -4164,6 +4192,8 @@ records:
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+      tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
+      suite: core
     closure_semantics_sha256: sha256:cd0e99be98ef6cc2fcbc82d7516ed8532ea27d401ea062582085ca422c93a540
 
   - id: ALARM-MIXED-SELECTOR-027
@@ -4195,6 +4225,8 @@ records:
     green_evidence:
       locator: artifact:8627640246
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+      tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
+      suite: core
     closure_semantics_sha256: sha256:30499843fe4c6a107aa81e29e0206f21d46f745b1445e7ee5c07845cff5ec2e5
 
   - id: COMMAND-REPLY-BOUNDS-016
