@@ -346,6 +346,37 @@ def test_optional_channels_cannot_silence_required_warning_composite_arm(tmp_pat
     assert "required AND composite condition" in message
 
 
+def test_optional_channels_cannot_silence_every_expanded_rate_condition_member(tmp_path: Path) -> None:
+    """A group selector must be evaluated as its effective member set."""
+    alarms = {
+        "channel_groups": {"optional_temperature_inputs": [_DEAD_CHANNEL]},
+        "global_alarms": {
+            "rate_requires_optional_group": {
+                "alarm_type": "rate",
+                "channel": _LIVE_CHANNEL,
+                "check": "rate_above",
+                "threshold": 1.0,
+                "additional_condition": {
+                    "channel_group": "optional_temperature_inputs",
+                    "check": "any_above",
+                    "threshold": 300.0,
+                },
+                "level": "warning",
+                "message": "test alarm",
+                "optional_channels": [_DEAD_CHANNEL],
+            }
+        },
+    }
+
+    with pytest.raises(SafetyPatternLivenessError) as exc_info:
+        validate_safety_pattern_liveness(**_build_fixture(tmp_path, alarms))
+
+    message = str(exc_info.value)
+    assert "rate_requires_optional_group" in message
+    assert "rate additional_condition" in message
+    assert _DEAD_CHANNEL in message
+
+
 def test_optional_declaration_does_not_silence_other_references(tmp_path: Path) -> None:
     """The opt-out is per reference — it must not become a per-alarm blanket."""
     other_dead = "Т98 Вторая опечатка"

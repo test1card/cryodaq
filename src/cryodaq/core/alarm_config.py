@@ -269,6 +269,12 @@ def _is_number(value: Any) -> bool:
 # warning and returns None — i.e. the alarm silently never fires at runtime.
 _VALID_ALARM_TYPES = frozenset({"threshold", "rate", "composite", "stale"})
 
+# AlarmEvent's canonical snapshot schema accepts exactly these case-sensitive
+# levels (alarm_v2.py:_ALARM_LEVELS).  Loader validation must use the same
+# vocabulary so a typo cannot fall through as an apparently benign alarm and
+# evade severity-specific safety validation.
+_VALID_ALARM_LEVELS = frozenset({"INFO", "WARNING", "CRITICAL"})
+
 # check values recognised by alarm_v2._check_threshold_channel (alarm_v2.py:261-285).
 # Its own `else` branch (L283-285) only logs a warning and returns (False, value).
 _VALID_THRESHOLD_CHECKS = frozenset(
@@ -413,6 +419,18 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
 
     Any other alarm_type → rejected (unknown to alarm_v2).
     """
+    # ``level`` is emitted unchanged by AlarmEvaluator and validated only much
+    # later by the canonical snapshot surface.  Treat its absence, a typo, or a
+    # wrong type as a startup configuration error instead: a raw-config
+    # liveness check cannot safely classify an unknown string as non-critical.
+    # ``HIGH`` remains a defensive legacy category in raw safety/throttle
+    # traversal, but is not a canonical AlarmEvent level and is rejected here.
+    level = cfg.get("level")
+    if type(level) is not str or level not in _VALID_ALARM_LEVELS:
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r} has invalid level {level!r}; canonical levels are {sorted(_VALID_ALARM_LEVELS)}"
+        )
+
     alarm_type = cfg.get("alarm_type")
 
     if alarm_type == "threshold":

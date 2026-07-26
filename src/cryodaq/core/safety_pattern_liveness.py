@@ -32,7 +32,7 @@ commands, holds no write credentials, and acquires no actuator authority.
 from __future__ import annotations
 
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -224,9 +224,19 @@ def _optional_channels_for_alarm(*, source_name: str, label: str, alarm: dict) -
 
 
 def _reject_optional_required_condition_arms(
-    *, source_name: str, label: str, alarm: dict, declared_optional: set[str]
+    *,
+    source_name: str,
+    label: str,
+    alarm: dict,
+    declared_optional: set[str],
+    groups: Mapping[str, list[str]],
 ) -> None:
-    """Reject opt-outs that make an otherwise-required condition permanently false."""
+    """Reject opt-outs that make an otherwise-required condition permanently false.
+
+    ``channel_group`` is a load-time alias for its member list.  Evaluate it as
+    that effective list here too; otherwise a rate additional condition can be
+    made entirely optional by putting every group member in ``optional_channels``.
+    """
     if not declared_optional:
         return
 
@@ -240,11 +250,14 @@ def _reject_optional_required_condition_arms(
     for context, condition in conditions:
         if not isinstance(condition, dict):
             continue
-        refs = {
-            ref
-            for ref in _extract_channel_refs(condition)
-            if not ref.startswith("__group__:") and ref not in _ALARM_PSEUDO_CHANNELS
-        }
+        refs: set[str] = set()
+        for ref in _extract_channel_refs(condition):
+            if ref.startswith("__group__:"):
+                # An unknown group is reported separately by the liveness
+                # traversal below.  Do not turn it into an empty condition set.
+                refs.update(groups.get(ref.removeprefix("__group__:"), []))
+            elif ref not in _ALARM_PSEUDO_CHANNELS:
+                refs.add(ref)
         optional_refs = refs & declared_optional
         if refs and refs <= declared_optional:
             location = f"{source_name} alarm {label!r} key {_OPTIONAL_CHANNELS_KEY!r}"
@@ -306,6 +319,7 @@ def _collect_dead_alarm_channel_refs(
             label=label,
             alarm=alarm,
             declared_optional=declared_optional,
+            groups=groups,
         )
         # ``_extract_channel_refs`` is the production ref traversal
         # (src/cryodaq/core/housekeeping.py:106) and is reused rather than

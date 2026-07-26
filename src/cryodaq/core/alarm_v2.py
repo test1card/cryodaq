@@ -608,16 +608,17 @@ class AlarmEvaluator:
         rate: float | None,
     ) -> AlarmEvent:
         known = self._is_finite(rate)
-        value = rate if known else 0.0
-        # ``values`` keeps the 0.0 placeholder (unchanged wire/firing contract);
-        # only the operator-facing message stops claiming the rate was 0.0.
+        # A rate unavailable from the estimator is not a zero measurement.
+        # Preserve the channel identity in ``channels`` (and keep-active firing
+        # behaviour) while omitting the unknown value from the published mapping.
+        values = {channel: rate} if known else {}
         return AlarmEvent(
             alarm_id=alarm_id,
             level=level,
-            message=self._format_message(message_tmpl, channel=channel, value=value if known else UNKNOWN_VALUE),
+            message=self._format_message(message_tmpl, channel=channel, value=rate if known else UNKNOWN_VALUE),
             triggered_at=time.time(),
             channels=[channel],
-            values={channel: value},
+            values=values,
         )
 
     def _resolve_channels(self, cfg: dict) -> list[str]:

@@ -8,8 +8,9 @@ message template:
 * ``_rate_event`` — reached when the rate is unknown (too few points, or the
   channel is unusable), yet the message read "... (0.0 K/мин)".
 
-Both alarms are correct to fire; only the rendered number lied. Firing
-behaviour and the ``values`` payload are unchanged — these tests pin that too.
+Both alarms are correct to fire. Firing behaviour is unchanged; an unavailable
+rate is omitted from ``values`` so downstream consumers cannot mistake it for
+a measured zero.
 """
 
 from __future__ import annotations
