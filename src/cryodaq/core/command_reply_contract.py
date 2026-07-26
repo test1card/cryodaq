@@ -24,6 +24,21 @@ COMMAND_REPLY_MAX_JSON_ITEMS = 4 * COMMAND_REPLY_HISTORY_MAX_ROWS + 64
 COMMAND_REPLY_MAX_JSON_KEY_CHARS = 256
 COMMAND_REPLY_MAX_INTEGER_DIGITS = 128
 
+# Settlement fields are optional because legacy handler-local replies predate
+# the transport envelope. When they are present, these are the only values
+# that can prove a command outcome to the GUI classifier.
+COMMAND_REPLY_DELIVERY_STATES = frozenset(
+    {
+        "dispatched",
+        "intent_persisted",
+        "not_confirmed",
+        "not_dispatched",
+        "settled",
+        "unknown",
+    }
+)
+COMMAND_REPLY_COMMIT_STATES = frozenset({"committed", "not_applicable", "not_committed", "unknown"})
+
 
 def _validate_history_row_bound(value: dict[str, Any]) -> None:
     """Reject a history-shaped reply above the producer's exact row ceiling."""

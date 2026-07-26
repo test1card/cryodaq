@@ -15,6 +15,13 @@ delegates are thin pass-throughs to it.
 
 from __future__ import annotations
 
+import ast
+import importlib
+from collections import defaultdict
+from pathlib import Path
+
+import pytest
+
 from cryodaq.gui.shell.command_outcome import result_outcome_unknown
 
 # -- Structured evidence must decide outright (the defect) --------------------
@@ -97,3 +104,82 @@ def test_prose_fallback_fires_for_no_structured_key_reply():
 
     result = {"ok": False, "error": "Инструмент исход неизвестен."}
     assert result_outcome_unknown(result) is True
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"ok": False, "error": "VISA read timed out", "commit_state": "bogus"},
+        {"ok": False, "error": "VISA read timed out", "outcome_unknown": "yes"},
+        {"ok": False, "error": "VISA read timed out", "_handler_timeout": None},
+        {"ok": False, "error": "VISA read timed out", "delivery_state": "typo"},
+    ],
+    ids=("bogus-commit", "non-boolean-outcome", "none-handler-timeout", "bogus-delivery"),
+)
+def test_malformed_structured_settlement_evidence_is_unknown(result: dict[str, object]):
+    """Malformed settlement evidence cannot suppress the safety latch."""
+
+    assert result_outcome_unknown(result) is True
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"ok": False, "error": "VISA read timed out"}, True),
+        ({"ok": False, "commit_state": "unknown"}, True),
+        ({"ok": False, "commit_state": "not_committed", "error": "quarantined"}, False),
+        (
+            {
+                "ok": False,
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "error": "admission timed out",
+            },
+            False,
+        ),
+    ],
+    ids=("legacy-prose", "unknown-commit", "not-committed", "not-dispatched-and-not-committed"),
+)
+def test_required_command_outcome_regressions(result: dict[str, object], expected: bool):
+    """Pin the required legacy, unknown, and provably-unsent reply shapes."""
+
+    assert result_outcome_unknown(result) is expected
+
+
+def _literal_settlement_values(value: ast.expr) -> set[str]:
+    if isinstance(value, ast.Constant) and type(value.value) is str:
+        return {value.value}
+    if isinstance(value, ast.IfExp):
+        return _literal_settlement_values(value.body) | _literal_settlement_values(value.orelse)
+    return set()
+
+
+def _emitted_settlement_values() -> dict[str, set[str]]:
+    """Collect statically knowable settlement values from every source reply."""
+
+    emitted: dict[str, set[str]] = defaultdict(set)
+    root = Path(__file__).resolve().parents[3] / "src"
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if not (isinstance(key, ast.Constant) and key.value in {"delivery_state", "commit_state"}):
+                    continue
+                values = _literal_settlement_values(value)
+                assert values, f"{path}:{value.lineno} emits a nonliteral {key.value}"
+                emitted[key.value].update(values)
+    return emitted
+
+
+def test_all_emitted_settlement_values_are_known_to_command_outcome_classifier():
+    """Reject a new emitter value until the shared classifier vocabulary names it."""
+
+    contract = importlib.import_module("cryodaq.core.command_reply_contract")
+    vocabulary = {
+        "delivery_state": contract.COMMAND_REPLY_DELIVERY_STATES,
+        "commit_state": contract.COMMAND_REPLY_COMMIT_STATES,
+    }
+    for field, values in _emitted_settlement_values().items():
+        assert values <= vocabulary[field], f"unrecognised {field}: {sorted(values - vocabulary[field])}"

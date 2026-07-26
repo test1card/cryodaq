@@ -65,13 +65,23 @@ now thin delegates to this shared function. Its rule, in order:
 2. Structured settlement evidence — `_handler_timeout: True`,
    `outcome_unknown: True`, `commit_state: "unknown"`, or
    `delivery_state: "unknown"` — is checked **first** and decides the
-   question outright.
+   question only when its type and value are recognised. `_handler_timeout` and
+   `outcome_unknown` must be exact booleans; `commit_state` and
+   `delivery_state` must be strings from the shared core vocabulary. A
+   recognised `True` / `"unknown"` value is unknown, while a recognised settled
+   value is resolved. A malformed, unrecognised, or `None` value is unknown.
 3. Error-prose substring matching is only a **fallback**, for reply shapes
    that carry none of the structured keys above at all.
 4. `not_committed` / `not_dispatched` commit/delivery states are truthful,
    *resolved* refusals (e.g. `mutation_protocol_incompatible`,
    `command_authority_quarantined`) and must **never** be folded into
    "unknown", even though they sound adjacent to the unresolved case.
+
+The recognised string vocabulary lives in
+`core/command_reply_contract.py`; the command-outcome regression suite scans
+all literal settlement values emitted under `src/` and rejects a value outside
+that vocabulary. This keeps a future transport spelling from silently turning
+into an apparently resolved GUI reply.
 
 Any new surface implementing this pattern must call this shared function for
 its entry check rather than reimplementing prose matching locally.
@@ -217,6 +227,11 @@ recorded here rather than a claimed guarantee.
 
 ## Changelog
 
+- 2026-07-26 (v4.0.4): Corrected the canonical classifier contract so only
+  exactly typed, recognised structured settlement values may resolve an
+  outcome; malformed evidence now fails closed to unknown. Added an executable
+  guard that compares every literal settlement value emitted under `src/` with
+  the shared core vocabulary.
 - 2026-07-26 (v4.0.4): Documented `command_outcome.py::result_outcome_unknown()`
   as the canonical entry classifier now shared by `experiment_overlay.py` and
   `keithley_panel.py`, replacing their former private per-surface prose-only

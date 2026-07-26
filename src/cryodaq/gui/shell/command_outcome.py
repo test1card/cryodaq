@@ -8,6 +8,11 @@ hazardous action may in fact have taken effect.
 
 from __future__ import annotations
 
+from cryodaq.core.command_reply_contract import (
+    COMMAND_REPLY_COMMIT_STATES,
+    COMMAND_REPLY_DELIVERY_STATES,
+)
+
 # Error-prose substrings recognized only as a fallback, for reply shapes
 # that carry none of the structured settlement keys below at all (legacy /
 # handler-local paths with no transport vocabulary).
@@ -26,6 +31,28 @@ _PROSE_UNKNOWN_MARKERS = (
 # command_authority_quarantined) and must never be folded in here.
 _UNKNOWN_COMMIT_STATES = frozenset({"unknown"})
 _UNKNOWN_DELIVERY_STATES = frozenset({"unknown"})
+_STRUCTURED_SETTLEMENT_KEYS = (
+    "_handler_timeout",
+    "outcome_unknown",
+    "commit_state",
+    "delivery_state",
+)
+
+
+def _structured_outcome_unknown(key: str, value: object) -> bool | None:
+    """Return the settlement decision, or None for malformed evidence."""
+
+    if key in {"_handler_timeout", "outcome_unknown"}:
+        if type(value) is not bool:
+            return None
+        return value
+    if key == "commit_state":
+        if type(value) is not str or value not in COMMAND_REPLY_COMMIT_STATES:
+            return None
+        return value in _UNKNOWN_COMMIT_STATES
+    if type(value) is not str or value not in COMMAND_REPLY_DELIVERY_STATES:
+        return None
+    return value in _UNKNOWN_DELIVERY_STATES
 
 
 def result_outcome_unknown(result: object) -> bool:
@@ -45,38 +72,23 @@ def result_outcome_unknown(result: object) -> bool:
     prose fallback are kept for reply shapes that carry no structured
     settlement vocabulary at all; removing them would regress those paths.
 
-    Presence of any structured settlement key decides the question
-    outright: a value of ``True``/``"unknown"`` resolves to unknown above,
-    and any other value (e.g. ``commit_state: "not_committed"`` /
-    ``delivery_state: "not_dispatched"``, which are truthful resolved
-    refusals) resolves to *not* unknown here, without consulting the prose
-    fallback. Prose matching runs only when none of ``_handler_timeout``,
-    ``outcome_unknown``, ``commit_state``, or ``delivery_state`` is present
-    at all, so a resolved refusal whose prose happens to contain a
-    timeout-shaped substring can never be reclassified as unknown.
+    A structured key decides the question only when its value is recognised:
+    ``True``/``"unknown"`` means unknown, while a recognised settled value
+    (such as ``commit_state: "not_committed"`` or
+    ``delivery_state: "not_dispatched"``) means resolved. Missing, malformed,
+    or unrecognised structured evidence is unknown. Prose matching runs only
+    when no structured settlement key is present at all, so a resolved refusal
+    whose prose contains a timeout-shaped substring cannot be reclassified as
+    unknown.
     """
 
     if not isinstance(result, dict):
         return True
-    if result.get("_handler_timeout") is True:
-        return True
-    if result.get("outcome_unknown") is True:
-        return True
-    if result.get("commit_state") in _UNKNOWN_COMMIT_STATES:
-        return True
-    if result.get("delivery_state") in _UNKNOWN_DELIVERY_STATES:
-        return True
-    # Any remaining *presence* of a structured settlement key is a truthful,
-    # resolved outcome (e.g. ``commit_state: "not_committed"`` /
-    # ``delivery_state: "not_dispatched"`` refusals, or an explicit
-    # ``outcome_unknown: False`` / ``_handler_timeout: False``). Such replies
-    # must decide the question outright here and never reach the prose
-    # fallback: a resolved refusal whose prose happened to contain a
-    # timeout-shaped substring (e.g. "Admission timed out before dispatch"
-    # alongside ``not_committed``/``not_dispatched``) would otherwise be
-    # reclassified as unknown, latching a hazardous source channel for a
-    # command that never left the client.
-    if any(key in result for key in ("_handler_timeout", "outcome_unknown", "commit_state", "delivery_state")):
+    structured_keys = tuple(key for key in _STRUCTURED_SETTLEMENT_KEYS if key in result)
+    if structured_keys:
+        decisions = tuple(_structured_outcome_unknown(key, result[key]) for key in structured_keys)
+        if None in decisions or any(decisions):
+            return True
         return False
     error = str(result.get("error") or "").casefold()
     return any(marker in error for marker in _PROSE_UNKNOWN_MARKERS)
