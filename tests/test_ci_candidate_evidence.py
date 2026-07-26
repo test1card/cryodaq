@@ -15,6 +15,7 @@ import yaml
 from tools import ci_candidate_runner
 from tools.candidate_evidence import execute_exported_candidate
 from tools.ci_candidate_evidence import (
+    FAILURE_RECEIPT_INDEX_ENV,
     FAILURE_RECEIPT_PREFIX,
     CiCandidateEvidenceError,
     _expected_receipt_count,
@@ -508,7 +509,9 @@ def test_failed_candidate_summary_is_bounded_and_workflow_required(
         *(f"tests/generated_{index}.py::test_failure" for index in range(21)),
     ]
     (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "remaining"}\n', encoding="utf-8")
-    marker = canonical_failure_receipt({"failed_nodeids": reported_nodes, "schema_version": 1, "suite": "remaining"})
+    marker = canonical_failure_receipt(
+        {"failed_nodeids": reported_nodes, "invocation_index": 1, "schema_version": 2, "suite": "remaining"}
+    )
     summary_lines = [
         f"{FAILURE_RECEIPT_PREFIX}{marker}",
         "FAILED tests/x.py::test_p[a - b] - AssertionError: got [x]",
@@ -552,6 +555,7 @@ def test_failure_receipt_plugin_uses_pytest_report_nodeids_verbatim(tmp_path: Pa
     environment = dict(os.environ)
     environment["PYTEST_PLUGINS"] = "tools.ci_candidate_evidence"
     environment["CRYODAQ_CANDIDATE_FAILURE_RECEIPT_SUITE"] = "remaining"
+    environment[FAILURE_RECEIPT_INDEX_ENV] = "1"
     environment["PYTHONPATH"] = str(ROOT)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--tb=short"],
@@ -572,7 +576,8 @@ def test_failure_receipt_plugin_uses_pytest_report_nodeids_verbatim(tmp_path: Pa
 def test_failure_receipt_parser_rejects_forged_marker_semantics() -> None:
     payload = {
         "failed_nodeids": ["tests/core/test_guard.py::test_guard"],
-        "schema_version": 1,
+        "invocation_index": 1,
+        "schema_version": 2,
         "suite": "core",
     }
     valid = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}\n"
@@ -619,7 +624,9 @@ def test_partial_receipt_from_one_subprocess_does_not_silently_drop_sibling_fail
     node_a = "tests/gui/test_app_palette.py::test_palette"
     node_b = "tests/gui/shell/views/test_operator_display.py::test_display"
     (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "gui"}\n', encoding="utf-8")
-    receipt_a = canonical_failure_receipt({"failed_nodeids": [node_a], "schema_version": 1, "suite": "gui"})
+    receipt_a = canonical_failure_receipt(
+        {"failed_nodeids": [node_a], "invocation_index": 1, "schema_version": 2, "suite": "gui"}
+    )
     stdout_lines = [
         "candidate-suite=gui compiled-sources=1",
         "candidate-suite=gui command=1/2",
@@ -639,6 +646,75 @@ def test_partial_receipt_from_one_subprocess_does_not_silently_drop_sibling_fail
     assert f"FAILED NODE (legacy fallback): {node_b}" in output
     assert "expected 2" in output
     assert "found 1" in output
+    assert "no structural receipt for invocation index/indices [2]" in output
+    assert "duplicate" not in output
+
+
+def test_duplicated_receipt_does_not_mask_missing_sibling_failures(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    node_a = "tests/gui/test_app_palette.py::test_palette"
+    node_b = "tests/gui/shell/views/test_operator_display.py::test_display"
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "gui"}\n', encoding="utf-8")
+    receipt_a = canonical_failure_receipt(
+        {"failed_nodeids": [node_a], "invocation_index": 1, "schema_version": 2, "suite": "gui"}
+    )
+    stdout_lines = [
+        "candidate-suite=gui command=1/2",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_a}",
+        "candidate-suite=gui command=2/2",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_a}",
+        f"FAILED {node_b} - AssertionError: subprocess crashed before emitting its receipt",
+    ]
+    (bundle / "stdout.bin").write_text("\n".join(stdout_lines) + "\n", encoding="utf-8")
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle, max_nodes=20)
+
+    output = capsys.readouterr().out
+    assert f"FAILED NODE: {node_a}" in output
+    assert f"FAILED NODE (legacy fallback): {node_b}" in output
+    assert "WARNING" in output
+    assert "duplicate" in output
+    assert "[2]" in output
+
+
+def test_duplicated_receipt_index_warns_even_when_every_index_is_covered(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    node_a = "tests/gui/test_app_palette.py::test_palette"
+    node_b = "tests/gui/shell/views/test_operator_display.py::test_display"
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "gui"}\n', encoding="utf-8")
+    receipt_a = canonical_failure_receipt(
+        {"failed_nodeids": [node_a], "invocation_index": 1, "schema_version": 2, "suite": "gui"}
+    )
+    receipt_b = canonical_failure_receipt(
+        {"failed_nodeids": [node_b], "invocation_index": 2, "schema_version": 2, "suite": "gui"}
+    )
+    stdout_lines = [
+        "candidate-suite=gui command=1/2",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_a}",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_a}",
+        "candidate-suite=gui command=2/2",
+        f"{FAILURE_RECEIPT_PREFIX}{receipt_b}",
+    ]
+    (bundle / "stdout.bin").write_text("\n".join(stdout_lines) + "\n", encoding="utf-8")
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle, max_nodes=20)
+
+    output = capsys.readouterr().out
+    assert f"FAILED NODE: {node_a}" in output
+    assert f"FAILED NODE: {node_b}" in output
+    assert "WARNING" in output
+    assert "duplicate" in output
+    assert "legacy fallback" not in output
 
 
 def test_complete_receipt_coverage_emits_no_warning_or_legacy_fallback(
@@ -650,8 +726,12 @@ def test_complete_receipt_coverage_emits_no_warning_or_legacy_fallback(
     node_a = "tests/gui/test_app_palette.py::test_palette"
     node_b = "tests/gui/shell/views/test_operator_display.py::test_display"
     (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "gui"}\n', encoding="utf-8")
-    receipt_a = canonical_failure_receipt({"failed_nodeids": [node_a], "schema_version": 1, "suite": "gui"})
-    receipt_b = canonical_failure_receipt({"failed_nodeids": [node_b], "schema_version": 1, "suite": "gui"})
+    receipt_a = canonical_failure_receipt(
+        {"failed_nodeids": [node_a], "invocation_index": 1, "schema_version": 2, "suite": "gui"}
+    )
+    receipt_b = canonical_failure_receipt(
+        {"failed_nodeids": [node_b], "invocation_index": 2, "schema_version": 2, "suite": "gui"}
+    )
     stdout_lines = [
         "candidate-suite=gui command=1/2",
         f"{FAILURE_RECEIPT_PREFIX}{receipt_a}",

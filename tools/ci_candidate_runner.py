@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.check_python_compile import compile_python_tree
+from tools.ci_candidate_evidence import FAILURE_RECEIPT_INDEX_ENV
 from tools.ci_guard_execution import (
     GIT_INDEX_CHECKOUT_GUARD_NODES,
     RECEIPT_PREFIX,
@@ -323,6 +324,7 @@ def _command_environment(*, basetemp: Path, suite: str, index: int) -> dict[str,
         {
             "COVERAGE_FILE": str(cache / ".coverage"),
             "CRYODAQ_STATE_ROOT": str(runtime),
+            FAILURE_RECEIPT_INDEX_ENV: str(index),
             "MPLCONFIGDIR": str(cache / "matplotlib"),
             "NUMBA_CACHE_DIR": str(cache / "numba"),
             "PYTHONPYCACHEPREFIX": str(pycache),

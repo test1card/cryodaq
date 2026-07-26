@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import sys
+from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -17,15 +18,16 @@ from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported
 
 _SHA256 = "sha256:"
 FAILURE_RECEIPT_PREFIX = "CRYODAQ_PYTEST_FAILURE_RECEIPT "
+FAILURE_RECEIPT_INDEX_ENV = "CRYODAQ_CANDIDATE_FAILURE_RECEIPT_INDEX"
 _FAILURE_RECEIPT_ENV = "CRYODAQ_CANDIDATE_FAILURE_RECEIPT_SUITE"
 _FAILURE_RECEIPT_STATE = "_cryodaq_candidate_failure_receipt"
 _FAILURE_RECEIPT_ENVELOPE_FIELDS = frozenset({"payload", "sha256"})
-_FAILURE_RECEIPT_PAYLOAD_FIELDS = frozenset({"failed_nodeids", "schema_version", "suite"})
+_FAILURE_RECEIPT_PAYLOAD_FIELDS = frozenset({"failed_nodeids", "invocation_index", "schema_version", "suite"})
 _FAILURE_RECEIPT_SUITES = frozenset({"agents", "core", "gui", "remaining"})
 _FAILURE_RECEIPT_ACTIVE_STATE: _FailureReceiptState | None = None
 _LEGACY_PYTEST_FAILURE_PREFIX = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+?)\r?$", re.MULTILINE)
 _COMMAND_ANNOUNCEMENT_RE = re.compile(
-    r"^candidate-suite=(?P<suite>[a-z]+) command=\d+/(?P<total>\d+)\r?$",
+    r"^candidate-suite=(?P<suite>[a-z]+) command=(?P<index>\d+)/(?P<total>\d+)\r?$",
     re.MULTILINE,
 )
 
@@ -50,8 +52,9 @@ def canonical_failure_receipt(payload: Mapping[str, Any]) -> str:
 
 
 class _FailureReceiptState:
-    def __init__(self, suite: str) -> None:
+    def __init__(self, suite: str, invocation_index: int) -> None:
         self.suite = suite
+        self.invocation_index = invocation_index
         self.nodes: list[str] = []
         self._seen: set[str] = set()
 
@@ -62,7 +65,13 @@ class _FailureReceiptState:
 
 
 def pytest_configure(config: Any) -> None:
-    """Enable report.nodeid receipts only for exported-candidate pytest runs."""
+    """Enable report.nodeid receipts only for exported-candidate pytest runs.
+
+    The suite and the per-subprocess invocation index are both required: the
+    suite binds the receipt to its candidate partition, and the index lets the
+    summariser tell two receipts apart so a duplicate can never stand in for a
+    sibling that never reported. A missing or invalid index fails closed.
+    """
 
     global _FAILURE_RECEIPT_ACTIVE_STATE
     suite = os.environ.get(_FAILURE_RECEIPT_ENV)
@@ -70,7 +79,16 @@ def pytest_configure(config: Any) -> None:
         return
     if suite not in _FAILURE_RECEIPT_SUITES:
         raise ValueError(f"candidate failure receipt suite is invalid: {suite!r}")
-    state = _FailureReceiptState(suite)
+    index_raw = os.environ.get(FAILURE_RECEIPT_INDEX_ENV)
+    if index_raw is None:
+        raise ValueError("candidate failure receipt invocation index is not bound")
+    try:
+        invocation_index = int(index_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"candidate failure receipt invocation index is invalid: {index_raw!r}") from exc
+    if invocation_index < 1:
+        raise ValueError(f"candidate failure receipt invocation index is invalid: {index_raw!r}")
+    state = _FailureReceiptState(suite, invocation_index)
     setattr(config, _FAILURE_RECEIPT_STATE, state)
     _FAILURE_RECEIPT_ACTIVE_STATE = state
 
@@ -99,7 +117,8 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
         return
     payload = {
         "failed_nodeids": state.nodes,
-        "schema_version": 1,
+        "invocation_index": state.invocation_index,
+        "schema_version": 2,
         "suite": state.suite,
     }
     line = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}"
@@ -392,9 +411,13 @@ def _extract_failure_receipt_payloads(output: str, *, suite: str) -> list[dict[s
         if raw != canonical_failure_receipt(payload):
             raise CiCandidateEvidenceError("candidate failure receipt digest or canonical encoding is invalid")
         failed_nodeids = payload.get("failed_nodeids")
+        invocation_index = payload.get("invocation_index")
         if (
-            payload.get("schema_version") != 1
+            payload.get("schema_version") != 2
             or payload.get("suite") != suite
+            or not isinstance(invocation_index, int)
+            or isinstance(invocation_index, bool)
+            or invocation_index < 1
             or not isinstance(failed_nodeids, list)
             or any(not isinstance(nodeid, str) or not nodeid for nodeid in failed_nodeids)
             or len(failed_nodeids) != len(set(failed_nodeids))
@@ -426,6 +449,23 @@ def _expected_receipt_count(output: str, *, suite: str) -> int | None:
             f"candidate command-count announcements disagree for suite {suite!r}: {sorted(totals)!r}"
         )
     return totals.pop()
+
+
+def _announced_receipt_indices(output: str, *, suite: str) -> set[int] | None:
+    """Return the set of pytest subprocess indices the candidate runner announced.
+
+    Each announcement ``candidate-suite={suite} command={index}/{total}``
+    marks one subprocess the runner actually started; every started subprocess
+    owes exactly one structural failure receipt carrying that same index.
+    Returns ``None`` when no announcement lines survive, so a bundle produced
+    without announcements is not falsely accused of a coverage gap.
+    """
+
+    indices: set[int] = set()
+    for match in _COMMAND_ANNOUNCEMENT_RE.finditer(output):
+        if match.group("suite") == suite:
+            indices.add(int(match.group("index")))
+    return indices or None
 
 
 def _failure_receipt_nodes(output: str, *, suite: str) -> tuple[str, ...]:
@@ -473,12 +513,14 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     """Print a bounded candidate-failure summary without replacing its bundle.
 
     The candidate runner executes several pytest subprocesses per suite, each
-    emitting one structural failure receipt at session finish.  When every
-    receipt survives, the union of their nodes is the authoritative summary.
-    When a subprocess dies before emitting its receipt, that portion's failures
-    are visible only as prose ``FAILED``/``ERROR`` lines; this function detects
-    the coverage gap, prints a visible warning, and recovers those nodes from
-    the labelled legacy fallback so they cannot vanish silently.
+    emitting one structural failure receipt at session finish carrying its
+    one-based invocation index.  When every index is covered by exactly one
+    receipt, the union of their nodes is the authoritative summary.  When a
+    subprocess dies before emitting its receipt, or when a receipt is
+    duplicated so that two receipts share one index, the count alone can no
+    longer prove coverage: this function detects the missing or duplicated
+    indices, prints a visible warning, and recovers the uncovered nodes from
+    the labelled legacy fallback so a sibling failure can never vanish silently.
     """
 
     if not 1 <= max_nodes <= 100:
@@ -501,21 +543,41 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
             if nodeid not in seen:
                 seen.add(nodeid)
                 structural_nodes.append(nodeid)
-    receipt_count = len(payloads)
+    receipt_indices: Counter[int] = Counter(payload["invocation_index"] for payload in payloads)
+    duplicate_indices = sorted(index for index, count in receipt_indices.items() if count > 1)
     expected_count = _expected_receipt_count(output, suite=suite)
-    receipts_missing = expected_count is not None and receipt_count < expected_count
+    announced_indices = _announced_receipt_indices(output, suite=suite)
+    received_set = set(receipt_indices)
+    if announced_indices is None:
+        missing_indices: list[int] = []
+    else:
+        missing_indices = sorted(announced_indices - received_set)
+    receipts_missing = expected_count is not None and len(payloads) < expected_count
+    coverage_gap = receipts_missing or bool(missing_indices)
+    coverage_corrupt = bool(duplicate_indices)
+    warn = coverage_gap or coverage_corrupt
     print(f"Exact candidate failed (exit {returncode}); failing pytest node IDs follow (max {max_nodes}).")
-    if receipts_missing:
+    if warn:
+        expected_clause = f", expected {expected_count}" if expected_count is not None else ""
         print(
             f"WARNING: structural failure receipt coverage is incomplete for suite "
-            f"'{suite}': expected {expected_count} pytest subprocess receipt(s), found "
-            f"{receipt_count}. Some pytest failures may be unreported by the structural "
-            f"receipt. Recovering from legacy prose fallback where possible; inspect "
-            f"preserved stdout.bin and stderr.bin in the candidate artifact for the "
-            f"complete record."
+            f"'{suite}': found {len(payloads)} pytest subprocess receipt(s){expected_clause}."
+        )
+        if missing_indices:
+            print(f"WARNING: no structural receipt for invocation index/indices {missing_indices}.")
+        if duplicate_indices:
+            print(
+                f"WARNING: duplicate structural receipts for invocation index/indices "
+                f"{duplicate_indices}; a duplicate can mask a sibling subprocess that "
+                f"never reported."
+            )
+        print(
+            "Some pytest failures may be unreported by the structural receipt. Recovering "
+            "from legacy prose fallback where possible; inspect preserved stdout.bin and "
+            "stderr.bin in the candidate artifact for the complete record."
         )
     reported: list[tuple[str, str]] = [(node, "") for node in structural_nodes]
-    if not structural_nodes or receipts_missing:
+    if not structural_nodes or coverage_gap:
         legacy_nodes = _legacy_failure_nodes(output)
         if legacy_nodes:
             if not structural_nodes:
