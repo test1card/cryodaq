@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import cryodaq.agents.assistant.periodic_png as periodic_png
 from cryodaq.agents.assistant.periodic_delivery import (
     PeriodicDeliveryOutcome,
     PeriodicDeliveryReceipt,
@@ -27,6 +28,7 @@ from cryodaq.periodic_state import (
     MAX_UNRESOLVED_DELIVERIES,
     PERIODIC_RENDER_LOCK,
     PeriodicArtifact,
+    PeriodicIOError,
     PeriodicStatus,
     allocate_pending,
     latest_completed_slot,
@@ -674,18 +676,11 @@ async def test_sender_four_outcomes_map_to_exact_durable_state(
     )
     await coordinator.start()
     try:
-        for _ in _settle_attempts():
-            payload = (await _load_stable(tmp_path)).payload
-            # Wait for exactly what is asserted below. The previous condition
-            # -- a terminal record, or an active FAILED -- could never be
-            # satisfied by the DELIVERY_UNKNOWN case, which lands as an
-            # *active* DELIVERY_UNKNOWN with no terminal. That parametrization
-            # therefore always ran the loop to exhaustion and then asserted,
-            # passing only because the budget happened to outlast the write.
-            observed = payload["last_terminal"] or payload["active"]
-            if isinstance(observed, dict) and observed["status"] == expected_status:
-                break
-            await asyncio.sleep(0.001)
+        # ``start()`` launches the background reconciliation loop.  Awaiting
+        # one explicit pass serializes behind that loop and returns only after
+        # its delivery transaction has persisted the terminal result.  Polling
+        # the state file merely races that transaction under executor load.
+        await coordinator.reconcile_once()
         payload = (await _load_stable(tmp_path)).payload
         observed = payload["last_terminal"] or payload["active"]
         assert observed["status"] == expected_status
@@ -698,6 +693,103 @@ async def test_sender_four_outcomes_map_to_exact_durable_state(
             else:
                 assert observed["finished_at"] is not None
         assert telegram.calls == 1
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_delivery_result_retries_transient_persistence_failure(tmp_path: Path) -> None:
+    """A terminal provider outcome must not strand the durable state in DELIVERING."""
+
+    _persist_ready(tmp_path)
+    persistence_attempts = 0
+
+    async def fail_once(fn, *args, **kwargs):
+        nonlocal persistence_attempts
+        if fn is periodic_png._persist_delivery_result:
+            persistence_attempts += 1
+            if persistence_attempts == 1:
+                raise PeriodicIOError("injected replacement failure") from PermissionError("sharing violation")
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    class TerminalFailure(Telegram):
+        async def send_photo(self, _photo: bytes, _caption: str):
+            return TelegramDeliveryResult(
+                TelegramOutcome.NOT_SENT,
+                None,
+                None,
+                None,
+                "invalid_photo",
+                "periodic PNG is invalid",
+            )
+
+    coordinator = PeriodicPngCoordinator(
+        data_dir=tmp_path,
+        config=_config(),
+        live_sources=Live(),
+        alarm_query=Alarm(),
+        archive_query=Archive(),
+        runner=Runner(),
+        delivery=TerminalFailure(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
+        artifact_reader=lambda _data, _artifact: b"authorized",
+        clock=Clock(124.0),
+        run_blocking=fail_once,
+    )
+    await coordinator.start()
+    try:
+        await coordinator.reconcile_once()
+        payload = (await _load_stable(tmp_path)).payload
+        terminal = payload["last_terminal"] or payload["active"]
+        assert terminal["status"] == "FAILED"
+        assert terminal["finished_at"] is not None
+        assert persistence_attempts == 2
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_unknown_delivery_result_retries_transient_persistence_failure(tmp_path: Path) -> None:
+    """An indeterminate provider outcome must not strand the durable state in DELIVERING."""
+
+    _persist_ready(tmp_path)
+    persistence_attempts = 0
+
+    async def fail_once(fn, *args, **kwargs):
+        nonlocal persistence_attempts
+        if fn is periodic_png._persist_delivery_unknown:
+            persistence_attempts += 1
+            if persistence_attempts == 1:
+                raise PeriodicIOError("injected replacement failure") from PermissionError("sharing violation")
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    class InvocationFailure(Telegram):
+        async def send_photo(self, _photo: bytes, _caption: str):
+            raise RuntimeError("transport outcome unavailable")
+
+    coordinator = PeriodicPngCoordinator(
+        data_dir=tmp_path,
+        config=_config(),
+        live_sources=Live(),
+        alarm_query=Alarm(),
+        archive_query=Archive(),
+        runner=Runner(),
+        delivery=InvocationFailure(),
+        destination_fingerprint=DESTINATION_FINGERPRINT,
+        expected_delivery_kind="telegram",
+        artifact_reader=lambda _data, _artifact: b"authorized",
+        clock=Clock(124.0),
+        run_blocking=fail_once,
+    )
+    await coordinator.start()
+    try:
+        await coordinator.reconcile_once()
+        payload = (await _load_stable(tmp_path)).payload
+        observed = payload["last_terminal"] or payload["active"]
+        assert observed["status"] == "DELIVERY_UNKNOWN"
+        assert observed["error_code"] == "delivery_internal_unknown"
+        assert persistence_attempts == 2
     finally:
         await coordinator.stop()
 

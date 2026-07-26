@@ -43,6 +43,7 @@ from cryodaq.periodic_state import (
     PERIODIC_RENDER_LOCK,
     PeriodicArtifact,
     PeriodicContractError,
+    PeriodicIOError,
     PeriodicSlot,
     PeriodicStateDocument,
     PeriodicStatus,
@@ -82,6 +83,8 @@ _ELECTION_BACKOFF = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 _MAX_RESTART_RETRY_S = 86_400.0
 _HEALTH_HEARTBEAT_S = 30.0
 _ALARM_REFRESH_S = 240.0
+_DELIVERY_PERSIST_RETRY_ATTEMPTS = 10
+_DELIVERY_PERSIST_RETRY_DELAY_S = 0.01
 _KNOWN_RENDER_OUTCOMES = frozenset(
     {
         "deadline",
@@ -1544,7 +1547,8 @@ class PeriodicPngCoordinator:
             return
         assert self._delivery_settlement_lock is not None
         async with self._delivery_settlement_lock:
-            await self._run_blocking(
+            await self._persist_delivery_settlement_with_retry(
+                self._run_blocking,
                 _persist_delivery_result,
                 self._data_dir,
                 active,
@@ -1555,10 +1559,28 @@ class PeriodicPngCoordinator:
                 now=self._clock.wall_time(),
             )
 
+    async def _persist_delivery_settlement_with_retry(
+        self,
+        persist: Callable[..., Awaitable[Any]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Persist a delivery settlement across a transient Windows sharing violation."""
+
+        for attempt in range(_DELIVERY_PERSIST_RETRY_ATTEMPTS):
+            try:
+                await persist(*args, **kwargs)
+                return
+            except PeriodicIOError as exc:
+                if not isinstance(exc.__cause__, PermissionError) or attempt + 1 == _DELIVERY_PERSIST_RETRY_ATTEMPTS:
+                    raise
+                await asyncio.sleep(_DELIVERY_PERSIST_RETRY_DELAY_S)
+
     async def _persist_unknown(self, active: dict[str, Any], code: str, text: str) -> None:
         assert self._delivery_settlement_lock is not None
         async with self._delivery_settlement_lock:
-            await self._run_blocking(
+            await self._persist_delivery_settlement_with_retry(
+                self._run_blocking,
                 _persist_delivery_unknown,
                 self._data_dir,
                 active,
