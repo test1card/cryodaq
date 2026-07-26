@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from typing import Any
 from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported_candidate
 
 _SHA256 = "sha256:"
+_FAILED_NODE = re.compile(r"^FAILED (?P<node>tests/[^\s]+::[^\s]+)(?:\s|$)", re.MULTILINE)
 
 
 class CiCandidateEvidenceError(ValueError):
@@ -261,6 +263,34 @@ def _attest(args: argparse.Namespace) -> int:
     return 0
 
 
+def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
+    """Print a bounded candidate-failure summary without replacing its bundle."""
+
+    if not 1 <= max_nodes <= 100:
+        raise CiCandidateEvidenceError("candidate failure summary limit must be between 1 and 100")
+    execution = json.loads((bundle / "execution-receipt.json").read_text(encoding="utf-8"))
+    returncode = execution.get("returncode")
+    if not isinstance(returncode, int) or returncode == 0:
+        raise CiCandidateEvidenceError("candidate failure summary requires a failed execution receipt")
+    output = "\n".join(
+        (bundle / name).read_bytes().decode("utf-8", errors="replace") for name in ("stdout.bin", "stderr.bin")
+    )
+    nodes = tuple(dict.fromkeys(match.group("node") for match in _FAILED_NODE.finditer(output)))
+    print(f"Exact candidate failed (exit {returncode}); failing pytest node IDs follow (max {max_nodes}).")
+    if not nodes:
+        print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
+        return
+    for node in nodes[:max_nodes]:
+        print(f"FAILED NODE: {node}")
+    if len(nodes) > max_nodes:
+        print(f"FAILED NODE: ... {len(nodes) - max_nodes} additional node IDs are in the candidate artifact.")
+
+
+def _summarize(args: argparse.Namespace) -> int:
+    emit_failure_summary(args.bundle, max_nodes=args.max_nodes)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -280,6 +310,10 @@ def main(argv: list[str] | None = None) -> int:
     attest.add_argument("--artifact-id", required=True)
     attest.add_argument("--artifact-digest", required=True)
     attest.set_defaults(handler=_attest)
+    summarize = subparsers.add_parser("summarize")
+    summarize.add_argument("--bundle", type=Path, required=True)
+    summarize.add_argument("--max-nodes", type=int, default=20)
+    summarize.set_defaults(handler=_summarize)
     args = parser.parse_args(argv)
     return args.handler(args)
 

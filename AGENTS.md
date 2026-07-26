@@ -309,7 +309,11 @@ green slices are not evidence that their combined commit is green.
   cancelled job leaves the checkpoint open even when other matrix jobs pass.
   Extract every failing assertion, reproduce it locally where possible, and
   publish a focused correction before calling the branch green or moving to a
-  release/PR gate.
+  release/PR gate. For a failed sealed candidate, inspect every job conclusion
+  and its bound candidate artifact; the workflow must also emit a bounded
+  failing-node summary in the ordinary job log while retaining the complete
+  bundle. Follow `docs/ORCHESTRATION.md`'s hosted-candidate inspection
+  procedure; a clean later log step never clears an earlier failed candidate.
 - Fix CI at the violated contract boundary. If a stronger fail-closed runtime
   contract makes an old fixture invalid, update the fixture and retain a
   regression for the stronger contract; never weaken production safety,

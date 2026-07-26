@@ -173,6 +173,24 @@ Record exact commands and counts. Explain skips, warnings, flakes, and
 environment limits. A failure seen once remains open until fixed or reproduced
 and defensibly adjudicated.
 
+### 5.1 Hosted candidate failure inspection
+
+For every hosted candidate run, enumerate every matrix-job conclusion before
+diagnosing any individual log. On a failed sealed candidate, the ordinary job
+log contains only a bounded node summary; the complete evidence remains in its
+named candidate artifact. Use the run ID to inspect both layers:
+
+```bash
+gh run view <run-id> --json jobs
+gh api "repos/<owner>/<repo>/actions/runs/<run-id>/artifacts?per_page=100"
+gh run download <run-id> --name "cryodaq-candidate-<os>-<suite>-<attempt>"
+```
+
+Read `execution-receipt.json`, `stdout.bin`, and `stderr.bin` from the matching
+bundle. A clean exact-checkout, lint, or format step does not clear a failed
+candidate; retain the full bundle, enumerate every failed matrix job, and only
+then adjudicate every failing node.
+
 ## 6. Git and publication
 
 - Preserve the worktree and inspect path-level diffs before staging.

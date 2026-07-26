@@ -15,6 +15,7 @@ from tools import ci_candidate_runner
 from tools.candidate_evidence import execute_exported_candidate
 from tools.ci_candidate_evidence import (
     CiCandidateEvidenceError,
+    emit_failure_summary,
     validate_execution_and_attestation,
     write_artifact_attestation,
     write_execution_bundle,
@@ -476,6 +477,50 @@ def test_candidate_runner_rejects_invalid_python_before_pytest(
     assert observed == []
 
 
+def _assert_candidate_failure_summary_step(steps: list[dict]) -> dict:
+    indexed = {step.get("id"): step for step in steps if step.get("id")}
+    candidate = indexed["candidate"]
+    assert "candidate-failure-summary" in indexed
+    summary = indexed["candidate-failure-summary"]
+    upload = indexed["candidate-upload"]
+    assert summary["if"] == "always() && steps.candidate.outcome == 'failure'"
+    assert "tools.ci_candidate_evidence summarize" in summary["run"]
+    assert '--bundle "${RUNNER_TEMP:?}/cryodaq-candidate-evidence"' in summary["run"]
+    assert "--max-nodes 20" in summary["run"]
+    assert steps.index(candidate) < steps.index(summary) < steps.index(upload)
+    return summary
+
+
+def test_failed_candidate_summary_is_bounded_and_workflow_required(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1}\n', encoding="utf-8")
+    nodes = [f"tests/core/test_visible_{index}.py::test_failure_{index}" for index in range(25)]
+    (bundle / "stdout.bin").write_text("\n".join(f"FAILED {node} - failure" for node in nodes), encoding="utf-8")
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle, max_nodes=20)
+    output = capsys.readouterr().out
+    assert all(node in output for node in nodes[:20])
+    assert all(node not in output for node in nodes[20:])
+    assert "5 additional node IDs" in output
+
+    payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = payload["jobs"]["test"]["steps"]
+    _assert_candidate_failure_summary_step(steps)
+
+    missing = [step for step in steps if step.get("id") != "candidate-failure-summary"]
+    with pytest.raises(AssertionError):
+        _assert_candidate_failure_summary_step(missing)
+    conditional = copy.deepcopy(steps)
+    next(step for step in conditional if step.get("id") == "candidate-failure-summary")["if"] = "always()"
+    with pytest.raises(AssertionError):
+        _assert_candidate_failure_summary_step(conditional)
+
+
 def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(tmp_path: Path) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     job = payload["jobs"]["test"]
@@ -492,6 +537,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     active = indexed["active-remaining"]
     candidate = indexed["candidate"]
+    summary = _assert_candidate_failure_summary_step(steps)
     upload = indexed["candidate-upload"]
     attestation_upload = indexed["candidate-attestation-upload"]
     attest = next(step for step in steps if step.get("name") == "Attest uploaded candidate artifact")
@@ -525,6 +571,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert enforce.get("continue-on-error") is not True
     assert (
         steps.index(candidate)
+        < steps.index(summary)
         < steps.index(upload)
         < steps.index(attest)
         < steps.index(attestation_upload)

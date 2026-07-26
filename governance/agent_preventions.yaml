@@ -2280,6 +2280,32 @@ false_green_pairs:
     guard: tests/e2e/test_d7_4_phase2_acceptance.py::test_t3_static_all_five_invalidate_before_start
     ci_partition: remaining
     red_evidence: the_restart_static_guard_rejected_stronger_producer_invalidation_and_stale_doubles_omitted_real_status_transport_and_incarnation_retirement_2026_07_24_pending_immutable_capture
+    green_evidence:
+      locator: artifact:8627209627
+      sha256: sha256:459179daaef374dfb976f704b663916a4d7fb5eabebcd22049c9fd2622e59387
+  - id: CANDIDATE-FAILURE-VISIBILITY-FALSE-GREEN-197
+    status: open
+    scope: repository
+    runtime_prevention_id: CANDIDATE-FAILURE-VISIBILITY-028
+    guard: tests/test_ci_candidate_evidence.py::test_failed_candidate_summary_is_bounded_and_workflow_required
+    ci_partition: remaining
+    red_evidence: sealed_candidate_failure_was_preserved_only_in_stdout_bin_and_stderr_bin_while_clean_later_job_log_steps_concealed_the_failed_d7_guard_2026_07_26_pending_immutable_capture
+    green_evidence: pending
+  - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-PHASE-ELAPSED-SUBCONDITION-026
+    guard: tests/core/test_alarm_config_validation.py::test_composite_sub_condition_phase_elapsed_s_below_raises
+    ci_partition: core
+    red_evidence: phase_elapsed_s_below_subcondition_loaded_then_evaluated_false_forever_and_suppressed_its_enclosing_composite_alarm_2026_07_26_pending_immutable_capture
+    green_evidence: pending
+  - id: ALARM-MIXED-SELECTOR-FALSE-GREEN-199
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-MIXED-SELECTOR-027
+    guard: tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises
+    ci_partition: core
+    red_evidence: channel_group_expansion_silently_overwrote_an_explicit_channel_selector_and_changed_the_monitored_channel_set_2026_07_26_pending_immutable_capture
     green_evidence: pending
   - id: TEST-LIVE-RUNTIME-PROOF-FALSE-GREEN-166
     status: open
@@ -4054,6 +4080,25 @@ records:
     red_evidence: ci_line_review_confirmed_misbinding_pending_hosted_artifact
     green_evidence: pending
 
+  - id: CANDIDATE-FAILURE-VISIBILITY-028
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#integration-and-publication-discipline
+    applies_to: Failed sealed-candidate GitHub Actions executions and their ordinary job logs.
+    classification: failed_candidate_log_concealment
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A candidate can fail while subsequent clean log steps conceal the failing node from ordinary job-log review.
+    invariant: A failed sealed candidate emits a bounded failing-node summary in the ordinary job log while the complete stdout/stderr bundle is retained.
+    rule_refs:
+      - AGENTS.md#integration-and-publication-discipline
+    guards:
+      - node: tests/test_ci_candidate_evidence.py::test_failed_candidate_summary_is_bounded_and_workflow_required
+        ci_partition: remaining
+    red_evidence: sealed_candidate_failure_was_preserved_only_in_stdout_bin_and_stderr_bin_while_clean_later_job_log_steps_concealed_the_failed_d7_guard_2026_07_26_pending_immutable_capture
+    green_evidence: pending
+
   - id: BROKER-DELIVERY-ISOLATION-015
     status: open
     scope: product_contract
@@ -4074,6 +4119,58 @@ records:
       - node: tests/core/test_broker.py::test_multiple_subscribers
         ci_partition: core
     red_evidence: filter_mutation_and_stale_shared_object_expectation_reproductions_2026_07_23_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ALARM-PHASE-ELAPSED-SUBCONDITION-026
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Alarm configuration composite conditions and rate additional conditions that select phase_elapsed_s.
+    classification: fail_open_alarm_selector
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A configured composite or rate alarm can evaluate a pseudo-channel through an unsupported branch and remain false forever.
+    invariant: phase_elapsed_s is accepted in a sub-condition only for the above check that routes it to the phase provider; unsupported checks fail configuration validation before an alarm can be silently dead.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_alarm_config_validation.py::test_composite_sub_condition_phase_elapsed_s_below_raises
+        ci_partition: core
+      - node: tests/core/test_alarm_config_validation.py::test_composite_sub_condition_phase_elapsed_s_rate_checks_raise
+        ci_partition: core
+      - node: tests/core/test_alarm_config_validation.py::test_rate_additional_condition_phase_elapsed_s_below_raises
+        ci_partition: core
+      - node: tests/core/test_alarm_config_validation.py::test_rate_additional_condition_phase_elapsed_s_above_still_loads
+        ci_partition: core
+    red_evidence: phase_elapsed_s_below_and_rate_subconditions_loaded_then_evaluated_false_forever_outside_the_single_phase_provider_branch_2026_07_26_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ALARM-MIXED-SELECTOR-027
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Alarm configuration top-level selectors, composite conditions, and rate additional conditions containing channel_group.
+    classification: silent_alarm_target_substitution
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: channel_group expansion can silently overwrite an explicit selector, so the configuration text and monitored channel set disagree.
+    invariant: Every alarm selector location accepts exactly one of channel, channels, or channel_group; mixed selectors fail validation before expansion can substitute the monitored target.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises
+        ci_partition: core
+      - node: tests/core/test_alarm_config_validation.py::test_composite_sub_condition_channels_and_channel_group_raises
+        ci_partition: core
+      - node: tests/core/test_alarm_config_validation.py::test_rate_additional_condition_channels_and_channel_group_raises
+        ci_partition: core
+      - node: tests/core/test_alarm_config_validation.py::test_single_explicit_channels_selector_still_loads
+        ci_partition: core
+    red_evidence: channel_group_expansion_silently_overwrote_explicit_channel_or_channels_selectors_across_each_loader_expansion_site_2026_07_26_pending_immutable_capture
     green_evidence: pending
 
   - id: COMMAND-REPLY-BOUNDS-016

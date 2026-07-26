@@ -157,6 +157,14 @@ jobs:
             --output "${RUNNER_TEMP:?}/cryodaq-candidate-evidence" \
             --artifact-name "${CANDIDATE_ARTIFACT:?}"
 
+      - name: Summarize failed exact candidate nodes
+        id: candidate-failure-summary
+        if: always() && steps.candidate.outcome == 'failure'
+        run: |
+          python -m tools.ci_candidate_evidence summarize \
+            --bundle "${RUNNER_TEMP:?}/cryodaq-candidate-evidence" \
+            --max-nodes 20
+
       - name: Upload exact candidate execution bundle
         id: candidate-upload
         if: always()
