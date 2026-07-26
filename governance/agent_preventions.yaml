@@ -4110,6 +4110,8 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_artifact_evidence_requires_receipt_tree_and_suite_binding
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_multi_partition_record_cannot_close_on_a_single_partition_artifact
+        ci_partition: remaining
     red_evidence: ci_line_review_confirmed_misbinding_pending_hosted_artifact
     green_evidence: pending
 

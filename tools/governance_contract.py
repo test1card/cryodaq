@@ -117,7 +117,16 @@ def _validate_immutable_evidence(value: Any, field: str) -> None:
 
 
 def _validate_artifact_evidence_partition(value: Any, partitions: set[str], field: str) -> None:
-    """Require a sealed artifact's receipt suite to cover the registered guard."""
+    """Require a sealed artifact's receipt suite to cover EVERY registered guard partition.
+
+    One sealed artifact is the record of one partition's execution, so mere
+    membership is too weak: a record whose guards span ``agents``/``core``/
+    ``gui``/``remaining`` was satisfiable by a single ``core`` artifact, which
+    says nothing about the other three. The schema allows one locator per
+    entry, so a multi-partition record cannot be closed on a single artifact at
+    all -- it needs per-partition evidence or an immutable aggregate bundle that
+    explicitly covers every required partition.
+    """
 
     is_artifact = (
         isinstance(value, Mapping)
@@ -125,8 +134,13 @@ def _validate_artifact_evidence_partition(value: Any, partitions: set[str], fiel
         and value["locator"].startswith("artifact:")
     )
     if is_artifact:
-        if value["suite"] not in partitions:
-            raise GovernanceContractError(f"{field} artifact evidence suite does not cover its registered guard")
+        suite = value["suite"]
+        if partitions != {suite}:
+            uncovered = sorted(partitions - {suite})
+            raise GovernanceContractError(
+                f"{field} artifact evidence attests only suite {suite!r} but its registered guards "
+                f"span {sorted(partitions)}; uncovered partitions: {uncovered}"
+            )
 
 
 _OPTIONAL_RECORD_FIELDS = frozenset(
