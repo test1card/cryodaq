@@ -68,6 +68,7 @@ def test_v2_count_signal_forwards_to_top_bar():
                     "a": {
                         "level": "CRITICAL",
                         "activation_id": "a1",
+                        "evaluator_error": False,
                         "message": "hot",
                         "channels": ["T11"],
                         "triggered_at": 1.0,
@@ -78,6 +79,7 @@ def test_v2_count_signal_forwards_to_top_bar():
                     "b": {
                         "level": "WARNING",
                         "activation_id": "b1",
+                        "evaluator_error": False,
                         "message": "warm",
                         "channels": ["T12"],
                         "triggered_at": 2.0,
