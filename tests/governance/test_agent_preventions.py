@@ -15,6 +15,7 @@ from tools.ci_candidate_runner import suite_for_node
 from tools.ci_guard_execution import GIT_INDEX_CHECKOUT_GUARD_NODES, active_guard_nodes
 from tools.governance_contract import (
     GovernanceContractError,
+    _git_blob_id,
     closure_semantics_sha256,
     validate_registry,
 )
@@ -47,6 +48,11 @@ def _guard_nodes(payload: dict) -> set[str]:
     for record in payload["records"]:
         nodes.update(guard["node"] for guard in record["guards"])
     return nodes
+
+
+def _guard_source_blobs(record: dict) -> dict[str, str]:
+    paths = {guard["node"].split("::", 1)[0] for guard in record["guards"]}
+    return {path: _git_blob_id((ROOT / path).read_bytes()) for path in sorted(paths)}
 
 
 def _required_governance_artifacts(payload: dict) -> tuple[str, ...]:
@@ -132,6 +138,7 @@ def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidenc
     record["status"] = "closed"
     record["red_evidence"] = {"locator": "git:" + "1" * 40, "sha256": "sha256:" + "1" * 64}
     record["green_evidence"] = {"locator": "github-run:12345", "sha256": "sha256:" + "2" * 64}
+    record["guard_source_blobs"] = _guard_source_blobs(record)
     record["closure_semantics_sha256"] = closure_semantics_sha256(record)
     validate_registry(closed)
 
@@ -165,6 +172,7 @@ def test_artifact_evidence_requires_receipt_tree_and_suite_binding() -> None:
         "tree": "2" * 40,
         "suite": "remaining",
     }
+    record["guard_source_blobs"] = _guard_source_blobs(record)
     record["closure_semantics_sha256"] = closure_semantics_sha256(record)
     validate_registry(payload)
 
@@ -218,6 +226,7 @@ def test_multi_partition_record_cannot_close_on_a_single_partition_artifact() ->
         # record's guards actually span.
         "suite": partitions[0],
     }
+    record["guard_source_blobs"] = _guard_source_blobs(record)
     record["closure_semantics_sha256"] = closure_semantics_sha256(record)
 
     with pytest.raises(GovernanceContractError, match="uncovered partitions"):
@@ -409,6 +418,44 @@ def test_skipped_xfailed_deselected_or_nondefault_guards_do_not_close() -> None:
     record["guards"][0]["ci_partition"] = "manual"
     with pytest.raises(GovernanceContractError, match="default CI"):
         validate_registry(invalid)
+
+
+def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_path: Path) -> None:
+    """A sealed tree must reject an in-place ``assert True`` guard weakening."""
+
+    payload = _registry()
+    closed_entries = [
+        *[record for record in payload["records"] if record["status"] == "closed"],
+        *[pair for pair in payload["false_green_pairs"] if pair["status"] == "closed"],
+    ]
+    assert {entry["id"] for entry in closed_entries} == {
+        "ALARM-PHASE-ELAPSED-SUBCONDITION-026",
+        "ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198",
+        "ALARM-MIXED-SELECTOR-027",
+        "ALARM-MIXED-SELECTOR-FALSE-GREEN-199",
+    }
+    source_path = "tests/core/test_alarm_config_validation.py"
+    sealed_guard = tmp_path / source_path
+    sealed_guard.parent.mkdir(parents=True)
+    sealed_guard.write_bytes((ROOT / source_path).read_bytes())
+    validate_registry(payload, root=tmp_path)
+
+    weakened = sealed_guard.read_text(encoding="utf-8").replace(
+        '    with pytest.raises(AlarmConfigError, match="phase_elapsed_s"):\n        load_alarm_config(p)\n',
+        "    assert True\n",
+        1,
+    )
+    assert "assert True" in weakened
+    sealed_guard.write_text(weakened, encoding="utf-8")
+
+    with pytest.raises(GovernanceContractError, match="covered guard source changed"):
+        validate_registry(payload, root=tmp_path)
+
+    for entry in closed_entries:
+        entry["status"] = "reopened"
+        entry.pop("guard_source_blobs")
+        entry.pop("closure_semantics_sha256")
+    validate_registry(payload, root=tmp_path)
 
 
 def test_false_green_pairs_have_unique_ids_runtime_links_and_exact_default_ci_guards() -> None:

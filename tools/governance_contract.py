@@ -143,6 +143,14 @@ def _validate_artifact_evidence_partition(value: Any, partitions: set[str], fiel
             )
 
 
+def _is_artifact_evidence(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and isinstance(value.get("locator"), str)
+        and value["locator"].startswith("artifact:")
+    )
+
+
 _OPTIONAL_RECORD_FIELDS = frozenset(
     {
         "expires_when",
@@ -153,6 +161,7 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "proposal_guard_scope",
         "human_gate",
         "automation_limit",
+        "guard_source_blobs",
     }
 )
 
@@ -220,7 +229,53 @@ def _validate_guard(guard: Any, partitions: set[str]) -> None:
         raise GovernanceContractError("guard platform is not exact")
 
 
-def validate_registry(payload: Any) -> dict[str, Any]:
+def _git_blob_id(raw: bytes) -> str:
+    """Return the Git blob identity, matching ci_candidate_evidence's framing."""
+
+    framed = f"blob {len(raw)}\0".encode("ascii") + raw
+    return hashlib.sha1(framed).hexdigest()
+
+
+def _validate_guard_source_blobs(
+    value: Any,
+    *,
+    entry_id: str,
+    guard_nodes: set[str],
+    root: Path,
+) -> None:
+    """Bind every closed guard file to its bytes at the evidence's attested tree.
+
+    A sealed candidate has no Git metadata, so the registry records a Git blob
+    identity rather than requiring a lookup at the evidence tree.  The current
+    exported bytes must still match it; a mismatch means enforcement changed
+    and requires an explicit reopened disposition.
+    """
+
+    field = f"{entry_id}.guard_source_blobs"
+    expected_paths = {node.split("::", 1)[0] for node in guard_nodes}
+    if not isinstance(value, Mapping) or set(value) != expected_paths:
+        raise GovernanceContractError(f"{field} must bind exactly its covered guard files")
+    for path, expected_blob in value.items():
+        if not isinstance(expected_blob, str) or _GIT_OBJECT_ID.fullmatch(expected_blob) is None:
+            raise GovernanceContractError(f"{field}.{path} is not a Git blob identity")
+        source = root / path
+        # The registry's existing collectability and strict-execution guards
+        # reject an absent test file.  This content binding adds the distinct
+        # in-place weakening check when the covered source is present.
+        if not source.is_file():
+            continue
+        try:
+            actual_blob = _git_blob_id(source.read_bytes())
+        except OSError as exc:
+            raise GovernanceContractError(f"{entry_id} covered guard source is unavailable; reopen it") from exc
+        if actual_blob != expected_blob:
+            raise GovernanceContractError(
+                f"{entry_id} covered guard source changed since its attested closure; reopen it"
+            )
+
+
+def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, Any]:
+    root = Path(__file__).resolve().parent.parent if root is None else root
     if not isinstance(payload, dict):
         raise GovernanceContractError("registry root must be a mapping")
     required_top = {
@@ -352,10 +407,17 @@ def validate_registry(payload: Any) -> dict[str, Any]:
             _validate_artifact_evidence_partition(
                 record["green_evidence"], guard_partitions, f"{record_id}.green_evidence"
             )
+            if _is_artifact_evidence(record["green_evidence"]):
+                _validate_guard_source_blobs(
+                    record.get("guard_source_blobs"),
+                    entry_id=record_id,
+                    guard_nodes=set(owned_nodes),
+                    root=root,
+                )
             if record.get("closure_semantics_sha256") != closure_semantics_sha256(record):
                 raise GovernanceContractError(f"{record_id} closure evidence is semantically stale")
-        elif "closure_semantics_sha256" in record:
-            raise GovernanceContractError(f"{record_id} has premature closure semantics evidence")
+        elif "closure_semantics_sha256" in record or "guard_source_blobs" in record:
+            raise GovernanceContractError(f"{record_id} has premature closure evidence")
         if record["status"] == "expired" and record["scope"] != "campaign_local":
             raise GovernanceContractError("only campaign-local records may expire")
 
@@ -372,13 +434,12 @@ def validate_registry(payload: Any) -> dict[str, Any]:
     }
     pair_guards: set[str] = set()
     for pair in pairs:
-        allowed_pair_shapes = (
-            required_pair_fields,
-            required_pair_fields | {"platform"},
-            required_pair_fields | {"closure_semantics_sha256"},
-            required_pair_fields | {"platform", "closure_semantics_sha256"},
-        )
-        if not isinstance(pair, Mapping) or set(pair) not in allowed_pair_shapes:
+        optional_pair_fields = {"platform", "closure_semantics_sha256", "guard_source_blobs"}
+        if (
+            not isinstance(pair, Mapping)
+            or not required_pair_fields <= set(pair)
+            or set(pair) - required_pair_fields - optional_pair_fields
+        ):
             raise GovernanceContractError("false-green pair shape is not exact")
         pair_id = _nonempty(pair["id"], "false-green pair id")
         if _ID.fullmatch(pair_id) is None or pair_id in pair_ids or pair_id in record_ids:
@@ -417,10 +478,17 @@ def validate_registry(payload: Any) -> dict[str, Any]:
             pair_partitions = {pair["ci_partition"]}
             _validate_artifact_evidence_partition(pair["red_evidence"], pair_partitions, f"{pair_id}.red_evidence")
             _validate_artifact_evidence_partition(pair["green_evidence"], pair_partitions, f"{pair_id}.green_evidence")
+            if _is_artifact_evidence(pair["green_evidence"]):
+                _validate_guard_source_blobs(
+                    pair.get("guard_source_blobs"),
+                    entry_id=pair_id,
+                    guard_nodes={pair["guard"]},
+                    root=root,
+                )
             if pair.get("closure_semantics_sha256") != closure_semantics_sha256(pair):
                 raise GovernanceContractError(f"{pair_id} closure evidence is semantically stale")
-        elif "closure_semantics_sha256" in pair:
-            raise GovernanceContractError(f"{pair_id} has premature closure semantics evidence")
+        elif "closure_semantics_sha256" in pair or "guard_source_blobs" in pair:
+            raise GovernanceContractError(f"{pair_id} has premature closure evidence")
     return payload
 
 
