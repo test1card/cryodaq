@@ -16,9 +16,14 @@ from typing import Any
 from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported_candidate
 
 _SHA256 = "sha256:"
-_PYTEST_FAILURE_NODE = re.compile(
-    r"^(?:FAILED|ERROR) (?P<node>tests/\S+\[[^\r\n]*\]|tests/\S+)(?: - .*)?\r?$", re.MULTILINE
-)
+FAILURE_RECEIPT_PREFIX = "CRYODAQ_PYTEST_FAILURE_RECEIPT "
+_FAILURE_RECEIPT_ENV = "CRYODAQ_CANDIDATE_FAILURE_RECEIPT_SUITE"
+_FAILURE_RECEIPT_STATE = "_cryodaq_candidate_failure_receipt"
+_FAILURE_RECEIPT_ENVELOPE_FIELDS = frozenset({"payload", "sha256"})
+_FAILURE_RECEIPT_PAYLOAD_FIELDS = frozenset({"failed_nodeids", "schema_version", "suite"})
+_FAILURE_RECEIPT_SUITES = frozenset({"agents", "core", "gui", "remaining"})
+_FAILURE_RECEIPT_ACTIVE_STATE: _FailureReceiptState | None = None
+_LEGACY_PYTEST_FAILURE_PREFIX = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+?)\r?$", re.MULTILINE)
 
 
 class CiCandidateEvidenceError(ValueError):
@@ -31,6 +36,81 @@ def _digest(raw: bytes) -> str:
 
 def _canonical(payload: Mapping[str, Any]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def canonical_failure_receipt(payload: Mapping[str, Any]) -> str:
+    """Return one canonical, self-digesting pytest failure receipt."""
+
+    payload_raw = _canonical(payload)
+    return _canonical({"payload": dict(payload), "sha256": _digest(payload_raw)}).decode("utf-8").rstrip("\n")
+
+
+class _FailureReceiptState:
+    def __init__(self, suite: str) -> None:
+        self.suite = suite
+        self.nodes: list[str] = []
+        self._seen: set[str] = set()
+
+    def add(self, nodeid: str) -> None:
+        if nodeid and nodeid not in self._seen:
+            self._seen.add(nodeid)
+            self.nodes.append(nodeid)
+
+
+def pytest_configure(config: Any) -> None:
+    """Enable report.nodeid receipts only for exported-candidate pytest runs."""
+
+    global _FAILURE_RECEIPT_ACTIVE_STATE
+    suite = os.environ.get(_FAILURE_RECEIPT_ENV)
+    if suite is None:
+        return
+    if suite not in _FAILURE_RECEIPT_SUITES:
+        raise ValueError(f"candidate failure receipt suite is invalid: {suite!r}")
+    state = _FailureReceiptState(suite)
+    setattr(config, _FAILURE_RECEIPT_STATE, state)
+    _FAILURE_RECEIPT_ACTIVE_STATE = state
+
+
+def pytest_runtest_logreport(report: Any) -> None:
+    """Record failed setup/call/teardown reports using pytest's exact nodeid."""
+
+    state = _FAILURE_RECEIPT_ACTIVE_STATE
+    if state is not None and report.failed:
+        state.add(report.nodeid)
+
+
+def pytest_collectreport(report: Any) -> None:
+    """Record collection ERROR nodeids, which have no runtest report."""
+
+    state = _FAILURE_RECEIPT_ACTIVE_STATE
+    if state is not None and report.failed:
+        state.add(report.nodeid)
+
+
+def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
+    """Emit one machine-readable receipt after pytest has produced all reports."""
+
+    state = _FAILURE_RECEIPT_ACTIVE_STATE
+    if state is None:
+        return
+    payload = {
+        "failed_nodeids": state.nodes,
+        "schema_version": 1,
+        "suite": state.suite,
+    }
+    line = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}"
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:
+        print(line, flush=True)
+    else:
+        reporter.ensure_newline()
+        reporter.write_line(line)
+
+
+def pytest_unconfigure(config: Any) -> None:
+    global _FAILURE_RECEIPT_ACTIVE_STATE
+    if _FAILURE_RECEIPT_ACTIVE_STATE is getattr(config, _FAILURE_RECEIPT_STATE, None):
+        _FAILURE_RECEIPT_ACTIVE_STATE = None
 
 
 def _git_blob_id(raw: bytes) -> str:
@@ -234,13 +314,21 @@ def _run(args: argparse.Namespace) -> int:
     repo = args.repository.resolve(strict=True)
     github = _github_environment()
     command = (sys.executable, "-B", "-m", "tools.ci_candidate_runner", "--suite", args.suite)
-    receipt = execute_exported_candidate(
-        repo,
-        args.revision,
-        command=command,
-        destination=args.destination,
-        timeout=args.timeout,
-    )
+    prior_suite = os.environ.get(_FAILURE_RECEIPT_ENV)
+    os.environ[_FAILURE_RECEIPT_ENV] = args.suite
+    try:
+        receipt = execute_exported_candidate(
+            repo,
+            args.revision,
+            command=command,
+            destination=args.destination,
+            timeout=args.timeout,
+        )
+    finally:
+        if prior_suite is None:
+            os.environ.pop(_FAILURE_RECEIPT_ENV, None)
+        else:
+            os.environ[_FAILURE_RECEIPT_ENV] = prior_suite
     write_execution_bundle(
         receipt,
         output=args.output,
@@ -265,6 +353,78 @@ def _attest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _failure_receipt_nodes(output: str, *, suite: str) -> tuple[str, ...]:
+    receipts: list[str] = []
+    offset = 0
+    while True:
+        start = output.find(FAILURE_RECEIPT_PREFIX, offset)
+        if start < 0:
+            break
+        payload_start = start + len(FAILURE_RECEIPT_PREFIX)
+        end = output.find("\n", payload_start)
+        if end < 0:
+            end = len(output)
+        receipts.append(output[payload_start:end].rstrip("\r"))
+        offset = end + 1
+    if not receipts:
+        return ()
+    nodes: list[str] = []
+    seen: set[str] = set()
+    for raw in receipts:
+        try:
+            envelope = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise CiCandidateEvidenceError(f"candidate failure receipt is not canonical JSON: {exc}") from exc
+        if not isinstance(envelope, dict) or set(envelope) != _FAILURE_RECEIPT_ENVELOPE_FIELDS:
+            raise CiCandidateEvidenceError("candidate failure receipt envelope shape is not exact")
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict) or set(payload) != _FAILURE_RECEIPT_PAYLOAD_FIELDS:
+            raise CiCandidateEvidenceError("candidate failure receipt payload shape is not exact")
+        if raw != canonical_failure_receipt(payload):
+            raise CiCandidateEvidenceError("candidate failure receipt digest or canonical encoding is invalid")
+        failed_nodeids = payload.get("failed_nodeids")
+        if (
+            payload.get("schema_version") != 1
+            or payload.get("suite") != suite
+            or not isinstance(failed_nodeids, list)
+            or any(not isinstance(nodeid, str) or not nodeid for nodeid in failed_nodeids)
+            or len(failed_nodeids) != len(set(failed_nodeids))
+        ):
+            raise CiCandidateEvidenceError("candidate failure receipt schema, suite, or node IDs are invalid")
+        for nodeid in failed_nodeids:
+            if nodeid not in seen:
+                seen.add(nodeid)
+                nodes.append(nodeid)
+    return tuple(nodes)
+
+
+def _legacy_failure_nodes(output: str) -> tuple[str, ...]:
+    """Best-effort node recovery for a bundle missing the structural receipt.
+
+    This deliberately does not validate or substitute for the signed receipt;
+    it only keeps the ordinary failure log informative while hosted execution
+    proves the new structural transport.
+    """
+
+    nodes: list[str] = []
+    seen: set[str] = set()
+    for match in _LEGACY_PYTEST_FAILURE_PREFIX.finditer(output):
+        candidate = match.group("node")
+        bracket_depth = 0
+        for offset, character in enumerate(candidate):
+            if character == "[":
+                bracket_depth += 1
+            elif character == "]" and bracket_depth:
+                bracket_depth -= 1
+            elif bracket_depth == 0 and candidate.startswith(" - ", offset):
+                candidate = candidate[:offset]
+                break
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            nodes.append(candidate)
+    return tuple(nodes)
+
+
 def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     """Print a bounded candidate-failure summary without replacing its bundle."""
 
@@ -277,13 +437,23 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     output = "\n".join(
         (bundle / name).read_bytes().decode("utf-8", errors="replace") for name in ("stdout.bin", "stderr.bin")
     )
-    nodes = tuple(dict.fromkeys(match.group("node") for match in _PYTEST_FAILURE_NODE.finditer(output)))
+    suite = execution.get("suite")
+    if not isinstance(suite, str) or suite not in _FAILURE_RECEIPT_SUITES:
+        raise CiCandidateEvidenceError("candidate failure summary requires an exact candidate suite")
+    nodes = _failure_receipt_nodes(output, suite=suite)
     print(f"Exact candidate failed (exit {returncode}); failing pytest node IDs follow (max {max_nodes}).")
     if not nodes:
-        print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
-        return
+        nodes = _legacy_failure_nodes(output)
+        if nodes:
+            print("Structural failure receipt unavailable; using labelled legacy prose fallback.")
+            prefix = "FAILED NODE (legacy fallback): "
+        else:
+            print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
+            return
+    else:
+        prefix = "FAILED NODE: "
     for node in nodes[:max_nodes]:
-        print(f"FAILED NODE: {node}")
+        print(f"{prefix}{node}")
     if len(nodes) > max_nodes:
         print(f"FAILED NODE: ... {len(nodes) - max_nodes} additional node IDs are in the candidate artifact.")
 

@@ -30,6 +30,8 @@ _PYTEST = (
     "-m",
     "pytest",
     "-p",
+    "tools.ci_candidate_evidence",
+    "-p",
     "pytest_asyncio.plugin",
     "-p",
     "pytest_timeout",

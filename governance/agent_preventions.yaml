@@ -2284,7 +2284,7 @@ false_green_pairs:
       locator: artifact:8627209627
       sha256: sha256:459179daaef374dfb976f704b663916a4d7fb5eabebcd22049c9fd2622e59387
   - id: CANDIDATE-FAILURE-VISIBILITY-FALSE-GREEN-197
-    status: closed
+    status: reopened
     scope: repository
     runtime_prevention_id: CANDIDATE-FAILURE-VISIBILITY-028
     guard: tests/test_ci_candidate_evidence.py::test_failed_candidate_summary_is_bounded_and_workflow_required
@@ -2299,7 +2299,6 @@ false_green_pairs:
       sha256: sha256:88ce24fce5c68a34d451b4eaee32c9a8073eb99354bad6ac407d87d705c5e894
       tree: 4fb4e484a7a0d3716b6d39e8bfd4abeaf4082f32
       suite: remaining
-    closure_semantics_sha256: sha256:3767e185b877a4cdd1e916e6598d0474f37cc726505cd27b7bb5d3c52726c216
   - id: ARTIFACT-EVIDENCE-TREE-SUITE-FALSE-GREEN-200
     status: open
     scope: repository
@@ -4116,7 +4115,7 @@ records:
     green_evidence: pending
 
   - id: CANDIDATE-FAILURE-VISIBILITY-028
-    status: closed
+    status: reopened
     scope: repository
     authority_source: AGENTS.md#integration-and-publication-discipline
     applies_to: Failed sealed-candidate GitHub Actions executions, including whitespace-bearing parametrized node IDs and collection or fixture ERROR outcomes, and their ordinary job logs.
@@ -4141,7 +4140,6 @@ records:
       sha256: sha256:131ef93fab51b4f6a8d44a1b9b00273a2eb4b0c18c8b7b814582bdc65a32876f
       tree: 4fb4e484a7a0d3716b6d39e8bfd4abeaf4082f32
       suite: remaining
-    closure_semantics_sha256: sha256:ce97d31594b994c4159c6434bcdbc2c8b399b32ce8124059cfea861a5f896a7d
 
   - id: BROKER-DELIVERY-ISOLATION-015
     status: open

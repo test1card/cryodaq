@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -14,7 +15,10 @@ import yaml
 from tools import ci_candidate_runner
 from tools.candidate_evidence import execute_exported_candidate
 from tools.ci_candidate_evidence import (
+    FAILURE_RECEIPT_PREFIX,
     CiCandidateEvidenceError,
+    _failure_receipt_nodes,
+    canonical_failure_receipt,
     emit_failure_summary,
     validate_execution_and_attestation,
     write_artifact_attestation,
@@ -497,36 +501,17 @@ def test_failed_candidate_summary_is_bounded_and_workflow_required(
 ) -> None:
     bundle = tmp_path / "candidate-evidence"
     bundle.mkdir()
-    (bundle / "execution-receipt.json").write_text('{"returncode": 1}\n', encoding="utf-8")
-    collection = subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--collect-only", "-q"],
-        cwd=ROOT,
-        capture_output=True,
-        check=True,
-        encoding="utf-8",
-        text=True,
-    )
-    nodes = [
-        line
-        for line in collection.stdout.splitlines()
-        if line.startswith("tests/") and "::" in line and any(character.isspace() for character in line)
-    ][:23]
-    assert len(nodes) == 23
     reported_nodes = [
-        nodes[0].split("::", maxsplit=1)[0],
         "tests/x.py::test_p[a - b]",
-        "tests/y.py::test_p[value with whitespace]",
-        *nodes,
+        "tests/path with whitespace/test_failure.py::test_p",
+        *(f"tests/generated_{index}.py::test_failure" for index in range(21)),
     ]
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "remaining"}\n', encoding="utf-8")
+    marker = canonical_failure_receipt({"failed_nodeids": reported_nodes, "schema_version": 1, "suite": "remaining"})
     summary_lines = [
-        f"ERROR {reported_nodes[0]} - collection error",
-        f"FAILED {reported_nodes[1]} - assertion message",
-        f"ERROR {reported_nodes[2]}",
-        *[
-            f"{outcome} {node} - {outcome.lower()} message"
-            for index, node in enumerate(nodes)
-            for outcome in (("FAILED",) if index % 2 == 0 else ("ERROR",))
-        ],
+        f"{FAILURE_RECEIPT_PREFIX}{marker}",
+        "FAILED tests/x.py::test_p[a - b] - AssertionError: got [x]",
+        "ERROR tests/path with whitespace/test_failure.py::test_p - collection error",
     ]
     (bundle / "stdout.bin").write_bytes("\r\n".join(summary_lines).encode("utf-8"))
     (bundle / "stderr.bin").write_bytes(b"")
@@ -537,7 +522,8 @@ def test_failed_candidate_summary_is_bounded_and_workflow_required(
     emitted_nodes = [line.removeprefix("FAILED NODE: ") for line in output.splitlines() if line.startswith(node_prefix)]
     assert emitted_nodes == reported_nodes[:20]
     assert all(node not in emitted_nodes for node in reported_nodes[20:])
-    assert "6 additional node IDs" in output
+    assert "3 additional node IDs" in output
+    assert "AssertionError: got [x]" not in output
 
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     steps = payload["jobs"]["test"]["steps"]
@@ -550,6 +536,170 @@ def test_failed_candidate_summary_is_bounded_and_workflow_required(
     next(step for step in conditional if step.get("id") == "candidate-failure-summary")["if"] = "always()"
     with pytest.raises(AssertionError):
         _assert_candidate_failure_summary_step(conditional)
+
+
+def test_failure_receipt_plugin_uses_pytest_report_nodeids_verbatim(tmp_path: Path) -> None:
+    tests = tmp_path / "tests" / "path with whitespace"
+    tests.mkdir(parents=True)
+    (tests / "test_failure.py").write_text(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('value', ['a - b'])\n"
+        "def test_p(value):\n"
+        "    assert value == 'passed'\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTEST_PLUGINS"] = "tools.ci_candidate_evidence"
+    environment["CRYODAQ_CANDIDATE_FAILURE_RECEIPT_SUITE"] = "remaining"
+    environment["PYTHONPATH"] = str(ROOT)
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--tb=short"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        encoding="utf-8",
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert _failure_receipt_nodes(completed.stdout + completed.stderr, suite="remaining") == (
+        "tests/path with whitespace/test_failure.py::test_p[a - b]",
+    )
+
+
+def test_failure_receipt_parser_rejects_forged_marker_semantics() -> None:
+    payload = {
+        "failed_nodeids": ["tests/core/test_guard.py::test_guard"],
+        "schema_version": 1,
+        "suite": "core",
+    }
+    valid = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}\n"
+    assert _failure_receipt_nodes(valid, suite="core") == tuple(payload["failed_nodeids"])
+
+    envelope = json.loads(valid.removeprefix(FAILURE_RECEIPT_PREFIX))
+    envelope["payload"]["suite"] = "remaining"
+    misbound = f"{FAILURE_RECEIPT_PREFIX}{json.dumps(envelope, separators=(',', ':'))}\n"
+    with pytest.raises(CiCandidateEvidenceError):
+        _failure_receipt_nodes(misbound, suite="core")
+
+    tampered = valid.replace("test_guard", "forged_guard")
+    with pytest.raises(CiCandidateEvidenceError):
+        _failure_receipt_nodes(tampered, suite="core")
+
+
+def test_failed_candidate_summary_uses_labelled_legacy_fallback_when_receipt_is_absent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    nodeid = "tests/path with whitespace/test_failure.py::test_failure[a - b]"
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "remaining"}\n', encoding="utf-8")
+    (bundle / "stdout.bin").write_text(
+        f"FAILED {nodeid} - AssertionError: trailing assertion [message]\n",
+        encoding="utf-8",
+    )
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle)
+
+    output = capsys.readouterr().out
+    assert "Structural failure receipt unavailable; using labelled legacy prose fallback." in output
+    assert f"FAILED NODE (legacy fallback): {nodeid}" in output
+
+
+def test_exported_candidate_runner_emits_structural_failure_receipt_after_environment_sanitization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _candidate_repository(tmp_path)
+    for relative in (
+        "tools/candidate_evidence.py",
+        "tools/check_python_compile.py",
+        "tools/ci_candidate_evidence.py",
+        "tools/ci_candidate_runner.py",
+        "tools/ci_guard_execution.py",
+        "tools/governance_contract.py",
+        "governance/agent_preventions.yaml",
+    ):
+        destination = repository / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((ROOT / relative).read_bytes())
+    failure = repository / "tests" / "path with whitespace" / "test_failure.py"
+    failure.parent.mkdir(parents=True)
+    failure.write_text(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('value', ['a - b'])\n"
+        "def test_failure(value):\n"
+        "    assert value == 'passed', 'trailing assertion [message]'\n",
+        encoding="utf-8",
+    )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "candidate runner failure receipt fixture")
+    commit = _git(repository, "rev-parse", "HEAD")
+    environment = dict(os.environ)
+    environment.update({key.upper(): value for key, value in _github(commit).items()})
+    environment["PYTEST_PLUGINS"] = "not.a.real.plugin"
+    environment["PYTHONPATH"] = str(ROOT)
+    bundle = tmp_path / "bundle"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tools.ci_candidate_evidence",
+            "run",
+            "--repository",
+            str(repository),
+            "--revision",
+            "HEAD",
+            "--suite",
+            "remaining",
+            "--destination",
+            str(tmp_path / "candidate"),
+            "--output",
+            str(bundle),
+            "--artifact-name",
+            "candidate",
+            "--timeout",
+            "30",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        encoding="utf-8",
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    output = (bundle / "stdout.bin").read_text(encoding="utf-8")
+    nodeid = "tests/path with whitespace/test_failure.py::test_failure[a - b]"
+    assert _failure_receipt_nodes(output, suite="remaining") == (nodeid,)
+    assert FAILURE_RECEIPT_PREFIX in output
+    print("Sealed stdout.bin contains the structural failure receipt marker.")
+    summary = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tools.ci_candidate_evidence",
+            "summarize",
+            "--bundle",
+            str(bundle),
+            "--max-nodes",
+            "20",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        encoding="utf-8",
+        text=True,
+        check=False,
+    )
+    assert summary.returncode == 0
+    assert f"FAILED NODE: {nodeid}" in summary.stdout
+    print(summary.stdout, end="")
 
 
 def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(tmp_path: Path) -> None:
