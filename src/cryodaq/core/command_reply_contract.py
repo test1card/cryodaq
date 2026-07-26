@@ -24,20 +24,29 @@ COMMAND_REPLY_MAX_JSON_ITEMS = 4 * COMMAND_REPLY_HISTORY_MAX_ROWS + 64
 COMMAND_REPLY_MAX_JSON_KEY_CHARS = 256
 COMMAND_REPLY_MAX_INTEGER_DIGITS = 128
 
-# Settlement fields are optional because legacy handler-local replies predate
-# the transport envelope. When they are present, these are the only values
-# that can prove a command outcome to the GUI classifier.
-COMMAND_REPLY_DELIVERY_STATES = frozenset(
+# Mutation-command settlement vocabulary, deliberately excluding similarly
+# named read and assistant-audit states below.
+MUTATION_COMMAND_DELIVERY_STATES = frozenset({"dispatched", "not_dispatched", "unknown"})
+MUTATION_COMMAND_COMMIT_STATES = frozenset({"committed", "not_committed", "unknown"})
+
+# Only these mutation-command tuples prove a settled outcome to the GUI.
+# ``None`` is the legacy absence of ``delivery_state``; it is retained solely
+# for old truthful ``commit_state: "not_committed"`` refusals.
+MUTATION_COMMAND_SETTLED_REPLY_TUPLES = frozenset(
     {
-        "dispatched",
-        "intent_persisted",
-        "not_confirmed",
-        "not_dispatched",
-        "settled",
-        "unknown",
+        ("dispatched", "committed"),
+        ("dispatched", "not_committed"),
+        ("not_dispatched", "not_committed"),
+        (None, "not_committed"),
     }
 )
-COMMAND_REPLY_COMMIT_STATES = frozenset({"committed", "not_applicable", "not_committed", "unknown"})
+
+# These similarly named fields describe different domains. They are separate
+# from the mutation settlement contract so a read or assistant-audit value can
+# never become evidence that a hazardous mutation settled.
+READ_COMMAND_DELIVERY_STATES = frozenset({"not_confirmed", "unknown"})
+READ_COMMAND_COMMIT_STATES = frozenset({"not_applicable"})
+ASSISTANT_AUDIT_DELIVERY_STATES = frozenset({"intent_persisted", "settled"})
 
 
 def _validate_history_row_bound(value: dict[str, Any]) -> None:

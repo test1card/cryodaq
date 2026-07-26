@@ -56,19 +56,31 @@ def test_structured_not_committed_with_timeout_prose_is_resolved_refusal():
     assert result_outcome_unknown(result) is False
 
 
-def test_structured_delivery_state_present_alone_short_circuits_prose():
-    """If any structured settlement key is present at all, prose matching must
-    not run. Here delivery_state=not_dispatched is present with no
-    commit_state, and the prose contains a marker ('timed out'). A second
-    synthetic shape proving the rule is keyed on key *presence*, not on the
-    not_committed/not_dispatched pair specifically."""
+def test_structured_delivery_state_without_terminal_commit_is_unknown():
+    """A delivery state alone does not prove a mutation reached a terminal state."""
 
     result = {
         "ok": False,
         "error": "Send timed out before the frame left the client",
         "delivery_state": "not_dispatched",
     }
-    assert result_outcome_unknown(result) is False
+    assert result_outcome_unknown(result) is True
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"ok": False, "delivery_state": "dispatched"},
+        {"ok": False, "delivery_state": "dispatched", "commit_state": "not_applicable"},
+        {"ok": False, "delivery_state": "intent_persisted"},
+        {"ok": False, "delivery_state": "not_confirmed"},
+    ],
+    ids=("dispatched-alone", "dispatched-read-commit", "assistant-audit", "read-failure"),
+)
+def test_nonterminal_or_nonmutation_settlement_values_are_unknown(result: dict[str, object]):
+    """Only a coherent mutation settlement tuple can release the safety latch."""
+
+    assert result_outcome_unknown(result) is True
 
 
 def test_quarantined_refusal_plain_prose_is_not_unknown():
@@ -146,40 +158,153 @@ def test_required_command_outcome_regressions(result: dict[str, object], expecte
     assert result_outcome_unknown(result) is expected
 
 
-def _literal_settlement_values(value: ast.expr) -> set[str]:
+def _literal_settlement_values(value: ast.expr, bindings: dict[str, set[str]]) -> set[str]:
     if isinstance(value, ast.Constant) and type(value.value) is str:
         return {value.value}
+    if isinstance(value, ast.Name):
+        return bindings.get(value.id, set())
     if isinstance(value, ast.IfExp):
-        return _literal_settlement_values(value.body) | _literal_settlement_values(value.orelse)
+        return _literal_settlement_values(value.body, bindings) | _literal_settlement_values(value.orelse, bindings)
     return set()
 
 
+def _literal_settlement_key(value: ast.expr, bindings: dict[str, set[str]]) -> str | None:
+    values = _literal_settlement_values(value, bindings)
+    if len(values) == 1:
+        return next(iter(values))
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        left = _literal_settlement_key(value.left, bindings)
+        right = _literal_settlement_key(value.right, bindings)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _settlement_mapping(node: ast.expr, bindings: dict[str, set[str]]) -> dict[str, set[str]]:
+    fields: dict[str, set[str]] = {}
+    if isinstance(node, ast.Dict):
+        pairs = zip(node.keys, node.values)
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict":
+        pairs = ((ast.Constant(keyword.arg), keyword.value) for keyword in node.keywords if keyword.arg is not None)
+    else:
+        return fields
+    for key, value in pairs:
+        if key is None:
+            continue
+        field = _literal_settlement_key(key, bindings)
+        if field not in {"delivery_state", "commit_state"}:
+            continue
+        values = _literal_settlement_values(value, bindings)
+        assert values, f"{value.lineno} emits a nonliteral {field}"
+        fields[field] = values
+    return fields
+
+
 def _emitted_settlement_values() -> dict[str, set[str]]:
-    """Collect statically knowable settlement values from every source reply."""
+    """Collect supported literal settlement spellings from source construction forms."""
 
     emitted: dict[str, set[str]] = defaultdict(set)
     root = Path(__file__).resolve().parents[3] / "src"
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        bindings: dict[str, set[str]] = {}
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Dict):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                values = _literal_settlement_values(node.value, bindings)
+                if values:
+                    bindings[node.targets[0].id] = values
+        for node in ast.walk(tree):
+            fields = _settlement_mapping(node, bindings)
+            if fields:
+                for field, values in fields.items():
+                    emitted[field].update(values)
                 continue
-            for key, value in zip(node.keys, node.values):
-                if not (isinstance(key, ast.Constant) and key.value in {"delivery_state", "commit_state"}):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
+                field = _literal_settlement_key(node.targets[0].slice, bindings)
+                if field in {"delivery_state", "commit_state"}:
+                    values = _literal_settlement_values(node.value, bindings)
+                    assert values, f"{path}:{node.value.lineno} emits a nonliteral {field}"
+                    emitted[field].update(values)
+                continue
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update"):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg not in {"delivery_state", "commit_state"}:
                     continue
-                values = _literal_settlement_values(value)
-                assert values, f"{path}:{value.lineno} emits a nonliteral {key.value}"
-                emitted[key.value].update(values)
+                values = _literal_settlement_values(keyword.value, bindings)
+                assert values, f"{path}:{keyword.value.lineno} emits a nonliteral {keyword.arg}"
+                emitted[keyword.arg].update(values)
     return emitted
 
 
-def test_all_emitted_settlement_values_are_known_to_command_outcome_classifier():
-    """Reject a new emitter value until the shared classifier vocabulary names it."""
+def test_all_emitted_settlement_values_have_a_separate_domain_vocabulary():
+    """Reject a new state spelling until its command/read/audit domain is named.
+
+    This lexical source scan recognizes direct dicts, ``dict(...)`` calls,
+    subscript assignment, ``update()``, and joined literal keys.
+    It cannot prove that a reply reaches a mutation command, trace a value built
+    across functions, or infer a runtime-computed key; tuple coherence is
+    enforced separately by the classifier's exhaustive input tests.
+    """
 
     contract = importlib.import_module("cryodaq.core.command_reply_contract")
     vocabulary = {
-        "delivery_state": contract.COMMAND_REPLY_DELIVERY_STATES,
-        "commit_state": contract.COMMAND_REPLY_COMMIT_STATES,
+        "delivery_state": (
+            contract.MUTATION_COMMAND_SETTLED_REPLY_TUPLES
+            | {(state, None) for state in contract.MUTATION_COMMAND_DELIVERY_STATES}
+            | {(state, None) for state in contract.READ_COMMAND_DELIVERY_STATES}
+            | {(state, None) for state in contract.ASSISTANT_AUDIT_DELIVERY_STATES}
+        ),
+        "commit_state": (
+            contract.MUTATION_COMMAND_SETTLED_REPLY_TUPLES
+            | {(None, state) for state in contract.MUTATION_COMMAND_COMMIT_STATES}
+            | {(None, state) for state in contract.READ_COMMAND_COMMIT_STATES}
+        ),
     }
     for field, values in _emitted_settlement_values().items():
-        assert values <= vocabulary[field], f"unrecognised {field}: {sorted(values - vocabulary[field])}"
+        known = {pair[0] if field == "delivery_state" else pair[1] for pair in vocabulary[field]}
+        assert values <= known, f"unrecognised {field}: {sorted(values - known)}"
+
+
+def test_drift_guard_recognizes_common_reply_construction_forms():
+    """The lexical guard sees dict(), assignment, update(), and joined keys.
+
+    It deliberately does not claim interprocedural or runtime-key coverage;
+    mutation settlement itself is fail-closed unless the runtime tuple is in
+    ``MUTATION_COMMAND_SETTLED_REPLY_TUPLES``.
+    """
+
+    source = """
+state = "dispatched"
+from_dict = dict(delivery_state=state, commit_state="not_applicable")
+from_assignment = {}
+from_assignment["delivery_" + "state"] = state
+from_assignment.update(commit_state="not_applicable")
+"""
+    tree = ast.parse(source)
+    bindings = {"state": {"dispatched"}}
+    mappings: list[dict[str, set[str]]] = []
+    reply = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+            reply = _settlement_mapping(node.value, bindings)
+            mappings.append(reply)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            mapping = _settlement_mapping(node.value, bindings)
+            if mapping:
+                mappings.append(mapping)
+        elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Subscript):
+            target = node.targets[0]
+            field = _literal_settlement_key(target.slice, bindings)
+            if field in {"delivery_state", "commit_state"}:
+                reply[field] = _literal_settlement_values(node.value, bindings)
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if isinstance(call.func, ast.Attribute) and call.func.attr == "update":
+                for keyword in call.keywords:
+                    if keyword.arg in {"delivery_state", "commit_state"}:
+                        reply[keyword.arg] = _literal_settlement_values(keyword.value, bindings)
+    mappings.append(reply)
+    assert {("dispatched", "not_applicable")} <= {
+        (next(iter(mapping.get("delivery_state", {None}))), next(iter(mapping.get("commit_state", {None}))))
+        for mapping in mappings
+    }
