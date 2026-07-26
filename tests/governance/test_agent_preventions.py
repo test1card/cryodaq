@@ -331,6 +331,56 @@ def test_every_record_declares_valid_scope_authority_and_applicability() -> None
         assert record["disposition_owner"] == "reviewer"
 
 
+def test_guard_falsification_authority_cannot_close_while_invocation_paths_are_unbound() -> None:
+    """The open A disposition cannot be papered over with closure evidence.
+
+    The human reviewer/authorship decision is not representable in this
+    registry yet.  Its declared automation limit is therefore a hard closure
+    block, rather than a decorative note an author can ignore.
+    """
+
+    payload = _registry()
+    record = next(record for record in payload["records"] if record["id"] == "GUARD-FALSIFICATION-AUTHORITY-029")
+    record["status"] = "closed"
+
+    with pytest.raises(GovernanceContractError, match="automation_limit"):
+        validate_registry(payload)
+
+
+def test_repeated_classifications_require_class_level_corpus_coverage() -> None:
+    """A second occurrence must fail until the class disposition names it.
+
+    The live corpus has five classifications at the observed first-recurrence
+    threshold (two records).  Turning an otherwise unique record into another
+    ``governance_escape`` record is the red shape: the coverage list is no
+    longer exact and validation must name the missing class disposition.
+    """
+
+    payload = _registry()
+    record = next(record for record in payload["records"] if record["id"] == "GOVERNANCE-SCOPE-001")
+    assert record["classification"] != "governance_escape"
+    record["classification"] = "governance_escape"
+
+    with pytest.raises(GovernanceContractError, match="classification corpus coverage"):
+        validate_registry(payload)
+
+
+def test_guard_dependency_neutralization_cannot_close_without_execution_manifest() -> None:
+    """The disclosed dependency-binding gap remains a fail-closed open debt.
+
+    The current validator can bind only direct guard-file bytes.  Until an
+    invocation-produced dependency manifest exists, this record cannot claim
+    closure merely by attaching otherwise valid-looking evidence.
+    """
+
+    payload = _registry()
+    record = next(record for record in payload["records"] if record["id"] == "GUARD-DEPENDENCY-NEUTRALIZATION-031")
+    record["status"] = "closed"
+
+    with pytest.raises(GovernanceContractError, match="automation_limit"):
+        validate_registry(payload)
+
+
 def test_campaign_records_require_expiry_and_cannot_be_summarized_as_universal() -> None:
     payload = validate_registry(_registry())
     campaigns = [record for record in payload["records"] if record["scope"] == "campaign_local"]

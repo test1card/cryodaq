@@ -73,6 +73,7 @@ _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS = {
     "close_requires_immutable_red_and_green_evidence": True,
     "guard_removed_skipped_xfailed_deselected_or_nondefault": "reopen",
 }
+_CLASSIFICATION_CORPUS_REPEAT_THRESHOLD = 2
 
 
 class GovernanceContractError(ValueError):
@@ -190,6 +191,7 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "human_gate",
         "automation_limit",
         "guard_source_blobs",
+        "classification_corpus",
     }
 )
 
@@ -240,6 +242,34 @@ def _validate_proposal_guard_scope(value: Any, record_id: str) -> None:
         raise GovernanceContractError(f"{field} shape is not exact")
     for key in required_keys:
         _nonempty(value[key], f"{field}.{key}")
+
+
+def _validate_classification_corpus(value: Any, record_id: str) -> tuple[str, ...]:
+    """Validate a class-level disposition for recurring prevention shapes.
+
+    Two is deliberately the first observed recurrence: the registry currently
+    contains five classifications with exactly two records and none with three.
+    Waiting for a third instance would preserve the instance-by-instance escape
+    that the corpus rule prohibits.
+    """
+
+    field = f"{record_id}.classification_corpus"
+    if not isinstance(value, Mapping) or set(value) != {"repeat_threshold", "covered_classifications"}:
+        raise GovernanceContractError(f"{field} shape is not exact")
+    if value["repeat_threshold"] != _CLASSIFICATION_CORPUS_REPEAT_THRESHOLD:
+        raise GovernanceContractError(
+            f"{field}.repeat_threshold must be the observed first-recurrence threshold "
+            f"{_CLASSIFICATION_CORPUS_REPEAT_THRESHOLD}"
+        )
+    classifications = value["covered_classifications"]
+    if (
+        not isinstance(classifications, list)
+        or not classifications
+        or classifications != sorted(set(classifications))
+        or any(not isinstance(item, str) or not item.strip() for item in classifications)
+    ):
+        raise GovernanceContractError(f"{field}.covered_classifications must be a sorted unique nonempty list")
+    return tuple(classifications)
 
 
 def _validate_guard(guard: Any, partitions: set[str]) -> None:
@@ -348,6 +378,8 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
     record_by_id: dict[str, Mapping[str, Any]] = {}
     guard_registration: dict[str, str] = {}
     record_guard_nodes: dict[str, dict[str, str | None]] = {}
+    classifications: dict[str, list[str]] = {}
+    classification_corpora: list[tuple[str, tuple[str, ...]]] = []
     base_record_fields = {
         "id",
         "status",
@@ -395,6 +427,12 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
             raise GovernanceContractError(f"record status or scope is invalid: {record_id}")
         for field in ("authority_source", "applies_to", "classification", "consequence", "invariant"):
             _nonempty(record[field], f"{record_id}.{field}")
+        classifications.setdefault(record["classification"], []).append(record_id)
+        if "classification_corpus" in record:
+            if record["scope"] != "repository":
+                raise GovernanceContractError(f"{record_id}.classification_corpus must be repository-scoped")
+            covered_classifications = _validate_classification_corpus(record["classification_corpus"], record_id)
+            classification_corpora.append((record_id, covered_classifications))
         for owner_field in ("correction_owner", "guard_owner", "disposition_owner"):
             if record[owner_field] not in _OWNERS:
                 raise GovernanceContractError(f"{record_id}.{owner_field} is invalid")
@@ -428,6 +466,8 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
         elif "expires_when" in record or "expiry_disposition" in record:
             raise GovernanceContractError("durable records cannot use campaign expiry")
         if record["status"] in {"closed", "expired"}:
+            if "automation_limit" in record:
+                raise GovernanceContractError(f"{record_id} cannot close while its automation_limit remains")
             _validate_immutable_evidence(record["red_evidence"], f"{record_id}.red_evidence")
             _validate_immutable_evidence(record["green_evidence"], f"{record_id}.green_evidence")
             guard_partitions = {guard["ci_partition"] for guard in guards}
@@ -449,6 +489,25 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
             raise GovernanceContractError(f"{record_id} has premature closure evidence")
         if record["status"] == "expired" and record["scope"] != "campaign_local":
             raise GovernanceContractError("only campaign-local records may expire")
+
+    if len(classification_corpora) > 1:
+        raise GovernanceContractError("registry has multiple classification corpus dispositions")
+    if classification_corpora:
+        corpus_id, covered_classifications = classification_corpora[0]
+        if record_by_id[corpus_id]["classification"] != "corpus_disposition_governance":
+            raise GovernanceContractError(f"{corpus_id}.classification must identify corpus disposition governance")
+        repeated = {
+            classification
+            for classification, ids in classifications.items()
+            if len(ids) >= _CLASSIFICATION_CORPUS_REPEAT_THRESHOLD
+        }
+        if set(covered_classifications) != repeated:
+            missing = sorted(repeated - set(covered_classifications))
+            unexpected = sorted(set(covered_classifications) - repeated)
+            raise GovernanceContractError(
+                f"classification corpus coverage must exactly name recurring classifications; "
+                f"missing: {missing}; unexpected: {unexpected}"
+            )
 
     pair_ids: set[str] = set()
     required_pair_fields = {

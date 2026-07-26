@@ -4627,3 +4627,73 @@ records:
         ci_partition: remaining
     red_evidence: sqlite_connection_finalizer_sequence_fastapi_deprecation_and_mutated_thread_constructor_reproductions_confirmed_2026_07_23_pending_immutable_capture
     green_evidence: pending
+
+  - id: GUARD-FALSIFICATION-AUTHORITY-029
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every prevention guard, its author, the reviewer who disposes its correction, and the production invocation path the guard claims to exercise.
+    classification: guard_construction_governance
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: An author can choose a convenient in-process assertion that never reaches the corrected production path, then self-certify a guard that cannot falsify the correction.
+    invariant: Guard-falsification criteria are reviewer-governed before implementation; every guard must name the production invocation path it exercises before this prevention can close.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_guard_falsification_authority_cannot_close_while_invocation_paths_are_unbound
+        ci_partition: remaining
+    automation_limit: No canonical typed guard-to-production-invocation graph or independently authored reviewer-disposition receipt exists today; creating and validating both would make the path-naming and separation portions machine-testable.
+    red_evidence: prose_only_guard_falsification_authority_rule_added_in_396c8fb8_without_registry_record_or_enforceable_production_path_binding_2026_07_26
+    green_evidence: pending
+
+  - id: PREVENTION-CORPUS-DISPOSITION-030
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every prevention disposition whose classification already occurs elsewhere in the prevention registry.
+    classification: corpus_disposition_governance
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: Repeated failure shapes can accumulate as isolated instances, leaving the common boundary unenforced while each individual record appears addressed.
+    invariant: At the observed first recurrence, every repeated classification is named by this class-level disposition and the registry rejects an unclassified repeat until that corpus coverage is deliberately updated.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_repeated_classifications_require_class_level_corpus_coverage
+        ci_partition: remaining
+    classification_corpus:
+      repeat_threshold: 2
+      covered_classifications:
+        - late_side_effect
+        - markup_interpretation
+        - publication_loss
+        - retained_handle_loss
+        - stale_authority
+    red_evidence: registry_corpus_on_2026_07_26_contains_five_classifications_with_exactly_two_records_and_no_prior_class_level_disposition_or_enforcement
+    green_evidence: pending
+
+  - id: GUARD-DEPENDENCY-NEUTRALIZATION-031
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every registered pytest guard and every fixture, conftest, imported helper, marker, and configuration input that can neutralize or alter its execution.
+    classification: guard_dependency_binding_governance
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: Binding only a guard test-file blob allows a fixture, conftest, imported helper, marker, or pytest configuration change to turn the guard inert while its recorded test-file identity remains unchanged.
+    invariant: A closed guard must bind the complete execution-dependency manifest from the exact production pytest invocation, not only its test-file blob; until that manifest exists this prevention remains open.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_guard_dependency_neutralization_cannot_close_without_execution_manifest
+        ci_partition: remaining
+    automation_limit: The registry has no faithful, sealed pytest execution-dependency manifest for indirect imports, fixtures, conftest discovery, markers, and configuration; an invocation-produced manifest bound into candidate evidence is required before the invariant can be mechanically enforced.
+    red_evidence: guard_source_blobs_in_current_registry_bind_only_direct_guard_test_files_while_conftest_fixture_imported_helper_marker_and_pytest_configuration_changes_remain_outside_that_binding_2026_07_26
+    green_evidence: pending
