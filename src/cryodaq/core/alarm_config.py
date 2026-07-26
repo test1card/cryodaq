@@ -101,8 +101,7 @@ def load_alarm_config(
     path = Path(path)
     if not path.exists():
         raise AlarmConfigError(
-            f"alarms_v3.yaml not found at {path} — refusing to start "
-            f"alarm engine without alarm configuration"
+            f"alarms_v3.yaml not found at {path} — refusing to start alarm engine without alarm configuration"
         )
 
     try:
@@ -112,9 +111,7 @@ def load_alarm_config(
         raise AlarmConfigError(f"alarms_v3.yaml at {path}: YAML parse error — {exc}") from exc
 
     if not isinstance(raw, dict):
-        raise AlarmConfigError(
-            f"alarms_v3.yaml at {path} is malformed (expected mapping, got {type(raw).__name__})"
-        )
+        raise AlarmConfigError(f"alarms_v3.yaml at {path} is malformed (expected mapping, got {type(raw).__name__})")
 
     channel_groups: dict[str, list[str]] = raw.get("channel_groups", {})
     try:
@@ -123,22 +120,16 @@ def load_alarm_config(
 
         # --- Global alarms ---
         for alarm_id, alarm_raw in raw.get("global_alarms", {}).items():
-            cfg = _expand_alarm(alarm_id, alarm_raw, channel_groups)
-            if cfg is not None:
-                alarms.append(cfg)
+            alarms.append(_expand_alarm(alarm_id, alarm_raw, channel_groups))
 
         # --- Phase alarms ---
         for phase_name, phase_dict in raw.get("phase_alarms", {}).items():
             if not isinstance(phase_dict, dict):
                 continue
             for alarm_id, alarm_raw in phase_dict.items():
-                cfg = _expand_alarm(alarm_id, alarm_raw, channel_groups, phase_filter=[phase_name])
-                if cfg is not None:
-                    alarms.append(cfg)
+                alarms.append(_expand_alarm(alarm_id, alarm_raw, channel_groups, phase_filter=[phase_name]))
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
-        raise AlarmConfigError(
-            f"alarms_v3.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}"
-        ) from exc
+        raise AlarmConfigError(f"alarms_v3.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}") from exc
 
     return engine_cfg, alarms
 
@@ -153,9 +144,7 @@ def _parse_engine_config(raw: dict) -> EngineConfig:
     for key, sp_raw in raw.get("setpoints", {}).items():
         default = float(sp_raw.get("default", 0.0))
         if not math.isfinite(default):
-            raise AlarmConfigError(
-                f"engine.setpoints.{key}.default must be finite, got {default!r}"
-            )
+            raise AlarmConfigError(f"engine.setpoints.{key}.default must be finite, got {default!r}")
         setpoints[key] = SetpointDef(
             key=key,
             source=sp_raw.get("source", "constant"),
@@ -165,21 +154,15 @@ def _parse_engine_config(raw: dict) -> EngineConfig:
 
     poll_interval_s = float(raw.get("poll_interval_s", 2.0))
     if not (math.isfinite(poll_interval_s) and poll_interval_s > 0):
-        raise AlarmConfigError(
-            f"engine.poll_interval_s must be a finite value > 0, got {poll_interval_s!r}"
-        )
+        raise AlarmConfigError(f"engine.poll_interval_s must be a finite value > 0, got {poll_interval_s!r}")
 
     rate_window_s = float(raw.get("rate_window_s", 120.0))
     if not (math.isfinite(rate_window_s) and rate_window_s > 0):
-        raise AlarmConfigError(
-            f"engine.rate_window_s must be a finite value > 0, got {rate_window_s!r}"
-        )
+        raise AlarmConfigError(f"engine.rate_window_s must be a finite value > 0, got {rate_window_s!r}")
 
     rate_min_points = int(raw.get("rate_min_points", 60))
     if rate_min_points < 1:
-        raise AlarmConfigError(
-            f"engine.rate_min_points must be >= 1, got {rate_min_points!r}"
-        )
+        raise AlarmConfigError(f"engine.rate_min_points must be >= 1, got {rate_min_points!r}")
 
     return EngineConfig(
         poll_interval_s=poll_interval_s,
@@ -195,10 +178,18 @@ def _expand_alarm(
     alarm_raw: Any,
     channel_groups: dict[str, list[str]],
     phase_filter: list[str] | None = None,
-) -> AlarmConfig | None:
-    """Создать AlarmConfig из raw YAML-словаря, раскрыв channel_group."""
+) -> AlarmConfig:
+    """Создать AlarmConfig из raw YAML-словаря, раскрыв channel_group.
+
+    Fail-closed: a non-dict alarm entry (e.g. ``global_alarms: {bad: "typo"}``)
+    used to return None and be silently DROPPED by the caller, so the alarm
+    simply went MISSING from the loaded set — no error, no log, and an
+    operator who believes it is configured. Skipping a malformed entry is the
+    fail-open shape this series has been eliminating; raise instead, naming
+    the alarm id and the offending value.
+    """
     if not isinstance(alarm_raw, dict):
-        return None
+        raise AlarmConfigError(f"alarm {alarm_id!r} must be a mapping, got {type(alarm_raw).__name__} {alarm_raw!r}")
 
     cfg = copy.deepcopy(alarm_raw)
     notify: list[str] = cfg.pop("notify", []) or []
@@ -246,9 +237,7 @@ _VALID_THRESHOLD_CHECKS = frozenset(
 
 # check values recognised by alarm_v2._eval_rate (alarm_v2.py:394-434). Unknown
 # values leave `fired` at its initial False — the rate alarm silently never fires.
-_VALID_RATE_CHECKS = frozenset(
-    {"rate_above", "rate_below", "rate_near_zero", "relative_rate_near_zero"}
-)
+_VALID_RATE_CHECKS = frozenset({"rate_above", "rate_below", "rate_near_zero", "relative_rate_near_zero"})
 
 # check values recognised by alarm_v2._eval_condition (alarm_v2.py:329-388), used
 # for composite sub-conditions and rate additional_condition. Its own `else`
@@ -265,6 +254,36 @@ _VALID_CONDITION_CHECKS = frozenset(
 # behaviour instead of rejecting it. Absent operator is legitimate — runtime
 # defaults to "AND" (alarm_v2.py:292).
 _VALID_COMPOSITE_OPERATORS = frozenset({"AND", "OR"})
+
+# Channel-selector keys accepted by alarm_v2._resolve_channels (alarm_v2.py:468-476):
+#   `channels` (list) — returned verbatim (L470-471)
+#   `channel`  (scalar) — wrapped in a one-element list, unless it is the
+#               phase_elapsed_s pseudo-channel which is intentionally NOT
+#               resolved here (L472-475)
+#   `channel_group` — not read at runtime; _expand_channel_group rewrites it to
+#               `channels` at load, so it is a valid selector at validation
+#               time (it will be gone before the evaluator ever sees the cfg).
+# Without one of these keys _resolve_channels returns [] (L476), and the
+# per-channel for-loop in _eval_threshold (L223), _eval_rate (L401), and
+# _eval_stale (L447) never executes — the alarm returns None forever (a dead
+# annunciator that looks configured).
+_MULTI_CHANNEL_SELECTOR_KEYS = frozenset({"channels", "channel", "channel_group"})
+
+# Sub-condition checks that read their selector via _resolve_channels(cond)
+# (alarm_v2.py:334/339) — the multi-channel family. Accept channel/channels/
+# channel_group. An empty resolution makes any() over [] return False (L336/341)
+# → silently dead.
+_MULTI_CHANNEL_CONDITION_CHECKS = frozenset({"any_below", "any_above"})
+
+# Sub-condition checks that read cond.get("channel") DIRECTLY
+# (alarm_v2.py:344/355/362/370/378) — the single-channel family. They do NOT
+# call _resolve_channels, so `channels`/`channel_group` do NOT satisfy them:
+# even after channel_group expansion sets `channels`, cond.get("channel") stays
+# None and `if not ch: return False` (L345/356/363/371/379) fires → silently
+# dead. Only a present, non-empty `channel` string is valid. The special value
+# "phase_elapsed_s" is legitimate for `above` (L348-350 re-routes it to the
+# phase provider) and must not be rejected.
+_SINGLE_CHANNEL_CONDITION_CHECKS = frozenset({"above", "below", "rate_above", "rate_below", "rate_near_zero"})
 
 
 def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
@@ -286,20 +305,29 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
       - check deviation_from_setpoint → str `setpoint_source` + numeric `threshold`
       - check fault_count_in_window   → exempt (uses .get("min_fault_count", 1))
       - any other check               → rejected (unknown to alarm_v2)
+      - channel selector (channel/channels/channel_group) required —
+        _eval_threshold (L218) calls _resolve_channels; [] → never fires
 
     alarm_type: rate — _eval_rate (alarm_v2.py:362-365)
       - check rate_above/rate_below   → numeric `threshold`
       - check rate_near_zero / relative_rate_near_zero → exempt (.get("rate_threshold", …))
       - any other check               → rejected (unknown to alarm_v2)
-      - additional_condition (if present) → validated as a composite sub-condition
+      - channel selector (channel/channels/channel_group) required —
+        _eval_rate (L395) calls _resolve_channels; [] → never fires
+      - additional_condition (if present/non-None) → must be a dict and is
+        validated as a composite sub-condition; a truthy non-dict reaches
+        _eval_condition and dies silently (defect #4)
 
-    alarm_type: composite — sub-conditions via _eval_condition (alarm_v2.py:284-330)
+    alarm_type: composite — sub-conditions via _eval_condition (alarm_v2.py:329-388)
       - operator AND|OR (case-sensitive; absent defaults to AND, alarm_v2.py:292)
         any other / wrong-case / non-string operator → rejected
       - check any_below / any_above / above / below / rate_above / rate_below
         → each sub-condition requires numeric `threshold`
       - check rate_near_zero → exempt (.get("rate_threshold", 0.1))
       - any other check       → rejected (unknown to alarm_v2)
+      - channel selector required per check family (see _validate_condition):
+        any_below/any_above accept channel/channels/channel_group;
+        above/below/rate_* accept ONLY scalar `channel`
 
     alarm_type: stale → no hard reads, exempt.
 
@@ -309,6 +337,11 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
 
     if alarm_type == "threshold":
         _validate_threshold_check(alarm_id, cfg)
+        # channel selector — alarm_v2._eval_threshold (L218) calls
+        # _resolve_channels(cfg); without one it returns [] and the per-channel
+        # for-loop (L223) never runs → the alarm returns None forever (dead
+        # annunciator that looks configured).
+        _require_multi_channel_selector(alarm_id, cfg, "(alarm_type=threshold)")
 
     elif alarm_type == "rate":
         # alarm_v2._eval_rate L362-365 / L407-417
@@ -324,10 +357,25 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
                     f"alarm {alarm_id!r} (alarm_type=rate, check={check}) requires a "
                     f"numeric 'threshold', got {cfg.get('threshold')!r}"
                 )
-        # additional_condition is passed to _eval_condition — validate it too
-        # alarm_v2._eval_rate L376-378
+        # channel selector — alarm_v2._eval_rate (L395) calls _resolve_channels;
+        # without one it returns [] and the per-channel for-loop (L401) never
+        # runs → the alarm returns None forever.
+        _require_multi_channel_selector(alarm_id, cfg, "(alarm_type=rate)")
+        # additional_condition is passed to _eval_condition (alarm_v2._eval_rate
+        # L421-422: `if add_cond and not self._eval_condition(add_cond)`). A
+        # truthy non-dict (e.g. a string) reaches _eval_condition which hard-
+        # reads cond.get(...) (alarm_v2.py:331) → AttributeError → swallowed by
+        # evaluate()'s broad `except Exception` (L201-203) → returns None →
+        # silently dead. A falsy non-dict (None/absent) is skipped by the
+        # `if add_cond` guard and is harmless, but any non-None value must be
+        # a dict — then validate it as a sub-condition.
         add_cond = cfg.get("additional_condition")
-        if isinstance(add_cond, dict):
+        if add_cond is not None:
+            if not isinstance(add_cond, dict):
+                raise AlarmConfigError(
+                    f"alarm {alarm_id!r} additional_condition must be a sub-condition "
+                    f"dict (or null/absent), got {type(add_cond).__name__} {add_cond!r}"
+                )
             _validate_condition(alarm_id, add_cond, context="additional_condition")
 
     elif alarm_type == "composite":
@@ -402,8 +450,7 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
 
     else:
         raise AlarmConfigError(
-            f"alarm {alarm_id!r} has unknown alarm_type {alarm_type!r}; "
-            f"valid values are {sorted(_VALID_ALARM_TYPES)}"
+            f"alarm {alarm_id!r} has unknown alarm_type {alarm_type!r}; valid values are {sorted(_VALID_ALARM_TYPES)}"
         )
 
 
@@ -415,16 +462,14 @@ def _validate_threshold_check(alarm_id: str, cfg: dict) -> None:
         # alarm_v2._check_threshold_channel L225/L227
         if not _is_number(cfg.get("threshold")):
             raise AlarmConfigError(
-                f"alarm {alarm_id!r} (check={check}) requires a numeric 'threshold', "
-                f"got {cfg.get('threshold')!r}"
+                f"alarm {alarm_id!r} (check={check}) requires a numeric 'threshold', got {cfg.get('threshold')!r}"
             )
     elif check == "outside_range":
         # alarm_v2._check_threshold_channel L229
         r = cfg.get("range")
         if not (isinstance(r, (list, tuple)) and len(r) == 2 and all(_is_number(x) for x in r)):
             raise AlarmConfigError(
-                f"alarm {alarm_id!r} (check=outside_range) requires a 2-element numeric "
-                f"'range', got {r!r}"
+                f"alarm {alarm_id!r} (check=outside_range) requires a 2-element numeric 'range', got {r!r}"
             )
     elif check == "deviation_from_setpoint":
         # alarm_v2._check_threshold_channel L232-233
@@ -450,10 +495,25 @@ def _validate_threshold_check(alarm_id: str, cfg: dict) -> None:
 def _validate_condition(alarm_id: str, cond: dict, context: str) -> None:
     """Validate a composite sub-condition or additional_condition dict.
 
-    Mirrors alarm_v2._eval_condition hard subscripts (alarm_v2.py:284-330):
-      any_below, any_above, above, below → cond["threshold"]  (L286/293/305/307/314)
-      rate_above, rate_below             → cond["threshold"]  (L322/330)
-      rate_near_zero                     → exempt (.get("rate_threshold", 0.1))
+    Mirrors alarm_v2._eval_condition (alarm_v2.py:329-388).
+    Threshold hard-reads:
+      any_below, any_above              → cond["threshold"]  (L335/340)
+      above, below                      → cond["threshold"]  (L350/352/359)
+      rate_above, rate_below            → cond["threshold"]  (L367/375)
+      rate_near_zero                    → exempt (.get("rate_threshold", 0.1), L383)
+    Channel selector (which channel(s) the check evaluates):
+      any_below, any_above              → _resolve_channels(cond) (L334/339):
+                                          multi-channel family — accepts
+                                          channel/channels/channel_group
+      above, below, rate_above,
+      rate_below, rate_near_zero        → cond.get("channel") (L344/355/362/370/
+                                          378): single-channel family — reads
+                                          `channel` DIRECTLY, not _resolve_channels,
+                                          so channels/channel_group do NOT satisfy
+                                          it; `if not ch: return False` (L345/356/
+                                          363/371/379) makes an absent/falsy channel
+                                          dead. "phase_elapsed_s" is legitimate for
+                                          `above` (L348-350).
     """
     check = cond.get("check", "above")
     if check not in _VALID_CONDITION_CHECKS:
@@ -467,6 +527,57 @@ def _validate_condition(alarm_id: str, cond: dict, context: str) -> None:
             f"alarm {alarm_id!r} {context} (check={check}) requires a numeric 'threshold', "
             f"got {cond.get('threshold')!r}"
         )
+    # Channel selector — which channel(s) this sub-condition evaluates. The
+    # two check families read the selector differently (see docstring above);
+    # without the right one the check returns False forever — a dead
+    # annunciator that looks configured.
+    _validate_condition_selector(alarm_id, cond, check, context)
+
+
+def _require_multi_channel_selector(alarm_id: str, cfg: dict, context: str) -> None:
+    """Require a selector that _resolve_channels expands to a non-empty list.
+
+    Mirrors alarm_v2._resolve_channels (L468-476): accepts ``channels`` (list),
+    ``channel`` (scalar), or ``channel_group`` (rewritten to ``channels`` at
+    load by _expand_channel_group). Without one, _resolve_channels returns []
+    and the for-loop in _eval_threshold (L223) / _eval_rate (L401) never
+    executes, so the alarm returns None forever — a dead annunciator that
+    looks configured.
+    """
+    if not any(key in cfg for key in _MULTI_CHANNEL_SELECTOR_KEYS):
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r} {context} requires a channel selector "
+            f"('channel', 'channels', or 'channel_group'); without one "
+            f"alarm_v2._resolve_channels returns [] and the alarm never fires"
+        )
+
+
+def _validate_condition_selector(alarm_id: str, cond: dict, check: str, context: str) -> None:
+    """Require the channel selector the check family actually reads at runtime.
+
+    Two families, derived from alarm_v2._eval_condition (L329-388):
+      any_below / any_above (L333-341): call _resolve_channels(cond), so they
+        accept channel/channels/channel_group — the multi-channel family.
+      above / below / rate_above / rate_below / rate_near_zero (L343-384): read
+        cond.get('channel') DIRECTLY and do NOT call _resolve_channels, so only
+        a scalar ``channel`` satisfies them. ``if not ch: return False``
+        (L345/356/363/371/379) makes an absent/falsy channel return False
+        forever — silently dead. ``phase_elapsed_s`` is legitimate for ``above``
+        (L348-350 re-routes it to the phase provider).
+    """
+    if check in _MULTI_CHANNEL_CONDITION_CHECKS:
+        _require_multi_channel_selector(alarm_id, cond, context)
+    elif check in _SINGLE_CHANNEL_CONDITION_CHECKS:
+        ch = cond.get("channel")
+        if not isinstance(ch, str) or not ch:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} {context} (check={check}) requires a "
+                f"'channel' string selector, got {ch!r}; alarm_v2._eval_condition "
+                f"reads cond.get('channel') directly (not _resolve_channels) and "
+                f"returns False forever when it is absent or falsy "
+                f"(alarm_v2.py:345/356/363/371/379). 'channels'/'channel_group' "
+                f"are NOT read by this check — use 'channel'."
+            )
 
 
 def _expand_channel_group(

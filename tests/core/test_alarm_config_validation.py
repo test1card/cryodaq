@@ -939,3 +939,186 @@ def test_shipped_physical_alarms_and_interlocks_not_parsed_by_this_loader() -> N
     source = inspect.getsource(alarm_config)
     assert "physical_alarms" not in source
     assert "interlocks.yaml" not in source
+
+
+# ---------------------------------------------------------------------------
+# fail-OPEN gap (round 3): four more shapes found by a reviewer after the
+# operator (f07314e6) and conditions-container (a6b6db88) fixes. Each was
+# VERIFIED by running the evaluator against the pre-fix loader — these load
+# cleanly today and then silently never fire (or silently vanish) at runtime.
+#
+#   1. non-dict alarm entry silently DROPPED (_expand_alarm returned None).
+#   2. composite sub-condition with no channel selector: _eval_condition's
+#      `if not ch: return False` (alarm_v2.py:345) → dead forever.
+#   3. top-level threshold/rate alarm with no channel selector:
+#      _resolve_channels returns [] → the for-loop body never runs → None.
+#   4. truthy non-dict additional_condition: _eval_condition hard-reads
+#      cond.get(...) (alarm_v2.py:331) → AttributeError → swallowed by
+#      evaluate()'s broad `except Exception` → None → dead.
+# ---------------------------------------------------------------------------
+def test_non_dict_alarm_entry_raises(tmp_path: Path) -> None:
+    """Defect #1: a non-dict alarm entry (e.g. global_alarms: {bad: "typo"})
+    was silently DROPPED — _expand_alarm returned None and the caller discarded
+    it, so the alarm went MISSING from the loaded set with no error and no log.
+    An operator who wrote it believes it is configured. Skipping a malformed
+    entry is the fail-open shape this series eliminates; must raise, naming the
+    alarm id and the offending value."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          typo_alarm: "just_a_string"
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="typo_alarm"):
+        load_alarm_config(p)
+
+
+def test_composite_sub_condition_missing_channel_selector_raises(tmp_path: Path) -> None:
+    """Defect #2: a composite sub-condition with check: above and a threshold
+    but NO channel. alarm_v2._eval_condition (L343-352) reads cond.get('channel')
+    DIRECTLY — not _resolve_channels — so 'channels'/'channel_group' would not
+    satisfy it either; absent channel → `if not ch: return False` (L345) →
+    silently dead forever. A CRITICAL annunciator that looks configured."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - check: above
+                threshold: 1.0
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel"):
+        load_alarm_config(p)
+
+
+def test_composite_sub_condition_any_below_missing_channel_selector_raises(tmp_path: Path) -> None:
+    """Defect #2 (any_* family): a composite sub-condition with check:
+    any_below and a threshold but NO channel/channels/channel_group.
+    alarm_v2._eval_condition (L333-336) calls _resolve_channels(cond) which
+    returns [] without a selector → any() over [] is False → silently dead.
+    The any_* family accepts channel/channels/channel_group (multi-channel
+    selector via _resolve_channels), unlike the single-channel family above."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel"):
+        load_alarm_config(p)
+
+
+def test_threshold_alarm_missing_channel_selector_raises(tmp_path: Path) -> None:
+    """Defect #3 (threshold): a top-level threshold alarm with no channel/
+    channels/channel_group. alarm_v2._eval_threshold (L218) calls
+    _resolve_channels(cfg) which returns [] when none is present → the for-loop
+    (L223) never executes → returns None forever — silently dead."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          orphan_threshold:
+            alarm_type: threshold
+            check: above
+            threshold: 4.0
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel"):
+        load_alarm_config(p)
+
+
+def test_rate_alarm_missing_channel_selector_raises(tmp_path: Path) -> None:
+    """Defect #3 (rate): same fail-open shape on the rate path.
+    alarm_v2._eval_rate (L395) calls _resolve_channels(cfg) → [] → the for-loop
+    (L401) never executes → returns None forever."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          orphan_rate:
+            alarm_type: rate
+            check: rate_above
+            threshold: 5.0
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel"):
+        load_alarm_config(p)
+
+
+def test_rate_additional_condition_non_dict_raises(tmp_path: Path) -> None:
+    """Defect #4: a truthy non-dict additional_condition (e.g. a string).
+    alarm_v2._eval_rate (L421-422) does `if add_cond and not
+    self._eval_condition(add_cond)` — a truthy non-dict is passed to
+    _eval_condition which hard-reads cond.get(...) (L331) → AttributeError →
+    swallowed by evaluate()'s broad `except Exception` (L201-203) → returns
+    None → silently dead. The loader previously validated additional_condition
+    only inside `if isinstance(add_cond, dict)`, so a truthy non-dict slipped
+    through."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          steady_state_check:
+            alarm_type: rate
+            channel: T11
+            check: rate_near_zero
+            additional_condition: "typo_string"
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="additional_condition"):
+        load_alarm_config(p)
+
+
+# ---------------------------------------------------------------------------
+# selector-rule precision guards: the channel-selector rule derived from
+# alarm_v2 must accept every legitimate selector shape the runtime honours,
+# not just the common case. These pin the accepted shapes so a later
+# tightening cannot brick a valid lab config.
+# ---------------------------------------------------------------------------
+def test_composite_sub_condition_phase_elapsed_s_channel_loads(tmp_path: Path) -> None:
+    """channel: phase_elapsed_s is a legitimate selector for check: above —
+    alarm_v2._eval_condition (L348-350) special-cases the phase-elapsed
+    pseudo-channel. The single-channel selector rule must accept it (it is a
+    non-empty string), not reject it. Pins the shipped vacuum_insufficient
+    alarm shape."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          phase_too_long:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channel: phase_elapsed_s
+                check: above
+                threshold: 3600
+              - channel: P1
+                check: above
+                threshold: 1.0e-4
+            level: WARNING
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    assert any(a.alarm_id == "phase_too_long" for a in alarms)
