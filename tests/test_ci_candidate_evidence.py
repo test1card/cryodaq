@@ -510,20 +510,25 @@ def test_failed_candidate_summary_is_bounded_and_workflow_required(
         line
         for line in collection.stdout.splitlines()
         if line.startswith("tests/") and "::" in line and any(character.isspace() for character in line)
-    ][:25]
-    assert len(nodes) == 25
-    reported_nodes = [nodes[0].split("::", maxsplit=1)[0], *nodes]
-    (bundle / "stdout.bin").write_text(
-        "\n".join(
-            [f"ERROR {reported_nodes[0]} - collection error"]
-            + [
-                f"{outcome} {node} - {outcome.lower()} message"
-                for index, node in enumerate(nodes)
-                for outcome in (("FAILED",) if index % 2 == 0 else ("ERROR",))
-            ]
-        ),
-        encoding="utf-8",
-    )
+    ][:23]
+    assert len(nodes) == 23
+    reported_nodes = [
+        nodes[0].split("::", maxsplit=1)[0],
+        "tests/x.py::test_p[a - b]",
+        "tests/y.py::test_p[value with whitespace]",
+        *nodes,
+    ]
+    summary_lines = [
+        f"ERROR {reported_nodes[0]} - collection error",
+        f"FAILED {reported_nodes[1]} - assertion message",
+        f"ERROR {reported_nodes[2]}",
+        *[
+            f"{outcome} {node} - {outcome.lower()} message"
+            for index, node in enumerate(nodes)
+            for outcome in (("FAILED",) if index % 2 == 0 else ("ERROR",))
+        ],
+    ]
+    (bundle / "stdout.bin").write_bytes("\r\n".join(summary_lines).encode("utf-8"))
     (bundle / "stderr.bin").write_bytes(b"")
 
     emit_failure_summary(bundle, max_nodes=20)

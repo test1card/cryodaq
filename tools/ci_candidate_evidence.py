@@ -16,7 +16,9 @@ from typing import Any
 from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported_candidate
 
 _SHA256 = "sha256:"
-_PYTEST_FAILURE_NODE = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+?)(?: - .*)?$", re.MULTILINE)
+_PYTEST_FAILURE_NODE = re.compile(
+    r"^(?:FAILED|ERROR) (?P<node>tests/\S+\[[^\r\n]*\]|tests/\S+)(?: - .*)?\r?$", re.MULTILINE
+)
 
 
 class CiCandidateEvidenceError(ValueError):
