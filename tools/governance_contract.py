@@ -84,6 +84,7 @@ _PUBLICATION_DISPOSITION_RECEIPTS_PATH = Path("governance/publication_dispositio
 _PUBLICATION_DISPOSITIONS = frozenset({"approved", "not_approved"})
 _PUBLICATION_REVIEW_MANDATES = frozenset({"depth-and-delta", "BREADTH"})
 _PUBLICATION_REVIEW_VERDICTS = frozenset({"approved", "do_not_approve"})
+_PUBLICATION_REVIEWER_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 _PUBLICATION_REVIEWER_FIELDS = frozenset({"identity", "mandate", "distinct_context", "verdict", "disagreements"})
 
 
@@ -565,7 +566,12 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
         attestation = receipt["attestation"]
         if not isinstance(attestation, Mapping) or set(attestation) != {"subject", "independent_contexts"}:
             raise GovernanceContractError(f"{receipt_id}.attestation shape is not exact")
-        _nonempty(attestation["subject"], f"{receipt_id}.attestation.subject")
+        subject = _nonempty(attestation["subject"], f"{receipt_id}.attestation.subject")
+        # Free text cannot bind a receipt to what it dispositions: an approved receipt
+        # naming an arbitrary candidate string validated. Require a full 40-hex commit.
+        subject_commit = subject.rsplit(" ", 1)[-1]
+        if _GIT_OBJECT_ID.fullmatch(subject_commit) is None:
+            raise GovernanceContractError(f"{receipt_id}.attestation.subject must end in a full 40-hex commit id")
         if attestation["independent_contexts"] is not True:
             raise GovernanceContractError(f"{receipt_id}.attestation.independent_contexts must be true")
 
@@ -586,6 +592,13 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
                     f"{field} must name identity, mandate, distinct_context, verdict, and disagreements"
                 )
             identity = _nonempty(reviewer["identity"], f"{field}.identity")
+            # Identities must be a constrained ASCII token. A reviewer differing only by
+            # a homoglyph is not independent, and normalisation does NOT catch that:
+            # NFKC folds compatibility variants, but a Cyrillic capital rendering like a
+            # Latin one is a genuinely distinct character it leaves alone. Restricting the
+            # charset defeats the whole confusable family by construction instead.
+            if _PUBLICATION_REVIEWER_IDENTITY.fullmatch(identity) is None:
+                raise GovernanceContractError(f"{field}.identity must be a plain ASCII identity token")
             identities.append(identity.casefold())
             mandate = reviewer["mandate"]
             if mandate not in _PUBLICATION_REVIEW_MANDATES:
