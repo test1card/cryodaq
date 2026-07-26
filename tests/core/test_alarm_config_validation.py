@@ -1122,3 +1122,307 @@ def test_composite_sub_condition_phase_elapsed_s_channel_loads(tmp_path: Path) -
     )
     _, alarms = load_alarm_config(p)
     assert any(a.alarm_id == "phase_too_long" for a in alarms)
+
+
+# ---------------------------------------------------------------------------
+# fail-OPEN gap (round 4): four more shapes a reviewer reproduced after the
+# selector-family split (f07314e6 / a6b6db88 / 2a16488b). Each loads cleanly
+# today and is then dead — or gone — at runtime.
+#
+#   1. alarm_type: stale skipped selector validation entirely, yet
+#      _eval_stale (alarm_v2.py:442) calls _resolve_channels(cfg) exactly like
+#      _eval_threshold/_eval_rate do, and its for-loop (L447) never runs on [].
+#      Exempting stale from the selector rule was an oversight: "no hard reads"
+#      justifies exempting it from the THRESHOLD rule, not from the SELECTOR
+#      rule.
+#   2. the selector rule tested KEY PRESENCE ONLY. Presence is not a selector:
+#      `channels: []`, `channels: null`, `channel: null` and a channel_group
+#      whose member list is empty all satisfy `key in cfg` and still resolve to
+#      [] (or crash) inside _resolve_channels (alarm_v2.py:468-476). A
+#      top-level `channel: phase_elapsed_s` is the same shape — L474 refuses to
+#      resolve the pseudo-channel, so it too yields [].
+#   3. channel_group was expanded in cfg and in composite conditions[i] but NOT
+#      in a rate alarm's additional_condition, so a legitimate any_above group
+#      sub-condition kept its channel_group key — which _resolve_channels never
+#      reads — and resolved to [] at runtime.
+#   4. a non-dict PHASE CONTAINER (phase_alarms: {cooldown: "typo"}) was
+#      silently `continue`d, dropping EVERY alarm of that phase. Same fail-open
+#      shape 2a16488b closed one level down for a non-dict alarm entry.
+# ---------------------------------------------------------------------------
+def test_stale_alarm_missing_channel_selector_raises(tmp_path: Path) -> None:
+    """Defect #1: alarm_type: stale with no channel/channels/channel_group.
+    _validate_required_keys exempted stale entirely ("no hard reads"), but
+    alarm_v2._eval_stale (L442) calls _resolve_channels(cfg) — which returns []
+    without a selector (L476) — and its per-channel for-loop (L447) then never
+    executes, so the alarm returns None forever. A CRITICAL data-loss
+    annunciator that loaded cleanly and can never fire."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          data_loss:
+            alarm_type: stale
+            timeout_s: 120
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel"):
+        load_alarm_config(p)
+
+
+def test_stale_alarm_with_channel_group_loads(tmp_path: Path) -> None:
+    """Guard for defect #1: the shipped data_loss_temperature shape (stale +
+    channel_group) must keep loading — channel_group is rewritten to `channels`
+    at load, so _resolve_channels honours it."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          all_temp: [T11, T12]
+        global_alarms:
+          data_loss_temperature:
+            alarm_type: stale
+            channel_group: all_temp
+            timeout_s: 120
+            level: CRITICAL
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    found = next(a for a in alarms if a.alarm_id == "data_loss_temperature")
+    assert found.config["channels"] == ["T11", "T12"]
+
+
+def test_threshold_empty_channels_list_raises(tmp_path: Path) -> None:
+    """Defect #2: `channels: []` satisfies `'channels' in cfg` but
+    alarm_v2._resolve_channels returns list([]) == [] (L470-471), so
+    _eval_threshold's for-loop (L223) never runs → dead forever. Presence is
+    not a selector; it must resolve to at least one channel."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          empty_selector:
+            alarm_type: threshold
+            channels: []
+            check: above
+            threshold: 4.0
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channels"):
+        load_alarm_config(p)
+
+
+def test_threshold_null_channel_raises(tmp_path: Path) -> None:
+    """Defect #2 (`channel: null` form): the key is present, so the old
+    presence-only rule passed it. At runtime alarm_v2._resolve_channels
+    (L472-475) returns [None], _state.get(None) never matches any tracked
+    channel, and the alarm is dead forever."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          null_selector:
+            alarm_type: threshold
+            channel: null
+            check: above
+            threshold: 4.0
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel"):
+        load_alarm_config(p)
+
+
+def test_rate_null_channels_raises(tmp_path: Path) -> None:
+    """Defect #2 (`channels: null` form): _resolve_channels does
+    list(cfg["channels"]) (L471) → TypeError on None → swallowed by
+    evaluate()'s broad `except Exception` (alarm_v2.py:201-203) → returns None
+    → silently dead."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          null_list_selector:
+            alarm_type: rate
+            channels: null
+            check: rate_above
+            threshold: 5.0
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channels"):
+        load_alarm_config(p)
+
+
+def test_threshold_channel_group_with_empty_member_list_raises(tmp_path: Path) -> None:
+    """Defect #2 (channel_group form): a KNOWN group whose member list is empty
+    expands to `channels: []` — the same [] resolution as an empty literal
+    selector, just one indirection away. Reject it where the resolution
+    actually happens."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          retired: []
+        global_alarms:
+          group_selector:
+            alarm_type: threshold
+            channel_group: retired
+            check: outside_range
+            range: [0.0, 350.0]
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+def test_threshold_top_level_phase_elapsed_s_channel_raises(tmp_path: Path) -> None:
+    """Defect #2 (pseudo-channel form): alarm_v2._resolve_channels explicitly
+    refuses to resolve `phase_elapsed_s` (L474: `if ch != "phase_elapsed_s"`),
+    so a TOP-LEVEL threshold/rate/stale alarm selecting it resolves to [] and
+    is dead. It is legitimate only inside a sub-condition, where
+    _eval_condition reads cond.get("channel") directly and re-routes it to the
+    phase provider (L348-350) — that shape stays accepted (see
+    test_composite_sub_condition_phase_elapsed_s_channel_loads)."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          phase_too_long:
+            alarm_type: threshold
+            channel: phase_elapsed_s
+            check: above
+            threshold: 3600
+            level: WARNING
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="phase_elapsed_s"):
+        load_alarm_config(p)
+
+
+def test_composite_sub_condition_empty_channels_list_raises(tmp_path: Path) -> None:
+    """Defect #2 on the sub-condition path: the any_* family resolves its
+    selector through _resolve_channels(cond) (alarm_v2.py:334/339), so an empty
+    `channels` makes any() over [] False forever — the same dead sub-condition
+    the presence-only rule was meant to stop."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        global_alarms:
+          vac_cold:
+            alarm_type: composite
+            operator: AND
+            conditions:
+              - channels: []
+                check: any_below
+                threshold: 200
+              - channel: P1
+                check: above
+                threshold: 1.0e-3
+            level: CRITICAL
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channels"):
+        load_alarm_config(p)
+
+
+def test_rate_additional_condition_channel_group_is_expanded(tmp_path: Path) -> None:
+    """Defect #3: channel_group is expanded in cfg and in composite
+    conditions[i] but NOT in a rate alarm's additional_condition, even though
+    both are the same sub-condition shape consumed by the same
+    _eval_condition. alarm_v2._resolve_channels never reads `channel_group`
+    (L468-476) — the loader is the only thing that gives that key meaning — so
+    the sub-condition resolved to [] and any() over [] gated the rate alarm
+    off forever. Resolution chosen: EXPAND (see _expand_alarm)."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          calibrated: [T11, T12]
+        global_alarms:
+          vacuum_stall:
+            alarm_type: rate
+            channel: P1
+            check: relative_rate_near_zero
+            rate_threshold: 0.01
+            additional_condition:
+              channel_group: calibrated
+              check: any_above
+              threshold: 200
+            level: INFO
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    found = next(a for a in alarms if a.alarm_id == "vacuum_stall")
+    add_cond = found.config["additional_condition"]
+    assert add_cond.get("channels") == ["T11", "T12"], (
+        f"additional_condition was left as {add_cond!r}: alarm_v2._resolve_channels "
+        f"never reads 'channel_group' (alarm_v2.py:468-476), so it resolves to [] "
+        f"and any() over [] is False → the rate alarm can never fire"
+    )
+    assert "channel_group" not in add_cond
+
+
+def test_rate_additional_condition_unknown_channel_group_raises(tmp_path: Path) -> None:
+    """Consequence of expanding defect #3: a channel_group TYPO inside
+    additional_condition must now fail closed exactly as it already does in cfg
+    and in composite conditions[i], instead of resolving to [] at runtime."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        channel_groups:
+          calibrated: [T11, T12]
+        global_alarms:
+          vacuum_stall:
+            alarm_type: rate
+            channel: P1
+            check: relative_rate_near_zero
+            additional_condition:
+              channel_group: calibrted
+              check: any_above
+              threshold: 200
+            level: INFO
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="channel_group"):
+        load_alarm_config(p)
+
+
+def test_non_dict_phase_container_raises(tmp_path: Path) -> None:
+    """Defect #4: a non-dict phase container (phase_alarms: {cooldown: "typo"})
+    was silently `continue`d by the loader, so EVERY alarm of that phase went
+    missing with no error and no log — the fail-open shape 2a16488b closed one
+    level down for a non-dict alarm ENTRY. Must raise, naming the phase and the
+    offending value."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        phase_alarms:
+          cooldown: "typo"
+        """,
+    )
+    with pytest.raises(AlarmConfigError, match="cooldown"):
+        load_alarm_config(p)
+
+
+def test_wellformed_phase_container_still_loads(tmp_path: Path) -> None:
+    """Guard for defect #4: a well-formed phase container keeps loading and
+    keeps its phase_filter."""
+    p = _write_yaml(
+        tmp_path,
+        """
+        phase_alarms:
+          cooldown:
+            excessive_cooling_rate:
+              alarm_type: rate
+              channels: [T11, T12]
+              check: rate_below
+              threshold: -5.0
+              level: WARNING
+        """,
+    )
+    _, alarms = load_alarm_config(p)
+    found = next(a for a in alarms if a.alarm_id == "excessive_cooling_rate")
+    assert found.phase_filter == ["cooldown"]

@@ -123,9 +123,20 @@ def load_alarm_config(
             alarms.append(_expand_alarm(alarm_id, alarm_raw, channel_groups))
 
         # --- Phase alarms ---
+        # Fail-closed: a non-dict phase CONTAINER (e.g. phase_alarms:
+        # {cooldown: "typo"}) used to be silently `continue`d, so EVERY alarm
+        # of that phase went missing from the loaded set — no error, no log,
+        # and an operator who believes the whole phase is covered. It is the
+        # same fail-open shape _expand_alarm already refuses one level down for
+        # a non-dict alarm ENTRY, just one container up, and it drops more.
+        # Raise instead, naming the phase and the offending value.
         for phase_name, phase_dict in raw.get("phase_alarms", {}).items():
             if not isinstance(phase_dict, dict):
-                continue
+                raise AlarmConfigError(
+                    f"phase_alarms[{phase_name!r}] must be a mapping of alarm_id → alarm "
+                    f"definitions, got {type(phase_dict).__name__} {phase_dict!r}; skipping it "
+                    f"would silently drop every alarm of phase {phase_name!r}"
+                )
             for alarm_id, alarm_raw in phase_dict.items():
                 alarms.append(_expand_alarm(alarm_id, alarm_raw, channel_groups, phase_filter=[phase_name]))
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
@@ -211,6 +222,35 @@ def _expand_alarm(
         if isinstance(cond, dict):
             _expand_channel_group(alarm_id, cond, channel_groups, context=f"conditions[{i}]")
 
+    # Expand channel_group inside a rate alarm's additional_condition too.
+    # It was expanded in cfg and in conditions[i] but NOT here, so a legitimate
+    # `any_above` group sub-condition kept its channel_group key — and
+    # alarm_v2._resolve_channels never reads that key (alarm_v2.py:468-476);
+    # the loader is the only thing that gives it meaning. The sub-condition
+    # therefore resolved to [] and any() over [] gated the rate alarm off
+    # forever (verified by probe: LOADED, RESOLVED []).
+    #
+    # EXPAND rather than REJECT, because:
+    #   - additional_condition and conditions[i] are the SAME sub-condition
+    #     shape, consumed by the SAME runtime function (_eval_condition), and
+    #     validated here by the SAME _validate_condition. Honouring
+    #     channel_group in one and not the other is a distinction with no basis
+    #     in the runtime.
+    #   - _validate_condition_selector already ACCEPTS channel_group as a valid
+    #     multi-channel selector for any_below/any_above wherever it is applied,
+    #     additional_condition included. Rejecting here would leave the
+    #     validator promising a shape the expander refuses.
+    #   - the runtime can honour the config perfectly once expanded — this is a
+    #     pure load-time rewrite, not a behaviour change in alarm_v2. Rejection
+    #     is the right answer only for shapes the runtime cannot honour (a
+    #     non-dict container, an unknown check), not for one the loader itself
+    #     failed to finish translating.
+    # Expanding also makes a channel_group TYPO here fail closed, exactly as it
+    # already does in cfg and conditions[i], instead of resolving to [].
+    add_cond = cfg.get("additional_condition")
+    if isinstance(add_cond, dict):
+        _expand_channel_group(alarm_id, add_cond, channel_groups, context="additional_condition")
+
     return AlarmConfig(
         alarm_id=alarm_id,
         config=cfg,
@@ -266,7 +306,10 @@ _VALID_COMPOSITE_OPERATORS = frozenset({"AND", "OR"})
 # Without one of these keys _resolve_channels returns [] (L476), and the
 # per-channel for-loop in _eval_threshold (L223), _eval_rate (L401), and
 # _eval_stale (L447) never executes — the alarm returns None forever (a dead
-# annunciator that looks configured).
+# annunciator that looks configured). PRESENCE OF THE KEY IS NOT ENOUGH: the
+# selector must also RESOLVE to at least one channel — see
+# _require_multi_channel_selector for the empty/null/mis-shaped forms that
+# satisfy `key in cfg` and still resolve to nothing.
 _MULTI_CHANNEL_SELECTOR_KEYS = frozenset({"channels", "channel", "channel_group"})
 
 # Sub-condition checks that read their selector via _resolve_channels(cond)
@@ -329,7 +372,10 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
         any_below/any_above accept channel/channels/channel_group;
         above/below/rate_* accept ONLY scalar `channel`
 
-    alarm_type: stale → no hard reads, exempt.
+    alarm_type: stale — _eval_stale (alarm_v2.py:440-462)
+      - no hard subscripts → exempt from the threshold rule
+      - channel selector (channel/channels/channel_group) required —
+        _eval_stale (L442) calls _resolve_channels; [] → never fires
 
     Any other alarm_type → rejected (unknown to alarm_v2).
     """
@@ -446,7 +492,15 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
             _validate_condition(alarm_id, cond, context=f"conditions[{i}]")
 
     elif alarm_type == "stale":
-        pass  # no hard reads — exempt (alarm_v2._eval_stale, alarm_v2.py:440-462)
+        # No hard subscripts — exempt from the THRESHOLD rule (alarm_v2._eval_stale
+        # reads only .get("timeout_s", 30.0) / .get("level") / .get("message")).
+        # It was wrongly exempt from the SELECTOR rule too: _eval_stale (L442)
+        # calls _resolve_channels(cfg) exactly like _eval_threshold (L218) and
+        # _eval_rate (L395) do, and its per-channel for-loop (L447) never
+        # executes on []. A stale alarm with no selector is therefore a dead
+        # data-loss annunciator — the highest-consequence dead alarm in the
+        # shipped set, since it is the one that reports the absence of data.
+        _require_multi_channel_selector(alarm_id, cfg, "(alarm_type=stale)")
 
     else:
         raise AlarmConfigError(
@@ -535,20 +589,112 @@ def _validate_condition(alarm_id: str, cond: dict, context: str) -> None:
 
 
 def _require_multi_channel_selector(alarm_id: str, cfg: dict, context: str) -> None:
-    """Require a selector that _resolve_channels expands to a non-empty list.
+    """Require a selector that _resolve_channels expands to a NON-EMPTY list.
 
     Mirrors alarm_v2._resolve_channels (L468-476): accepts ``channels`` (list),
     ``channel`` (scalar), or ``channel_group`` (rewritten to ``channels`` at
     load by _expand_channel_group). Without one, _resolve_channels returns []
-    and the for-loop in _eval_threshold (L223) / _eval_rate (L401) never
-    executes, so the alarm returns None forever — a dead annunciator that
-    looks configured.
+    and the for-loop in _eval_threshold (L223) / _eval_rate (L401) /
+    _eval_stale (L447) never executes, so the alarm returns None forever — a
+    dead annunciator that looks configured.
+
+    This used to check KEY PRESENCE ONLY, which is not the same property.
+    Presence is not a selector — every shape below satisfies ``key in cfg`` and
+    still resolves to nothing:
+
+      ``channels: []``      → list([]) is [] (L470-471) → dead.
+      ``channels: null``    → list(None) raises TypeError inside the evaluator,
+                              swallowed by evaluate()'s broad ``except
+                              Exception`` (L201-203) → returns None → dead.
+      ``channels: "T11"``   → list("T11") is ['T','1','1'] (L471) → three
+                              channel names that no Reading ever publishes →
+                              dead. A bare string is a mis-shaped list, not a
+                              one-element one.
+      ``channel: null``     → returns [None] (L472-475); ChannelStateTracker
+                              keys are ``str`` (channel_state.py:26) and are
+                              matched exactly, so None never matches → dead.
+      ``channel: phase_elapsed_s``
+                            → L474 explicitly REFUSES to resolve the pseudo-
+                              channel, so a TOP-LEVEL alarm selecting it gets
+                              [] → dead. It is legitimate only inside a
+                              sub-condition, where _eval_condition reads
+                              cond.get("channel") directly and re-routes it to
+                              the phase provider (L348-350); that path does not
+                              come through here.
+      ``channel_group: <group with an empty member list>``
+                            → expands to ``channels: []`` → dead. Caught in
+                              _expand_channel_group, where the resolution
+                              actually happens.
+
+    Precedence follows the runtime, and the load-time rewrite that precedes it:
+    _expand_channel_group OVERWRITES ``channels`` from the group, so
+    ``channel_group`` wins when both are present; _resolve_channels then
+    prefers ``channels`` over ``channel`` (L470 before L472).
     """
     if not any(key in cfg for key in _MULTI_CHANNEL_SELECTOR_KEYS):
         raise AlarmConfigError(
             f"alarm {alarm_id!r} {context} requires a channel selector "
             f"('channel', 'channels', or 'channel_group'); without one "
             f"alarm_v2._resolve_channels returns [] and the alarm never fires"
+        )
+
+    if "channel_group" in cfg:
+        # A group NAME here; _expand_channel_group resolves it (and fails
+        # closed on an unknown name or an empty member list) before the
+        # evaluator ever sees the cfg.
+        group_name = cfg["channel_group"]
+        if not isinstance(group_name, str) or not group_name:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} {context} has 'channel_group' "
+                f"{group_name!r}; a channel_group must be a non-empty group "
+                f"name, otherwise nothing is selected and the alarm never fires"
+            )
+        return
+
+    if "channels" in cfg:
+        channels = cfg["channels"]
+        if not isinstance(channels, list):
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} {context} has 'channels' "
+                f"{type(channels).__name__} {channels!r}; it must be a list of "
+                f"channel names — alarm_v2._resolve_channels does "
+                f"list(cfg['channels']) (alarm_v2.py:471), which yields [] for "
+                f"an empty value, raises on None, and splits a bare string into "
+                f"its characters; the alarm never fires in any of those cases"
+            )
+        if not channels:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} {context} has an empty 'channels' list; a "
+                f"selector must resolve to at least one channel, otherwise the "
+                f"per-channel loop in alarm_v2 never runs and the alarm never fires"
+            )
+        for i, ch in enumerate(channels):
+            if not isinstance(ch, str) or not ch:
+                raise AlarmConfigError(
+                    f"alarm {alarm_id!r} {context} has 'channels[{i}]' {ch!r}; "
+                    f"channel names must be non-empty strings — alarm_v2 matches "
+                    f"them EXACTLY against ChannelStateTracker keys, which are "
+                    f"str (channel_state.py:26), so this entry can never match"
+                )
+        return
+
+    ch = cfg["channel"]
+    if not isinstance(ch, str) or not ch:
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r} {context} has 'channel' {ch!r}; it must be a "
+            f"non-empty channel name — alarm_v2 matches channels EXACTLY "
+            f"against ChannelStateTracker keys, which are str "
+            f"(channel_state.py:26), so this selector can never match"
+        )
+    if ch == "phase_elapsed_s":
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r} {context} selects the pseudo-channel "
+            f"'phase_elapsed_s', which alarm_v2._resolve_channels explicitly "
+            f"refuses to resolve (alarm_v2.py:474) — it returns [] and the "
+            f"alarm never fires. 'phase_elapsed_s' is only meaningful inside a "
+            f"sub-condition with check=above, where _eval_condition reads "
+            f"cond.get('channel') directly and re-routes it to the phase "
+            f"provider (alarm_v2.py:348-350)"
         )
 
 
@@ -593,17 +739,39 @@ def _expand_channel_group(
     `channels` key at all, so alarm_v2._resolve_channels() resolved to an
     empty list at runtime and the alarm silently never fired (no hard read,
     no exception — a dead annunciator that looks configured).
+
+    A KNOWN group whose member list is empty (or not a list) is the same dead
+    end one indirection away: it expands to ``channels: []`` and resolves to
+    nothing. Refuse it here, where the resolution actually happens — the
+    selector check upstream can only see the group NAME.
     """
     group_name = cfg.pop("channel_group", None)
     if group_name is None:
         return
-    if group_name not in groups:
-        where = f" {context}" if context else ""
+    where = f" {context}" if context else ""
+    if not isinstance(group_name, str) or group_name not in groups:
         raise AlarmConfigError(
             f"alarm {alarm_id!r}{where} references unknown channel_group "
             f"{group_name!r}; known groups are {sorted(groups)}"
         )
-    cfg["channels"] = list(groups[group_name])
+    members = groups[group_name]
+    if not isinstance(members, list) or not members:
+        raise AlarmConfigError(
+            f"alarm {alarm_id!r}{where} references channel_group {group_name!r}, "
+            f"which resolves to {members!r}; a channel_group must list at least "
+            f"one channel — an empty resolution leaves alarm_v2._resolve_channels "
+            f"returning [] and the alarm never fires"
+        )
+    for i, ch in enumerate(members):
+        if not isinstance(ch, str) or not ch:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r}{where} references channel_group "
+                f"{group_name!r}, whose member [{i}] is {ch!r}; channel names "
+                f"must be non-empty strings — alarm_v2 matches them EXACTLY "
+                f"against ChannelStateTracker keys, which are str "
+                f"(channel_state.py:26), so this member can never match"
+            )
+    cfg["channels"] = list(members)
 
 
 def _find_default_config() -> Path | None:
