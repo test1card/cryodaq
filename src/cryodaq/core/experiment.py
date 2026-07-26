@@ -2701,7 +2701,7 @@ class ExperimentManager:
                         item["timestamp"].isoformat(),
                         item["instrument_id"],
                         item["channel"],
-                        item["value"],
+                        item["value"] if math.isfinite(item["value"]) else "",
                         item["unit"],
                         item["status"],
                     ]

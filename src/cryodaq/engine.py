@@ -7754,16 +7754,16 @@ def main() -> None:
             # unrecoverable by retry — exit with a distinct code so the
             # launcher refuses to spin in a tight restart loop.
             logger.critical(
-                "Engine startup config failed: phase=yaml exception=%s",
-                type(exc).__name__,
+                "Engine startup config failed: phase=yaml error=%s",
+                exc,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except FileNotFoundError as exc:
             # Missing required config file at startup is also a config
             # error: same exit code.
             logger.critical(
-                "Engine startup config failed: phase=file_missing exception=%s",
-                type(exc).__name__,
+                "Engine startup config failed: phase=file_missing error=%s",
+                exc,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
         except (
@@ -7789,9 +7789,9 @@ def main() -> None:
                 "config",
             )
             logger.critical(
-                "CONFIG ERROR (%s config): exception=%s",
+                "CONFIG ERROR (%s config): %s",
                 label,
-                type(exc).__name__,
+                exc,
             )
             sys.exit(ENGINE_CONFIG_ERROR_EXIT_CODE)
     finally:

@@ -446,7 +446,13 @@ class AssistantQueryAgent:
 
     def _fmt_alarm_status(self, query: str, data: dict[str, Any]) -> str:
         result = data.get("alarm_result")
-        if result is None or result.count == 0:
+        if result is None:
+            return FORMAT_ALARM_STATUS_USER.format(
+                query=query,
+                alarm_count="нет данных",
+                alarms_text="нет данных о тревогах",
+            )
+        if result.count == 0:
             return FORMAT_ALARM_STATUS_USER.format(
                 query=query,
                 alarm_count=0,
@@ -512,7 +518,13 @@ class AssistantQueryAgent:
             h = vac.eta_seconds / 3600
             vac_text = f"{int(h)}ч {int((h % 1) * 60)}мин"
 
-        alarms_text = ", ".join(a.alarm_id for a in cs.active_alarms) if cs.active_alarms else "тревог нет"
+        alarms_text = (
+            ", ".join(a.alarm_id for a in cs.active_alarms)
+            if cs.active_alarms
+            else "тревог нет"
+            if cs.alarms_available
+            else "нет данных о тревогах"
+        )
 
         return FORMAT_COMPOSITE_STATUS_USER.format(
             query=query,

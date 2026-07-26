@@ -250,10 +250,14 @@ async def test_alarm_adapter_returns_empty_when_no_alarms() -> None:
     assert result.count == 0
 
 
-async def test_alarm_adapter_returns_empty_when_call_fails() -> None:
+async def test_alarm_adapter_returns_none_when_call_fails() -> None:
     adapter = AlarmAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    result = await adapter.active()
-    assert result.count == 0
+    assert await adapter.active() is None
+
+
+async def test_alarm_adapter_returns_none_for_malformed_reply() -> None:
+    adapter = AlarmAdapter(_fake_client(None))
+    assert await adapter.active() is None
 
 
 # ---------------------------------------------------------------------------
@@ -417,3 +421,12 @@ async def test_composite_adapter_handles_partial_failure() -> None:
     # Gracefully degraded — snapshot failed, key_temperatures is empty
     assert result.key_temperatures == {}
     assert result.snapshot_empty is True
+
+
+async def test_composite_adapter_marks_alarm_data_unavailable() -> None:
+    adapter, _snap, _cooldown, _vacuum, alarms, _experiment = await _make_composite_adapter()
+    alarms.active = AsyncMock(return_value=None)
+
+    result = await adapter.status()
+
+    assert result.alarms_available is False

@@ -23,11 +23,11 @@ class AlarmAdapter:
     def __init__(self, engine_client: EngineQueryClient) -> None:
         self._client = engine_client
 
-    async def active(self) -> AlarmStatusResult:
-        reply = await self._client.call({"cmd": "alarm_v2_status"})
-        if not reply.get("ok"):
-            return AlarmStatusResult()
+    async def active(self) -> AlarmStatusResult | None:
         try:
+            reply = await self._client.call({"cmd": "alarm_v2_status"})
+            if not reply.get("ok"):
+                return None
             active: dict[str, Any] = reply.get("active", {})
             infos = [
                 ActiveAlarmInfo(
@@ -45,4 +45,4 @@ class AlarmAdapter:
             return AlarmStatusResult(active=infos)
         except Exception as exc:
             logger.warning("AlarmAdapter.active failed: %s", exc)
-            return AlarmStatusResult()
+            return None

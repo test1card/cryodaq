@@ -203,3 +203,4 @@ class CompositeStatus:
     current_pressure: float | None
     snapshot_empty: bool = False
     snapshot_age_s: float | None = None
+    alarms_available: bool = True

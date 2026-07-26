@@ -72,7 +72,7 @@ class CompositeAdapter:
             elif unit in ("mbar", "Pa") and current_pressure is None:
                 current_pressure = val
 
-        active_alarms = getattr(alarm_result, "active", []) if alarm_result else []
+        active_alarms = getattr(alarm_result, "active", []) if alarm_result is not None else []
 
         if vac_eta is not None and vac_eta.current_mbar is None and current_pressure is not None:
             vac_eta.current_mbar = current_pressure
@@ -95,4 +95,5 @@ class CompositeAdapter:
             current_pressure=current_pressure,
             snapshot_empty=snapshot_empty,
             snapshot_age_s=snapshot_age_s,
+            alarms_available=alarm_result is not None,
         )

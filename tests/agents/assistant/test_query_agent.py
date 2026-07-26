@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
+from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
 from cryodaq.agents.assistant.query.agent import _FALLBACK, AssistantQueryAgent
 from cryodaq.agents.assistant.query.schemas import (
     ActiveAlarmInfo,
@@ -577,3 +579,68 @@ async def test_query_agent_format_alarm_with_active_alarms() -> None:
     assert captured_prompt  # format prompt was built
     assert "T1_high" in captured_prompt[0]
     assert "WARNING" in captured_prompt[0]
+
+
+async def test_query_agent_failed_alarm_transport_formats_unavailable() -> None:
+    """A failed engine alarm query must not format as an empty alarm set."""
+    adapters = _make_adapters()
+    client = MagicMock()
+    client.call = AsyncMock(return_value={"ok": False, "error": "engine unavailable"})
+    adapters.alarms = AlarmAdapter(client)
+    prompts: list[str] = []
+    calls = 0
+
+    async def generate(prompt, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _make_gen_result(_intent_json("alarm_status"))
+        prompts.append(prompt)
+        return _make_gen_result("Нет данных о тревогах.")
+
+    ollama = MagicMock()
+    ollama.generate = AsyncMock(side_effect=generate)
+
+    response = await _make_agent(ollama, adapters).handle_query("Есть ли тревоги?")
+
+    assert response == "Нет данных о тревогах."
+    assert "нет данных о тревогах" in prompts[0]
+    assert "Активные тревоги (0 шт.):\nтревог нет" not in prompts[0]
+
+
+async def test_query_agent_composite_failed_alarm_transport_formats_unavailable() -> None:
+    """Composite status must preserve unavailable alarm truth to its prompt."""
+    adapters = _make_adapters()
+    adapters.broker_snapshot.latest_with_labels = AsyncMock(
+        return_value={"T_cold": {"value": 4.2, "unit": "K", "display_name": "T_cold"}}
+    )
+    adapters.broker_snapshot.oldest_age_s = AsyncMock(return_value=None)
+    client = MagicMock()
+    client.call = AsyncMock(return_value={"ok": False, "error": "engine unavailable"})
+    adapters.alarms = AlarmAdapter(client)
+    adapters.composite = CompositeAdapter(
+        broker_snapshot=adapters.broker_snapshot,
+        cooldown=adapters.cooldown,
+        vacuum=adapters.vacuum,
+        alarms=adapters.alarms,
+        experiment=adapters.experiment,
+    )
+    prompts: list[str] = []
+    calls = 0
+
+    async def generate(prompt, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _make_gen_result(_intent_json("composite_status"))
+        prompts.append(prompt)
+        return _make_gen_result("Нет данных о тревогах.")
+
+    ollama = MagicMock()
+    ollama.generate = AsyncMock(side_effect=generate)
+
+    response = await _make_agent(ollama, adapters).handle_query("Что сейчас?")
+
+    assert response == "Нет данных о тревогах."
+    assert "нет данных о тревогах" in prompts[0]
+    assert "тревог нет" not in prompts[0]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -462,6 +463,46 @@ async def test_finalize_builds_archive_snapshot_with_tables_plots_and_run_artifa
     stored_record = metadata["run_records"][0]
     assert stored_record["experiment_context"]["sample"] == "Cu-archive"
     assert all(path.startswith(str(archive_root)) for path in stored_record["artifact_paths"])
+
+
+def test_archive_measured_values_blanks_nonfinite_values(manager: ExperimentManager, tmp_path: Path) -> None:
+    table = tmp_path / "measured_values.csv"
+    timestamp = datetime(2026, 7, 27, tzinfo=UTC)
+
+    manager._write_measured_values_table(
+        table,
+        [
+            {
+                "timestamp": timestamp,
+                "instrument_id": "ls218",
+                "channel": "T1",
+                "value": float("nan"),
+                "unit": "K",
+                "status": "masked",
+            },
+            {
+                "timestamp": timestamp,
+                "instrument_id": "ls218",
+                "channel": "T2",
+                "value": float("inf"),
+                "unit": "K",
+                "status": "masked",
+            },
+            {
+                "timestamp": timestamp,
+                "instrument_id": "ls218",
+                "channel": "T3",
+                "value": 4.2,
+                "unit": "K",
+                "status": "ok",
+            },
+        ],
+    )
+
+    with table.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert [row["value"] for row in rows] == ["", "", "4.2"]
 
 
 # ---------------------------------------------------------------------------

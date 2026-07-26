@@ -432,8 +432,8 @@ def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, 
                     logger.warning("reporting.automatic_enabled must be a boolean; using normal-mode default")
         except Exception as exc:
             logger.warning(
-                "Startup config parse failed; phase=agent_yaml exception=%s",
-                type(exc).__name__,
+                "Startup config parse failed; phase=agent_yaml error=%s",
+                exc,
             )
 
     reporting_path = config_dir / "reporting.yaml"
@@ -454,8 +454,8 @@ def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, 
                     logger.warning("reporting.automatic_enabled must be a boolean; preserving current default")
         except Exception as exc:
             logger.warning(
-                "Startup config parse failed; phase=reporting_yaml exception=%s",
-                type(exc).__name__,
+                "Startup config parse failed; phase=reporting_yaml error=%s",
+                exc,
             )
     periodic_requested = False
     if experiment_mode:

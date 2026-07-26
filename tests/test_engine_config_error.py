@@ -59,7 +59,7 @@ def test_engine_exits_code_2_on_descriptor_config_error(monkeypatch, caplog: pyt
     import cryodaq.engine as engine
     from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError
 
-    secret = "descriptor manifest unavailable\r\nTOP-SECRET"
+    detail = "live descriptor manifest instrument mismatch (missing=ls218, extra=ls336)"
 
     async def fail_descriptor_startup(
         *,
@@ -74,7 +74,7 @@ def test_engine_exits_code_2_on_descriptor_config_error(monkeypatch, caplog: pyt
         assert shutdown_capability == ""
         assert engine_ready_nonce == ""
         assert engine_ready_channel_fd is None
-        raise ChannelDescriptorStorageError(secret)
+        raise ChannelDescriptorStorageError(detail)
 
     monkeypatch.setattr(engine, "_run_engine", fail_descriptor_startup)
     monkeypatch.setattr(engine, "_acquire_engine_lock", lambda: 1)
@@ -90,6 +90,5 @@ def test_engine_exits_code_2_on_descriptor_config_error(monkeypatch, caplog: pyt
         engine.main()
 
     assert raised.value.code == engine.ENGINE_CONFIG_ERROR_EXIT_CODE
-    assert "CONFIG ERROR (channel descriptor config): exception=ChannelDescriptorStorageError" in caplog.text
-    assert secret not in caplog.text
-    assert "TOP-SECRET" not in caplog.text
+    assert "CONFIG ERROR (channel descriptor config):" in caplog.text
+    assert detail in caplog.text
