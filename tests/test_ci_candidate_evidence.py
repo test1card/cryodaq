@@ -498,15 +498,41 @@ def test_failed_candidate_summary_is_bounded_and_workflow_required(
     bundle = tmp_path / "candidate-evidence"
     bundle.mkdir()
     (bundle / "execution-receipt.json").write_text('{"returncode": 1}\n', encoding="utf-8")
-    nodes = [f"tests/core/test_visible_{index}.py::test_failure_{index}" for index in range(25)]
-    (bundle / "stdout.bin").write_text("\n".join(f"FAILED {node} - failure" for node in nodes), encoding="utf-8")
+    collection = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--collect-only", "-q"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+        encoding="utf-8",
+        text=True,
+    )
+    nodes = [
+        line
+        for line in collection.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line and any(character.isspace() for character in line)
+    ][:25]
+    assert len(nodes) == 25
+    reported_nodes = [nodes[0].split("::", maxsplit=1)[0], *nodes]
+    (bundle / "stdout.bin").write_text(
+        "\n".join(
+            [f"ERROR {reported_nodes[0]} - collection error"]
+            + [
+                f"{outcome} {node} - {outcome.lower()} message"
+                for index, node in enumerate(nodes)
+                for outcome in (("FAILED",) if index % 2 == 0 else ("ERROR",))
+            ]
+        ),
+        encoding="utf-8",
+    )
     (bundle / "stderr.bin").write_bytes(b"")
 
     emit_failure_summary(bundle, max_nodes=20)
     output = capsys.readouterr().out
-    assert all(node in output for node in nodes[:20])
-    assert all(node not in output for node in nodes[20:])
-    assert "5 additional node IDs" in output
+    node_prefix = "FAILED NODE: tests/"
+    emitted_nodes = [line.removeprefix("FAILED NODE: ") for line in output.splitlines() if line.startswith(node_prefix)]
+    assert emitted_nodes == reported_nodes[:20]
+    assert all(node not in emitted_nodes for node in reported_nodes[20:])
+    assert "6 additional node IDs" in output
 
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     steps = payload["jobs"]["test"]["steps"]

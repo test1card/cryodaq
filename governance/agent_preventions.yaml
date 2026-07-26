@@ -2289,24 +2289,36 @@ false_green_pairs:
     runtime_prevention_id: CANDIDATE-FAILURE-VISIBILITY-028
     guard: tests/test_ci_candidate_evidence.py::test_failed_candidate_summary_is_bounded_and_workflow_required
     ci_partition: remaining
-    red_evidence: sealed_candidate_failure_was_preserved_only_in_stdout_bin_and_stderr_bin_while_clean_later_job_log_steps_concealed_the_failed_d7_guard_2026_07_26_pending_immutable_capture
+    red_evidence:
+      locator: artifact:8626948662
+      sha256: sha256:fcbcb798daa38f014db870f543e0fb94c39388d54ee4aefc89dbff0be9300fb6
     green_evidence: pending
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-FALSE-GREEN-198
-    status: open
+    status: closed
     scope: product_contract
     runtime_prevention_id: ALARM-PHASE-ELAPSED-SUBCONDITION-026
     guard: tests/core/test_alarm_config_validation.py::test_composite_sub_condition_phase_elapsed_s_below_raises
     ci_partition: core
-    red_evidence: phase_elapsed_s_below_subcondition_loaded_then_evaluated_false_forever_and_suppressed_its_enclosing_composite_alarm_2026_07_26_pending_immutable_capture
-    green_evidence: pending
+    red_evidence:
+      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
+      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+    green_evidence:
+      locator: artifact:8627640246
+      sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+    closure_semantics_sha256: sha256:fff32d16700bad2fcfb38f996081264873a35f443a1173fa36e46c1a8ec25054
   - id: ALARM-MIXED-SELECTOR-FALSE-GREEN-199
-    status: open
+    status: closed
     scope: product_contract
     runtime_prevention_id: ALARM-MIXED-SELECTOR-027
     guard: tests/core/test_alarm_config_validation.py::test_top_level_channels_and_channel_group_raises
     ci_partition: core
-    red_evidence: channel_group_expansion_silently_overwrote_an_explicit_channel_selector_and_changed_the_monitored_channel_set_2026_07_26_pending_immutable_capture
-    green_evidence: pending
+    red_evidence:
+      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
+      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+    green_evidence:
+      locator: artifact:8627640246
+      sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+    closure_semantics_sha256: sha256:f5a8098a52f1d9643d6af3d311a153adef0a335d6f0dad9273b720bc6b0736ee
   - id: TEST-LIVE-RUNTIME-PROOF-FALSE-GREEN-166
     status: open
     scope: repository
@@ -4084,19 +4096,21 @@ records:
     status: open
     scope: repository
     authority_source: AGENTS.md#integration-and-publication-discipline
-    applies_to: Failed sealed-candidate GitHub Actions executions and their ordinary job logs.
+    applies_to: Failed sealed-candidate GitHub Actions executions, including whitespace-bearing parametrized node IDs and collection or fixture ERROR outcomes, and their ordinary job logs.
     classification: failed_candidate_log_concealment
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A candidate can fail while subsequent clean log steps conceal the failing node from ordinary job-log review.
-    invariant: A failed sealed candidate emits a bounded failing-node summary in the ordinary job log while the complete stdout/stderr bundle is retained.
+    invariant: A failed sealed candidate emits a bounded summary of every pytest FAILED or ERROR node ID, preserving whitespace in parametrized IDs and excluding the trailing failure message, in the ordinary job log while the complete stdout/stderr bundle is retained.
     rule_refs:
       - AGENTS.md#integration-and-publication-discipline
     guards:
       - node: tests/test_ci_candidate_evidence.py::test_failed_candidate_summary_is_bounded_and_workflow_required
         ci_partition: remaining
-    red_evidence: sealed_candidate_failure_was_preserved_only_in_stdout_bin_and_stderr_bin_while_clean_later_job_log_steps_concealed_the_failed_d7_guard_2026_07_26_pending_immutable_capture
+    red_evidence:
+      locator: artifact:8626960353
+      sha256: sha256:05e1a973ff9f0ad83f2207e193d340c0dd60b48b28139102959699a37498d1d5
     green_evidence: pending
 
   - id: BROKER-DELIVERY-ISOLATION-015
@@ -4122,7 +4136,7 @@ records:
     green_evidence: pending
 
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-026
-    status: open
+    status: closed
     scope: product_contract
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     applies_to: Alarm configuration composite conditions and rate additional conditions that select phase_elapsed_s.
@@ -4144,11 +4158,16 @@ records:
         ci_partition: core
       - node: tests/core/test_alarm_config_validation.py::test_rate_additional_condition_phase_elapsed_s_above_still_loads
         ci_partition: core
-    red_evidence: phase_elapsed_s_below_and_rate_subconditions_loaded_then_evaluated_false_forever_outside_the_single_phase_provider_branch_2026_07_26_pending_immutable_capture
-    green_evidence: pending
+    red_evidence:
+      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
+      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+    green_evidence:
+      locator: artifact:8627640246
+      sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+    closure_semantics_sha256: sha256:cd0e99be98ef6cc2fcbc82d7516ed8532ea27d401ea062582085ca422c93a540
 
   - id: ALARM-MIXED-SELECTOR-027
-    status: open
+    status: closed
     scope: product_contract
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     applies_to: Alarm configuration top-level selectors, composite conditions, and rate additional conditions containing channel_group.
@@ -4170,8 +4189,13 @@ records:
         ci_partition: core
       - node: tests/core/test_alarm_config_validation.py::test_single_explicit_channels_selector_still_loads
         ci_partition: core
-    red_evidence: channel_group_expansion_silently_overwrote_explicit_channel_or_channels_selectors_across_each_loader_expansion_site_2026_07_26_pending_immutable_capture
-    green_evidence: pending
+    red_evidence:
+      locator: tree:9662e675f962034e927712c573e8f5b267596885:src/cryodaq/core/alarm_config.py
+      sha256: sha256:6eef980501f3254bd640e562ad69544c5cf2698615229d67087821def8d680ee
+    green_evidence:
+      locator: artifact:8627640246
+      sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
+    closure_semantics_sha256: sha256:30499843fe4c6a107aa81e29e0206f21d46f745b1445e7ee5c07845cff5ec2e5
 
   - id: COMMAND-REPLY-BOUNDS-016
     status: open

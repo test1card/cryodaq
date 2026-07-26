@@ -16,7 +16,7 @@ from typing import Any
 from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported_candidate
 
 _SHA256 = "sha256:"
-_FAILED_NODE = re.compile(r"^FAILED (?P<node>tests/[^\s]+::[^\s]+)(?:\s|$)", re.MULTILINE)
+_PYTEST_FAILURE_NODE = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+?)(?: - .*)?$", re.MULTILINE)
 
 
 class CiCandidateEvidenceError(ValueError):
@@ -275,7 +275,7 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     output = "\n".join(
         (bundle / name).read_bytes().decode("utf-8", errors="replace") for name in ("stdout.bin", "stderr.bin")
     )
-    nodes = tuple(dict.fromkeys(match.group("node") for match in _FAILED_NODE.finditer(output)))
+    nodes = tuple(dict.fromkeys(match.group("node") for match in _PYTEST_FAILURE_NODE.finditer(output)))
     print(f"Exact candidate failed (exit {returncode}); failing pytest node IDs follow (max {max_nodes}).")
     if not nodes:
         print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
