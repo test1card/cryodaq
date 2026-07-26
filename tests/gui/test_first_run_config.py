@@ -552,9 +552,17 @@ def test_recovery_manifest_and_secret_snapshots_are_owner_only_and_cleaned(tmp_p
     assert "new-secret" not in manifest_text
     assert {target["name"] for target in manifest["targets"]} == {
         "instruments.local.yaml",
+        "channel_descriptors.local.yaml",
         "notifications.local.yaml",
     }
-    assert all(target["existed"] and target["snapshot"] for target in manifest["targets"])
+    # The derived descriptor authority is a fresh write on this install, so it is
+    # rolled back by deletion and carries no snapshot; every target that did exist
+    # must carry one, and nothing else may claim a snapshot.
+    assert {target["name"] for target in manifest["targets"] if target["existed"]} == {
+        "instruments.local.yaml",
+        "notifications.local.yaml",
+    }
+    assert all(bool(target["snapshot"]) is target["existed"] for target in manifest["targets"])
     done = json.loads((tmp_path / cfg.FIRST_RUN_MARKER_NAME).read_text(encoding="utf-8"))
     assert done["txn_id"] == manifest["txn_id"]
     assert manifest_path.stat().st_mode & 0o077 == 0
