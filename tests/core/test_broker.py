@@ -790,3 +790,26 @@ async def test_claimed_required_publication_cancellation_waits_and_surfaces_late
     queue.task_done()
     with pytest.raises(RuntimeError, match="required publisher did not settle the event"):
         await publication
+
+
+async def test_cancelled_required_publication_settlement_cannot_forge_acknowledgement() -> None:
+    broker = DataBroker()
+    queue = await broker.subscribe("required_zmq", maxsize=1, required_publisher=True)
+    publication = asyncio.create_task(
+        broker.publish_required(
+            _reading("operator_log", 25.0, ""),
+            request_id="b" * 32,
+            request_fingerprint="c" * 64,
+        )
+    )
+    envelope = await asyncio.wait_for(queue.get(), timeout=0.1)
+    assert type(envelope) is RequiredPublication
+    envelope.claim()
+    envelope._settlement.cancel()
+
+    with pytest.raises(RuntimeError, match="settlement is no longer pending"):
+        envelope.acknowledge()
+    assert envelope._state.value == "claimed"
+    queue.task_done()
+    with pytest.raises(asyncio.CancelledError):
+        await publication

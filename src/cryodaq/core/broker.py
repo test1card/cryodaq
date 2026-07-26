@@ -94,8 +94,10 @@ class RequiredPublication:
         if self._state is _RequiredPublicationState.UNCLAIMED:
             raise RuntimeError("required publication must be claimed before acknowledgement")
         if self._state is _RequiredPublicationState.CLAIMED:
-            self._state = _RequiredPublicationState.ACKNOWLEDGED
+            if self._settlement.done():
+                raise RuntimeError("required publication settlement is no longer pending")
             self._settlement.set_result(None)
+            self._state = _RequiredPublicationState.ACKNOWLEDGED
             return
         if self._state is _RequiredPublicationState.ACKNOWLEDGED:
             return
@@ -106,8 +108,10 @@ class RequiredPublication:
             _RequiredPublicationState.UNCLAIMED,
             _RequiredPublicationState.CLAIMED,
         ):
-            self._state = _RequiredPublicationState.REJECTED
+            if self._settlement.done():
+                raise RuntimeError("required publication settlement is no longer pending")
             self._settlement.set_exception(RuntimeError("required publisher did not settle the event"))
+            self._state = _RequiredPublicationState.REJECTED
             return
         if self._state in (
             _RequiredPublicationState.REJECTED,
@@ -119,8 +123,10 @@ class RequiredPublication:
     def _withdraw_if_unclaimed(self, failure: RuntimeError) -> bool:
         if self._state is not _RequiredPublicationState.UNCLAIMED:
             return False
-        self._state = _RequiredPublicationState.WITHDRAWN
+        if self._settlement.done():
+            raise RuntimeError("required publication settlement is no longer pending")
         self._settlement.set_exception(failure)
+        self._state = _RequiredPublicationState.WITHDRAWN
         return True
 
 
@@ -129,34 +135,23 @@ async def _await_required_publication(envelope: RequiredPublication) -> None:
 
     cancellation: asyncio.CancelledError | None = None
     settlement = envelope._settlement
-
-    async def observe() -> BaseException | None:
+    while not settlement.done():
         try:
-            await settlement
-        except BaseException as exc:
-            return exc
-        return None
-
-    observer = asyncio.create_task(
-        observe(),
-        name="required-publication-terminal-observer",
-    )
-    while not observer.done():
-        try:
-            await asyncio.shield(observer)
+            await asyncio.shield(settlement)
         except asyncio.CancelledError as exc:
             if cancellation is None:
                 cancellation = exc
             envelope._withdraw_if_unclaimed(_RequiredPublicationCallerCancelled())
-    settlement_error = observer.result()
-    if isinstance(settlement_error, _RequiredPublicationCallerCancelled):
+    try:
+        settlement.result()
+    except _RequiredPublicationCallerCancelled:
         if cancellation is None:
             raise RuntimeError("required publication withdrawal lost caller cancellation") from None
         raise cancellation
-    if settlement_error is not None:
-        if cancellation is not None and not isinstance(settlement_error, asyncio.CancelledError):
-            raise settlement_error from cancellation
-        raise settlement_error
+    except BaseException as exc:
+        if cancellation is not None and not isinstance(exc, asyncio.CancelledError):
+            raise exc from cancellation
+        raise
     if cancellation is not None:
         raise cancellation
 
