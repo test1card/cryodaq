@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
-from cryodaq.core.alarm_config import AlarmConfig, SetpointDef
+from cryodaq.core.alarm_config import AlarmConfig, SetpointDef, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
 from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager, tick_alarm
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.rate_estimator import RateEstimator
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import ChannelStatus, Reading
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -91,9 +93,7 @@ def test_phase_alarm_suppressed_outside_phase() -> None:
     state2, rate2, ev2, sm2 = _make_stack(phase="measurement", setpoints={"T12_setpoint": 4.2})
     state2.update(_reading("T12", 5.5))
     fired = _simulate_tick(ev2, sm2, [alarm_cfg], current_phase="measurement")
-    assert fired.get("detector_drift") == "TRIGGERED", (
-        f"alarm must fire inside its phase filter, got {fired}"
-    )
+    assert fired.get("detector_drift") == "TRIGGERED", f"alarm must fire inside its phase filter, got {fired}"
 
 
 def test_phase_alarm_fires_in_correct_phase() -> None:
@@ -121,8 +121,7 @@ def test_phase_alarm_fires_in_correct_phase() -> None:
 
     transitions = _simulate_tick(ev, sm, [alarm_cfg], current_phase="measurement")
     assert transitions.get("detector_drift") == "TRIGGERED", (
-        f"alarm with phase_filter=['measurement'] must fire when current_phase='measurement', "
-        f"got {transitions}"
+        f"alarm with phase_filter=['measurement'] must fire when current_phase='measurement', got {transitions}"
     )
 
 
@@ -214,6 +213,37 @@ def test_tick_dedup_no_retrigger() -> None:
     # Second tick — still faulty, should be deduped
     t2 = _simulate_tick(ev, sm, alarms, None)
     assert "sensor_fault" not in t2  # no re-notify
+
+
+def test_shipped_vacuum_loss_cold_holds_when_pressure_becomes_unusable() -> None:
+    """The real CRITICAL vacuum alarm may not clear when pressure becomes unknown."""
+    _, alarms = load_alarm_config(Path(__file__).parents[2] / "config" / "alarms_v3.yaml")
+    alarm_cfg = next(alarm for alarm in alarms if alarm.alarm_id == "vacuum_loss_cold")
+    assert alarm_cfg.config["level"] == "CRITICAL"
+    assert alarm_cfg.notify == ["gui", "telegram", "sound"]
+
+    state, _, evaluator, state_mgr = _make_stack()
+    state.update(_reading("Т11", 100.0))
+    state.update(_reading("Т12", 100.0))
+    state.update(_reading("VSP63D_1/pressure", 2.0e-3, unit="mbar"))
+
+    _, initial_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
+    assert initial_transition == "TRIGGERED"
+
+    state.update(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="VSP63D_1",
+            channel="VSP63D_1/pressure",
+            value=math.nan,
+            unit="mbar",
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+    )
+
+    _, next_transition = tick_alarm(alarm_cfg, None, evaluator, state_mgr)
+    assert next_transition is None
+    assert "vacuum_loss_cold" in state_mgr.get_active()
 
 
 # ---------------------------------------------------------------------------

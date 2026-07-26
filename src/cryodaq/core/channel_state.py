@@ -6,6 +6,7 @@ readings для intermittent fault detection.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -30,6 +31,14 @@ class ChannelState:
     instrument_id: str
     is_stale: bool = False
     fault_count_window: int = 0  # количество fault readings в окне (заполняется трекером)
+
+    @property
+    def is_usable(self) -> bool:
+        """Whether this state still represents a finite, fresh measurement."""
+        try:
+            return not self.is_stale and math.isfinite(self.value)
+        except TypeError:
+            return False
 
 
 class ChannelStateTracker:

@@ -341,6 +341,42 @@ def test_composite_or() -> None:
     assert result is not None
 
 
+def test_composite_unknown_propagates_for_and_and_or() -> None:
+    """A stale input is unknown: it never activates an alarm by itself."""
+    ev = _make_evaluator(
+        [
+            _reading("T11", 100.0),
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="VSP63D_1",
+                channel="P1",
+                value=math.nan,
+                unit="mbar",
+                status=ChannelStatus.SENSOR_ERROR,
+            ),
+        ]
+    )
+    unknown_pressure = {"channel": "P1", "check": "above", "threshold": 1e-3}
+
+    assert ev._eval_condition(unknown_pressure) is None
+    assert ev._and_conditions([True, None]) is None
+    assert ev._and_conditions([False, None]) is False
+    assert ev._or_conditions([False, None]) is None
+    assert ev._or_conditions([True, None]) is True
+
+    and_cfg = {
+        "alarm_type": "composite",
+        "operator": "AND",
+        "conditions": [
+            {"channel": "T11", "check": "below", "threshold": 200},
+            unknown_pressure,
+        ],
+    }
+    or_cfg = {**and_cfg, "operator": "OR"}
+    assert ev.evaluate("unknown_and", and_cfg) is None
+    assert ev.evaluate("unknown_or", or_cfg) is not None
+
+
 # ---------------------------------------------------------------------------
 # Rate
 # ---------------------------------------------------------------------------
@@ -417,6 +453,48 @@ def test_rate_no_data_no_fire() -> None:
         "rate_window_s": 90,
     }
     assert ev.evaluate("test", cfg) is None
+
+
+def test_active_rate_alarm_holds_on_unusable_reading() -> None:
+    """A rate alarm may not clear solely because its channel becomes unknown."""
+    state = ChannelStateTracker()
+    rate = RateEstimator(window_s=120.0, min_points=2)
+    evaluator = AlarmEvaluator(state, rate, PhaseProvider(), SetpointProvider())
+    manager = AlarmStateManager()
+    now = time.time()
+    rate.push("T1", now - 60.0, 0.0)
+    rate.push("T1", now, 6.0)
+    state.update(_reading("T1", 6.0))
+    cfg = {
+        "alarm_type": "rate",
+        "channel": "T1",
+        "check": "rate_above",
+        "threshold": 5.0,
+        "level": "CRITICAL",
+    }
+
+    event = evaluator.evaluate("rapid_warming", cfg)
+    assert manager.process("rapid_warming", event, cfg) == "TRIGGERED"
+
+    state.update(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="LS218",
+            channel="T1",
+            value=math.nan,
+            unit="K",
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+    )
+    event = evaluator.evaluate(
+        "rapid_warming",
+        cfg,
+        is_active=True,
+        active_channels=frozenset({"T1"}),
+    )
+
+    assert manager.process("rapid_warming", event, cfg) is None
+    assert "rapid_warming" in manager.get_active()
 
 
 # ---------------------------------------------------------------------------

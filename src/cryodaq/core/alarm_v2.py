@@ -190,9 +190,14 @@ class AlarmEvaluator:
                     active_channels=active_channels,
                 )
             elif alarm_type == "composite":
-                return self._eval_composite(alarm_id, alarm_config)
+                return self._eval_composite(alarm_id, alarm_config, is_active=is_active)
             elif alarm_type == "rate":
-                return self._eval_rate(alarm_id, alarm_config)
+                return self._eval_rate(
+                    alarm_id,
+                    alarm_config,
+                    is_active=is_active,
+                    active_channels=active_channels,
+                )
             elif alarm_type == "stale":
                 return self._eval_stale(alarm_id, alarm_config)
             else:
@@ -222,7 +227,7 @@ class AlarmEvaluator:
 
         for ch in channels:
             state = self._state.get(ch)
-            if state is not None and state.is_stale:
+            if state is not None and not state.is_usable:
                 # Unknown input may raise the separate stale alarm, but it is
                 # never affirmative evidence that an active threshold alarm
                 # cleared. Return a deduplicated keep-active event instead.
@@ -304,7 +309,7 @@ class AlarmEvaluator:
     # composite
     # ------------------------------------------------------------------
 
-    def _eval_composite(self, alarm_id: str, cfg: dict) -> AlarmEvent | None:
+    def _eval_composite(self, alarm_id: str, cfg: dict, *, is_active: bool = False) -> AlarmEvent | None:
         operator = cfg.get("operator", "AND")
         conditions = cfg.get("conditions", [])
         level = cfg.get("level", "WARNING")
@@ -313,14 +318,17 @@ class AlarmEvaluator:
         results = [self._eval_condition(c) for c in conditions]
 
         if operator == "AND":
-            fired = all(results)
+            fired = self._and_conditions(results)
         elif operator == "OR":
-            fired = any(results)
+            fired = self._or_conditions(results)
         else:
             logger.warning("Неизвестный composite operator=%r", operator)
             return None
 
-        if not fired:
+        # ``None`` is an unknown input, never a false condition. It cannot
+        # activate an inactive alarm, but it must preserve an active alarm's
+        # hazard-specific acknowledgement and annunciation state.
+        if fired is not True and not (fired is None and is_active):
             return None
 
         # Collect channels and values
@@ -329,7 +337,7 @@ class AlarmEvaluator:
         for cond in conditions:
             for ch in self._resolve_channels(cond):
                 state = self._state.get(ch)
-                if state and ch not in channels:
+                if state and state.is_usable and ch not in channels:
                     channels.append(ch)
                     values[ch] = state.value
 
@@ -342,19 +350,51 @@ class AlarmEvaluator:
             values=values,
         )
 
-    def _eval_condition(self, cond: dict) -> bool:
-        """Вычислить одно sub-condition → bool."""
+    @staticmethod
+    def _and_conditions(results: list[bool | None]) -> bool | None:
+        """Strong three-valued AND: False dominates; unknown otherwise propagates."""
+        if any(result is False for result in results):
+            return False
+        return True if all(result is True for result in results) else None
+
+    @staticmethod
+    def _or_conditions(results: list[bool | None]) -> bool | None:
+        """Strong three-valued OR: True dominates; unknown otherwise propagates."""
+        if any(result is True for result in results):
+            return True
+        return False if all(result is False for result in results) else None
+
+    def _eval_condition(self, cond: dict) -> bool | None:
+        """Evaluate one sub-condition to True, False, or unknown (None)."""
         check = cond.get("check", "above")
 
         if check == "any_below":
             channels = self._resolve_channels(cond)
             threshold = cond["threshold"]
-            return any((s := self._state.get(ch)) is not None and s.value < threshold for ch in channels)
+            unknown = False
+            for ch in channels:
+                state = self._state.get(ch)
+                if state is None:
+                    continue
+                if not state.is_usable:
+                    unknown = True
+                elif state.value < threshold:
+                    return True
+            return None if unknown else False
 
         elif check == "any_above":
             channels = self._resolve_channels(cond)
             threshold = cond["threshold"]
-            return any((s := self._state.get(ch)) is not None and s.value > threshold for ch in channels)
+            unknown = False
+            for ch in channels:
+                state = self._state.get(ch)
+                if state is None:
+                    continue
+                if not state.is_usable:
+                    unknown = True
+                elif state.value > threshold:
+                    return True
+            return None if unknown else False
 
         elif check == "above":
             ch = cond.get("channel")
@@ -363,41 +403,58 @@ class AlarmEvaluator:
             # Special: phase_elapsed_s
             if ch == "phase_elapsed_s":
                 elapsed = self._phase.get_phase_elapsed_s()
-                return elapsed > cond["threshold"]
+                return elapsed > cond["threshold"] if self._is_finite(elapsed) else None
             state = self._state.get(ch)
-            return state is not None and state.value > cond["threshold"]
+            if state is None:
+                return False
+            if not state.is_usable:
+                return None
+            return state.value > cond["threshold"]
 
         elif check == "below":
             ch = cond.get("channel")
             if not ch:
                 return False
             state = self._state.get(ch)
-            return state is not None and state.value < cond["threshold"]
+            if state is None:
+                return False
+            if not state.is_usable:
+                return None
+            return state.value < cond["threshold"]
 
         elif check == "rate_above":
             ch = cond.get("channel")
             if not ch:
                 return False
+            state = self._state.get(ch)
+            if state is not None and not state.is_usable:
+                return None
             window = cond.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
             rate = self._rate.get_rate_custom_window(ch, window)
-            return rate is not None and rate > cond["threshold"]
+            return rate > cond["threshold"] if self._is_finite(rate) else None
 
         elif check == "rate_below":
             ch = cond.get("channel")
             if not ch:
                 return False
+            state = self._state.get(ch)
+            if state is not None and not state.is_usable:
+                return None
             window = cond.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
             rate = self._rate.get_rate_custom_window(ch, window)
-            return rate is not None and rate < cond["threshold"]
+            return rate < cond["threshold"] if self._is_finite(rate) else None
 
         elif check == "rate_near_zero":
             ch = cond.get("channel")
             if not ch:
                 return False
+            state = self._state.get(ch)
+            if state is not None and not state.is_usable:
+                return None
             window = cond.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
             rate = self._rate.get_rate_custom_window(ch, window)
             rate_threshold = cond.get("rate_threshold", 0.1)
-            return rate is not None and abs(rate) < rate_threshold
+            return abs(rate) < rate_threshold if self._is_finite(rate) else None
 
         else:
             logger.warning("Неизвестный composite condition check=%r", check)
@@ -407,7 +464,14 @@ class AlarmEvaluator:
     # rate
     # ------------------------------------------------------------------
 
-    def _eval_rate(self, alarm_id: str, cfg: dict) -> AlarmEvent | None:
+    def _eval_rate(
+        self,
+        alarm_id: str,
+        cfg: dict,
+        *,
+        is_active: bool = False,
+        active_channels: frozenset[str] | None = None,
+    ) -> AlarmEvent | None:
         channels = self._resolve_channels(cfg)
         check = cfg.get("check", "rate_above")
         window = cfg.get("rate_window_s", _DEFAULT_RATE_WINDOW_S)
@@ -415,8 +479,12 @@ class AlarmEvaluator:
         message_tmpl = cfg.get("message", f"Alarm {alarm_id}")
 
         for ch in channels:
+            state = self._state.get(ch)
+            unknown = state is not None and not state.is_usable
             rate = self._rate.get_rate_custom_window(ch, window)
-            if rate is None:
+            if unknown or not self._is_finite(rate):
+                if is_active and (active_channels is None or ch in active_channels):
+                    return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
                 continue
 
             fired = False
@@ -427,26 +495,28 @@ class AlarmEvaluator:
             elif check == "rate_near_zero":
                 fired = abs(rate) < cfg.get("rate_threshold", 0.1)
             elif check == "relative_rate_near_zero":
-                state = self._state.get(ch)
-                if state and state.value > 0:
+                if state is None:
+                    unknown = True
+                elif state.value > 0:
                     rel_rate = abs(rate / state.value)
                     fired = rel_rate < cfg.get("rate_threshold", 0.01)
+
+            if unknown:
+                if is_active and (active_channels is None or ch in active_channels):
+                    return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
+                continue
 
             if fired:
                 # Check additional_condition if present
                 add_cond = cfg.get("additional_condition")
-                if add_cond and not self._eval_condition(add_cond):
-                    continue
+                if add_cond:
+                    add_result = self._eval_condition(add_cond)
+                    if add_result is not True:
+                        if add_result is None and is_active and (active_channels is None or ch in active_channels):
+                            return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
+                        continue
 
-                msg = self._format_message(message_tmpl, channel=ch, value=rate)
-                return AlarmEvent(
-                    alarm_id=alarm_id,
-                    level=level,
-                    message=msg,
-                    triggered_at=time.time(),
-                    channels=[ch],
-                    values={ch: rate},
-                )
+                return self._rate_event(alarm_id, level, message_tmpl, ch, rate)
         return None
 
     # ------------------------------------------------------------------
@@ -465,7 +535,7 @@ class AlarmEvaluator:
             if state is None:
                 # Канал никогда не получал данных — тоже stale (если есть данные вообще)
                 continue
-            if state.is_stale or (now - state.timestamp) > timeout:
+            if not state.is_usable or (now - state.timestamp) > timeout:
                 msg = self._format_message(message_tmpl, channel=ch, value=0.0)
                 return AlarmEvent(
                     alarm_id=alarm_id,
@@ -480,6 +550,31 @@ class AlarmEvaluator:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_finite(value: object) -> bool:
+        try:
+            return math.isfinite(value)  # type: ignore[arg-type]
+        except TypeError:
+            return False
+
+    def _rate_event(
+        self,
+        alarm_id: str,
+        level: str,
+        message_tmpl: str,
+        channel: str,
+        rate: float | None,
+    ) -> AlarmEvent:
+        value = rate if self._is_finite(rate) else 0.0
+        return AlarmEvent(
+            alarm_id=alarm_id,
+            level=level,
+            message=self._format_message(message_tmpl, channel=channel, value=value),
+            triggered_at=time.time(),
+            channels=[channel],
+            values={channel: value},
+        )
 
     def _resolve_channels(self, cfg: dict) -> list[str]:
         """Раскрыть каналы из channel / channels / channel_group в config."""
