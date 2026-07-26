@@ -4,9 +4,14 @@ Guards the F-1 "silent safety kill" class at BOOT. A safety alarm/interlock
 pattern is matched against a channel roster on a specific "plane". If a channel
 rename makes a CRITICAL/safety pattern match NOTHING, the safety rule is
 silently inert — it protects a channel that no longer exists under that name.
-This module raises if any CRITICAL/safety pattern is dead against the
-ACTUALLY-SELECTED descriptor manifest, so the failure is loud at boot instead
-of silent at runtime.  The engine's current temporary lab-build policy catches
+This module raises if any such pattern is dead against the ACTUALLY-SELECTED
+descriptor manifest, so the failure is loud at boot instead of silent at
+runtime. The same reasoning applies to every alarm reference regardless of
+severity — a misspelled WARNING channel annunciates nothing just as silently
+as a misspelled CRITICAL one — so alarm references are checked at all
+severities (plane 5), with an explicit per-reference ``optional_channels``
+opt-out for hardware a given lab does not populate. The engine's current
+temporary lab-build policy catches
 only this diagnostic exception and continues after a CRITICAL log until the
 exact lab manifest has been validated.  Removing that narrow catch restores
 the intended fail-closed startup behavior.
@@ -32,6 +37,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from cryodaq.core.housekeeping import _extract_channel_refs
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_manager import SafetyConfigError
 
@@ -68,12 +74,177 @@ class SafetyPatternLivenessError(SafetyConfigError):
 # pins the set; keep this in sync with it.
 _THROTTLE_BYPASS_PATTERNS: frozenset[str] = frozenset({re.escape("system/disk_free_gb")})
 
+# Channels that legitimately reach the ALARM plane without appearing in the
+# descriptor manifest, because their publisher writes straight to the
+# DataBroker instead of being scheduled from a descriptor-bound instrument.
+# The alarm-v2 feed reads a DataBroker queue (src/cryodaq/engine.py:7233
+# ``broker=broker``; src/cryodaq/engine_wiring/runtime_tasks.py:48
+# ``state_tracker.update(reading)``), so such a channel IS live for alarms even
+# though it has no descriptor row. DiskMonitor is the sole member today — it
+# calls ``await self._broker.publish(reading)`` with channel
+# ``system/disk_free_gb`` (src/cryodaq/core/disk_monitor.py:85,91).
+#
+# NOTE the difference from ``_THROTTLE_BYPASS_PATTERNS`` above: that set carves
+# the disk channel OUT of the throttle plane (it never passes through the
+# throttle); this set carves it INTO the alarm plane (it does reach the alarm
+# evaluator). Same channel, opposite reasons — do not merge the two sets.
+# ``test_non_descriptor_alarm_channels_are_current`` pins this membership.
+_NON_DESCRIPTOR_ALARM_CHANNELS: frozenset[str] = frozenset({"system/disk_free_gb"})
+
+# Pseudo-channels that are NOT channel names at all: the evaluator re-routes
+# them to a non-broker data source. ``_resolve_channels`` explicitly refuses to
+# resolve ``phase_elapsed_s`` (src/cryodaq/core/alarm_v2.py:600) and the
+# ``above`` sub-condition re-routes it to the phase provider — the reasoning is
+# written out in full at src/cryodaq/core/alarm_config.py:333-349. Requiring a
+# roster entry for one would be a guaranteed false positive.
+_ALARM_PSEUDO_CHANNELS: frozenset[str] = frozenset({"phase_elapsed_s"})
+
+# Alarm-level key declaring which of that alarm's own channel references may be
+# absent from the roster (optional / unpopulated hardware at a given lab). This
+# is the ONLY sanctioned way to silence the liveness check for a reference, and
+# it is per-reference and visible in the config: silence is opt-IN and named,
+# never a blanket severity exclusion. The key is inert to the alarm loader,
+# which stores the raw dict verbatim (src/cryodaq/core/alarm_config.py:254-259)
+# and rejects only unknown *enum values*, not unknown keys.
+_OPTIONAL_CHANNELS_KEY = "optional_channels"
+
 
 @dataclass(frozen=True, slots=True)
 class _DeadPattern:
     pattern: str
     plane: str
     source: str
+
+
+def _alarm_channel_resolution_set(canonical_ids: Collection[str]) -> set[str]:
+    """Names an alarm channel reference may legitimately carry.
+
+    The alarm evaluator looks its channels up in ``ChannelStateTracker``, which
+    is keyed by the published ``Reading.channel`` — the CANONICAL post-bind
+    identity, because the alarm-v2 feed consumes a DataBroker queue and the
+    DataBroker carries the post-bind canonical stream
+    (src/cryodaq/core/scheduler.py:676 ``committed_publish_readings``).
+    ``ChannelStateTracker.get`` first tries the exact key, then a short-prefix
+    alias built as ``channel.split(" ", 1)[0]``
+    (src/cryodaq/core/channel_state.py:90,105-111), so both spellings resolve
+    at runtime and both must be accepted here. Today canonical ids carry no
+    space, making the prefix set identical to the id set; including it anyway
+    keeps a future spaced-identity manifest from producing a false failure.
+    """
+    resolvable = set(canonical_ids)
+    resolvable |= {cid.split(" ", 1)[0] for cid in canonical_ids if " " in cid}
+    resolvable |= _NON_DESCRIPTOR_ALARM_CHANNELS
+    return resolvable
+
+
+def _iter_alarm_entries(data: dict) -> list[tuple[str, dict]]:
+    """Yield ``(source_label, alarm_dict)`` for every alarm in alarms_v3.yaml.
+
+    Covers the three sections the production loader reads: flat
+    ``global_alarms``, nested ``phase_alarms`` (phase -> alarm_id -> alarm) and
+    ``interlocks`` (src/cryodaq/core/alarm_config.py:116-141). Severity is NOT
+    consulted: a dead reference blinds a WARNING annunciator exactly as
+    silently as a CRITICAL one.
+    """
+    entries: list[tuple[str, dict]] = []
+    for alarm_id, alarm in (data.get("global_alarms") or {}).items():
+        if isinstance(alarm, dict):
+            entries.append((f"global_alarms/{alarm_id}", alarm))
+    for phase_name, section in (data.get("phase_alarms") or {}).items():
+        if not isinstance(section, dict):
+            continue
+        for alarm_id, alarm in section.items():
+            if isinstance(alarm, dict):
+                entries.append((f"phase_alarms/{phase_name}/{alarm_id}", alarm))
+    for alarm_id, alarm in (data.get("interlocks") or {}).items():
+        if isinstance(alarm, dict):
+            entries.append((f"interlocks/{alarm_id}", alarm))
+    return entries
+
+
+def _collect_dead_alarm_channel_refs(
+    *,
+    alarms_config_path: Path,
+    canonical_ids: Collection[str],
+) -> list[_DeadPattern]:
+    """Find alarm channel references that resolve to NO real channel.
+
+    Applies to EVERY severity. A WARNING or INFO alarm whose channel reference
+    is misspelled loads cleanly, evaluates forever against a channel that never
+    reports, and never fires — the operator sees a configured annunciator and
+    gets no protection. That is the same silent-inertness class the CRITICAL
+    planes above exist to prevent, so it is checked the same way.
+
+    A missing alarms file is not this validator's error to raise: the engine
+    already fails closed on it through ``load_alarm_config``
+    (src/cryodaq/engine.py:6614, ``AlarmConfigError``). Same for a file that
+    fails to parse. Returning no findings here leaves that authoritative error
+    in place instead of shadowing it with a confusing liveness message.
+    """
+    if not alarms_config_path.exists():
+        return []
+    try:
+        with alarms_config_path.open(encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    raw_groups = data.get("channel_groups") or {}
+    groups: dict[str, list[str]] = {}
+    if isinstance(raw_groups, dict):
+        for name, channels in raw_groups.items():
+            if isinstance(channels, list):
+                groups[str(name)] = [str(c) for c in channels if isinstance(c, str)]
+
+    resolvable = _alarm_channel_resolution_set(canonical_ids)
+    source_name = alarms_config_path.name
+    dead: list[_DeadPattern] = []
+
+    for label, alarm in _iter_alarm_entries(data):
+        declared_optional = {
+            str(item).strip()
+            for item in (alarm.get(_OPTIONAL_CHANNELS_KEY) or [])
+            if isinstance(item, str) and item.strip()
+        }
+        # ``_extract_channel_refs`` is the production ref traversal
+        # (src/cryodaq/core/housekeeping.py:106) and is reused rather than
+        # re-implemented so the two never drift over which nested shapes
+        # (composite ``conditions``, rate ``additional_condition``) carry a
+        # channel. It yields group references as ``__group__:<name>`` and
+        # ignores bare strings inside other lists, so ``optional_channels``
+        # itself contributes no references.
+        for ref in _extract_channel_refs(alarm):
+            if ref.startswith("__group__:"):
+                group_name = ref.removeprefix("__group__:")
+                members = groups.get(group_name)
+                if members is None:
+                    dead.append(
+                        _DeadPattern(
+                            pattern=f"channel_group:{group_name}",
+                            plane="alarm annunciation (canonical post-bind channel_id)",
+                            source=f"{source_name} (alarm {label!r})",
+                        )
+                    )
+                    continue
+                candidates = [(member, f"{member!r} via channel_group {group_name!r}") for member in members]
+            else:
+                candidates = [(ref, repr(ref))]
+
+            for channel, described in candidates:
+                if channel in _ALARM_PSEUDO_CHANNELS or channel in declared_optional:
+                    continue
+                if channel in resolvable:
+                    continue
+                dead.append(
+                    _DeadPattern(
+                        pattern=described,
+                        plane="alarm annunciation (canonical post-bind channel_id)",
+                        source=f"{source_name} (alarm {label!r})",
+                    )
+                )
+    return dead
 
 
 def _resolve_critical_patterns_to_raw(
@@ -256,6 +427,7 @@ def validate_safety_pattern_liveness(
     interlocks_config_path: Path,
     safety_manager: SafetyManager,
     adaptive_throttle_patterns: Collection[str],
+    alarms_config_path: Path | None = None,
 ) -> list[str]:
     """Raise if any CRITICAL/safety channel-pattern is dead against the
     SELECTED descriptor manifest, on the plane its consumer sees.
@@ -270,11 +442,19 @@ def validate_safety_pattern_liveness(
 
     Raises ``SafetyPatternLivenessError`` (a ``SafetyConfigError``) listing
     every dead pattern with its plane and config source. Returns cleanly when
-    all CRITICAL/safety patterns are live. WARNING/INFO-only refs are NOT
-    checked.
+    all checked patterns are live.
 
-    Severity scope (fail-closed ONLY for these — when in doubt, do NOT raise,
-    because a false fail-closed that bricks the lab is the worse outcome):
+    ``alarms_config_path`` defaults to ``alarms_v3.yaml`` beside
+    ``interlocks_config_path``. In production those are the same directory:
+    the engine resolves both from ``_CONFIG_DIR`` (src/cryodaq/engine.py:6433
+    ``_CONFIG_DIR / "alarms_v3.yaml"`` and ``_engine_config_path("interlocks")``
+    at src/cryodaq/engine.py:2236-2239, which only ever returns
+    ``_CONFIG_DIR/interlocks[.local].yaml``), so the default reproduces the
+    production pairing exactly rather than guessing it. Pass the argument
+    explicitly to validate a manifest pair that does not live side by side.
+
+    Scope (fail-closed for these — when in doubt, do NOT raise, because a false
+    fail-closed that bricks the lab is the worse outcome):
 
       1. ``interlocks.yaml`` — every interlock is safety-class. CANONICAL plane,
          ``.match`` (``InterlockCondition.matches_channel``).
@@ -286,6 +466,16 @@ def validate_safety_pattern_liveness(
          legacy ``interlocks.yaml`` patterns plus ``alarms_v3.yaml`` patterns
          derived from CRITICAL/HIGH alarms and all v3 interlocks. RAW plane,
          ``.search`` (substring).
+      5. ``alarms_v3.yaml`` channel references, at EVERY severity. CANONICAL
+         plane, exact key (with the tracker's short-prefix alias). Severity is
+         deliberately not a filter here: plane 4 above only sees the channels
+         of CRITICAL/HIGH alarms because its purpose is throttle protection,
+         which left a typo in a WARNING or INFO alarm loading cleanly and
+         annunciating nothing, forever. Adding a channel alarm is the single
+         most common adaptation a new lab makes, so that reference is exactly
+         the one that must fail loudly rather than silently. Per-reference
+         opt-out via ``optional_channels``; see
+         ``_collect_dead_alarm_channel_refs``.
 
     ``descriptor_catalog`` is whichever manifest the engine actually selected
     for this run (base ``channel_descriptors.yaml`` or the complete local
@@ -392,14 +582,29 @@ def validate_safety_pattern_liveness(
     )
     dead.extend(adaptive_dead)
 
+    # Plane 5: every alarms_v3.yaml channel reference, at every severity, on
+    # the plane the alarm evaluator actually reads.
+    resolved_alarms_path = (
+        alarms_config_path if alarms_config_path is not None else interlocks_config_path.parent / "alarms_v3.yaml"
+    )
+    dead.extend(
+        _collect_dead_alarm_channel_refs(
+            alarms_config_path=resolved_alarms_path,
+            canonical_ids=canonical_ids,
+        )
+    )
+
     if dead:
         lines = [
             "Startup safety-pattern liveness check FAILED: safety monitoring must be live before startup:",
         ]
         if dead:
             lines.append(
-                f"Dead CRITICAL/safety channel pattern(s): {len(dead)} match NO "
-                "channel on the plane their consumer sees (F-1 silent safety kill)."
+                f"Dead safety/alarm channel pattern(s): {len(dead)} match NO "
+                "channel on the plane their consumer sees (F-1 silent safety kill). "
+                "An alarm reference that resolves to nothing never fires; if a "
+                f"channel is legitimately absent at this lab, declare it under "
+                f"{_OPTIONAL_CHANNELS_KEY!r} on that alarm instead of leaving it dangling."
             )
             for d in dead:
                 lines.append(f"  - pattern={d.pattern!r} plane={d.plane} source={d.source}")
