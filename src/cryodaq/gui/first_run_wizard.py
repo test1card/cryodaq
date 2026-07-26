@@ -589,11 +589,22 @@ class FirstRunWizard(QWizard):
         never called on Cancel (see ``run_first_run_wizard``)."""
         instruments_data: dict | None = None
         instrument_overrides = self._instruments_page.get_overrides()
+        missing_descriptor_authority = (self._config_dir / "instruments.local.yaml").exists() and not (
+            self._config_dir / "channel_descriptors.local.yaml"
+        ).exists()
         if instrument_overrides:
-            base = cfg.load_instruments_config(self._config_dir, prefer_local=self._force)
+            base = cfg.load_instruments_config(
+                self._config_dir,
+                prefer_local=self._force or missing_descriptor_authority,
+            )
             patched = _apply_schema_overrides(base, instrument_overrides)
             if patched != base:
                 instruments_data = patched
+        elif missing_descriptor_authority:
+            # Older wizard releases produced only instruments.local.yaml. Reuse
+            # that exact local authority so Finish repairs its missing paired
+            # descriptor manifest without requiring the operator to edit a field.
+            instruments_data = cfg.load_instruments_config(self._config_dir, prefer_local=True)
 
         notifications_data: dict | None = None
         telegram_values = self._telegram_page.get_values()

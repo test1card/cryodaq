@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +16,7 @@ import pytest
 import yaml
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QWizard
 
+from cryodaq import engine
 from cryodaq.drivers.registry import (
     BUILTIN_DRIVER_SPECS,
     ConfigField,
@@ -41,6 +44,9 @@ def _app() -> QApplication:
 
 def _write_valid_config(config_dir: Path, *, local: bool = False) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
+    source_config = Path(__file__).parents[2] / "config"
+    for name in ("channel_descriptors.local.yaml.example", "instruments.local.yaml.example"):
+        shutil.copyfile(source_config / name, config_dir / name)
     (config_dir / "instruments.yaml").write_text(
         "instruments:\n  - type: lakeshore_218s\n    name: LS\n    resource: GPIB0::12::INSTR\ncustom_top: base\n",
         encoding="utf-8",
@@ -144,6 +150,55 @@ def test_instrument_page_renders_distinct_registry_schemas_and_round_trips(tmp_p
     assert saved["instruments"][1]["channels"] == [2, 3]
     assert saved["instruments"][1]["mode"] == "averaged"
     assert saved["custom_top"] == "preserved"
+
+
+def test_wizard_instrument_write_loads_as_live_descriptor_authority(tmp_path: Path) -> None:
+    """A wizard-written local instruments file must have matching descriptor authority."""
+    _app()
+    source_config = Path(__file__).parents[2] / "config"
+    for name in (
+        "instruments.yaml",
+        "safety.yaml",
+        "channel_descriptors.yaml",
+        "channel_descriptors.local.yaml.example",
+    ):
+        shutil.copyfile(source_config / name, tmp_path / name)
+
+    wizard = FirstRunWizard(tmp_path)
+    wizard._instruments_page._resource_edits["LS218_1"].setText("GPIB0::99::INSTR")
+    assert wizard.apply_results()
+
+    instruments_path = tmp_path / "instruments.local.yaml"
+    with patch.object(engine, "_CONFIG_DIR", tmp_path):
+        driver_load = engine._load_drivers(instruments_path, mock=True, data_dir=tmp_path)
+        authority = asyncio.run(engine._load_live_descriptor_authority(instruments_path, driver_load))
+
+    assert authority.instrument_ids == {config.name for config in driver_load.validated_configs}
+
+
+def test_legacy_local_instruments_without_descriptors_are_repaired_on_finish(tmp_path: Path) -> None:
+    _app()
+    source_config = Path(__file__).parents[2] / "config"
+    for name in (
+        "instruments.yaml",
+        "safety.yaml",
+        "channel_descriptors.yaml",
+        "channel_descriptors.local.yaml.example",
+    ):
+        shutil.copyfile(source_config / name, tmp_path / name)
+    shutil.copyfile(tmp_path / "instruments.yaml", tmp_path / "instruments.local.yaml")
+    cfg.mark_first_run_done(tmp_path)
+
+    assert cfg.needs_first_run(tmp_path) is True
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        assert FirstRunWizard(tmp_path).apply_results()
+
+    instruments_path = tmp_path / "instruments.local.yaml"
+    with patch.object(engine, "_CONFIG_DIR", tmp_path):
+        driver_load = engine._load_drivers(instruments_path, mock=True, data_dir=tmp_path)
+        authority = asyncio.run(engine._load_live_descriptor_authority(instruments_path, driver_load))
+
+    assert authority.instrument_ids == {config.name for config in driver_load.validated_configs}
 
 
 def test_instrument_page_rejects_unknown_driver_type(tmp_path: Path) -> None:
@@ -350,6 +405,7 @@ def test_forced_wizard_seeds_existing_local_and_preserves_valid_unedited_fields(
 def test_forced_wizard_unchanged_finish_does_not_rewrite_existing_local(tmp_path: Path) -> None:
     _app()
     _write_valid_config(tmp_path, local=True)
+    (tmp_path / "channel_descriptors.local.yaml").write_text("existing authority\n", encoding="utf-8")
     path = tmp_path / "instruments.local.yaml"
     original = path.read_bytes()
     wizard = FirstRunWizard(tmp_path, force=True)

@@ -29,6 +29,7 @@ RECOVERY_SNAPSHOT_PREFIX = ".first_run_recovery."
 _TRANSACTION_STATES = frozenset({"preparing", "replacing", "rolled_back"})
 _TRANSACTION_TARGETS = {
     "instruments.local.yaml": False,
+    "channel_descriptors.local.yaml": False,
     "notifications.local.yaml": True,
 }
 
@@ -53,6 +54,13 @@ def needs_first_run(config_dir: Path) -> bool:
     legacy setup; unrelated web/RAG/notification overrides do not.
     """
     if (config_dir / FIRST_RUN_PENDING_NAME).exists():
+        return True
+    # A local instruments authority always selects the matching local descriptor
+    # authority at engine startup.  Older wizard versions wrote only the former;
+    # reopen setup so finishing the wizard repairs that incomplete authority pair.
+    if (config_dir / "instruments.local.yaml").exists() and not (
+        config_dir / "channel_descriptors.local.yaml"
+    ).exists():
         return True
     if _read_done_txn(config_dir / FIRST_RUN_MARKER_NAME) is not None:
         return False
@@ -172,12 +180,198 @@ _INSTRUMENTS_LOCAL_HEADER = """\
 
 """
 
+_CHANNEL_DESCRIPTORS_LOCAL_HEADER = """\
+# Local channel descriptor authority — generated with instruments.local.yaml by
+# the CryoDAQ first-run wizard. Do not edit one file without regenerating the
+# other: both are complete replacement authorities selected together at startup.
+#
+# This file is not committed to git (*.local.yaml is in .gitignore).
+
+"""
+
 
 def write_instruments_local(config_dir: Path, data: dict[str, Any]) -> Path:
     """Atomically dump a validated ``instruments.local.yaml``."""
     path = config_dir / "instruments.local.yaml"
     _write_yaml(path, data, _INSTRUMENTS_LOCAL_HEADER)
     return path
+
+
+def build_channel_descriptors_local(config_dir: Path, instruments: dict[str, Any]) -> dict[str, Any]:
+    """Derive the complete local descriptor authority for configured instruments.
+
+    The shipped local descriptor example is the reviewed descriptor vocabulary.
+    This function selects exactly the configured instrument identities and
+    rebuilds emitted-channel bindings from their live wizard configuration, so
+    the local instruments and descriptor authorities cannot be assembled from
+    unrelated snapshots.
+    """
+    template_path = config_dir / "channel_descriptors.local.yaml.example"
+    if not template_path.exists():
+        template_path = config_dir / "channel_descriptors.yaml"
+    template = _load_yaml_mapping(template_path)
+    instruments_template_path = config_dir / "instruments.local.yaml.example"
+    if not instruments_template_path.exists():
+        instruments_template_path = config_dir / "instruments.yaml"
+    instruments_template = _load_yaml_mapping(instruments_template_path)
+
+    entries = instruments.get("instruments")
+    descriptors = template.get("descriptors")
+    bindings = template.get("bindings")
+    template_entries = instruments_template.get("instruments")
+    if (
+        not isinstance(entries, list)
+        or not isinstance(descriptors, list)
+        or not isinstance(bindings, list)
+        or not isinstance(template_entries, list)
+    ):
+        raise FirstRunConfigError("cannot derive local descriptor authority from an invalid template")
+
+    configured: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("name"), str)
+            or not isinstance(entry.get("type"), str)
+        ):
+            raise FirstRunConfigError("cannot derive local descriptor authority from invalid instruments")
+        name = entry["name"]
+        if name in configured:
+            raise FirstRunConfigError("cannot derive local descriptor authority from duplicate instrument names")
+        configured[name] = entry
+
+    template_types: dict[str, str] = {}
+    for entry in template_entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("name"), str)
+            or not isinstance(entry.get("type"), str)
+        ):
+            raise FirstRunConfigError("instrument template has an invalid instrument entry")
+        template_types[entry["name"]] = entry["type"]
+
+    descriptor_by_channel: dict[str, dict[str, Any]] = {}
+    for row in descriptors:
+        if not isinstance(row, dict) or not isinstance(row.get("channel_id"), str):
+            raise FirstRunConfigError("descriptor template has an invalid descriptor entry")
+        channel_id = row["channel_id"]
+        if channel_id in descriptor_by_channel:
+            raise FirstRunConfigError("descriptor template has duplicate channel identities")
+        descriptor_by_channel[channel_id] = row
+
+    binding_by_channel: dict[str, dict[str, Any]] = {}
+    for row in bindings:
+        if not isinstance(row, dict) or not isinstance(row.get("channel_id"), str):
+            raise FirstRunConfigError("descriptor template has an invalid binding entry")
+        channel_id = row["channel_id"]
+        if channel_id in binding_by_channel:
+            raise FirstRunConfigError("descriptor template has duplicate channel bindings")
+        binding_by_channel[channel_id] = row
+
+    descriptors_by_template_instrument: dict[str, list[dict[str, Any]]] = {}
+    for row in descriptors:
+        if not isinstance(row, dict) or not isinstance(row.get("instrument_id"), str):
+            raise FirstRunConfigError("descriptor template has an invalid descriptor entry")
+        descriptors_by_template_instrument.setdefault(row["instrument_id"], []).append(row)
+
+    selected_descriptors: list[dict[str, Any]] = []
+    used_template_instruments: set[str] = set()
+    for name, instrument in configured.items():
+        candidates = [
+            template_name
+            for template_name, template_type in template_types.items()
+            if template_type == instrument["type"]
+            and template_name not in used_template_instruments
+            and template_name in descriptors_by_template_instrument
+        ]
+        if name in candidates:
+            template_name = name
+        elif candidates:
+            template_name = candidates[0]
+        else:
+            raise FirstRunConfigError(
+                f"descriptor template lacks a {instrument['type']!r} instrument slot for {name!r}"
+            )
+        used_template_instruments.add(template_name)
+        for row in descriptors_by_template_instrument[template_name]:
+            copied = copy.deepcopy(row)
+            copied["instrument_id"] = name
+            selected_descriptors.append(copied)
+
+    selected_descriptors = [
+        row
+        for row in selected_descriptors
+        if _descriptor_is_emitted_by_instrument(row, configured[row["instrument_id"]])
+    ]
+    selected_ids = {row["channel_id"] for row in selected_descriptors}
+    selected_bindings: list[dict[str, Any]] = []
+    for descriptor in selected_descriptors:
+        channel_id = descriptor["channel_id"]
+        template_binding = binding_by_channel.get(channel_id)
+        if template_binding is None:
+            raise FirstRunConfigError(f"descriptor template lacks binding for {channel_id!r}")
+        binding = copy.deepcopy(template_binding)
+        instrument = configured[descriptor["instrument_id"]]
+        binding["instrument_id"] = instrument["name"]
+        binding["emitted_channel"] = _emitted_channel_for_descriptor(descriptor, instrument, binding)
+        selected_bindings.append(binding)
+
+    if (
+        len(selected_ids) != len(selected_descriptors)
+        or {row["channel_id"] for row in selected_bindings} != selected_ids
+    ):
+        raise FirstRunConfigError("derived local descriptor authority is not one-to-one")
+    return {
+        "schema_version": 1,
+        "descriptors": selected_descriptors,
+        "bindings": selected_bindings,
+    }
+
+
+def _descriptor_is_emitted_by_instrument(descriptor: dict[str, Any], instrument: dict[str, Any]) -> bool:
+    """Return whether this reviewed descriptor is emitted by the configured driver."""
+    if instrument["type"] != "etalon_multiline":
+        return True
+    source_key = descriptor.get("source_key")
+    if not isinstance(source_key, str) or not source_key.startswith("length."):
+        return True
+    try:
+        channel_number = int(source_key.removeprefix("length."))
+    except ValueError:
+        return False
+    channels = instrument.get("channels")
+    return isinstance(channels, list) and channel_number in channels
+
+
+def _emitted_channel_for_descriptor(
+    descriptor: dict[str, Any],
+    instrument: dict[str, Any],
+    binding: dict[str, Any],
+) -> str:
+    """Build a binding key from the same values passed to the driver."""
+    source_key = descriptor.get("source_key")
+    if instrument["type"] == "lakeshore_218s" and isinstance(source_key, str) and source_key.startswith("input."):
+        parts = source_key.split(".")
+        if len(parts) == 3 and parts[1].isdigit() and parts[2] in {"temperature", "raw_sensor"}:
+            channel_number = int(parts[1])
+            channels = instrument.get("channels")
+            label = (
+                channels.get(channel_number, f"CH{channel_number}")
+                if isinstance(channels, dict)
+                else f"CH{channel_number}"
+            )
+            return f"{label}_raw" if parts[2] == "raw_sensor" else str(label)
+    if instrument["type"] == "etalon_multiline" and isinstance(source_key, str):
+        if source_key.startswith("length."):
+            return f"{instrument['name']}/length_ch{source_key.removeprefix('length.')}"
+        if source_key in {"env.temperature", "env.pressure", "env.humidity"}:
+            return f"{instrument['name']}/env_{source_key.removeprefix('env.')}"
+    emitted = binding.get("emitted_channel")
+    if not isinstance(emitted, str):
+        raise FirstRunConfigError("descriptor template has an invalid emitted channel")
+    if "/" in emitted:
+        return f"{instrument['name']}/{emitted.split('/', 1)[1]}"
+    return emitted
 
 
 def read_safety_summary(config_dir: Path) -> dict[str, Any]:
@@ -495,16 +689,31 @@ def write_setup_transaction(
     notifications: dict[str, Any] | None = None,
     backup_existing: bool = False,
 ) -> None:
-    """Persist outputs with crash recovery and a transaction-tagged commit."""
+    """Persist outputs with crash recovery and a transaction-tagged commit.
+
+    An instruments authority is always persisted with the descriptor authority
+    derived from that exact in-memory configuration. The recovery manifest
+    rolls back both files until the completion marker is committed.
+    """
     outputs: list[tuple[Path, str, bool, bytes | None]] = []
     if instruments is not None:
-        path = config_dir / "instruments.local.yaml"
+        instruments_path = config_dir / "instruments.local.yaml"
+        descriptors_path = config_dir / "channel_descriptors.local.yaml"
+        descriptors = build_channel_descriptors_local(config_dir, instruments)
         outputs.append(
             (
-                path,
+                instruments_path,
                 _serialize_yaml(instruments, _INSTRUMENTS_LOCAL_HEADER),
                 False,
-                path.read_bytes() if path.exists() else None,
+                instruments_path.read_bytes() if instruments_path.exists() else None,
+            )
+        )
+        outputs.append(
+            (
+                descriptors_path,
+                _serialize_yaml(descriptors, _CHANNEL_DESCRIPTORS_LOCAL_HEADER),
+                False,
+                descriptors_path.read_bytes() if descriptors_path.exists() else None,
             )
         )
     if notifications is not None:

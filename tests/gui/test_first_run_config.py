@@ -47,6 +47,47 @@ chamber:
   volume_l: 0.0
 """
 
+_TRANSACTION_INSTRUMENTS = {"instruments": [{"type": "test", "name": "new"}]}
+_TRANSACTION_DESCRIPTOR_TEMPLATE = {
+    "schema_version": 1,
+    "descriptors": [
+        {
+            "schema_version": 1,
+            "channel_id": "new/channel",
+            "instrument_id": "new",
+            "source_key": "measurement",
+            "quantity": "temperature",
+            "unit": "K",
+            "role": "primary_measurement",
+            "safety_class": "observational",
+            "display_group": "test",
+            "display_name": "Test channel",
+            "visible_by_default": True,
+            "display_order": 0,
+            "descriptor_revision": 1,
+        }
+    ],
+    "bindings": [
+        {
+            "instrument_id": "new",
+            "emitted_channel": "new/channel",
+            "channel_id": "new/channel",
+        }
+    ],
+}
+
+
+@pytest.fixture(autouse=True)
+def _descriptor_template(tmp_path: Path) -> None:
+    (tmp_path / "channel_descriptors.yaml").write_text(
+        yaml.safe_dump(_TRANSACTION_DESCRIPTOR_TEMPLATE, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "instruments.local.yaml.example").write_text(
+        "instruments:\n  - type: test\n    name: new\n",
+        encoding="utf-8",
+    )
+
 
 # ---------------------------------------------------------------------------
 # needs_first_run / mark_first_run_done
@@ -58,9 +99,9 @@ def test_needs_first_run_true_on_genuinely_fresh_config_dir(tmp_path: Path) -> N
     assert cfg.needs_first_run(tmp_path) is True
 
 
-def test_needs_first_run_false_when_valid_legacy_instruments_local_exists(tmp_path: Path) -> None:
+def test_needs_first_run_repairs_legacy_instruments_local_without_descriptors(tmp_path: Path) -> None:
     (tmp_path / "instruments.local.yaml").write_text("instruments: []", encoding="utf-8")
-    assert cfg.needs_first_run(tmp_path) is False
+    assert cfg.needs_first_run(tmp_path) is True
 
 
 @pytest.mark.parametrize("name", ["web.local.yaml", "rag.local.yaml", "notifications.local.yaml"])
@@ -184,14 +225,37 @@ def test_write_setup_transaction_rolls_back_and_remains_retryable(tmp_path: Path
         with pytest.raises(OSError, match="disk full"):
             cfg.write_setup_transaction(
                 tmp_path,
-                instruments={"instruments": [{"name": "new"}]},
+                instruments=_TRANSACTION_INSTRUMENTS,
                 notifications={"telegram": {"bot_token": "secret", "chat_id": 42}},
             )
 
     assert instrument_path.read_text(encoding="utf-8") == original
     assert not (tmp_path / "notifications.local.yaml").exists()
     assert not (tmp_path / cfg.FIRST_RUN_MARKER_NAME).exists()
-    assert cfg.needs_first_run(tmp_path) is False  # original live config remains authoritative
+    assert cfg.needs_first_run(tmp_path) is True  # original legacy config still needs descriptor repair
+
+
+def test_write_setup_transaction_rolls_back_instrument_descriptor_pair(tmp_path: Path) -> None:
+    instrument_path = tmp_path / "instruments.local.yaml"
+    descriptor_path = tmp_path / "channel_descriptors.local.yaml"
+    instrument_original = b"instruments:\n  - type: test\n    name: old\n"
+    descriptor_original = b"old descriptor authority\n"
+    instrument_path.write_bytes(instrument_original)
+    descriptor_path.write_bytes(descriptor_original)
+    real_atomic_write = cfg.atomic_write_text
+
+    def fail_descriptor(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+        if path.name == "channel_descriptors.local.yaml":
+            raise OSError("disk full")
+        real_atomic_write(path, content, encoding=encoding)
+
+    with patch("cryodaq.gui.first_run_config.atomic_write_text", side_effect=fail_descriptor):
+        with pytest.raises(OSError, match="disk full"):
+            cfg.write_setup_transaction(tmp_path, instruments=_TRANSACTION_INSTRUMENTS)
+
+    assert instrument_path.read_bytes() == instrument_original
+    assert descriptor_path.read_bytes() == descriptor_original
+    assert not (tmp_path / cfg.FIRST_RUN_MARKER_NAME).exists()
 
 
 def test_fresh_setup_partial_failure_retries_on_next_launch(tmp_path: Path) -> None:
@@ -206,7 +270,7 @@ def test_fresh_setup_partial_failure_retries_on_next_launch(tmp_path: Path) -> N
         with pytest.raises(OSError, match="disk full"):
             cfg.write_setup_transaction(
                 tmp_path,
-                instruments={"instruments": [{"name": "new"}]},
+                instruments=_TRANSACTION_INSTRUMENTS,
                 notifications={"telegram": {"bot_token": "secret", "chat_id": 42}},
             )
 
@@ -224,7 +288,7 @@ def test_write_setup_transaction_marker_is_last(tmp_path: Path) -> None:
         real_atomic_write(path, content, encoding=encoding)
 
     with patch("cryodaq.gui.first_run_config.atomic_write_text", side_effect=record):
-        cfg.write_setup_transaction(tmp_path, instruments={"instruments": []})
+        cfg.write_setup_transaction(tmp_path, instruments=_TRANSACTION_INSTRUMENTS)
 
     assert writes[-1] == cfg.FIRST_RUN_MARKER_NAME
     assert not (tmp_path / cfg.FIRST_RUN_PENDING_NAME).exists()
@@ -237,7 +301,7 @@ def test_write_setup_transaction_backup_preserves_existing_comments(tmp_path: Pa
 
     cfg.write_setup_transaction(
         tmp_path,
-        instruments={"instruments": [{"name": "new"}]},
+        instruments=_TRANSACTION_INSTRUMENTS,
         backup_existing=True,
     )
 
@@ -262,7 +326,7 @@ def _seed_established_install(tmp_path: Path) -> dict[str, bytes]:
 
 def _new_setup_payloads() -> tuple[dict, dict]:
     return (
-        {"instruments": [{"name": "new"}]},
+        _TRANSACTION_INSTRUMENTS,
         {"telegram": {"bot_token": "new-secret", "chat_id": 2}},
     )
 
