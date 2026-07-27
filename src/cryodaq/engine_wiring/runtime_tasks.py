@@ -432,25 +432,61 @@ async def leak_rate_feed(
     """Feed pressure readings into LeakRateEstimator; auto-finalize on window expiry."""
     pressure_channel = vt_cfg.get("pressure_channel", "")
     queue = await broker.subscribe("leak_rate_feed", maxsize=500)
+
+    async def unavailable() -> None:
+        try:
+            await event_logger.log_event_strict(
+                "leak_rate_unavailable",
+                "Leak-rate measurement unavailable.",
+            )
+        except Exception as exc:  # noqa: BLE001 -- unavailable must not publish before durable write
+            logger.error("Leak-rate unavailable event could not be persisted: %s", exc)
+
     try:
         while True:
-            reading: Reading = await queue.get()
+            # Measurement timestamps remain the replay/fit clock.  The independent
+            # monotonic deadline includes the estimator's driver-derived source-
+            # liveness grace, so its timeout cannot race the first eligible sample.
+            timeout = 0.1 if leak_rate_estimator.is_finalizing else leak_rate_estimator.deadline_remaining_s()
+            try:
+                reading: Reading = await asyncio.wait_for(queue.get(), timeout=0.1 if timeout is None else timeout)
+            except TimeoutError:
+                if (
+                    leak_rate_estimator.is_active
+                    and not leak_rate_estimator.is_finalizing
+                    and leak_rate_estimator.deadline_remaining_s() == 0.0
+                ):
+                    leak_rate_estimator.cancel()
+                    await unavailable()
+                continue
             if pressure_channel and reading.channel != pressure_channel:
                 continue
             if reading.unit != "mbar":
                 continue
             if not leak_rate_estimator.is_active:
                 continue
+            if leak_rate_estimator.is_finalizing:
+                continue
+            if not reading.is_usable():
+                if leak_rate_estimator.should_finalize(reading.timestamp):
+                    leak_rate_estimator.cancel()
+                    await unavailable()
+                continue
             leak_rate_estimator.add_sample(reading.timestamp, reading.value)
-            if leak_rate_estimator.should_finalize():
+            if leak_rate_estimator.should_finalize(reading.timestamp):
                 try:
-                    result = leak_rate_estimator.finalize()
+                    result = await leak_rate_estimator.finalize_async()
+                except Exception as exc:  # noqa: BLE001 -- persistence failure is unavailable, never a number
+                    logger.error("Leak rate auto-finalize failed: %s", exc)
+                    leak_rate_estimator.cancel()
+                    await unavailable()
+                else:
+                    if result is None:
+                        continue
                     await event_logger.log_event(
                         "leak_rate",
                         f"Leak rate (auto): {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
                     )
-                except (ValueError, Exception) as exc:  # noqa: BLE001
-                    logger.error("Leak rate auto-finalize failed: %s", exc)
     except asyncio.CancelledError:
         return
 

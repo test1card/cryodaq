@@ -60,3 +60,31 @@ class EventLogger:
                 )
             except Exception:
                 logger.warning("EventBus publish failed in log_event", exc_info=True)
+
+    async def log_event_strict(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        extra_tags: list[str] | None = None,
+    ) -> None:
+        """Durably write an event before publishing it; failures propagate."""
+        experiment_id = self._em.active_experiment_id
+        await self._writer.append_operator_log(
+            message=message,
+            author="system",
+            source="auto",
+            experiment_id=experiment_id,
+            tags=["auto", event_type, *(extra_tags or [])],
+        )
+        if self._event_bus is not None:
+            from cryodaq.core.event_bus import EngineEvent
+
+            await self._event_bus.publish(
+                EngineEvent(
+                    event_type="event_logged",
+                    timestamp=datetime.now(UTC),
+                    payload={"event_type": event_type, "message": message},
+                    experiment_id=experiment_id,
+                )
+            )

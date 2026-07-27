@@ -632,6 +632,19 @@ def test_load_config_fails_on_non_numeric_timeout(tmp_path):
         sm.load_config(cfg)
 
 
+def test_load_config_rejects_yaml_boolean_before_engine_wiring_can_coerce_it(tmp_path):
+    """Production SafetyManager parsing never turns YAML true into a 1.0 drain bound."""
+    cfg = tmp_path / "safety.yaml"
+    cfg.write_text(
+        "critical_channels:\n  - 'Т1 .*'\nscheduler_drain_timeout_s: true\n",
+        encoding="utf-8",
+    )
+    sm = SafetyManager(SafetyBroker(), mock=True)
+
+    with pytest.raises(SafetyConfigError, match="scheduler_drain_timeout_s must be numeric, not bool"):
+        sm.load_config(cfg)
+
+
 def test_load_config_fails_on_non_dict_source_limits(tmp_path):
     """A.4.1 residual: non-mapping source_limits must raise SafetyConfigError."""
     cfg = tmp_path / "safety.yaml"
