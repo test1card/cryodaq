@@ -43,10 +43,6 @@ async def _noop() -> None:
     return None
 
 
-async def _authority_handler(condition, reading) -> bool:
-    return True
-
-
 def _reading(
     *,
     channel: str = "Т5 Зона нагрева",
@@ -74,8 +70,7 @@ def _make_engine(
 ) -> InterlockEngine:
     engine = InterlockEngine(
         broker=DataBroker(),
-        action_names={"emergency_off"},
-        trip_handler=_authority_handler,
+        actions={"emergency_off": _noop},
         alarm_publisher=publisher,
         dead_channel_handler=handler,
     )
@@ -173,7 +168,9 @@ async def test_persistent_nonusable_faults_via_real_safety_manager() -> None:
         assert mgr.state == SafetyState.RUNNING
 
         async def handler(condition, reading):
-            return await mgr.on_interlock_dead_channel(condition.name, reading.channel, value=reading.value)
+            return await mgr.on_interlock_dead_channel(
+                condition.name, reading.channel, value=reading.value
+            )
 
         engine = _make_engine(handler=handler, min_samples=5, min_duration_s=10.0)
         for off in (0.0, 3.0, 6.0, 9.0, 12.0):
@@ -198,7 +195,9 @@ async def test_dead_channel_no_fault_when_not_running() -> None:
     try:
         assert mgr.state == SafetyState.SAFE_OFF
         await mgr.on_interlock_dead_channel("overheat_zone", "Т5 Зона нагрева", value=float("nan"))
-        assert mgr.state == SafetyState.SAFE_OFF, "dead interlock channel while NOT running must never fault"
+        assert mgr.state == SafetyState.SAFE_OFF, (
+            "dead interlock channel while NOT running must never fault"
+        )
     finally:
         await mgr.stop()
 
@@ -220,7 +219,9 @@ async def test_usable_reading_resets_debounce() -> None:
     for off in (0.0, 3.0, 6.0, 9.0):
         await engine._process_reading(_reading(value=float("nan"), offset_s=off))
     # good reading resets the window
-    await engine._process_reading(_reading(value=42.0, offset_s=12.0, status=ChannelStatus.OK))
+    await engine._process_reading(
+        _reading(value=42.0, offset_s=12.0, status=ChannelStatus.OK)
+    )
     for off in (15.0, 18.0, 21.0, 24.0):
         await engine._process_reading(_reading(value=float("nan"), offset_s=off))
 
@@ -242,9 +243,13 @@ async def test_finite_error_status_is_nonusable() -> None:
 
     # Finite values but SENSOR_ERROR status — must be treated as non-usable.
     for off in (0.0, 3.0, 6.0, 9.0, 12.0):
-        await engine._process_reading(_reading(value=123.4, offset_s=off, status=ChannelStatus.SENSOR_ERROR))
+        await engine._process_reading(
+            _reading(value=123.4, offset_s=off, status=ChannelStatus.SENSOR_ERROR)
+        )
 
-    assert escalations == ["Т5 Зона нагрева"], "finite value + error status must count as non-usable and escalate"
+    assert escalations == ["Т5 Зона нагрева"], (
+        "finite value + error status must count as non-usable and escalate"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -255,15 +260,10 @@ async def test_finite_error_status_is_nonusable() -> None:
 async def test_usable_threshold_breach_still_trips() -> None:
     tripped: list = []
 
-    async def authority_handler(condition, reading) -> bool:
+    async def action() -> None:
         tripped.append(True)
-        return True
 
-    engine = InterlockEngine(
-        broker=DataBroker(),
-        action_names={"emergency_off"},
-        trip_handler=authority_handler,
-    )
+    engine = InterlockEngine(broker=DataBroker(), actions={"emergency_off": action})
     engine.add_condition(
         InterlockCondition(
             name="overheat_zone",
@@ -274,7 +274,9 @@ async def test_usable_threshold_breach_still_trips() -> None:
             action="emergency_off",
         )
     )
-    await engine._process_reading(_reading(value=400.0, offset_s=0.0, status=ChannelStatus.OK))
+    await engine._process_reading(
+        _reading(value=400.0, offset_s=0.0, status=ChannelStatus.OK)
+    )
     assert tripped == [True], "a finite over-threshold reading must trip exactly as before"
 
 
@@ -299,7 +301,9 @@ async def test_escalated_flag_not_leaked_when_not_running() -> None:
     try:
 
         async def handler(condition, reading):
-            return await mgr.on_interlock_dead_channel(condition.name, reading.channel, value=reading.value)
+            return await mgr.on_interlock_dead_channel(
+                condition.name, reading.channel, value=reading.value
+            )
 
         engine = _make_engine(handler=handler, min_samples=5, min_duration_s=10.0)
 
@@ -342,14 +346,12 @@ async def test_escalated_flag_not_leaked_when_not_running() -> None:
 def _trip_engine(*, comparison: str, threshold: float, handler=None) -> tuple[InterlockEngine, list]:
     tripped: list = []
 
-    async def authority_handler(condition, reading) -> bool:
+    async def action() -> None:
         tripped.append(True)
-        return True
 
     engine = InterlockEngine(
         broker=DataBroker(),
-        action_names={"emergency_off"},
-        trip_handler=authority_handler,
+        actions={"emergency_off": action},
         dead_channel_handler=handler,
     )
     engine.add_condition(
@@ -370,14 +372,20 @@ async def test_positive_inf_overrange_insta_trips_above_threshold() -> None:
     # A normal below-threshold reading, then +inf/OVERRANGE (sensor pegged HIGH).
     await engine._process_reading(_reading(value=300.0, offset_s=0.0, status=ChannelStatus.OK))
     assert tripped == [], "below-threshold reading must not trip"
-    await engine._process_reading(_reading(value=float("inf"), offset_s=0.5, status=ChannelStatus.OVERRANGE))
-    assert tripped == [True], "+inf on an above-threshold interlock must trip at once, not wait for debounce"
+    await engine._process_reading(
+        _reading(value=float("inf"), offset_s=0.5, status=ChannelStatus.OVERRANGE)
+    )
+    assert tripped == [True], (
+        "+inf on an above-threshold interlock must trip at once, not wait for debounce"
+    )
 
 
 async def test_negative_inf_insta_trips_below_threshold() -> None:
     engine, tripped = _trip_engine(comparison="<", threshold=1.0)
     # -inf (pegged LOW) on a below-threshold interlock is the dangerous side.
-    await engine._process_reading(_reading(value=float("-inf"), offset_s=0.0, status=ChannelStatus.UNDERRANGE))
+    await engine._process_reading(
+        _reading(value=float("-inf"), offset_s=0.0, status=ChannelStatus.UNDERRANGE)
+    )
     assert tripped == [True], "-inf on a below-threshold interlock must insta-trip (symmetric)"
 
 
@@ -391,7 +399,9 @@ async def test_positive_inf_safe_side_debounces() -> None:
         return False
 
     engine, tripped = _trip_engine(comparison="<", threshold=1.0, handler=handler)
-    await engine._process_reading(_reading(value=float("inf"), offset_s=0.0, status=ChannelStatus.OVERRANGE))
+    await engine._process_reading(
+        _reading(value=float("inf"), offset_s=0.0, status=ChannelStatus.OVERRANGE)
+    )
     assert tripped == [], "+inf on a below-threshold interlock is the safe side — must not trip"
     window = engine._nonusable_windows.get("Т5 Зона нагрева")
     assert window is not None, "safe-side infinity must feed the non-usable debounce window"

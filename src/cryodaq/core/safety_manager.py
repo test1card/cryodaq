@@ -2367,15 +2367,15 @@ class SafetyManager:
         channel: str = "",
         value: float = 0.0,
         source: str = "safety_manager",
-    ) -> bool:
+    ) -> None:
         if not self._begin_fault_latch(
             reason,
             channel=channel,
             value=value,
             source=source,
         ):
-            return False
-        return await self._settle_latched_fault(
+            return
+        await self._settle_latched_fault(
             reason,
             channel=channel,
             value=value,
@@ -2389,7 +2389,7 @@ class SafetyManager:
         channel: str = "",
         value: float = 0.0,
         source: str = "safety_manager",
-    ) -> bool:
+    ) -> None:
         """Settle OFF, durable logging, and publication for a latched cut."""
 
         # 2. Now safe to do async cleanup — state already protects us.
@@ -2399,16 +2399,14 @@ class SafetyManager:
         #    conditional on a CONFIRMED off (F3).
         outputs_confirmed_off = True
         caller_cancelled: asyncio.CancelledError | None = None
-        settlement_confirmed = True
 
         if self._keithley is not None:
-            shutdown_task = asyncio.create_task(self._ensure_output_off())
+            shutdown_task = asyncio.create_task(self._keithley.emergency_off())
             result, error, cancelled = await _settle_shielded_hardware_task(shutdown_task)
             caller_cancelled = cancelled
             outputs_confirmed_off = error is None and result is True
             if error is not None:
                 logger.critical("FAULT: emergency_off failed: %s", error)
-            settlement_confirmed = outputs_confirmed_off
 
         # F3: only drop the sources whose OFF the driver CONFIRMED. On an
         # unconfirmed OFF (emergency_off returned False, per the CR-2 driver
@@ -2447,7 +2445,6 @@ class SafetyManager:
             caller_cancelled = caller_cancelled or cancelled
             if error is not None:
                 logger.error("Failed to write safety fault to operator_log: %s", error)
-                settlement_confirmed = False
 
         # 5. Broadcast Keithley channel states — best-effort, non-critical.
         #    Publish failure does NOT prevent fault latching or post-mortem
@@ -2458,10 +2455,8 @@ class SafetyManager:
         caller_cancelled = caller_cancelled or cancelled
         if error is not None:
             logger.warning("Failed to publish Keithley channel states: %s", error)
-            settlement_confirmed = False
         if caller_cancelled is not None:
             raise caller_cancelled
-        return settlement_confirmed and self._state is SafetyState.FAULT_LATCHED
 
     async def _run_global_output_off(self) -> Any:
         """Execute one complete driver-compatible global-OFF operation."""
@@ -2868,8 +2863,8 @@ class SafetyManager:
         value: float,
         *,
         action: str = "emergency_off",
-    ) -> bool:
-        """Own an interlock action and return only its exact settlement."""
+    ) -> None:
+        """Own the complete interlock action through truthful publication."""
         if action == "stop_source":
             # This synchronous cut reaches an in-flight request_run before the
             # owned interlock task can acquire _cmd_lock.
@@ -2883,12 +2878,11 @@ class SafetyManager:
             ),
             name=f"safety_interlock_{interlock_name}",
         )
-        result, error, caller_cancelled = await _settle_shielded_hardware_task(operation)
+        _result, error, caller_cancelled = await _settle_shielded_hardware_task(operation)
         if error is not None:
             raise error
         if caller_cancelled is not None:
             raise caller_cancelled
-        return result is True
 
     async def _on_interlock_trip_owned(
         self,
@@ -2897,7 +2891,7 @@ class SafetyManager:
         value: float,
         *,
         action: str = "emergency_off",
-    ) -> bool:
+    ) -> None:
         """Handle an interlock trip from InterlockEngine.
 
         ``action="emergency_off"`` (default, backwards-compatible):
@@ -2917,9 +2911,8 @@ class SafetyManager:
 
         if action == "emergency_off":
             logger.critical("INTERLOCK emergency_off: %s", reason)
-            # FAULT_LATCHED is only the authority cut. The interlock action
-            # succeeds only when the owned global OFF settlement is exact.
-            return await self._fault(reason, channel=channel, value=value)
+            await self._fault(reason, channel=channel, value=value)
+            return
 
         if action == "stop_source":
             logger.warning("INTERLOCK stop_source: %s", reason)
@@ -2935,7 +2928,7 @@ class SafetyManager:
                 if self._keithley is not None:
                     try:
                         off_task = asyncio.create_task(
-                            self._ensure_output_off(),
+                            self._keithley.emergency_off(),
                             name=f"interlock_full_off_{interlock_name}",
                         )
                         ok, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
@@ -2954,7 +2947,7 @@ class SafetyManager:
                         )
                         if caller_cancelled is not None:
                             raise caller_cancelled
-                        return False
+                        return
                     # A final-element OFF proof is deliberately nominal, not
                     # truthy: driver bugs and un-awaited/mock-shaped values
                     # must fault closed instead of becoming safety evidence.
@@ -2966,7 +2959,7 @@ class SafetyManager:
                         )
                         if caller_cancelled is not None:
                             raise caller_cancelled
-                        return False
+                        return
                 self._active_sources.clear()
                 retained_generation = self._has_current_reviewed_connection_generation()
                 self._reviewed_source_connected = retained_generation
@@ -2994,7 +2987,7 @@ class SafetyManager:
                     )
             if caller_cancelled is not None:
                 raise caller_cancelled
-            return publish_error is None and self._state is SafetyState.SAFE_OFF and not self._active_sources
+            return
 
         # Unknown action — fail-safe to a full fault rather than ignore.
         logger.critical(
@@ -3007,7 +3000,6 @@ class SafetyManager:
             channel=channel,
             value=value,
         )
-        return False
 
     async def on_interlock_dead_channel(
         self,

@@ -22,10 +22,6 @@ from cryodaq.drivers.base import Reading
 # ---------------------------------------------------------------------------
 
 
-async def _authority_handler(condition: InterlockCondition, reading: Reading) -> bool:
-    return True
-
-
 def _make_condition(
     name: str = "high_temp",
     description: str = "Temperature too high",
@@ -58,19 +54,9 @@ async def _make_engine(
         called.append(True)
 
     broker = DataBroker()
-
-    selected_action = action_fn if action_fn is not None else _default_action
-
-    async def authority_handler(condition: InterlockCondition, reading: Reading) -> bool:
-        result = selected_action()
-        if asyncio.iscoroutine(result):
-            await result
-        return True
-
     engine = InterlockEngine(
         broker=broker,
-        action_names={action_name},
-        trip_handler=authority_handler,
+        actions={action_name: action_fn if action_fn is not None else _default_action},
     )
     await engine.start()
     return broker, engine, called
@@ -212,18 +198,9 @@ async def test_action_called_async() -> None:
         action_b_started.set()
 
     broker = DataBroker()
-
-    async def authority_handler(condition, reading) -> bool:
-        if condition.action == "action_a":
-            await action_a()
-        else:
-            await action_b()
-        return True
-
     engine = InterlockEngine(
         broker=broker,
-        action_names={"action_a", "action_b"},
-        trip_handler=authority_handler,
+        actions={"action_a": action_a, "action_b": action_b},
     )
     # Condition A: T1 channel, threshold 300, action_a
     engine.add_condition(
@@ -283,7 +260,9 @@ async def test_action_called_async() -> None:
 async def test_regex_channel_matching() -> None:
     broker, engine, called = await _make_engine()
     # Pattern matches T1 through T8
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    engine.add_condition(
+        _make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">")
+    )
 
     await broker.publish(Reading.now("T5", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
@@ -301,7 +280,9 @@ async def test_regex_channel_matching() -> None:
 
 async def test_regex_no_match_ignored() -> None:
     broker, engine, called = await _make_engine()
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    engine.add_condition(
+        _make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">")
+    )
 
     # "PRESSURE_1" does not match T[1-8]
     await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
@@ -390,22 +371,13 @@ async def test_event_history() -> None:
 
 async def test_event_history_bounded() -> None:
     broker = DataBroker()
-
     trip_count = 0
 
     async def counting_action() -> None:
         nonlocal trip_count
         trip_count += 1
 
-    async def authority_handler(condition, reading) -> bool:
-        await counting_action()
-        return True
-
-    engine = InterlockEngine(
-        broker=broker,
-        action_names={"emergency_off"},
-        trip_handler=authority_handler,
-    )
+    engine = InterlockEngine(broker=broker, actions={"emergency_off": counting_action})
     # Use cooldown_s=0 so every reading can trip; interlock re-arms each time
     engine.add_condition(_make_condition(threshold=300.0, comparison=">", cooldown_s=0.0))
     await engine.start()
@@ -463,16 +435,7 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
         action_count[0] += 1
 
     broker = DataBroker()
-
-    async def authority_handler(condition, reading) -> bool:
-        await _action()
-        return True
-
-    engine = InterlockEngine(
-        broker=broker,
-        action_names={"emergency_off"},
-        trip_handler=authority_handler,
-    )
+    engine = InterlockEngine(broker=broker, actions={"emergency_off": _action})
     engine.load_config(config_file)
 
     # Interlock must be registered and start ARMED
@@ -488,13 +451,17 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
         assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
             "Interlock loaded from YAML did not trip on T5=450 > 400 (threshold not loaded)"
         )
-        assert action_count[0] == 1, "YAML-loaded action was not called on first trip"
+        assert action_count[0] == 1, (
+            "YAML-loaded action was not called on first trip"
+        )
 
         # --- Behavioral check 2: non-matching channel does NOT trip ---
         # acknowledge() transitions TRIPPED → ARMED (not a separate ACKNOWLEDGED state)
         engine.acknowledge("overheat")
         await asyncio.sleep(0.01)
-        assert engine.get_state()["overheat"] == InterlockState.ARMED, "Expected ARMED after acknowledge()"
+        assert engine.get_state()["overheat"] == InterlockState.ARMED, (
+            "Expected ARMED after acknowledge()"
+        )
         # "PRESSURE_1" does not match r"T\d+" — must stay ARMED (not re-tripped)
         await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
         await asyncio.sleep(0.05)
@@ -523,7 +490,8 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
         # cooldown_s=60 loaded & active → the loud trip announcement is deduped,
         # and a cooldown-dedup WARNING is emitted instead.
         assert "БЛОКИРОВКА СРАБОТАЛА" not in caplog.text, (
-            "loud trip announcement must be deduplicated within cooldown_s (cooldown_s may not have been loaded)"
+            "loud trip announcement must be deduplicated within cooldown_s "
+            "(cooldown_s may not have been loaded)"
         )
         assert "кулдаун" in caplog.text.lower()
     finally:
@@ -537,7 +505,7 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
 
 async def test_missing_action_rejected() -> None:
     broker = DataBroker()
-    engine = InterlockEngine(broker=broker, action_names={"emergency_off"}, trip_handler=_authority_handler)
+    engine = InterlockEngine(broker=broker, actions={"emergency_off": lambda: None})
 
     with pytest.raises(ValueError, match="неизвестное действие"):
         engine.add_condition(_make_condition(name="bad", action="nonexistent_action"))
@@ -550,7 +518,7 @@ async def test_missing_action_rejected() -> None:
 
 async def test_duplicate_name_rejected() -> None:
     broker = DataBroker()
-    engine = InterlockEngine(broker=broker, action_names={"emergency_off"}, trip_handler=_authority_handler)
+    engine = InterlockEngine(broker=broker, actions={"emergency_off": lambda: None})
 
     engine.add_condition(_make_condition(name="duplicate"))
     with pytest.raises(ValueError, match="уже зарегистрирована"):
@@ -564,11 +532,8 @@ async def test_duplicate_name_rejected() -> None:
 
 async def test_get_state() -> None:
     broker = DataBroker()
-
     engine = InterlockEngine(
-        broker=broker,
-        action_names={"emergency_off", "stop_source"},
-        trip_handler=_authority_handler,
+        broker=broker, actions={"emergency_off": lambda: None, "stop_source": lambda: None}
     )
     engine.add_condition(_make_condition(name="lock_a", action="emergency_off"))
     engine.add_condition(_make_condition(name="lock_b", action="stop_source"))
@@ -627,19 +592,7 @@ async def test_multiple_interlocks() -> None:
         called_b.append(True)
 
     broker = DataBroker()
-
-    async def authority_handler(condition, reading) -> bool:
-        if condition.action == "action_a":
-            await action_a()
-        else:
-            await action_b()
-        return True
-
-    engine = InterlockEngine(
-        broker=broker,
-        action_names={"action_a", "action_b"},
-        trip_handler=authority_handler,
-    )
+    engine = InterlockEngine(broker=broker, actions={"action_a": action_a, "action_b": action_b})
 
     # lock_a monitors T-channels and trips above 300 K
     engine.add_condition(
@@ -697,7 +650,7 @@ def test_interlock_missing_file_raises(tmp_path):
     """C-1.1: missing interlocks.yaml must raise InterlockConfigError."""
     from cryodaq.core.interlock import InterlockEngine
 
-    engine = InterlockEngine(broker=None, action_names={"emergency_off"}, trip_handler=_authority_handler)
+    engine = InterlockEngine(broker=None, actions={"emergency_off": lambda: None})
     with pytest.raises(InterlockConfigError, match="not found"):
         engine.load_config(tmp_path / "nonexistent.yaml")
 
@@ -707,7 +660,7 @@ def test_interlock_malformed_yaml_raises(tmp_path):
     cfg.write_text("not: valid: [yaml")
     from cryodaq.core.interlock import InterlockEngine
 
-    engine = InterlockEngine(broker=None, action_names={"emergency_off"}, trip_handler=_authority_handler)
+    engine = InterlockEngine(broker=None, actions={"emergency_off": lambda: None})
     with pytest.raises(InterlockConfigError, match="YAML parse error"):
         engine.load_config(cfg)
 
@@ -735,8 +688,7 @@ def test_interlock_valid_config_loads(tmp_path):
 
     engine = InterlockEngine(
         broker=None,
-        action_names={"emergency_off"},
-        trip_handler=_authority_handler,
+        actions={"emergency_off": lambda: None},
     )
     engine.load_config(cfg)
     assert len(engine.get_state()) == 1
