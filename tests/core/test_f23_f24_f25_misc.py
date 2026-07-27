@@ -80,10 +80,14 @@ async def test_rate_estimator_uses_measurement_timestamp_not_dequeue() -> None:
 
 
 def _make_interlock_engine() -> InterlockEngine:
-    async def _noop() -> None:
-        pass
+    async def authority_handler(condition, reading) -> bool:
+        return True
 
-    return InterlockEngine(broker=None, actions={"emergency_off": _noop})  # type: ignore[arg-type]
+    return InterlockEngine(
+        broker=None,
+        action_names={"emergency_off"},
+        trip_handler=authority_handler,
+    )  # type: ignore[arg-type]
 
 
 def test_interlock_acknowledge_re_arms_tripped_interlock() -> None:

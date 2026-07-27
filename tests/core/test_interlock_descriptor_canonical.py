@@ -90,15 +90,14 @@ async def test_canonical_channel_ids_trip_every_configured_t_interlock() -> None
     broker = DataBroker()
     actions_seen: list[str] = []
 
-    async def _emergency_off() -> None:
-        actions_seen.append("emergency_off")
-
-    async def _stop_source() -> None:
-        actions_seen.append("stop_source")
+    async def authority_handler(condition, reading) -> bool:
+        actions_seen.append(condition.action)
+        return True
 
     engine = InterlockEngine(
         broker=broker,
-        actions={"emergency_off": _emergency_off, "stop_source": _stop_source},
+        action_names={"emergency_off", "stop_source"},
+        trip_handler=authority_handler,
     )
     engine.load_config(INTERLOCKS_PATH)
     await engine.start()
@@ -141,15 +140,14 @@ async def test_raw_companion_channel_does_not_trip_interlock() -> None:
     broker = DataBroker()
     tripped: list[str] = []
 
-    async def _emergency_off() -> None:
-        tripped.append("emergency_off")
-
-    async def _stop_source() -> None:
-        tripped.append("stop_source")
+    async def authority_handler(condition, reading) -> bool:
+        tripped.append(condition.action)
+        return True
 
     engine = InterlockEngine(
         broker=broker,
-        actions={"emergency_off": _emergency_off, "stop_source": _stop_source},
+        action_names={"emergency_off", "stop_source"},
+        trip_handler=authority_handler,
     )
     engine.load_config(INTERLOCKS_PATH)
     await engine.start()

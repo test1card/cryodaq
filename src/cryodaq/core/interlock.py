@@ -19,7 +19,7 @@ import logging
 import math
 import re
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -99,6 +99,17 @@ class InterlockCondition:
     _pattern: re.Pattern[str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        try:
+            self.threshold = float(self.threshold)
+            self.cooldown_s = float(self.cooldown_s)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Interlock '{self.name}': threshold and cooldown_s must be numeric.") from exc
+        if not math.isfinite(self.threshold):
+            raise ValueError(f"Interlock '{self.name}': threshold must be finite.")
+        if not math.isfinite(self.cooldown_s):
+            raise ValueError(f"Interlock '{self.name}': cooldown_s must be finite.")
+        if self.cooldown_s < 0:
+            raise ValueError(f"Interlock '{self.name}': cooldown_s cannot be negative.")
         if self.comparison not in (">", "<"):
             raise ValueError(
                 f"Блокировка '{self.name}': недопустимый оператор сравнения '{self.comparison}'. Допустимы: '>' и '<'."
@@ -170,16 +181,19 @@ class InterlockEngine:
     ----------
     broker:
         DataBroker, из которого получаются показания.
-    actions:
-        Словарь действий: имя → async-коллбэк.
-        Пример: ``{"emergency_off": keithley.emergency_off}``.
+    action_names:
+        Поддерживаемые метки действий для валидации конфигурации. Драйверные
+        коллбэки не принимаются и не выполняются этим классом.
+    trip_handler:
+        Обязательный обработчик SafetyManager с полным контекстом условия и
+        показания; это единственный путь защитного действия.
 
     Пример использования::
 
         engine = InterlockEngine(
             broker=broker,
-            actions={"emergency_off": keithley.emergency_off,
-                     "stop_source": keithley.stop_source},
+            action_names={"emergency_off", "stop_source"},
+            trip_handler=safety_manager_interlock_handler,
         )
         engine.load_config(Path("config/interlocks.yaml"))
         await engine.start()
@@ -190,7 +204,7 @@ class InterlockEngine:
     def __init__(
         self,
         broker: DataBroker,
-        actions: dict[str, Callable[[], Any]],
+        action_names: Collection[str],
         *,
         trip_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
         alarm_publisher: Any | None = None,
@@ -200,17 +214,13 @@ class InterlockEngine:
 
         Parameters
         ----------
-        actions:
-            Dict of action_name → zero-arg callable. The callable is called
-            from ``_trip`` after the trip event is logged. Backward-compatible
-            with existing tests.
+        action_names:
+            Supported declarative action labels. Mappings are rejected so a
+            driver callback cannot become a second execution authority.
         trip_handler:
-            Optional async/sync callback receiving the full ``InterlockCondition``
-            and ``Reading`` context. Called from ``_trip`` ALONGSIDE the
-            actions-dict callable. Used by SafetyManager wiring (Phase 2a
-            I.1) so the action name, condition name, channel, and value
-            survive the trip path instead of being collapsed by zero-arg
-            callbacks.
+            Required async/sync SafetyManager authority callback receiving the
+            full ``InterlockCondition`` and ``Reading`` context. ``_trip``
+            invokes no other protective callback.
         alarm_publisher:
             Optional object exposing ``publish_diagnostic_alarm(channel_id,
             severity, age_seconds)`` (AlarmStateManager). Used by P2-5 to emit
@@ -224,8 +234,13 @@ class InterlockEngine:
             ``on_interlock_dead_channel`` which gates the fault on RUNNING —
             SafetyManager remains the sole authority.
         """
+        if trip_handler is None:
+            raise ValueError("InterlockEngine requires a SafetyManager trip_handler before conditions can arm.")
+        if isinstance(action_names, dict) or not all(isinstance(action_name, str) for action_name in action_names):
+            raise TypeError("action_names must be a collection of action-name strings, not callbacks.")
+
         self._broker = broker
-        self._actions = actions
+        self._action_names = frozenset(action_names)
         self._trip_handler = trip_handler
         self._alarm_publisher = alarm_publisher
         self._dead_channel_handler = dead_channel_handler
@@ -299,7 +314,8 @@ class InterlockEngine:
                 f"interlocks.yaml at {config_path}: 'interlocks' must be a list, got {type(entries).__name__}"
             )
 
-        loaded = 0
+        staged_conditions: list[InterlockCondition] = []
+        staged_names = set(self._interlocks)
         for entry in entries:
             try:
                 condition = InterlockCondition(
@@ -311,22 +327,34 @@ class InterlockEngine:
                     action=entry["action"],
                     cooldown_s=float(entry.get("cooldown_s", 0.0)),
                 )
-                self.add_condition(condition)
-                loaded += 1
+                if condition.name in staged_names:
+                    raise ValueError(f"Interlock '{condition.name}' is already registered.")
+                if condition.action not in self._action_names:
+                    raise ValueError(
+                        f"Interlock '{condition.name}': unknown action "
+                        f"'{condition.action}'. Available actions: {sorted(self._action_names)}."
+                    )
+                staged_names.add(condition.name)
+                staged_conditions.append(condition)
             except (KeyError, ValueError, TypeError, re.error) as exc:
                 raise InterlockConfigError(
                     f"interlocks.yaml at {config_path}: invalid interlock entry — {type(exc).__name__}: {exc}"
                 ) from exc
 
-        self._load_nonusable_escalation(raw, config_path)
+        nonusable_escalation = self._parse_nonusable_escalation(raw, config_path)
+        self._interlocks.update(
+            (condition.name, _InterlockRecord(condition=condition)) for condition in staged_conditions
+        )
+        if nonusable_escalation is not None:
+            self._nonusable_min_duration_s, self._nonusable_min_samples = nonusable_escalation
 
         logger.info(
             "Конфигурация блокировок загружена из '%s': %d блокировок.",
             config_path,
-            loaded,
+            len(staged_conditions),
         )
 
-    def _load_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> None:
+    def _parse_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> tuple[float, int] | None:
         """Parse the optional P2-5 ``nonusable_escalation`` block fail-closed.
 
         Absent → keep defaults (10 s / 5 samples). Present but malformed →
@@ -334,7 +362,7 @@ class InterlockEngine:
         """
         block = raw.get("nonusable_escalation")
         if block is None:
-            return
+            return None
         if not isinstance(block, dict):
             raise InterlockConfigError(
                 f"interlocks.yaml at {config_path}: 'nonusable_escalation' must be a "
@@ -353,8 +381,7 @@ class InterlockEngine:
                 f"positive finite min_duration_s and positive min_samples "
                 f"(got min_duration_s={min_duration_s}, min_samples={min_samples})"
             )
-        self._nonusable_min_duration_s = min_duration_s
-        self._nonusable_min_samples = min_samples
+        return min_duration_s, min_samples
 
     def add_condition(self, condition: InterlockCondition) -> None:
         """Добавить блокировку программно.
@@ -372,11 +399,11 @@ class InterlockEngine:
         """
         if condition.name in self._interlocks:
             raise ValueError(f"Блокировка '{condition.name}' уже зарегистрирована.")
-        if condition.action not in self._actions:
+        if condition.action not in self._action_names:
             raise ValueError(
                 f"Блокировка '{condition.name}': неизвестное действие "
                 f"'{condition.action}'. Доступные действия: "
-                f"{list(self._actions.keys())}."
+                f"{sorted(self._action_names)}."
             )
         self._interlocks[condition.name] = _InterlockRecord(condition=condition)
         logger.info(
@@ -654,7 +681,32 @@ class InterlockEngine:
             )
 
         # Вызов защитного действия
-        action_callable = self._actions[condition.action]
+        # SafetyManager is the sole execution authority. It must settle with
+        # the exact value True before this engine can call the action successful.
+        async def authority_action() -> bool:
+            try:
+                result = self._trip_handler(condition, reading)
+                if asyncio.iscoroutine(result):
+                    result = await result
+            except Exception as exc:
+                logger.critical(
+                    "SafetyManager authority handler failed for interlock '%s': %s",
+                    condition.name,
+                    exc,
+                    exc_info=True,
+                )
+                raise
+            if result is not True:
+                logger.critical(
+                    "SafetyManager authority result was not confirmed for interlock '%s' "
+                    "(result type=%s); immediate operator intervention is required.",
+                    condition.name,
+                    type(result).__name__,
+                )
+                raise RuntimeError("SafetyManager authority result was not confirmed")
+            return True
+
+        action_callable = authority_action
         try:
             await action_callable()
             logger.critical(
@@ -672,24 +724,6 @@ class InterlockEngine:
                 exc,
                 exc_info=True,
             )
-
-        # Phase 2a I.1: notify the optional trip_handler with FULL
-        # context. SafetyManager uses this to differentiate "stop_source"
-        # (soft stop, no fault latch) from "emergency_off" (full latch).
-        # The handler is called even if the actions-dict callable above
-        # raised — both paths run independently.
-        if self._trip_handler is not None:
-            try:
-                result = self._trip_handler(condition, reading)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as exc:
-                logger.critical(
-                    "trip_handler failed for interlock '%s': %s",
-                    condition.name,
-                    exc,
-                    exc_info=True,
-                )
 
     # ------------------------------------------------------------------
     # Управление состоянием

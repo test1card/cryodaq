@@ -2341,24 +2341,21 @@ class _InterlockHandlerContext:
     experiment_manager: Any | None = None
 
 
-async def _interlock_noop() -> None:
-    return None
-
-
 async def _interlock_trip_handler(
     condition: Any,
     reading: Any,
     *,
     context: _InterlockHandlerContext,
-) -> None:
+) -> bool:
     """Route an interlock trip to SafetyManager, failing closed on errors."""
     try:
-        await context.safety_manager.on_interlock_trip(
+        result = await context.safety_manager.on_interlock_trip(
             interlock_name=condition.name,
             channel=reading.channel,
             value=float(reading.value) if reading.value is not None else 0.0,
             action=condition.action,
         )
+        return result is True
     except Exception as exc:
         logger.critical(
             "Interlock trip handler failed; action=%s exception=%s; escalating to fault",
@@ -2372,11 +2369,15 @@ async def _interlock_trip_handler(
                 channel=reading.channel,
                 value=float(reading.value) if reading.value is not None else 0.0,
             )
+            # A fallback latch makes the unsafe/unknown state visible. It is
+            # never evidence that the requested interlock action succeeded.
+            return False
         except Exception as exc2:
             logger.critical(
                 "Interlock fault escalation failed: exception=%s; instrument state is unknown",
                 type(exc2).__name__,
             )
+            return False
 
 
 async def _interlock_dead_channel_handler(
@@ -6571,15 +6572,9 @@ async def _run_engine(
     zmq_pub = ZMQPublisher()
 
     # Interlock Engine — действия делегируются SafetyManager.
-    # The actions-dict callables are kept as no-ops for
-    # backwards compatibility with InterlockEngine's required interface, but
-    # the REAL safety routing happens via trip_handler which receives the
-    # full (condition, reading) context. Without this the action name and
-    # channel would be discarded and stop_source would behave as emergency_off.
-    interlock_actions: dict[str, Any] = {
-        "emergency_off": _interlock_noop,
-        "stop_source": _interlock_noop,
-    }
+    # The full-context trip_handler is the only protective execution path;
+    # InterlockEngine receives labels solely to validate configuration.
+    interlock_action_names = {"emergency_off", "stop_source"}
 
     interlock_handler_context = _InterlockHandlerContext(
         safety_manager=safety_manager,
@@ -6589,7 +6584,7 @@ async def _run_engine(
 
     interlock_engine = InterlockEngine(
         broker,
-        actions=interlock_actions,
+        action_names=interlock_action_names,
         trip_handler=functools.partial(
             _interlock_trip_handler,
             context=interlock_handler_context,
