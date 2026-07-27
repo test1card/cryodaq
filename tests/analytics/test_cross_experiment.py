@@ -423,6 +423,12 @@ def test_compute_trend_empty_metric_returns_no_points() -> None:
     assert trend.baseline_mean is None
 
 
+@pytest.mark.parametrize("metric", ["initial_cooldown_rate_k_per_hour", "experiment_id"])
+def test_compute_trend_rejects_unknown_or_non_numeric_metric_before_scanning_summaries(metric: str) -> None:
+    with pytest.raises(ValueError, match="unsupported numeric ExperimentSummary metric"):
+        compute_trend([], metric, threshold=1.0)
+
+
 def test_compute_trend_ignores_nonfinite_evidence_and_rejects_invalid_controls() -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     summaries = [

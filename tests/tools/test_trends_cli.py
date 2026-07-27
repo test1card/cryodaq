@@ -13,6 +13,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 import pyarrow.parquet as pq  # noqa: E402
 
+from cryodaq.analytics.cross_experiment import ScanResult  # noqa: E402
 from cryodaq.tools import trends_cli  # noqa: E402
 
 COLD = "Т12"
@@ -146,3 +147,86 @@ def test_cli_drift_exit_code_reflects_detection(tmp_path: Path, capsys: pytest.C
 def test_cli_requires_command() -> None:
     with pytest.raises(SystemExit):
         trends_cli.main([])
+
+
+@pytest.mark.parametrize("metric", ["initial_cooldown_rate_k_per_hour", "experiment_id"])
+def test_cli_drift_rejects_invalid_or_non_numeric_metric_before_archive_scan(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+) -> None:
+    def unexpected_archive_scan(*args: object, **kwargs: object) -> ScanResult:
+        raise AssertionError("invalid metrics must be rejected before scanning the archive")
+
+    monkeypatch.setattr(trends_cli, "scan_archive", unexpected_archive_scan)
+    rc = trends_cli.main(
+        [
+            "drift",
+            "--data-dir",
+            str(tmp_path),
+            "--metric",
+            metric,
+            "--threshold",
+            "1.0",
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err.startswith(
+        f"error: unsupported numeric ExperimentSummary metric {metric!r}; supported metrics: "
+    )
+
+
+@pytest.mark.parametrize(
+    ("end_value", "final_day"),
+    [
+        ("2026-01-10", datetime(2026, 1, 10, tzinfo=UTC)),
+        ("20260110", datetime(2026, 1, 10, tzinfo=UTC)),
+        ("2026-W02-6", datetime(2026, 1, 10, tzinfo=UTC)),
+        ("2026W026", datetime(2026, 1, 10, tzinfo=UTC)),
+        ("2026-W02", datetime(2026, 1, 5, tzinfo=UTC)),
+        ("2026W02", datetime(2026, 1, 5, tzinfo=UTC)),
+    ],
+)
+def test_cli_scan_date_only_end_includes_the_final_day_only(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    end_value: str,
+    final_day: datetime,
+) -> None:
+    _make_experiment(tmp_path, "exp-first", final_day)
+    _make_experiment(tmp_path, "exp-late", final_day + timedelta(hours=23, minutes=59, seconds=59))
+    _make_experiment(tmp_path, "exp-next-day", final_day + timedelta(days=1))
+
+    rc = trends_cli.main(["scan", "--data-dir", str(tmp_path), "--end", end_value])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "exp-first" in output
+    assert "exp-late" in output
+    assert "exp-next-day" not in output
+
+
+def test_cli_scan_preserves_timestamp_end_and_offset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamp = "2026-01-10T12:34:56.123456+03:30"
+    captured: dict[str, datetime | None] = {}
+
+    def capture_archive(*args: object, **kwargs: object) -> ScanResult:
+        end = kwargs.get("end")
+        assert end is None or isinstance(end, datetime)
+        captured["end"] = end
+        return ScanResult(summaries=[], skipped=[])
+
+    monkeypatch.setattr(trends_cli, "scan_archive", capture_archive)
+
+    assert trends_cli.main(["scan", "--data-dir", str(tmp_path), "--end", timestamp]) == 0
+    assert captured["end"] == datetime.fromisoformat(timestamp)
+    assert captured["end"].isoformat() == timestamp
+
+
+def test_parse_date_max_date_end_is_overflow_safe(tmp_path: Path) -> None:
+    assert trends_cli.main(["scan", "--data-dir", str(tmp_path), "--end", "9999-12-31"]) == 0

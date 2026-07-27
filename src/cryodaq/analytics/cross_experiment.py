@@ -49,10 +49,11 @@ import csv
 import json
 import logging
 import math
+import types
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import numpy as np
 
@@ -111,6 +112,30 @@ class ExperimentSummary:
         payload = asdict(self)
         payload["start_time"] = self.start_time.isoformat()
         return payload
+
+
+def _is_numeric_summary_annotation(annotation: Any) -> bool:
+    """Whether an ExperimentSummary field is an int/float, optionally None."""
+    if annotation in {int, float}:
+        return True
+    if get_origin(annotation) not in {Union, types.UnionType}:
+        return False
+    return all(arg is type(None) or arg in {int, float} for arg in get_args(annotation))
+
+
+_EXPERIMENT_SUMMARY_TYPE_HINTS = get_type_hints(ExperimentSummary)
+SUPPORTED_TREND_METRICS = frozenset(
+    summary_field.name
+    for summary_field in fields(ExperimentSummary)
+    if _is_numeric_summary_annotation(_EXPERIMENT_SUMMARY_TYPE_HINTS[summary_field.name])
+)
+
+
+def validate_trend_metric(metric: str) -> None:
+    """Reject a metric that is not a numeric ExperimentSummary field."""
+    if metric not in SUPPORTED_TREND_METRICS:
+        supported = ", ".join(sorted(SUPPORTED_TREND_METRICS))
+        raise ValueError(f"unsupported numeric ExperimentSummary metric {metric!r}; supported metrics: {supported}")
 
 
 @dataclass
@@ -527,6 +552,7 @@ def compute_trend(
     от первой точки), информационная величина в дополнение к baseline/recent
     сравнению.
     """
+    validate_trend_metric(metric)
     if not math.isfinite(threshold) or threshold < 0:
         raise ValueError("threshold must be non-negative and finite")
     if baseline_n < 1 or recent_n < 1:

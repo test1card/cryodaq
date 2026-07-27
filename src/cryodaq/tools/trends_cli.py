@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 
 from cryodaq.analytics.cross_experiment import (
@@ -30,20 +30,29 @@ from cryodaq.analytics.cross_experiment import (
     format_summary_table,
     format_trend_report,
     scan_archive,
+    validate_trend_metric,
 )
 
 
-def _parse_date(value: str | None) -> datetime | None:
+def _parse_date(value: str | None, *, end: bool = False) -> datetime | None:
     if not value:
         return None
-    return datetime.fromisoformat(value)
+    parsed = datetime.fromisoformat(value)
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        pass
+    else:
+        if end:
+            return datetime.combine(parsed.date(), time.max, tzinfo=parsed.tzinfo)
+    return parsed
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
     result = scan_archive(
         Path(args.data_dir),
         start=_parse_date(args.start),
-        end=_parse_date(args.end),
+        end=_parse_date(args.end, end=True),
         cold_channel=args.cold_channel,
         warm_channel=args.warm_channel,
     )
@@ -62,20 +71,29 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_drift(args: argparse.Namespace) -> int:
+    try:
+        validate_trend_metric(args.metric)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     result = scan_archive(
         Path(args.data_dir),
         start=_parse_date(args.start),
-        end=_parse_date(args.end),
+        end=_parse_date(args.end, end=True),
         cold_channel=args.cold_channel,
         warm_channel=args.warm_channel,
     )
-    trend = compute_trend(
-        result.summaries,
-        args.metric,
-        threshold=args.threshold,
-        baseline_n=args.baseline_n,
-        recent_n=args.recent_n,
-    )
+    try:
+        trend = compute_trend(
+            result.summaries,
+            args.metric,
+            threshold=args.threshold,
+            baseline_n=args.baseline_n,
+            recent_n=args.recent_n,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(format_trend_report(trend))
     if args.json:
         export_trend_json(trend, Path(args.json))
