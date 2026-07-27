@@ -45,6 +45,11 @@ from cryodaq.core.alarm_ack_codec import (
     is_canonical_engine_instance_id,
     validate_alarm_ack_wire_result,
 )
+from cryodaq.core.command_authority import (
+    ENGINE_MUTATION_CAPABILITY,
+    MUTATION_PROTOCOL_MAJOR,
+    MUTATION_RECEIPT_SCHEMA,
+)
 from cryodaq.core.zmq_bridge import PROTOCOL_VERSION
 from cryodaq.notifications._secrets import SecretStr
 from cryodaq.paths import get_config_dir
@@ -401,8 +406,119 @@ _OPERATOR_LOG_SUCCESS_KEYS = frozenset(
     {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt", "proto"}
 )
 _OPERATOR_LOG_PENDING_KEYS = _OPERATOR_LOG_SUCCESS_KEYS | {"error_code", "error"}
+_OPERATOR_LOG_PENDING_ERROR_CODE = "committed_reconciliation_failed"
+_OPERATOR_LOG_PENDING_ERROR = "operator log committed, but required publication remains pending"
 _OPERATOR_LOG_ENTRY_KEYS = frozenset({"id", "timestamp", "experiment_id", "author", "source", "message", "tags"})
 _OPERATOR_LOG_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
+_SQLITE_MAX_ROWID = 2**63 - 1
+_UNKNOWN_SETTLEMENT_EVIDENCE_KEYS = frozenset(
+    {
+        "ok",
+        "committed",
+        "retry_safe",
+        "publication_state",
+        "commit_state",
+        "delivery_state",
+        "error_code",
+        "proto",
+        "schema",
+        "request_id",
+    }
+)
+_UNKNOWN_SETTLEMENT_SAFE_ERROR_CODES = frozenset(
+    {
+        "committed_reconciliation_failed",
+        "operator_log_admission_invalid",
+        "operator_log_commit_outcome_unknown",
+        "operator_log_persistence_failed",
+        "operator_log_state_invalid",
+    }
+)
+_UNKNOWN_SETTLEMENT_SAFE_SCHEMAS = frozenset({"operator_log_commit_v1", "mutation_compatibility_v1"})
+_UNKNOWN_SETTLEMENT_SENSITIVE_KEY_PARTS = frozenset(
+    {
+        "artifact",
+        "author",
+        "capability",
+        "config",
+        "credential",
+        "message",
+        "note",
+        "operator",
+        "password",
+        "path",
+        "sample",
+        "secret",
+        "snapshot",
+        "token",
+    }
+)
+_UNKNOWN_SETTLEMENT_MAX_DEPTH = 4
+_UNKNOWN_SETTLEMENT_MAX_ITEMS = 16
+_UNKNOWN_SETTLEMENT_MAX_STRING_CHARS = 128
+_UNKNOWN_SETTLEMENT_OMIT = object()
+_OPERATOR_LOG_ENGINE_REJECTION_KEYS = frozenset({"ok", "committed", "error_code", "error", "retry_safe", "proto"})
+_OPERATOR_LOG_ENGINE_REJECTION_WITH_REQUEST_ID_KEYS = _OPERATOR_LOG_ENGINE_REJECTION_KEYS | {"request_id"}
+_OPERATOR_LOG_TRANSPORT_REJECTION_KEYS = frozenset(
+    {"ok", "error_code", "error", "delivery_state", "commit_state", "retry_safe", "proto"}
+)
+_OPERATOR_LOG_MUTATION_PROTOCOL_REJECTION_KEYS = _OPERATOR_LOG_TRANSPORT_REJECTION_KEYS | {"compatibility_receipt"}
+_OPERATOR_LOG_WEB_MUTATION_DISCOVERY_REJECTION_KEYS = frozenset(
+    {
+        "ok",
+        "error_code",
+        "error",
+        "delivery_state",
+        "commit_state",
+        "retry_safe",
+        "compatibility_receipt",
+    }
+)
+_MUTATION_COMPATIBILITY_REJECTION_RECEIPT_KEYS = frozenset(
+    {"schema", "accepted", "server_protocol_major", "required_capability"}
+)
+_OPERATOR_LOG_ENGINE_REJECTIONS = frozenset(
+    {
+        ("engine_shutting_down", "operator log submissions are frozen for shutdown", True),
+        (
+            "operator_log_request_id_invalid",
+            "request_id must be exactly 32 lowercase hexadecimal characters",
+            True,
+        ),
+        ("operator_log_busy", "the bounded operator log commit lane is full", True),
+        ("idempotency_key_conflict", "request_id was already committed with different content", False),
+        ("idempotency_key_conflict", "request_id is already in flight with different content", False),
+        ("idempotency_key_conflict", "request_id is reconciling different committed content", False),
+    }
+)
+_OPERATOR_LOG_ENGINE_REJECTIONS_WITH_REQUEST_ID = frozenset(
+    {
+        ("operator_log_admission_invalid", "Operator-log command or publication fields are invalid.", True),
+        ("stale_experiment_command", "Experiment identity changed before the operator log could commit.", False),
+        ("operator_log_busy", "another durable experiment mutation is still authoritative", True),
+        ("idempotency_key_conflict", "request_id was already committed with different content", False),
+    }
+)
+_OPERATOR_LOG_TRANSPORT_REJECTIONS = frozenset(
+    {
+        ("command_request_invalid", "Command request is invalid.", True),
+        ("command_endpoint_action_rejected", "Command is not admitted by this endpoint.", False),
+        (
+            "command_authority_quarantined",
+            "A prior command outcome is still uncertain; mutation is quarantined.",
+            False,
+        ),
+    }
+)
+_OPERATOR_LOG_DISPATCHED_TRANSPORT_REJECTIONS = frozenset(
+    {
+        (
+            "engine_shutdown_latched",
+            "engine shutdown owns mutation admission; later state changes are refused",
+            False,
+        ),
+    }
+)
 
 # Operator-log tags that downstream consumers treat as semantic SYSTEM
 # categories, not free-form labels. A REST caller must not forge them
@@ -516,6 +632,126 @@ async def _forward_write(cmd: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail="Ошибка движка") from exc
 
 
+def _is_sqlite_rowid(value: object) -> bool:
+    """Accept one exact positive SQLite row-id value."""
+
+    return type(value) is int and 1 <= value <= _SQLITE_MAX_ROWID
+
+
+def _is_exact_mutation_compatibility_rejection_receipt(receipt: object) -> bool:
+    """Accept only the complete exact compatibility rejection receipt."""
+
+    return (
+        type(receipt) is dict
+        and set(receipt) == _MUTATION_COMPATIBILITY_REJECTION_RECEIPT_KEYS
+        and type(receipt.get("schema")) is str
+        and receipt["schema"] == MUTATION_RECEIPT_SCHEMA
+        and receipt.get("accepted") is False
+        and type(receipt.get("server_protocol_major")) is int
+        and receipt["server_protocol_major"] == MUTATION_PROTOCOL_MAJOR
+        and type(receipt.get("required_capability")) is str
+        and receipt["required_capability"] == ENGINE_MUTATION_CAPABILITY
+    )
+
+
+def _bounded_json_safe_projection(
+    value: object,
+    *,
+    depth: int = 0,
+    ancestors: set[int] | None = None,
+    allowed_keys: frozenset[str] | None = None,
+) -> object:
+    """Project untrusted values to a small, JSON-safe, identity-redacted shape."""
+
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        return value if -_SQLITE_MAX_ROWID <= value <= _SQLITE_MAX_ROWID else _UNKNOWN_SETTLEMENT_OMIT
+    if type(value) is float:
+        return value if math.isfinite(value) else _UNKNOWN_SETTLEMENT_OMIT
+    if type(value) is str:
+        return (
+            value
+            if len(value) <= _UNKNOWN_SETTLEMENT_MAX_STRING_CHARS and value.isprintable()
+            else _UNKNOWN_SETTLEMENT_OMIT
+        )
+    if depth >= _UNKNOWN_SETTLEMENT_MAX_DEPTH or type(value) not in (dict, list, tuple):
+        return _UNKNOWN_SETTLEMENT_OMIT
+    ancestor_ids = ancestors or set()
+    if id(value) in ancestor_ids:
+        return _UNKNOWN_SETTLEMENT_OMIT
+    child_ancestors = ancestor_ids | {id(value)}
+    if type(value) is dict:
+        projected: dict[str, object] = {}
+        for index, (key, child) in enumerate(value.items()):
+            if index >= _UNKNOWN_SETTLEMENT_MAX_ITEMS or len(projected) >= _UNKNOWN_SETTLEMENT_MAX_ITEMS:
+                break
+            if type(key) is not str or (allowed_keys is not None and key not in allowed_keys):
+                continue
+            normalized_key = "".join(char for char in key.casefold() if char.isalnum())
+            if any(part in normalized_key for part in _UNKNOWN_SETTLEMENT_SENSITIVE_KEY_PARTS):
+                continue
+            projected_child = _bounded_json_safe_projection(
+                child,
+                depth=depth + 1,
+                ancestors=child_ancestors,
+            )
+            if projected_child is not _UNKNOWN_SETTLEMENT_OMIT:
+                projected[key] = projected_child
+        return projected
+    projected_list: list[object] = []
+    for index, child in enumerate(value):
+        if index >= _UNKNOWN_SETTLEMENT_MAX_ITEMS or len(projected_list) >= _UNKNOWN_SETTLEMENT_MAX_ITEMS:
+            break
+        projected_child = _bounded_json_safe_projection(child, depth=depth + 1, ancestors=child_ancestors)
+        if projected_child is not _UNKNOWN_SETTLEMENT_OMIT:
+            projected_list.append(projected_child)
+    return projected_list
+
+
+def _safe_unknown_settlement_evidence(result: object, caller_request_id: str) -> dict[str, object]:
+    """Retain only bounded reconciliation status fields from an unknown reply."""
+
+    projected = _bounded_json_safe_projection(result, allowed_keys=_UNKNOWN_SETTLEMENT_EVIDENCE_KEYS)
+    if type(projected) is not dict:
+        return {}
+    safe: dict[str, object] = {}
+    for key, value in projected.items():
+        if key in {"ok", "committed", "retry_safe"} and type(value) is bool:
+            safe[key] = value
+        elif key == "proto" and type(value) is int:
+            safe[key] = value
+        elif (
+            key == "request_id"
+            and type(value) is str
+            and len(value) == 32
+            and all(char in "0123456789abcdef" for char in value)
+            and value == caller_request_id
+        ):
+            safe[key] = value
+        elif (
+            key in {"publication_state", "commit_state", "delivery_state"}
+            and type(value) is str
+            and value
+            in {
+                "published",
+                "pending",
+                "aborted",
+                "committed",
+                "not_committed",
+                "unknown",
+                "dispatched",
+                "not_dispatched",
+            }
+        ):
+            safe[key] = value
+        elif key == "error_code" and type(value) is str and value in _UNKNOWN_SETTLEMENT_SAFE_ERROR_CODES:
+            safe[key] = value
+        elif key == "schema" and type(value) is str and value in _UNKNOWN_SETTLEMENT_SAFE_SCHEMAS:
+            safe[key] = value
+    return safe
+
+
 def _strict_rest_operator_log_commit(result: object, command: dict[str, Any]) -> bool:
     """Accept only a complete receipt bound to the exact REST submission."""
 
@@ -540,9 +776,8 @@ def _strict_rest_operator_log_commit(result: object, command: dict[str, Any]) ->
     ):
         return False
     if publication_state == "pending" and (
-        result.get("error_code") != "committed_reconciliation_failed"
-        or type(result.get("error")) is not str
-        or len(result["error"]) > 512
+        result.get("error_code") != _OPERATOR_LOG_PENDING_ERROR_CODE
+        or result.get("error") != _OPERATOR_LOG_PENDING_ERROR
     ):
         return False
     entry = result.get("entry")
@@ -556,7 +791,7 @@ def _strict_rest_operator_log_commit(result: object, command: dict[str, Any]) ->
         return False
     entry_id = entry.get("id")
     timestamp = entry.get("timestamp")
-    if type(entry_id) is not int or entry_id <= 0 or type(timestamp) is not str or len(timestamp) > 128:
+    if not _is_sqlite_rowid(entry_id) or type(timestamp) is not str or len(timestamp) > 128:
         return False
     try:
         parsed = datetime.fromisoformat(timestamp)
@@ -569,7 +804,8 @@ def _strict_rest_operator_log_commit(result: object, command: dict[str, Any]) ->
     return (
         receipt.get("schema") == "operator_log_commit_v1"
         and receipt.get("request_id") == command.get("request_id")
-        and receipt.get("entry_id") == entry_id
+        and _is_sqlite_rowid(receipt.get("entry_id"))
+        and receipt["entry_id"] == entry_id
         and receipt.get("experiment_id") == expected_experiment_id
         and receipt.get("committed") is True
         and entry.get("experiment_id") == expected_experiment_id
@@ -580,11 +816,86 @@ def _strict_rest_operator_log_commit(result: object, command: dict[str, Any]) ->
     )
 
 
-@router.post("/log", dependencies=[Depends(require_write_token)])
+def _definite_rest_operator_log_rejection(result: object, command: dict[str, Any]) -> bool:
+    """Accept only exact engine/REP refusals that prove this write did not commit."""
+
+    if type(result) is not dict:
+        return False
+    if set(result) == _OPERATOR_LOG_WEB_MUTATION_DISCOVERY_REJECTION_KEYS:
+        return (
+            result.get("ok") is False
+            and type(result.get("error_code")) is str
+            and result["error_code"] == "mutation_protocol_incompatible"
+            and type(result.get("error")) is str
+            and result["error"] == "Web mutation compatibility discovery failed; command was not dispatched"
+            and type(result.get("delivery_state")) is str
+            and result["delivery_state"] == "not_dispatched"
+            and type(result.get("commit_state")) is str
+            and result["commit_state"] == "not_committed"
+            and result.get("retry_safe") is True
+            and _is_exact_mutation_compatibility_rejection_receipt(result.get("compatibility_receipt"))
+        )
+    if (
+        result.get("ok") is not False
+        or type(result.get("proto")) is not int
+        or result.get("proto") != PROTOCOL_VERSION
+        or type(result.get("error_code")) is not str
+        or not result["error_code"]
+        or type(result.get("error")) is not str
+        or not result["error"]
+        or type(result.get("retry_safe")) is not bool
+    ):
+        return False
+    rejection = (result["error_code"], result["error"], result["retry_safe"])
+    if set(result) == _OPERATOR_LOG_ENGINE_REJECTION_KEYS:
+        return result.get("committed") is False and rejection in _OPERATOR_LOG_ENGINE_REJECTIONS
+    if set(result) == _OPERATOR_LOG_ENGINE_REJECTION_WITH_REQUEST_ID_KEYS:
+        return (
+            result.get("committed") is False
+            and type(result["request_id"]) is str
+            and result["request_id"] == command.get("request_id")
+            and rejection in _OPERATOR_LOG_ENGINE_REJECTIONS_WITH_REQUEST_ID
+        )
+    if set(result) == _OPERATOR_LOG_TRANSPORT_REJECTION_KEYS:
+        return result.get("commit_state") == "not_committed" and (
+            (result.get("delivery_state") == "not_dispatched" and rejection in _OPERATOR_LOG_TRANSPORT_REJECTIONS)
+            or (
+                result.get("delivery_state") == "dispatched"
+                and rejection in _OPERATOR_LOG_DISPATCHED_TRANSPORT_REJECTIONS
+            )
+        )
+    if set(result) != _OPERATOR_LOG_MUTATION_PROTOCOL_REJECTION_KEYS:
+        return False
+    return (
+        result.get("error_code") == "mutation_protocol_incompatible"
+        and result.get("error")
+        == "mutating command refused; perform mutation_capabilities discovery and retry explicitly"
+        and result.get("delivery_state") == "dispatched"
+        and result.get("commit_state") == "not_committed"
+        and result.get("retry_safe") is True
+        and _is_exact_mutation_compatibility_rejection_receipt(result.get("compatibility_receipt"))
+    )
+
+
+def _unknown_rest_operator_log_settlement(result: object, caller_request_id: str) -> dict[str, Any]:
+    """Make an untrusted settlement visibly non-successful with safe evidence."""
+
+    return {
+        "ok": False,
+        "error_code": "operator_log_settlement_malformed",
+        "error": "engine returned an unknown or malformed operator-log settlement",
+        "commit_state": "unknown",
+        "retry_safe": False,
+        "caller_request_id": caller_request_id,
+        "engine_settlement": _safe_unknown_settlement_evidence(result, caller_request_id),
+    }
+
+
+@router.post("/log", dependencies=[Depends(require_write_token)], response_model=None)
 async def post_log(
     payload: LogAppendIn,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Добавить запись в операторский журнал (author = «REST API»)."""
     if len(idempotency_key) != 32 or any(char not in "0123456789abcdef" for char in idempotency_key):
         raise HTTPException(
@@ -621,13 +932,14 @@ async def post_log(
         cmd["tags"] = list(payload.tags)
     result = await _forward_write(cmd)
     if type(result) is not dict:
-        raise HTTPException(status_code=502, detail="Некорректный ответ движка")
-    if result.get("ok") is True or result.get("committed") is True:
-        if not _strict_rest_operator_log_commit(result, cmd):
-            raise HTTPException(status_code=502, detail="Неполное подтверждение движка")
-    detached = dict(result)
-    detached["request_id"] = idempotency_key
-    return detached
+        return JSONResponse(_unknown_rest_operator_log_settlement(result, idempotency_key), status_code=502)
+    if _strict_rest_operator_log_commit(result, cmd):
+        if result["publication_state"] == "published":
+            return {**result, "request_id": idempotency_key}
+        return JSONResponse({**result, "caller_request_id": idempotency_key}, status_code=503)
+    if _definite_rest_operator_log_rejection(result, cmd):
+        return JSONResponse({**result, "caller_request_id": idempotency_key}, status_code=409)
+    return JSONResponse(_unknown_rest_operator_log_settlement(result, idempotency_key), status_code=502)
 
 
 @router.post("/alarms/{alarm_id}/ack", dependencies=[Depends(require_write_token)])

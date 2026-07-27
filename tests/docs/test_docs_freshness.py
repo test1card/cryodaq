@@ -363,6 +363,144 @@ def test_outcome_unknown_gui_instances_are_documented_in_design_system() -> None
     )
 
 
+def _normalize_contract_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+EXPECTED_POST_LOG_SETTLEMENT_ROWS = {
+    "409": (
+        """A definite non-commit. The response contains `caller_request_id`, copied
+        from the submitted header, and an exact boolean `retry_safe`. It proves
+        non-commit with either `committed=false` or `commit_state="not_committed"`;
+        it is not a `publication_state="published"` or `"pending"` receipt.""",
+        """Retain the same caller-owned key. Retry only when `retry_safe` is `true`;
+        when it is `false`, resolve the rejection without blindly resubmitting or
+        replacing the key.""",
+    ),
+    "502": (
+        """Outcome unknown: neither success nor definite failure. A structured
+        unknown-settlement body has `commit_state="unknown"`, `retry_safe=false`,
+        `caller_request_id`, and `engine_settlement`. `engine_settlement` is bounded,
+        filtered evidence only: it may be empty and may retain only safe
+        status/correlation fields (`ok`, `committed`, `retry_safe`,
+        `publication_state`, `commit_state`, `delivery_state`, `error_code`, `proto`,
+        `schema`, and a matching `request_id`). It is not an authoritative settlement
+        and cannot turn the 502 into a success or non-commit. A forwarding/transport
+        exception can instead be FastAPI's generic 502 detail body and provides none
+        of those structured fields.""",
+        """Do not blindly retry and do not invent a new key. Reconcile using the same
+        caller-owned identity; a generic transport 502 is unknown for the same
+        reason.""",
+    ),
+    "503": (
+        """The command is committed but required broker publication remains pending.
+        The accepted receipt has `committed=true`, `retry_safe=false`,
+        `publication_state="pending"`, and `caller_request_id`; it also carries the
+        persisted entry/commit receipt and the pending diagnostic.""",
+        """Do not issue a new mutation. Reconcile, or retry that reconciliation, with
+        the same key until publication settles.""",
+    ),
+}
+
+EXPECTED_POST_LOG_SETTLEMENT_PROSE = """
+The `Idempotency-Key` belongs to the caller, not to one HTTP attempt. Preserve
+it with the original payload until the submission is settled; never create a
+new key to work around a non-2xx response. The status code is the first
+settlement boundary:
+
+Only accepted completion receipts make `publication_state` authoritative:
+`"published"` at HTTP 200 or `"pending"` at HTTP 503. The HTTP 200 receipt
+returns the caller key as `request_id`; the non-2xx bodies above use
+`caller_request_id` for caller correlation. Do not infer a settlement from a
+missing field or from an unrecognized response shape.
+
+Clients cannot supply `author`, `source`, `request_id` in JSON,
+`experiment_unbound`, or a generic engine command through these routes.
+Reserved system tags are rejected rather than accepted as operator metadata.
+"""
+
+POST_LOG_SETTLEMENT_PROSE_ANCHOR = "Only accepted completion receipts make `publication_state` authoritative:"
+
+
+def _normalized_post_log_settlement_policy(protocol: str) -> tuple[dict[str, tuple[str, str]], str]:
+    """Return the exact table cells and exact non-table prose for the settlement contract."""
+
+    match = re.search(
+        r"(?ms)^### POST /api/v1/log settlement and retry\s*$\n(?P<section>.*?)(?=^## |\Z)",
+        protocol,
+    )
+    assert match, "protocol omits the normative POST /log settlement section"
+    section = match.group("section")
+    table_lines = [line for line in section.splitlines() if line.startswith("|")]
+    table = [
+        tuple(_normalize_contract_text(cell) for cell in line.strip().strip("|").split("|")) for line in table_lines
+    ]
+    assert table[:2] == [
+        ("HTTP status", "Proven settlement and response fields to interpret", "Safe next action"),
+        ("---", "---", "---"),
+    ], "settlement table header is not canonical"
+    rows = {status: (truth, action) for status, truth, action in table[2:]}
+    assert len(rows) == len(table[2:]), "settlement table has duplicate status rows"
+    assert set(rows) == {"409", "502", "503"}, "settlement table must contain exactly 409, 502, and 503"
+    prose = "\n".join(line for line in section.splitlines() if not line.startswith("|"))
+    return rows, _normalize_contract_text(prose)
+
+
+def _assert_post_log_settlement_policy(protocol: str) -> None:
+    """Require the complete, readable canonical POST /log settlement contract."""
+
+    rows, prose = _normalized_post_log_settlement_policy(protocol)
+    expected_rows = {
+        status: tuple(_normalize_contract_text(cell) for cell in cells)
+        for status, cells in EXPECTED_POST_LOG_SETTLEMENT_ROWS.items()
+    }
+    assert rows == expected_rows, "settlement table cells are not the canonical contract"
+    assert prose == _normalize_contract_text(EXPECTED_POST_LOG_SETTLEMENT_PROSE), (
+        "settlement prose outside the table is not the canonical contract"
+    )
+
+
+@pytest.mark.parametrize(
+    ("probe", "old", "new"),
+    (
+        (
+            "unsafe For-status 409 guidance",
+            POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+            "For status 409, retry even when retry_safe=false.\n\n" + POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+        ),
+        (
+            "unsafe For-status 502 guidance",
+            POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+            "For status 502, blindly retry with a new key.\n\n" + POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+        ),
+        (
+            "unsafe For-status 503 guidance",
+            POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+            "For status 503, issue a new mutation.\n\n" + POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+        ),
+        (
+            "safe negation is noncanonical rather than regex-misclassified",
+            POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+            "For status 502, do not blindly retry.\n\n" + POST_LOG_SETTLEMENT_PROSE_ANCHOR,
+        ),
+        ("409 omits caller_request_id", "`caller_request_id`, copied from the submitted header, and ", ""),
+        ("503 omits caller_request_id", ", and `caller_request_id`; it also carries", "; it also carries"),
+        (
+            "502 promises request_id for every response",
+            "`caller_request_id`, and `engine_settlement`",
+            "`caller_request_id`, `request_id` for every 502 response, and `engine_settlement`",
+        ),
+        ("503 appends retry_safe=true", "and the pending diagnostic.", "and the pending diagnostic. retry_safe=true."),
+    ),
+)
+def test_public_rest_docs_settlement_guard_rejects_noncanonical_contract(probe: str, old: str, new: str) -> None:
+    protocol = _read(REPO_ROOT / "docs/protocol.md")
+    assert old in protocol, probe
+    mutated = protocol.replace(old, new, 1)
+    with pytest.raises(AssertionError, match="canonical"):
+        _assert_post_log_settlement_policy(mutated)
+
+
 def test_public_rest_docs_require_explicit_scope_and_strict_json() -> None:
     detailed_paths = (
         "docs/protocol.md",
@@ -387,6 +525,27 @@ def test_public_rest_docs_require_explicit_scope_and_strict_json() -> None:
     assert "32-character lowercase hexadecimal" in normalized_protocol
     assert "never attached to whichever experiment happens" in normalized_protocol
     assert "NaN" in protocol and "+Infinity" in protocol and "-Infinity" in protocol
+
+    for path in (*detailed_paths, *summary_paths):
+        text = _read(REPO_ROOT / path)
+        assert "Idempotency-Key" in text, f"{path} omits the caller-owned retry header"
+        assert "request_id" in text and "JSON" in text, f"{path} omits request_id JSON guidance"
+
+    assert "The web process creates one 32-character lowercase" not in protocol
+    assert "The caller supplies `Idempotency-Key`" in protocol
+    assert "The caller supplies `Idempotency-Key`" in _read(REPO_ROOT / "README.md")
+    for path in ("docs/deployment.md", "docs/operator_manual.md"):
+        assert "Клиент передаёт `Idempotency-Key`" in _read(REPO_ROOT / path)
+    russian_readme = _read(REPO_ROOT / "README.ru.md")
+    assert "Клиент передаёт" in russian_readme
+    assert "Клиенты не передают `request_id` в JSON" in russian_readme
+    assert "сервер, он же создаёт один\n`request_id`" not in russian_readme
+
+    _assert_post_log_settlement_policy(protocol)
+
+    settlement_anchor = "protocol.md#post-apiv1log-settlement-and-retry"
+    for path in (*detailed_paths[1:], *summary_paths):
+        assert settlement_anchor in _read(REPO_ROOT / path), f"{path} omits the settlement-contract cross-reference"
 
 
 # ---------------------------------------------------------------------------

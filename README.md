@@ -494,10 +494,16 @@ require a bearer token from the gitignored `config/web.local.yaml`.
 
 `POST /api/v1/log` may include the exact `experiment_id`; if it is omitted the
 entry is explicitly `experiment_unbound` and is never attached implicitly to
-the current experiment. The server owns author/source and creates one
-32-character lowercase hexadecimal `request_id` per request. Public live
+the current experiment. The caller supplies `Idempotency-Key` as an exactly
+32-character lowercase hexadecimal value and reuses that same key for retries; the
+server copies it to `request_id`. Clients do not put `request_id` in JSON. The
+server owns author/source. Public live
 readings encode `NaN` and infinities as JSON `null` while retaining their
 identity and status, so unavailable data cannot masquerade as a valid number.
+For `POST /api/v1/log`, HTTP 409 is definite non-commit (obey `retry_safe`),
+502 is unknown (do not blindly retry or replace the key), and 503 is committed
+with publication pending; follow the normative [settlement and retry
+contract](docs/protocol.md#post-apiv1log-settlement-and-retry).
 
 Helper CLIs:
 

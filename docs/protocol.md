@@ -70,8 +70,10 @@ Exactly two REST routes mutate state and both require the configured bearer
 token before their request body is processed:
 
 - `POST /api/v1/log` accepts operator text, optional tags, and an optional
-  exact `experiment_id`. The web process creates one 32-character lowercase
-  hexadecimal `request_id` per request and owns the author/source identity.
+  exact `experiment_id`. The caller supplies `Idempotency-Key` as an exactly
+  32-character lowercase hexadecimal value, owns it, and reuses the same key for every
+  retry of that request. The server copies that header to `request_id`; clients
+  never put `request_id` in JSON. The server owns the author/source identity.
   When `experiment_id` is absent, the entry is explicitly
   `experiment_unbound`; it is never attached to whichever experiment happens
   to be current when the engine receives it. A supplied stale experiment ID
@@ -80,7 +82,26 @@ token before their request body is processed:
   `activation_id` returned by the current alarm snapshot. Delayed or stale
   acknowledgements fail closed.
 
-Clients cannot supply `author`, `source`, `request_id`,
+### POST /api/v1/log settlement and retry
+
+The `Idempotency-Key` belongs to the caller, not to one HTTP attempt. Preserve
+it with the original payload until the submission is settled; never create a
+new key to work around a non-2xx response. The status code is the first
+settlement boundary:
+
+| HTTP status | Proven settlement and response fields to interpret | Safe next action |
+| --- | --- | --- |
+| 409 | A definite non-commit. The response contains `caller_request_id`, copied from the submitted header, and an exact boolean `retry_safe`. It proves non-commit with either `committed=false` or `commit_state="not_committed"`; it is not a `publication_state="published"` or `"pending"` receipt. | Retain the same caller-owned key. Retry only when `retry_safe` is `true`; when it is `false`, resolve the rejection without blindly resubmitting or replacing the key. |
+| 502 | Outcome unknown: neither success nor definite failure. A structured unknown-settlement body has `commit_state="unknown"`, `retry_safe=false`, `caller_request_id`, and `engine_settlement`. `engine_settlement` is bounded, filtered evidence only: it may be empty and may retain only safe status/correlation fields (`ok`, `committed`, `retry_safe`, `publication_state`, `commit_state`, `delivery_state`, `error_code`, `proto`, `schema`, and a matching `request_id`). It is not an authoritative settlement and cannot turn the 502 into a success or non-commit. A forwarding/transport exception can instead be FastAPI's generic 502 detail body and provides none of those structured fields. | Do not blindly retry and do not invent a new key. Reconcile using the same caller-owned identity; a generic transport 502 is unknown for the same reason. |
+| 503 | The command is committed but required broker publication remains pending. The accepted receipt has `committed=true`, `retry_safe=false`, `publication_state="pending"`, and `caller_request_id`; it also carries the persisted entry/commit receipt and the pending diagnostic. | Do not issue a new mutation. Reconcile, or retry that reconciliation, with the same key until publication settles. |
+
+Only accepted completion receipts make `publication_state` authoritative:
+`"published"` at HTTP 200 or `"pending"` at HTTP 503. The HTTP 200 receipt
+returns the caller key as `request_id`; the non-2xx bodies above use
+`caller_request_id` for caller correlation. Do not infer a settlement from a
+missing field or from an unrecognized response shape.
+
+Clients cannot supply `author`, `source`, `request_id` in JSON,
 `experiment_unbound`, or a generic engine command through these routes.
 Reserved system tags are rejected rather than accepted as operator metadata.
 

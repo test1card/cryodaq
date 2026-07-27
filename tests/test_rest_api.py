@@ -10,13 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import patch
+from dataclasses import MISSING, fields
+from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
 
 from cryodaq.core.alarm_ack_codec import alarm_ack_request_fingerprint
+from cryodaq.core.command_authority import ENGINE_MUTATION_CAPABILITY, MUTATION_PROTOCOL_MAJOR
+from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQCommandServer
+from cryodaq.engine import EngineCommandContext, _handle_gui_command, _operator_log_committed_pending
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 from cryodaq.web.server import create_app
 
@@ -583,6 +588,64 @@ def _published_log_result(command: dict, *, entry_id: int = 1) -> dict:
     }
 
 
+def _wire_command_reply(reply: dict[str, object]) -> dict[str, object]:
+    """Exercise the ZMQ producer's one authoritative reply envelope."""
+
+    return json.loads(ZMQCommandServer(handler=None)._encode_reply(reply))
+
+
+def _assert_unknown_settlement_response(response, request_id: str) -> None:
+    """Unknown replies may expose only the bounded reconciliation evidence keys."""
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error_code"] == "operator_log_settlement_malformed"
+    assert body["error"] == "engine returned an unknown or malformed operator-log settlement"
+    assert body["commit_state"] == "unknown"
+    assert body["retry_safe"] is False
+    assert body["caller_request_id"] == request_id
+    assert set(body["engine_settlement"]) <= {
+        "ok",
+        "committed",
+        "retry_safe",
+        "publication_state",
+        "commit_state",
+        "delivery_state",
+        "error_code",
+        "proto",
+        "schema",
+        "request_id",
+    }
+    assert "error" not in body["engine_settlement"]
+
+
+def _shutdown_latched_producer_reply() -> dict[str, object]:
+    """Produce the shutdown-latch refusal through the live engine handler."""
+
+    required: dict[str, object] = {}
+    for item in fields(EngineCommandContext):
+        if item.default is MISSING and item.default_factory is MISSING:
+            required[item.name] = MagicMock(name=item.name)
+    context = EngineCommandContext(**required)
+    context.shutdown_request_id = "a" * 32
+    context.mutation_capability_token = "m" * 32
+    return _wire_command_reply(
+        asyncio.run(
+            _handle_gui_command(
+                {
+                    "cmd": "keithley_start",
+                    "channel": "smua",
+                    "protocol_major": MUTATION_PROTOCOL_MAJOR,
+                    "mutation_capability": ENGINE_MUTATION_CAPABILITY,
+                    "capability_token": context.mutation_capability_token,
+                },
+                context=context,
+            )
+        )
+    )
+
+
 # --- POST /api/v1/log -------------------------------------------------------
 
 
@@ -748,6 +811,41 @@ def test_post_log_rejects_incomplete_or_misbound_success_receipt(auth_client, co
     assert response.status_code == 502
 
 
+@pytest.mark.parametrize(
+    ("entry_id", "receipt_entry_id", "expected_status"),
+    [
+        pytest.param(True, 1, 502, id="entry-bool"),
+        pytest.param(1.0, 1, 502, id="entry-float"),
+        pytest.param(2**63, 2**63, 502, id="entry-above-sqlite-rowid-range"),
+        pytest.param(1, True, 502, id="receipt-bool"),
+        pytest.param(1, 1.0, 502, id="receipt-float"),
+        pytest.param(1, 2**63, 502, id="receipt-above-sqlite-rowid-range"),
+        pytest.param(1, 2, 502, id="entry-receipt-mismatch"),
+        pytest.param(2**63 - 1, 2**63 - 1, 200, id="sqlite-rowid-upper-boundary"),
+    ],
+)
+def test_post_log_requires_exact_sqlite_rowid_receipt_identities(
+    auth_client,
+    entry_id: object,
+    receipt_entry_id: object,
+    expected_status: int,
+) -> None:
+    async def _fake(cmd: dict) -> dict:
+        result = _published_log_result(cmd)
+        result["entry"]["id"] = entry_id
+        result["commit_receipt"]["entry_id"] = receipt_entry_id
+        return result
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers("b" * 32),
+            json={"message": "strict row id"},
+        )
+
+    assert response.status_code == expected_status
+
+
 def test_post_log_accepts_commit_from_real_zmq_reply_encoder(auth_client) -> None:
     async def _fake(cmd: dict) -> dict:
         handler_result = _published_log_result(cmd)
@@ -762,6 +860,728 @@ def test_post_log_accepts_commit_from_real_zmq_reply_encoder(auth_client) -> Non
         )
 
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("settlement", "expected_status"),
+    [
+        pytest.param(
+            {
+                "ok": False,
+                "committed": True,
+                "retry_safe": False,
+                "publication_state": "pending",
+                "proto": PROTOCOL_VERSION,
+                "error_code": "committed_reconciliation_failed",
+                "error": "operator log committed, but required publication remains pending",
+            },
+            503,
+            id="committed-publication-pending",
+        ),
+        pytest.param(
+            {
+                "ok": False,
+                "committed": False,
+                "retry_safe": True,
+                "error_code": "operator_log_busy",
+                "error": "another durable experiment mutation is still authoritative",
+                "request_id": "d" * 32,
+                "proto": PROTOCOL_VERSION,
+            },
+            409,
+            id="definite-rejection",
+        ),
+        pytest.param(
+            {
+                "ok": False,
+                "error_code": "command_request_invalid",
+                "error": "Command request is invalid.",
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": True,
+                "proto": PROTOCOL_VERSION,
+            },
+            409,
+            id="bridge-not-dispatched",
+        ),
+        pytest.param(
+            {
+                "ok": False,
+                "retry_safe": False,
+                "error_code": "operator_log_commit_outcome_unknown",
+                "error": "operator log commit outcome is unknown; reconcile this exact request key",
+                "commit_state": "unknown",
+                "request_id": "d" * 32,
+                "proto": PROTOCOL_VERSION,
+            },
+            502,
+            id="outcome-unknown",
+        ),
+    ],
+)
+def test_post_log_non_success_settlement_keeps_body_and_uses_non_2xx(
+    auth_client,
+    settlement: dict[str, object],
+    expected_status: int,
+) -> None:
+    request_id = "d" * 32
+
+    async def _fake(cmd: dict) -> dict:
+        if settlement.get("publication_state") == "pending":
+            pending = _published_log_result(cmd)
+            pending.update(settlement)
+            return pending
+        return dict(settlement)
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "settlement"},
+        )
+
+    assert response.status_code == expected_status
+    expected_body = dict(settlement)
+    if settlement.get("publication_state") == "pending":
+        expected_body = _published_log_result(
+            {
+                "request_id": request_id,
+                "message": "settlement",
+                "experiment_unbound": True,
+            }
+        )
+        expected_body.update(settlement)
+        expected_body["caller_request_id"] = request_id
+    elif expected_status == 409:
+        expected_body["caller_request_id"] = request_id
+    else:
+        expected_body = {
+            "ok": False,
+            "error_code": "operator_log_settlement_malformed",
+            "error": "engine returned an unknown or malformed operator-log settlement",
+            "commit_state": "unknown",
+            "retry_safe": False,
+            "caller_request_id": request_id,
+            "engine_settlement": {
+                "ok": False,
+                "retry_safe": False,
+                "error_code": "operator_log_commit_outcome_unknown",
+                "commit_state": "unknown",
+                "request_id": request_id,
+                "proto": PROTOCOL_VERSION,
+            },
+        }
+    assert response.json() == expected_body
+
+
+@pytest.mark.parametrize(
+    "producer_reply",
+    [
+        pytest.param(
+            lambda request_id: {
+                "ok": False,
+                "committed": False,
+                "error_code": "operator_log_admission_invalid",
+                "error": "Operator-log command or publication fields are invalid.",
+                "retry_safe": True,
+                "request_id": request_id,
+            },
+            id="engine-refusal-with-request-id",
+        ),
+        pytest.param(
+            lambda _request_id: {
+                "ok": False,
+                "error_code": "command_request_invalid",
+                "error": "Command request is invalid.",
+                "delivery_state": "not_dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": True,
+            },
+            id="bridge-pre-dispatch-refusal",
+        ),
+        pytest.param(
+            lambda _request_id: {
+                "ok": False,
+                "error_code": "mutation_protocol_incompatible",
+                "error": "mutating command refused; perform mutation_capabilities discovery and retry explicitly",
+                "delivery_state": "dispatched",
+                "commit_state": "not_committed",
+                "retry_safe": True,
+                "compatibility_receipt": {
+                    "schema": "mutation_compatibility_v1",
+                    "accepted": False,
+                    "server_protocol_major": 1,
+                    "required_capability": "cryodaq_mutation_v1",
+                },
+            },
+            id="exact-compatibility-refusal",
+        ),
+    ],
+)
+def test_post_log_accepts_only_wire_enveloped_producer_refusals(auth_client, producer_reply) -> None:
+    request_id = "c" * 32
+    settlement = _wire_command_reply(producer_reply(request_id))
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "refusal"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {**settlement, "caller_request_id": request_id}
+
+
+def test_post_log_accepts_real_web_mutation_discovery_refusal(auth_client) -> None:
+    from cryodaq.web import server
+
+    request_id = "c" * 32
+    settlement = server._mutation_discovery_failure()
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "discovery refusal"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {**settlement, "caller_request_id": request_id}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-field",
+        "extra-field",
+        "invented-code",
+        "invented-error",
+        "wrong-error-code-type",
+        "wrong-error-type",
+        "wrong-delivery-type",
+        "wrong-commit-type",
+        "wrong-retry-type",
+        "injected-proto",
+        "contradictory-commit",
+        "contradictory-retry",
+        "contradictory-dispatch",
+        "mismatched-caller-identity",
+    ),
+)
+def test_post_log_rejects_near_miss_web_mutation_discovery_refusals(auth_client, mutation: str) -> None:
+    from cryodaq.web import server
+
+    request_id = "c" * 32
+    settlement = server._mutation_discovery_failure()
+    if mutation == "missing-field":
+        settlement.pop("compatibility_receipt")
+    elif mutation == "extra-field":
+        settlement["unexpected"] = True
+    elif mutation == "invented-code":
+        settlement["error_code"] = "invented_discovery_failure"
+    elif mutation == "invented-error":
+        settlement["error"] = "invented discovery failure"
+    elif mutation == "wrong-error-code-type":
+        settlement["error_code"] = 0
+    elif mutation == "wrong-error-type":
+        settlement["error"] = 0
+    elif mutation == "wrong-delivery-type":
+        settlement["delivery_state"] = 0
+    elif mutation == "wrong-commit-type":
+        settlement["commit_state"] = 0
+    elif mutation == "wrong-retry-type":
+        settlement["retry_safe"] = 1
+    elif mutation == "injected-proto":
+        settlement["proto"] = PROTOCOL_VERSION
+    elif mutation == "contradictory-commit":
+        settlement["commit_state"] = "committed"
+    elif mutation == "contradictory-retry":
+        settlement["retry_safe"] = False
+    elif mutation == "contradictory-dispatch":
+        settlement["delivery_state"] = "dispatched"
+    else:
+        settlement["request_id"] = "d" * 32
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "discovery near miss"},
+        )
+
+    _assert_unknown_settlement_response(response, request_id)
+    if mutation == "mismatched-caller-identity":
+        assert "request_id" not in response.json()["engine_settlement"]
+
+
+def test_post_log_accepts_real_engine_shutdown_latch_refusal(auth_client) -> None:
+    request_id = "d" * 32
+    settlement = _shutdown_latched_producer_reply()
+
+    assert PROTOCOL_VERSION == 2
+    assert settlement == {
+        "ok": False,
+        "error_code": "engine_shutdown_latched",
+        "error": "engine shutdown owns mutation admission; later state changes are refused",
+        "delivery_state": "dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": False,
+        "proto": 2,
+    }
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "shutdown latch"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {**settlement, "caller_request_id": request_id}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-field",
+        "extra-field",
+        "schema-wrong-type",
+        "schema-wrong-value",
+        "accepted-int-zero",
+        "accepted-wrong-value",
+        "major-bool",
+        "major-float",
+        "major-wrong-value",
+        "capability-wrong-type",
+        "capability-wrong-value",
+    ),
+)
+def test_post_log_rejects_nonexact_compatibility_refusal_receipt(auth_client, mutation: str) -> None:
+    request_id = "e" * 32
+    producer_reply: dict[str, object] = {
+        "ok": False,
+        "error_code": "mutation_protocol_incompatible",
+        "error": "mutating command refused; perform mutation_capabilities discovery and retry explicitly",
+        "delivery_state": "dispatched",
+        "commit_state": "not_committed",
+        "retry_safe": True,
+        "compatibility_receipt": {
+            "schema": "mutation_compatibility_v1",
+            "accepted": False,
+            "server_protocol_major": 1,
+            "required_capability": "cryodaq_mutation_v1",
+        },
+    }
+    receipt = producer_reply["compatibility_receipt"]
+    assert type(receipt) is dict
+    if mutation == "missing-field":
+        receipt.pop("accepted")
+    elif mutation == "extra-field":
+        receipt["unexpected"] = True
+    elif mutation == "schema-wrong-type":
+        receipt["schema"] = True
+    elif mutation == "schema-wrong-value":
+        receipt["schema"] = "other"
+    elif mutation == "accepted-int-zero":
+        receipt["accepted"] = 0
+    elif mutation == "accepted-wrong-value":
+        receipt["accepted"] = True
+    elif mutation == "major-bool":
+        receipt["server_protocol_major"] = True
+    elif mutation == "major-float":
+        receipt["server_protocol_major"] = 1.0
+    elif mutation == "major-wrong-value":
+        receipt["server_protocol_major"] = 2
+    elif mutation == "capability-wrong-type":
+        receipt["required_capability"] = True
+    else:
+        receipt["required_capability"] = "other"
+    settlement = _wire_command_reply(producer_reply)
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "compatibility receipt"},
+        )
+
+    _assert_unknown_settlement_response(response, request_id)
+
+
+def test_post_log_unknown_settlement_omits_other_canonical_request_id(auth_client) -> None:
+    request_id = "a" * 32
+    settlement: dict[str, object] = {
+        "ok": False,
+        "committed": False,
+        "retry_safe": False,
+        "error_code": "operator_log_state_invalid",
+        "request_id": "b" * 32,
+    }
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "foreign correlation"},
+        )
+
+    _assert_unknown_settlement_response(response, request_id)
+    assert "request_id" not in response.json()["engine_settlement"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "unknown-commit-with-injected-committed",
+        "unknown-persistence-with-injected-committed",
+        "made-up-code",
+        "missing-proto",
+        "bool-proto",
+        "wrong-proto",
+        "empty-error",
+        "extra-key",
+    ),
+)
+def test_post_log_malformed_refusal_variants_are_unknown_settlements(auth_client, mutation: str) -> None:
+    request_id = "f" * 32
+    producer_reply: dict[str, object] = {
+        "ok": False,
+        "committed": False,
+        "error_code": "operator_log_admission_invalid",
+        "error": "Operator-log command or publication fields are invalid.",
+        "retry_safe": True,
+        "request_id": request_id,
+    }
+    if mutation == "unknown-commit-with-injected-committed":
+        producer_reply = {
+            "ok": False,
+            "error_code": "operator_log_commit_outcome_unknown",
+            "error": "operator log commit outcome is unknown; reconcile this exact request key",
+            "commit_state": "unknown",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    elif mutation == "unknown-persistence-with-injected-committed":
+        producer_reply = {
+            "ok": False,
+            "error_code": "operator_log_persistence_failed",
+            "error": "operator log persistence outcome is unknown; reconcile this exact request key",
+            "commit_state": "unknown",
+            "retry_safe": False,
+            "request_id": request_id,
+        }
+    settlement = _wire_command_reply(producer_reply)
+    if mutation.startswith("unknown-"):
+        settlement["committed"] = False
+    elif mutation == "made-up-code":
+        settlement["error_code"] = "operator_log_refused_by_magic"
+    elif mutation == "missing-proto":
+        settlement.pop("proto")
+    elif mutation == "bool-proto":
+        settlement["proto"] = True
+    elif mutation == "wrong-proto":
+        settlement["proto"] = PROTOCOL_VERSION + 1
+    elif mutation == "empty-error":
+        settlement["error"] = ""
+    else:
+        settlement["unexpected"] = True
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "refusal"},
+        )
+
+    _assert_unknown_settlement_response(response, request_id)
+
+
+def test_post_log_malformed_settlement_keeps_safe_evidence_and_caller_correlation(auth_client) -> None:
+    request_id = "e" * 32
+
+    async def _fake(_cmd: dict) -> list[object]:
+        return []
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "malformed"},
+        )
+
+    _assert_unknown_settlement_response(response, request_id)
+    assert response.json()["engine_settlement"] == {}
+
+
+@pytest.mark.parametrize(
+    "settlement",
+    [
+        {
+            "ok": False,
+            "committed": False,
+            "retry_safe": False,
+            "error_code": "operator_log_commit_outcome_unknown",
+            "error": "the result must be reconciled",
+            "outcome_unknown": True,
+            "delivery_state": "not_dispatched",
+            "commit_state": "not_committed",
+        },
+        {
+            "ok": False,
+            "committed": False,
+            "retry_safe": False,
+            "error_code": "operator_log_state_invalid",
+            "error": "the transport settlement is invalid",
+            "delivery_state": True,
+            "commit_state": "not_committed",
+        },
+        {
+            "ok": False,
+            "committed": False,
+            "retry_safe": False,
+            "error_code": "operator_log_state_invalid",
+            "error": "the transport settlement is invalid",
+            "delivery_state": "not_dispatched",
+            "commit_state": True,
+        },
+        {
+            "ok": False,
+            "committed": False,
+            "retry_safe": False,
+            "error_code": "operator_log_state_invalid",
+            "error": "the transport settlement contradicts itself",
+            "delivery_state": "not_dispatched",
+            "commit_state": "committed",
+        },
+        {
+            "ok": False,
+            "committed": False,
+            "retry_safe": False,
+            "error_code": "operator_log_state_invalid",
+            "error": "the transport settlement has an invalid state",
+            "delivery_state": "not_dispatched",
+            "commit_state": "invalid",
+        },
+        {
+            "ok": False,
+            "committed": False,
+            "retry_safe": False,
+            "error_code": "operator_log_state_invalid",
+            "error": "the settlement belongs to a different request",
+            "request_id": "e" * 32,
+        },
+        {"ok": True},
+    ],
+    ids=(
+        "explicit-outcome-unknown-precedence",
+        "boolean-delivery-state",
+        "boolean-commit-state",
+        "contradictory-commit-state",
+        "invalid-commit-state",
+        "mismatched-engine-request-id",
+        "optimistic-malformed-dict",
+    ),
+)
+def test_post_log_unknown_or_malformed_settlement_is_wrapped_not_rejected(
+    auth_client,
+    settlement: dict[str, object],
+) -> None:
+    request_id = "f" * 32
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "settlement"},
+        )
+
+    _assert_unknown_settlement_response(response, request_id)
+    if settlement.get("request_id") != request_id:
+        assert "request_id" not in response.json()["engine_settlement"]
+
+
+@pytest.mark.parametrize("bad_error", ("", "publication reconciliation is pending", True))
+def test_post_log_committed_pending_requires_the_engine_diagnostic(auth_client, bad_error: object) -> None:
+    """A committed-pending response is definite only with the producer literal."""
+
+    request_id = "d" * 32
+
+    async def _fake(cmd: dict) -> dict:
+        pending = _published_log_result(cmd)
+        pending.update(
+            ok=False,
+            publication_state="pending",
+            error_code="committed_reconciliation_failed",
+            error=bad_error,
+        )
+        return pending
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "settlement"},
+        )
+
+    assert response.status_code == 502
+
+
+def test_post_log_accepts_committed_pending_from_real_engine_helper_and_encoder(auth_client) -> None:
+    """Bind the REST 503 branch to the actual operator-log pending producer."""
+
+    request_id = "d" * 32
+
+    async def _fake(cmd: dict) -> dict[str, object]:
+        return _wire_command_reply(
+            _operator_log_committed_pending(
+                OperatorLogEntry(
+                    id=1,
+                    timestamp=datetime(2026, 7, 23, tzinfo=UTC),
+                    experiment_id=None,
+                    author="REST API",
+                    source="rest",
+                    message=cmd["message"],
+                    tags=(),
+                ),
+                cmd["request_id"],
+            )
+        )
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "producer pending"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "operator log committed, but required publication remains pending"
+    assert response.json()["caller_request_id"] == request_id
+
+
+def test_post_log_unknown_settlement_redacts_nested_sensitive_and_unsafe_values(auth_client) -> None:
+    """The 502 route retains bounded status evidence without echoing opaque payloads."""
+
+    request_id = "e" * 32
+    settlement: dict[str, object] = {
+        "ok": False,
+        "committed": True,
+        "retry_safe": False,
+        "publication_state": "pending",
+        "commit_state": "unknown",
+        "error_code": "operator_log_state_invalid",
+        "proto": PROTOCOL_VERSION,
+        "schema": "operator_log_commit_v1",
+        "request_id": request_id,
+        "capability_token": "do-not-echo",
+        "config_snapshot": {"nested": {"CAPABILITY_TOKEN": "do-not-echo"}},
+        "entry": {"author": "operator", "message": "do-not-echo", "notes": ["do-not-echo"]},
+        "artifact_path": "C:/secret/report.png",
+        "bytes": b"do-not-echo",
+    }
+    settlement["cycle"] = settlement
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "safe evidence"},
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "ok": False,
+        "error_code": "operator_log_settlement_malformed",
+        "error": "engine returned an unknown or malformed operator-log settlement",
+        "commit_state": "unknown",
+        "retry_safe": False,
+        "caller_request_id": request_id,
+        "engine_settlement": {
+            "ok": False,
+            "committed": True,
+            "retry_safe": False,
+            "publication_state": "pending",
+            "commit_state": "unknown",
+            "error_code": "operator_log_state_invalid",
+            "proto": PROTOCOL_VERSION,
+            "schema": "operator_log_commit_v1",
+            "request_id": request_id,
+        },
+    }
+
+
+def test_post_log_unknown_settlement_bounds_deep_cyclic_and_huge_values(auth_client) -> None:
+    """Adversarial unknown evidence cannot amplify or break the 502 response."""
+
+    request_id = "f" * 32
+    nested: dict[str, object] = {}
+    cursor = nested
+    for _ in range(8):
+        child: dict[str, object] = {}
+        cursor["next"] = child
+        cursor = child
+    cursor["cycle"] = nested
+    settlement: dict[str, object] = {f"untrusted_{index}": "x" * 128 for index in range(1024)}
+    settlement.update(
+        {
+            "schema": nested,
+            "error_code": "x" * 1024,
+            "proto": 10**100,
+            "request_id": "not-a-request-id",
+        }
+    )
+
+    async def _fake(_cmd: dict) -> dict[str, object]:
+        return settlement
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(request_id),
+            json={"message": "bounded evidence"},
+        )
+
+    _assert_unknown_settlement_response(response, request_id)
+    assert response.json()["engine_settlement"] == {}
+
+
+def test_post_log_json_request_id_rejected_before_engine_call(auth_client) -> None:
+    with patch("cryodaq.web.server._async_engine_command", side_effect=AssertionError):
+        response = auth_client.post(
+            "/api/v1/log",
+            headers=_log_headers(),
+            json={"message": "no JSON identity", "request_id": "f" * 32},
+        )
+
+    assert response.status_code == 422
 
 
 def test_post_log_extra_field_rejected(auth_client) -> None:
