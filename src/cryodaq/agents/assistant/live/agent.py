@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cryodaq.agents.assistant.live.context_builder import ContextBuilder
+from cryodaq.agents.assistant.live.context_builder import ContextBuilder, normalize_sensor_health_summary
 from cryodaq.agents.assistant.live.output_router import OutputRouter, OutputTarget
 from cryodaq.agents.assistant.live.prompts import (
     ALARM_SUMMARY_SYSTEM,
@@ -740,6 +740,15 @@ class AssistantLiveAgent:
         payload = event.payload
 
         ctx = await self._ctx_builder.build_shift_handover_context(payload)
+        if ctx.context_unavailable:
+            await self._dispatch_unavailable_context(
+                event=event,
+                audit_id=audit_id,
+                payload=payload,
+                kind="shift_handover",
+                message="Сводка смены не сформирована: данные тревог или событий недоступны.",
+            )
+            return
         user_prompt = SHIFT_HANDOVER_USER.format(
             experiment_id=ctx.experiment_id or "нет активного эксперимента",
             phase=ctx.phase or "—",
@@ -795,15 +804,22 @@ class AssistantLiveAgent:
         ctx = await self._ctx_builder.build_periodic_report_context(
             window_minutes=window_minutes,
         )
+        sensor_health_summary = normalize_sensor_health_summary(ctx.sensor_health_summary)
 
-        if ctx.context_read_failed:
-            logger.warning(
-                "AssistantLiveAgent: periodic report context read failed (audit_id=%s) — proceeding with empty context",
-                audit_id,
+        if ctx.context_read_failed or (ctx.sensor_health_summary is not None and sensor_health_summary is None):
+            await self._dispatch_unavailable_context(
+                event=event,
+                audit_id=audit_id,
+                payload=event.payload,
+                kind="periodic_report",
+                message="Периодический отчёт не сформирован: данные за интервал недоступны.",
             )
+            return
         elif (
             self._config.periodic_report_skip_if_idle
             and ctx.total_event_count < self._config.periodic_report_min_events
+            and not ctx.source_saturated
+            and (sensor_health_summary is None or sensor_health_summary.critical == 0)
         ):
             logger.debug(
                 "AssistantLiveAgent: periodic report skipped (idle: %d events < min=%d)",
@@ -859,6 +875,32 @@ class AssistantLiveAgent:
             result.latency_s,
             ctx.total_event_count,
             dispatched_pr,
+        )
+
+    async def _dispatch_unavailable_context(
+        self,
+        *,
+        event: EngineEvent,
+        audit_id: str,
+        payload: dict[str, Any],
+        kind: str,
+        message: str,
+    ) -> None:
+        logger.warning("AssistantLiveAgent: %s context unavailable (audit_id=%s)", kind, audit_id)
+        await self._dispatch_with_audit(
+            event=event,
+            audit_id=audit_id,
+            payload=payload,
+            context_assembled=message,
+            prompt_template=f"{kind}_context_unavailable",
+            model="deterministic",
+            system_prompt="",
+            user_prompt=message,
+            response=message,
+            tokens={"in": 0, "out": 0},
+            latency_s=0.0,
+            errors=[],
+            targets=_build_targets(self._config),
         )
 
 

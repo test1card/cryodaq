@@ -18,6 +18,7 @@ from cryodaq.agents.assistant.live.context_builder import (
     ContextBuilder,
     _is_sensor_health_alarm_entry,
 )
+from cryodaq.core.sensor_diagnostics import DiagnosticsSummary
 
 
 def _entry(
@@ -67,9 +68,7 @@ def _builder(
         (("auto", "alarm", "diag_T1"), "noise", True),
     ],
 )
-def test_classifier_routes_alarm_correctly(
-    tags: tuple[str, ...], message: str, expected: bool
-) -> None:
+def test_classifier_routes_alarm_correctly(tags: tuple[str, ...], message: str, expected: bool) -> None:
     e = _entry(message, tags=tags)
     assert _is_sensor_health_alarm_entry(e) is expected
 
@@ -99,15 +98,7 @@ async def test_alarm_split_physics_vs_sensor_health() -> None:
 
 
 def _summary(total=20, healthy=18, warning=2, critical=0, worst="Т7", score=55):
-    s = MagicMock()
-    s.total_channels = total
-    s.healthy = healthy
-    s.warning = warning
-    s.critical = critical
-    s.worst_channel = worst
-    s.worst_score = score
-    s.worst_flags = []
-    return s
+    return DiagnosticsSummary(total, healthy, warning, critical, worst, score, [])
 
 
 async def test_sensor_health_summary_passes_through() -> None:
@@ -118,7 +109,7 @@ async def test_sensor_health_summary_passes_through() -> None:
 
 
 async def test_template_dict_exposes_sensor_health_section() -> None:
-    cb = _builder([], sensor_summary=_summary(warning=4, worst="Т7", score=42))
+    cb = _builder([], sensor_summary=_summary(total=22, warning=4, worst="Т7", score=55))
     ctx = await cb.build_periodic_report_context(window_minutes=60)
     td = ctx.to_template_dict()
     assert "sensor_health_section" in td
@@ -136,7 +127,10 @@ async def test_template_dict_exposes_physics_only_alarms_section() -> None:
         _entry("ПОТЕРЯ ВАКУУМА", ("auto", "alarm", "vacuum_loss_cold")),
         _entry("Датчик Т7: 400 K", ("auto", "alarm", "sensor_fault")),
     ]
-    cb = _builder(entries)
+    cb = _builder(
+        entries,
+        sensor_summary=_summary(total=20, healthy=20, warning=0, critical=0, worst="Т7", score=100),
+    )
     ctx = await cb.build_periodic_report_context(window_minutes=60)
     td = ctx.to_template_dict()
     assert "vacuum_loss_cold" not in td["physics_alarms_section"], (
@@ -153,11 +147,11 @@ async def test_template_dict_handles_no_sensor_provider() -> None:
     cb = _builder([])
     ctx = await cb.build_periodic_report_context(window_minutes=60)
     td = ctx.to_template_dict()
-    assert td["sensor_health_section"] == "нет данных"
+    assert td["sensor_health_section"] == "данные недоступны"
 
 
 async def test_template_dict_handles_empty_sensor_summary() -> None:
-    cb = _builder([], sensor_summary=_summary(total=0, healthy=0, warning=0, critical=0))
+    cb = _builder([], sensor_summary=DiagnosticsSummary(0, 0, 0, 0, "", 100, []))
     ctx = await cb.build_periodic_report_context(window_minutes=60)
     td = ctx.to_template_dict()
     assert td["sensor_health_section"] == "нет данных"

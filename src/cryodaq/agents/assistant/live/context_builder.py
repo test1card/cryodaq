@@ -13,6 +13,7 @@ Slice C (campaign) contexts deferred.
 from __future__ import annotations
 
 import logging
+import math
 import time as _time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -53,14 +54,15 @@ class ContextBuilder:
         sqlite_reader: Any,
         experiment_manager: Any,
         sensor_diag_provider: Any | None = None,
+        alarm_reader: Any | None = None,
     ) -> None:
-        # v0.55.5 — optional zero-arg callable returning the current
-        # SensorDiagnosticsEngine summary (DiagnosticsSummary). Wired from
-        # engine.py to feed PART D hourly digest. Left None in unit tests
-        # that don't need the digest section.
+        # Zero-arg callable returning the current SensorDiagnosticsEngine
+        # summary (DiagnosticsSummary).  Production wiring must provide it:
+        # a missing or stale cache is unavailable evidence, not an empty digest.
         self._reader = sqlite_reader
         self._em = experiment_manager
         self._sensor_diag_provider = sensor_diag_provider
+        self._alarm_reader = alarm_reader
 
     async def build_alarm_context(
         self,
@@ -111,23 +113,52 @@ class ContextBuilder:
             recent_alarms_text=_alarms_stub(recent_alarm_lookback_s),
         )
 
-    async def build_experiment_finalize_context(
-        self, payload: dict[str, Any]
-    ) -> ExperimentFinalizeContext:
+    async def build_experiment_finalize_context(self, payload: dict[str, Any]) -> ExperimentFinalizeContext:
         """Assemble context for experiment finalize/stop/abort prompt."""
         return _build_experiment_finalize_context(self._em, payload)
 
-    async def build_sensor_anomaly_context(
-        self, payload: dict[str, Any]
-    ) -> SensorAnomalyContext:
+    async def build_sensor_anomaly_context(self, payload: dict[str, Any]) -> SensorAnomalyContext:
         """Assemble context for sensor anomaly analysis prompt."""
         return _build_sensor_anomaly_context(self._em, payload)
 
-    async def build_shift_handover_context(
-        self, payload: dict[str, Any]
-    ) -> ShiftHandoverContext:
+    async def build_shift_handover_context(self, payload: dict[str, Any]) -> ShiftHandoverContext:
         """Assemble context for shift handover summary prompt."""
-        return _build_shift_handover_context(self._em, payload)
+        context = _build_shift_handover_context(self._em, payload)
+        if context.context_unavailable:
+            return context
+        now = datetime.now(UTC)
+        start_time = now - timedelta(hours=context.shift_duration_h)
+        try:
+            entries = await self._reader.get_operator_log(
+                start_time=start_time,
+                end_time=now,
+                limit=50,
+            )
+        except Exception:
+            logger.warning("ShiftHandoverContext: event context unavailable", exc_info=True)
+            entries = None
+        try:
+            active = await self._alarm_reader.active()
+        except Exception:
+            logger.warning("ShiftHandoverContext: alarm context unavailable", exc_info=True)
+            active = None
+
+        context.context_unavailable = entries is None or active is None
+        context.active_alarms = "данные недоступны" if active is None else _format_active_alarms(active.active)
+        if entries is None:
+            context.recent_events = "данные недоступны"
+        elif entries:
+            shown = min(len(entries), 10)
+            total = "50+" if len(entries) == 50 else str(len(entries))
+            completeness = ""
+            if len(entries) > shown:
+                completeness = "; пропущенные события могут включать критические"
+            context.recent_events = (
+                f"Показано {shown} из {total} событий{completeness}.\n{_format_log_entries(entries[:shown])}"
+            )
+        else:
+            context.recent_events = "нет событий за смену"
+        return context
 
     async def build_periodic_report_context(
         self,
@@ -145,7 +176,10 @@ class ContextBuilder:
 
         entries: list[Any] = []
         _ctx_failed = False
-        if hasattr(self._reader, "get_operator_log"):
+        if not hasattr(self._reader, "get_operator_log"):
+            logger.warning("PeriodicReportContext: get_operator_log unavailable — window data unavailable")
+            _ctx_failed = True
+        else:
             try:
                 entries = await self._reader.get_operator_log(
                     start_time=start_time,
@@ -159,28 +193,27 @@ class ContextBuilder:
                 )
                 _ctx_failed = True
 
+        # The bounded reader cannot distinguish exactly 50 entries from a
+        # larger result set.  Treat the limit as an incomplete source rather
+        # than presenting this partial window as a complete observation.
+        source_saturated = len(entries) >= 50
+
         alarm_entries = [e for e in entries if "alarm" in e.tags]
         # v0.55.5 — split alarm entries into physics-meaning vs sensor-health.
         # Telegram dispatch already filters sensor-health out of one-shot
         # alarms; the hourly digest reports them as a count plus the worst
         # channel, while full alarm narratives stay focused on physics.
-        sensor_health_alarm_entries = [
-            e for e in alarm_entries if _is_sensor_health_alarm_entry(e)
-        ]
-        physics_alarm_entries = [
-            e for e in alarm_entries if not _is_sensor_health_alarm_entry(e)
-        ]
+        sensor_health_alarm_entries = [e for e in alarm_entries if _is_sensor_health_alarm_entry(e)]
+        physics_alarm_entries = [e for e in alarm_entries if not _is_sensor_health_alarm_entry(e)]
         phase_entries = [e for e in entries if "phase_transition" in e.tags or "phase" in e.tags]
         experiment_entries = [e for e in entries if "experiment" in e.tags]
         calibration_entries = [e for e in entries if "calibration" in e.tags]
         # Exclude machine-generated and AI-generated entries from operator section
-        operator_entries = [
-            e for e in entries
-            if e.source != "auto" and "ai" not in e.tags and "auto" not in e.tags
-        ]
+        operator_entries = [e for e in entries if e.source != "auto" and "ai" not in e.tags and "auto" not in e.tags]
         # Any auto event not classified above (calibration, leak_rate, etc.)
         other_entries = [
-            e for e in entries
+            e
+            for e in entries
             if "auto" in e.tags
             and "alarm" not in e.tags
             and "phase_transition" not in e.tags
@@ -191,8 +224,12 @@ class ContextBuilder:
         ]
 
         total_event_count = (
-            len(alarm_entries) + len(phase_entries) + len(experiment_entries)
-            + len(calibration_entries) + len(operator_entries) + len(other_entries)
+            len(alarm_entries)
+            + len(phase_entries)
+            + len(experiment_entries)
+            + len(calibration_entries)
+            + len(operator_entries)
+            + len(other_entries)
         )
 
         experiment_id: str | None = getattr(self._em, "active_experiment_id", None)
@@ -203,16 +240,28 @@ class ContextBuilder:
             except Exception:
                 pass
 
-        sensor_health_summary: Any | None = None
-        if self._sensor_diag_provider is not None:
+        raw_sensor_health_summary: Any | None = None
+        sensor_health_summary: ValidatedSensorHealthSummary | None = None
+        if self._sensor_diag_provider is None:
+            logger.warning("PeriodicReportContext: sensor diagnostics provider unavailable")
+            _ctx_failed = True
+        else:
             try:
-                sensor_health_summary = self._sensor_diag_provider()
+                raw_sensor_health_summary = self._sensor_diag_provider()
+                sensor_health_summary = normalize_sensor_health_summary(raw_sensor_health_summary)
             except Exception:
-                logger.debug(
-                    "PeriodicReportContext: sensor_diag_provider failed",
+                logger.warning(
+                    "PeriodicReportContext: sensor diagnostics provider failed",
                     exc_info=True,
                 )
-                sensor_health_summary = None
+                _ctx_failed = True
+
+        if raw_sensor_health_summary is None:
+            logger.warning("PeriodicReportContext: sensor diagnostics unavailable")
+            _ctx_failed = True
+        elif sensor_health_summary is None:
+            logger.warning("PeriodicReportContext: sensor health summary malformed — unavailable")
+            _ctx_failed = True
 
         return PeriodicReportContext(
             window_minutes=window_minutes,
@@ -226,6 +275,7 @@ class ContextBuilder:
             other_entries=other_entries,
             total_event_count=total_event_count,
             context_read_failed=_ctx_failed,
+            source_saturated=source_saturated,
             physics_alarm_entries=physics_alarm_entries,
             sensor_health_alarm_entries=sensor_health_alarm_entries,
             sensor_health_summary=sensor_health_summary,
@@ -265,12 +315,10 @@ class ContextBuilder:
             return "нет данных"
         try:
             from_ts = _time.time() - lookback_min * 60
-            data: dict[str, list[tuple[float, float]]] = (
-                await self._reader.read_readings_history(
-                    channels=channels,
-                    from_ts=from_ts,
-                    limit_per_channel=20,
-                )
+            data: dict[str, list[tuple[float, float]]] = await self._reader.read_readings_history(
+                channels=channels,
+                from_ts=from_ts,
+                limit_per_channel=20,
             )
             if not data:
                 return "нет данных"
@@ -290,17 +338,11 @@ class ContextBuilder:
             return "нет данных"
         try:
             from_ts = _time.time() - 30 * 60
-            data: dict[str, list[tuple[float, float]]] = (
-                await self._reader.read_readings_history(
-                    from_ts=from_ts,
-                    limit_per_channel=10,
-                )
+            data: dict[str, list[tuple[float, float]]] = await self._reader.read_readings_history(
+                from_ts=from_ts,
+                limit_per_channel=10,
             )
-            pressure = {
-                k: v
-                for k, v in data.items()
-                if "pressure" in k.lower() or "mbar" in k.lower()
-            }
+            pressure = {k: v for k, v in data.items() if "pressure" in k.lower() or "mbar" in k.lower()}
             if not pressure:
                 return "нет данных"
             lines: list[str] = []
@@ -429,10 +471,7 @@ def _detect_implausible(channel: str, value: Any, unit: str = "K") -> str | None
         return None
     if _is_cryo_channel(channel) and unit == "K":
         if v > _TEMP_IMPLAUSIBLE_HIGH_K:
-            return (
-                "физически невозможно для криогенного канала, "
-                "вероятно сбой сенсора"
-            )
+            return "физически невозможно для криогенного канала, вероятно сбой сенсора"
         if v < _TEMP_IMPLAUSIBLE_LOW_K:
             return "отрицательное значение, физически невозможно"
     return None
@@ -507,7 +546,8 @@ class ShiftHandoverContext:
     experiment_age: str
     active_alarms: str
     recent_events: str
-    shift_duration_h: int
+    shift_duration_h: int | float
+    context_unavailable: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -515,9 +555,7 @@ class ShiftHandoverContext:
 # ---------------------------------------------------------------------------
 
 
-def _build_experiment_finalize_context(
-    em: Any, payload: dict[str, Any]
-) -> ExperimentFinalizeContext:
+def _build_experiment_finalize_context(em: Any, payload: dict[str, Any]) -> ExperimentFinalizeContext:
     action = payload.get("action", "experiment_finalize")
     experiment = payload.get("experiment", {})
     experiment_id = experiment.get("experiment_id")
@@ -541,9 +579,7 @@ def _build_experiment_finalize_context(
         duration_str = _format_age(age_float)
     phases = experiment.get("phases") or experiment.get("phase_history") or []
     if phases:
-        phases_text = "\n".join(
-            f"- {p.get('phase', '?')}: {p.get('started_at', '?')}" for p in phases
-        )
+        phases_text = "\n".join(f"- {p.get('phase', '?')}: {p.get('started_at', '?')}" for p in phases)
     else:
         phases_text = "нет данных"
     return ExperimentFinalizeContext(
@@ -556,9 +592,7 @@ def _build_experiment_finalize_context(
     )
 
 
-def _build_sensor_anomaly_context(
-    em: Any, payload: dict[str, Any]
-) -> SensorAnomalyContext:
+def _build_sensor_anomaly_context(em: Any, payload: dict[str, Any]) -> SensorAnomalyContext:
     alarm_id = payload.get("alarm_id", "unknown")
     level = payload.get("level", "CRITICAL")
     channels: list[str] = payload.get("channels", [])
@@ -631,6 +665,17 @@ class DiagnosticSuggestionContext:
     lookback_min: int = 60
 
 
+_MAX_SHIFT_DURATION_H = 168
+
+
+def _validated_shift_duration_h(value: Any) -> int | float | None:
+    if type(value) is int:
+        return value if 0 < value <= _MAX_SHIFT_DURATION_H else None
+    if type(value) is not float or not math.isfinite(value) or not 0 < value <= _MAX_SHIFT_DURATION_H:
+        return None
+    return value
+
+
 def _build_shift_handover_context(em: Any, payload: dict[str, Any]) -> ShiftHandoverContext:
     experiment_id: str | None = getattr(em, "active_experiment_id", None)
     phase: str | None = None
@@ -641,14 +686,41 @@ def _build_shift_handover_context(em: Any, payload: dict[str, Any]) -> ShiftHand
             pass
     age_s = _compute_experiment_age(em)
     experiment_age = _format_age(age_s) if age_s is not None else "—"
-    shift_duration_h = int(payload.get("shift_duration_h", 8))
+    shift_duration_h = _validated_shift_duration_h(payload.get("shift_duration_h", 8))
     return ShiftHandoverContext(
         experiment_id=experiment_id,
         phase=phase,
         experiment_age=experiment_age,
         active_alarms="нет данных",
         recent_events="нет данных",
-        shift_duration_h=shift_duration_h,
+        shift_duration_h=shift_duration_h or 0,
+        context_unavailable=shift_duration_h is None,
+    )
+
+
+def _format_active_alarms(alarms: list[Any]) -> str:
+    if not alarms:
+        return "нет активных тревог"
+    level_rank = {"CRITICAL": 0, "WARNING": 2, "INFO": 3}
+    ordered_alarms = sorted(
+        alarms,
+        key=lambda alarm: (
+            # Unknown levels are pessimistic, but must not take precedence
+            # over a known CRITICAL solely through lexical tie-breaking.
+            level_rank.get(str(alarm.level).upper(), 1),
+            str(alarm.level),
+            str(alarm.alarm_id),
+        ),
+    )
+    shown_alarms = ordered_alarms[:10]
+    return "\n".join(
+        [
+            f"Показано {len(shown_alarms)} из {len(ordered_alarms)} активных тревог:",
+            *[
+                f"- {alarm.level}: {alarm.alarm_id}" + (f" ({', '.join(alarm.channels)})" if alarm.channels else "")
+                for alarm in shown_alarms
+            ],
+        ]
     )
 
 
@@ -682,6 +754,7 @@ class PeriodicReportContext:
     other_entries: list[Any] = field(default_factory=list)
     total_event_count: int = 0
     context_read_failed: bool = False
+    source_saturated: bool = False
     # v0.55.5 — physics vs sensor-health split + diagnostics summary snapshot.
     physics_alarm_entries: list[Any] = field(default_factory=list)
     sensor_health_alarm_entries: list[Any] = field(default_factory=list)
@@ -689,33 +762,62 @@ class PeriodicReportContext:
 
     def to_template_dict(self) -> dict[str, str]:
         """Format all context fields as prompt-ready strings."""
+        if self.context_read_failed:
+            unavailable = "данные недоступны"
+            return {
+                "active_experiment_summary": unavailable,
+                "events_section": unavailable,
+                "alarms_section": unavailable,
+                "physics_alarms_section": unavailable,
+                "sensor_health_section": unavailable,
+                "sensor_health_alarms_section": unavailable,
+                "phase_transitions_section": unavailable,
+                "operator_entries_section": unavailable,
+                "calibration_section": unavailable,
+                "total_event_count": unavailable,
+                "source_completeness": unavailable,
+            }
         if self.active_experiment_id:
-            phase_str = (
-                f" (фаза: {self.active_experiment_phase})"
-                if self.active_experiment_phase else ""
-            )
+            phase_str = f" (фаза: {self.active_experiment_phase})" if self.active_experiment_phase else ""
             active_exp = f"{self.active_experiment_id}{phase_str}"
         else:
             active_exp = "нет активного эксперимента"
 
+        source_completeness = "полный"
+        total_event_count = str(self.total_event_count)
+        if self.source_saturated:
+            source_completeness = (
+                "неполный: чтение журнала достигло лимита 50 записей (50+); "
+                "события вне полученной части, включая критические, могут отсутствовать"
+            )
+            total_event_count += " (источник: 50+, неполный контекст)"
+
         return {
             "active_experiment_summary": active_exp,
-            "events_section": _format_log_entries(self.other_entries) or "(нет)",
+            "events_section": _format_log_entries(self.other_entries, source_saturated=self.source_saturated)
+            or "(нет)",
             # alarms_section retained for backward compatibility with prompt
             # templates that still reference it; physics_alarms_section is
             # the v0.55.5 preferred field. Both expose the physics-only view.
-            "alarms_section": _format_log_entries(self.physics_alarm_entries) or "(нет)",
+            "alarms_section": _format_log_entries(self.physics_alarm_entries, source_saturated=self.source_saturated)
+            or "(нет)",
             "physics_alarms_section": (
-                _format_log_entries(self.physics_alarm_entries) or "(нет)"
+                _format_log_entries(self.physics_alarm_entries, source_saturated=self.source_saturated) or "(нет)"
             ),
             "sensor_health_section": _format_sensor_health_section(self.sensor_health_summary),
             "sensor_health_alarms_section": (
-                _format_log_entries(self.sensor_health_alarm_entries) or "(нет)"
+                _format_log_entries(self.sensor_health_alarm_entries, source_saturated=self.source_saturated) or "(нет)"
             ),
-            "phase_transitions_section": _format_log_entries(self.phase_entries) or "(нет)",
-            "operator_entries_section": _format_log_entries(self.operator_entries) or "(нет)",
-            "calibration_section": _format_log_entries(self.calibration_entries) or "(нет)",
-            "total_event_count": str(self.total_event_count),
+            "phase_transitions_section": _format_log_entries(self.phase_entries, source_saturated=self.source_saturated)
+            or "(нет)",
+            "operator_entries_section": _format_log_entries(
+                self.operator_entries, source_saturated=self.source_saturated
+            )
+            or "(нет)",
+            "calibration_section": _format_log_entries(self.calibration_entries, source_saturated=self.source_saturated)
+            or "(нет)",
+            "total_event_count": total_event_count,
+            "source_completeness": source_completeness,
         }
 
 
@@ -753,6 +855,90 @@ def _is_sensor_health_alarm_entry(entry: Any) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class ValidatedSensorHealthSummary:
+    """Validated diagnostics fields shared by periodic-report consumers."""
+
+    total_channels: int
+    healthy: int
+    warning: int
+    critical: int
+    worst_channel: str
+    worst_score: int
+    worst_flags: tuple[str, ...]
+
+
+def normalize_sensor_health_summary(summary: Any) -> ValidatedSensorHealthSummary | None:
+    """Normalize an exact producer object or wire-format dict, or reject it.
+
+    ``total_channels`` includes warm-reference channels, while the three
+    scored-health buckets deliberately do not.  Their difference is therefore
+    the known count of unscored channels, not evidence of a malformed cache.
+    """
+    if isinstance(summary, ValidatedSensorHealthSummary):
+        return summary
+
+    required = ("total_channels", "healthy", "warning", "critical", "worst_channel", "worst_score", "worst_flags")
+    values = {
+        name: (summary.get(name) if isinstance(summary, dict) else getattr(summary, name, None)) for name in required
+    }
+    counts = (values["total_channels"], values["healthy"], values["warning"], values["critical"])
+    if not all(type(count) is int and count >= 0 for count in counts) or sum(counts[1:]) > counts[0]:
+        return None
+    if (
+        type(values["worst_channel"]) is not str
+        or type(values["worst_score"]) is not int
+        or not -1 <= values["worst_score"] <= 100
+        or type(values["worst_flags"]) is not list
+        or not all(type(flag) is str for flag in values["worst_flags"])
+    ):
+        return None
+
+    scored = sum(counts[1:])
+    if counts[0] == 0:
+        if values["worst_channel"] != "" or values["worst_score"] != 100 or values["worst_flags"] != []:
+            return None
+        return ValidatedSensorHealthSummary(
+            total_channels=values["total_channels"],
+            healthy=values["healthy"],
+            warning=values["warning"],
+            critical=values["critical"],
+            worst_channel=values["worst_channel"],
+            worst_score=values["worst_score"],
+            worst_flags=tuple(values["worst_flags"]),
+        )
+    if values["worst_channel"] == "":
+        return None
+    if scored == 0:
+        if values["worst_score"] != -1:
+            return None
+    elif values["worst_score"] < 0:
+        return None
+    elif counts[3] > 0:
+        if values["worst_score"] >= 50:
+            return None
+    elif counts[2] > 0:
+        if values["worst_score"] < 50 or values["worst_score"] >= 80:
+            return None
+    elif values["worst_score"] < 80:
+        return None
+
+    return ValidatedSensorHealthSummary(
+        total_channels=values["total_channels"],
+        healthy=values["healthy"],
+        warning=values["warning"],
+        critical=values["critical"],
+        worst_channel=values["worst_channel"],
+        worst_score=values["worst_score"],
+        worst_flags=tuple(values["worst_flags"]),
+    )
+
+
+def is_valid_sensor_health_summary(summary: Any) -> bool:
+    """Return whether ``summary`` conforms to the producer/wire contract."""
+    return normalize_sensor_health_summary(summary) is not None
+
+
 def _format_sensor_health_section(summary: Any) -> str:
     """Render a one-line health digest for the periodic-report prompt.
 
@@ -763,26 +949,35 @@ def _format_sensor_health_section(summary: Any) -> str:
     """
     if summary is None:
         return "нет данных"
-    total = getattr(summary, "total_channels", 0)
+    normalized = normalize_sensor_health_summary(summary)
+    if normalized is None:
+        return "данные недоступны"
+    total = normalized.total_channels
     if total == 0:
         return "нет данных"
-    healthy = getattr(summary, "healthy", 0)
-    warning = getattr(summary, "warning", 0)
-    critical = getattr(summary, "critical", 0)
-    worst_channel = getattr(summary, "worst_channel", "")
-    worst_score = getattr(summary, "worst_score", 100)
-    line = f"всего {total}, OK {healthy}, ПРЕД {warning}, КРИТ {critical}"
-    if (warning or critical) and worst_channel:
+    healthy = normalized.healthy
+    warning = normalized.warning
+    critical = normalized.critical
+    unscored = total - healthy - warning - critical
+    worst_channel = normalized.worst_channel
+    worst_score = normalized.worst_score
+    line = f"всего {total}, OK {healthy}, ПРЕД {warning}, КРИТ {critical}, не оценено {unscored}"
+    if (warning > 0 or critical > 0) and worst_channel != "":
         line += f"; худший — {worst_channel} (score={worst_score})"
     return line
 
 
-def _format_log_entries(entries: list[Any]) -> str:
+def _format_log_entries(entries: list[Any], *, source_saturated: bool = False) -> str:
     if not entries:
-        return ""
+        return "(нет в полученной части журнала; источник неполный)" if source_saturated else ""
     lines = []
     for e in entries[:10]:
         ts = e.timestamp.astimezone().strftime("%H:%M") if hasattr(e, "timestamp") else "?"
         msg = getattr(e, "message", str(e))[:120]
         lines.append(f"- {ts}: {msg}")
+    if len(entries) > len(lines):
+        lines.insert(
+            0,
+            f"Показано {len(lines)} из {len(entries)} записей; пропущенные события могут включать критические.",
+        )
     return "\n".join(lines)

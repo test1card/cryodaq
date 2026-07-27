@@ -47,7 +47,7 @@ from typing import Any
 import yaml
 
 from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
-from cryodaq.agents.assistant.live.context_builder import ContextBuilder
+from cryodaq.agents.assistant.live.context_builder import ContextBuilder, is_valid_sensor_health_summary
 from cryodaq.agents.assistant.live.output_router import OutputRouter
 from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
 from cryodaq.agents.assistant.query.adapters.archive_adapter import ArchiveAdapter
@@ -179,7 +179,13 @@ class _RemoteEngineStateCache:
                     self._sensor_diagnostics = None
                     self._sensor_receipt = None
                 diag_reply = await self._client.call({"cmd": "get_sensor_diagnostics"})
-                if experiment_receipt_valid and diag_reply.get("ok") and isinstance(active, str) and active:
+                if (
+                    experiment_receipt_valid
+                    and diag_reply.get("ok")
+                    and isinstance(active, str)
+                    and active
+                    and is_valid_sensor_health_summary(diag_reply.get("summary"))
+                ):
                     _validate_context_receipt(
                         diag_reply.get("scope_receipt"),
                         expected_scope="sensor_diagnostics",
@@ -550,7 +556,12 @@ async def _run_llm_runtime(
     telegram_sender: Any | None = None
     try:
         reader = EngineContextReader(engine_client)
-        context_builder = ContextBuilder(reader, state_cache, sensor_diag_provider=state_cache.get_summary)
+        context_builder = ContextBuilder(
+            reader,
+            state_cache,
+            sensor_diag_provider=state_cache.get_summary,
+            alarm_reader=AlarmAdapter(engine_client),
+        )
         audit_logger = AuditLogger(
             _DATA_DIR / "agents" / "assistant" / "audit",
             enabled=config.audit_enabled,

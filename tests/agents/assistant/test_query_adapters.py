@@ -250,6 +250,12 @@ async def test_alarm_adapter_returns_empty_when_no_alarms() -> None:
     assert result.count == 0
 
 
+async def test_alarm_adapter_returns_none_when_success_reply_lacks_active_alarms() -> None:
+    """A malformed successful reply is unavailable, never a known-empty alarm set."""
+    adapter = AlarmAdapter(_fake_client({"ok": True}))
+    assert await adapter.active() is None
+
+
 async def test_alarm_adapter_returns_none_when_call_fails() -> None:
     adapter = AlarmAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
     assert await adapter.active() is None

@@ -6,7 +6,10 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent, _format_age
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
@@ -74,7 +77,11 @@ def _make_mock_em() -> MagicMock:
 
 def _make_context_builder(em) -> ContextBuilder:
     reader = MagicMock()
-    return ContextBuilder(reader, em)
+    reader.get_operator_log = AsyncMock(return_value=[])
+    builder = ContextBuilder(reader, em)
+    builder._alarm_reader = MagicMock()
+    builder._alarm_reader.active = AsyncMock(return_value=SimpleNamespace(active=[]))
+    return builder
 
 
 def _make_audit(tmp_path: Path) -> AuditLogger:
@@ -568,6 +575,15 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
         shift_handover_request_enabled=True,
     )
     agent, bus = _make_agent(config=cfg, ollama=ollama, telegram=telegram, tmp_path=tmp_path)
+    agent._ctx_builder._reader.get_operator_log.return_value = [
+        SimpleNamespace(
+            timestamp=datetime(2026, 5, 1, 19, 30, tzinfo=UTC),
+            message="Compressor warning before handover",
+        )
+    ]
+    agent._ctx_builder._alarm_reader.active.return_value = SimpleNamespace(
+        active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])]
+    )
     insight_q = await bus.subscribe("test_sh_insight", maxsize=10)
     await agent.start()
 
@@ -582,8 +598,11 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
 
     ollama.generate.assert_awaited_once()
     call_kwargs = ollama.generate.call_args[1]
+    user_prompt = ollama.generate.call_args.args[0]
     assert call_kwargs["system"] is not None
     assert "смен" in call_kwargs["system"].lower()
+    assert "CRITICAL: T1-high (T1)" in user_prompt
+    assert "Compressor warning before handover" in user_prompt
 
     telegram._send_to_all.assert_awaited_once()
 
@@ -596,6 +615,38 @@ async def test_shift_handover_handler_dispatches(tmp_path: Path) -> None:
     assert insight_events[0].payload["trigger_event_type"] == "shift_handover_request"
 
     bus.unsubscribe("test_sh_insight")
+    await agent.stop()
+
+
+@pytest.mark.parametrize("unavailable", ["alarm", "log"])
+async def test_shift_handover_unavailable_context_bypasses_ollama(tmp_path: Path, unavailable: str) -> None:
+    done = asyncio.Event()
+    telegram = AsyncMock()
+
+    async def _send_and_signal(*args, **kwargs):
+        done.set()
+
+    telegram._send_to_all = AsyncMock(side_effect=_send_and_signal)
+    ollama = _make_mock_ollama()
+    agent, bus = _make_agent(ollama=ollama, telegram=telegram, tmp_path=tmp_path)
+    if unavailable == "alarm":
+        agent._ctx_builder._alarm_reader.active = AsyncMock(return_value=None)
+    else:
+        agent._ctx_builder._reader.get_operator_log = AsyncMock(side_effect=RuntimeError("db locked"))
+    await agent.start()
+
+    await bus.publish(
+        EngineEvent(
+            event_type="shift_handover_request",
+            timestamp=datetime(2026, 5, 1, 20, 0, 0, tzinfo=UTC),
+            payload={"requested_by": "Иванов", "shift_duration_h": 8},
+            experiment_id="exp-001",
+        )
+    )
+    await asyncio.wait_for(done.wait(), timeout=1.0)
+
+    ollama.generate.assert_not_awaited()
+    assert "не сформирована" in telegram._send_to_all.call_args.args[0]
     await agent.stop()
 
 

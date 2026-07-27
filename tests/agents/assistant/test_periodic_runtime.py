@@ -961,7 +961,15 @@ async def test_engine_disconnect_invalidates_cached_context() -> None:
                 first_cycle_done.set()
                 return {
                     "ok": True,
-                    "summary": {"status": "ok"},
+                    "summary": {
+                        "total_channels": 1,
+                        "healthy": 1,
+                        "warning": 0,
+                        "critical": 0,
+                        "worst_channel": "T1",
+                        "worst_score": 100,
+                        "worst_flags": [],
+                    },
                     "scope_receipt": receipt("sensor_diagnostics"),
                 }
             await allow_disconnect.wait()
@@ -1049,6 +1057,68 @@ async def test_missing_phase_keys_in_reply_resolve_to_unavailable_not_empty() ->
         assert cache.get_phase_history() == []
     finally:
         await cache.stop()
+
+
+async def test_malformed_receipt_valid_diagnostics_summary_is_unavailable_not_zero() -> None:
+    published = asyncio.Event()
+    park = asyncio.Event()
+
+    class Client:
+        calls = 0
+
+        async def call(self, command: dict[str, object]) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                assert command == {"cmd": "experiment_status"}
+                return {
+                    "ok": True,
+                    "active_experiment": {"experiment_id": "exp-1"},
+                    "current_phase": "COOLDOWN",
+                    "phases": [],
+                    "scope_receipt": _status_receipt("experiment_status"),
+                }
+            if self.calls == 2:
+                assert command == {"cmd": "get_sensor_diagnostics"}
+                published.set()
+                return {
+                    "ok": True,
+                    "summary": {"total_channels": 1, "healthy": 1, "critical": 0},
+                    "scope_receipt": _status_receipt("sensor_diagnostics"),
+                }
+            await park.wait()
+            raise AssertionError("parked client unexpectedly resumed")
+
+    cache = _RemoteEngineStateCache(Client(), poll_interval_s=0.0)
+    await cache.start()
+    try:
+        await asyncio.wait_for(published.wait(), 1.0)
+        await asyncio.sleep(0)
+        assert cache.active_experiment_id == "exp-1"
+        assert cache.get_summary() is None
+    finally:
+        await cache.stop()
+
+
+async def test_malformed_sensor_summary_renders_unavailable_not_zero() -> None:
+    from types import SimpleNamespace
+
+    from cryodaq.agents.assistant.live.context_builder import PeriodicReportContext
+
+    context = PeriodicReportContext(
+        window_minutes=60,
+        active_experiment_id=None,
+        active_experiment_phase=None,
+        sensor_health_summary=SimpleNamespace(
+            total_channels=1,
+            healthy=True,
+            critical=0,
+            worst_channel="T1",
+            worst_score=0,
+            worst_flags=[],
+        ),
+    )
+
+    assert "недоступ" in context.to_template_dict()["sensor_health_section"]
 
 
 async def test_explicit_empty_phases_with_keys_present_is_legitimate_empty_history() -> None:
@@ -1198,7 +1268,15 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
                 assert command == {"cmd": "get_sensor_diagnostics"}
                 return {
                     "ok": True,
-                    "summary": {"status": "ok"},
+                    "summary": {
+                        "total_channels": 1,
+                        "healthy": 1,
+                        "warning": 0,
+                        "critical": 0,
+                        "worst_channel": "T1",
+                        "worst_score": 100,
+                        "worst_flags": [],
+                    },
                     "scope_receipt": fresh_receipt("sensor_diagnostics"),
                 }
             published.set()
@@ -1214,7 +1292,7 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
         assert cache.get_phase_history() == [{"phase": "COOLDOWN"}]
         summary = cache.get_summary()
         assert summary is not None
-        assert summary.status == "ok"
+        assert summary.healthy == 1
 
         _ClockDateTime.current = datetime(2026, 7, 22, 12, 0, 6, tzinfo=UTC)
         assert cache.active_experiment_id is None

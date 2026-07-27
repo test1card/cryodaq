@@ -1022,6 +1022,41 @@ async def test_unknown_engine_action_defaults_to_compatibility_gated_mutation(
     }
 
 
+@pytest.mark.parametrize("shift_duration_h", [True, 0, -1, float("nan"), float("inf"), 169])
+async def test_shift_handover_command_rejects_invalid_duration_before_queueing(
+    manager: ExperimentManager, shift_duration_h: object
+) -> None:
+    event_bus = _EventBus()
+    context = _context(manager, event_bus=event_bus)
+
+    reply = await _handle_gui_command(
+        _mutation({"cmd": "shift_handover_summary", "shift_duration_h": shift_duration_h}),
+        context=context,
+    )
+
+    assert reply["ok"] is False
+    assert reply["error_code"] == "shift_duration_invalid"
+    assert reply["commit_state"] == "not_committed"
+    assert event_bus.events == []
+
+
+async def test_shift_handover_command_rejects_huge_integer_duration_before_queueing(
+    manager: ExperimentManager,
+) -> None:
+    event_bus = _EventBus()
+    context = _context(manager, event_bus=event_bus)
+
+    reply = await _handle_gui_command(
+        _mutation({"cmd": "shift_handover_summary", "shift_duration_h": 10**10_000}),
+        context=context,
+    )
+
+    assert reply["ok"] is False
+    assert reply["error_code"] == "shift_duration_invalid"
+    assert reply["commit_state"] == "not_committed"
+    assert event_bus.events == []
+
+
 async def test_engine_command_failure_does_not_expose_exception_secret(
     manager: ExperimentManager,
     caplog: pytest.LogCaptureFixture,

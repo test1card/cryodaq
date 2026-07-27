@@ -5603,6 +5603,23 @@ async def _handle_gui_command(
                 return {"ok": True, "status": "no_data"}
             return {"ok": True, **asdict(pred)}
         if action == "shift_handover_summary":
+            shift_duration_h = cmd.get("shift_duration_h", 8)
+            if (
+                (type(shift_duration_h) is int and not 0 < shift_duration_h <= 168)
+                or (
+                    type(shift_duration_h) is float
+                    and (not math.isfinite(shift_duration_h) or not 0 < shift_duration_h <= 168)
+                )
+                or type(shift_duration_h) not in (int, float)
+            ):
+                return {
+                    "ok": False,
+                    "error_code": "shift_duration_invalid",
+                    "error": "shift_duration_h must be a finite number from 0 (exclusive) through 168 hours",
+                    "delivery_state": "dispatched",
+                    "commit_state": "not_committed",
+                    "retry_safe": True,
+                }
             _sh_active = experiment_manager.active_experiment
             await event_bus.publish(
                 EngineEvent(
@@ -5610,7 +5627,7 @@ async def _handle_gui_command(
                     timestamp=datetime.now(UTC),
                     payload={
                         "requested_by": cmd.get("operator", ""),
-                        "shift_duration_h": int(cmd.get("shift_duration_h", 8)),
+                        "shift_duration_h": shift_duration_h,
                     },
                     experiment_id=_sh_active.experiment_id if _sh_active else None,
                 )
