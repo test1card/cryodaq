@@ -37,7 +37,6 @@ from cryodaq.gui.zmq_client import (
     set_bridge,
 )
 from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
-from cryodaq.mock_mode import mock_env_enabled
 from cryodaq.operator_snapshot import SnapshotMode
 
 logger = logging.getLogger("cryodaq.gui")
@@ -457,7 +456,6 @@ def main() -> None:
 
     app.setApplicationName("CryoDAQ")
     app.setOrganizationName("АКЦ ФИАН")
-    mock_mode = "--mock" in sys.argv[1:] or mock_env_enabled()
 
     # Single-instance guard
     lock_fd = try_acquire_lock(".gui.lock")
@@ -485,7 +483,6 @@ def main() -> None:
         construction_phase = "main_window"
         MainWindow(
             bridge=bridge,
-            mock_mode=mock_mode,
             owner_anchor=lambda owner: setattr(owners, "window", owner),
             shutdown_request=lambda: owners.request_shutdown(app),
         )

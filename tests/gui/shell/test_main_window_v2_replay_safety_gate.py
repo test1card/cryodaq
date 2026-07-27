@@ -422,25 +422,17 @@ def test_recent_reading_timestamp_does_not_stand_in_for_safety_authority() -> No
 
 
 @pytest.mark.parametrize(
-    ("source", "mock", "expected_title", "expected_replay"),
+    ("source", "expected_title", "expected_replay"),
     [
         (
             None,
-            False,
             "CryoDAQ \u2014 \u041a\u0440\u0438\u043e\u0433\u0435\u043d\u043d\u0430\u044f "
             "\u043b\u0430\u0431\u043e\u0440\u0430\u0442\u043e\u0440\u0438\u044f "
             "\u0410\u041a\u0426 \u0424\u0418\u0410\u041d",
             False,
         ),
         (
-            None,
-            True,
-            "CryoDAQ — MOCK: имитационные данные, не живые измерения",
-            False,
-        ),
-        (
             Path("C:/evidence/run-17.sqlite"),
-            False,
             "CryoDAQ \u2014 REPLAY: run-17.sqlite",
             True,
         ),
@@ -449,7 +441,6 @@ def test_recent_reading_timestamp_does_not_stand_in_for_safety_authority() -> No
 def test_launcher_runtime_title_and_replay_mode_propagation(
     monkeypatch,
     source: Path | None,
-    mock: bool,
     expected_title: str,
     expected_replay: bool,
 ) -> None:
@@ -469,7 +460,6 @@ def test_launcher_runtime_title_and_replay_mode_propagation(
             replay_mode,
             owner_anchor,
             shutdown_request,
-            **kwargs,
         ) -> None:
             super().__init__()
             captures.append(
@@ -478,7 +468,6 @@ def test_launcher_runtime_title_and_replay_mode_propagation(
                     "bridge": bridge,
                     "embedded": embedded,
                     "replay_mode": replay_mode,
-                    "mock_mode": kwargs.get("mock_mode", False),
                     "shutdown_request": shutdown_request,
                 }
             )
@@ -524,7 +513,7 @@ def test_launcher_runtime_title_and_replay_mode_propagation(
         lambda self: None,
     )
 
-    window = launcher.LauncherWindow(app, mock=mock, replay_source=source)
+    window = launcher.LauncherWindow(app, replay_source=source)
     window._tray = SimpleNamespace(isVisible=lambda: False)
     try:
         assert window.windowTitle() == expected_title
@@ -533,7 +522,6 @@ def test_launcher_runtime_title_and_replay_mode_propagation(
         assert captured["bridge"] is bridge
         assert captured["embedded"] is True
         assert captured["replay_mode"] is expected_replay
-        assert captured["mock_mode"] is mock
         assert callable(captured["shutdown_request"])
         assert window._main_window is captured["widget"]
         assert ingress_calls == [

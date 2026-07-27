@@ -55,7 +55,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.annunciation_controller import decode_projection
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.state.operator_snapshot_ingress import start_operator_snapshot_ingress
-from cryodaq.gui.tray_status import TrayLevel, bounded_tray_tooltip, resolve_tray_status, tray_icon_for_level
+from cryodaq.gui.tray_status import TrayLevel, resolve_tray_status, tray_icon_for_level
 from cryodaq.gui.zmq_client import (
     CLIENT_PROTOCOL_VERSION,
     LateCommandResult,
@@ -67,7 +67,6 @@ from cryodaq.gui.zmq_client import (
     settle_registered_gui_command_workers,
 )
 from cryodaq.instance_lock import release_lock_exact, try_acquire_lock
-from cryodaq.mock_mode import mock_env_enabled
 from cryodaq.operator_snapshot import SnapshotMode
 
 logger = logging.getLogger("cryodaq.launcher")
@@ -361,7 +360,7 @@ def _decode_launcher_safety_status(
     payload: object,
     *,
     expected_engine_instance_id: str,
-) -> tuple[str, bool] | None:
+) -> str | None:
     """Decode only the exact engine-bound safety status used by the tray."""
 
     if (
@@ -395,7 +394,7 @@ def _decode_launcher_safety_status(
         or active_channels != sorted(set(active_channels))
     ):
         return None
-    return state, payload["mock"]
+    return state
 
 
 def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, bool]:
@@ -2266,8 +2265,6 @@ class LauncherWindow(QMainWindow):
 
         if replay_source is not None:
             self.setWindowTitle(f"CryoDAQ — REPLAY: {replay_source.name}")
-        elif mock:
-            self.setWindowTitle("CryoDAQ — MOCK: имитационные данные, не живые измерения")
         else:
             self.setWindowTitle("CryoDAQ — Криогенная лаборатория АКЦ ФИАН")
         self.setMinimumSize(1360, 860)
@@ -2424,11 +2421,7 @@ class LauncherWindow(QMainWindow):
             if LauncherWindow._do_shutdown(self):
                 raise
             try:
-                self.setWindowTitle(
-                    "CryoDAQ — MOCK: имитационные данные, не живые измерения — HOLD: incomplete startup settlement"
-                    if getattr(self, "_mock", False) is True
-                    else "CryoDAQ — HOLD: incomplete startup settlement"
-                )
+                self.setWindowTitle("CryoDAQ — HOLD: incomplete startup settlement")
                 self.show()
             except RuntimeError:
                 logger.critical("Construction HOLD could not render a window")
@@ -4416,7 +4409,6 @@ class LauncherWindow(QMainWindow):
             bridge=self._bridge,
             embedded=True,
             replay_mode=self._replay_source is not None,
-            mock_mode=self._mock,
             owner_anchor=lambda owner: setattr(self, "_main_window", owner),
             shutdown_request=self._do_shutdown,
         )
@@ -4458,7 +4450,6 @@ class LauncherWindow(QMainWindow):
             alarm_count=None,
             data_fresh=None,
             reporting_fault=None,
-            mock=self._mock,
         )
         self._tray = QSystemTrayIcon(self._tray_icon_yellow, self)
 
@@ -4482,34 +4473,6 @@ class LauncherWindow(QMainWindow):
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.setToolTip(initial_status.tooltip)
         self._tray.show()
-
-    def _tray_tooltip(self, tooltip: str) -> str:
-        """Bound non-resolver tray text with launcher-owned provenance."""
-
-        return bounded_tray_tooltip(tooltip, mock=getattr(self, "_mock", False) is True)
-
-    def _set_mock_mode(self, mock: bool) -> None:
-        """Latch verified mock provenance across persistent launcher chrome."""
-
-        if mock is not True or getattr(self, "_mock", False) is True:
-            return
-        self._mock = True
-        title = self.windowTitle()
-        self.setWindowTitle(
-            "CryoDAQ — MOCK: имитационные данные, не живые измерения — HOLD: incomplete startup settlement"
-            if "HOLD:" in title
-            else "CryoDAQ — MOCK: имитационные данные, не живые измерения"
-        )
-        main_window = getattr(self, "_main_window", None)
-        if main_window is not None:
-            main_window.set_mock_mode(True)
-        tray = getattr(self, "_tray", None)
-        if tray is not None:
-            try:
-                tooltip = tray.toolTip()
-            except RuntimeError:
-                tooltip = ""
-            tray.setToolTip(bounded_tray_tooltip(tooltip if type(tooltip) is str else "", mock=True))
 
     def _merge_main_window_menus(self) -> None:
         """Перенести меню MainWindow в menuBar лаунчера."""
@@ -5243,12 +5206,9 @@ class LauncherWindow(QMainWindow):
         if icon is not None:
             tray.setIcon(icon)
         tray.setToolTip(
-            LauncherWindow._tray_tooltip(
-                self,
-                "CryoDAQ: завершение не окончено; ресурсы ещё завершаются."
-                if failed
-                else "CryoDAQ: выполняется контролируемое завершение.",
-            )
+            "CryoDAQ: завершение не окончено; ресурсы ещё завершаются."
+            if failed
+            else "CryoDAQ: выполняется контролируемое завершение."
         )
         tray.show()
         if failed and not self._shutdown_failure_notified:
@@ -5916,7 +5876,6 @@ class LauncherWindow(QMainWindow):
             alarm_count=self._last_alarm_count,
             data_fresh=data_flowing,
             reporting_fault=self._periodic_reporting_fault,
-            mock=getattr(self, "_mock", False) is True,
         )
         icon = {
             TrayLevel.HEALTHY: self._tray_icon_green,
@@ -5938,13 +5897,10 @@ class LauncherWindow(QMainWindow):
         ):
             return
         assert type(authority) is _LauncherStatusAuthority
-        decoded = _decode_launcher_safety_status(
+        self._last_safety_state = _decode_launcher_safety_status(
             result,
             expected_engine_instance_id=authority.engine_instance_id,
         )
-        self._last_safety_state = None if decoded is None else decoded[0]
-        if decoded is not None:
-            LauncherWindow._set_mock_mode(self, decoded[1])
 
     def _on_annunciation_result(self, result: object, authority: object = None) -> None:
         """Accept only exact alarm truth bound to the captured engine cut."""
@@ -6105,7 +6061,7 @@ def main() -> None:
 
     setup_logging("launcher", level=resolve_log_level())
 
-    mock = args.mock or mock_env_enabled()
+    mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
 
     soak_bridge_handshake = _consume_soak_bridge_handshake(
         cli_mock=args.mock,

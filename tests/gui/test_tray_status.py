@@ -127,35 +127,6 @@ def test_tooltip_is_bounded_for_windows_and_keeps_disclaimer_first() -> None:
     assert "9999+" in status.tooltip
 
 
-@pytest.mark.parametrize(
-    ("connected", "safety_state", "alarm_count", "data_fresh", "reporting_fault", "expected"),
-    [
-        (None, None, None, None, None, ("MOCK:", "Т:неизв.", "Д:неизв.", "О:неизв.")),
-        (True, "fault_latched", 7, False, True, ("MOCK:", "АВАРИЯ", "Т:7", "Д:устар.", "О:сбой")),
-        (True, "ready", 0, True, False, ("MOCK:", "Т:0", "Д:свежие", "О:норма")),
-    ],
-)
-def test_mock_tray_tooltip_is_one_bounded_composition_with_all_truth_fields(
-    connected: bool | None,
-    safety_state: str | None,
-    alarm_count: int | None,
-    data_fresh: bool | None,
-    reporting_fault: bool | None,
-    expected: tuple[str, ...],
-) -> None:
-    status = resolve_tray_status(
-        connected=connected,
-        safety_state=safety_state,
-        alarm_count=alarm_count,
-        data_fresh=data_fresh,
-        reporting_fault=reporting_fault,
-        mock=True,
-    )
-
-    assert len(status.tooltip.encode("utf-16-le")) // 2 <= 127
-    assert all(text in status.tooltip for text in expected)
-
-
 @pytest.mark.parametrize("connected", [1, 0, "yes", object()])
 def test_non_boolean_connection_authority_is_unknown(connected: object) -> None:
     status = resolve_tray_status(

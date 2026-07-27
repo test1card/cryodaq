@@ -1063,167 +1063,6 @@ def test_replay_health_evaluates_process_and_bridge_without_live_status_workers(
     assert host._last_alarm_count is None
 
 
-def test_mock_tray_health_tooltip_never_claims_live_acquisition() -> None:
-    import time
-
-    import cryodaq.launcher as launcher
-
-    tray = SimpleNamespace(setIcon=MagicMock(), setToolTip=MagicMock())
-    busy_worker = SimpleNamespace(isFinished=lambda: False)
-    host = SimpleNamespace(
-        _runtime_callbacks_open=True,
-        _shutdown_requested=False,
-        _assistant_enabled=False,
-        _is_engine_alive=MagicMock(return_value=True),
-        _restart_giving_up=False,
-        _engine_unsettled_incarnation=None,
-        _bridge_restart_fault=False,
-        _bridge_restart_hold=False,
-        _tray_only=True,
-        _clear_engine_down_banner=MagicMock(),
-        _restart_attempts=0,
-        _engine_external=False,
-        _replay_source=None,
-        _bridge=SimpleNamespace(is_alive=lambda: True),
-        _last_safety_state="ready",
-        _last_alarm_count=0,
-        _safety_worker=busy_worker,
-        _annunciation_worker=busy_worker,
-        _last_reading_time=time.monotonic(),
-        _periodic_reporting_fault=False,
-        _tray_icon_green="green",
-        _tray_icon_yellow="yellow",
-        _tray_icon_red="red",
-        _tray=tray,
-        _mock=True,
-    )
-
-    launcher.LauncherWindow._check_engine_health(host)
-
-    tooltip = tray.setToolTip.call_args.args[0]
-    assert tooltip.startswith("MOCK:")
-    assert "симуляция" in tooltip
-    assert "не живая установка" in tooltip
-
-
-def test_mock_tray_startup_uses_resolver_tooltip_once_and_keeps_unknown_truth(monkeypatch) -> None:
-    """The startup tray path must not re-prefix its already bounded resolver result."""
-    import cryodaq.launcher as launcher
-
-    tray = MagicMock()
-    host = SimpleNamespace(
-        _mock=True,
-        _tray_only=True,
-        _on_open_full_gui=lambda: None,
-        _on_restart_engine=lambda: None,
-        _on_quit=lambda: None,
-        _on_tray_activated=lambda: None,
-    )
-    monkeypatch.setattr(launcher, "QSystemTrayIcon", MagicMock(return_value=tray))
-    monkeypatch.setattr(launcher, "QMenu", MagicMock())
-    monkeypatch.setattr(launcher, "tray_icon_for_level", lambda level: level.value)
-
-    launcher.LauncherWindow._build_tray(host)
-
-    tooltip = tray.setToolTip.call_args.args[0]
-    assert tooltip.count("MOCK:") == 1
-    assert len(tooltip.encode("utf-16-le")) // 2 <= 127
-    assert all(field in tooltip for field in ("Т:неизв.", "Д:неизв.", "О:неизв."))
-
-
-def test_verified_mock_safety_status_latches_all_persistent_chrome() -> None:
-    from PySide6.QtWidgets import QApplication, QMainWindow
-
-    import cryodaq.launcher as launcher
-    from cryodaq.gui.shell.main_window_v2 import MainWindowV2
-    from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
-
-    app = QApplication.instance() or QApplication([])
-    shell = MainWindowV2()
-    for timer in shell.findChildren(launcher.QTimer):
-        timer.stop()
-    tray = SimpleNamespace(toolTip=lambda: "CryoDAQ: состояние неизвестно", setToolTip=MagicMock())
-    host = QMainWindow()
-    host.setWindowTitle("CryoDAQ — HOLD: incomplete startup settlement")
-    host._mock = False
-    host._main_window = shell
-    host._tray = tray
-    host._replay_source = None
-    host._runtime_callbacks_open = True
-    host._runtime_callback_epoch = 1
-    host._shutdown_requested = False
-    host._engine_instance_id = _ENGINE_INSTANCE
-    host._safety_status_generation = 1
-    host._bridge = SimpleNamespace(is_alive=lambda: True, process_pid=lambda: _ENGINE_PID, restart_count=lambda: 0)
-    host._launcher_status_authority_is_current = lambda value, *, generation_attribute: (
-        launcher.LauncherWindow._launcher_status_authority_is_current(
-            host,
-            value,
-            generation_attribute=generation_attribute,
-        )
-    )
-    authority = launcher._LauncherStatusAuthority(1, _ENGINE_INSTANCE, _ENGINE_PID, 0, 1)
-    payload = {
-        "ok": True,
-        "state": "ready",
-        "fault_reason": "",
-        "fault_revision": 0,
-        "fault_activated_at": 0.0,
-        "recovery_reason": "",
-        "channels_tracked": 0,
-        "keithley_connected": False,
-        "active_channels": [],
-        "mock": True,
-        "engine_instance_id": _ENGINE_INSTANCE,
-        "proto": CLIENT_PROTOCOL_VERSION,
-    }
-
-    launcher.LauncherWindow._on_safety_result(host, payload, authority)
-    assert host._last_safety_state == "ready"
-    assert (
-        host.windowTitle()
-        == "CryoDAQ — MOCK: имитационные данные, не живые измерения — HOLD: incomplete startup settlement"
-    )
-    assert "MOCK" in shell.windowTitle()
-    assert not shell._top_bar._mock_provenance_badge.isHidden()
-    assert tray.setToolTip.call_args.args[0].startswith("MOCK: симуляция")
-
-    payload["mock"] = False
-    launcher.LauncherWindow._on_safety_result(host, payload, authority)
-    launcher.LauncherWindow._on_safety_result(host, {"ok": True}, authority)
-    assert host._mock is True
-    assert "MOCK" in shell.windowTitle()
-    assert not shell._top_bar._mock_provenance_badge.isHidden()
-
-    shell.deleteLater()
-    host.deleteLater()
-    app.processEvents()
-
-
-def test_mock_construction_hold_preserves_root_title_provenance() -> None:
-    import cryodaq.launcher as launcher
-
-    titles: list[str] = []
-    host = SimpleNamespace(
-        _mock=True,
-        _construction_failure_phase=None,
-        setWindowTitle=titles.append,
-        show=MagicMock(),
-    )
-
-    with (
-        patch.object(launcher.LauncherWindow, "_do_shutdown", return_value=False),
-        pytest.raises(RuntimeError),
-    ):
-        launcher.LauncherWindow._run_construction_step(
-            host,
-            "engine",
-            lambda: (_ for _ in ()).throw(RuntimeError("injected")),
-        )
-
-    assert titles == ["CryoDAQ — MOCK: имитационные данные, не живые измерения — HOLD: incomplete startup settlement"]
-
-
 def test_real_replay_launcher_health_and_root_shutdown_preserve_hold_without_live_alarm_owners(
     monkeypatch,
 ) -> None:
@@ -1444,34 +1283,12 @@ def test_launcher_replay_sentinel_when_no_path():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mock_env", [None, "true", "TRUE"])
 @patch("cryodaq.logging_setup.setup_logging")
-def test_launcher_replay_and_mock_mutually_exclusive(
-    _setup_logging: MagicMock, monkeypatch, capsys, mock_env: str | None
-):
-    """CLI and accepted environment spellings reject replay before Qt starts."""
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["cryodaq", "--mock", "--replay", "/some.db"] if mock_env is None else ["cryodaq", "--replay", "/some.db"],
-    )
-    if mock_env is None:
-        monkeypatch.delenv("CRYODAQ_MOCK", raising=False)
-    else:
-        monkeypatch.setenv("CRYODAQ_MOCK", mock_env)
-    # A bypassed gate must fail in the test before either wizard or Qt starts.
-    with (
-        patch(
-            "cryodaq.gui.first_run_wizard.maybe_show_first_run_wizard",
-            side_effect=AssertionError("replay/mock gate was bypassed"),
-        ),
-        patch("cryodaq.gui.app._load_bundled_fonts"),
-        patch("cryodaq.gui.app.apply_fusion_dark_palette"),
-        patch("cryodaq.gui.first_run_config.recover_pending_setup"),
-        patch("cryodaq.launcher.try_acquire_lock", return_value=1),
-        patch("cryodaq.launcher.QApplication"),
-        pytest.raises(SystemExit) as exc_info,
-    ):
+def test_launcher_replay_and_mock_mutually_exclusive(_setup_logging: MagicMock, monkeypatch, capsys):
+    """--mock + --replay must raise SystemExit before Qt starts."""
+    monkeypatch.setattr(sys, "argv", ["cryodaq", "--mock", "--replay", "/some.db"])
+    # Prevent Qt from starting
+    with patch("cryodaq.launcher.QApplication"), pytest.raises(SystemExit) as exc_info:
         from cryodaq import launcher
 
         # Reload to pick up monkeypatched argv isn't needed —
@@ -1485,50 +1302,6 @@ def test_launcher_replay_and_mock_mutually_exclusive(
 # ---------------------------------------------------------------------------
 # _start_engine cmd construction — uses SimpleNamespace to avoid Qt init
 # ---------------------------------------------------------------------------
-
-
-def test_launcher_passes_existing_mock_flag_to_embedded_shell(monkeypatch) -> None:
-    """The launcher-owned mock flag must reach the persistent shell chrome."""
-    from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
-
-    import cryodaq.launcher as launcher
-
-    app = QApplication.instance() or QApplication([])
-    captured: dict[str, object] = {}
-    expected_modes = []
-
-    class Shell(QWidget):
-        def __init__(self, **kwargs) -> None:  # noqa: ANN003
-            super().__init__()
-            captured.update(kwargs)
-            kwargs["owner_anchor"](self)
-
-    host = QMainWindow()
-    host._bridge = object()
-    host._main_window = None
-    host._mock = True
-    host._replay_source = None
-    host._do_shutdown = lambda: None
-    host._on_open_web = lambda: None
-    host._on_restart_engine = lambda: None
-    host._merge_main_window_menus = lambda: None
-    host._build_settings_menu = lambda: None
-
-    monkeypatch.setattr(launcher, "MainWindow", Shell)
-    monkeypatch.setattr(
-        launcher,
-        "start_operator_snapshot_ingress",
-        lambda _bridge, _window, *, expected_mode, anchor: (expected_modes.append(expected_mode), anchor(object())),
-    )
-
-    launcher.LauncherWindow._build_ui(host)
-
-    assert captured.get("mock_mode", False) is True
-    assert captured["replay_mode"] is False
-    assert expected_modes == [launcher.SnapshotMode.LIVE]
-    assert host._main_window is not None
-    host.deleteLater()
-    app.processEvents()
 
 
 def _make_fake_self(src: Path, *, loop: bool = False) -> object:

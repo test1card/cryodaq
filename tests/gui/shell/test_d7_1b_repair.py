@@ -96,10 +96,7 @@ def _status_launcher(*, bridge: object | None = None) -> SimpleNamespace:
         _last_reading_time=10.0,
         _safety_worker=None,
         _annunciation_worker=None,
-        _window_title="CryoDAQ — HOLD: incomplete startup settlement",
     )
-    launcher.windowTitle = lambda: launcher._window_title
-    launcher.setWindowTitle = lambda title: setattr(launcher, "_window_title", title)
     return _bind_launcher_methods(
         launcher,
         "_invalidate_launcher_status_authority",

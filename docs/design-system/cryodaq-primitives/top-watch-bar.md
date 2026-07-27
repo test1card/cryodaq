@@ -1,10 +1,10 @@
 ---
 title: TopWatchBar
-keywords: top-bar, watch-bar, header, chrome, vitals, at-a-glance, pressure, temperature, mode-badge, mock, provenance
-applies_to: persistent top chrome showing engine, experiment, fixed physical references, channel summary, alarms, mode, and mock provenance
+keywords: top-bar, watch-bar, header, chrome, vitals, at-a-glance, pressure, temperature, mode-badge
+applies_to: persistent top chrome showing engine, experiment, fixed physical references, channel summary, alarms, and mode
 status: active
 implements: src/cryodaq/gui/shell/top_watch_bar.py (Phase B.4/B.4.5.2)
-last_updated: 2026-07-27
+last_updated: 2026-07-17
 references: rules/data-display-rules.md, rules/color-rules.md, rules/content-voice-rules.md
 ---
 
@@ -115,21 +115,6 @@ cues must not be replaced by a summary-only presentation.
     stale age, disconnect, interval extrema and their source times, invalid
     reason, and clock-skew evidence. Tooltip detail supplements rather than
     replaces the visible state cue.
-
-## Mock provenance and constrained width
-
-`MOCK` is independent provenance, not a health or replay state. The root title
-and persistent badge start from the local argv/environment hint and may only
-upgrade from a schema-complete, protocol-matched read-only `safety_status`
-reply with a stable engine identity and exact boolean `mock`. Later false,
-malformed, mismatched, or replaced-identity replies never remove it. Replay is
-a separate non-live domain and does not request this engine fact.
-
-At the supported 1280px logical shell width, the MOCK badge, alarm text, and
-mode text each receive at least their font-metric width. Experiment, channel,
-and context zones are the flexible layout participants; no MOCK/alarm/mode
-truth may clip or become icon-only. The MOCK badge has accessible text naming
-the simulated-data provenance; it is never color-only.
 
 ## Layout structure
 

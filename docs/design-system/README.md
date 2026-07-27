@@ -3,14 +3,14 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-07-27
+last_updated: 2026-07-20
 status: canonical
-version: 4.0.4
+version: 4.0.3
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.0.4`
+**Current design-system version:** `4.0.3`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
