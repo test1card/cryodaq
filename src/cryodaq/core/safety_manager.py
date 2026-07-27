@@ -55,16 +55,6 @@ class SafetyShutdownUnverifiedError(RuntimeError):
     """Raised while shutdown must HOLD because safety settlement is incomplete."""
 
 
-def _config_float(value: object, *, name: str) -> float:
-    """Accept only finite YAML numerics; bool is never a safety number."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} must be numeric, not {type(value).__name__}")
-    converted = float(value)
-    if not math.isfinite(converted):
-        raise ValueError(f"{name} must be finite")
-    return converted
-
-
 class SafetyState(Enum):
     SAFE_OFF = "safe_off"
     READY = "ready"
@@ -345,25 +335,17 @@ class SafetyManager:
             src_limits = raw.get("source_limits", {})
             self._config = SafetyConfig(
                 critical_channels=patterns,
-                stale_timeout_s=_config_float(raw.get("stale_timeout_s", 10.0), name="stale_timeout_s"),
-                heartbeat_timeout_s=_config_float(raw.get("heartbeat_timeout_s", 15.0), name="heartbeat_timeout_s"),
+                stale_timeout_s=float(raw.get("stale_timeout_s", 10.0)),
+                heartbeat_timeout_s=float(raw.get("heartbeat_timeout_s", 15.0)),
                 max_safety_backlog=int(raw.get("max_safety_backlog", 100)),
                 require_keithley_for_run=bool(raw.get("require_keithley_for_run", True)),
-                max_dT_dt_K_per_min=_config_float(
-                    raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0),
-                    name="rate_limits.max_dT_dt_K_per_min",
-                ),
+                max_dT_dt_K_per_min=float(raw.get("rate_limits", {}).get("max_dT_dt_K_per_min", 5.0)),
                 require_reason=bool(raw.get("recovery", {}).get("require_reason", True)),
-                cooldown_before_rearm_s=_config_float(
-                    raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0),
-                    name="recovery.cooldown_before_rearm_s",
-                ),
-                max_power_w=_config_float(src_limits.get("max_power_w", 5.0), name="source_limits.max_power_w"),
-                max_voltage_v=_config_float(src_limits.get("max_voltage_v", 40.0), name="source_limits.max_voltage_v"),
-                max_current_a=_config_float(src_limits.get("max_current_a", 1.0), name="source_limits.max_current_a"),
-                scheduler_drain_timeout_s=_config_float(
-                    raw.get("scheduler_drain_timeout_s", 5.0), name="scheduler_drain_timeout_s"
-                ),
+                cooldown_before_rearm_s=float(raw.get("recovery", {}).get("cooldown_before_rearm_s", 60.0)),
+                max_power_w=float(src_limits.get("max_power_w", 5.0)),
+                max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
+                max_current_a=float(src_limits.get("max_current_a", 1.0)),
+                scheduler_drain_timeout_s=float(raw.get("scheduler_drain_timeout_s", 5.0)),
             )
             self._keithley_patterns = [re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])]
             # Liveness validation resolves these canonical patterns against

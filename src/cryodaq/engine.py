@@ -825,24 +825,6 @@ def _leak_rate_volume_warning(chamber_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def _build_leak_rate_estimator(
-    chamber_cfg: dict[str, Any],
-    *,
-    data_dir: Path,
-    finalization_settlement_timeout_s: float,
-    sample_liveness_grace_s: float,
-) -> LeakRateEstimator:
-    """Wire raw YAML values into the estimator so its exact validators own them."""
-    leak_cfg = chamber_cfg.get("leak_rate", {})
-    return LeakRateEstimator(
-        chamber_volume_l=chamber_cfg.get("volume_l", 0.0),
-        sample_window_s=leak_cfg.get("default_sample_window_s", 300.0),
-        data_dir=data_dir,
-        finalization_settlement_timeout_s=finalization_settlement_timeout_s,
-        sample_liveness_grace_s=sample_liveness_grace_s,
-    )
-
-
 async def _handle_leak_rate_command(
     action: str,
     cmd: dict[str, Any],
@@ -865,12 +847,10 @@ async def _handle_leak_rate_command(
         _raw_dur = cmd.get("duration_s")
         window_s: float | None = None
         if _raw_dur is not None:
-            if isinstance(_raw_dur, bool) or not isinstance(_raw_dur, (int, float)):
-                return {"ok": False, "error": "duration_s not numeric"}
             try:
                 window_s = float(_raw_dur)
-            except (TypeError, ValueError, OverflowError):
-                return {"ok": False, "error": "duration_s not numeric"}
+            except (TypeError, ValueError):
+                return {"ok": False, "error": f"duration_s not numeric: {_raw_dur!r}"}
             if not (0 < window_s < float("inf")):
                 return {
                     "ok": False,
@@ -893,16 +873,13 @@ async def _handle_leak_rate_command(
         try:
             from dataclasses import asdict as _asdict  # noqa: PLC0415
 
-            result = await leak_rate_estimator.finalize_async()
-            if result is None:
-                raise ValueError("Leak-rate measurement was superseded")
+            result = leak_rate_estimator.finalize()
             await event_logger.log_event(
                 "leak_rate",
                 f"Leak rate: {result.leak_rate_mbar_l_per_s:.3e} mbar·L/s",
             )
             return {"ok": True, "action": "leak_rate_stop", "measurement": _asdict(result)}
-        except Exception as exc:  # noqa: BLE001 -- persist failures must not publish a result
-            logger.error("Leak-rate stop failed: %s", exc)
+        except ValueError:
             return {
                 "ok": False,
                 "error_code": "leak_rate_stop_invalid",
@@ -6639,11 +6616,10 @@ async def _run_engine(
     _instruments_raw = yaml.safe_load(instruments_cfg.read_text(encoding="utf-8"))
     _chamber_cfg = _instruments_raw.get("chamber", {})
     _leak_cfg = _chamber_cfg.get("leak_rate", {})
-    leak_rate_estimator = _build_leak_rate_estimator(
-        _chamber_cfg,
+    leak_rate_estimator = LeakRateEstimator(
+        chamber_volume_l=float(_chamber_cfg.get("volume_l", 0.0)),
+        sample_window_s=float(_leak_cfg.get("default_sample_window_s", 300.0)),
         data_dir=_DATA_DIR,
-        finalization_settlement_timeout_s=safety_manager._config.scheduler_drain_timeout_s,
-        sample_liveness_grace_s=persistence_freshness_s,
     )
     _leak_warn = _leak_rate_volume_warning(_chamber_cfg)
     if _leak_warn:
