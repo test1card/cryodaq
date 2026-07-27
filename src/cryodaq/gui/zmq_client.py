@@ -2419,6 +2419,7 @@ class ZmqCommandWorker(QThread):
     """Background thread for non-blocking ZMQ commands (unchanged API)."""
 
     finished = Signal(dict)
+    settled = Signal()
     _result_ready = Signal(int, dict)
 
     def __init__(self, cmd: dict, parent=None) -> None:
@@ -2456,9 +2457,11 @@ class ZmqCommandWorker(QThread):
                 "error": "GUI command worker execution failed",
                 "error_type": type(exc).__name__,
             }
-        session_epoch = self._session_epoch
-        if session_epoch is not None:
-            self._result_ready.emit(session_epoch, result)
+        finally:
+            session_epoch = self._session_epoch
+            if session_epoch is not None:
+                self._result_ready.emit(session_epoch, result)
+            self.settled.emit()
 
     @Slot(int, dict)
     def _deliver_result_if_current(self, session_epoch: int, result: dict) -> None:

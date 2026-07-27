@@ -1,15 +1,15 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-20
-version: 4.0.3
+last_updated: 2026-07-27
+version: 4.0.4
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-20
-**Session:** v4.0.3 operator-state semantic correction
-**Scope:** Design system v4.0.3 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-07-27
+**Session:** v4.0.4 mock-provenance chrome correction
+**Scope:** Design system v4.0.4 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -118,6 +118,19 @@ design-system/
     ├── change-impact.md                # mandatory five-field operator/safety review
     └── contribution.md                 # proposal process, 6 types, review gates
 ```
+
+## v4.0.4 mock-provenance correction
+
+- `TopWatchBar` documents independent one-way MOCK provenance, its exact
+  read-only engine-status acceptance boundary, replay separation, accessible
+  badge text, and the supported 1280px font-metric priority for MOCK, mode,
+  and alarms.
+- `tray-status.md` documents the one bounded MOCK composition: mock unknown,
+  fault/alarm, and healthy cases retain alarm, freshness, and reporting truth
+  at or below the Windows 127 UTF-16-unit limit.
+- `patterns/responsive-behavior.md`, `accessibility/wcag-baseline.md`, and
+  `governance/change-impact.md` record the logical geometry evidence and the
+  open Windows/NVDA/DPI/operator-performance acceptance boundary.
 
 ## Statistics
 
@@ -248,7 +261,7 @@ F36 operator-snapshot additions:
 
 ## Status
 
-**Design system v4.0.3 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+**Design system v4.0.4 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
 83 rules (79 widget rules plus 4 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
 ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
 remain open.

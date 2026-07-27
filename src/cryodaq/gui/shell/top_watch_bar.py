@@ -13,12 +13,13 @@ import copy
 import html
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
@@ -78,6 +79,23 @@ _EXPERIMENT_STATUS_REPLAY_KEYS = _EXPERIMENT_STATUS_LIVE_KEYS | {
     "replay_session_id",
 }
 _LIVE_APP_MODES = frozenset({"experiment", "debug"})
+_SAFETY_STATUS_KEYS = frozenset(
+    {
+        "ok",
+        "state",
+        "fault_reason",
+        "fault_revision",
+        "fault_activated_at",
+        "recovery_reason",
+        "channels_tracked",
+        "keithley_connected",
+        "active_channels",
+        "mock",
+        "engine_instance_id",
+        "proto",
+    }
+)
+_SAFETY_STATES = frozenset({"safe_off", "ready", "run_permitted", "running", "fault_latched", "manual_recovery"})
 _LIVE_EXPERIMENT_KEYS = frozenset(
     {
         "experiment_id",
@@ -616,6 +634,7 @@ class TopWatchBar(QWidget):
     experiment_clicked = Signal()
     alarms_clicked = Signal()
     experiment_status_received = Signal(dict)  # B.5: forward /status to dashboard
+    mock_mode_verified = Signal(bool)
 
     def __init__(self, channel_manager: ChannelManager | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -640,6 +659,9 @@ class TopWatchBar(QWidget):
         self._expected_app_mode_domain = "live"
         self._replay_authority: ReplayStatusAuthority | None = None
         self._engine_alive: bool | None = None
+        self._mock_safety_engine_instance_id: str | None = None
+        self._mock_safety_mock: bool | None = None
+        self._mock_safety_generation = 0
         self._last_experiment_full_text = "\u25cb Нет активного эксперимента"
 
         self._build_ui()
@@ -676,6 +698,7 @@ class TopWatchBar(QWidget):
         # One in-flight worker per poll stream — skip tick if previous
         # request still running (Finding 2, Block A.9).
         self._experiment_worker = None
+        self._mock_status_worker = None
 
     # ------------------------------------------------------------------
     # UI construction
@@ -697,7 +720,9 @@ class TopWatchBar(QWidget):
         self._exp_label = _ClickableLabel(self._last_experiment_full_text)
         self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
         self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
-        self._exp_label.setMaximumWidth(220)
+        self._exp_label.setMaximumWidth(180)
+        self._exp_label.setMinimumWidth(0)
+        self._exp_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
         layout.addWidget(self._exp_label, stretch=1)
 
@@ -711,11 +736,32 @@ class TopWatchBar(QWidget):
         self._mode_switch_worker = None
         layout.addWidget(self._mode_badge)
 
+        self._mock_provenance_badge = QLabel()
+        self._mock_provenance_badge.setObjectName("mockProvenanceBadge")
+        self._mock_provenance_badge.setTextFormat(Qt.TextFormat.PlainText)
+        self._mock_provenance_badge.setText("MOCK")
+        self._mock_provenance_badge.setAccessibleName("MOCK: имитационные данные, не живые измерения")
+        self._mock_provenance_badge.setToolTip("MOCK: имитационные данные, не живые измерения")
+        self._mock_provenance_badge.setAccessibleDescription(
+            "Измерения симулированы и не поступают от живой установки."
+        )
+        self._mock_provenance_badge.setStyleSheet(
+            f"#mockProvenanceBadge {{ background-color: {theme.BACKGROUND}; "
+            f"color: {theme.STATUS_CAUTION}; border: 1px solid {theme.STATUS_CAUTION}; "
+            f"border-radius: {theme.RADIUS_SM}px; padding: {theme.SPACE_1}px {theme.SPACE_3}px; "
+            f"font-family: '{theme.FONT_BODY}'; font-size: {theme.FONT_LABEL_SIZE}px; "
+            f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; }}"
+        )
+        self._mock_provenance_badge.hide()
+        layout.addWidget(self._mock_provenance_badge)
+
         layout.addWidget(self._make_zone_sep())
 
         # Zone 3: channel summary
         self._channel_label = QLabel("● —/— норма")
         self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        self._channel_label.setMinimumWidth(0)
+        self._channel_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(self._channel_label)
 
         layout.addWidget(self._make_zone_sep())
@@ -725,6 +771,7 @@ class TopWatchBar(QWidget):
             "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
         )
         self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        self._alarms_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self._alarms_label.clicked.connect(self.alarms_clicked.emit)
         layout.addWidget(self._alarms_label)
 
@@ -785,6 +832,8 @@ class TopWatchBar(QWidget):
         )
 
         self._context_frame = QFrame(self)
+        self._context_frame.setMinimumWidth(0)
+        self._context_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self._context_frame.setObjectName("topWatchBarContext")
         # v0.55.2 ds-006: padding 2px 8px expressed via SPACE_1 // 2 + SPACE_2
         # (2 is the same micro-step we pin in sensor_cell.py; folding both
@@ -1121,16 +1170,96 @@ class TopWatchBar(QWidget):
 
     def _poll_fast(self) -> None:
         """Poll experiment status (zone 2). Skips if previous still in flight."""
-        if self._experiment_worker is not None and not self._experiment_worker.isFinished():
-            return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
+        if self._expected_app_mode_domain != "replay" and self._mock_status_worker is None:
+            worker = ZmqCommandWorker({"cmd": "safety_status"}, parent=self)
+            generation = self._mock_safety_generation
+            self._mock_status_worker = worker
+            worker.finished.connect(
+                lambda result, owner=worker, receipt=generation: self._on_mock_safety_result(
+                    result, owner=owner, generation=receipt
+                )
+            )
+            worker.settled.connect(lambda owner=worker: self._retire_worker("_mock_status_worker", owner))
+            worker.start()
+        if self._experiment_worker is not None:
+            return
         expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
-        self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
-        self._experiment_worker.finished.connect(
+        worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
+        self._experiment_worker = worker
+        worker.finished.connect(
             lambda result, expected=expected_replay_authority: self._on_experiment_result(result, expected)
         )
-        self._experiment_worker.start()
+        worker.settled.connect(lambda owner=worker: self._retire_worker("_experiment_worker", owner))
+        worker.start()
+
+    def _retire_worker(self, attribute: str, worker: object) -> None:
+        """Release a terminal poll owner without letting an old result clear a newer one."""
+
+        if getattr(self, attribute) is not worker:
+            return
+        setattr(self, attribute, None)
+        worker.deleteLater()
+
+    def _on_mock_safety_result(
+        self,
+        result: object,
+        *,
+        owner: object | None = None,
+        generation: int | None = None,
+    ) -> None:
+        """Accept only a schema-complete engine fact; mock provenance only latches."""
+
+        if generation is not None and generation != self._mock_safety_generation:
+            return
+        if owner is not None and owner is not self._mock_status_worker:
+            return
+        if type(result) is not dict or set(result) != _SAFETY_STATUS_KEYS:
+            return
+        engine_instance_id = result.get("engine_instance_id")
+        active_channels = result.get("active_channels")
+        if (
+            result.get("ok") is not True
+            or type(result.get("proto")) is not int
+            or result["proto"] != CLIENT_PROTOCOL_VERSION
+            or type(engine_instance_id) is not str
+            or re.fullmatch(r"[0-9a-f]{32}", engine_instance_id) is None
+            or type(result.get("state")) is not str
+            or result["state"] not in _SAFETY_STATES
+            or type(result.get("fault_reason")) is not str
+            or type(result.get("fault_revision")) is not int
+            or result["fault_revision"] < 0
+            or type(result.get("fault_activated_at")) is not float
+            or not math.isfinite(result["fault_activated_at"])
+            or result["fault_activated_at"] < 0.0
+            or type(result.get("recovery_reason")) is not str
+            or type(result.get("channels_tracked")) is not int
+            or result["channels_tracked"] < 0
+            or type(result.get("keithley_connected")) is not bool
+            or type(result.get("mock")) is not bool
+            or type(active_channels) is not list
+            or any(type(channel) is not str or not channel or not channel.isprintable() for channel in active_channels)
+            or active_channels != sorted(set(active_channels))
+        ):
+            return
+        expected = self._mock_safety_engine_instance_id
+        if expected is not None and engine_instance_id != expected:
+            return
+        self._mock_safety_engine_instance_id = engine_instance_id
+        previous_mock = self._mock_safety_mock
+        self._mock_safety_mock = result["mock"] if previous_mock is None else previous_mock or result["mock"]
+        self.mock_mode_verified.emit(self._mock_safety_mock)
+
+    def invalidate_safety_status_transport(self) -> None:
+        """Revoke standalone status identity before a proven bridge turnover."""
+
+        self._mock_safety_generation += 1
+        self._mock_safety_engine_instance_id = None
+        self._mock_safety_mock = None
+        worker = self._mock_status_worker
+        if worker is not None:
+            worker.requestInterruption()
 
     def _on_experiment_result(
         self,
@@ -1285,6 +1414,14 @@ class TopWatchBar(QWidget):
         self._expected_app_mode_domain = "replay" if replay else "live"
         self._replay_authority = None
         self._mark_experiment_status_unavailable()
+
+    def set_mock_mode(self, mock: bool) -> None:
+        """Keep simulated-data provenance visible across all shell surfaces."""
+
+        if type(mock) is not bool:
+            raise TypeError("mock mode must be an exact bool")
+        self._mock_mode = getattr(self, "_mock_mode", False) or mock
+        self._mock_provenance_badge.setVisible(self._mock_mode)
 
     def bind_replay_authority(
         self,
@@ -1446,7 +1583,7 @@ class TopWatchBar(QWidget):
         if self._app_mode not in ("experiment", "debug"):
             logger.warning("Mode badge clicked but app_mode unknown: %s", self._app_mode)
             return
-        if self._mode_switch_worker is not None and not self._mode_switch_worker.isFinished():
+        if self._mode_switch_worker is not None:
             return  # command in flight
 
         from PySide6.QtWidgets import QMessageBox
@@ -1492,9 +1629,11 @@ class TopWatchBar(QWidget):
         self._mode_badge.setCursor(Qt.CursorShape.WaitCursor)
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
-        self._mode_switch_worker = ZmqCommandWorker({"cmd": "set_app_mode", "app_mode": target}, parent=self)
-        self._mode_switch_worker.finished.connect(self._on_mode_switch_result)
-        self._mode_switch_worker.start()
+        worker = ZmqCommandWorker({"cmd": "set_app_mode", "app_mode": target}, parent=self)
+        self._mode_switch_worker = worker
+        worker.finished.connect(self._on_mode_switch_result)
+        worker.settled.connect(lambda owner=worker: self._retire_worker("_mode_switch_worker", owner))
+        worker.start()
 
     def _on_mode_switch_result(self, result: dict) -> None:
         self._mode_badge.setCursor(Qt.CursorShape.PointingHandCursor)

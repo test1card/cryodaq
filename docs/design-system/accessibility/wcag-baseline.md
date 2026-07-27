@@ -5,10 +5,22 @@ applies_to: accessibility conformance target and scope across the product
 status: canonical
 references: rules/accessibility-rules.md, tokens/colors.md, patterns/state-visualization.md
 external_reference: WCAG 2.2 (W3C Recommendation, October 2023)
-last_updated: 2026-04-17
+last_updated: 2026-07-27
 ---
 
 # WCAG Baseline
+
+## Persistent simulation provenance
+
+When the engine confirms simulated data, root chrome presents literal `MOCK`
+text with an accessible name and description; the caution color is redundant.
+The state latches one way so a later malformed or false response cannot make a
+screen-reader user believe the session returned to live acquisition. At the
+1280px supported width, geometry tests require the adjacent mode and alarm text
+to remain fully readable rather than relying on clipped labels or a tooltip.
+The constrained tray repeats MOCK as text inside its 127 UTF-16-unit budget
+while retaining alarm, freshness, and reporting text. Windows/NVDA/DPI visual
+acceptance remains an open external gate.
 
 Accessibility conformance target and scope. Establishes which WCAG 2.2 criteria CryoDAQ commits to meeting, which are out of scope, and why.
 

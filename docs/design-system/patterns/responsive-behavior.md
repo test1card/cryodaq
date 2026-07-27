@@ -4,7 +4,7 @@ keywords: responsive, viewport, breakpoints, reflow, desktop-only, minimum-width
 applies_to: how layouts adapt to different viewport dimensions
 status: canonical
 references: tokens/breakpoints.md, tokens/layout.md, components/bento-grid.md
-last_updated: 2026-07-15
+last_updated: 2026-07-27
 ---
 
 # Responsive Behavior
@@ -145,6 +145,12 @@ truthfully):
 - BottomStatusBar items may drop least-critical (time) first if truly squeezed.
 
 These are "best effort" fallbacks, not design targets.
+
+When MOCK provenance is present, the persistent MOCK badge is explicit and
+one-way latched. At the supported 1280px floor, font-metric geometry reserves
+the complete alarm and mode text beside it; flexible experiment/channel/context
+zones compact before those adjacent truth labels. This offscreen assertion is
+logical-layout evidence only, not Windows DPI or operator-performance proof.
 
 ## No breakpoint media queries
 

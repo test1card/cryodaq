@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-07-20
-version: 4.0.3
+last_updated: 2026-07-27
+version: 4.0.4
 ---
 
 # Design System Changelog
@@ -12,6 +12,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.0.4] — 2026-07-27
+
+### Corrected
+
+- Made MOCK provenance an independent, one-way chrome fact: an exact,
+  schema-complete read-only `safety_status` reply can upgrade standalone GUI
+  from its argv/environment hint, but later false or malformed replies cannot
+  downgrade the root title or persistent TopWatchBar badge. Replay remains a
+  separate mode and never receives this live-engine poll.
+- Put MOCK provenance inside the Windows-bounded tray composition. Unknown,
+  fault/alarm, freshness, and reporting fields remain present in all tested
+  mock tooltips at or below 127 UTF-16 units.
+- Reserved full font-metric width for the adjacent mode and alarm truth at the
+  supported 1280px shell width; flexible experiment, channel, and context
+  zones yield first rather than clipping those state labels.
 
 ## [4.0.3] — 2026-07-20
 

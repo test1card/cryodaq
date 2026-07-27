@@ -156,11 +156,16 @@ class MainWindowV2(QMainWindow):
         embedded: bool = False,
         subscriber: Any | None = None,
         replay_mode: bool = False,
+        mock_mode: bool = False,
         owner_anchor: Callable[[MainWindowV2], None] | None = None,
         shutdown_request: Callable[[], Any] | None = None,
     ) -> None:
         if type(replay_mode) is not bool:
             raise TypeError("replay_mode must be an exact bool")
+        if type(mock_mode) is not bool:
+            raise TypeError("mock_mode must be an exact bool")
+        if replay_mode and mock_mode:
+            raise ValueError("mock and replay modes are mutually exclusive")
         super().__init__(parent)
         self._shutting_down = False
         # QThread-descendant inventory carried across settle_owned_workers()
@@ -170,6 +175,7 @@ class MainWindowV2(QMainWindow):
         self._bridge = bridge
         self._embedded = embedded
         self._replay_mode = replay_mode
+        self._mock_mode = mock_mode
         self._status_timer: QTimer | None = None
         self._annunciation_controller: AnnunciationController | None = None
         self._create_exp_worker: Any | None = None
@@ -192,7 +198,7 @@ class MainWindowV2(QMainWindow):
         self._last_disk_observed_at: datetime | None = None
         self._accepted_disk_bridge_instance_id: str | None = None
 
-        self.setWindowTitle("CryoDAQ")
+        self.setWindowTitle("CryoDAQ — MOCK: имитационные данные, не живые измерения" if mock_mode else "CryoDAQ")
         self.setMinimumSize(1280, 800)
 
         self._channel_mgr = get_channel_manager()
@@ -269,6 +275,8 @@ class MainWindowV2(QMainWindow):
         # Shell components
         self._top_bar = TopWatchBar(channel_manager=self._channel_mgr)
         self._top_bar.set_replay_mode(self._replay_mode)
+        self._top_bar.set_mock_mode(self._mock_mode)
+        self._top_bar.mock_mode_verified.connect(self.set_mock_mode)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
         # The only in-shell owner of engine annunciation sound.  Launcher
@@ -321,6 +329,16 @@ class MainWindowV2(QMainWindow):
 
         root.addWidget(self._bottom_bar)
         self.setCentralWidget(central)
+
+    def set_mock_mode(self, mock: bool) -> None:
+        """Latch verified simulated-data provenance across the standalone shell."""
+
+        if type(mock) is not bool:
+            raise TypeError("mock mode must be an exact bool")
+        self._mock_mode = self._mock_mode or mock
+        if self._mock_mode:
+            self.setWindowTitle("CryoDAQ — MOCK: имитационные данные, не живые измерения")
+        self._top_bar.set_mock_mode(self._mock_mode)
 
     # ------------------------------------------------------------------
     # Tool rail handler
@@ -662,8 +680,11 @@ class MainWindowV2(QMainWindow):
         if annunciation_controller is not None:
             annunciation_controller.invalidate_transport()
         top_bar = getattr(self, "_top_bar", None)
-        if self._replay_mode and top_bar is not None:
-            top_bar.invalidate_replay_authority()
+        if top_bar is not None:
+            if self._replay_mode:
+                top_bar.invalidate_replay_authority()
+            else:
+                top_bar.invalidate_safety_status_transport()
 
     def invalidate_engine_producer(self) -> None:
         """Retire every GUI consumer anchored to the outgoing engine."""
@@ -1293,14 +1314,21 @@ class MainWindowV2(QMainWindow):
         # already guarantees it, since current_ids is unioned into the set
         # being tested. It does not add a cross-call requirement today.
         stable_inventory = False
-        try:
-            candidates = list(self.findChildren(QThread))
-        except RuntimeError:
-            settlement_failures.append("QThread descendant inventory unavailable")
+        if _bounded_wait_ms(deadline) == 0:
+            settlement_failures.append("QThread descendant inventory deadline elapsed")
             candidates = None
+        else:
+            try:
+                candidates = list(self.findChildren(QThread))
+            except RuntimeError:
+                settlement_failures.append("QThread descendant inventory unavailable")
+                candidates = None
         if candidates is not None:
             current_ids = {id(thread) for thread in candidates}
             for index, thread in enumerate(candidates):
+                if _bounded_wait_ms(deadline) == 0:
+                    settlement_failures.append("QThread descendant settlement deadline elapsed")
+                    break
                 owner = f"QThread[{index}]"
                 try:
                     if thread.isRunning():
@@ -1313,11 +1341,15 @@ class MainWindowV2(QMainWindow):
                         thread.setParent(self)
                 except RuntimeError:
                     settlement_failures.append(f"{owner} became invalid during shutdown")
-            try:
-                after = list(self.findChildren(QThread))
-            except RuntimeError:
-                settlement_failures.append("QThread descendant revalidation unavailable")
+            if _bounded_wait_ms(deadline) == 0:
+                settlement_failures.append("QThread descendant revalidation deadline elapsed")
                 after = None
+            else:
+                try:
+                    after = list(self.findChildren(QThread))
+                except RuntimeError:
+                    settlement_failures.append("QThread descendant revalidation unavailable")
+                    after = None
             if after is not None:
                 after_ids = {id(thread) for thread in after}
                 try:

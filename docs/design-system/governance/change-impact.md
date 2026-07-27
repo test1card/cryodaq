@@ -3,7 +3,7 @@ title: GUI Change Impact Review
 keywords: tradeoff, operator impact, safety impact, mitigation, revert trigger
 applies_to: every GUI, UI, UX, and design-system change
 status: canonical
-last_updated: 2026-07-20
+last_updated: 2026-07-27
 references: ../README.md, ../patterns/operator-evidence-and-retention.md, testing-strategy.md
 ---
 
@@ -37,6 +37,7 @@ operator agency, the change is rejected.
 
 | Slice | Better | Worse | Safety/workflow justification | Mitigation and tests | Revise/revert trigger |
 |---|---|---|---|---|---|
+| MOCK provenance across chrome | Operators distinguish simulated data from live acquisition even when a standalone GUI attaches after a mock engine starts | The badge consumes constrained header/tray space, so flexible experiment/channel/context zones compact | Simulation provenance must not be mistaken for live acquisition; it remains separate from health and replay without concealing adjacent mode or alarm truth | Accept only the schema-complete read-only fact and latch it one way; `test_app_mock_provenance.py`, `test_main_window_v2.py`, `test_tray_status.py`, and `test_launcher_replay.py` cover the provenance, width, and 127-UTF-16-unit bounds. Windows/DPI/NVDA/operator-acceptance evidence remains open | Revise/revert if false, malformed, mismatched, or replacement-identity replies clear MOCK; replay is labeled MOCK; adjacent truth clips; or the bounded tray tooltip loses alarm, freshness, or reporting text |
 | Warning compatibility → caution | Operators learn one yellow-orange attention step between safe and fault | Legacy logs and payloads still contain the word `warning` | Similar warning/caution visuals must not create a false precision in operator severity | Normalize only at presentation boundaries; preserve backend/history truth; test legacy and canonical inputs render identically | Revise if warning and caution paint differently, source history is rewritten, or unknown severity becomes quiet |
 | Measurement palette separation | Series and quantity colors no longer train operators to ignore safety colors | Several familiar trace hues change | Green/yellow-orange/red must keep one safety meaning | Keep stable series order, visible legends/units, line-style redundancy, and disjointness tests across every theme | Revert a hue if it collides with any safety token or operators cannot distinguish adjacent labeled series |
 | Active phase uses ACCENT | Activity no longer makes a green healthy assertion | Operators accustomed to green phase progress must adapt | Progress and health are independent facts | Completed phases use neutral chrome; health remains separately visible; component tests assert no STATUS_OK progress | Revise if active phase is mistaken for health or loses a visible current-step cue |

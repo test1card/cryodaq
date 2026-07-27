@@ -30,6 +30,7 @@ def resolve_tray_status(
     alarm_count: int | None,
     data_fresh: bool | None = None,
     reporting_fault: bool | None = None,
+    mock: bool = False,
 ) -> TrayStatus:
     """Resolve a coarse status without converting missing evidence to green."""
     safety = (safety_state or "").strip().lower() or None
@@ -37,6 +38,7 @@ def resolve_tray_status(
     connection = connected if type(connected) is bool else None
     freshness = data_fresh if type(data_fresh) is bool else None
     reporting = reporting_fault if type(reporting_fault) is bool else None
+    mock_provenance = mock is True
 
     if (alarms is not None and alarms > 0) or safety in {"fault", "fault_latched"}:
         return TrayStatus(
@@ -48,6 +50,7 @@ def resolve_tray_status(
                 alarm_count=alarms,
                 data_fresh=freshness,
                 reporting_fault=reporting,
+                mock=mock_provenance,
             ),
         )
     if connection is not True or safety is None or alarms is None or freshness is not True or reporting is not False:
@@ -60,6 +63,7 @@ def resolve_tray_status(
                 alarm_count=alarms,
                 data_fresh=freshness,
                 reporting_fault=reporting,
+                mock=mock_provenance,
             ),
         )
     if safety in {"safe_off", "ready", "run_permitted", "running"}:
@@ -72,6 +76,7 @@ def resolve_tray_status(
                 alarm_count=alarms,
                 data_fresh=freshness,
                 reporting_fault=reporting,
+                mock=mock_provenance,
             ),
         )
     return TrayStatus(
@@ -83,6 +88,7 @@ def resolve_tray_status(
             alarm_count=alarms,
             data_fresh=freshness,
             reporting_fault=reporting,
+            mock=mock_provenance,
         ),
     )
 
@@ -106,19 +112,35 @@ def _build_tooltip(
     alarm_count: int | None,
     data_fresh: bool | None,
     reporting_fault: bool | None,
+    mock: bool = False,
 ) -> str:
     connection_text = "да" if connected is True else "нет" if connected is False else "неизв."
     safety_text = _SAFETY_TEXT.get(safety_state or "", "неизв.")
     alarm_text = "неизв." if alarm_count is None else "9999+" if alarm_count > 9999 else str(alarm_count)
     freshness_text = "свежие" if data_fresh is True else "устар." if data_fresh is False else "неизв."
     reporting_text = "сбой" if reporting_fault is True else "норма" if reporting_fault is False else "неизв."
-    tooltip = (
-        "CryoDAQ · сводка; детали в окне\n"
-        f"{summary}\n"
-        f"Связь: {connection_text} · Б: {safety_text}\n"
-        f"Т: {alarm_text} · Д: {freshness_text} · О: {reporting_text}"
-    )
+    if mock:
+        tooltip = (
+            "MOCK: симуляция, не живая установка\n"
+            f"{summary}\n"
+            f"Св:{connection_text} Б:{safety_text}\n"
+            f"Т:{alarm_text} Д:{freshness_text} О:{reporting_text}"
+        )
+    else:
+        tooltip = (
+            "CryoDAQ · сводка; детали в окне\n"
+            f"{summary}\n"
+            f"Связь: {connection_text} · Б: {safety_text}\n"
+            f"Т: {alarm_text} · Д: {freshness_text} · О: {reporting_text}"
+        )
     return _truncate_utf16(tooltip, _WINDOWS_TOOLTIP_UTF16_LIMIT)
+
+
+def bounded_tray_tooltip(tooltip: str, *, mock: bool) -> str:
+    """Bound non-resolver tray text under the same Windows UTF-16 limit."""
+
+    prefix = "MOCK: симуляция, не живая установка\n" if mock is True else ""
+    return _truncate_utf16(prefix + tooltip, _WINDOWS_TOOLTIP_UTF16_LIMIT)
 
 
 def _truncate_utf16(text: str, limit: int) -> str:

@@ -7731,7 +7731,9 @@ def main() -> None:
     if args.force:
         _force_kill_existing()
 
-    mock = args.mock or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
+    from cryodaq.mock_mode import mock_env_enabled
+
+    mock = args.mock or mock_env_enabled()
 
     lock_fd = _acquire_engine_lock()
     try:

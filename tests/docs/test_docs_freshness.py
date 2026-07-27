@@ -88,6 +88,35 @@ def test_design_system_release_markers_are_one_version() -> None:
     assert f"Current v{version} state" in governance_rules
 
 
+def test_mock_provenance_tradeoff_record_is_complete_and_release_fresh() -> None:
+    """RULE-GOV-004 keeps the B2 MOCK decision machine-readable and current."""
+    design_root = REPO_ROOT / "docs" / "design-system"
+    impact = _read(design_root / "governance" / "change-impact.md")
+    assert (
+        "| Slice | Better | Worse | Safety/workflow justification | Mitigation and tests | Revise/revert trigger |"
+        in impact
+    )
+    rows = [line for line in impact.splitlines() if line.startswith("| MOCK provenance across chrome |")]
+    assert len(rows) == 1
+    fields = [cell.strip() for cell in rows[0].strip("|").split("|")]
+    assert len(fields) == 6
+    assert all(fields)
+
+    for relative in (
+        "CHANGELOG.md",
+        "GUI_MIGRATION_INVENTORY.md",
+        "MANIFEST.md",
+        "README.md",
+        "accessibility/wcag-baseline.md",
+        "cryodaq-primitives/top-watch-bar.md",
+        "cryodaq-primitives/tray-status.md",
+        "governance/change-impact.md",
+        "patterns/responsive-behavior.md",
+        "rules/governance-rules.md",
+    ):
+        assert _frontmatter(_read(design_root / relative)).get("last_updated") == "2026-07-27", relative
+
+
 def test_canonical_design_system_artifacts_and_markdown_references_are_tracked() -> None:
     tracked = set(_tracked_files())
     design_root = REPO_ROOT / "docs" / "design-system"

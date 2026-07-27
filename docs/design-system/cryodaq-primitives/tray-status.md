@@ -3,8 +3,8 @@ title: Tray Status
 keywords: tray, status, coarse, non-authoritative, alarm, unknown, provenance, shutdown
 applies_to: system tray icon and tooltip
 status: canonical
-last_updated: 2026-07-20
-version: 4.0.3
+last_updated: 2026-07-27
+version: 4.0.4
 references: patterns/operator-evidence-and-retention.md, patterns/state-visualization.md, cryodaq-primitives/alarm-panel.md
 ---
 
@@ -37,6 +37,15 @@ verified-OFF, persistence, or laboratory gate.
    proven terminal. Incomplete settlement is fault-colored with Russian text
    and a non-color notification; it cannot reuse a healthy or disconnected
    presentation.
+
+## MOCK provenance and bounded composition
+
+MOCK is independent provenance, not a health state. The launcher and
+standalone shell latch it one way from an exact engine fact; replay remains a
+separate non-live mode. The tray composes MOCK inside the same Windows 127
+UTF-16-unit budget as alarm, freshness, and reporting truth. It must not
+prepend text after an already-bounded resolver result, because Windows would
+then truncate the safety facts at the end.
 
 ## State precedence
 
