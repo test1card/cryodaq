@@ -589,9 +589,7 @@ def render_artifact_manifest_section(document: Document, dataset: ReportDataset,
 def render_cooldown_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Охлаждение", level=1)
     temp_readings = [
-        item
-        for item in dataset.readings
-        if _visible_quantity(item, "temperature") and math.isfinite(item.value)
+        item for item in dataset.readings if _visible_quantity(item, "temperature") and math.isfinite(item.value)
     ]
     _add_archived_or_multichannel(
         document,
@@ -634,9 +632,7 @@ def render_cooldown_section(document: Document, dataset: ReportDataset, assets_d
 def render_thermal_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Тепловая нагрузка", level=1)
     power_readings = [
-        item
-        for item in dataset.readings
-        if _visible_quantity(item, "power") and math.isfinite(item.value)
+        item for item in dataset.readings if _visible_quantity(item, "power") and math.isfinite(item.value)
     ]
     _add_archived_or_multichannel(
         document,
@@ -665,11 +661,7 @@ def render_thermal_section(document: Document, dataset: ReportDataset, assets_di
 
 def render_pressure_section(document: Document, dataset: ReportDataset, assets_dir: Path) -> None:
     document.add_heading("Давление", level=1)
-    pressure = [
-        item
-        for item in dataset.readings
-        if _visible_quantity(item, "pressure")
-    ]
+    pressure = [item for item in dataset.readings if _visible_quantity(item, "pressure")]
     _add_archived_or_multichannel(
         document,
         dataset,

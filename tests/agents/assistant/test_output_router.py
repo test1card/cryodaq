@@ -63,12 +63,15 @@ async def test_gui_publish_without_consumer_has_unknown_outcome() -> None:
     )
 
     assert outcomes == {"gui_insight": "outcome_unknown"}
-    assert await router.dispatch(
-        _Event(),
-        "response",
-        targets=[OutputTarget.GUI_INSIGHT],
-        audit_id="audit-gui-no-consumer",
-    ) == []
+    assert (
+        await router.dispatch(
+            _Event(),
+            "response",
+            targets=[OutputTarget.GUI_INSIGHT],
+            audit_id="audit-gui-no-consumer",
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio

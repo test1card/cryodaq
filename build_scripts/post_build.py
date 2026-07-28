@@ -4,6 +4,7 @@ Run after ``pyinstaller build_scripts/cryodaq.spec``. Seeds the dist tree
 with the contents that ``paths.py`` expects to find next to the exe under
 ``sys.executable.parent``.
 """
+
 from __future__ import annotations
 
 import shutil

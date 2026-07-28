@@ -66,11 +66,7 @@ def test_receipt_bound_guards_are_checked_out_with_lf() -> None:
         (path.decode("utf-8"), name.decode("utf-8")): value.decode("utf-8")
         for path, name, value in zip(fields[::3], fields[1::3], fields[2::3], strict=True)
     }
-    assert attributes == {
-        (path, "text"): "set" for path in paths
-    } | {
-        (path, "eol"): "lf" for path in paths
-    }
+    assert attributes == {(path, "text"): "set" for path in paths} | {(path, "eol"): "lf" for path in paths}
 
 
 def test_receipt_guard_blob_still_rejects_a_real_source_mismatch(tmp_path: Path) -> None:

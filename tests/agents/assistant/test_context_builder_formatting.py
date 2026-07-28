@@ -209,9 +209,7 @@ async def test_shift_handover_context_reads_required_window_and_alarm_snapshot()
     builder = ContextBuilder(reader, _build_em_stub())
     builder._alarm_reader = MagicMock()
     builder._alarm_reader.active = AsyncMock(
-        return_value=AlarmStatusResult(
-            active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])]
-        )
+        return_value=AlarmStatusResult(active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])])
     )
 
     context = await builder.build_shift_handover_context({"shift_duration_h": 8})
@@ -269,9 +267,7 @@ async def test_shift_handover_context_keeps_known_empty_distinct_from_unavailabl
                     message="CRITICAL alarm was acknowledged",
                 )
             ],
-            AlarmStatusResult(
-                active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])]
-            ),
+            AlarmStatusResult(active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])]),
             "CRITICAL: T1-high (T1)",
             "CRITICAL alarm was acknowledged",
             False,

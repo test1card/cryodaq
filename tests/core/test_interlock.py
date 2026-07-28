@@ -278,9 +278,7 @@ async def test_action_called_async() -> None:
 async def test_regex_channel_matching() -> None:
     broker, engine, called = await _make_engine()
     # Pattern matches T1 through T8
-    engine.add_condition(
-        _make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">")
-    )
+    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
 
     await broker.publish(Reading.now("T5", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
@@ -298,9 +296,7 @@ async def test_regex_channel_matching() -> None:
 
 async def test_regex_no_match_ignored() -> None:
     broker, engine, called = await _make_engine()
-    engine.add_condition(
-        _make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">")
-    )
+    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
 
     # "PRESSURE_1" does not match T[1-8]
     await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
@@ -469,17 +465,13 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
         assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
             "Interlock loaded from YAML did not trip on T5=450 > 400 (threshold not loaded)"
         )
-        assert action_count[0] == 1, (
-            "YAML-loaded action was not called on first trip"
-        )
+        assert action_count[0] == 1, "YAML-loaded action was not called on first trip"
 
         # --- Behavioral check 2: non-matching channel does NOT trip ---
         # acknowledge() transitions TRIPPED → ARMED (not a separate ACKNOWLEDGED state)
         engine.acknowledge("overheat")
         await asyncio.sleep(0.01)
-        assert engine.get_state()["overheat"] == InterlockState.ARMED, (
-            "Expected ARMED after acknowledge()"
-        )
+        assert engine.get_state()["overheat"] == InterlockState.ARMED, "Expected ARMED after acknowledge()"
         # "PRESSURE_1" does not match r"T\d+" — must stay ARMED (not re-tripped)
         await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
         await asyncio.sleep(0.05)
@@ -508,8 +500,7 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
         # cooldown_s=60 loaded & active → the loud trip announcement is deduped,
         # and a cooldown-dedup WARNING is emitted instead.
         assert "БЛОКИРОВКА СРАБОТАЛА" not in caplog.text, (
-            "loud trip announcement must be deduplicated within cooldown_s "
-            "(cooldown_s may not have been loaded)"
+            "loud trip announcement must be deduplicated within cooldown_s (cooldown_s may not have been loaded)"
         )
         assert "кулдаун" in caplog.text.lower()
     finally:
@@ -550,9 +541,7 @@ async def test_duplicate_name_rejected() -> None:
 
 async def test_get_state() -> None:
     broker = DataBroker()
-    engine = InterlockEngine(
-        broker=broker, actions={"emergency_off": lambda: None, "stop_source": lambda: None}
-    )
+    engine = InterlockEngine(broker=broker, actions={"emergency_off": lambda: None, "stop_source": lambda: None})
     engine.add_condition(_make_condition(name="lock_a", action="emergency_off"))
     engine.add_condition(_make_condition(name="lock_b", action="stop_source"))
 

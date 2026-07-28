@@ -55,9 +55,7 @@ _BOOLEAN_AVAILABILITY_RE = re.compile(
 _NULLABLE_AVAILABILITY_RE = re.compile(
     r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*finiteNumber\s*\([^)]*\)"
 )
-_DATE_VALUE_RE = re.compile(
-    r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*new\s+Date\s*\("
-)
+_DATE_VALUE_RE = re.compile(r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*new\s+Date\s*\(")
 _CHANNEL_SPELLING_INFERENCE_RE = re.compile(
     r"\b(?:ch|channel|(?:msg|reading)\.channel)\s*\.\s*"
     r"(?:startsWith|endsWith|includes|match|search|indexOf)\s*\("
@@ -102,9 +100,7 @@ def _formatter_value(match: re.Match[str]) -> str:
     return next(value for value in match.group("value", "coerced", "intl") if value is not None)
 
 
-def _format_is_guarded(
-    line: str, match: re.Match[str], booleans: dict[str, str], nullable: set[str]
-) -> bool:
+def _format_is_guarded(line: str, match: re.Match[str], booleans: dict[str, str], nullable: set[str]) -> bool:
     """Recognize a value-linked conditional branch, not a guard-shaped substring."""
 
     code = _COMMENT_RE.sub("", line)
@@ -127,8 +123,10 @@ def _format_is_guarded(
     if condition in booleans:
         return not in_false_branch and booleans[condition] in {value, value.rsplit(".", 1)[0]}
     if value in nullable:
-        return condition == f"{value} !== null" and not in_false_branch or (
-            condition == f"{value} === null" and in_false_branch
+        return (
+            condition == f"{value} !== null"
+            and not in_false_branch
+            or (condition == f"{value} === null" and in_false_branch)
         )
     return (
         not in_false_branch
@@ -139,9 +137,7 @@ def _format_is_guarded(
             f"finiteNumber({value}) !== null",
             f"{value} !== null",
         }
-    ) or (
-        in_false_branch and condition in {f"finiteNumber({value}) === null", f"{value} === null"}
-    )
+    ) or (in_false_branch and condition in {f"finiteNumber({value}) === null", f"{value} === null"})
 
 
 def _unguarded_formatters(path: Path) -> list[str]:

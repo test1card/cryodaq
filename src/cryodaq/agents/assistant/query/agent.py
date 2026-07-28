@@ -339,10 +339,7 @@ class AssistantQueryAgent:
                 cooldown_active=ru_bool(False),
             )
         if not eta.available:
-            return (
-                f"Запрос: {query}\n\nПрогноз охлаждения недоступен: {eta.reason}. "
-                "Не утверждай, что прогноза нет."
-            )
+            return f"Запрос: {query}\n\nПрогноз охлаждения недоступен: {eta.reason}. Не утверждай, что прогноза нет."
         h = max(eta.t_remaining_hours, 0.0)
         t_str = f"{int(h)}ч {int((h % 1) * 60)}мин"
         t_cold = f"{eta.T_cold:.2f}" if eta.T_cold is not None else "нет данных"
@@ -373,10 +370,7 @@ class AssistantQueryAgent:
                 confidence=0.0,
             )
         if not eta.available:
-            return (
-                f"Запрос: {query}\n\nВакуумный прогноз недоступен: {eta.reason}. "
-                "Не утверждай, что прогноза нет."
-            )
+            return f"Запрос: {query}\n\nВакуумный прогноз недоступен: {eta.reason}. Не утверждай, что прогноза нет."
 
         cur = eta.current_mbar if eta.current_mbar is not None else current_p
         cur_str = f"{cur:.2e}" if cur is not None else "нет данных"
@@ -413,8 +407,7 @@ class AssistantQueryAgent:
         unavailable = [stats.reason for stats in stats_dict.values() if not stats.available]
         if unavailable:
             return (
-                f"Запрос: {query}\n\nСтатистика диапазона недоступна: {unavailable[0]}. "
-                "Не подставляй нулевые значения."
+                f"Запрос: {query}\n\nСтатистика диапазона недоступна: {unavailable[0]}. Не подставляй нулевые значения."
             )
         channel, stats = next(iter(stats_dict.items()))
         return FORMAT_RANGE_STATS_USER.format(
@@ -477,10 +470,7 @@ class AssistantQueryAgent:
                 alarms_text="нет данных о тревогах",
             )
         if not result.available:
-            return (
-                f"Запрос: {query}\n\nСостояние тревог недоступно: {result.reason}. "
-                "Не утверждай, что тревог нет."
-            )
+            return f"Запрос: {query}\n\nСостояние тревог недоступно: {result.reason}. Не утверждай, что тревог нет."
         if result.count == 0:
             return FORMAT_ALARM_STATUS_USER.format(
                 query=query,
@@ -589,10 +579,7 @@ class AssistantQueryAgent:
                 entries_text="(адаптер архива не сконфигурирован)",
             )
         if not result.available:
-            return (
-                f"Запрос: {query}\n\nАрхив недоступен: {result.reason}. "
-                "Не утверждай, что записей нет."
-            )
+            return f"Запрос: {query}\n\nАрхив недоступен: {result.reason}. Не утверждай, что записей нет."
         entries = result.entries or []
         if not entries:
             entries_text = "(нет записей за выбранный период)"
@@ -693,10 +680,7 @@ class AssistantQueryAgent:
                 by_alarm_id_text="(адаптер архива не сконфигурирован)",
             )
         if not result.available:
-            return (
-                f"Запрос: {query}\n\nИстория тревог недоступна: {result.reason}. "
-                "Не подставляй нулевые счётчики."
-            )
+            return f"Запрос: {query}\n\nИстория тревог недоступна: {result.reason}. Не подставляй нулевые счётчики."
         if result.by_alarm_id:
             top = sorted(result.by_alarm_id.items(), key=lambda kv: kv[1], reverse=True)
             lines = [f"- {aid} ×{count}" for aid, count in top]
@@ -726,8 +710,7 @@ class AssistantQueryAgent:
             )
         if not result.available:
             return (
-                f"Запрос: {query}\n\nСемантический поиск недоступен: {result.reason}. "
-                "Не утверждай, что совпадений нет."
+                f"Запрос: {query}\n\nСемантический поиск недоступен: {result.reason}. Не утверждай, что совпадений нет."
             )
         hits = list(result.hits)
         filter_note = f" (фильтр source_kind={result.source_kind_filter})" if result.source_kind_filter else ""

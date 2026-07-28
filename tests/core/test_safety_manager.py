@@ -1058,11 +1058,7 @@ async def test_cancelled_soft_interlock_settles_exact_off_before_propagating(
         del channel
         entered.set()
         await release.wait()
-        return (
-            SourceOffResult.DEVICE_REPORTED_OFF
-            if off_proof
-            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        )
+        return SourceOffResult.DEVICE_REPORTED_OFF if off_proof else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     k.emergency_off.side_effect = slow_off
     manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
@@ -1117,11 +1113,7 @@ async def test_cancelled_run_publish_forces_full_off_before_no_receipt(
         if off_proof:
             hardware_on = False
             k.output_state_unverified = False
-        return (
-            SourceOffResult.DEVICE_REPORTED_OFF
-            if off_proof
-            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        )
+        return SourceOffResult.DEVICE_REPORTED_OFF if off_proof else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     original_publish = manager._publish_keithley_channel_states
 

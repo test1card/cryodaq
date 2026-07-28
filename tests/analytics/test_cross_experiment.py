@@ -45,6 +45,7 @@ def test_scan_archive_requires_explicit_stage_configuration(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="cold_channel must be explicitly configured"):
         _scan_archive_impl(tmp_path)
 
+
 _SCHEMA = pa.schema(
     [
         ("timestamp", pa.timestamp("us", tz="UTC")),

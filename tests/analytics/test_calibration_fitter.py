@@ -45,13 +45,11 @@ def _populate_db(
         krdg_val = _synthetic_dt670(srdg_val)
 
         conn.execute(
-            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
             (ts, "ls218", reference_channel, krdg_val, "K", "ok"),
         )
         conn.execute(
-            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
             (ts + 0.1, "ls218", srdg_channel, srdg_val, "sensor_unit", "ok"),
         )
 
@@ -117,19 +115,13 @@ def test_extract_filters_ovl(tmp_path) -> None:
     )
     # Normal pair
     conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'ok')")
-    conn.execute(
-        "INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')"
-    )
+    conn.execute("INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')")
     # OVL pair (inf KRDG)
     conn.execute("INSERT INTO readings VALUES (3, 101.0, 'ls', 'ref', 1e308, 'K', 'ok')")
-    conn.execute(
-        "INSERT INTO readings VALUES (4, 101.1, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'ok')"
-    )
+    conn.execute("INSERT INTO readings VALUES (4, 101.1, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'ok')")
     # Zero SRDG
     conn.execute("INSERT INTO readings VALUES (5, 102.0, 'ls', 'ref', 77.0, 'K', 'ok')")
-    conn.execute(
-        "INSERT INTO readings VALUES (6, 102.1, 'ls', 'tgt_raw', 0.0, 'sensor_unit', 'ok')"
-    )
+    conn.execute("INSERT INTO readings VALUES (6, 102.1, 'ls', 'tgt_raw', 0.0, 'sensor_unit', 'ok')")
     conn.commit()
     conn.close()
 
@@ -148,14 +140,10 @@ def test_time_alignment_filter(tmp_path) -> None:
     )
     # Aligned pair (0.5s delta)
     conn.execute("INSERT INTO readings VALUES (1, 100.0, 'ls', 'ref', 77.0, 'K', 'ok')")
-    conn.execute(
-        "INSERT INTO readings VALUES (2, 100.5, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')"
-    )
+    conn.execute("INSERT INTO readings VALUES (2, 100.5, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')")
     # Misaligned pair (5s delta)
     conn.execute("INSERT INTO readings VALUES (3, 110.0, 'ls', 'ref', 78.0, 'K', 'ok')")
-    conn.execute(
-        "INSERT INTO readings VALUES (4, 115.0, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'ok')"
-    )
+    conn.execute("INSERT INTO readings VALUES (4, 115.0, 'ls', 'tgt_raw', 83.0, 'sensor_unit', 'ok')")
     conn.commit()
     conn.close()
 
@@ -164,9 +152,7 @@ def test_time_alignment_filter(tmp_path) -> None:
     )
     assert len(pairs) == 1
     # Only the aligned pair (srdg=82.5, krdg=77.0) should survive
-    assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.01), (
-        f"Wrong pair retained: {pairs[0]}; expected (82.5, 77.0)"
-    )
+    assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.01), f"Wrong pair retained: {pairs[0]}; expected (82.5, 77.0)"
 
 
 # ------------------------------------------------------------------
@@ -214,8 +200,8 @@ def test_downsample_preserves_curvature() -> None:
     kink_count = sum(1 for s, _ in downsampled if 45.0 <= s <= 55.0)
     flat_count = sum(1 for s, _ in downsampled if s < 45.0 or s > 55.0)
 
-    kink_density = kink_count / 10.0   # points per SRDG unit in kink zone
-    flat_density = flat_count / 90.0   # points per SRDG unit in flat zones
+    kink_density = kink_count / 10.0  # points per SRDG unit in kink zone
+    flat_density = flat_count / 90.0  # points per SRDG unit in flat zones
 
     assert kink_density > flat_density, (
         f"Curvature-preserving downsample failed: "
@@ -259,8 +245,7 @@ def test_breakpoints_douglas_peucker(data_dir) -> None:
                 interp_t = t0 + frac * (t1 - t0)
                 # Within 200mK (relaxed for synthetic data)
                 assert abs(interp_t - krdg_val) < 0.5, (
-                    f"Breakpoint interpolation error: {abs(interp_t - krdg_val):.3f} K "
-                    f"at SRDG={srdg_val:.1f}"
+                    f"Breakpoint interpolation error: {abs(interp_t - krdg_val):.3f} K at SRDG={srdg_val:.1f}"
                 )
                 break
 
@@ -330,30 +315,18 @@ def test_coverage_empty_regions(tmp_path) -> None:
 
     assert len(coverage) == 10, f"Expected 10 bins, got {len(coverage)}"
 
-    assert coverage[0]["point_count"] == 20, (
-        f"Bin 0 should have 20 cold points; got {coverage[0]}"
-    )
-    assert coverage[-1]["point_count"] == 20, (
-        f"Bin 9 should have 20 warm points; got {coverage[-1]}"
-    )
+    assert coverage[0]["point_count"] == 20, f"Bin 0 should have 20 cold points; got {coverage[0]}"
+    assert coverage[-1]["point_count"] == 20, f"Bin 9 should have 20 warm points; got {coverage[-1]}"
 
     # All middle bins (indices 1–8) must be empty
     for idx in range(1, 9):
         b = coverage[idx]
-        assert b["point_count"] == 0, (
-            f"Middle bin {idx} should have 0 points; got {b}"
-        )
-        assert b["status"] == "empty", (
-            f"Middle bin {idx} should have status='empty'; got {b}"
-        )
+        assert b["point_count"] == 0, f"Middle bin {idx} should have 0 points; got {b}"
+        assert b["status"] == "empty", f"Middle bin {idx} should have status='empty'; got {b}"
 
     # Both endpoint bins must be non-empty
-    assert coverage[0]["status"] != "empty", (
-        f"Bin 0 unexpectedly empty; got {coverage[0]}"
-    )
-    assert coverage[-1]["status"] != "empty", (
-        f"Bin 9 unexpectedly empty; got {coverage[-1]}"
-    )
+    assert coverage[0]["status"] != "empty", f"Bin 0 unexpectedly empty; got {coverage[0]}"
+    assert coverage[-1]["status"] != "empty", f"Bin 9 unexpectedly empty; got {coverage[-1]}"
 
     # Total point count preserved
     total = sum(b["point_count"] for b in coverage)
@@ -397,9 +370,7 @@ def test_fit_end_to_end(data_dir, tmp_path) -> None:
 # ------------------------------------------------------------------
 
 
-def test_fit_logs_warning_when_all_metric_points_fail(
-    data_dir, tmp_path, caplog
-) -> None:
+def test_fit_logs_warning_when_all_metric_points_fail(data_dir, tmp_path, caplog) -> None:
     """If no downsampled point can be evaluated, rmse_k/max_abs_error_k go NaN.
 
     The fit itself still succeeds (curve is built); the metrics are reporting-only.
@@ -437,9 +408,7 @@ def test_fit_logs_warning_when_all_metric_points_fail(
     assert result.curve is not None
     assert math.isnan(result.metrics["rmse_k"])
     assert math.isnan(result.metrics["max_abs_error_k"])
-    warnings = [
-        r for r in caplog.records if r.levelno >= logging.WARNING and "NaN" in r.message
-    ]
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "NaN" in r.message]
     assert warnings, "Expected a WARNING when all metric points fail to evaluate"
 
 
@@ -448,9 +417,7 @@ def test_fit_logs_warning_when_all_metric_points_fail(
 # ------------------------------------------------------------------
 
 
-def test_extract_pairs_reads_rotated_cold_day(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_extract_pairs_reads_rotated_cold_day(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A calibration fit over data older than the cold-rotation threshold must
     still find its pairs. Once F17 rotates a daily SQLite file to Parquet and
     deletes it, a direct glob goes blind — extract_pairs has to union hot+cold.
@@ -491,18 +458,14 @@ def test_extract_pairs_reads_rotated_cold_day(
             batch.append(_reading("Т2_raw", srdg_val, ts + 0.1))
         writer._write_batch(batch)
         await writer.stop()
-        service = ColdRotationService(
-            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
-        )
+        service = ColdRotationService(data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30)
         results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
         assert results, "old day must have rotated to Parquet"
 
     asyncio.run(_seed_and_rotate())
     assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
 
-    pairs = CalibrationFitter.extract_pairs(
-        tmp_path, base_ts, base_ts + 100, "Т1", "Т2", raw_channel="Т2_raw"
-    )
+    pairs = CalibrationFitter.extract_pairs(tmp_path, base_ts, base_ts + 100, "Т1", "Т2", raw_channel="Т2_raw")
     assert len(pairs) == 20, f"rotated cold-day calibration pairs lost: {len(pairs)}"
 
 
@@ -523,9 +486,7 @@ def test_extract_pairs_drops_error_status(tmp_path) -> None:
     conn.execute("INSERT INTO readings VALUES (2, 100.1, 'ls', 'tgt_raw', 82.5, 'sensor_unit', 'ok')")
     # Pair B — SRDG errored (in-range value 90.0) → decode→NaN → dropped.
     conn.execute("INSERT INTO readings VALUES (3, 200.0, 'ls', 'ref', 77.0, 'K', 'ok')")
-    conn.execute(
-        "INSERT INTO readings VALUES (4, 200.1, 'ls', 'tgt_raw', 90.0, 'sensor_unit', 'sensor_error')"
-    )
+    conn.execute("INSERT INTO readings VALUES (4, 200.1, 'ls', 'tgt_raw', 90.0, 'sensor_unit', 'sensor_error')")
     # Pair C — KRDG errored (in-range value 78.0) → decode→NaN → dropped.
     conn.execute("INSERT INTO readings VALUES (5, 300.0, 'ls', 'ref', 78.0, 'K', 'sensor_error')")
     conn.execute("INSERT INTO readings VALUES (6, 300.1, 'ls', 'tgt_raw', 95.0, 'sensor_unit', 'ok')")

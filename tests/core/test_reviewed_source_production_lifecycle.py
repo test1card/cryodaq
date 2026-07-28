@@ -51,11 +51,7 @@ class _ConnectedProofSource(InstrumentDriver):
         del channel
         connected = self.connected is True
         self.off_call_connected.append(connected)
-        return (
-            SourceOffResult.DEVICE_REPORTED_OFF
-            if connected
-            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        )
+        return SourceOffResult.DEVICE_REPORTED_OFF if connected else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     async def start_source(self, *_args: object, **_kwargs: object) -> None:
         return None

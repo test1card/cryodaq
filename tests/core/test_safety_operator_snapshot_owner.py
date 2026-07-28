@@ -930,24 +930,28 @@ async def test_replacement_and_reconnect_cannot_restore_faulted_child_authority(
         manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
         "initial proof",
     )
-    assert (await manager.complete_reviewed_source_connect(
-        driver,
-        manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
-        generation,
-        "initial proof",
-    )).verified_off
+    assert (
+        await manager.complete_reviewed_source_connect(
+            driver,
+            manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
+            generation,
+            "initial proof",
+        )
+    ).verified_off
 
     child_release.set()
     assert manager._collect_task is not None
     await asyncio.gather(manager._collect_task, return_exceptions=True)
     await asyncio.sleep(0)
     assert manager.snapshot_operator_safety().verified_off is False
-    assert not (await manager.complete_reviewed_source_connect(
-        driver,
-        manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
-        generation,
-        "late proof",
-    )).verified_off
+    assert not (
+        await manager.complete_reviewed_source_connect(
+            driver,
+            manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
+            generation,
+            "late proof",
+        )
+    ).verified_off
 
     async def replacement_child() -> None:
         await replacement_release.wait()

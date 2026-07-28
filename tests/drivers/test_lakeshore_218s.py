@@ -21,10 +21,7 @@ from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 # Helpers
 # ---------------------------------------------------------------------------
 
-NORMAL_RESPONSE = (
-    "+004.235E+0,+004.891E+0,+004.100E+0,+003.998E+0,"
-    "+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
-)
+NORMAL_RESPONSE = "+004.235E+0,+004.891E+0,+004.100E+0,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
 
 EXPECTED_NORMAL_VALUES = [
     4.235,
@@ -37,10 +34,7 @@ EXPECTED_NORMAL_VALUES = [
     4.321,
 ]
 
-RAW_RESPONSE = (
-    "+8.298000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,"
-    "+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
-)
+RAW_RESPONSE = "+8.298000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
 
 
 _MOCK_IDN = "LSCI,MODEL218S,MOCK001,010101"
@@ -217,9 +211,7 @@ async def test_parse_normal_response() -> None:
     for reading, expected in zip(readings, EXPECTED_NORMAL_VALUES, strict=True):
         assert reading.unit == "K"
         assert reading.status == ChannelStatus.OK
-        assert math.isclose(reading.value, expected, rel_tol=1e-4), (
-            f"Expected {expected}, got {reading.value}"
-        )
+        assert math.isclose(reading.value, expected, rel_tol=1e-4), f"Expected {expected}, got {reading.value}"
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +220,7 @@ async def test_parse_normal_response() -> None:
 
 
 async def test_parse_overrange() -> None:
-    ovl_response = (
-        "+OVL,+004.891E+0,+OVL,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
-    )
+    ovl_response = "+OVL,+004.891E+0,+OVL,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
     transport = _make_mock_transport(ovl_response)
 
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
@@ -354,9 +344,7 @@ async def test_timeout_handling() -> None:
         # If it returns readings, they must all carry TIMEOUT status
         assert len(readings) == 8
         for r in readings:
-            assert r.status == ChannelStatus.TIMEOUT, (
-                f"Expected TIMEOUT status on timeout, got {r.status}"
-            )
+            assert r.status == ChannelStatus.TIMEOUT, f"Expected TIMEOUT status on timeout, got {r.status}"
     except (TimeoutError, OSError, RuntimeError):
         # Raising a typed exception is also a valid design choice
         pass
@@ -614,18 +602,13 @@ async def test_runtime_calibration_out_of_range_raw_falls_back_to_krdg(tmp_path)
 
     # SRDG raw for CH1 drifts ABOVE raw_max=90: first 95.0, then 120.0.
     oor_raw_1 = (
-        "+9.500000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,"
-        "+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
+        "+9.500000E+1,+8.017000E+1,+1.738000E+1,+1.728000E+1,+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
     )
     oor_raw_2 = (
-        "+1.200000E+2,+8.017000E+1,+1.738000E+1,+1.728000E+1,"
-        "+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
+        "+1.200000E+2,+8.017000E+1,+1.738000E+1,+1.728000E+1,+8.204000E+1,+8.332000E+1,+8.433000E+1,+5.114000E+0"
     )
     # Native KRDG for CH1: 4.235 K on the first read, 6.789 K on the second.
-    normal_2 = (
-        "+006.789E+0,+004.891E+0,+004.100E+0,+003.998E+0,"
-        "+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
-    )
+    normal_2 = "+006.789E+0,+004.891E+0,+004.100E+0,+003.998E+0,+004.567E+0,+004.123E+0,+003.876E+0,+004.321E+0"
 
     krdg_responses = [NORMAL_RESPONSE, normal_2, NORMAL_RESPONSE]
     srdg_responses = [oor_raw_1, oor_raw_2, RAW_RESPONSE]
@@ -727,9 +710,7 @@ async def test_krdg_fallback_to_per_channel() -> None:
 
     # Verify exact mapped values — not just length/unit.
     for i, r in enumerate(readings):
-        assert r.value == pytest.approx(expected_values[i]), (
-            f"CH{i+1}: expected {expected_values[i]}, got {r.value}"
-        )
+        assert r.value == pytest.approx(expected_values[i]), f"CH{i + 1}: expected {expected_values[i]}, got {r.value}"
 
 
 async def test_krdg_sticky_fallback() -> None:

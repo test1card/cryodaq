@@ -656,18 +656,14 @@ _G4_DOCS = (
     "docs/quickstart.md",
 )
 _G4_REFERENCE_RE = re.compile(r"\[\[ref:([^\]\n]+)\]\]")
-_G4_UNMARKED_REFERENCE_RE = re.compile(
-    r"(?<![\w/])((?:src|tests|scripts)(?:/[\w.-]+)*\.py(?:::[A-Za-z_][\w.]*)?)"
-)
+_G4_UNMARKED_REFERENCE_RE = re.compile(r"(?<![\w/])((?:src|tests|scripts)(?:/[\w.-]+)*\.py(?:::[A-Za-z_][\w.]*)?)")
 _G4_LEGACY_LINE_RE = re.compile(r"(?:[\w./-]+\.(?:py|ya?ml|toml|md)|\.gitignore):\d+")
 _G4_CONSOLE_COMMAND_RE = re.compile(r"(?m)^\s*(cryodaq(?:-[\w]+)*)\b")
 _G4_PROCEDURE_RE = re.compile(r"<!-- G4-PROCEDURES\n(.*?)\n-->", re.DOTALL)
 _G4_BOUND_RE = re.compile(
     r"(?:0|[1-9]\d*)(?:\.\d+)?(?:\s+(?:\+|\d+|[A-Za-z][A-Za-z0-9/-]*|\d+(?:\.\d+)?[A-Za-z][A-Za-z0-9/-]*))+"
 )
-_G4_ID_DECLARATION_RE = re.compile(
-    r"(?m)^\s*(?:#\s+|contract_id:\s*|-\s+id:\s*)([A-Z][A-Z0-9-]*-\d{3})(?=[:\s]|$)"
-)
+_G4_ID_DECLARATION_RE = re.compile(r"(?m)^\s*(?:#\s+|contract_id:\s*|-\s+id:\s*)([A-Z][A-Z0-9-]*-\d{3})(?=[:\s]|$)")
 _G4_ID_DECLARATION_PATHS = (
     "governance/agent_preventions.yaml",
     "tests/docs/test_docs_freshness.py",

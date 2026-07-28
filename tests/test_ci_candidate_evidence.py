@@ -1041,8 +1041,8 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert active["if"] == "matrix.suite == 'remaining'"
     assert "${GITHUB_SHA:?}" in active["run"]
     assert "tools.ci_active_checkout_runner" in active["run"]
-    assert "--repository \"${GITHUB_WORKSPACE:?}\"" in active["run"]
-    assert "--revision \"${GITHUB_SHA:?}\"" in active["run"]
+    assert '--repository "${GITHUB_WORKSPACE:?}"' in active["run"]
+    assert '--revision "${GITHUB_SHA:?}"' in active["run"]
     assert all(selection not in active["run"] for root in EXECUTION_ROOTS for selection in (*root.files, *root.nodes))
     # The former guard only searched raw workflow text, so a comment containing
     # every selection passed even while the executable pytest arguments drifted.

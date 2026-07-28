@@ -373,8 +373,7 @@ class CalibrationFitter:
         )
         if len(raw_pairs) < max(4, min_points_per_zone):
             raise ValueError(
-                f"Not enough calibration pairs: {len(raw_pairs)} "
-                f"(need at least {max(4, min_points_per_zone)})"
+                f"Not enough calibration pairs: {len(raw_pairs)} (need at least {max(4, min_points_per_zone)})"
             )
 
         # 2. Downsample

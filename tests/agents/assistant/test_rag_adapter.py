@@ -267,9 +267,9 @@ def test_search_truncates_long_chunk_text_in_snippet() -> None:
 
     assert result is not None
     snippet = result.hits[0].snippet
-    assert len(snippet) <= 280          # exact cap from _truncate_snippet(max_chars=280)
-    assert snippet.endswith("…")        # truncated with ellipsis
+    assert len(snippet) <= 280  # exact cap from _truncate_snippet(max_chars=280)
+    assert snippet.endswith("…")  # truncated with ellipsis
     assert snippet.startswith("Описание")  # prefix preserved after collapse
-    assert "\n" not in snippet          # newlines collapsed
-    assert "\t" not in snippet          # tabs collapsed
-    assert "  " not in snippet          # consecutive spaces collapsed
+    assert "\n" not in snippet  # newlines collapsed
+    assert "\t" not in snippet  # tabs collapsed
+    assert "  " not in snippet  # consecutive spaces collapsed

@@ -43,9 +43,7 @@ def _annotation_is_source_off_result(node: ast.AST | None) -> bool:
 
 def _literal_bool_return(function: ast.AST) -> bool:
     return any(
-        isinstance(node, ast.Return)
-        and isinstance(node.value, ast.Constant)
-        and type(node.value.value) is bool
+        isinstance(node, ast.Return) and isinstance(node.value, ast.Constant) and type(node.value.value) is bool
         for node in ast.walk(function)
     )
 
@@ -155,9 +153,7 @@ def test_driver_level_emergency_off_doubles_return_source_off_result() -> None:
                     valid = isinstance(value, ast.Constant) and value.value is None
                     valid = valid or _is_exception_call(value)
                     if isinstance(value, ast.Name):
-                        valid = valid or _function_result_is_typed(
-                            _find_named_function(value.id, node, parents, tree)
-                        )
+                        valid = valid or _function_result_is_typed(_find_named_function(value.id, node, parents, tree))
                 elif isinstance(value, ast.Name):
                     valid = _function_result_is_typed(_find_named_function(value.id, node, parents, tree))
                 elif isinstance(value, ast.Call) and _attribute_parts(value.func)[-1:] == ["AsyncMock"]:
