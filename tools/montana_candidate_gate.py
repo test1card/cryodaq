@@ -7,10 +7,12 @@ as MONTANA-INTEGRATION-SEQUENCE-001.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
 import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -345,3 +347,95 @@ def validate_separate_integration_freeze(
     review = successor_manifest.get("review")
     if review != {"status": "approved", "commit": successor_commit, "tree": successor_tree}:
         raise MontanaEvidenceError("successor review is absent or bound to another object")
+
+
+def _json_mapping(path: Path) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MontanaEvidenceError(f"candidate evidence is unreadable: {path.name}") from exc
+    if not isinstance(payload, Mapping):
+        raise MontanaEvidenceError(f"candidate evidence is not an object: {path.name}")
+    return payload
+
+
+def _sha256(path: Path) -> str:
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+
+
+def validate_ci_candidate_bundle(
+    repository: Path,
+    revision: str,
+    bundle: Path,
+    suite: str,
+) -> tuple[str, str]:
+    """Apply the Montana exact-execution contract to one real CI bundle."""
+
+    repository = repository.resolve(strict=True)
+    bundle = bundle.resolve(strict=True)
+    candidate_path = bundle / "candidate-manifest.json"
+    execution_path = bundle / "execution-receipt.json"
+    bundle_path = bundle / "bundle-manifest.json"
+    candidate = _json_mapping(candidate_path)
+    execution = _json_mapping(execution_path)
+    bundle_manifest = _json_mapping(bundle_path)
+    try:
+        validate_candidate_manifest(repository, candidate)
+    except CandidateEvidenceError as exc:
+        raise MontanaEvidenceError(f"CI candidate manifest is invalid: {exc}") from exc
+
+    commit_result = _git(repository, "rev-parse", "--verify", f"{revision}^{{commit}}")
+    tree_result = _git(repository, "rev-parse", "--verify", f"{revision}^{{tree}}")
+    if commit_result.returncode != 0 or tree_result.returncode != 0:
+        raise MontanaEvidenceError("CI revision is not an inspectable commit")
+    commit = commit_result.stdout.strip()
+    tree = tree_result.stdout.strip()
+    expected_command_tail = ["-B", "-m", "tools.ci_candidate_runner", "--suite", suite]
+    command = execution.get("command")
+    if (
+        candidate.get("commit") != commit
+        or candidate.get("tree") != tree
+        or execution.get("commit") != commit
+        or execution.get("tree") != tree
+        or execution.get("candidate_manifest_sha256") != candidate.get("manifest_sha256")
+        or execution.get("suite") != suite
+        or execution.get("returncode") != 0
+        or not isinstance(command, list)
+        or len(command) != len(expected_command_tail) + 1
+        or not isinstance(command[0], str)
+        or not command[0]
+        or command[1:] != expected_command_tail
+    ):
+        raise MontanaEvidenceError("CI execution receipt is not a passing exact Montana candidate run")
+    if execution.get("stdout_sha256") != _sha256(bundle / "stdout.bin"):
+        raise MontanaEvidenceError("CI stdout digest is not exact")
+    if execution.get("stderr_sha256") != _sha256(bundle / "stderr.bin"):
+        raise MontanaEvidenceError("CI stderr digest is not exact")
+    files = bundle_manifest.get("files")
+    expected_files = {
+        name: _sha256(bundle / name)
+        for name in ("candidate-manifest.json", "execution-receipt.json", "stderr.bin", "stdout.bin")
+    }
+    if bundle_manifest.get("schema_version") != 1 or files != expected_files:
+        raise MontanaEvidenceError("CI bundle manifest is incomplete or not exact")
+    return commit, tree
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repository", type=Path, required=True)
+    parser.add_argument("--revision", required=True)
+    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--suite", choices=("agents", "core", "gui", "remaining"), required=True)
+    args = parser.parse_args(argv)
+    try:
+        commit, tree = validate_ci_candidate_bundle(args.repository, args.revision, args.bundle, args.suite)
+    except (MontanaEvidenceError, OSError) as exc:
+        print(f"MONTANA_CANDIDATE_GATE failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"MONTANA_CANDIDATE_GATE passed commit={commit} tree={tree} suite={args.suite}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

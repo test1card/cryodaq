@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -1029,6 +1030,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     active = indexed["active-remaining"]
     candidate = indexed["candidate"]
+    montana_gate = indexed["montana-candidate-gate"]
     summary = _assert_candidate_failure_summary_step(steps)
     upload = indexed["candidate-upload"]
     attestation_upload = indexed["candidate-attestation-upload"]
@@ -1054,6 +1056,13 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert "continue-on-error" not in candidate
     assert "tools.ci_candidate_evidence run" in candidate["run"]
     assert '--revision "${GITHUB_SHA:?}"' in candidate["run"]
+    assert "if" not in montana_gate
+    assert "continue-on-error" not in montana_gate
+    assert "tools.montana_candidate_gate" in montana_gate["run"]
+    assert '--repository "${GITHUB_WORKSPACE:?}"' in montana_gate["run"]
+    assert '--revision "${GITHUB_SHA:?}"' in montana_gate["run"]
+    assert '--suite "${{ matrix.suite }}"' in montana_gate["run"]
+    assert '--bundle "${RUNNER_TEMP:?}/cryodaq-candidate-evidence"' in montana_gate["run"]
     upload_pin = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     assert upload["uses"] == upload_pin
     assert attestation_upload["uses"] == upload_pin
@@ -1062,6 +1071,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert enforce.get("continue-on-error") is not True
     assert (
         steps.index(candidate)
+        < steps.index(montana_gate)
         < steps.index(summary)
         < steps.index(upload)
         < steps.index(attest)
@@ -1070,6 +1080,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     )
     for dependency in (
         "steps.active-remaining.outcome",
+        "steps.montana-candidate-gate.outcome",
         "steps.candidate-upload.outcome",
         "steps.candidate-attestation-upload.outcome",
     ):
@@ -1107,3 +1118,68 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert Path(strict_response_files[0][1:]).read_text(encoding="utf-8").splitlines() == list(active_nodes)
     assert "--timeout=120" in strict
     assert "--timeout-method=thread" in strict
+
+
+def test_montana_candidate_gate_workflow_command_rejects_violation_and_accepts_control(tmp_path: Path) -> None:
+    repository = _candidate_repository(tmp_path)
+    commit = _git(repository, "rev-parse", "HEAD")
+    receipt = execute_exported_candidate(
+        repository,
+        commit,
+        command=(sys.executable, "-c", "print('clean candidate')"),
+        destination=tmp_path / "montana-export",
+    )
+    receipt = replace(
+        receipt,
+        command=(sys.executable, "-B", "-m", "tools.ci_candidate_runner", "--suite", "core"),
+    )
+    bundle = tmp_path / "montana-bundle"
+    write_execution_bundle(
+        receipt,
+        output=bundle,
+        workflow_path=repository / ".github" / "workflows" / "main.yml",
+        dependency_lock=repository / "requirements-lock.txt",
+        suite="core",
+        github=_github(commit),
+        artifact_name="candidate-Windows-core",
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "tools.montana_candidate_gate",
+        "--repository",
+        str(repository),
+        "--revision",
+        commit,
+        "--suite",
+        "core",
+        "--bundle",
+        str(bundle),
+    ]
+    control = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=False)
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert "MONTANA_CANDIDATE_GATE passed" in control.stdout
+
+    execution_path = bundle / "execution-receipt.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    execution["command"] = [sys.executable, "-c", "print('not the candidate runner')"]
+    execution_path.write_text(
+        json.dumps(execution, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    bundle_path = bundle / "bundle-manifest.json"
+    bundle_manifest = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle_manifest["files"]["execution-receipt.json"] = (
+        f"sha256:{hashlib.sha256(execution_path.read_bytes()).hexdigest()}"
+    )
+    bundle_path.write_text(
+        json.dumps(bundle_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    violation = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=False)
+    assert violation.returncode == 1
+    assert "MONTANA_CANDIDATE_GATE failed" in violation.stderr
+    assert "not a passing exact Montana candidate run" in violation.stderr

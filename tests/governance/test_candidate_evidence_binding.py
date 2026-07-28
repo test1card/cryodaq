@@ -250,17 +250,45 @@ def test_export_execution_redirects_nested_python_cache_outside_candidate(
 
 
 def test_export_execution_rejects_committed_path_mutation(candidate_repo: Path, tmp_path: Path) -> None:
-    with pytest.raises(CandidateEvidenceError, match="committed paths changed"):
-        execute_exported_candidate(
-            candidate_repo,
-            "HEAD",
-            command=[
-                sys.executable,
-                "-c",
-                "from pathlib import Path; Path('src/pkg/main.py').write_text('MUTATED\\n', encoding='utf-8')",
-            ],
-            destination=tmp_path / "export-mutated",
-        )
+    receipt = execute_exported_candidate(
+        candidate_repo,
+        "HEAD",
+        command=[
+            sys.executable,
+            "-c",
+            "from pathlib import Path; "
+            "path=Path('src/pkg/main.py'); original=path.read_bytes(); "
+            "path.write_text('MUTATED\\n', encoding='utf-8'); "
+            "exec(path.read_text(encoding='utf-8')); "
+            "path.write_bytes(original); print('MUTATED_EXECUTED_RESTORED')",
+        ],
+        destination=tmp_path / "export-mutated",
+    )
+
+    assert receipt.returncode != 0
+    assert b"MUTATED_EXECUTED_RESTORED" not in receipt.stdout
+    assert b"PermissionError" in receipt.stderr
+    assert (receipt.export_root / "src" / "pkg" / "main.py").read_text(encoding="utf-8") == (
+        candidate_repo / "src" / "pkg" / "main.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_export_execution_allows_honest_read_only_candidate(candidate_repo: Path, tmp_path: Path) -> None:
+    receipt = execute_exported_candidate(
+        candidate_repo,
+        "HEAD",
+        command=[
+            sys.executable,
+            "-c",
+            "from pathlib import Path; "
+            "assert 'from pkg.dep import VALUE' in Path('src/pkg/main.py').read_text(encoding='utf-8'); "
+            "print('HONEST_CANDIDATE_PASSED')",
+        ],
+        destination=tmp_path / "export-honest",
+    )
+
+    assert receipt.returncode == 0, receipt.stdout + receipt.stderr
+    assert receipt.stdout.strip() == b"HONEST_CANDIDATE_PASSED"
 
 
 def test_export_execution_rejects_unexpected_file_creation(candidate_repo: Path, tmp_path: Path) -> None:
