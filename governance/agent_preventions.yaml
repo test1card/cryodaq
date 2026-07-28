@@ -4751,3 +4751,27 @@ records:
       locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_033.json
       sha256: sha256:423bf8c0878c732f22f98f5bf23b6883f1bfc2d648c390c21d87a9e4434cc9ef
     green_evidence: pending
+
+  - id: GUARD-COVERAGE-REGRESSION-034
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: >-
+      Every class-wide static, structural, AST, source, documentation, or CI guard
+      registered in the guard-coverage inventory, including its matcher,
+      challenge corpus, allowlists/exemptions, and execution dependencies.
+    classification: guard_coverage_regression_governance
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A guard-strengthening change can silently remove a proven challenge, add an exemption, or weaken its own declared corpus while the commit message still claims broader enforcement.
+    invariant: The exact-checkout comparison preserves every base-proven stable challenge and independently reports stable exemption changes; any challenge or inventory shrink or exemption addition requires an exact tracked approved reduction declaration.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_guard_coverage.py::test_guard_coverage_reduction_requires_exact_tracked_declaration
+        ci_partition: remaining
+    automation_limit: The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
+    red_evidence: local_exact_object_comparisons_reject_3d6d1a22_1d2c43ad_and_0f505dd6_with_stable_lost_challenge_and_added_exemption_ids_2026_07_28_pending_immutable_capture
+    green_evidence: pending

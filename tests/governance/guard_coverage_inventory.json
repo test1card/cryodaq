@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "guards": {
+    "C1-ENGINE-ADAPTER-SEAL": {
+      "path": "tests/agents/assistant/test_c1_engine_adapter_seal.py",
+      "challenges": {
+        "C1-CHALLENGE-CONDITIONAL-NONE-001": {
+          "kind": "c1_source",
+          "source": "class _Probe:\n    async def probe(self):\n        reply = await self.transport.call({'cmd': 'probe'})\n        if not reply_is_success(reply):\n            return Result(available=False, stale=True, reason='probe')\n        return None if reply.get('skip') else Result(available=True, stale=False, reason='')\n",
+          "expected": "conditional expression None return after engine query"
+        }
+      },
+      "exemptions": {
+        "C1-EXEMPT-ARCHIVE-EMPTY-ID-001": {
+          "kind": "c1_known_violation",
+          "path": "src/cryodaq/agents/assistant/query/adapters/archive_adapter.py",
+          "symbol": "get_detail",
+          "purpose": "empty experiment identifier absence contract"
+        }
+      }
+    },
+    "C2-DESCRIPTOR-SELECTION": {
+      "path": "tests/analytics/test_c2_descriptor_selection_guard.py",
+      "challenges": {
+        "C2-CHALLENGE-DIRECT-RE-FINDALL-001": {
+          "kind": "c2_source",
+          "source": "import re\n\ndef probe(item):\n    return re.findall('temperature', item.channel_id)\n",
+          "expected": "regular expression findall() over an identifier"
+        },
+        "C2-CHALLENGE-DIRECT-RE-FINDITER-002": {
+          "kind": "c2_source",
+          "source": "import re\n\ndef probe(item):\n    return re.finditer('temperature', item.channel_id)\n",
+          "expected": "regular expression finditer() over an identifier"
+        }
+      },
+      "exemptions": {
+        "C2-EXEMPT-OC-010": {
+          "kind": "c2_allowlist",
+          "path": "src/cryodaq/reporting/periodic_renderer.py",
+          "symbol": "_channel_key",
+          "purpose": "BLOCKED-ON-SCHEMA"
+        }
+      }
+    },
+    "G4-DOCUMENTATION-PROCEDURES": {
+      "path": "tests/docs/test_docs_freshness.py",
+      "challenges": {
+        "G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001": {
+          "kind": "g4_external_as_software",
+          "expected": "acceptance evidence is external or physical, not SOFTWARE-PROVABLE"
+        }
+      },
+      "exemptions": {}
+    },
+    "SOURCE-OFF-RESULT-DOUBLES": {
+      "path": "tests/governance/test_source_off_result_test_doubles.py",
+      "challenges": {
+        "SOURCE-OFF-CHALLENGE-DICT-ANNOTATION-001": {
+          "kind": "source_off_source",
+          "source": "class _Probe:\n    async def emergency_off(self) -> dict[str, bool]:\n        return {'off': True}\n",
+          "expected": "emergency_off must return SourceOffResult"
+        }
+      },
+      "exemptions": {
+        "SOURCE-OFF-EXEMPT-REVIEWED-DISCONNECT-001": {
+          "kind": "source_off_scope",
+          "path": "tests/core/test_reviewed_source_disconnect.py",
+          "symbol": "test_truthy_non_boolean_proof_cannot_authorize_disconnect",
+          "purpose": "intentional invalid result"
+        },
+        "SOURCE-OFF-EXEMPT-SAFETY-FIXES-002": {
+          "kind": "source_off_scope",
+          "path": "tests/core/test_safety_fixes.py",
+          "symbol": "test_interlock_stop_source_rejects_truthy_non_bool_off_evidence",
+          "purpose": "intentional invalid result"
+        },
+        "SOURCE-OFF-EXEMPT-OPERATOR-SNAPSHOT-003": {
+          "kind": "source_off_scope",
+          "path": "tests/core/test_safety_operator_snapshot_owner.py",
+          "symbol": "test_second_channel_unverified_target_fails_closed",
+          "purpose": "intentional invalid result"
+        },
+        "SOURCE-OFF-EXEMPT-CONSUMER-DOUBLE-004": {
+          "kind": "source_off_scope",
+          "path": "tests/core/test_source_off_result_consumers.py",
+          "symbol": "_OffDriver.emergency_off",
+          "purpose": "intentional invalid result"
+        },
+        "SOURCE-OFF-EXEMPT-WATCHDOG-ACK-005": {
+          "kind": "source_off_scope",
+          "path": "tests/core/test_source_off_result_consumers.py",
+          "symbol": "test_watchdog_ack_accepts_only_device_reported_off",
+          "purpose": "intentional invalid result"
+        },
+        "SOURCE-OFF-EXEMPT-DICT-ANNOTATION-006": {
+          "kind": "source_off_dict_annotation_skip",
+          "path": "tests/governance/test_source_off_result_test_doubles.py",
+          "symbol": "test_driver_level_emergency_off_doubles_return_source_off_result",
+          "purpose": "dict-annotated emergency_off bypass"
+        }
+      }
+    }
+  },
+  "reduction_declarations": []
+}
