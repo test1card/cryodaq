@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 _IDENTITY_WORDS = frozenset({"channel", "channel_id", "instrument_id", "source_key", "identifier"})
+_GUI_IDENTITY_WORDS = frozenset({"ch", "ch_id", "channel_raw", "measurement", "short_id"})
 _SHORT_ITERATION_IDENTITY_NAMES = frozenset({"ch", "ch_id"})
 _STRING_OPERATIONS = frozenset({"startswith", "endswith"})
 _REGEX_OPERATIONS = frozenset({"search", "match", "fullmatch"})
@@ -62,6 +63,31 @@ def _literal(node: ast.AST) -> bool:
 
 def _literal_collection(node: ast.AST) -> bool:
     return isinstance(node, (ast.Tuple, ast.List, ast.Set)) and all(_literal(item) for item in node.elts)
+
+
+def _contains_string_literal(node: ast.AST) -> bool:
+    return any(_literal(child) for child in ast.walk(node))
+
+
+def _gui_identifier_roster(node: ast.AST) -> bool:
+    targets: tuple[ast.AST, ...] = ()
+    value: ast.AST | None = None
+    if isinstance(node, ast.Assign):
+        targets = tuple(node.targets)
+        value = node.value
+    elif isinstance(node, ast.AnnAssign):
+        targets = (node.target,)
+        value = node.value
+    return (
+        value is not None
+        and _contains_string_literal(value)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id.upper() == target.id
+            and any(token in target.id for token in ("CHANNEL", "INSTRUMENT", "SOURCE"))
+            for target in targets
+        )
+    )
 
 
 def _children_without_nested_scopes(scope: ast.AST) -> list[ast.AST]:
@@ -213,6 +239,8 @@ def _scope_aliases(
     scope: ast.AST,
     helpers: set[str],
     identity_keyed_containers: set[str],
+    *,
+    gui: bool = False,
 ) -> set[str]:
     aliases = (
         {
@@ -227,6 +255,12 @@ def _scope_aliases(
         if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
         else set()
     )
+    if gui:
+        aliases |= {
+            node.id
+            for node in _children_without_nested_scopes(scope)
+            if isinstance(node, ast.Name) and node.id.lower() in _GUI_IDENTITY_WORDS
+        }
     changed = True
     while changed:
         changed = False
@@ -249,7 +283,15 @@ def _scope_aliases(
     return aliases
 
 
-def _reason(node: ast.AST, aliases: set[str]) -> str | None:
+def _reason(
+    node: ast.AST,
+    aliases: set[str],
+    *,
+    gui: bool = False,
+    literal_bindings: set[str] = frozenset(),
+) -> str | None:
+    if gui and _gui_identifier_roster(node):
+        return "GUI identifier literal roster"
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
         if node.func.attr in _STRING_OPERATIONS and _identity_expression(node.func.value, aliases):
             return f"identity spelling operation {node.func.attr}()"
@@ -275,6 +317,15 @@ def _reason(node: ast.AST, aliases: set[str]) -> str | None:
                 return "literal membership over identity"
             if any(isinstance(operator, (ast.Eq, ast.NotEq)) for operator in node.ops):
                 return "bare literal equality over identity"
+        if gui and any(_identity_expression(operand, aliases) for operand in operands):
+            spelling_bearing = any(
+                _contains_string_literal(operand) or (isinstance(operand, ast.Name) and operand.id in literal_bindings)
+                for operand in operands
+            )
+            if spelling_bearing:
+                if any(isinstance(operator, (ast.In, ast.NotIn)) for operator in node.ops):
+                    return "computed membership over identity"
+                return "GUI identifier-derived comparison"
     if isinstance(node, ast.Subscript):
         if isinstance(node.value, ast.Dict) and _identity_expression(node.slice, aliases):
             return "dict dispatch keyed on identity"
@@ -341,6 +392,7 @@ def _sites(root: Path) -> list[_Site]:
     sites: list[_Site] = []
     for path in paths:
         relative = path.relative_to(root).as_posix()
+        gui = relative.startswith("src/cryodaq/gui/")
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
         parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
         scopes = [
@@ -356,7 +408,24 @@ def _sites(root: Path) -> list[_Site]:
         ]
         helpers = _returning_identity_functions(tree)
         identity_keyed_containers = _identity_keyed_containers(tree)
-        aliases = {scope: _scope_aliases(scope, helpers, identity_keyed_containers) for scope in scopes}
+        aliases = {
+            scope: _scope_aliases(
+                scope,
+                helpers,
+                identity_keyed_containers,
+                gui=gui,
+            )
+            for scope in scopes
+        }
+        literal_bindings = {
+            name
+            for assignment in ast.walk(tree)
+            if isinstance(assignment, (ast.Assign, ast.AnnAssign))
+            and assignment.value is not None
+            and _contains_string_literal(assignment.value)
+            for target in ((assignment.target,) if isinstance(assignment, ast.AnnAssign) else tuple(assignment.targets))
+            for name in _assigned_names(target)
+        }
         for node in ast.walk(tree):
             scope = node
             while scope not in aliases:
@@ -369,6 +438,8 @@ def _sites(root: Path) -> list[_Site]:
                     parents,
                     identity_keyed_containers,
                 ),
+                gui=gui,
+                literal_bindings=literal_bindings,
             )
             if reason:
                 site = _Site(
@@ -1610,6 +1681,369 @@ _REGISTRY_ROWS = (
         "OPEN-ROUTING-DEBT",
         "web dashboard derives instrument number from channel spelling",
     ),
+    (
+        "C2-112",
+        _Challenge(
+            "src/cryodaq/gui/dashboard/dynamic_sensor_grid.py",
+            "DynamicSensorGrid.dispatch_reading",
+            "computed membership over identity",
+            "a56a567a833ac4318496",
+        ),
+        "LEGITIMATE",
+        "resolved GUI cell map owns exact channel identity keys",
+    ),
+    (
+        "C2-113",
+        _Challenge(
+            "src/cryodaq/gui/dashboard/experiment_card.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "3597afd2ef21b4318fa4",
+        ),
+        "LEGITIMATE",
+        "ExperimentCardData contract declares the fixed reference-channel roster",
+    ),
+    (
+        "C2-114",
+        _Challenge(
+            "src/cryodaq/gui/dashboard/experiment_card.py",
+            "ExperimentCardData.__post_init__",
+            "computed membership over identity",
+            "85b3c6241fa05daf8185",
+        ),
+        "LEGITIMATE",
+        "ExperimentCardData validates against its declared reference-channel roster",
+    ),
+    (
+        "C2-115",
+        _Challenge(
+            "src/cryodaq/gui/first_run_config.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "e92d3dc52d82109e020c",
+        ),
+        "LEGITIMATE",
+        "first-run configuration declares the supported instrument-type roster",
+    ),
+    (
+        "C2-116",
+        _Challenge(
+            "src/cryodaq/gui/first_run_config.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "030329c4285b444f6439",
+        ),
+        "LEGITIMATE",
+        "generated configuration header prose is not an identity selector",
+    ),
+    (
+        "C2-117",
+        _Challenge(
+            "src/cryodaq/gui/first_run_config.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "f31bbe0b9500b3d7401d",
+        ),
+        "LEGITIMATE",
+        "generated descriptor header prose is not an identity selector",
+    ),
+    (
+        "C2-118",
+        _Challenge(
+            "src/cryodaq/gui/first_run_config.py",
+            "build_channel_descriptors_local",
+            "computed membership over identity",
+            "a1f171ba497af421b88f",
+        ),
+        "LEGITIMATE",
+        "descriptor generation rejects duplicate exact channel identities",
+    ),
+    (
+        "C2-119",
+        _Challenge(
+            "src/cryodaq/gui/first_run_config.py",
+            "build_channel_descriptors_local",
+            "computed membership over identity",
+            "1eca03c528ebd6c3ca2b",
+        ),
+        "LEGITIMATE",
+        "binding generation rejects duplicate exact channel identities",
+    ),
+    (
+        "C2-120",
+        _Challenge(
+            "src/cryodaq/gui/first_run_wizard.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "ab87d2183f84e5dc2285",
+        ),
+        "LEGITIMATE",
+        "first-run source-setup schema declares the reviewed field roster",
+    ),
+    (
+        "C2-121",
+        _Challenge(
+            "src/cryodaq/gui/shell/annunciation_controller.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "23bc917a4a26728cfcf5",
+        ),
+        "LEGITIMATE",
+        "annunciation protocol declares its accepted source values",
+    ),
+    (
+        "C2-122",
+        _Challenge(
+            "src/cryodaq/gui/shell/annunciation_controller.py",
+            "decode_projection",
+            "GUI identifier-derived comparison",
+            "bd10d7cb4a6717d6fd80",
+        ),
+        "LEGITIMATE",
+        "annunciation projection validation requires a source_key",
+    ),
+    (
+        "C2-123",
+        _Challenge(
+            "src/cryodaq/gui/shell/annunciation_controller.py",
+            "AnnunciationController.acknowledge",
+            "GUI identifier-derived comparison",
+            "36bf20dbc0c8fd9c707b",
+        ),
+        "LEGITIMATE",
+        "annunciation acknowledgement correlates exact protocol identity values",
+    ),
+    (
+        "C2-124",
+        _Challenge(
+            "src/cryodaq/gui/shell/annunciation_controller.py",
+            "AnnunciationController._activations_with_pending_alarm_holds",
+            "GUI identifier-derived comparison",
+            "406ec91326093ef606de",
+        ),
+        "LEGITIMATE",
+        "annunciation hold correlation compares exact protocol identity values",
+    ),
+    (
+        "C2-125",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/calibration_panel.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "9523370ce05f520d980f",
+        ),
+        "LEGITIMATE",
+        "configuration filename is not an instrument identity selector",
+    ),
+    (
+        "C2-126",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/calibration_panel.py",
+            "_load_lakeshore_channels",
+            "computed membership over identity",
+            "1acf40e8dbb7480cd2b2",
+        ),
+        "LEGITIMATE",
+        "instrument configuration schema declares the channel label key",
+    ),
+    (
+        "C2-127",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/calibration_panel.py",
+            "_load_lakeshore_channels",
+            "identity indexing or slicing",
+            "1d9eb185b872e4ba78f0",
+        ),
+        "LEGITIMATE",
+        "instrument configuration schema owns channel label lookup",
+    ),
+    (
+        "C2-128",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/conductivity_panel.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "f5edd02f8c469da74217",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "conductivity panel lacks a descriptor-backed power-channel selector",
+    ),
+    (
+        "C2-129",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/multiline_panel.py",
+            "is_manifest_multiline_descriptor",
+            "GUI identifier-derived comparison",
+            "279862590dd0d5fd4034",
+        ),
+        "LEGITIMATE",
+        "MultiLine manifest descriptor authority declares the exact length-channel binding",
+    ),
+    (
+        "C2-130",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/multiline_panel.py",
+            "is_manifest_multiline_descriptor",
+            "GUI identifier-derived comparison",
+            "0beb0337d769150cf7ff",
+        ),
+        "LEGITIMATE",
+        "MultiLine manifest descriptor authority declares exact environment bindings",
+    ),
+    (
+        "C2-131",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/multiline_panel.py",
+            "_env_kind",
+            "GUI identifier-derived comparison",
+            "6e2b8a021465d98b985f",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "MultiLine environment role still depends on parsing the channel spelling",
+    ),
+    (
+        "C2-132",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/operator_log_panel.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "6215c7b9d67cc478270a",
+        ),
+        "LEGITIMATE",
+        "operator-log protocol declares its exact analytics channel",
+    ),
+    (
+        "C2-133",
+        _Challenge(
+            "src/cryodaq/gui/shell/overlays/operator_log_panel.py",
+            "OperatorLogPanel.on_reading",
+            "GUI identifier-derived comparison",
+            "2097ca6a3ad339ea5398",
+        ),
+        "LEGITIMATE",
+        "operator-log consumer matches its declared protocol channel exactly",
+    ),
+    (
+        "C2-134",
+        _Challenge(
+            "src/cryodaq/gui/shell/top_watch_bar.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "4a1112c7c5c75301d3e5",
+        ),
+        "LEGITIMATE",
+        "watch-bar contract declares the fixed second-stage reference channel",
+    ),
+    (
+        "C2-135",
+        _Challenge(
+            "src/cryodaq/gui/shell/top_watch_bar.py",
+            "<module>",
+            "GUI identifier literal roster",
+            "c7304d70e94206cf8c7a",
+        ),
+        "LEGITIMATE",
+        "watch-bar contract declares the fixed nitrogen-plate reference channel",
+    ),
+    (
+        "C2-136",
+        _Challenge(
+            "src/cryodaq/gui/shell/top_watch_bar.py",
+            "TopWatchBar.on_reading",
+            "computed membership over identity",
+            "d4683c56e2f188fd1b7a",
+        ),
+        "LEGITIMATE",
+        "watch bar selects exact identities from its declared physical-reference roster",
+    ),
+    (
+        "C2-137",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "CooldownPredictionWidget",
+            "GUI identifier literal roster",
+            "ed664f35fd9bf565582f",
+        ),
+        "LEGITIMATE",
+        "predictor key is internal state and not a channel identity selector",
+    ),
+    (
+        "C2-138",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "KeithleyPowerWidget.set_keithley_readings",
+            "bare literal equality over identity",
+            "0223438e06cad6d93601",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "Keithley power widget lacks descriptor-backed SMU role selection",
+    ),
+    (
+        "C2-139",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "KeithleyPowerWidget.set_keithley_readings",
+            "bare literal equality over identity",
+            "1f37d808dfc05a615650",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "Keithley power widget lacks descriptor-backed SMU role selection",
+    ),
+    (
+        "C2-140",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "KeithleyPowerWidget.set_keithley_readings",
+            "GUI identifier-derived comparison",
+            "bf04142ee62c2c3559a9",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "Keithley power widget uses a spelling-derived SMU role",
+    ),
+    (
+        "C2-141",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "KeithleyPowerWidget.set_keithley_readings",
+            "dict dispatch keyed on identity",
+            "bb31da67fdfb525cb4a6",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "Keithley power widget derives quantity and unit from a path segment",
+    ),
+    (
+        "C2-142",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "ExperimentSummaryWidget._on_stats_loaded",
+            "computed membership over identity",
+            "b07f07ea30ca2541e190",
+        ),
+        "OPEN-ROUTING-DEBT",
+        "non-temperature ordering depends on a spelling-derived temperature set",
+    ),
+    (
+        "C2-143",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "TemperatureSteadyStateWidget.set_temperature_readings",
+            "computed membership over identity",
+            "5ee1f2f2a052628afff5",
+        ),
+        "OPEN-ROUTING-DEBT",
+        "landmark routing parses a display suffix from channel spelling",
+    ),
+    (
+        "C2-144",
+        _Challenge(
+            "src/cryodaq/gui/shell/views/analytics_widgets.py",
+            "TemperatureSteadyStateWidget._key_for_short_id",
+            "GUI identifier-derived comparison",
+            "b52e31519b8cfa6c083e",
+        ),
+        "LEGITIMATE",
+        "steady-state widget matches exact identities from its declared landmark roster",
+    ),
 )
 
 _REGISTRY = tuple(_Registration(*row) for row in _REGISTRY_ROWS)
@@ -1909,6 +2343,36 @@ def test_c2_registry_rejects_exact_same_line_policy_substitutions(
     assert any("Identity spelling inference at" in error for error in errors)
     assert any("changed policy shape" in error for error in errors)
     assert any("Do not register this site as legitimate" in error for error in errors)
+
+
+def test_c2_registry_rejects_a_new_gui_site_and_names_a_genuine_fix(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "gui_registry"
+    target = root / "src" / "cryodaq" / "gui" / "probe.py"
+    target.parent.mkdir(parents=True)
+    original = "def route(reading):\n    return reading.channel.startswith('cold')\n"
+    target.write_text(original, encoding="utf-8")
+    registrations = _registrations_for_sites(_sites(root))
+
+    target.write_text(
+        original + "\ndef new_route(reading):\n    return reading.channel.endswith('/pressure')\n",
+        encoding="utf-8",
+    )
+    new_errors = _registry_errors(_sites(root), registrations)
+    assert any("probe.py:5" in error for error in new_errors)
+    assert any("Do not register this site as legitimate" in error for error in new_errors)
+
+    target.write_text(
+        "def route(reading, resolved_channel):\n    return reading.channel == resolved_channel\n",
+        encoding="utf-8",
+    )
+    fixed_errors = _registry_errors(_sites(root), registrations)
+    assert fixed_errors == [
+        "Registered challenge MUTATION-0 disappeared or changed policy shape: "
+        "src/cryodaq/gui/probe.py scope route, identity spelling operation "
+        f"startswith(), AST {registrations[0].challenge.fingerprint}."
+    ]
 
 
 def test_c2_python_spelling_sweep_includes_pyw(tmp_path: Path) -> None:

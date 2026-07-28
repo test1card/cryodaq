@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import UTC, datetime
@@ -742,6 +743,39 @@ def test_state_badge_unknown_default_is_fail_closed(app):
     assert theme.STATUS_CAUTION in panel._smua_block._state_badge.styleSheet()
     assert not panel._smua_block._start_btn.isEnabled()
     assert not panel._smua_block._stop_btn.isEnabled()
+
+
+def test_unknown_source_reading_renders_unknown_instead_of_off(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel)
+
+    panel.on_reading(
+        _reading(
+            "analytics/keithley_channel_state/smua",
+            math.nan,
+            "",
+            state="unknown",
+        )
+    )
+
+    assert panel._smua_block._state_badge.text().startswith(_kp_mod._STATE_LABELS["unknown"])
+    assert panel._smua_block._state_badge.text() != _kp_mod._STATE_LABELS["off"]
+    assert not panel._smua_block._start_btn.isEnabled()
+
+
+def test_device_reported_off_reading_renders_off_without_a_verified_claim(app):
+    panel = KeithleyPanel()
+    _connect_authorized(panel, source_state=None)
+    reading = _state_reading("smua", "off")
+    reading.metadata["off_evidence"] = {
+        "off_tier": "command_only",
+        "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+        "verified_off": False,
+    }
+
+    panel.on_reading(reading)
+
+    assert panel._smua_block._state_badge.text() == _kp_mod._STATE_LABELS["off"]
 
 
 def test_unrecognized_source_state_never_masquerades_as_off(app):

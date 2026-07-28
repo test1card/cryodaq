@@ -2244,6 +2244,7 @@ class SafetyManager:
         if self._data_broker is None:
             return
 
+        off_results = dict(self._reviewed_source_off_evidence.channel_off_results)
         for smu_channel in ("smua", "smub"):
             if fault_channel == smu_channel:
                 state = "fault"
@@ -2251,16 +2252,24 @@ class SafetyManager:
             elif smu_channel in self._active_sources:
                 state = "on"
                 value = 1.0
-            else:
+            elif off_results[smu_channel] is SourceOffResult.DEVICE_REPORTED_OFF:
                 state = "off"
                 value = 0.0
+            else:
+                state = "unknown"
+                value = math.nan
 
             reading = Reading.now(
                 channel=f"analytics/keithley_channel_state/{smu_channel}",
                 value=value,
                 unit="",
                 instrument_id="safety_manager",
-                metadata={"state": state, "channel": smu_channel, "reason": reason},
+                metadata={
+                    "state": state,
+                    "channel": smu_channel,
+                    "reason": reason,
+                    "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
+                },
             )
             try:
                 await self._data_broker.publish(reading)
