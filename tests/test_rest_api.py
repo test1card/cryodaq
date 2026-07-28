@@ -244,6 +244,73 @@ def test_log_response_redacts_author(client) -> None:
     assert entry["message"] == "hello"
 
 
+def test_get_experiment_distinguishes_unavailable_from_no_experiment(client) -> None:
+    """Engine unavailability must not share a shape with a genuine empty.
+
+    A dropped/non-ok engine yields 503 + ``{available:false, stale, reason}``;
+    a reachable engine with no active experiment stays 200 + the authoritative
+    ``active_experiment=null`` projection. A client can tell them apart.
+    """
+    envelope = {"available": False, "stale": True, "reason": "experiment status unavailable"}
+
+    async def _non_ok(req: dict) -> dict:
+        assert req == {"cmd": "experiment_status"}
+        return {"ok": False}
+
+    async def _raises(req: dict) -> dict:
+        assert req == {"cmd": "experiment_status"}
+        raise RuntimeError("engine offline")
+
+    async def _ok_no_experiment(req: dict) -> dict:
+        assert req == {"cmd": "experiment_status"}
+        return {"ok": True}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_non_ok):
+        non_ok = client.get("/api/v1/experiment")
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_raises):
+        raised = client.get("/api/v1/experiment")
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_ok_no_experiment):
+        empty = client.get("/api/v1/experiment")
+
+    assert non_ok.status_code == 503
+    assert non_ok.json() == envelope
+    assert raised.status_code == 503
+    assert raised.json() == envelope
+    assert empty.status_code == 200
+    assert empty.json() == {"active_experiment": None, "current_phase": None, "phase_started_at": None}
+
+
+def test_get_log_distinguishes_unavailable_from_empty(client) -> None:
+    """Engine unavailability must not share a shape with a genuine empty log."""
+    envelope = {"available": False, "stale": True, "reason": "operator log unavailable"}
+
+    async def _non_ok(req: dict) -> dict:
+        assert req == {"cmd": "log_get", "limit": 10}
+        return {"ok": False}
+
+    async def _raises(req: dict) -> dict:
+        assert req == {"cmd": "log_get", "limit": 10}
+        raise RuntimeError("engine offline")
+
+    async def _ok_empty(req: dict) -> dict:
+        assert req == {"cmd": "log_get", "limit": 10}
+        return {"ok": True, "entries": []}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_non_ok):
+        non_ok = client.get("/api/v1/log")
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_raises):
+        raised = client.get("/api/v1/log")
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_ok_empty):
+        empty = client.get("/api/v1/log")
+
+    assert non_ok.status_code == 503
+    assert non_ok.json() == envelope
+    assert raised.status_code == 503
+    assert raised.json() == envelope
+    assert empty.status_code == 200
+    assert empty.json() == []
+
+
 def test_legacy_log_route_shares_public_projection(client) -> None:
     """The embedded dashboard route cannot bypass operator-log redaction."""
     entry = {
@@ -1924,7 +1991,7 @@ def test_post_ack_rejects_noncanonical_idempotency_key_without_forwarding(
 
 @pytest.mark.parametrize(
     ("state", "expected_status"),
-    [("published", 200), ("pending", 503), ("aborted", 200)],
+    [("published", 200), ("pending", 503), ("aborted", 409)],
 )
 def test_post_ack_requires_complete_bound_terminal_or_pending_reply(
     auth_client,
@@ -1951,6 +2018,35 @@ def test_post_ack_requires_complete_bound_terminal_or_pending_reply(
         }
     else:
         assert response.json() == returned
+
+
+def test_post_ack_aborted_returns_409_with_preserved_receipt(auth_client) -> None:
+    """A terminally-aborted ack was never applied (ok=False, committed=False).
+
+    Returning 200 would let a REST client treat the operation as successful
+    and stop retrying/escalating while the alarm stays unacknowledged. The
+    exact abort receipt is preserved verbatim in the 409 body so a typed
+    client can still read why it aborted. 409 matches the operator-log
+    rejection convention (rest_api.py post_log); 503 is reserved for the
+    committed-but-pending retry case.
+    """
+    returned: dict = {}
+
+    async def _fake(cmd: dict) -> dict:
+        returned.update(_alarm_ack_wire_result(cmd, "aborted"))
+        return returned
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
+        response = auth_client.post(
+            "/api/v1/alarms/T1_high/ack",
+            headers=_ack_headers("d" * 32),
+            json=_ack_payload(),
+        )
+
+    assert response.status_code == 409
+    assert response.json() == returned
+    assert response.json()["ok"] is False
+    assert response.json()["publication_state"] == "aborted"
 
 
 @pytest.mark.parametrize("state", ["published", "pending", "aborted"])
@@ -2013,7 +2109,7 @@ def test_delayed_rest_ack_never_substitutes_latest_activation(auth_client) -> No
 
     assert snapshot_response.status_code == 200
     assert snapshot["snapshot_revision"] == 1
-    assert response.status_code == 200
+    assert response.status_code == 409
     assert response.json()["ok"] is False
     assert response.json()["publication_state"] == "aborted"
     assert response.json()["error_code"] == "alarm_ack_aborted"

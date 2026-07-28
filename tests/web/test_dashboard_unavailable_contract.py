@@ -69,6 +69,20 @@ def test_both_dashboards_still_define_an_unavailable_helper() -> None:
     assert "function finiteNumber" in _source(STATIC_DASHBOARD)
 
 
+def test_served_dashboard_distinguishes_unavailable_experiment_from_none() -> None:
+    """The served dashboard must not render an unreachable engine as
+    'Нет активного эксперимента'. The ``experiment_available`` signal must gate
+    the experiment branch and must precede the no-experiment fallback, so an
+    unavailable experiment status is rendered as a connectivity fault, not an
+    authoritative empty. (The static dashboard consumes ``/status``, which
+    carries no experiment field, so it is out of scope here.)"""
+    src = _source(SERVED_DASHBOARD)
+    assert "experiment_available" in src, "served dashboard lacks the experiment availability signal"
+    availability = src.index("experiment_available")
+    no_experiment = src.index("Нет активного эксперимента")
+    assert availability < no_experiment, "availability check must precede the no-experiment fallback"
+
+
 @pytest.fixture
 def unavailable_readings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Push non-finite readings through the production callback, not a stub."""

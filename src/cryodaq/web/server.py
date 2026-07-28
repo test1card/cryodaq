@@ -574,13 +574,23 @@ def create_app() -> FastAPI:
                 base["active_alarms"] = redact_public_payload(alarms.get("active", {}))
         except Exception as exc:
             logger.warning("api_status alarm fetch failed: %s", exc)
-        # Experiment/shift data via ZMQ command
+        # Experiment/shift data via ZMQ command. ``experiment`` keeps its
+        # projected shape (object or None) for back-compat, and the separate
+        # ``experiment_available`` flag lets the dashboard tell an unreachable
+        # engine (False) from a reachable engine with no active experiment
+        # (True, ``experiment`` None) — they must not share one shape.
         try:
             exp = await _async_engine_command({"cmd": "experiment_status"})
-            base["experiment"] = project_public_experiment(exp) if exp.get("ok") else None
+            if exp.get("ok"):
+                base["experiment"] = project_public_experiment(exp)
+                base["experiment_available"] = True
+            else:
+                base["experiment"] = None
+                base["experiment_available"] = False
         except Exception as exc:
             logger.warning("api_status experiment fetch failed: %s", exc)
             base["experiment"] = None
+            base["experiment_available"] = False
         return redact_public_payload(base)
 
     @application.get("/api/version")
@@ -741,13 +751,16 @@ async function refresh(){
   document.getElementById('temps').innerHTML=temps||'Нет данных';
   document.getElementById('pressure').textContent=pressure;
   document.getElementById('keithley').textContent='A: '+kA+' │ B: '+kB;
-  // Experiment
-  const exp=d.experiment;
-  if(exp&&exp.active_experiment){
-   const e=exp.active_experiment;
-   const phase=exp.current_phase?' ['+exp.current_phase+']':'';
-   document.getElementById('experiment').textContent=(e.name||'—')+phase;
-  }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
+   // Experiment — distinguish "unavailable" from "no experiment"; an
+   // unreachable engine must never render as an authoritative empty.
+   const exp=d.experiment;
+   if(d.experiment_available===false){
+    document.getElementById('experiment').textContent='Эксперимент: нет связи';
+   }else if(exp&&exp.active_experiment){
+    const e=exp.active_experiment;
+    const phase=exp.current_phase?' ['+exp.current_phase+']':'';
+    document.getElementById('experiment').textContent=(e.name||'—')+phase;
+   }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
   let html='';
   for(const e of(ld.entries||[])){
    const ts=(e.timestamp||'').split('T')[1]||'';

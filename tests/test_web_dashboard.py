@@ -55,6 +55,59 @@ def test_api_status_returns_json(client) -> None:
     assert "active_alarms" in data
 
 
+def test_api_status_distinguishes_unavailable_experiment_from_none(client) -> None:
+    """An unreachable experiment_status must not render identically to a
+    reachable engine with no active experiment — the dashboard must be able
+    to tell them apart, so /api/status carries an explicit signal."""
+
+    async def _unavailable_experiment(req: dict) -> dict:
+        cmd = req.get("cmd", "")
+        if cmd == "safety_status":
+            return {"ok": True, "state": "safe"}
+        if cmd == "alarm_v2_status":
+            return {"ok": True, "active": {}}
+        if cmd == "experiment_status":
+            return {"ok": False}
+        raise AssertionError(f"unexpected request: {req!r}")
+
+    async def _raising_experiment(req: dict) -> dict:
+        cmd = req.get("cmd", "")
+        if cmd == "safety_status":
+            return {"ok": True, "state": "safe"}
+        if cmd == "alarm_v2_status":
+            return {"ok": True, "active": {}}
+        if cmd == "experiment_status":
+            raise RuntimeError("down")
+        raise AssertionError(f"unexpected request: {req!r}")
+
+    async def _ok_no_experiment(req: dict) -> dict:
+        cmd = req.get("cmd", "")
+        if cmd == "safety_status":
+            return {"ok": True, "state": "safe"}
+        if cmd == "alarm_v2_status":
+            return {"ok": True, "active": {}}
+        if cmd == "experiment_status":
+            return {"ok": True}
+        raise AssertionError(f"unexpected request: {req!r}")
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_unavailable_experiment):
+        unavailable = client.get("/api/status").json()
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_raising_experiment):
+        raised = client.get("/api/status").json()
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_ok_no_experiment):
+        ok_none = client.get("/api/status").json()
+
+    assert unavailable.get("experiment_available") is False
+    assert raised.get("experiment_available") is False
+    assert ok_none.get("experiment_available") is True
+    assert unavailable.get("experiment") is None
+    assert ok_none.get("experiment") == {
+        "active_experiment": None,
+        "current_phase": None,
+        "phase_started_at": None,
+    }
+
+
 def test_api_version_returns_proto_server_app_version(client) -> None:
     """GET /api/version is unauthenticated (same trust as other reads)
     and returns the {proto, server, app_version} triple, `server: "web"`."""

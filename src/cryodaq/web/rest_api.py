@@ -365,29 +365,61 @@ async def get_alarms() -> dict[str, Any]:
     return {"ok": False, "active": {}}
 
 
+_UNAVAILABLE_EXPERIMENT_ENVELOPE = {
+    "available": False,
+    "stale": True,
+    "reason": "experiment status unavailable",
+}
+
+
 @router.get("/experiment", response_model=ExperimentOut)
-async def get_experiment() -> dict[str, Any]:
-    """Active experiment status — sensitive fields redacted by the model."""
+async def get_experiment() -> dict[str, Any] | JSONResponse:
+    """Active experiment status — sensitive fields redacted by the model.
+
+    A genuine "no active experiment" (engine reachable, ``ok`` true) is
+    returned as 200 with ``active_experiment=null``. Engine unavailability
+    (exception or non-``ok`` reply) is returned as 503 with the
+    ``{available:false, stale:true, reason}`` envelope below, which does NOT
+    share a shape with the authoritative empty above — a client can tell them
+    apart. Returning 200 with ``active_experiment=null`` on an unreachable
+    engine would let a client treat a dropped engine as "no experiment".
+    """
     try:
         result = await server._async_engine_command({"cmd": "experiment_status"})
         if result.get("ok"):
             return result
+        server.logger.warning("api/v1 experiment fetch non-ok")
     except Exception:
         server.logger.warning("api/v1 experiment fetch failed")
-    return {"active_experiment": None, "current_phase": None, "phase_started_at": None}
+    return JSONResponse(_UNAVAILABLE_EXPERIMENT_ENVELOPE, status_code=503)
+
+
+_UNAVAILABLE_LOG_ENVELOPE = {
+    "available": False,
+    "stale": True,
+    "reason": "operator log unavailable",
+}
 
 
 @router.get("/log", response_model=list[LogEntryOut])
-async def get_log(limit: int = 10) -> list[dict[str, Any]]:
-    """Recent operator-log entries — authors redacted by the model."""
+async def get_log(limit: int = 10) -> list[dict[str, Any]] | JSONResponse:
+    """Recent operator-log entries — authors redacted by the model.
+
+    A genuine empty log (engine reachable, ``ok`` true, no entries) is 200
+    with ``[]``. Engine unavailability (exception or non-``ok`` reply) is 503
+    with the ``{available:false, stale:true, reason}`` envelope below — a
+    distinct shape from the authoritative empty list, so a client never reads
+    "no entries" when the engine is in fact unreachable.
+    """
     limit = max(1, min(limit, server._LOG_MAX_LIMIT))
     try:
         result = await server._async_engine_command({"cmd": "log_get", "limit": limit})
         if result.get("ok"):
             return project_public_log_entries(result.get("entries", []))
+        server.logger.warning("api/v1 log fetch non-ok")
     except Exception:
         server.logger.warning("api/v1 log fetch failed")
-    return []
+    return JSONResponse(_UNAVAILABLE_LOG_ENVELOPE, status_code=503)
 
 
 # ---------------------------------------------------------------------------
@@ -942,12 +974,16 @@ async def post_log(
     return JSONResponse(_unknown_rest_operator_log_settlement(result, idempotency_key), status_code=502)
 
 
-@router.post("/alarms/{alarm_id}/ack", dependencies=[Depends(require_write_token)])
+@router.post(
+    "/alarms/{alarm_id}/ack",
+    dependencies=[Depends(require_write_token)],
+    response_model=None,
+)
 async def post_alarm_ack(
     alarm_id: str,
     payload: AlarmAckIn,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Квитировать аларм (acknowledged_by = «REST API»)."""
     if len(idempotency_key) != 32 or any(char not in "0123456789abcdef" for char in idempotency_key):
         raise HTTPException(
@@ -981,7 +1017,7 @@ async def post_alarm_ack(
         )
     if settlement == "aborted":
         assert type(result) is dict
-        return dict(result)
+        return JSONResponse(dict(result), status_code=409)
     # No open ``ok=False`` compatibility path exists. In particular, an
     # aborted-looking result with a missing protocol marker or mismatched
     # request identity must not be laundered into an HTTP 200 response after
