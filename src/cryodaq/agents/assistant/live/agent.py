@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder, normalize_sensor_health_summary
-from cryodaq.agents.assistant.live.output_router import OutputRouter, OutputTarget
+from cryodaq.agents.assistant.live.output_router import OutputRouter, OutputTarget, _is_delivered_outcome
 from cryodaq.agents.assistant.live.prompts import (
     ALARM_SUMMARY_SYSTEM,
     ALARM_SUMMARY_USER,
@@ -214,21 +214,19 @@ class _EventDedup:
         self._window_s = window_s
         self._seen: dict[str, float] = {}
 
-    def is_new(self, event_id: str) -> bool:
+    def should_dispatch(self, event_id: str) -> bool:
+        now = time.monotonic()
+        last = self._seen.get(event_id)
+        if last is None or last < now - self._window_s:
+            return True
+        self._seen[event_id] = now
+        return False
+
+    def mark_delivered(self, event_id: str) -> None:
         now = time.monotonic()
         cutoff = now - self._window_s
-        last = self._seen.get(event_id)
-        if last is not None and last >= cutoff:
-            # Still inside the window — refresh the timestamp so the next
-            # re-fire keeps the window sliding (one narrative per burst).
-            self._seen[event_id] = now
-            return False
-        # Fresh sighting — record and lazily prune expired keys to bound
-        # the dict size when many distinct alarm_ids cycle through.
         self._seen[event_id] = now
-        self._seen = {k: v for k, v in self._seen.items() if v >= cutoff}
-        return True
-
+        self._seen = {key: timestamp for key, timestamp in self._seen.items() if timestamp >= cutoff}
 
 def _event_dedup_id(event: EngineEvent) -> str | None:
     """Compute a dedup key for ``event`` or ``None`` when dedup does not apply.
@@ -333,7 +331,7 @@ class AssistantLiveAgent:
         targets: list[OutputTarget],
         prefix_suffix: str = "",
         allow_dispatch: bool = True,
-    ) -> tuple[list[str], dict[str, str]]:
+    ) -> tuple[list[str], dict[str, Any]]:
         """Persist intent, dispatch, and persist exact per-target settlement."""
         trigger_event = {
             "event_type": event.event_type,
@@ -358,7 +356,7 @@ class AssistantLiveAgent:
             logger.error("AssistantLiveAgent: output blocked before durable intent (audit_id=%s)", audit_id)
             return [], {"audit": "failed"}
 
-        outcomes: dict[str, str] = {}
+        outcomes: dict[str, Any] = {}
         if allow_dispatch and not errors and response.strip():
             outcomes = await self._router.dispatch_detailed(
                 event,
@@ -368,10 +366,10 @@ class AssistantLiveAgent:
                 prefix_suffix=prefix_suffix,
             )
             for target, state in outcomes.items():
-                if state != "delivered":
+                if not _is_delivered_outcome(state):
                     errors.append(f"output_{target}_{state}")
 
-        dispatched = [target for target, state in outcomes.items() if state == "delivered"]
+        dispatched = [target for target, state in outcomes.items() if _is_delivered_outcome(state)]
         if (
             await self._audit.complete(
                 audit_id=audit_id,
@@ -394,7 +392,7 @@ class AssistantLiveAgent:
                     # F-BotPolish: pre-invocation dedup gate — slice handler
                     # logic itself is unchanged.
                     dedup_id = _event_dedup_id(event)
-                    if dedup_id is not None and not self._dedup.is_new(dedup_id):
+                    if dedup_id is not None and not self._dedup.should_dispatch(dedup_id):
                         logger.debug(
                             "AssistantLiveAgent: dropping duplicate event %s",
                             dedup_id,
@@ -552,6 +550,10 @@ class AssistantLiveAgent:
         )
         if self._config.slice_b_suggestion and not result.truncated and result.text.strip():
             await self._generate_diagnostic_suggestion(event, payload)
+        if dispatched:
+            dedup_id = _event_dedup_id(event)
+            if dedup_id is not None:
+                self._dedup.mark_delivered(dedup_id)
 
     async def _generate_diagnostic_suggestion(self, event: EngineEvent, alarm_payload: dict[str, Any]) -> None:
         """Generate and dispatch Slice B diagnostic suggestion (second LLM call).

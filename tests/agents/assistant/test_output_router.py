@@ -19,6 +19,58 @@ class _Event:
     experiment_id = "exp-1"
 
 
+class _TelegramApiResponse:
+    """Minimal aiohttp response protocol used by TelegramSender._send."""
+
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def json(self):
+        return {"ok": False, "description": "Forbidden: bot was blocked by the user"}
+
+
+class _TelegramApiSession:
+    closed = False
+
+    def post(self, *_args, **_kwargs):
+        return _TelegramApiResponse()
+
+
+@pytest.mark.asyncio
+async def test_telegram_http_200_with_api_failure_is_not_delivered() -> None:
+    sender = TelegramSender("token", [101])
+    sender._session = _TelegramApiSession()
+
+    assert await sender._send(101, "alarm") == "failed"
+
+
+@pytest.mark.asyncio
+async def test_gui_publish_without_consumer_has_unknown_outcome() -> None:
+    from cryodaq.core.event_bus import EventBus
+
+    router = OutputRouter(telegram_bot=None, event_bus=EventBus())
+
+    outcomes = await router.dispatch_detailed(
+        _Event(),
+        "response",
+        targets=[OutputTarget.GUI_INSIGHT],
+        audit_id="audit-gui-no-consumer",
+    )
+
+    assert outcomes == {"gui_insight": "outcome_unknown"}
+    assert await router.dispatch(
+        _Event(),
+        "response",
+        targets=[OutputTarget.GUI_INSIGHT],
+        audit_id="audit-gui-no-consumer",
+    ) == []
+
+
 @pytest.mark.asyncio
 async def test_http_failure_is_not_reported_as_dispatched() -> None:
     telegram = TelegramSender("token", [101])

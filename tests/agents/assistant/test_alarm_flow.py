@@ -124,6 +124,15 @@ def _make_agent(
     return agent, bus
 
 
+async def _wait_for_await_count(mock: AsyncMock, expected: int) -> None:
+    for _ in range(400):
+        if mock.await_count == expected:
+            await asyncio.sleep(0)
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"expected {expected} awaits, got {mock.await_count}")
+
+
 # ---------------------------------------------------------------------------
 # AssistantConfig
 # ---------------------------------------------------------------------------
@@ -289,6 +298,47 @@ async def test_critical_level_alarm_is_handled(tmp_path: Path) -> None:
     await asyncio.wait_for(done.wait(), timeout=2.0)
 
     ollama.generate.assert_awaited_once()
+    await agent.stop()
+
+
+async def test_unknown_critical_delivery_does_not_dedup_refire(tmp_path: Path) -> None:
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock(return_value={101: "outcome_unknown"})
+    agent, bus = _make_agent(telegram=telegram, tmp_path=tmp_path)
+    await agent.start()
+
+    await bus.publish(_alarm_event(alarm_id="dedup-unknown"))
+    await _wait_for_await_count(telegram._send_to_all, 1)
+    await bus.publish(_alarm_event(alarm_id="dedup-unknown"))
+    await _wait_for_await_count(telegram._send_to_all, 2)
+
+    assert agent._dedup.should_dispatch("alarm:dedup-unknown") is True
+    await agent.stop()
+
+
+async def test_delivered_critical_alarm_still_dedups_refire(tmp_path: Path) -> None:
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock(return_value={101: "delivered"})
+    agent, bus = _make_agent(telegram=telegram, tmp_path=tmp_path)
+    await agent.start()
+
+    await bus.publish(_alarm_event(alarm_id="dedup-delivered"))
+    await _wait_for_await_count(telegram._send_to_all, 1)
+    for _ in range(400):
+        if not agent._dedup.should_dispatch("alarm:dedup-delivered"):
+            break
+        await asyncio.sleep(0.005)
+    else:
+        raise AssertionError("delivered alarm was not recorded for dedup")
+    audit_record = json.loads(next((tmp_path / "audit").rglob("*.json")).read_text(encoding="utf-8"))
+    assert audit_record["outputs_dispatched"] == ["telegram"]
+    assert audit_record["output_outcomes"] == {"telegram": "delivered"}
+    assert not any(error.startswith("output_telegram_") for error in audit_record["errors"])
+    await bus.publish(_alarm_event(alarm_id="dedup-delivered"))
+    await asyncio.sleep(0)
+
+    telegram._send_to_all.assert_awaited_once()
+    assert agent._dedup.should_dispatch("alarm:dedup-delivered") is False
     await agent.stop()
 
 

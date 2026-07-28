@@ -61,6 +61,12 @@ class OutputTarget(enum.Enum):
     GUI_INSIGHT = "gui_insight"
 
 
+def _is_delivered_outcome(state: Any) -> bool:
+    return state == "delivered" or (
+        isinstance(state, dict) and state and all(recipient_state == "delivered" for recipient_state in state.values())
+    )
+
+
 class OutputRouter:
     """Dispatches AssistantLiveAgent LLM output to configured channels."""
 
@@ -136,7 +142,8 @@ class OutputRouter:
                             experiment_id=trigger_event.experiment_id,
                         )
                     )
-                    outcomes["gui_insight"] = "delivered"
+                    # EventBus admission does not acknowledge GUI consumption or rendering.
+                    outcomes["gui_insight"] = "outcome_unknown"
 
             except Exception:
                 outcomes[target.value] = "outcome_unknown"
@@ -168,13 +175,7 @@ class OutputRouter:
         )
         delivered: list[str] = []
         for target, state in outcomes.items():
-            if state == "delivered":
-                delivered.append(target)
-            elif (
-                isinstance(state, dict)
-                and state
-                and all(recipient_state == "delivered" for recipient_state in state.values())
-            ):
+            if _is_delivered_outcome(state):
                 delivered.append(target)
         return delivered
 

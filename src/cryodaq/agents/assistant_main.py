@@ -313,8 +313,22 @@ class TelegramSender:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error("Telegram sendMessage %d: %s", resp.status, body[:200])
-                    return "failed" if not 300 <= resp.status < 400 else "outcome_unknown"
-                return "delivered"
+                    return "failed" if 400 <= resp.status < 500 else "outcome_unknown"
+                try:
+                    result = await resp.json()
+                except Exception:
+                    logger.error("Telegram sendMessage 200 with unparseable response")
+                    return "outcome_unknown"
+                if not isinstance(result, dict):
+                    logger.error("Telegram sendMessage 200 without an object acknowledgement")
+                    return "outcome_unknown"
+                if result.get("ok") is True:
+                    return "delivered"
+                if result.get("ok") is False:
+                    logger.error("Telegram sendMessage rejected: %s", result.get("description", "unknown error"))
+                    return "failed"
+                logger.error("Telegram sendMessage 200 without API acknowledgement")
+                return "outcome_unknown"
         except Exception as exc:
             logger.error("Ошибка отправки Telegram: %s", exc)
             return "outcome_unknown"
