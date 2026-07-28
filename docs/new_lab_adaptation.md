@@ -57,6 +57,7 @@ reviewer can see them change:
 | `config/channels.yaml` | per-channel UI name, group, thermal zone, alarm band |
 | `config/cooldown.yaml` | which channel is the cold stage and which the warm stage |
 | `config/housekeeping.yaml` | throttling and housekeeping budgets |
+| `config/instruments.yaml` | the tracked instrument roster used when no `instruments.local.yaml` exists — this stand's real addresses live in the local file, but the tracked one is committed policy and is the file an adapting lab most naturally edits first |
 
 **Gitignored, machine-local — addresses and secrets.** `.gitignore` ignores
 `config/*.local.yaml` (`.gitignore:33`). Each has a tracked `.example`
@@ -88,8 +89,9 @@ Two mechanics you must know before editing anything:
   local acceptance record; the base file is not consulted in that mode.
 - **`config/alarms_v3.yaml` and `config/physical_alarms.yaml` have no local
   override at all.** The engine reads them from the tracked path
-  unconditionally (`src/cryodaq/engine.py:6432`, `:6612`, `:6645`), as does
-  `config/channels.yaml` (`src/cryodaq/core/channel_manager.py:25`). Your
+  unconditionally (`src/cryodaq/engine.py:6677-6678` for `alarms_v3.yaml`,
+  `:6710-6711` for `physical_alarms.yaml`). `config/channels.yaml` is loaded
+  through `ChannelManager` (`src/cryodaq/core/channel_manager.py:25`). Your
   alarm thresholds are therefore *committed policy in your fork* by
   construction. That is the intended design: a threshold is a physical claim
   and must be reviewable, whereas a COM port is not.
@@ -657,10 +659,16 @@ cryodaq-engine --mock
 
 Pass signal: the process **stays up** and logs
 `Alarm Engine v2: загружено N алармов`. Fail signal: it exits with code **2**
-and logs `CONFIG ERROR (<layer> config): exception=<Error>`; the launcher
-deliberately does not auto-restart that code
-(`src/cryodaq/engine.py:7691`, `:7769-7796`). A dead alarm channel reference,
-for instance, exits 2 with `SafetyPatternLivenessError`.
+and logs `CONFIG ERROR (<layer> config): <error>`
+(`src/cryodaq/engine.py:7857`). The decision not to auto-restart that exit code
+lives in the **launcher**, not the engine: see
+`src/cryodaq/launcher.py:5609` (`Engine exited with CONFIG ERROR (code %d). NOT
+auto-restarting.`) and `:5614`. A dead alarm channel reference, for instance,
+exits 2 with `SafetyPatternLivenessError`.
+
+*** Do not grep for a literal `exception=` — that string does not appear in the
+message. *** The format is `CONFIG ERROR (%s config): %s`, so grep for
+`CONFIG ERROR` and read the layer name from the first field.
 
 **Limit: there is no bounded "validate and exit" mode.** On success the engine
 runs until you stop it, so this cannot be a CI gate as it stands. Closing that
