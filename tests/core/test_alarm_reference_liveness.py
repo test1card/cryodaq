@@ -63,10 +63,9 @@ def _write_fixture_manifest(path: Path) -> None:
                 "quantity": "temperature",
                 "unit": "K",
                 "role": "primary_measurement",
-                # observational keeps the critical-temperature union check
-                # (safety_pattern_liveness.py plane 2) out of this fixture, so a
-                # failure here can only come from the alarm plane.
-                "safety_class": "observational",
+                # This channel is also the fixture's declared RUN-critical
+                # input, so its descriptor must carry the production class.
+                "safety_class": "safety_critical_input",
                 "display_group": "test",
                 "display_name": "Test channel",
                 "visible_by_default": True,
@@ -108,7 +107,7 @@ def _build_fixture(tmp_path: Path, alarms: dict) -> dict:
     safety_path = config_dir / "safety.yaml"
     # Single-quoted YAML scalars keep the regex backslash literal.
     safety_path.write_text(
-        "critical_channels:\n  - '^source\\.heartbeat$'\nkeithley_channels:\n  - '^source heartbeat$'\n",
+        "critical_channels:\n  - 'source.heartbeat'\nkeithley_channels:\n  - '^source heartbeat$'\n",
         encoding="utf-8",
     )
     safety_manager = SafetyManager(SafetyBroker())

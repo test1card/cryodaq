@@ -4,7 +4,8 @@
 # Любые правки должны быть согласованы с ответственным инженером.
 
 # Каналы, обязательные для разрешения работы нагревателя.
-# Regex — если канал не обновляется в течение stale_timeout_s → FAULT.
+# Exact canonical descriptor identities. If one stops updating for
+# stale_timeout_s, the safety manager faults.
 #
 # Architect rule (2026-05-07): только positionally-fixed reference
 # каналы gate the safety FSM. T11 (азотная/1-я ступень, ~40K floor) и T12
@@ -13,8 +14,8 @@
 # mobile per-experiment, использование их как critical_channels
 # создаёт ложные fault'ы при перестановке датчиков.
 critical_channels:
-  - "^Т11$"     # canonical identity; startup resolves the one exact raw binding
-  - "^Т12$"     # canonical identity; startup resolves the one exact raw binding
+  - "Т11"     # opaque canonical identity; startup resolves exact (instrument_id, emitted_channel)
+  - "Т12"     # opaque canonical identity; startup resolves exact (instrument_id, emitted_channel)
 
 # Через сколько секунд без обновления критический канал считается устаревшим
 stale_timeout_s: 10.0

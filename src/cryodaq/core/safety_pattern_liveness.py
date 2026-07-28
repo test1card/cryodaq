@@ -362,62 +362,74 @@ def _collect_dead_alarm_channel_refs(
     return dead
 
 
-def _resolve_critical_patterns_to_raw(
+def _resolve_critical_input_bindings(
     *,
     descriptor_catalog: LiveChannelDescriptorCatalog,
-    canonical_ids: list[str],
-    raw_labels: list[str],
-    patterns: list[re.Pattern[str]],
-) -> tuple[list[re.Pattern[str]], list[_DeadPattern]]:
-    """Resolve canonical critical identities to exact raw emitted labels.
+    declared_ids: list[str],
+) -> tuple[dict[tuple[str, str], str], list[_DeadPattern]]:
+    """Resolve canonical critical identities to exact live input bindings.
 
     ``safety.yaml`` names the stable canonical identities.  SafetyManager's
-    broker still receives the pre-bind emitted label, so production startup
-    must resolve each canonical identity through the selected descriptor
-    bindings and install a full-string escaped raw matcher.  A zero, multiple,
-    missing, or colliding mapping is a configuration fault; silently falling
-    back to a substring or alias would make the safety plane ambiguous.
+    broker receives pre-bind readings, so production startup resolves each
+    canonical declaration to one exact ``(instrument_id, emitted_channel)``
+    pair. A missing, repeated, ambiguous, or non-critical association is a
+    configuration fault.
     """
 
     storage_catalog = descriptor_catalog.storage_catalog_snapshot()
-    raw_by_canonical: dict[str, list[str]] = {channel_id: [] for channel_id in canonical_ids}
-    for (instrument_id, emitted_channel), channel_id in descriptor_catalog._bindings.items():
-        if channel_id not in raw_by_canonical or emitted_channel not in raw_labels:
-            continue
-        descriptor = storage_catalog.by_channel_id.get(channel_id)
-        if descriptor is None or descriptor.instrument_id != instrument_id:
-            continue
-        raw_by_canonical[channel_id].append(emitted_channel)
-    raw_owners: dict[str, set[str]] = {}
-    for channel_id, labels in raw_by_canonical.items():
-        for label in labels:
-            raw_owners.setdefault(label, set()).add(channel_id)
-    colliding_raw = {label for label, owners in raw_owners.items() if len(owners) > 1}
-
-    resolved: list[re.Pattern[str]] = []
+    resolved: dict[tuple[str, str], str] = {}
+    declared: set[str] = set()
     dead: list[_DeadPattern] = []
-    for pattern in patterns:
-        matches = [channel_id for channel_id in canonical_ids if pattern.fullmatch(channel_id)]
-        if len(matches) != 1:
+    for channel_id in declared_ids:
+        if channel_id not in storage_catalog.by_channel_id:
             dead.append(
                 _DeadPattern(
-                    pattern=pattern.pattern,
+                    pattern=channel_id,
                     plane="canonical identity resolution to raw emitted label",
                     source="safety.yaml critical_channels",
                 )
             )
             continue
-        raw_matches = raw_by_canonical.get(matches[0], [])
-        if len(raw_matches) != 1 or raw_matches[0] in colliding_raw:
+        if channel_id in declared:
             dead.append(
                 _DeadPattern(
-                    pattern=pattern.pattern,
-                    plane="descriptor reverse binding to raw emitted label",
+                    pattern=channel_id,
+                    plane="unique canonical critical-input declaration",
                     source="safety.yaml critical_channels",
                 )
             )
             continue
-        resolved.append(re.compile(rf"^{re.escape(raw_matches[0])}$"))
+        declared.add(channel_id)
+        descriptor = storage_catalog.by_channel_id.get(channel_id)
+        candidates = [
+            identity
+            for identity, bound_channel_id in descriptor_catalog._bindings.items()
+            if bound_channel_id == channel_id
+        ]
+        if descriptor is None or len(candidates) != 1:
+            dead.append(
+                _DeadPattern(
+                    pattern=channel_id,
+                    plane="canonical critical identity resolution to one exact live binding",
+                    source="safety.yaml critical_channels",
+                )
+            )
+            continue
+        identity = candidates[0]
+        if (
+            descriptor.safety_class is not ChannelSafetyClass.SAFETY_CRITICAL_INPUT
+            or descriptor.role is ChannelRole.SOURCE_READBACK
+            or descriptor.instrument_id != identity[0]
+        ):
+            dead.append(
+                _DeadPattern(
+                    pattern=channel_id,
+                    plane="descriptor-owned safety-critical input classification",
+                    source="safety.yaml critical_channels",
+                )
+            )
+            continue
+        resolved[identity] = channel_id
     return resolved, dead
 
 
@@ -660,7 +672,7 @@ def validate_safety_pattern_liveness(
     SELECTED descriptor manifest, on the plane its consumer sees.
 
     Reuses the engine's already-loaded ``safety_manager`` (the actual runtime
-    SafetyManager with its compiled critical/keithley patterns) and the
+    SafetyManager with its critical declarations and Keithley patterns) and the
     already-computed ``adaptive_throttle_patterns``: the exact union of legacy
     interlock patterns and alarms-v3 protected patterns supplied to the
     runtime ``AdaptiveThrottle``.  No safety config is parsed twice at boot.
@@ -685,7 +697,8 @@ def validate_safety_pattern_liveness(
 
       1. ``interlocks.yaml`` — every interlock is safety-class. CANONICAL plane,
          ``.match`` (``InterlockCondition.matches_channel``).
-      2. ``safety.yaml`` ``critical_channels`` — RAW plane, ``.match``.
+      2. ``safety.yaml`` ``critical_channels`` — canonical declarations
+         resolved to exact ``(instrument_id, emitted_channel)`` bindings.
       3. ``safety.yaml`` ``keithley_heartbeat_channels`` — canonical
          descriptor identities resolved to exact ``(instrument_id,
          emitted_channel)`` pairs owned by the reviewed-source runtime binding.
@@ -736,25 +749,16 @@ def validate_safety_pattern_liveness(
             )
 
     # Plane 2: safety.yaml names canonical identities, while SafetyManager
-    # consumes raw labels. Resolve and install the exact reverse bindings
-    # before any safety monitor starts.
+    # consumes raw readings. Resolve exact declared-owner bindings before any
+    # safety monitor starts.
     # Keep the canonical source immutable and resolve it on every validation.
-    # The descriptor authority can be replaced at runtime, so a previously
-    # resolved raw matcher must never be reused for a new descriptor snapshot.
-    # ``load_config`` refreshes this source whenever safety.yaml is reloaded;
-    # the fallback is only for test doubles that expose a SafetyConfig without
-    # the normal loader.
-    canonical_patterns = getattr(safety_manager, "_canonical_critical_patterns", None)
-    if canonical_patterns is None:
-        canonical_patterns = list(safety_manager._config.critical_channels)
-        safety_manager._canonical_critical_patterns = list(canonical_patterns)
-    else:
-        canonical_patterns = list(canonical_patterns)
-    resolved_critical, critical_dead = _resolve_critical_patterns_to_raw(
+    # The descriptor authority can be replaced at runtime, so previously
+    # resolved identities must never be reused for a new descriptor snapshot.
+    # ``load_config`` refreshes this source whenever safety.yaml is reloaded.
+    declared_critical_ids = list(safety_manager._canonical_critical_ids)
+    resolved_critical, critical_dead = _resolve_critical_input_bindings(
         descriptor_catalog=descriptor_catalog,
-        canonical_ids=canonical_ids,
-        raw_labels=raw_labels,
-        patterns=list(canonical_patterns),
+        declared_ids=declared_critical_ids,
     )
     dead.extend(critical_dead)
     critical_manifest_ids = {
@@ -763,12 +767,9 @@ def validate_safety_pattern_liveness(
         if getattr(getattr(descriptor, "quantity", None), "value", None) == "temperature"
         and getattr(getattr(descriptor, "safety_class", None), "value", None) == "safety_critical_input"
     }
-    matched_critical_ids: set[str] = set()
-    for pattern in canonical_patterns:
-        for channel_id in canonical_ids:
-            if pattern.fullmatch(channel_id):
-                matched_critical_ids.add(channel_id)
-    if critical_manifest_ids and matched_critical_ids != critical_manifest_ids:
+    matched_critical_ids = set(declared_critical_ids) & set(canonical_ids)
+    critical_union_dead = bool(critical_manifest_ids and matched_critical_ids != critical_manifest_ids)
+    if critical_union_dead:
         dead.append(
             _DeadPattern(
                 pattern=f"manifest={sorted(critical_manifest_ids)!r}",
@@ -776,13 +777,12 @@ def validate_safety_pattern_liveness(
                 source="selected descriptor manifest vs safety.yaml critical_channels",
             )
         )
-    if critical_dead:
-        # Do not leave an earlier successful raw resolution installed after a
-        # failed descriptor/configuration replacement. Boot fails below, and
-        # an empty runtime matcher is fail-closed if inspected before raise.
-        safety_manager._config.critical_channels = []
+    if critical_dead or critical_union_dead:
+        # Do not leave earlier authority installed after a failed descriptor
+        # or configuration replacement.
+        safety_manager._critical_input_bindings = {}
     else:
-        safety_manager._config.critical_channels = resolved_critical
+        safety_manager._critical_input_bindings = resolved_critical
 
     # Plane 3: canonical, per-output source-readback declarations resolve to
     # exact identities owned by the reviewed-source runtime binding.

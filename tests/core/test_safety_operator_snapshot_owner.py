@@ -473,6 +473,7 @@ async def test_stale_invalid_and_missing_critical_inputs_are_explicit_blockers()
     manager._safety_monitor_active = True
     await _qualify_generation(manager, driver, expected_verified_off=True)
     manager._config.critical_channels = [re.compile("critical/temperature")]
+    manager._critical_input_bindings = {("test", "critical/temperature"): "critical.temperature"}
 
     manager._refresh_operator_safety_snapshot()
     assert "critical_input_missing" in _codes(manager.snapshot_operator_safety())

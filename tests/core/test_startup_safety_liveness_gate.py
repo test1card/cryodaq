@@ -135,7 +135,7 @@ def _install_engine_startup_harness(
     (config_dir / "instruments.local.yaml").write_text("instruments: []\n", encoding="utf-8")
     (config_dir / "interlocks.yaml").write_text("interlocks: []\n", encoding="utf-8")
     (config_dir / "housekeeping.yaml").write_text("{}\n", encoding="utf-8")
-    (config_dir / "safety.yaml").write_text("critical_channels:\n  - '^default$'\n", encoding="utf-8")
+    (config_dir / "safety.yaml").write_text("critical_channels:\n  - 'default'\n", encoding="utf-8")
     (config_dir / "cooldown.yaml").write_text("cooldown:\n  enabled: false\n", encoding="utf-8")
     _write_manifest(
         config_dir / "channel_descriptors.yaml",
@@ -211,13 +211,13 @@ async def test_run_engine_records_effective_physical_policy_provenance(
     (config_dir / "housekeeping.yaml").write_text("{}\n", encoding="utf-8")
     (config_dir / "cooldown.yaml").write_text("cooldown:\n  enabled: false\n", encoding="utf-8")
     (config_dir / "safety.yaml").write_text(
-        "critical_channels:\n  - '^tracked$'\nsource_limits:\n  max_power_w: 1.0\n",
+        "critical_channels:\n  - 'tracked'\nsource_limits:\n  max_power_w: 1.0\n",
         encoding="utf-8",
     )
     selected = config_dir / ("safety.local.yaml" if local_override else "safety.yaml")
     if local_override:
         selected.write_text(
-            "critical_channels:\n  - '^local$'\nsource_limits:\n  max_power_w: 2.0\n",
+            "critical_channels:\n  - 'local'\nsource_limits:\n  max_power_w: 2.0\n",
             encoding="utf-8",
         )
     expected_hash = hashlib.sha256(selected.read_bytes()).hexdigest()
@@ -266,8 +266,8 @@ async def test_run_engine_provenance_hash_matches_the_safety_bytes_it_applies(
     (config_dir / "housekeeping.yaml").write_text("{}\n", encoding="utf-8")
     (config_dir / "cooldown.yaml").write_text("cooldown:\n  enabled: false\n", encoding="utf-8")
     safety_path = config_dir / "safety.yaml"
-    bytes_before = b"critical_channels:\n  - '^before$'\nsource_limits:\n  max_power_w: 1.0\n"
-    bytes_applied = b"critical_channels:\n  - '^applied$'\nsource_limits:\n  max_power_w: 2.0\n"
+    bytes_before = b"critical_channels:\n  - 'before'\nsource_limits:\n  max_power_w: 1.0\n"
+    bytes_applied = b"critical_channels:\n  - 'applied'\nsource_limits:\n  max_power_w: 2.0\n"
     safety_path.write_bytes(bytes_before)
     original_read_bytes = Path.read_bytes
 
@@ -296,7 +296,7 @@ def test_all_physical_policy_loaders_return_applied_snapshot_receipts(tmp_path: 
     interlocks_path = tmp_path / "interlocks.yaml"
     housekeeping_path = tmp_path / "housekeeping.yaml"
     cooldown_path = tmp_path / "cooldown.yaml"
-    safety_path.write_bytes(b"critical_channels:\n  - '^safety$'\n")
+    safety_path.write_bytes(b"critical_channels:\n  - 'safety'\n")
     interlocks_path.write_bytes(b"interlocks: []\n")
     housekeeping_path.write_bytes(b"adaptive_throttle:\n  enabled: true\n")
     cooldown_path.write_bytes(b"cooldown:\n  enabled: false\n")
@@ -525,15 +525,15 @@ def test_dead_interlock_pattern_raises_canonical(tmp_path) -> None:
     assert "interlocks.yaml" in message
 
 
-def test_dead_safety_critical_pattern_raises_from_canonical_authority() -> None:
-    """A dead canonical safety.yaml critical pattern makes validation raise.
+def test_dead_safety_critical_declaration_raises_from_canonical_authority() -> None:
+    """A dead canonical safety.yaml critical declaration makes validation raise.
 
-    Loads the real safety config, then appends a critical_channels pattern that
-    matches NO raw emitted label. The validator must raise and name the dead
-    pattern, its plane, and the safety.yaml source.
+    Loads the real safety config, then appends a critical_channels identity
+    absent from the descriptor authority. The validator must raise and name the
+    dead declaration, its plane, and the safety.yaml source.
     """
     sm = _real_safety_manager()
-    sm._canonical_critical_patterns.append(re.compile("__DEAD_SAFETY_CRITICAL__"))
+    sm._canonical_critical_ids.append("__DEAD_SAFETY_CRITICAL__")
     with pytest.raises(SafetyPatternLivenessError) as exc_info:
         validate_safety_pattern_liveness(
             descriptor_catalog=_real_catalog(),
@@ -608,7 +608,7 @@ def test_legacy_keithley_regex_cannot_replace_structural_heartbeat_ownership(tmp
     interlocks_path.write_text("interlocks: []\n", encoding="utf-8")
     safety_path = tmp_path / "safety.yaml"
     safety_path.write_text(
-        'critical_channels:\n  - "^source heartbeat$"\nkeithley_channels:\n  - "^custom keithley heartbeat$"\n',
+        'critical_channels:\n  - "source.heartbeat"\nkeithley_channels:\n  - "^custom keithley heartbeat$"\n',
         encoding="utf-8",
     )
     safety_manager = SafetyManager(SafetyBroker())

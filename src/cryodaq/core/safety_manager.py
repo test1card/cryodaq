@@ -292,6 +292,8 @@ class SafetyManager:
         self._global_off_owner_abort_generation = -1
 
         self._keithley_patterns = [re.compile(p) for p in self._config.keithley_channel_patterns]
+        self._canonical_critical_ids: list[str] = []
+        self._critical_input_bindings: dict[tuple[str, str], str] | None = None
         self._keithley_heartbeat_bindings: dict[SmuChannel, frozenset[tuple[str, str]]] = {
             channel: frozenset() for channel in SMU_CHANNELS
         }
@@ -339,7 +341,7 @@ class SafetyManager:
             raise SafetyConfigError(f"safety.yaml at {path} produced no valid critical_channels")
 
         logger.info(
-            "SafetyManager config: %d critical channel patterns from %s",
+            "SafetyManager config: %d critical channel declarations from %s",
             len(patterns),
             path,
         )
@@ -380,12 +382,12 @@ class SafetyManager:
                 scheduler_drain_timeout_s=float(raw.get("scheduler_drain_timeout_s", 5.0)),
             )
             self._keithley_patterns = [re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])]
+            self._critical_input_bindings = None
             self._keithley_heartbeat_bindings = {channel: frozenset() for channel in SMU_CHANNELS}
-            # Liveness validation resolves these canonical patterns against
-            # the selected descriptor authority.  A config reload must start
-            # from the newly loaded canonical source rather than retaining a
-            # previous raw-label resolution.
-            self._canonical_critical_patterns = list(patterns)
+            # Liveness validation resolves these opaque canonical declarations
+            # against the selected descriptor authority. A config reload must
+            # never retain authority from a previous descriptor snapshot.
+            self._canonical_critical_ids = list(raw_patterns)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise SafetyConfigError(
                 f"safety.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}"
@@ -1944,13 +1946,30 @@ class SafetyManager:
             self._cooldown_predictor_unavailable_reason = "" if available else reason
             self._refresh_operator_safety_snapshot()
 
-    def _critical_input_snapshot_fact(self, now: float) -> tuple[PlantHealthFact, SafetyBlocker | None]:
-        for pattern in self._config.critical_channels:
-            matches = [
-                (channel, sample)
-                for (_instrument_id, channel), sample in self._latest.items()
-                if pattern.match(channel)
+    def _critical_input_requirements(
+        self,
+    ) -> list[tuple[str, list[tuple[tuple[str, str], tuple[float, float, str]]]]]:
+        """Return each declared critical input and only its accepted samples."""
+        if self._critical_input_bindings:
+            return [
+                (
+                    identity[1],
+                    [(identity, self._latest[identity])] if identity in self._latest else [],
+                )
+                for identity in sorted(self._critical_input_bindings)
             ]
+        if self._critical_input_bindings is not None or not self._mock:
+            return [(pattern.pattern, []) for pattern in self._config.critical_channels]
+        return [
+            (
+                pattern.pattern,
+                [(identity, sample) for identity, sample in self._latest.items() if pattern.match(identity[1])],
+            )
+            for pattern in self._config.critical_channels
+        ]
+
+    def _critical_input_snapshot_fact(self, now: float) -> tuple[PlantHealthFact, SafetyBlocker | None]:
+        for _declared, matches in self._critical_input_requirements():
             if not matches and not self._mock:
                 return (
                     PlantHealthFact(
@@ -1966,7 +1985,7 @@ class SafetyManager:
                         "Restore a current valid critical-channel reading",
                     ),
                 )
-            for _channel, (observed, value, status) in matches:
+            for (_instrument_id, _channel), (observed, value, status) in matches:
                 if now - observed > self._config.stale_timeout_s:
                     return (
                         PlantHealthFact(
@@ -2708,12 +2727,8 @@ class SafetyManager:
         if self._cooldown_predictor_available is False:
             return False, f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
 
-        for pattern in self._config.critical_channels:
-            matched = False
-            for (_instrument_id, ch), (ts, value, status) in self._latest.items():
-                if not pattern.match(ch):
-                    continue
-                matched = True
+        for declared, matches in self._critical_input_requirements():
+            for (_instrument_id, ch), (ts, value, status) in matches:
                 age = now - ts
                 if age > self._config.stale_timeout_s:
                     return False, f"Stale data: {ch} ({age:.1f}s)"
@@ -2721,8 +2736,8 @@ class SafetyManager:
                     return False, f"Channel {ch} status={status}"
                 if math.isnan(value) or math.isinf(value):
                     return False, f"Channel {ch} invalid value {value}"
-            if not matched and not self._mock:
-                return False, f"No data for critical channel: {pattern.pattern}"
+            if not matches and not self._mock:
+                return False, f"No data for critical channel: {declared}"
 
         if self._config.require_keithley_for_run and not self._mock:
             if self._keithley is None:
@@ -2778,7 +2793,11 @@ class SafetyManager:
                     reading.status.value,
                 )
                 self._refresh_operator_safety_snapshot()
-                if reading.unit == "K" and reading.is_usable():
+                critical_identity = (reading.instrument_id, reading.channel)
+                rate_identity_accepted = (
+                    self._critical_input_bindings is None and self._mock
+                ) or critical_identity in (self._critical_input_bindings or {})
+                if reading.unit == "K" and reading.is_usable() and rate_identity_accepted:
                     # S3: gate the rate estimator on the doctrine predicate. A
                     # NaN/±inf or error-status reading poisons the OLS buffer —
                     # _ols_slope_per_min() returns None until the bad point ages
@@ -2788,7 +2807,12 @@ class SafetyManager:
                     # F23: use measurement timestamp, not queue dequeue time.
                     # Under backlog, monotonic() clusters; reading.timestamp reflects
                     # actual instrument measurement time, giving correct dT/dt.
-                    self._rate_estimator.push(reading.channel, reading.timestamp.timestamp(), reading.value)
+                    rate_key = (
+                        reading.channel
+                        if self._critical_input_bindings is None
+                        else self._critical_input_bindings[critical_identity]
+                    )
+                    self._rate_estimator.push(rate_key, reading.timestamp.timestamp(), reading.value)
         except asyncio.CancelledError:
             raise
 
@@ -2837,14 +2861,14 @@ class SafetyManager:
         if self._state not in (SafetyState.RUN_PERMITTED, SafetyState.RUNNING):
             return
 
-        for pattern in self._config.critical_channels:
-            for (_instrument_id, ch), (ts, _value, _status) in self._latest.items():
-                if pattern.match(ch) and now - ts > self._config.stale_timeout_s:
+        for declared, matches in self._critical_input_requirements():
+            if not matches and not self._mock:
+                await self._fault(f"No data for critical channel {declared}", channel=declared)
+                return
+            for (_instrument_id, ch), (ts, value, status) in matches:
+                if now - ts > self._config.stale_timeout_s:
                     await self._fault(f"Устаревшие данные канала {ch}", channel=ch)
                     return
-
-        for (_instrument_id, ch), (_ts, value, status) in self._latest.items():
-            if any(pattern.match(ch) for pattern in self._config.critical_channels):
                 if status != "ok":
                     await self._fault(f"Channel {ch} status={status}", channel=ch, value=value)
                     return
@@ -2898,17 +2922,25 @@ class SafetyManager:
                 )
                 return
 
-        for ch in self._rate_estimator.channels():
-            if not any(pattern.match(ch) for pattern in self._config.critical_channels):
-                continue
-            rate = self._rate_estimator.get_rate(ch)
+        if self._critical_input_bindings is None:
+            rate_inputs = [
+                (ch, ch)
+                for ch in self._rate_estimator.channels()
+                if self._mock and any(pattern.match(ch) for pattern in self._config.critical_channels)
+            ]
+        else:
+            rate_inputs = [
+                (channel_id, identity[1]) for identity, channel_id in sorted(self._critical_input_bindings.items())
+            ]
+        for rate_key, emitted_channel in rate_inputs:
+            rate = self._rate_estimator.get_rate(rate_key)
             if rate is None:
                 continue
             abs_rate = abs(rate)
             if abs_rate > self._config.max_dT_dt_K_per_min:
                 await self._fault(
-                    f"Rate limit exceeded {ch}: {abs_rate:.2f} K/min > {self._config.max_dT_dt_K_per_min}",  # noqa: E501
-                    channel=ch,
+                    f"Rate limit exceeded {emitted_channel}: {abs_rate:.2f} K/min > {self._config.max_dT_dt_K_per_min}",
+                    channel=emitted_channel,
                     value=abs_rate,
                 )
                 return

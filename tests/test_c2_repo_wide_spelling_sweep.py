@@ -784,17 +784,6 @@ _REGISTRY_ROWS = (
         "rate grouping lacks verified descriptor selector",
     ),
     (
-        "C2-030",
-        _Challenge(
-            "src/cryodaq/core/safety_manager.py",
-            "SafetyManager._critical_input_snapshot_fact",
-            "regular expression match() over identity",
-            "c831efc14111c39b3741",
-        ),
-        "BLOCKED-ON-SCHEMA",
-        "safety configuration lacks verified descriptor selector",
-    ),
-    (
         "C2-031",
         _Challenge(
             "src/cryodaq/core/safety_manager.py",
@@ -806,39 +795,6 @@ _REGISTRY_ROWS = (
         "safety configuration lacks verified descriptor selector",
     ),
     (
-        "C2-032",
-        _Challenge(
-            "src/cryodaq/core/safety_manager.py",
-            "SafetyManager._check_preconditions",
-            "regular expression match() over identity",
-            "c0c1b947225dcf4b8328",
-        ),
-        "LEGITIMATE",
-        "startup liveness installs one exact escaped raw label from descriptor authority",
-    ),
-    (
-        "C2-033",
-        _Challenge(
-            "src/cryodaq/core/safety_manager.py",
-            "SafetyManager._run_checks",
-            "regular expression match() over identity",
-            "c0c1b947225dcf4b8328",
-        ),
-        "LEGITIMATE",
-        "startup liveness installs one exact escaped raw label from descriptor authority",
-    ),
-    (
-        "C2-034",
-        _Challenge(
-            "src/cryodaq/core/safety_manager.py",
-            "SafetyManager._run_checks",
-            "regular expression match() over identity",
-            "c0c1b947225dcf4b8328",
-        ),
-        "LEGITIMATE",
-        "startup liveness installs one exact escaped raw label from descriptor authority",
-    ),
-    (
         "C2-035",
         _Challenge(
             "src/cryodaq/core/safety_manager.py",
@@ -847,40 +803,18 @@ _REGISTRY_ROWS = (
             "c0c1b947225dcf4b8328",
         ),
         "LEGITIMATE",
-        "startup liveness installs one exact escaped raw label from descriptor authority",
-    ),
-    (
-        "C2-036",
-        _Challenge(
-            "src/cryodaq/core/safety_manager.py",
-            "SafetyManager._has_fresh_keithley_data",
-            "regular expression match() over identity",
-            "c831efc14111c39b3741",
-        ),
-        "BLOCKED-ON-SCHEMA",
-        "safety configuration lacks verified descriptor selector",
-    ),
-    (
-        "C2-037",
-        _Challenge(
-            "src/cryodaq/core/safety_manager.py",
-            "SafetyManager._has_fresh_keithley_data",
-            "computed membership over identity",
-            "1b7c426debc1f57d8fb5",
-        ),
-        "LIVE-C2-PRODUCT-DEFECT",
-        "computed path segment can misassociate heartbeat data and suppress the emergency-OFF fault",
+        "mock-mode compatibility only; production rate selection requires descriptor bindings",
     ),
     (
         "C2-038",
         _Challenge(
             "src/cryodaq/core/safety_pattern_liveness.py",
-            "_resolve_critical_patterns_to_raw",
-            "regular expression fullmatch() over identity",
-            "afb2b58b7bc28e90cf60",
+            "_resolve_critical_input_bindings",
+            "computed membership over identity",
+            "c6da8c2a80c71fce6a67",
         ),
-        "BLOCKED-ON-SCHEMA",
-        "safety liveness configuration lacks verified descriptor selector",
+        "LEGITIMATE",
+        "safety.yaml critical_channels declares exact canonical descriptor identities",
     ),
     (
         "C2-039",
@@ -889,28 +823,6 @@ _REGISTRY_ROWS = (
             "_resolve_adaptive_patterns_to_raw",
             "regular expression fullmatch() over identity",
             "ae317c142cd85ba6d1e8",
-        ),
-        "BLOCKED-ON-SCHEMA",
-        "safety liveness configuration lacks verified descriptor selector",
-    ),
-    (
-        "C2-040",
-        _Challenge(
-            "src/cryodaq/core/safety_pattern_liveness.py",
-            "validate_safety_pattern_liveness",
-            "regular expression fullmatch() over identity",
-            "afb2b58b7bc28e90cf60",
-        ),
-        "BLOCKED-ON-SCHEMA",
-        "safety liveness configuration lacks verified descriptor selector",
-    ),
-    (
-        "C2-041",
-        _Challenge(
-            "src/cryodaq/core/safety_pattern_liveness.py",
-            "validate_safety_pattern_liveness",
-            "regular expression match() over identity",
-            "c831efc14111c39b3741",
         ),
         "BLOCKED-ON-SCHEMA",
         "safety liveness configuration lacks verified descriptor selector",
@@ -2047,7 +1959,7 @@ _REGISTRY_ROWS = (
 )
 
 _REGISTRY = tuple(_Registration(*row) for row in _REGISTRY_ROWS)
-_LIVE_PRODUCT_DEFECT_IDS = frozenset({"C2-037"})
+_LIVE_PRODUCT_DEFECT_IDS = frozenset()
 
 
 def _registry_errors(
@@ -2313,8 +2225,8 @@ def _registrations_for_sites(sites: list[_Site]) -> tuple[_Registration, ...]:
     (
         (
             "src/cryodaq/core/safety_manager.py",
-            "if not any(pattern.match(ch) for pattern in self._config.critical_channels):",
-            'if not re.compile(r".*").match(ch):',
+            "if self._mock and any(pattern.match(ch) for pattern in self._config.critical_channels)",
+            'if self._mock and re.compile(r".*").match(ch)',
         ),
         (
             "src/cryodaq/gui/shell/overlays/keithley_panel.py",

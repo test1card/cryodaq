@@ -64,7 +64,7 @@ def _descriptor(
         "quantity": "voltage" if source_readback else "temperature",
         "unit": "V" if source_readback else "K",
         "role": "source_readback" if source_readback else "primary_measurement",
-        "safety_class": "hazardous_source_readback" if source_readback else "observational",
+        "safety_class": "hazardous_source_readback" if source_readback else "safety_critical_input",
         "display_group": "test",
         "display_name": channel_id,
         "visible_by_default": True,
@@ -133,7 +133,7 @@ def _write_fixture(
         encoding="utf-8",
     )
     safety = {
-        "critical_channels": ["^guard$"],
+        "critical_channels": ["guard"],
         "heartbeat_timeout_s": 15.0,
         "keithley_channels": [".*"],
         "keithley_heartbeat_channels": {
@@ -191,6 +191,7 @@ async def _exercise(
 ) -> tuple[SafetyState, int, set[str]]:
     await manager.start()
     try:
+        readings = [("Sensor_1", "guard raw"), *readings]
         for instrument_id, channel in readings:
             await broker.publish(
                 Reading.now(

@@ -167,8 +167,8 @@ def test_interlock_pattern_matches_canonical_channel(condition: InterlockConditi
     )
 
 
-def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
-    """Canonical safety identities must install exact raw-plane matchers.
+def test_safety_critical_declarations_resolve_to_exact_live_bindings() -> None:
+    """Canonical safety identities must install exact live identities.
 
     safety.yaml deliberately names stable canonical identities. Startup
     resolves them through the selected descriptor authority before
@@ -179,7 +179,7 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
     manager = SafetyManager(SafetyBroker())
     manager.load_config(_SAFETY_PATH)
     manager._config.require_keithley_for_run = False
-    canonical_before = [pattern.pattern for pattern in manager._config.critical_channels]
+    canonical_before = list(manager._canonical_critical_ids)
     protected = [
         *load_protected_channel_patterns(_INTERLOCKS_PATH),
         *load_critical_channels_from_alarms_v3(_ALARMS_V3_PATH),
@@ -192,13 +192,11 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
         adaptive_throttle_patterns=protected,
     )
 
-    assert [pattern.pattern for pattern in manager._canonical_critical_patterns] == canonical_before
-    assert len(manager._config.critical_channels) == len(canonical_before)
-    for pattern in manager._config.critical_channels:
-        matched = [channel for channel in RAW_EMITTED_CHANNELS if pattern.fullmatch(channel)]
-        assert len(matched) == 1, (
-            f"resolved safety matcher {pattern.pattern!r} must select exactly one raw emitted channel; got {matched!r}"
-        )
+    assert manager._canonical_critical_ids == canonical_before
+    assert manager._critical_input_bindings == {
+        ("LS218_2", "Т11 Теплообменник 1"): "Т11",
+        ("LS218_2", "Т12 Теплообменник 2"): "Т12",
+    }
 
 
 @pytest.mark.parametrize(
