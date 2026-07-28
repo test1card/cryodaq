@@ -28,12 +28,7 @@ _EXPLICIT_ABSENCE_PREDICATES = {
     "reply_declares_empty_sequence",
     "reply_declares_no_data",
 }
-_KNOWN_PRODUCTION_VIOLATIONS = {
-    "archive_adapter.py:get_detail:228: None return after engine query": (
-        "empty experiment id returns None before the query; a separate lane must replace it "
-        "with an explicit absence contract or a typed result"
-    ),
-}
+_KNOWN_PRODUCTION_VIOLATIONS: dict[str, str] = {}
 
 
 def _called_name(node: ast.expr) -> str | None:
@@ -225,7 +220,8 @@ def _violations(root: Path) -> list[str]:
 
 
 def test_c1_engine_adapter_seal_accepts_current_adapters() -> None:
-    assert set(_violations(_ROOT)) == set(_KNOWN_PRODUCTION_VIOLATIONS)
+    assert _KNOWN_PRODUCTION_VIOLATIONS == {}
+    assert _violations(_ROOT) == []
 
 
 @pytest.mark.parametrize("root_name", ("missing", "empty"))

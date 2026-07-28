@@ -206,13 +206,11 @@ class QueryRouter:
             return {"archive_detail": None}
         # Heuristic: the IntentClassifier may surface an experiment id via
         # ``quantity`` or as the only entry in ``target_channels`` (the LLM
-        # sometimes treats it as a "channel"). Fallback to None — adapter
-        # will return None, format prompt frames it as "детали не найдены".
+        # sometimes treats it as a "channel"). Pass an empty candidate to the
+        # adapter so it returns a typed invalid request, not an absence.
         candidate = (intent.quantity or "").strip()
         if not candidate and intent.target_channels:
             candidate = intent.target_channels[0].strip()
-        if not candidate:
-            return {"archive_detail": None, "query": query}
         result = await archive.get_detail(candidate)
         return {"archive_detail": result, "experiment_id": candidate}
 

@@ -38,7 +38,11 @@ from cryodaq.agents.assistant.query.ru_labels import (
     phase_display_name,
     ru_bool,
 )
-from cryodaq.agents.assistant.query.schemas import QueryAdapters, QueryCategory
+from cryodaq.agents.assistant.query.schemas import (
+    ARCHIVE_DETAIL_INVALID_REQUEST_REASON,
+    QueryAdapters,
+    QueryCategory,
+)
 from cryodaq.agents.rag.source_labels import prettify_source_label
 
 if TYPE_CHECKING:
@@ -619,6 +623,12 @@ class AssistantQueryAgent:
                 duration_str="—",
                 phases_text="(нет данных)",
                 cooldown_text="(не указано)",
+            )
+        if result.reason == ARCHIVE_DETAIL_INVALID_REQUEST_REASON:
+            return (
+                f"Запрос: {query}\n\n"
+                "Не указан идентификатор эксперимента, поэтому архив не запрашивался. "
+                "Уточните идентификатор; не утверждай, что запись не найдена."
             )
         if not result.available:
             return (

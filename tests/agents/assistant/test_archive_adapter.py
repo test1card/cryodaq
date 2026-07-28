@@ -235,10 +235,19 @@ def test_get_detail_refuses_oversized_metadata(tmp_path: Path) -> None:
     assert result.cooldown_metrics is None
 
 
-def test_get_detail_empty_id_returns_none() -> None:
-    adapter = ArchiveAdapter(_fake_client())
-    assert _run(adapter.get_detail("")) is None
-    assert _run(adapter.get_detail("   ")) is None
+def test_get_detail_empty_id_returns_typed_invalid_request() -> None:
+    client = _fake_client()
+    adapter = ArchiveAdapter(client)
+
+    result = _run(adapter.get_detail(""))
+
+    assert isinstance(result, ArchiveDetailResult)
+    assert (result.available, result.stale, result.reason) == (
+        False,
+        True,
+        "experiment identifier is required",
+    )
+    client.call.assert_not_awaited()
 
 
 def test_get_detail_returns_none_when_call_fails() -> None:

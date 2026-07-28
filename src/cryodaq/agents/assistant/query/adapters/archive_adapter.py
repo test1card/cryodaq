@@ -32,6 +32,7 @@ from cryodaq.agents.assistant.query.adapters._reply import (
     reply_is_success,
 )
 from cryodaq.agents.assistant.query.schemas import (
+    ARCHIVE_DETAIL_INVALID_REQUEST_REASON,
     AlarmHistoryResult,
     ArchiveDetailResult,
     ArchiveListResult,
@@ -222,10 +223,21 @@ class ArchiveAdapter:
     # ------------------------------------------------------------------
 
     async def get_detail(self, experiment_id: str) -> ArchiveDetailResult | None:
-        """Return one record, ``None`` when absent, or an unavailable result."""
+        """Return one record, ``None`` only for an authoritative absence."""
         ident = (experiment_id or "").strip()
         if not ident:
-            return None
+            return ArchiveDetailResult(
+                experiment_id="",
+                sample="",
+                operator="",
+                status="",
+                started_at="",
+                ended_at=None,
+                duration_h=None,
+                available=False,
+                stale=True,
+                reason=ARCHIVE_DETAIL_INVALID_REQUEST_REASON,
+            )
         try:
             reply = await self._client.call({"cmd": "experiment_get_archive_item", "experiment_id": ident})
         except asyncio.CancelledError:

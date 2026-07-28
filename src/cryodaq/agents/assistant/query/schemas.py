@@ -40,6 +40,9 @@ def _validate_availability(available: bool, stale: bool, reason: str | None) -> 
         raise ValueError("stale or unavailable availability requires a reason")
 
 
+ARCHIVE_DETAIL_INVALID_REQUEST_REASON = "experiment identifier is required"
+
+
 @dataclass
 class QueryIntent:
     category: QueryCategory
