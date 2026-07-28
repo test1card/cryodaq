@@ -196,6 +196,11 @@ def test_post_build_seeds_theme_pack_for_frozen_loader(monkeypatch: pytest.Monke
     script.parent.mkdir(parents=True)
     bundle_root.mkdir(parents=True)
     shutil.copy2(repo_root / "build_scripts" / "post_build.py", script)
+    # post_build now stamps the unqualified-artifact marker, so the synthetic
+    # project needs the identity helper it imports and the pyproject it reads
+    # the version from. Copy the real ones rather than inventing a version.
+    shutil.copy2(repo_root / "build_scripts" / "artifact_identity.py", script.parent / "artifact_identity.py")
+    shutil.copy2(repo_root / "pyproject.toml", project_root / "pyproject.toml")
     shutil.copytree(repo_root / "config", project_root / "config")
 
     subprocess.run([sys.executable, str(script)], check=True, capture_output=True, text=True)
