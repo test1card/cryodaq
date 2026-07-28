@@ -34,6 +34,8 @@ def _snapshot(**changes: object) -> OperatorSafetySnapshot:
         "observed_monotonic_s": 20.0,
         "lifecycle": SafetyLifecycle.READY,
         "readiness": ReadinessTruth.READY,
+        "off_tier": "verified_off",
+        "channel_off_results": (("smua", "device_reported_off"), ("smub", "device_reported_off")),
         "verified_off": True,
         "blockers": (),
         "plant_health": (

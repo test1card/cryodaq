@@ -145,6 +145,7 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     VerifiedOffSource,
     is_issued_runtime_binding,
+    parse_global_off_evidence,
 )
 from cryodaq.drivers.registry import (
     DriverConstructionContext,
@@ -239,7 +240,7 @@ _ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
 _CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
 _ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
 _ENGINE_READY_WIRE_PREFIX = b"CRYODAQ_ENGINE_READY_V2 "
-_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v1"
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v2"
 _OPERATOR_LOG_COMMIT_SCHEMA = "operator_log_commit_v1"
 _OPERATOR_LOG_SUCCESS_KEYS = frozenset(
     {"ok", "committed", "retry_safe", "publication_state", "entry", "commit_receipt"}
@@ -4909,7 +4910,8 @@ def _request_teardown_after_shutdown_receipt(
         and receipt is not None
         and reply == expected_wire_receipt
         and reply.get("engine_instance_id") == context.engine_instance_id
-        and reply.get("global_off_verified") is True
+        and parse_global_off_evidence(reply.get("off_evidence")) is not None
+        and parse_global_off_evidence(reply.get("off_evidence")).verified_off
         and reply.get("teardown_requested") is True
         and context.shutdown_event is not None
     ):
@@ -5085,7 +5087,13 @@ async def _handle_gui_command(
                 off_result = await _run_keithley_command(
                     "keithley_emergency_off", {"cmd": "keithley_emergency_off"}, safety_manager
                 )
-                if off_result.get("ok") is not True or off_result.get("active_channels") != []:
+                off_evidence = parse_global_off_evidence(off_result.get("off_evidence"))
+                if (
+                    off_result.get("ok") is not True
+                    or off_result.get("active_channels") != []
+                    or off_evidence is None
+                    or not off_evidence.verified_off
+                ):
                     return {
                         "ok": False,
                         "error_code": "launcher_shutdown_global_off_unverified",
@@ -5099,7 +5107,7 @@ async def _handle_gui_command(
                     "schema": _ENGINE_SHUTDOWN_RECEIPT_SCHEMA,
                     "engine_instance_id": instance_id,
                     "request_id": request_id,
-                    "global_off_verified": True,
+                    "off_evidence": off_evidence.receipt_payload(),
                     "teardown_requested": True,
                     "delivery_state": "dispatched",
                     "commit_state": "committed",

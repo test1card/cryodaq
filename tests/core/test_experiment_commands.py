@@ -2132,7 +2132,7 @@ async def test_omitted_emergency_off_channel_is_verified_global_scope() -> None:
         )
         await manager.start()
         generation = await manager.begin_reviewed_source_connect(driver, binding, "test setup")
-        assert await manager.complete_reviewed_source_connect(driver, binding, generation, "test setup") is True
+        assert (await manager.complete_reviewed_source_connect(driver, binding, generation, "test setup")).verified_off
         transport.reset_evidence()
         return manager, driver, transport
 

@@ -10,6 +10,7 @@ from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
     SourceOffResult,
+    SourceOffTier,
     _issue_registry_runtime_binding,
 )
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
@@ -66,7 +67,6 @@ def _manager(result: object) -> tuple[SafetyManager, _OffDriver, object]:
     manager._safety_children_authoritative = lambda: True  # type: ignore[method-assign]
     manager._reviewed_source_generation = object()
     manager._reviewed_source_connected = True
-    manager._reviewed_source_verified_off = True
     return manager, driver, binding
 
 
@@ -116,6 +116,26 @@ async def test_operator_emergency_off_accepts_only_device_reported_off() -> None
         accepted.append(result["ok"] is True)
 
     assert accepted == [True, False, False, False]
+
+
+async def test_unknown_off_is_never_promoted_in_manager_connect_or_snapshot() -> None:
+    manager, driver, binding = _manager(SourceOffResult.PHYSICAL_STATE_UNKNOWN)
+    driver.output_state_unverified = True
+
+    evidence = await manager.complete_reviewed_source_connect(
+        driver,
+        binding,
+        manager._reviewed_source_generation,
+        "test",
+    )
+    snapshot = manager.snapshot_operator_safety()
+    result = await manager.emergency_off()
+
+    assert evidence.off_tier is SourceOffTier.VERIFIED_OFF
+    assert evidence.receipt_payload()["verified_off"] is False
+    assert snapshot.device_readback_off is False
+    assert snapshot.verified_off is False
+    assert result["off_evidence"]["verified_off"] is False
 
 
 async def test_interlock_stop_source_accepts_only_device_reported_off() -> None:

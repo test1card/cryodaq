@@ -50,6 +50,8 @@ class _SafetyOwner:
             time.monotonic(),
             SafetyLifecycle.READY,
             ReadinessTruth.READY,
+            "verified_off",
+            (("smua", "device_reported_off"), ("smub", "device_reported_off")),
             True,
             (),
             (
@@ -227,6 +229,8 @@ async def test_expired_safety_cut_cannot_publish_or_retain_ready_output(tmp_path
         0.0,
         SafetyLifecycle.READY,
         ReadinessTruth.READY,
+        "verified_off",
+        (("smua", "device_reported_off"), ("smub", "device_reported_off")),
         True,
         (),
         (

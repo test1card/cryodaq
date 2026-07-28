@@ -276,6 +276,71 @@ class SourceOffTier(StrEnum):
     VERIFIED_OFF = "verified_off"
 
 
+def off_result_satisfies_tier(tier: SourceOffTier, result: SourceOffResult) -> bool:
+    return (tier is SourceOffTier.VERIFIED_OFF and result is SourceOffResult.DEVICE_REPORTED_OFF) or (
+        tier is SourceOffTier.COMMAND_ONLY and result is SourceOffResult.COMMAND_ACCEPTED
+    )
+
+
+def physical_off_verified(tier: SourceOffTier, result: SourceOffResult) -> bool:
+    return tier is SourceOffTier.VERIFIED_OFF and result is SourceOffResult.DEVICE_REPORTED_OFF
+
+
+@dataclass(frozen=True, slots=True)
+class SourceOffEvidence:
+    """Exact global source-OFF evidence without collapsing its trust tier."""
+
+    off_tier: SourceOffTier
+    channel_off_results: tuple[tuple[str, SourceOffResult], ...]
+
+    def __post_init__(self) -> None:
+        if type(self.off_tier) is not SourceOffTier:
+            raise TypeError("off_tier must be an exact SourceOffTier")
+        if (
+            type(self.channel_off_results) is not tuple
+            or tuple(channel for channel, _result in self.channel_off_results) != ("smua", "smub")
+            or not all(type(result) is SourceOffResult for _channel, result in self.channel_off_results)
+        ):
+            raise ValueError("channel_off_results must be exact smua/smub SourceOffResult values")
+
+    @classmethod
+    def from_global_result(cls, tier: SourceOffTier, result: SourceOffResult) -> SourceOffEvidence:
+        return cls(tier, (("smua", result), ("smub", result)))
+
+    @property
+    def satisfies_tier(self) -> bool:
+        return all(off_result_satisfies_tier(self.off_tier, result) for _channel, result in self.channel_off_results)
+
+    @property
+    def verified_off(self) -> bool:
+        return all(physical_off_verified(self.off_tier, result) for _channel, result in self.channel_off_results)
+
+    def receipt_payload(self) -> dict[str, object]:
+        return {
+            "off_tier": self.off_tier.value,
+            "channel_off_results": {channel: result.value for channel, result in self.channel_off_results},
+            "verified_off": self.verified_off,
+        }
+
+
+def parse_global_off_evidence(payload: object) -> SourceOffEvidence | None:
+    """Accept one exact wire payload and reject any claimed derived truth."""
+    if type(payload) is not dict or set(payload) != {"off_tier", "channel_off_results", "verified_off"}:
+        return None
+    tier_value = payload["off_tier"]
+    results = payload["channel_off_results"]
+    if type(tier_value) is not str or type(results) is not dict or set(results) != {"smua", "smub"}:
+        return None
+    try:
+        evidence = SourceOffEvidence(
+            SourceOffTier(tier_value),
+            (("smua", SourceOffResult(results["smua"])), ("smub", SourceOffResult(results["smub"]))),
+        )
+    except (TypeError, ValueError):
+        return None
+    return evidence if payload["verified_off"] is evidence.verified_off else None
+
+
 class SourceAdjustmentMode(StrEnum):
     START_STOP_ONLY = "start_stop_only"
     LIVE_UPDATE = "live_update"

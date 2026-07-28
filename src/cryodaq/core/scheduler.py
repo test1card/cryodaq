@@ -27,6 +27,7 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     SharedBusParticipant,
     SharedBusRecoveryCoordinator,
+    SourceOffEvidence,
     is_issued_runtime_binding,
 )
 
@@ -59,6 +60,7 @@ class _ReviewedConnectAttempt:
     generation_issued: bool = False
     driver_io_started: bool = False
     connected_committed: bool = False
+    off_evidence: SourceOffEvidence | None = None
     settled_safe: bool = False
     operation_error: BaseException | None = None
     failure: BaseException | None = None
@@ -165,7 +167,7 @@ class Scheduler:
             Callable[[InstrumentDriver, DriverRuntimeBinding, str], Awaitable[object]] | None
         ) = None,
         reviewed_source_connect_complete: (
-            Callable[[InstrumentDriver, DriverRuntimeBinding, object, str], Awaitable[bool]] | None
+            Callable[[InstrumentDriver, DriverRuntimeBinding, object, str], Awaitable[SourceOffEvidence]] | None
         ) = None,
         reviewed_source_uncertain: (
             Callable[[InstrumentDriver, DriverRuntimeBinding, object, str], Awaitable[None]] | None
@@ -485,9 +487,10 @@ class Scheduler:
             connect_task.result()
             if attempt.abandon_requested:
                 raise _ReviewedConnectAbandoned("connect abandoned after driver I/O")
-            committed = await complete(driver, binding, generation, context)
-            if committed is not True:
-                raise RuntimeError("connect completed without exact both-channel OFF proof")
+            evidence = await complete(driver, binding, generation, context)
+            if type(evidence) is not SourceOffEvidence or not evidence.satisfies_tier:
+                raise RuntimeError("connect completed without exact device-readback OFF evidence")
+            attempt.off_evidence = evidence
             if attempt.abandon_requested:
                 raise _ReviewedConnectAbandoned("connect abandoned during completion")
             attempt.connected_committed = True

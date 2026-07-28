@@ -74,15 +74,13 @@ async def _qualify(sm: SafetyManager, driver: _FakeKeithley, binding: object) ->
         binding,  # type: ignore[arg-type]
         "watchdog fixture",
     )
-    assert (
-        await sm.complete_reviewed_source_connect(
-            driver,
-            binding,  # type: ignore[arg-type]
-            generation,
-            "watchdog fixture",
-        )
-        is True
+    evidence = await sm.complete_reviewed_source_connect(
+        driver,
+        binding,  # type: ignore[arg-type]
+        generation,
+        "watchdog fixture",
     )
+    assert evidence.verified_off
 
 
 async def test_reconcile_trip_latches_fault() -> None:

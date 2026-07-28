@@ -26,7 +26,10 @@ from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import (
     DriverRuntimeBinding,
     DriverTrustClass,
+    SourceOffEvidence,
     SourceOffResult,
+    SourceOffTier,
+    VerifiedOffSource,
     is_issued_runtime_binding,
 )
 from cryodaq.engine_wiring.operator_safety_snapshot import (
@@ -207,7 +210,7 @@ class SafetyManager:
         # SAFE_OFF state name are deliberately not OFF proof.
         observed = time.monotonic()
         self._reviewed_source_connected = False
-        self._reviewed_source_verified_off = False
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._safety_monitor_active = False
         self._persistence_fault_active = False
         # P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): cooldown
@@ -230,6 +233,10 @@ class SafetyManager:
             observed_monotonic_s=observed,
             lifecycle=SafetyLifecycle.UNKNOWN,
             readiness=ReadinessTruth.UNKNOWN,
+            off_tier=self._reviewed_source_off_evidence.off_tier.value,
+            channel_off_results=tuple(
+                (channel, result.value) for channel, result in self._reviewed_source_off_evidence.channel_off_results
+            ),
             verified_off=False,
             blockers=(
                 SafetyBlocker(
@@ -488,7 +495,7 @@ class SafetyManager:
             self._failed_child_reason = "safety_manager_stopping"
         self._reviewed_source_generation = None
         self._reviewed_source_connected = False
-        self._reviewed_source_verified_off = False
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._refresh_operator_safety_snapshot()
 
         cancelled: asyncio.CancelledError | None = None
@@ -721,7 +728,7 @@ class SafetyManager:
 
         self._reviewed_source_generation = None
         self._reviewed_source_connected = False
-        self._reviewed_source_verified_off = False
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._safety_monitor_active = False
         self._failed_child_role = role
         self._failed_child_reason = f"safety_{role}_{outcome}"
@@ -818,14 +825,17 @@ class SafetyManager:
         if self._reviewed_source_generation is None:
             self._reviewed_source_generation = _ReviewedSourceGeneration()
         self._reviewed_source_connected = True
-        self._reviewed_source_verified_off = verified_off
+        self._reviewed_source_off_evidence = SourceOffEvidence.from_global_result(
+            self._reviewed_source_off_tier(),
+            SourceOffResult.DEVICE_REPORTED_OFF if verified_off else SourceOffResult.PHYSICAL_STATE_UNKNOWN,
+        )
         self._refresh_operator_safety_snapshot()
 
     def record_reviewed_source_unavailable(self) -> None:
         """Invalidate connection and OFF authority without probing a driver."""
         self._reviewed_source_generation = None
         self._reviewed_source_connected = False
-        self._reviewed_source_verified_off = False
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._refresh_operator_safety_snapshot()
 
     def _require_reviewed_source_identity(
@@ -855,6 +865,22 @@ class SafetyManager:
             and getattr(self._keithley, "connected", None) is True
         )
 
+    def _reviewed_source_off_tier(self) -> SourceOffTier:
+        return (
+            SourceOffTier.VERIFIED_OFF
+            if self._mock or isinstance(self._keithley, VerifiedOffSource)
+            else SourceOffTier.COMMAND_ONLY
+        )
+
+    def _unknown_global_off_evidence(self) -> SourceOffEvidence:
+        return SourceOffEvidence.from_global_result(
+            self._reviewed_source_off_tier(), SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        )
+
+    def _global_off_evidence_for_result(self, result: object) -> SourceOffEvidence:
+        outcome = result if type(result) is SourceOffResult else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        return SourceOffEvidence.from_global_result(self._reviewed_source_off_tier(), outcome)
+
     async def begin_reviewed_source_connect(
         self,
         driver: object,
@@ -869,7 +895,7 @@ class SafetyManager:
             had_active_source = bool(self._active_sources)
             self._reviewed_source_generation = None
             self._reviewed_source_connected = False
-            self._reviewed_source_verified_off = False
+            self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
             self._refresh_operator_safety_snapshot()
             if not self._safety_children_authoritative():
                 raise RuntimeError("cannot grant reviewed-source generation without live safety children")
@@ -888,23 +914,26 @@ class SafetyManager:
         runtime_binding: DriverRuntimeBinding,
         generation: object,
         context: str,
-    ) -> bool:
-        """Commit current-generation both-channel OFF cache after connect."""
+    ) -> SourceOffEvidence:
+        """Commit current-generation device-readback OFF evidence after connect."""
         del context
         async with self._cmd_lock:
             self._require_reviewed_source_identity(driver, runtime_binding)
             if not self._safety_children_authoritative():
-                return False
+                return self._unknown_global_off_evidence()
             if generation is not self._reviewed_source_generation:
-                return False
+                return self._unknown_global_off_evidence()
             connected = getattr(driver, "connected", None) is True
             verified_off = connected and getattr(driver, "output_state_unverified", None) is False
             self._reviewed_source_connected = connected
-            self._reviewed_source_verified_off = verified_off
+            self._reviewed_source_off_evidence = SourceOffEvidence.from_global_result(
+                self._reviewed_source_off_tier(),
+                SourceOffResult.DEVICE_REPORTED_OFF if verified_off else SourceOffResult.PHYSICAL_STATE_UNKNOWN,
+            )
             if verified_off:
                 self._active_sources.clear()
             self._refresh_operator_safety_snapshot()
-            return verified_off
+            return self._reviewed_source_off_evidence
 
     async def mark_reviewed_source_uncertain(
         self,
@@ -924,7 +953,7 @@ class SafetyManager:
                 return
             self._reviewed_source_generation = None
             self._reviewed_source_connected = False
-            self._reviewed_source_verified_off = False
+            self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
             self._refresh_operator_safety_snapshot()
             if self._active_sources:
                 await self._fault(f"reviewed source connection uncertain ({context})")
@@ -950,7 +979,7 @@ class SafetyManager:
             return
         self._reviewed_source_generation = None
         self._reviewed_source_connected = False
-        self._reviewed_source_verified_off = False
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._refresh_operator_safety_snapshot()
 
     async def request_run(
@@ -1119,7 +1148,7 @@ class SafetyManager:
             # lifecycle generation. Mere object presence is never authority.
             if self._mock:
                 self._reviewed_source_connected = True
-            self._reviewed_source_verified_off = False
+            self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
             self._refresh_operator_safety_snapshot()
             if self._state != SafetyState.RUNNING:
                 self._run_permitted_since = time.monotonic()
@@ -1449,13 +1478,14 @@ class SafetyManager:
             self._require_reviewed_source_identity(driver, runtime_binding)
             self._reviewed_source_generation = None
             self._reviewed_source_connected = False
-            self._reviewed_source_verified_off = False
+            self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
             self._refresh_operator_safety_snapshot()
 
             proof_task = asyncio.create_task(driver.emergency_off())
             proof_result, proof_error, proof_cancelled = await _settle_shielded_hardware_task(proof_task)
             cancelled = proof_cancelled
-            confirmed = proof_error is None and proof_result is SourceOffResult.DEVICE_REPORTED_OFF
+            self._reviewed_source_off_evidence = self._global_off_evidence_for_result(proof_result)
+            confirmed = proof_error is None and self._reviewed_source_off_evidence.verified_off
             if proof_error is not None and not isinstance(proof_error, asyncio.CancelledError):
                 logger.exception(
                     "Reviewed-source OFF proof failed during scheduler disconnect (%s)",
@@ -1464,7 +1494,6 @@ class SafetyManager:
                 )
 
             if not confirmed:
-                self._reviewed_source_verified_off = False
                 self._refresh_operator_safety_snapshot()
                 await self._fault(f"reviewed source disconnect lacked verified OFF ({context})")
                 if cancelled is not None:
@@ -1487,7 +1516,6 @@ class SafetyManager:
 
             self._active_sources.clear()
             self._reviewed_source_connected = False
-            self._reviewed_source_verified_off = False
             self._refresh_operator_safety_snapshot()
             if self._state != SafetyState.FAULT_LATCHED:
                 self._transition(
@@ -1540,6 +1568,7 @@ class SafetyManager:
                 "state": self._state.value,
                 "channels": sorted(channels),
                 "active_channels": sorted(self._active_sources),
+                "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
                 "error": reason,
             }
         self._active_sources.difference_update(channels)
@@ -1551,6 +1580,7 @@ class SafetyManager:
                 "state": self._state.value,
                 "channels": sorted(channels),
                 "active_channels": sorted(self._active_sources),
+                "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
                 "latched": True,
                 "warning": "Outputs disabled but fault remains latched",
             }
@@ -1562,6 +1592,7 @@ class SafetyManager:
                 "state": self._state.value,
                 "channels": sorted(channels),
                 "active_channels": sorted(self._active_sources),
+                "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
             }
         publish_task = asyncio.create_task(self._publish_keithley_channel_states("emergency_off"))
         _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
@@ -1956,7 +1987,8 @@ class SafetyManager:
         children_authoritative = self._safety_children_authoritative()
         verified_off = (
             children_authoritative
-            and self._reviewed_source_verified_off
+            and self._reviewed_source_connected
+            and self._reviewed_source_off_evidence.verified_off
             and not self._active_sources
             and lifecycle not in {SafetyLifecycle.RUN_PERMITTED, SafetyLifecycle.RUNNING}
         )
@@ -2138,6 +2170,7 @@ class SafetyManager:
             lifecycle = SafetyLifecycle.UNKNOWN
             readiness = ReadinessTruth.UNKNOWN
             verified_off = False
+            self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
             plant[0] = PlantHealthFact(
                 "safety_fsm",
                 "Safety state",
@@ -2152,6 +2185,10 @@ class SafetyManager:
             observed_monotonic_s=observed,
             lifecycle=lifecycle,
             readiness=readiness,
+            off_tier=self._reviewed_source_off_evidence.off_tier.value,
+            channel_off_results=tuple(
+                (channel, result.value) for channel, result in self._reviewed_source_off_evidence.channel_off_results
+            ),
             verified_off=verified_off,
             blockers=tuple(blockers),
             plant_health=tuple(plant),
@@ -2414,7 +2451,7 @@ class SafetyManager:
         if self._keithley is not None:
             retained_generation = self._has_current_reviewed_connection_generation()
             self._reviewed_source_connected = retained_generation
-            self._reviewed_source_verified_off = retained_generation and outputs_confirmed_off
+            self._reviewed_source_off_evidence = self._global_off_evidence_for_result(result)
         self._refresh_operator_safety_snapshot()
 
         # 4. Post-mortem log emission — shielded — MUST happen after hardware
@@ -2508,13 +2545,14 @@ class SafetyManager:
         if error is not None:
             logger.critical("_ensure_output_off failed: %s", error)
             confirmed = False
-        exact_confirmed = error is None and confirmed is SourceOffResult.DEVICE_REPORTED_OFF
+        evidence = self._global_off_evidence_for_result(confirmed)
+        exact_confirmed = error is None and evidence.verified_off
         retained_generation = self._has_current_reviewed_connection_generation()
         self._reviewed_source_connected = retained_generation
-        if channel is None and retained_generation:
-            self._reviewed_source_verified_off = exact_confirmed
+        if channel is None:
+            self._reviewed_source_off_evidence = evidence
         elif not exact_confirmed or not retained_generation:
-            self._reviewed_source_verified_off = False
+            self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._refresh_operator_safety_snapshot()
         if caller_cancelled is not None:
             raise caller_cancelled
@@ -2599,7 +2637,7 @@ class SafetyManager:
 
         retained_generation = self._has_current_reviewed_connection_generation()
         self._reviewed_source_connected = retained_generation
-        self._reviewed_source_verified_off = retained_generation
+        self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._transition(SafetyState.SAFE_OFF, reason)
         if caller_cancelled is not None:
             raise caller_cancelled
@@ -2669,7 +2707,7 @@ class SafetyManager:
         if not self._mock and (self._reviewed_source_generation is None or not self._reviewed_source_connected):
             return False, "Reviewed source connection generation is UNAVAILABLE"
 
-        if not self._mock and not self._active_sources and self._reviewed_source_verified_off is not True:
+        if not self._mock and not self._active_sources and not self._reviewed_source_off_evidence.verified_off:
             return False, ("Reviewed source OFF state is UNVERIFIED - confirm exact OFF before RUN")
 
         # F2: a connected Keithley whose crash-recovery force-OFF could not be
@@ -2952,7 +2990,7 @@ class SafetyManager:
                 self._active_sources.clear()
                 retained_generation = self._has_current_reviewed_connection_generation()
                 self._reviewed_source_connected = retained_generation
-                self._reviewed_source_verified_off = retained_generation
+                self._reviewed_source_off_evidence = self._global_off_evidence_for_result(ok)
                 self._refresh_operator_safety_snapshot()
                 if self._state not in (
                     SafetyState.FAULT_LATCHED,

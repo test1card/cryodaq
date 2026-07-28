@@ -149,7 +149,7 @@ async def test_canonical_reviewed_source_qualifies_through_scheduler_start() -> 
             timeout=2.0,
         )
         assert manager._reviewed_source_connected is True
-        assert manager._reviewed_source_verified_off is True
+        assert manager._reviewed_source_off_evidence.verified_off
         assert manager.snapshot_operator_safety().verified_off is True
         assert state.reviewed_source_disconnect_required is False
         assert state.total_reads > 0

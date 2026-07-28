@@ -44,6 +44,8 @@ def _snapshot(**changes: object) -> OperatorSafetySnapshot:
         "observed_monotonic_s": 2.5,
         "lifecycle": SafetyLifecycle.READY,
         "readiness": ReadinessTruth.READY,
+        "off_tier": "verified_off",
+        "channel_off_results": (("smua", "device_reported_off"), ("smub", "device_reported_off")),
         "verified_off": True,
         "blockers": (),
         "plant_health": (_plant(),),
@@ -56,6 +58,8 @@ def test_ready_is_exact_verified_off_and_has_no_blockers() -> None:
     ready = _snapshot()
     assert ready.readiness is ReadinessTruth.READY
     assert ready.verified_off is True
+    assert ready.device_readback_off is True
+    assert ready.off_tier == "verified_off"
     assert pickle.loads(pickle.dumps(ready)) == ready
 
     with pytest.raises(ValueError, match="safe_off lifecycle requires BLOCKED truth and blockers"):
@@ -320,7 +324,12 @@ def test_contract_has_no_mutation_or_control_capability_and_narrow_imports() -> 
         "PlantHealthFact",
         "OperatorSafetySnapshot",
     }
-    source = inspect.getsource(module)
+    source = (
+        inspect.getsource(module)
+        .replace("``SafetyManager``", "")
+        .replace('"command_only"', "")
+        .replace('"command_accepted"', "")
+    )
     for forbidden in (
         "SafetyManager",
         "cryodaq.drivers",
@@ -332,6 +341,6 @@ def test_contract_has_no_mutation_or_control_capability_and_narrow_imports() -> 
         "Callable",
         "command",
     ):
-        assert forbidden not in source.replace("``SafetyManager``", "")
+        assert forbidden not in source
     snapshot = _snapshot()
     assert not any(callable(getattr(snapshot, name)) for name in vars(type(snapshot)) if not name.startswith("__"))

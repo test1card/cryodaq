@@ -18,6 +18,7 @@ from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
     SourceOffResult,
+    VerifiedOffSource,
     _issue_registry_runtime_binding,
 )
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
@@ -571,6 +572,7 @@ async def test_disconnect_cancellation_settles_proof_and_lifecycle_revisions() -
     class Driver:
         def __init__(self) -> None:
             self.connected = True
+            self.output_state_unverified = False
 
         async def emergency_off(self) -> SourceOffResult:
             off_started.set()
@@ -583,6 +585,7 @@ async def test_disconnect_cancellation_settles_proof_and_lifecycle_revisions() -
             self.connected = False
 
     driver = Driver()
+    assert isinstance(driver, VerifiedOffSource)
     manager = _manager(driver=driver)
     manager._safety_monitor_active = True
     before = manager.snapshot_operator_safety()

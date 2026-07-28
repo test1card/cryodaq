@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
+from cryodaq.drivers.contracts import parse_global_off_evidence
 from cryodaq.gui.shell.annunciation_controller import decode_projection
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.state.operator_snapshot_ingress import start_operator_snapshot_ingress
@@ -513,7 +514,7 @@ _ASSISTANT_SHUTDOWN_ENV = "CRYODAQ_ASSISTANT_SHUTDOWN_FILE"
 _ASSISTANT_SHUTDOWN_PREFIX = "assistant-shutdown-"
 _ENGINE_INSTANCE_ID_ENV = "CRYODAQ_ENGINE_INSTANCE_ID"
 _ENGINE_SHUTDOWN_CAPABILITY_ENV = "CRYODAQ_ENGINE_SHUTDOWN_CAPABILITY"
-_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v1"
+_ENGINE_SHUTDOWN_RECEIPT_SCHEMA = "cryodaq.engine_shutdown.v2"
 _SOAK_BRIDGE_FD_ENV = "CRYODAQ_SOAK_BRIDGE_FD"
 _SOAK_BRIDGE_NONCE_ENV = "CRYODAQ_SOAK_BRIDGE_NONCE"
 _SOAK_ARTIFACT_FD_ENV = "CRYODAQ_SOAK_ARTIFACT_FD"
@@ -3562,7 +3563,7 @@ class LauncherWindow(QMainWindow):
                     "schema",
                     "engine_instance_id",
                     "request_id",
-                    "global_off_verified",
+                    "off_evidence",
                     "teardown_requested",
                     "delivery_state",
                     "commit_state",
@@ -3578,7 +3579,8 @@ class LauncherWindow(QMainWindow):
                     and receipt["engine_instance_id"] == instance_id
                     and type(receipt["request_id"]) is str
                     and receipt["request_id"] == request_id
-                    and receipt["global_off_verified"] is True
+                    and parse_global_off_evidence(receipt["off_evidence"]) is not None
+                    and parse_global_off_evidence(receipt["off_evidence"]).verified_off
                     and receipt["teardown_requested"] is True
                     and type(receipt["delivery_state"]) is str
                     and receipt["delivery_state"] == "dispatched"

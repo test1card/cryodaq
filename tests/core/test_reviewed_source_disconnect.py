@@ -54,7 +54,14 @@ async def _settle_started_managers() -> None:
 class _ReviewedSource(InstrumentDriver):
     def __init__(self, proofs: list[SourceOffResult]) -> None:
         super().__init__("reviewed", mock=True)
-        self.proofs = list(proofs)
+        self.proofs = [
+            proof
+            if type(proof) is SourceOffResult
+            else SourceOffResult.DEVICE_REPORTED_OFF
+            if proof is True
+            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+            for proof in proofs
+        ]
         self.disconnect_calls = 0
         self._connected = True
         self._output_state_unverified = False
@@ -152,7 +159,7 @@ async def _qualify_generation(
         generation,
         "test qualification",
     )
-    assert committed is verified_off
+    assert committed.verified_off is verified_off
 
 
 def test_non_mock_manual_connection_record_cannot_grant_authority() -> None:
@@ -468,15 +475,14 @@ async def test_active_source_reconnect_fault_and_ack_cannot_reuse_generation() -
     assert manager.state is SafetyState.FAULT_LATCHED
     assert manager._reviewed_source_generation is None
     assert manager._active_sources == set()
-    assert (
+    assert not (
         await manager.complete_reviewed_source_connect(
             driver,
             binding,
             stale_generation,
             "late active reconnect",
         )
-        is False
-    )
+    ).verified_off
     assert (await manager.acknowledge_fault("reviewed reconnect"))["ok"] is True
     manager._transition(SafetyState.READY, "test recovered state")
     blocked = await manager.request_run(0.1, 1.0, 0.1)
@@ -491,8 +497,7 @@ async def test_active_source_reconnect_fault_and_ack_cannot_reuse_generation() -
             fresh,
             "fresh reconnect",
         )
-        is True
-    )
+    ).verified_off
     manager._transition(SafetyState.READY, "fresh reviewed evidence")
     assert (await manager.request_run(0.1, 1.0, 0.1))["ok"] is True
 
@@ -541,7 +546,7 @@ async def test_timed_out_reviewed_connect_is_retained_and_blocks_retry() -> None
     # synchronous abandonment cut has already made RUN authority impossible.
     assert manager._reviewed_source_generation is None
     assert manager._reviewed_source_connected is False
-    assert manager._reviewed_source_verified_off is False
+    assert not manager._reviewed_source_off_evidence.verified_off
     manager._config.critical_channels = []
     blocked = await manager.request_run(0.1, 1.0, 0.1)
     assert blocked["ok"] is False
@@ -629,14 +634,14 @@ async def test_timeout_racing_committed_complete_revokes_before_run_can_start() 
     committed = asyncio.Event()
     release_complete = asyncio.Event()
 
-    async def _complete(candidate, candidate_binding, generation, context: str) -> bool:
+    async def _complete(candidate, candidate_binding, generation, context: str):
         result = await manager.complete_reviewed_source_connect(
             candidate,
             candidate_binding,
             generation,
             context,
         )
-        assert result is True
+        assert result.verified_off is True
         committed.set()
         await release_complete.wait()
         return result
@@ -659,7 +664,7 @@ async def test_timeout_racing_committed_complete_revokes_before_run_can_start() 
     assert manager._abort_generation > before_abort
     assert manager._reviewed_source_generation is None
     assert manager._reviewed_source_connected is False
-    assert manager._reviewed_source_verified_off is False
+    assert not manager._reviewed_source_off_evidence.verified_off
     blocked = await manager.request_run(0.1, 1.0, 0.1)
     assert blocked["ok"] is False
     assert manager.state is not SafetyState.RUNNING

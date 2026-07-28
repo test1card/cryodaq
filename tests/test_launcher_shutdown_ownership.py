@@ -289,10 +289,14 @@ def _live_engine_host(process: _ScriptedProcess, bridge: MagicMock) -> SimpleNam
 def _shutdown_receipt(request_id: str) -> dict[str, object]:
     return {
         "ok": True,
-        "schema": "cryodaq.engine_shutdown.v1",
+        "schema": "cryodaq.engine_shutdown.v2",
         "engine_instance_id": "a" * 32,
         "request_id": request_id,
-        "global_off_verified": True,
+        "off_evidence": {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+            "verified_off": True,
+        },
         "teardown_requested": True,
         "delivery_state": "dispatched",
         "commit_state": "committed",
@@ -992,7 +996,7 @@ def test_launcher_retains_command_path_until_exact_shutdown_receipt() -> None:
         ("set", "unexpected", "optimistic"),
         ("drop", "proto", None),
         ("set", "ok", 1),
-        ("set", "global_off_verified", False),
+        ("set", "off_evidence", {"off_tier": "verified_off"}),
         ("set", "proto", True),
         ("set", "schema", 1),
         ("set", "request_id", 123),
@@ -1026,6 +1030,44 @@ def test_launcher_rejects_non_exact_shutdown_receipt(
     assert host._engine_proc is process
     assert process.alive is True
     host._close_engine_stderr_stream.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "off_evidence",
+    (
+        {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+        },
+        {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+            "verified_off": True,
+            "extra": "rejected",
+        },
+        {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+            "verified_off": False,
+        },
+    ),
+)
+def test_launcher_rejects_non_exact_or_disagreeing_off_evidence(off_evidence: dict[str, object]) -> None:
+    from cryodaq.launcher import LauncherWindow
+
+    process = _ScriptedProcess([])
+    bridge = MagicMock()
+    bridge.send_command.side_effect = lambda command: {
+        **_shutdown_receipt(command["request_id"]),
+        "off_evidence": off_evidence,
+    }
+    host = _live_engine_host(process, bridge)
+
+    with pytest.raises(RuntimeError, match="missing or mismatched"):
+        LauncherWindow._stop_engine(host)
+
+    assert host._engine_proc is process
+    assert process.alive is True
 
 
 def test_exact_shutdown_receipt_and_clean_exit_release_engine_owner() -> None:

@@ -140,6 +140,8 @@ class OperatorSafetySnapshot:
     observed_monotonic_s: float
     lifecycle: SafetyLifecycle
     readiness: ReadinessTruth
+    off_tier: str
+    channel_off_results: tuple[tuple[str, str], ...]
     verified_off: bool
     blockers: tuple[SafetyBlocker, ...]
     plant_health: tuple[PlantHealthFact, ...]
@@ -154,8 +156,21 @@ class OperatorSafetySnapshot:
             raise TypeError("lifecycle must be an exact SafetyLifecycle")
         if type(self.readiness) is not ReadinessTruth:
             raise TypeError("readiness must be an exact ReadinessTruth")
+        if self.off_tier not in {"command_only", "verified_off"}:
+            raise ValueError("off_tier must be an exact declared OFF tier")
+        if (
+            type(self.channel_off_results) is not tuple
+            or tuple(channel for channel, _result in self.channel_off_results) != ("smua", "smub")
+            or not all(
+                result in {"physical_state_unknown", "command_accepted", "device_reported_off"}
+                for _channel, result in self.channel_off_results
+            )
+        ):
+            raise ValueError("channel_off_results must be exact smua/smub OFF outcomes")
         if type(self.verified_off) is not bool:
             raise TypeError("verified_off must be an exact bool")
+        if self.verified_off and not self.device_readback_off:
+            raise ValueError("verified_off cannot exceed device-readback OFF evidence")
         if (
             type(self.blockers) is not tuple
             or len(self.blockers) > MAX_CHANNELS
@@ -203,6 +218,13 @@ class OperatorSafetySnapshot:
                 and self.verified_off is not False
             ):
                 raise ValueError("active source lifecycle cannot claim verified-OFF")
+
+    @property
+    def device_readback_off(self) -> bool:
+        """Whether every channel's current evidence is explicit device readback."""
+        return self.off_tier == "verified_off" and all(
+            result == "device_reported_off" for _channel, result in self.channel_off_results
+        )
 
 
 __all__ = [

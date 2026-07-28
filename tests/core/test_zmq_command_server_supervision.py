@@ -70,6 +70,19 @@ def _launcher_shutdown_command(*, request_id: str = "c" * 32) -> dict[str, str]:
     }
 
 
+def _verified_global_off_result(**fields: object) -> dict[str, object]:
+    return {
+        "ok": True,
+        "active_channels": [],
+        "off_evidence": {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+            "verified_off": True,
+        },
+        **fields,
+    }
+
+
 def test_exact_startup_readiness_actions_are_observations_while_near_misses_fail_closed() -> None:
     """Only exact startup challenges may bypass mutation quarantine."""
 
@@ -1862,9 +1875,7 @@ def test_engine_commands_keep_inner_timeouts_wired() -> None:
 async def test_launcher_shutdown_requires_exact_capability_and_verified_global_off(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    context = _shutdown_context(
-        off_result={"ok": True, "active_channels": [], "state": "safe_off", "channels": ["smua", "smub"]}
-    )
+    context = _shutdown_context(off_result=_verified_global_off_result(state="safe_off", channels=["smua", "smub"]))
     command = _launcher_shutdown_command()
 
     invalid = await _handle_gui_command({"cmd": "launcher_shutdown"}, context=context)
@@ -1885,10 +1896,14 @@ async def test_launcher_shutdown_requires_exact_capability_and_verified_global_o
     receipt = await _handle_gui_command(command, context=context)
     assert receipt == {
         "ok": True,
-        "schema": "cryodaq.engine_shutdown.v1",
+        "schema": "cryodaq.engine_shutdown.v2",
         "engine_instance_id": "a" * 32,
         "request_id": "c" * 32,
-        "global_off_verified": True,
+        "off_evidence": {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+            "verified_off": True,
+        },
         "teardown_requested": True,
         "delivery_state": "dispatched",
         "commit_state": "committed",
@@ -1927,7 +1942,7 @@ async def test_real_server_shutdown_latch_rejects_queued_output_mutation() -> No
         assert channel is None
         off_started.set()
         await release_off.wait()
-        return {"ok": True, "active_channels": []}
+        return _verified_global_off_result()
 
     context = _shutdown_context(off_result={"ok": True, "active_channels": []})
     context.safety_manager.emergency_off = AsyncMock(side_effect=delayed_off)
@@ -1965,8 +1980,8 @@ async def test_real_server_shutdown_latch_rejects_queued_output_mutation() -> No
         shutdown_reply = await asyncio.wait_for(shutdown_task, timeout=3)
         mutation_reply = await asyncio.wait_for(mutation_task, timeout=3)
 
-        assert shutdown_reply["schema"] == "cryodaq.engine_shutdown.v1"
-        assert shutdown_reply["global_off_verified"] is True
+        assert shutdown_reply["schema"] == "cryodaq.engine_shutdown.v2"
+        assert shutdown_reply["off_evidence"]["verified_off"] is True
         assert mutation_reply == {
             "ok": False,
             "error_code": "engine_shutdown_latched",
@@ -1990,8 +2005,8 @@ async def test_launcher_shutdown_global_off_failure_never_creates_receipt() -> N
     context.safety_manager.emergency_off = AsyncMock(
         side_effect=[
             {"ok": False, "active_channels": ["smua"], "state": "fault_latched"},
-            {"ok": True, "active_channels": []},
-            {"ok": True, "active_channels": []},
+            _verified_global_off_result(),
+            _verified_global_off_result(),
         ]
     )
     context.safety_manager.get_status.return_value = {"state": "safe_off"}
@@ -2026,10 +2041,35 @@ async def test_launcher_shutdown_global_off_failure_never_creates_receipt() -> N
     assert global_off["active_channels"] == []
 
     retry = await _handle_gui_command(command, context=context)
-    assert retry["schema"] == "cryodaq.engine_shutdown.v1"
-    assert retry["global_off_verified"] is True
+    assert retry["schema"] == "cryodaq.engine_shutdown.v2"
+    assert retry["off_evidence"]["verified_off"] is True
     assert context.shutdown_receipt == retry
     assert context.safety_manager.emergency_off.await_count == 3
+
+
+async def test_launcher_shutdown_refuses_unknown_device_off_evidence() -> None:
+    """A successful coroutine is not a physical-OFF receipt."""
+    context = _shutdown_context(
+        off_result={
+            "ok": True,
+            "active_channels": [],
+            "off_evidence": {
+                "off_tier": "verified_off",
+                "channel_off_results": {
+                    "smua": "physical_state_unknown",
+                    "smub": "physical_state_unknown",
+                },
+                "verified_off": False,
+            },
+        }
+    )
+
+    result = await _handle_gui_command(_launcher_shutdown_command(), context=context)
+
+    assert result["error_code"] == "launcher_shutdown_global_off_unverified"
+    assert context.shutdown_receipt is None
+    assert context.shutdown_event is not None
+    assert not context.shutdown_event.is_set()
 
 
 async def test_reply_sent_callback_runs_only_after_successful_wire_send() -> None:
@@ -2102,10 +2142,14 @@ async def test_serialization_fallback_never_releases_teardown_for_unsent_receipt
     command = _launcher_shutdown_command()
     unsent_receipt: dict[str, object] = {
         "ok": True,
-        "schema": "cryodaq.engine_shutdown.v1",
+        "schema": "cryodaq.engine_shutdown.v2",
         "engine_instance_id": "a" * 32,
         "request_id": "c" * 32,
-        "global_off_verified": True,
+        "off_evidence": {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+            "verified_off": True,
+        },
         "teardown_requested": True,
         "delivery_state": "dispatched",
         "commit_state": "committed",
