@@ -10,6 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 AGENTS = REPO_ROOT / "AGENTS.md"
 CLAUDE = REPO_ROOT / "CLAUDE.md"
 ORCHESTRATION = REPO_ROOT / "docs" / "ORCHESTRATION.md"
+_SHA_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])", re.IGNORECASE)
+_HISTORICAL_MARKERS = ("<claude-mem-context>", "# Memory Context\n", "get_observations([IDs])", "feat/montana")
 
 # Governance model (maintainer decision):
 #   - AGENTS.md         instructs ALL agents (Claude included) -> canonical,
@@ -20,7 +22,7 @@ ORCHESTRATION = REPO_ROOT / "docs" / "ORCHESTRATION.md"
 #                       routing (the developer model-orchestra table) and be
 #                       more than a thin pointer. It must still defer to
 #                       AGENTS.md, not duplicate the code index, and not carry
-#                       transient campaign state (SHAs, branch names, mem dumps).
+#                       SHA-shaped strings and a few historical campaign markers.
 
 
 def test_canonical_guidance_files_exist_and_cross_link() -> None:
@@ -49,24 +51,23 @@ def test_claude_file_defers_to_agents_without_duplicating_index() -> None:
     assert "src/cryodaq/" not in text
 
 
-def test_canonical_guidance_is_stable_not_campaign_state() -> None:
+def test_canonical_guidance_rejects_sha_and_known_campaign_markers() -> None:
+    """Rejects SHA-shaped strings and a few historical campaign markers, not campaign state generally."""
     agents_text = AGENTS.read_text(encoding="utf-8")
     claude_text = CLAUDE.read_text(encoding="utf-8")
     orchestration_text = ORCHESTRATION.read_text(encoding="utf-8")
-    combined = agents_text + claude_text + orchestration_text
+    # Preserve document boundaries: concatenation could hide a SHA at the end
+    # of one file by adjoining the first alphanumeric character of the next.
+    combined = "\n".join((agents_text, claude_text, orchestration_text))
 
-    # Transient campaign state must stay out of ALL permanent guidance,
-    # CLAUDE.md included: it may carry stable model routing, but never SHAs,
-    # branch names, or memory dumps.
-    assert "<claude-mem-context>" not in combined
-    assert "# Memory Context\n" not in combined
-    assert "get_observations([IDs])" not in combined
-    assert not re.search(
-        r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])",
-        combined,
-        flags=re.IGNORECASE,
-    ), "commit SHA leaked into permanent guidance"
-    assert "feat/montana" not in combined
+    # This deliberately narrow regression check covers SHAs, this campaign's
+    # historical branch marker, and two known memory artifacts. It is not a
+    # general classifier for transient campaign state.
+    errors = [
+        *(f"historical campaign marker leaked: {marker!r}" for marker in _HISTORICAL_MARKERS if marker in combined),
+        *(f"SHA-shaped string leaked: {match.group(0)}" for match in _SHA_RE.finditer(combined)),
+    ]
+    assert not errors, "permanent guidance guard failed:\n" + "\n".join(errors)
 
     # Model/provider routing is permitted only in CLAUDE.md. AGENTS.md and
     # docs/ORCHESTRATION.md must remain tool/model-neutral.

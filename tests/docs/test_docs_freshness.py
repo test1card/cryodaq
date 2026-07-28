@@ -656,9 +656,22 @@ _G4_DOCS = (
     "docs/quickstart.md",
 )
 _G4_REFERENCE_RE = re.compile(r"\[\[ref:([^\]\n]+)\]\]")
+_G4_UNMARKED_REFERENCE_RE = re.compile(
+    r"(?<![\w/])((?:src|tests|scripts)(?:/[\w.-]+)*\.py(?:::[A-Za-z_][\w.]*)?)"
+)
 _G4_LEGACY_LINE_RE = re.compile(r"(?:[\w./-]+\.(?:py|ya?ml|toml|md)|\.gitignore):\d+")
 _G4_CONSOLE_COMMAND_RE = re.compile(r"(?m)^\s*(cryodaq(?:-[\w]+)*)\b")
 _G4_PROCEDURE_RE = re.compile(r"<!-- G4-PROCEDURES\n(.*?)\n-->", re.DOTALL)
+_G4_BOUND_RE = re.compile(
+    r"(?:0|[1-9]\d*)(?:\.\d+)?(?:\s+(?:\+|\d+|[A-Za-z][A-Za-z0-9/-]*|\d+(?:\.\d+)?[A-Za-z][A-Za-z0-9/-]*))+"
+)
+_G4_ID_DECLARATION_RE = re.compile(
+    r"(?m)^\s*(?:#\s+|contract_id:\s*|-\s+id:\s*)([A-Z][A-Z0-9-]*-\d{3})(?=[:\s]|$)"
+)
+_G4_ID_DECLARATION_PATHS = (
+    "governance/agent_preventions.yaml",
+    "tests/docs/test_docs_freshness.py",
+)
 _G4_PROCEDURE_FIELDS = (
     "preconditions",
     "target",
@@ -709,6 +722,16 @@ def _g4_yaml_key(root: Path, reference: str) -> str | None:
     return None
 
 
+def _g4_declared_ids(root: Path) -> set[str]:
+    """Read stable IDs from their declaration sites, never from citations."""
+
+    return {
+        stable_id
+        for relative in _G4_ID_DECLARATION_PATHS
+        for stable_id in _G4_ID_DECLARATION_RE.findall(_read(root / relative))
+    }
+
+
 def _g4_reference_error(root: Path, reference: str) -> str | None:
     if reference.startswith("make:"):
         target, separator, requirement = reference[5:].partition("|requires:")
@@ -730,11 +753,18 @@ def _g4_reference_error(root: Path, reference: str) -> str | None:
     if reference.startswith("test:"):
         reference = reference[5:]
     if reference.startswith("id:"):
-        return None if re.fullmatch(r"[A-Z][A-Z0-9-]*-\d{3}", reference[3:]) else f"invalid stable ID: {reference}"
-    if reference.endswith((".yaml", ".yml")) or ".yaml::" in reference or ".yml::" in reference:
+        stable_id = reference[3:]
+        if not re.fullmatch(r"[A-Z][A-Z0-9-]*-\d{3}", stable_id):
+            return f"invalid stable ID: {reference}"
+        return None if stable_id in _g4_declared_ids(root) else f"stable ID is not declared: {stable_id}"
+    if reference.endswith((".yaml", ".yml")):
+        return None if (root / reference).is_file() else f"file does not exist: {reference}"
+    if ".yaml::" in reference or ".yml::" in reference:
         return _g4_yaml_key(root, reference)
 
     path_text, separator, symbol = reference.partition("::")
+    if not separator and path_text.endswith(".py"):
+        return None if (root / path_text).is_file() else f"file does not exist: {path_text}"
     if not separator or not path_text.endswith(".py") or not symbol:
         return f"must be path::qualified.symbol, yaml-file::key.path, command, make target, or stable ID: {reference}"
     path = root / path_text
@@ -777,6 +807,10 @@ def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> No
         for reference in _G4_REFERENCE_RE.findall(text):
             if error := _g4_reference_error(root, reference):
                 errors.append(f"{name}: {error}")
+        unmarked = _G4_REFERENCE_RE.sub("", text)
+        for reference in _G4_UNMARKED_REFERENCE_RE.findall(unmarked):
+            if error := _g4_reference_error(root, reference):
+                errors.append(f"{name}: unmarked executable reference: {error}")
         for command in _G4_CONSOLE_COMMAND_RE.findall(text):
             if command not in _pyproject()["project"]["scripts"]:
                 errors.append(f"{name}: command is not a project console script: {command}")
@@ -794,18 +828,54 @@ def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> No
         for field in _G4_PROCEDURE_FIELDS:
             if not fields.get(field, "").strip():
                 errors.append(f"{gate}: procedure field is missing: {field}")
-        if not re.search(r"\d", fields.get("bound", "")):
-            errors.append(f"{gate}: bound must be numeric or resource-bounded")
+        if not _G4_BOUND_RE.fullmatch(fields.get("bound", "").strip()):
+            errors.append(f"{gate}: bound must be a quantified bound expression")
         result = fields.get("result", "")
         if result not in {"SOFTWARE-PROVABLE", "EXTERNALLY_EVIDENCED", "PHYSICAL"}:
             errors.append(f"{gate}: invalid result class: {result}")
-        if result == "SOFTWARE-PROVABLE":
-            errors.append(f"{gate}: acceptance evidence is external or physical, not SOFTWARE-PROVABLE")
     assert not errors, "G4 documentation guard failed:\n" + "\n".join(errors)
 
 
 def test_g4_executable_references_and_procedure_declarations() -> None:
     _validate_g4_docs(REPO_ROOT)
+
+
+@pytest.mark.parametrize(
+    ("reference", "error"),
+    (
+        ("tests/does_not_exist.py", "file does not exist"),
+        ("tests/docs/test_docs_freshness.py::missing_symbol", "symbol does not exist"),
+    ),
+)
+def test_g4_rejects_unmarked_missing_executable_references(reference: str, error: str) -> None:
+    with pytest.raises(AssertionError, match=f"unmarked executable reference: {error}"):
+        _validate_g4_docs(REPO_ROOT, {"AGENTS.md": f"Evidence: {reference}"})
+
+
+def test_g4_rejects_syntactically_valid_but_undeclared_id() -> None:
+    with pytest.raises(AssertionError, match="stable ID is not declared: FAKE-999"):
+        _validate_g4_docs(REPO_ROOT, {"AGENTS.md": "[[ref:id:FAKE-999]]"})
+
+
+@pytest.mark.parametrize("bound", ("unbounded 1", "1", "1 ???"))
+def test_g4_rejects_non_quantified_bound_metadata(bound: str) -> None:
+    checklist = _read(REPO_ROOT / "docs/new_lab_acceptance_checklist.md").replace(
+        "bound: 1 runtime comparison", f"bound: {bound}", 1
+    )
+    with pytest.raises(AssertionError, match="G0.1: bound must be a quantified bound expression"):
+        _validate_g4_docs(REPO_ROOT, {"docs/new_lab_acceptance_checklist.md": checklist})
+
+
+def test_g4_allows_software_provable_procedure_declarations() -> None:
+    checklist = _read(REPO_ROOT / "docs/new_lab_acceptance_checklist.md").replace(
+        "result: PHYSICAL", "result: SOFTWARE-PROVABLE", 1
+    )
+    _validate_g4_docs(REPO_ROOT, {"docs/new_lab_acceptance_checklist.md": checklist})
+
+
+def test_g4_fails_closed_when_a_required_document_is_missing(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        _validate_g4_docs(tmp_path)
 
 
 def test_architecture_snapshot_is_bound_to_index_and_excludes_generated_outputs(
