@@ -606,15 +606,19 @@ guard faults enter the SafetyManager by default. Dead channel patterns and safet
 faults surface as operator alarms. Startup checks expose rules that match no real
 canonical channel.
 
-Reviewed source drivers must prove OFF. A disconnect cannot be treated as safe if
-readback did not confirm removal of output. Watchdog behavior remains honestly
-bounded: an operator-selected TSP late-pet mode is not independent host-death
-protection. Required mode refuses an unsupported autonomous contract instead of
-pretending software polling closes the physical gate.
+The current reviewed-source path requires OFF evidence; a disconnect cannot be
+treated as safe if readback did not confirm removal of output. If a future
+source can accept an OFF command but cannot prove a physical OFF state, its
+lower capability must be disclosed as commanded-but-unverified, not reported as
+safe and not made contingent on adding an external final element. Watchdog
+behavior remains honestly bounded: an operator-selected TSP late-pet mode is
+not independent host-death protection. Required mode refuses an unsupported
+autonomous contract instead of pretending software polling closes the physical
+gate.
 
 No generic actuator plugin system was introduced. A new hazardous actuator still
-requires a hazard analysis, safety adapter, verified-OFF behavior, independent
-host-death protection, and physical bench evidence.
+requires a hazard analysis, safety adapter, honest OFF-capability disclosure,
+and physical bench evidence.
 
 ### 6.9 Exact alarm activation acknowledgement
 
@@ -860,9 +864,10 @@ testable modules, and first-run/recovery and reporting isolation began.
 ### 8.2 July 10: periodic reporting and scalable extension contracts
 
 Rendering moved to child processes; state, manifest, retry, scheduling, hydration,
-delivery, and stream barriers became explicit. The public hardware-scalability
-contract was added: registry, capabilities, shared-bus behavior, descriptors,
-packaging, conformance, and safety separation.
+delivery, and stream barriers became explicit. A passive hardware-scalability
+foundation was added: registry, capabilities, shared-bus behavior, descriptors,
+packaging, conformance, and safety separation. It did not add a generic
+hazardous-actuator adaptation contract.
 
 ### 8.3 July 11–12: build the new authority planes
 
@@ -1156,7 +1161,7 @@ what software tests can prove and what only the apparatus can prove.
 - remote command approval;
 - generic plugin SDK examples;
 - Linux packaging convenience;
-- any generic hazardous-actuator SDK;
+- any generic hazardous-actuator SDK or adaptation contract;
 - cloud dependence or health-driven automatic remediation.
 
 ## 14. Detailed subsystem and file appendix

@@ -60,6 +60,11 @@ Telegram-бота в `config/notifications.local.yaml`. Descriptor local-фай�
 Ошибка или неполный roster блокирует startup; descriptor задаёт идентичность,
 но не выдаёт capability или source authority.
 
+Если вы разворачиваете CryoDAQ на **другом** железе, а не на этом стенде,
+конфигурации из шага 4 недостаточно: см. `docs/new_lab_adaptation.md`
+(манифест дескрипторов, приёмка калибровки, покрытие каналов, вывод порогов)
+и `docs/new_lab_acceptance_checklist.md`.
+
 ## 5. Bootstrap модели предиктора охлаждения
 
 Текущий tracked helper требует POSIX-compatible `make` и shell:

@@ -56,6 +56,13 @@ by inference from code or tests.
   arbitrary** — most entries exist because the obvious alternative was tried and
   failed, or because a measurement contradicted a widely-held assumption. Append-only;
   supersede by adding an entry, never by editing history.
+- `docs/new_lab_adaptation.md`: the adaptation path for a fork running on
+  different cryogenic hardware — descriptor manifest, calibration acceptance,
+  channel coverage, threshold derivation, tracked-vs-local configuration, and
+  the definition of done. `docs/new_lab_acceptance_checklist.md` is the
+  instantiable hardware acceptance template it ends in;
+  `docs/lab_verification_checklist.md` is this stand's own filled-in instance,
+  not a generic one.
 - `docs/design-system/`: canonical UI design system and governance.
 - `governance/agent_preventions.yaml`: machine-readable confirmed-mistake,
   prevention-rule, guard, CI, and immutable-evidence registry.

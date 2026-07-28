@@ -290,6 +290,12 @@ the raw label an instrument happens to emit. It is distinct from `channels.yaml`
 - **Reconcile before lab use.** The tracked base roster and the machine-local
   physical roster must be reconciled before a deployment drives real hardware.
 
+The registry and descriptor flow supports passive-extension work, but it is not
+a generic hazardous-actuator adaptation path: `SafetyManager` is still wired
+to the Keithley-shaped source interface (`src/cryodaq/core/safety_manager.py:140-158`,
+`:2203`, `:2434`, `:2605`). A rostered second actuator is admitted only by the
+loader and cannot be presented as a working end-to-end adaptation.
+
 Loader: `src/cryodaq/storage/channel_descriptors.py`
 (`load_live_channel_descriptor_catalog`).
 

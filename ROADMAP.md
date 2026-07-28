@@ -184,9 +184,10 @@ Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 CryoDAQ must remain usable beyond the current stand. Historically, adding an
 instrument required central engine edits and name-based GUI routing. The active
 branch now uses the allowlisted registry, canonical descriptor authority, and
-descriptor-qualified generic and specialist routing. F35 turns that
-implementation into a supported extension contract for other ASC laboratories,
-with frozen-package and physical evidence still outstanding.
+descriptor-qualified generic and specialist routing. F35 establishes a passive
+extension foundation for other ASC laboratories; it does not yet establish a
+generic hazardous-actuator adaptation contract. Frozen-package and physical
+evidence also remain outstanding.
 
 Execution status: F35.1 registry/capabilities and F35.2 shared-bus contracts
 are committed. Within F35.3, D1 manifest authority, D2 persistence activation,
@@ -235,7 +236,7 @@ Scope and acceptance criteria:
    connect/read/disconnect, cancellation, reconnect, malformed/non-finite
    input, mock mode, stable `instrument_id`, persistence-first publication,
    replay, and resource cleanup.
-6. **Reference extension proof.** A new passive reference driver can be added
+6. **Reference extension proof.** The current proof shows that a new passive reference driver can be added
    with its own module, schema, config, and tests without editing engine,
    scheduler, launcher, storage, or generic GUI code; an end-to-end test proves
    acquisition, persistence, replay, reporting, and instrument-health display.
@@ -243,9 +244,10 @@ Scope and acceptance criteria:
    role, safety class, and display group—and reporting/generic GUI paths must
    consume that descriptor rather than rediscovering semantics from names.
 7. **Safety boundary stays deliberate.** Arbitrary plugins never gain source
-   authority by duck typing. A new hazardous actuator requires an explicit
-   reviewed safety adapter, hazard analysis, verified-OFF contract, independent
-   host-death protection, and physical bench evidence.
+   authority by duck typing. A generic hazardous-actuator extension contract is
+   not implemented; a future one requires an explicit reviewed safety adapter,
+   hazard analysis, an honest OFF-capability disclosure, and physical bench
+   evidence.
 
 Passive measurement extensions are the first target. A generic safety-actuator
 plugin system is explicitly not an acceptance criterion and must not weaken the

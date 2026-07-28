@@ -243,9 +243,15 @@ ls -l /dev/ttyUSB* /dev/ttyS*
    ```
 3. Перезапустить engine. Новый прибор виден в панели «Приборы»
    (`Ctrl+D`) — должна появиться строка со статусом / heartbeat.
-4. Новые каналы нужно ещё добавить в `config/channels.yaml`
-   (для отображения и группировки); иначе они будут собраны и
-   записаны в SQLite, но не показаны на дашборде.
+4. Добавить каждую пару `(instrument_id, emitted_channel)` в обязательный
+   descriptor manifest: `config/channel_descriptors.local.yaml`, если выбран
+   `instruments.local.yaml`, иначе `config/channel_descriptors.yaml`.
+   Локальный manifest полностью заменяет base и обязателен вместе с локальным
+   списком приборов; каждый emitted channel без binding отклоняется до
+   persistence/publication (`src/cryodaq/engine.py:2247-2256`,
+   `src/cryodaq/storage/channel_descriptors.py:827-837`).
+   `config/channels.yaml` задаёт только отображение и группировку, не
+   идентичность канала.
 
 ## Mock mode для разработки
 
@@ -301,7 +307,10 @@ cryodaq-engine --mock
 1. Написать драйвер, наследующийся от
    `src/cryodaq/drivers/base.InstrumentDriver`. Реализовать
    `read_channels() -> list[Reading]`, `connect()`, `disconnect()`.
-2. Зарегистрировать тип в `src/cryodaq/engine.py` фабрикой.
+2. Зарегистрировать тип в allowlisted registry
+   `src/cryodaq/drivers/registry.py`: engine вызывает
+   `validate_instrument_entries()` и `construct_driver()`, а не собственную
+   фабрику (`src/cryodaq/engine.py:2082-2127`).
 3. Добавить пример записи в `config/instruments.yaml` с комментарием
    «# type: <ваш_type>».
 4. Написать unit-тест в `tests/drivers/`.

@@ -776,6 +776,12 @@ worse than having no second reviewer, because it manufactures confidence. Name t
 model used for each review; the constraint is capability and independence, never a
 particular vendor.
 
+Today that adaptation promise covers configuration and passive-driver work, not
+end-to-end adoption of an arbitrary hazardous actuator. The loader can admit a
+rostered source, but `SafetyManager` remains Keithley-shaped
+(`src/cryodaq/engine.py:2082-2158`, `src/cryodaq/core/safety_manager.py:140-158`,
+`:2203`, `:2434`, `:2605`); the generic actuator contract is an exposed gap.
+
 The distinction matters because **a guard is governing work wearing
 implementation clothes.** A test that merely exercises code is building work. A
 guard is a claim about what could go wrong -- and that claim can only be made by
