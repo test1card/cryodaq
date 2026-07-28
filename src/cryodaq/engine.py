@@ -6415,7 +6415,11 @@ async def _run_engine(
     housekeeping_cfg = _engine_config_path("housekeeping")
     safety_cfg = _engine_config_path("safety")
     cooldown_cfg_path = _engine_config_path("cooldown")
-    interlocks_snapshot = interlocks_cfg.read_bytes()
+    # One read, shared by the throttle-pattern scan and InterlockEngine, so the
+    # digest we disclose is the digest of the bytes we actually apply. An absent
+    # interlocks file is not an error here: both consumers already tolerate it,
+    # and skipping the read preserves that. There are no bytes to race on.
+    interlocks_snapshot = interlocks_cfg.read_bytes() if interlocks_cfg.is_file() else None
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
     # --- Создать основные компоненты ---
     broker = DataBroker()
@@ -6471,7 +6475,7 @@ async def _run_engine(
     # critical channels even though alarms_v3 marks them CRITICAL.
     legacy_patterns = load_protected_channel_patterns(
         interlocks_cfg,
-        snapshots={interlocks_cfg: interlocks_snapshot},
+        snapshots=None if interlocks_snapshot is None else {interlocks_cfg: interlocks_snapshot},
     )
     alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
     v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
