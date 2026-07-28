@@ -17,14 +17,18 @@ from cryodaq.channels.descriptors import (
     validate_catalog_update,
 )
 from cryodaq.channels.persistence import (
-    MAX_PERSISTED_ENVELOPE_BYTES,
-    PersistedChannelEnvelopeError,
-    decode_persisted_channel_envelope,
+    MAX_PERSISTED_ENVELOPE_BYTES as _MAX_PERSISTED_ENVELOPE_BYTES,
+)
+from cryodaq.channels.persistence import (
+    PersistedChannelEnvelopeError as _PersistedChannelEnvelopeError,
+)
+from cryodaq.channels.persistence import (
+    decode_persisted_channel_envelope as _decode_persisted_channel_envelope,
 )
 from cryodaq.storage._sqlite import sqlite3
 
 MAX_ARCHIVE_DESCRIPTORS: Final = MAX_CATALOG_DESCRIPTORS
-MAX_ARCHIVE_DESCRIPTOR_BYTES: Final = MAX_CATALOG_DESCRIPTORS * MAX_PERSISTED_ENVELOPE_BYTES
+MAX_ARCHIVE_DESCRIPTOR_BYTES: Final = MAX_CATALOG_DESCRIPTORS * _MAX_PERSISTED_ENVELOPE_BYTES
 
 
 class DescriptorArchiveError(RuntimeError):
@@ -79,7 +83,7 @@ def _verified_rows(
         if type(row) is not ArchivedDescriptor or type(row.envelope_json) is not bytes:
             raise DescriptorArchiveError("descriptor archive row types are not exact")
         envelope_size = len(row.envelope_json)
-        if envelope_size > MAX_PERSISTED_ENVELOPE_BYTES:
+        if envelope_size > _MAX_PERSISTED_ENVELOPE_BYTES:
             raise DescriptorArchiveError("descriptor archive envelope exceeds byte bound")
         total_bytes += envelope_size
         if total_bytes > MAX_ARCHIVE_DESCRIPTOR_BYTES:
@@ -92,8 +96,8 @@ def _verified_rows(
     hashes: list[str] = []
     for row in materialized:
         try:
-            envelope = decode_persisted_channel_envelope(row.envelope_json)
-        except (TypeError, PersistedChannelEnvelopeError) as exc:
+            envelope = _decode_persisted_channel_envelope(row.envelope_json)
+        except (TypeError, _PersistedChannelEnvelopeError) as exc:
             raise DescriptorArchiveError("descriptor archive envelope is corrupt") from exc
         if row.envelope_json != envelope.canonical_json:
             raise DescriptorArchiveError("descriptor archive envelope is not canonical")
@@ -168,7 +172,7 @@ def load_referenced_descriptors(
     if (
         count > MAX_ARCHIVE_DESCRIPTORS
         or total_bytes > MAX_ARCHIVE_DESCRIPTOR_BYTES
-        or largest > MAX_PERSISTED_ENVELOPE_BYTES
+        or largest > _MAX_PERSISTED_ENVELOPE_BYTES
     ):
         raise DescriptorArchiveError("descriptor catalog exceeds archive bounds")
     verified = _verified_rows(
@@ -241,8 +245,6 @@ __all__ = [
     "ArchivedDescriptor",
     "ResolvedStorageDescriptor",
     "DescriptorArchiveError",
-    "PersistedChannelEnvelopeError",
-    "decode_persisted_channel_envelope",
     "load_referenced_descriptors",
     "resolve_archived_descriptors",
     "resolve_legacy_descriptor",

@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from cryodaq.reporting.data import HistoricalReading, ReportDataset
-from cryodaq.storage.broker_replay import DescriptorReplayBatch, DescriptorReplayReading
-from cryodaq.storage.descriptor_archive import (
+from cryodaq.channels.persistence import (
     PersistedChannelEnvelopeError,
     decode_persisted_channel_envelope,
 )
+from cryodaq.reporting.data import HistoricalReading, ReportDataset
+from cryodaq.storage.broker_replay import DescriptorReplayBatch, DescriptorReplayReading
 
 MAX_REPORT_DESCRIPTOR_ISSUES = 32
 
