@@ -546,9 +546,37 @@ class MultiLineDriver(InstrumentDriver):
             )
         except (TCPTransportError, ValueError) as exc:
             logger.error("MultiLine '%s' read failed: %s", self.name, exc)
-            return []
+            return self._unavailable_readings(str(exc) or type(exc).__name__)
 
         readings[-3:] = [self._mask_nonfinite_reading(reading) for reading in readings[-3:]]
+        return readings
+
+    def _unavailable_readings(self, reason: str) -> list[Reading]:
+        """Return the expected measurement roster with explicit unavailable state."""
+
+        metadata = {"available": False, "stale": True, "reason": reason}
+        readings = [
+            Reading.now(
+                channel=f"{self.name}/length_ch{channel_number}",
+                value=float("nan"),
+                unit="mm",
+                instrument_id=self.name,
+                status=ChannelStatus.SENSOR_ERROR,
+                metadata=dict(metadata),
+            )
+            for channel_number in self._channel_numbers
+        ]
+        readings.extend(
+            Reading.now(
+                channel=f"{self.name}/env_{field}",
+                value=float("nan"),
+                unit=unit,
+                instrument_id=self.name,
+                status=ChannelStatus.SENSOR_ERROR,
+                metadata=dict(metadata),
+            )
+            for field, unit in (("temperature", "°C"), ("pressure", "hPa"), ("humidity", "%"))
+        )
         return readings
 
     # ------------------------------------------------------------------

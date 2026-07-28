@@ -553,10 +553,13 @@ async def test_nonfinite_iv_is_masked_with_bounded_raw_evidence() -> None:
     assert all("nan\\tinf" in reading.metadata["reported_iv_response"] for reading in smua)
 
 
-def test_nonfinite_raw_buffer_rows_are_rejected_but_finite_truth_is_retained() -> None:
+def test_unreadable_buffer_response_is_not_an_authoritative_empty_history() -> None:
     driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
 
-    assert driver._parse_buffer_response("0,nan,1") == []
+    with pytest.raises(ValueError, match="no finite buffered IV rows"):
+        driver._parse_buffer_response("0,nan,1")
+
+    assert driver._parse_buffer_response("") == []
 
     zero_current = driver._parse_buffer_response("0,1,0")
     assert len(zero_current) == 1

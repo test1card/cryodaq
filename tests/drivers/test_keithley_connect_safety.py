@@ -37,8 +37,10 @@ def _canonical_query(command: str, timeout_ms: int | None = None) -> str:
     del timeout_ms
     if command == "*IDN?":
         return _CANONICAL_IDN
-    if "source.output" in command:
+    if "CRYODAQ_OFF_V1" in command:
         return _off_reply(command)
+    if "source.output" in command:
+        return "1"
     return "0"
 
 

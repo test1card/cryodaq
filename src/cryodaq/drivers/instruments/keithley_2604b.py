@@ -232,6 +232,19 @@ def _parse_compliance(raw: str) -> bool:
     raise ValueError(f"source.compliance must be literal 'true' or 'false', got {token!r}")
 
 
+def _parse_finite_readback(raw: str, *, field: str) -> float:
+    """Parse one finite numeric hardware readback without defaulting unknown input."""
+
+    token = _bounded_ascii_token(raw, field=field)
+    try:
+        value = float(token)
+    except ValueError as exc:
+        raise ValueError(f"{field} readback is not numeric: {token!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{field} readback must be finite, got {token!r}")
+    return value
+
+
 class _WatchdogArmError(RuntimeError):
     """Watchdog upload/activation integrity check failed.
 
@@ -875,7 +888,16 @@ class Keithley2604B(InstrumentDriver):
                                     generation=regulation_generation,
                                     command_epoch=regulation_epoch,
                                 ):
-                                    self._last_v[smu_channel] = target_v
+                                    applied_v = _parse_finite_readback(
+                                        await self._operational_query(f"print({smu_channel}.source.levelv)"),
+                                        field=f"{smu_channel}.source.levelv",
+                                    )
+                                    self._require_current_regulation(
+                                        smu_channel,
+                                        generation=regulation_generation,
+                                        command_epoch=regulation_epoch,
+                                    )
+                                    self._last_v[smu_channel] = applied_v
 
                 readings.extend(self._build_channel_readings(smu_channel, voltage, current, extra_meta=extra_meta))
             except OSError as exc:
@@ -962,6 +984,12 @@ class Keithley2604B(InstrumentDriver):
                 authority_check=lambda: self._require_current_start(smu_channel, start_token),
             )
             self._require_current_start(smu_channel, start_token)
+            output_on = _parse_output_enabled(
+                await self._operational_query(f"print({smu_channel}.source.output)", timeout_ms=3000)
+            )
+            self._require_current_start(smu_channel, start_token)
+            if not output_on:
+                raise RuntimeError(f"{self.name}: {smu_channel} OUTPUT_ON readback did not confirm ON")
 
             self._last_v[smu_channel] = 0.0
             self._compliance_count[smu_channel] = 0
@@ -1037,6 +1065,14 @@ class Keithley2604B(InstrumentDriver):
                     f"{smu_channel}.source.limitv = {value}",
                     authority_check=require_update_authority,
                 )
+                applied = _parse_finite_readback(
+                    await self._operational_query(f"print({smu_channel}.source.limitv)"),
+                    field=f"{smu_channel}.source.limitv",
+                )
+                if applied != value:
+                    raise RuntimeError(
+                        f"{self.name}: {smu_channel}.source.limitv readback {applied!r} does not match {value!r}"
+                    )
             require_update_authority()
             runtime.v_comp = value
         else:
@@ -1045,6 +1081,14 @@ class Keithley2604B(InstrumentDriver):
                     f"{smu_channel}.source.limiti = {value}",
                     authority_check=require_update_authority,
                 )
+                applied = _parse_finite_readback(
+                    await self._operational_query(f"print({smu_channel}.source.limiti)"),
+                    field=f"{smu_channel}.source.limiti",
+                )
+                if applied != value:
+                    raise RuntimeError(
+                        f"{self.name}: {smu_channel}.source.limiti readback {applied!r} does not match {value!r}"
+                    )
             require_update_authority()
             runtime.i_comp = value
         return value
@@ -1486,7 +1530,9 @@ class Keithley2604B(InstrumentDriver):
     async def check_error(self) -> str | None:
         self._require_operational_connection("check_error")
         response = (await self._operational_query("print(errorqueue.count)")).strip()
-        if response in {"", "0"}:
+        if response == "":
+            raise ValueError("error queue count response is empty")
+        if response == "0":
             return None
         return response
 
@@ -1519,8 +1565,20 @@ class Keithley2604B(InstrumentDriver):
     async def diagnostics(self) -> dict[str, Any]:
         """Periodic health check — called by scheduler every 30s."""
         self._raise_if_operationally_barred("diagnostics")
-        if not self._connected or self.mock:
-            return {}
+        if not self._connected:
+            return {
+                "available": False,
+                "stale": True,
+                "reason": "diagnostics unavailable: instrument is not connected",
+                "diagnostics": {},
+            }
+        if self.mock:
+            return {
+                "available": False,
+                "stale": True,
+                "reason": "diagnostics unavailable in mock mode",
+                "diagnostics": {},
+            }
         result: dict[str, Any] = {}
         try:
             raw = await self._operational_query("print(errorqueue.count)")
@@ -1533,7 +1591,13 @@ class Keithley2604B(InstrumentDriver):
             if self._recovery_transport_open:
                 raise
             log.error("%s: diagnostics error: %s", self.name, exc)
-        return result
+            return {
+                "available": False,
+                "stale": True,
+                "reason": str(exc) or type(exc).__name__,
+                "diagnostics": {},
+            }
+        return {"available": True, "stale": False, "reason": None, "diagnostics": result}
 
     # --- TSP software late-pet watchdog -------------------------------------
     # All methods are no-ops unless _wdog_enabled and not mock, so the default
@@ -2018,7 +2082,11 @@ class Keithley2604B(InstrumentDriver):
         return readings
 
     def _parse_buffer_response(self, raw: str) -> list[dict[str, float]]:
+        if not raw.strip():
+            return []
         tokens = [token.strip() for token in raw.replace("\t", ",").split(",")]
+        if len(tokens) % 3:
+            raise ValueError("buffer response does not contain complete timestamp/voltage/current rows")
         results: list[dict[str, float]] = []
         n = len(tokens) // 3
         for idx in range(n):
@@ -2026,11 +2094,10 @@ class Keithley2604B(InstrumentDriver):
                 ts = float(tokens[idx])
                 voltage = float(tokens[n + idx])
                 current = float(tokens[2 * n + idx])
-            except (ValueError, IndexError):
-                continue
+            except (ValueError, IndexError) as exc:
+                raise ValueError("buffer response contains an unreadable IV row") from exc
             if not all(math.isfinite(value) for value in (ts, voltage, current)):
-                log.error("%s: discarding non-finite buffered IV row", self.name)
-                continue
+                raise ValueError("buffer response contains no finite buffered IV rows")
             resistance = voltage / current if current != 0.0 else float("nan")
             power = voltage * current
             if not math.isfinite(power):

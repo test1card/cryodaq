@@ -59,6 +59,7 @@ class LakeShore218S(InstrumentDriver):
         self._srdg_last_batch_retry: float = 0.0
         self._last_status_check: float = 0.0
         self._last_status_result: dict[int, int] = {}
+        self._last_status_reason: str | None = None
 
     async def connect(self) -> None:
         try:
@@ -137,12 +138,18 @@ class LakeShore218S(InstrumentDriver):
     async def disconnect(self) -> None:
         await self._transport.close()
         self._connected = False
+        self._last_status_check = 0.0
+        self._last_status_result = {}
+        self._last_status_reason = None
 
     async def abort_connect(self) -> None:
         """Settle partial transport ownership before connection truth commits."""
 
         await self._transport.abort_open()
         self._connected = False
+        self._last_status_check = 0.0
+        self._last_status_result = {}
+        self._last_status_reason = None
 
     async def read_channels(self) -> list[Reading]:
         if not self._connected:
@@ -163,16 +170,32 @@ class LakeShore218S(InstrumentDriver):
             self._last_status_check = now
             try:
                 self._last_status_result = await self.read_status()
+                self._last_status_reason = None
             except Exception as exc:
                 log.debug("%s: RDGST? periodic check failed: %s", self.name, exc)
+                self._last_status_reason = str(exc) or type(exc).__name__
         # Attach status bits as metadata
-        if self._last_status_result:
-            for r in readings:
-                ch_num = (r.metadata or {}).get("raw_channel")
-                if ch_num is not None and ch_num in self._last_status_result:
-                    if r.metadata is None:
-                        r.metadata = {}
-                    r.metadata["sensor_status"] = self._last_status_result[ch_num]
+        for r in readings:
+            ch_num = (r.metadata or {}).get("raw_channel")
+            if ch_num is None:
+                continue
+            if r.metadata is None:
+                r.metadata = {}
+            status = self._last_status_result.get(ch_num)
+            if status is None or status < 0:
+                reason = self._last_status_reason or f"RDGST? unavailable for channel {ch_num}"
+                r.metadata["sensor_status_availability"] = {
+                    "available": False,
+                    "stale": True,
+                    "reason": reason,
+                }
+            else:
+                r.metadata["sensor_status"] = status
+                r.metadata["sensor_status_availability"] = {
+                    "available": True,
+                    "stale": self._last_status_reason is not None,
+                    "reason": self._last_status_reason,
+                }
 
         return readings
 

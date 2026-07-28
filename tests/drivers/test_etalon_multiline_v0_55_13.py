@@ -369,14 +369,10 @@ async def test_disconnect_preserves_caller_cancellation_after_listener_cleanup()
 # ---------------------------------------------------------------------------
 
 
-def test_read_channels_returns_empty_when_disconnected(
+def test_read_channels_marks_each_expected_channel_unavailable_when_disconnected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """v0.55.13 (audit SCOPE 4 finding 4.4) — calling
-    read_channels() on a driver whose transport is None must NOT raise
-    TCPTransportError. It must absorb that into the existing
-    catch-and-return-[] degradation path so the scheduler tick stays
-    resilient."""
+    """A failed acquisition must not look like a successful empty cycle."""
     driver = MultiLineDriver(
         host="127.0.0.1",
         port=2001,
@@ -389,7 +385,11 @@ def test_read_channels_returns_empty_when_disconnected(
 
     result = _run(driver.read_channels())
 
-    assert result == []
+    assert len(result) == 5
+    assert all(reading.status.value == "sensor_error" for reading in result)
+    assert all(reading.metadata["available"] is False for reading in result)
+    assert all(reading.metadata["stale"] is True for reading in result)
+    assert all(reading.metadata["reason"] for reading in result)
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +508,9 @@ def test_averaged_frame_rejects_server_error_or_wrong_channel(server_error: int,
     transport.query = AsyncMock(return_value=(f"channeldata_{channel},1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0_{server_error}"))
     driver._transport = transport
 
-    assert _run(driver.read_channels()) == []
+    readings = _run(driver.read_channels())
+    assert len(readings) == 4
+    assert all(reading.status.value == "sensor_error" for reading in readings)
     assert transport.query.await_count == 1
 
 

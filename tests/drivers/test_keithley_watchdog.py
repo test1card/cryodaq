@@ -45,6 +45,7 @@ class _RecordingTransport:
         self.wdog_version_raw = "3"
         self.wdog_autonomous_raw = "0"
         self.wdog_active_raw = "0"
+        self.output_state = {"smua": 0, "smub": 0}
 
     async def open(self, resource: str) -> None:
         self._opened = True
@@ -72,8 +73,10 @@ class _RecordingTransport:
             if "cryodaq_off_v1" in c:
                 match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", cmd)
                 assert match is not None
-                return f"CRYODAQ_OFF_V1|{match.group(1)}|0\n"
-            return "0"
+                channel = "smua" if "smua" in c else "smub"
+                return f"CRYODAQ_OFF_V1|{match.group(1)}|{self.output_state[channel]}\n"
+            channel = "smua" if "smua" in c else "smub"
+            return str(self.output_state[channel])
         if "errorqueue.count" in c:
             return "0"
         return "0"
@@ -83,6 +86,9 @@ class _RecordingTransport:
             raise RuntimeError("simulated upload failure")
         self.writes.append(cmd)
         self.calls.append(("write", cmd))
+        if ".source.output =" in cmd:
+            channel = "smua" if "smua" in cmd else "smub"
+            self.output_state[channel] = 1 if "OUTPUT_ON" in cmd else 0
         # Mirror firmware state transitions so the post-run readbacks (A8) see
         # the same state a real 2604B would: run() clears the latch and arms;
         # disarm() clears active.

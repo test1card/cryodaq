@@ -24,6 +24,12 @@ class _FakeKeithleyTransport:
     def __init__(self, *, current: float, voltage: float) -> None:
         self._iv = f"{current}\t{voltage}"
         self.writes: list[str] = []
+        self._levelv = {"smua": 0.0, "smub": 0.0}
+        self._limits = {"smua": {"limitv": 0.0, "limiti": 0.0}, "smub": {"limitv": 0.0, "limiti": 0.0}}
+        self._output = {"smua": 0, "smub": 0}
+        self.ignore_levelv_writes = False
+        self.ignore_limit_writes = False
+        self.ignore_output_on_writes = False
 
     async def open(self, resource: str) -> None:
         del resource
@@ -38,9 +44,18 @@ class _FakeKeithleyTransport:
         if "cryodaq_off_v1" in c:
             match = re.search(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g", cmd)
             assert match is not None
-            return f"CRYODAQ_OFF_V1|{match.group(1)}|0\n"
+            channel = "smua" if "smua" in c else "smub"
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|{self._output[channel]}\n"
         if "source.output" in c:
-            return "0"  # inactive channels report OFF
+            channel = "smua" if "smua" in c else "smub"
+            return str(self._output[channel])
+        if "source.levelv" in c:
+            channel = "smua" if "smua" in c else "smub"
+            return str(self._levelv[channel])
+        if "source.limitv" in c or "source.limiti" in c:
+            channel = "smua" if "smua" in c else "smub"
+            field = "limitv" if "source.limitv" in c else "limiti"
+            return str(self._limits[channel][field])
         if "measure.iv()" in c:
             return self._iv
         if "source.compliance" in c:
@@ -49,6 +64,17 @@ class _FakeKeithleyTransport:
 
     async def write(self, cmd: str) -> None:
         self.writes.append(cmd)
+        channel = "smua" if "smua" in cmd else "smub"
+        if ".source.levelv =" in cmd and not self.ignore_levelv_writes:
+            self._levelv[channel] = float(cmd.split("=", 1)[1])
+        if ".source.limit" in cmd and not self.ignore_limit_writes:
+            field = "limitv" if ".source.limitv" in cmd else "limiti"
+            self._limits[channel][field] = float(cmd.split("=", 1)[1])
+        if ".source.output =" in cmd:
+            if "OUTPUT_ON" in cmd and not self.ignore_output_on_writes:
+                self._output[channel] = 1
+            elif "OUTPUT_OFF" in cmd:
+                self._output[channel] = 0
 
 
 async def _connected_physical_driver(
@@ -120,6 +146,44 @@ async def test_slew_rate_limits_large_v_step() -> None:
         f"slew limiter must clamp the step to {MAX_DELTA_V_PER_STEP} V, but commanded {commanded} V"
     )
     assert driver._last_v["smua"] == pytest.approx(MAX_DELTA_V_PER_STEP)
+
+
+async def test_regulation_uses_voltage_readback_not_write_acknowledgement() -> None:
+    driver, fake = await _connected_physical_driver()
+    fake.ignore_levelv_writes = True
+    driver._channels["smua"].active = True
+    driver._channels["smua"].p_target = 0.5
+    driver._channels["smua"].v_comp = 40.0
+    driver._source_regulation_epoch["smua"] = driver._source_command_epoch["smua"]
+    driver._last_v["smua"] = 0.0
+
+    await driver.read_channels()
+
+    assert any("smua.source.levelv" in command for command in fake.writes)
+    assert driver._last_v["smua"] == 0.0
+
+
+async def test_start_source_requires_output_on_readback() -> None:
+    driver, fake = await _connected_physical_driver()
+    fake.ignore_output_on_writes = True
+
+    with pytest.raises(RuntimeError, match="OUTPUT_ON readback"):
+        await driver.start_source("smua", 0.5, 40.0, 1.0)
+
+    assert driver.active_channels == []
+
+
+async def test_limit_update_rejects_mismatched_readback() -> None:
+    driver, fake = await _connected_physical_driver()
+    fake.ignore_limit_writes = True
+    driver._channels["smua"].active = True
+    driver._channels["smua"].v_comp = 40.0
+    driver._source_regulation_epoch["smua"] = driver._source_command_epoch["smua"]
+
+    with pytest.raises(RuntimeError, match="limitv readback"):
+        await driver.update_source_limit("smua", v_comp=20.0)
+
+    assert driver._channels["smua"].v_comp == 40.0
 
 
 async def test_slew_rate_constant_is_safe() -> None:
@@ -266,12 +330,56 @@ async def test_diagnostics_mock_returns_empty() -> None:
     driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
     await driver.connect()
     result = await driver.diagnostics()
-    assert result == {}
+    assert result == {
+        "available": False,
+        "stale": True,
+        "reason": "diagnostics unavailable in mock mode",
+        "diagnostics": {},
+    }
     await driver.disconnect()
 
 
-async def test_diagnostics_disconnected_returns_empty() -> None:
+async def test_diagnostics_disconnected_returns_unavailable_envelope() -> None:
     """When not connected, diagnostics returns empty dict."""
     driver = Keithley2604B("k2604", "USB0::MOCK", mock=True)
     result = await driver.diagnostics()
-    assert result == {}
+    assert result == {
+        "available": False,
+        "stale": True,
+        "reason": "diagnostics unavailable: instrument is not connected",
+        "diagnostics": {},
+    }
+
+
+async def test_diagnostics_parse_failure_returns_unavailable_envelope() -> None:
+    driver, fake = await _connected_physical_driver()
+    original_query = fake.query
+
+    async def invalid_queue_count(command: str, timeout_ms: int | None = None) -> str:
+        if command == "print(errorqueue.count)":
+            return "invalid"
+        return await original_query(command, timeout_ms)
+
+    fake.query = invalid_queue_count  # type: ignore[method-assign]
+
+    result = await driver.diagnostics()
+
+    assert result["available"] is False
+    assert result["stale"] is True
+    assert result["diagnostics"] == {}
+    assert "invalid" in result["reason"]
+
+
+async def test_check_error_rejects_empty_queue_count_reply() -> None:
+    driver, fake = await _connected_physical_driver()
+    original_query = fake.query
+
+    async def empty_queue_count(command: str, timeout_ms: int | None = None) -> str:
+        if command == "print(errorqueue.count)":
+            return ""
+        return await original_query(command, timeout_ms)
+
+    fake.query = empty_queue_count  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="error queue count response is empty"):
+        await driver.check_error()

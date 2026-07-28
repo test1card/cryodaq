@@ -824,3 +824,30 @@ async def test_read_status_not_connected_raises() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     with pytest.raises(RuntimeError, match="not connected"):
         await driver.read_status()
+
+
+async def test_status_refresh_failure_marks_cached_status_stale() -> None:
+    driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
+    driver._connected = True
+    driver._last_status_result = {1: 17}
+    driver.read_status = AsyncMock(side_effect=RuntimeError("RDGST unavailable"))  # type: ignore[method-assign]
+    driver._read_krdg_channels = AsyncMock(
+        return_value=[
+            Reading.now(
+                channel="CH1",
+                value=4.2,
+                unit="K",
+                instrument_id="ls218s",
+                metadata={"raw_channel": 1, "reading_kind": "temperature"},
+            )
+        ]
+    )  # type: ignore[method-assign]
+
+    result = await driver.read_channels()
+
+    assert result[0].metadata["sensor_status"] == 17
+    assert result[0].metadata["sensor_status_availability"] == {
+        "available": True,
+        "stale": True,
+        "reason": "RDGST unavailable",
+    }
