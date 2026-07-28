@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,7 +145,7 @@ class ReportGenerator:
         deadline_epoch: float | None = None,
     ) -> ReportGenerationResult:
         metadata_path = experiment_root / "metadata.json"
-        dataset = self._extractor.load_dataset(metadata_path)
+        dataset = self._load_descriptor_dataset(metadata_path)
         experiment = dataset.metadata["experiment"]
         template = dataset.metadata["template"]
         assets_dir = reports_dir / "assets"
@@ -194,6 +196,31 @@ class ReportGenerator:
             assets_dir=assets_dir,
             sections=editable_sections,
         )
+
+    def _load_descriptor_dataset(self, metadata_path: Path):
+        """Settle the descriptor replay before a synchronous document render."""
+
+        load = self._extractor.load_descriptor_dataset(metadata_path)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(load)
+
+        result = []
+        failure: list[BaseException] = []
+
+        def runner() -> None:
+            try:
+                result.append(asyncio.run(load))
+            except BaseException as exc:
+                failure.append(exc)
+
+        thread = threading.Thread(target=runner, name="report-descriptor-replay")
+        thread.start()
+        thread.join()
+        if failure:
+            raise failure[0]
+        return result[0]
 
     def _build_document(
         self,

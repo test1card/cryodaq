@@ -9,11 +9,19 @@ import pytest
 import yaml
 from docx import Document
 
+from cryodaq.channels.descriptors import (
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.core.experiment import ExperimentManager
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.report_process import ReportProcessRunner
 from cryodaq.report_state import ReportContractError, load_current_manifest
 from cryodaq.reporting.generator import ReportGenerator
+from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 
@@ -293,6 +301,63 @@ async def test_report_generation_uses_new_output_names_and_sections(manager: Exp
     assert "Комментарии оператора" in text
     assert "Интерпретация результатов" in text
     assert "Фотографии и внешние изображения" in text
+
+
+async def test_generated_report_binds_descriptor_projection_and_embeds_chart(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Descriptor chart",
+        title="Descriptor chart",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id="stage_temperature",
+        instrument_id="reference",
+        source_key="input.stage.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Stage temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(
+        tmp_path,
+        channel_catalog=LiveChannelDescriptorCatalog(ChannelCatalog((descriptor,))),
+    )
+    first = datetime(2026, 3, 16, 12, 1, tzinfo=UTC)
+    receipt = await writer.write_committed(
+        [
+            Reading(first, "reference", "stage_temperature", 8.5, "K", ChannelStatus.OK),
+            Reading(first.replace(minute=2), "reference", "stage_temperature", 4.2, "K", ChannelStatus.OK),
+        ]
+    )
+    assert receipt is not None
+    await writer.stop()
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["artifact_index"] = [
+        item for item in metadata["artifact_index"] if item.get("role") != "temperature_overview"
+    ]
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    (experiment_root / "archive" / "plots" / "temperature_overview.png").unlink()
+
+    result = ReportGenerator(tmp_path).generate(exp_id)
+    document = Document(result.docx_path)
+
+    assert len(document.inline_shapes) == 1
+    assert (result.assets_dir / "cooldown_temperature.png").is_file()
+    assert "4.20 К" in _doc_text(result.docx_path)
 
 
 async def test_report_generation_for_cooldown_template_uses_archive_tables(

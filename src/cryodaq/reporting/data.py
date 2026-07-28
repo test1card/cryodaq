@@ -15,6 +15,7 @@ from cryodaq.report_state import (
     ReportContractError,
 )
 from cryodaq.storage.archive_reader import ArchiveReader
+from cryodaq.storage.broker_replay import DescriptorReplayReader
 from cryodaq.storage.descriptor_archive import ResolvedStorageDescriptor
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
@@ -137,6 +138,26 @@ class ReportDataExtractor:
             result_tables=[dict(item) for item in metadata.get("result_tables", []) if isinstance(item, dict)],
             summary_metadata=dict(metadata.get("summary_metadata") or {}),
         )
+
+    async def load_descriptor_dataset(self, metadata_path: Path) -> ReportDataset:
+        """Load one report dataset bound to the bounded descriptor replay."""
+
+        dataset = self.load_dataset(metadata_path)
+        experiment = dataset.metadata["experiment"]
+        start_time = self._parse_time(experiment.get("start_time"))
+        raw_end_time = experiment.get("end_time")
+        end_time = self._parse_time(raw_end_time) if str(raw_end_time or "").strip() else datetime.now(UTC)
+        batch = await DescriptorReplayReader(self._data_dir).read_window(
+            start=start_time,
+            end=end_time,
+        )
+
+        from cryodaq.reporting.descriptor_projection import (
+            bind_descriptor_projection,
+            project_descriptor_replay,
+        )
+
+        return bind_descriptor_projection(dataset, project_descriptor_replay(batch))
 
     @staticmethod
     def _validate_artifact_paths(metadata: dict[str, Any], experiment_root: Path) -> None:
