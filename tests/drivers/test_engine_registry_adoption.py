@@ -13,6 +13,7 @@ import yaml
 import cryodaq.engine as engine_module
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.drivers.base import InstrumentDriver
+from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.drivers.registry import (
     KEITHLEY_2604B_SOURCE_BINDING,
     DriverRegistryError,
@@ -294,8 +295,8 @@ def test_passive_protocol_lookalike_cannot_become_source(
         async def stop_source(self, *_args: object) -> None:
             return None
 
-        async def emergency_off(self, *_args: object) -> bool:
-            return True
+        async def emergency_off(self, *_args: object) -> SourceOffResult:
+            return SourceOffResult.DEVICE_REPORTED_OFF
 
         @property
         def output_state_unverified(self) -> bool:

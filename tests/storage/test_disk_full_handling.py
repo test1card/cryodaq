@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 
@@ -112,7 +113,7 @@ async def test_safety_manager_on_persistence_failure_latches_fault():
 
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock(return_value=True)
+    keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
 
     mgr = SafetyManager(safety_broker, keithley_driver=keithley, mock=True)
     await mgr.start()
@@ -168,7 +169,7 @@ async def test_acknowledge_fault_clears_disk_full_flag():
 
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock(return_value=True)
+    keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     mgr = SafetyManager(safety_broker, keithley_driver=keithley, mock=True)
     mgr._config.cooldown_before_rearm_s = 0.0  # no cooldown for the test
     mgr._config.require_reason = False

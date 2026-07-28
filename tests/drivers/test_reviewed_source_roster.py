@@ -23,7 +23,7 @@ import yaml
 import cryodaq.drivers.registry as registry_module
 import cryodaq.engine as engine_module
 from cryodaq.drivers.base import InstrumentDriver, Reading
-from cryodaq.drivers.contracts import ControlledSource, DriverTrustClass, VerifiedOffSource
+from cryodaq.drivers.contracts import ControlledSource, DriverTrustClass, SourceOffResult, VerifiedOffSource
 from cryodaq.drivers.registry import (
     KEITHLEY_2604B_SOURCE_BINDING,
     DriverAuthority,
@@ -69,8 +69,8 @@ class _AcmePSU9000(InstrumentDriver):
     async def stop_source(self, channel: str) -> None:
         return None
 
-    async def emergency_off(self, channel: str | None = None) -> bool:
-        return True
+    async def emergency_off(self, channel: str | None = None) -> SourceOffResult:
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     @property
     def output_state_unverified(self) -> bool:

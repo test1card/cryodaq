@@ -96,8 +96,8 @@ def test_descriptor_preserves_verified_legacy_source_without_promoting_adjustabi
 
         async def stop_source(self, channel: str) -> None: ...
 
-        async def emergency_off(self, channel: str | None = None) -> bool:
-            return True
+        async def emergency_off(self, channel: str | None = None) -> contracts.SourceOffResult:
+            return contracts.SourceOffResult.DEVICE_REPORTED_OFF
 
         @property
         def output_state_unverified(self) -> bool:
@@ -125,8 +125,8 @@ def test_descriptor_classifies_full_adjustable_verified_source() -> None:
 
         async def stop_source(self, channel: str) -> None: ...
 
-        async def emergency_off(self, channel: str | None = None) -> bool:
-            return True
+        async def emergency_off(self, channel: str | None = None) -> contracts.SourceOffResult:
+            return contracts.SourceOffResult.DEVICE_REPORTED_OFF
 
         @property
         def output_state_unverified(self) -> bool:

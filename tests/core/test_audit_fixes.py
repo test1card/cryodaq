@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.drivers.contracts import SourceOffResult
 
 # ---------------------------------------------------------------------------
 # BUG-1: Safety state machine race — request_run rejected during _fault()
@@ -37,7 +38,7 @@ async def test_request_run_rejected_during_fault() -> None:
     fault_entered = asyncio.Event()
     proceed = asyncio.Event()
 
-    async def slow_emergency_off(channel=None):
+    async def slow_emergency_off(channel=None) -> SourceOffResult:
         fault_entered.set()
         await proceed.wait()  # yield point — event loop runs other tasks
         return await original_emergency_off(channel)
@@ -81,7 +82,7 @@ async def test_fault_sets_state_before_emergency_off() -> None:
     state_during_eoff = None
     original_emergency_off = k.emergency_off
 
-    async def check_state_off(channel=None):
+    async def check_state_off(channel=None) -> SourceOffResult:
         nonlocal state_during_eoff
         state_during_eoff = sm.state
         return await original_emergency_off(channel)

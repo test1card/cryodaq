@@ -17,13 +17,14 @@ import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.contracts import SourceOffResult
 
 
 @pytest.fixture
 async def mgr():
     safety_broker = SafetyBroker()
     keithley = MagicMock()
-    keithley.emergency_off = AsyncMock(return_value=True)
+    keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     keithley.start_source = AsyncMock()
     keithley.stop_source = AsyncMock()
 

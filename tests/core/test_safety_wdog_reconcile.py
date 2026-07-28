@@ -14,6 +14,7 @@ from cryodaq.drivers import registry as driver_registry
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 
@@ -34,9 +35,9 @@ class _FakeKeithley:
     def watchdog_trip_pending(self) -> bool:
         return self._tripped
 
-    async def emergency_off(self, channel: str | None = None) -> bool:
+    async def emergency_off(self, channel: str | None = None) -> SourceOffResult:
         self.emergency_off_called = True
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     async def acknowledge_wdog_trip(self) -> bool:
         self.ack_called = True

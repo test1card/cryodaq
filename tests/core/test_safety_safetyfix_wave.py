@@ -4,7 +4,7 @@ F2: a connected Keithley whose crash-recovery force-OFF is unverified
     (output_state_unverified) is a BLOCKING run precondition — RUN refused with
     an actionable reason; everything else stays available; a verified OFF clears
     the block.
-F3: _fault() must honour emergency_off()'s bool — on an unconfirmed OFF the
+F3: _fault() must honour emergency_off()'s SourceOffResult — on an unconfirmed OFF the
     source stays tracked in _active_sources (fault stays latched, payload shows
     it still on); a confirmed OFF clears it.
 F4: a soft-interlock stop must not queue behind a slow request_run holding
@@ -26,6 +26,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 
@@ -34,7 +35,7 @@ def _mock_keithley():
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # explicit: MagicMock attrs are truthy
-    k.emergency_off = AsyncMock(return_value=True)
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -118,7 +119,7 @@ async def test_run_precondition_blocks_on_unverified_output():
 @pytest.mark.asyncio
 async def test_fault_keeps_active_sources_when_off_unconfirmed(caplog):
     k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=False)  # OFF not confirmed
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.PHYSICAL_STATE_UNKNOWN)
     mgr, broker = await _make_manager(mock=False, keithley=k)
     try:
         await _get_to_running(mgr, broker)
@@ -132,14 +133,14 @@ async def test_fault_keeps_active_sources_when_off_unconfirmed(caplog):
     finally:
         # The test deliberately keeps the source unverified. Close the retained
         # lifecycle only after supplying an explicit later exact OFF proof.
-        k.emergency_off = AsyncMock(return_value=True)
+        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         await mgr.stop()
 
 
 @pytest.mark.asyncio
 async def test_fault_clears_active_sources_when_off_confirmed():
     k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=True)
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     mgr, broker = await _make_manager(mock=False, keithley=k)
     try:
         await _get_to_running(mgr, broker)

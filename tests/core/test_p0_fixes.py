@@ -19,6 +19,7 @@ from cryodaq.core.broker import DataBroker
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import Reading
+from cryodaq.drivers.contracts import SourceOffResult
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,7 +33,7 @@ def _mock_keithley():
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock()
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k

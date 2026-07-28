@@ -26,6 +26,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 from cryodaq.storage.sqlite_writer import SQLiteWriter
@@ -40,8 +41,7 @@ def _mock_keithley():
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    # Exact verified-OFF contract: only literal True proves the hardware OFF.
-    k.emergency_off = AsyncMock(return_value=True)
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k

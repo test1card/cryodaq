@@ -17,6 +17,7 @@ from cryodaq.core.safety_manager import (
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
@@ -44,7 +45,7 @@ def _manager(*, mock: bool = False, driver: object | None = None) -> SafetyManag
         if not isinstance(getattr(driver, "stop_source", None), AsyncMock):
             driver.stop_source = AsyncMock(return_value=True)
         if not isinstance(getattr(driver, "emergency_off", None), AsyncMock):
-            driver.emergency_off = AsyncMock(return_value=True)
+            driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         if type(getattr(driver, "output_state_unverified", None)) is not bool:
             driver.output_state_unverified = False
     binding = None
@@ -264,9 +265,9 @@ async def test_second_channel_requires_ordered_exact_target_off_proof() -> None:
     driver.output_state_unverified = True
     driver.watchdog_trip_pending = False
 
-    async def _target_off(channel: str | None = None) -> bool:
+    async def _target_off(channel: str | None = None) -> SourceOffResult:
         order.append(("off", str(channel)))
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     async def _start(channel: str, *_settings: float) -> None:
         order.append(("start", channel))
@@ -293,7 +294,7 @@ async def test_second_channel_requires_ordered_exact_target_off_proof() -> None:
 @pytest.mark.parametrize(
     "target_result",
     (
-        pytest.param(False, id="false"),
+        pytest.param(SourceOffResult.PHYSICAL_STATE_UNKNOWN, id="physical-state-unknown"),
         pytest.param(1, id="truthy-non-bool"),
         pytest.param(OSError("readback failed"), id="exception"),
     ),
@@ -307,7 +308,7 @@ async def test_second_channel_unverified_target_fails_closed(target_result: obje
             if isinstance(target_result, BaseException):
                 raise target_result
             return target_result
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.connected = True
@@ -338,12 +339,12 @@ async def test_cancelled_second_channel_proof_settles_full_fault_shutdown() -> N
     entered = asyncio.Event()
     global_shutdown = asyncio.Event()
 
-    async def _off(channel: str | None = None) -> bool:
+    async def _off(channel: str | None = None) -> SourceOffResult:
         if channel == "smub":
             entered.set()
             await asyncio.Future()
         global_shutdown.set()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.connected = True
@@ -376,14 +377,14 @@ async def test_same_turn_target_proof_completion_and_cancellation_still_force_fu
     target_returned = asyncio.Event()
     global_shutdown = asyncio.Event()
 
-    async def _off(channel: str | None = None) -> bool:
+    async def _off(channel: str | None = None) -> SourceOffResult:
         if channel == "smub":
             entered.set()
             await release.wait()
             target_returned.set()
-            return True
+            return SourceOffResult.DEVICE_REPORTED_OFF
         global_shutdown.set()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.connected = True
@@ -401,7 +402,7 @@ async def test_same_turn_target_proof_completion_and_cancellation_still_force_fu
     task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smub"))
     await entered.wait()
     # Schedule the proof's successful completion before cancelling its owner.
-    # The helper may therefore observe both a literal True result and caller
+    # The helper may therefore observe both device-reported OFF and caller
     # cancellation; cancellation must invalidate the scoped proof regardless.
     release.set()
     task.cancel()
@@ -492,7 +493,7 @@ async def test_persistence_fault_recovery_and_source_start_stop_each_refresh_own
     driver = MagicMock()
     driver.start_source = AsyncMock()
     driver.stop_source = AsyncMock()
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     driver.watchdog_trip_pending = False
     driver.output_state_unverified = False
     driver.connected = True
@@ -534,7 +535,7 @@ async def test_persistence_fault_recovery_and_source_start_stop_each_refresh_own
 async def test_confirmed_off_and_disconnect_are_separate_explicit_mutations() -> None:
     driver = MagicMock()
     driver.connected = True
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
 
     async def _disconnect() -> None:
         driver.connected = False
@@ -570,10 +571,10 @@ async def test_disconnect_cancellation_settles_proof_and_lifecycle_revisions() -
         def __init__(self) -> None:
             self.connected = True
 
-        async def emergency_off(self) -> bool:
+        async def emergency_off(self) -> SourceOffResult:
             off_started.set()
             await off_release.wait()
-            return True
+            return SourceOffResult.DEVICE_REPORTED_OFF
 
         async def disconnect(self) -> None:
             disconnect_started.set()
@@ -734,7 +735,7 @@ async def test_child_death_during_inflight_start_forces_full_off_and_never_commi
 
     driver = MagicMock()
     driver.start_source = AsyncMock(side_effect=blocked_start)
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     manager = _manager(mock=True, driver=driver)
     monkeypatch.setattr(manager, "_collect_loop", terminal_child)
     monkeypatch.setattr(manager, "_monitor_loop", live_child)
@@ -781,14 +782,14 @@ async def test_child_death_during_second_channel_off_proof_never_starts_or_erase
     async def live_monitor() -> None:
         await monitor_release.wait()
 
-    async def blocked_off(channel: str | None = None) -> bool:
+    async def blocked_off(channel: str | None = None) -> SourceOffResult:
         if channel == "smub":
             target_entered.set()
             await target_release.wait()
-            return True
+            return SourceOffResult.DEVICE_REPORTED_OFF
         global_entered.set()
         await global_release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.connected = True
@@ -870,7 +871,7 @@ async def test_child_death_during_limit_write_prevents_commit_and_further_update
     driver.mock = False
     driver._channels = {"smua": runtime}
     driver.update_source_limit = AsyncMock(side_effect=blocked_write)
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     manager = _manager(mock=True, driver=driver)
     monkeypatch.setattr(manager, "_collect_loop", terminal_child)
     monkeypatch.setattr(manager, "_monitor_loop", live_child)
@@ -917,7 +918,7 @@ async def test_replacement_and_reconnect_cannot_restore_faulted_child_authority(
     driver.connected = True
     driver.output_state_unverified = False
     driver.watchdog_trip_pending = False
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     manager = _manager(driver=driver)
     manager._config.critical_channels = []
     monkeypatch.setattr(manager, "_collect_loop", terminal_child)
@@ -987,10 +988,10 @@ async def test_child_fault_off_settlement_is_retained_and_deadline_visible(
     async def live_child() -> None:
         await live_release.wait()
 
-    async def blocked_off(*_args: object) -> bool:
+    async def blocked_off(*_args: object) -> SourceOffResult:
         off_entered.set()
         await off_release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=blocked_off)
@@ -1370,10 +1371,10 @@ async def test_already_latched_child_death_revokes_snapshot_before_blocked_off(
     async def live_monitor() -> None:
         await monitor_release.wait()
 
-    async def blocked_off(*_args: object) -> bool:
+    async def blocked_off(*_args: object) -> SourceOffResult:
         off_entered.set()
         await off_release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=blocked_off)
@@ -1474,13 +1475,13 @@ async def test_pending_old_child_settlement_blocks_new_generation(
 
     off_calls = 0
 
-    async def blocked_off(*_args: object) -> bool:
+    async def blocked_off(*_args: object) -> SourceOffResult:
         nonlocal off_calls
         off_calls += 1
         if off_calls == 1:
             off_entered.set()
             await off_release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=blocked_off)
@@ -1546,7 +1547,7 @@ async def test_non_child_fault_stops_limit_update_after_first_applied_write() ->
     driver.mock = False
     driver._channels = {"smua": runtime}
     driver.update_source_limit = AsyncMock(side_effect=blocked_write)
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     manager = _manager(mock=True, driver=driver)
     manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]
     await manager.start()
@@ -1588,7 +1589,7 @@ async def test_stop_holds_live_safety_owner_until_global_off_is_verified(
 
     driver = MagicMock()
     driver.stop_source = AsyncMock(side_effect=RuntimeError("target OFF unverified"))
-    driver.emergency_off = AsyncMock(return_value=False)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.PHYSICAL_STATE_UNKNOWN)
     manager = _manager(mock=True, driver=driver)
     monkeypatch.setattr(manager, "_collect_loop", live_child)
     monkeypatch.setattr(manager, "_monitor_loop", live_child)
@@ -1612,9 +1613,9 @@ async def test_stop_holds_live_safety_owner_until_global_off_is_verified(
     assert manager.state is SafetyState.FAULT_LATCHED
 
     # An explicit later retry may close the HOLD only after the exact global
-    # OFF operation returns True. The original safety children remain owned
+    # OFF operation returns DEVICE_REPORTED_OFF. The original safety children remain owned
     # until that proof exists, then settle as part of the same retry.
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     await manager.stop()
     assert manager._active_sources == set()
     assert manager._collect_task is None
@@ -1632,14 +1633,18 @@ async def test_repeated_shutdown_hold_retries_coalesce_retained_owner_but_issue_
     async def live_child() -> None:
         await children_release.wait()
 
-    async def controlled_off() -> bool:
+    async def controlled_off() -> SourceOffResult:
         call = len(off_calls) + 1
         off_calls.append(call)
         if call == 2:
             retained_off_entered.set()
             await retained_off_release.wait()
-            return False
-        return call >= 4
+            return SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        return (
+            SourceOffResult.DEVICE_REPORTED_OFF
+            if call >= 4
+            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        )
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=controlled_off)
@@ -1737,14 +1742,18 @@ async def test_successful_retry_waits_for_older_inconclusive_hold_settlement(
     async def live_child() -> None:
         await children_release.wait()
 
-    async def controlled_off() -> bool:
+    async def controlled_off() -> SourceOffResult:
         call = len(off_calls) + 1
         off_calls.append(call)
         if call == 2:
             retained_off_entered.set()
             await retained_off_release.wait()
-            return False
-        return call >= 3
+            return SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        return (
+            SourceOffResult.DEVICE_REPORTED_OFF
+            if call >= 3
+            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        )
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=controlled_off)
@@ -1796,12 +1805,12 @@ async def test_older_inconclusive_hold_cannot_follow_newer_proof_into_success(
     async def live_child() -> None:
         await children_release.wait()
 
-    async def ordered_off() -> bool:
+    async def ordered_off() -> SourceOffResult:
         call = len(off_calls) + 1
         off_calls.append(call)
         if call == 2:
             await retained_off_release.wait()
-            return False
+            return SourceOffResult.PHYSICAL_STATE_UNKNOWN
         if call == 3:
             retry_proof_entered.set()
             retained_off_release.set()
@@ -1811,8 +1820,8 @@ async def test_older_inconclusive_hold_cannot_follow_newer_proof_into_success(
             # before this newer proof returns. The stop call must still retain
             # the frozen pre-proof identity and demand call 4.
             await asyncio.sleep(0)
-            return True
-        return False
+            return SourceOffResult.DEVICE_REPORTED_OFF
+        return SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=ordered_off)
@@ -1836,7 +1845,7 @@ async def test_older_inconclusive_hold_cannot_follow_newer_proof_into_success(
     assert manager._monitor_task is not None and not manager._monitor_task.done()
     assert manager._stopping_child_generation is None
 
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     for _ in range(100):
         if not manager._pending_child_fault_settlements:
             break
@@ -1857,16 +1866,20 @@ async def test_cancelled_retry_with_pending_hold_restores_cut_then_propagates(
     async def live_child() -> None:
         await children_release.wait()
 
-    async def controlled_off() -> bool:
+    async def controlled_off() -> SourceOffResult:
         call = len(off_calls) + 1
         off_calls.append(call)
         if call == 2:
             await retained_off_release.wait()
-            return False
+            return SourceOffResult.PHYSICAL_STATE_UNKNOWN
         if call == 3:
             retry_proof_entered.set()
-            return True
-        return call >= 4
+            return SourceOffResult.DEVICE_REPORTED_OFF
+        return (
+            SourceOffResult.DEVICE_REPORTED_OFF
+            if call >= 4
+            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        )
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=controlled_off)
@@ -2014,7 +2027,7 @@ async def test_stop_latches_fault_when_target_off_succeeds_but_global_proof_fail
 
     driver = MagicMock()
     driver.stop_source = AsyncMock(return_value=True)
-    driver.emergency_off = AsyncMock(return_value=False)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.PHYSICAL_STATE_UNKNOWN)
     manager = _manager(mock=True, driver=driver)
     fault_log = AsyncMock()
     manager._fault_log_callback = fault_log
@@ -2045,7 +2058,7 @@ async def test_stop_latches_fault_when_target_off_succeeds_but_global_proof_fail
     fault_log.assert_awaited_once()
     assert fault_log.await_args.kwargs["source"] == "safety_shutdown"
 
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     await manager.stop()
     assert manager._collect_task is None
     assert manager._monitor_task is None
@@ -2085,10 +2098,10 @@ async def test_child_death_during_stop_preserves_fault_and_reports_direct_off_tr
             stop_entered.set()
             await stop_release.wait()
 
-    async def blocked_global_off(*_args: object) -> bool:
+    async def blocked_global_off(*_args: object) -> SourceOffResult:
         global_entered.set()
         await global_release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()
     driver.stop_source = AsyncMock(side_effect=stop_source)
@@ -2149,7 +2162,7 @@ async def test_cancelled_limit_write_settles_hardware_then_faults_before_return(
     driver.mock = False
     driver._channels = {"smua": runtime}
     driver.update_source_limit = AsyncMock(side_effect=blocked_write)
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     manager = _manager(mock=True, driver=driver)
     manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]
     await manager.start()
@@ -2259,7 +2272,7 @@ async def test_second_limit_write_error_reports_partial_truth_and_faults() -> No
     driver.mock = False
     driver._channels = {"smua": runtime}
     driver.update_source_limit = AsyncMock(side_effect=write)
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     manager = _manager(mock=True, driver=driver)
     manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]
     await manager.start()

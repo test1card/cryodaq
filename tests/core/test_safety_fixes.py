@@ -25,6 +25,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 
@@ -37,8 +38,7 @@ def _mock_keithley():
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    # Exact verified-OFF contract: only literal True proves the hardware OFF.
-    k.emergency_off = AsyncMock(return_value=True)
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -521,10 +521,10 @@ async def test_nonusable_reading_not_pushed_to_rate_estimator():
 
 @pytest.mark.asyncio
 async def test_interlock_stop_source_faults_when_off_unconfirmed():
-    """stop_source interlock: emergency_off() returning False (OFF not
+    """stop_source interlock: emergency_off() returning PHYSICAL_STATE_UNKNOWN (OFF not
     confirmed) must escalate to FAULT_LATCHED, not fall through to SAFE_OFF."""
     k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=False)  # output NOT confirmed off
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.PHYSICAL_STATE_UNKNOWN)
     mgr, broker = await _make_manager(mock=False, keithley=k)
     try:
         await _get_to_running(mgr, broker)
@@ -535,7 +535,7 @@ async def test_interlock_stop_source_faults_when_off_unconfirmed():
     finally:
         # The assertion intentionally leaves OFF unverified. The hardened
         # lifecycle retains HOLD until this explicit later exact proof.
-        k.emergency_off = AsyncMock(return_value=True)
+        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         await mgr.stop()
 
 
@@ -552,7 +552,7 @@ async def test_interlock_stop_source_faults_when_off_unconfirmed():
 async def test_interlock_stop_source_rejects_truthy_non_bool_off_evidence(
     unqualified_result,
 ):
-    """Only literal ``True`` may clear active-source evidence after a trip."""
+    """Only ``DEVICE_REPORTED_OFF`` may clear active-source evidence after a trip."""
     k = _mock_keithley()
     k.emergency_off = AsyncMock(return_value=unqualified_result)
     mgr, broker = await _make_manager(mock=False, keithley=k)
@@ -572,15 +572,15 @@ async def test_interlock_stop_source_rejects_truthy_non_bool_off_evidence(
         assert source.reason_code == "reviewed_source_off_unverified"
     finally:
         # Truthy non-bools are correctly rejected as OFF evidence. Restore an
-        # exact bool only for teardown so the stronger HOLD contract can close.
-        k.emergency_off = AsyncMock(return_value=True)
+        # exact driver OFF proof only for teardown so the stronger HOLD can close.
+        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         await mgr.stop()
 
 
 @pytest.mark.asyncio
 async def test_interlock_stop_source_accepts_exact_true_off_evidence():
     k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=True)
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     mgr, broker = await _make_manager(mock=False, keithley=k)
     try:
         await _get_to_running(mgr, broker)

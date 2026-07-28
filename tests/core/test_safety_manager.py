@@ -264,12 +264,12 @@ async def test_emergency_off_from_running():
 
 async def test_emergency_off_unconfirmed_latches_fault():
     """CR-2: if the driver cannot confirm output OFF (write raised or readback
-    still-on → driver returns False), operator emergency_off must NOT report
+    still-on → driver returns PHYSICAL_STATE_UNKNOWN), operator emergency_off must NOT report
     success and must NOT transition to SAFE_OFF (which would stop all
     stale/heartbeat/rate monitoring while the SMU may still be sourcing).
     It must latch a FAULT instead."""
     k = _mock_keithley()
-    k.emergency_off = AsyncMock(return_value=False)
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.PHYSICAL_STATE_UNKNOWN)
     mgr, broker = await _make_manager(mock=False, keithley=k)
     try:
         await _feed(broker, "Т1 Криостат верх", 4.5)
@@ -286,7 +286,7 @@ async def test_emergency_off_unconfirmed_latches_fault():
     finally:
         # Unverified OFF intentionally leaves live HOLD ownership. Supply one
         # exact later proof before asking the manager to relinquish children.
-        k.emergency_off = AsyncMock(return_value=True)
+        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         await mgr.stop()
 
 
@@ -312,7 +312,7 @@ async def test_emergency_off_driver_raise_latches_fault():
     finally:
         # The simulated dead transport is the behavior under test, not a valid
         # terminal receipt. Restore an exact proof for deterministic teardown.
-        k.emergency_off = AsyncMock(return_value=True)
+        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         await mgr.stop()
 
 
@@ -450,10 +450,11 @@ async def test_fault_hardware_shutdown_completes_under_cancellation():
     emergency_off_calls = []
     shutdown_event = asyncio.Event()
 
-    async def slow_emergency_off(channel=None):
+    async def slow_emergency_off(channel=None) -> SourceOffResult:
         await asyncio.sleep(0.05)
         emergency_off_calls.append("done")
         shutdown_event.set()
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k = _mock_keithley()
     k.emergency_off.side_effect = slow_emergency_off
@@ -766,10 +767,11 @@ async def test_safe_off_fault_latched_shields_emergency_off():
     off_started = asyncio.Event()
     off_completed = asyncio.Event()
 
-    async def slow_emergency_off(channel=None):
+    async def slow_emergency_off(channel=None) -> SourceOffResult:
         off_started.set()
         await asyncio.sleep(0.1)
         off_completed.set()
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k = _mock_keithley()
     k.emergency_off.side_effect = slow_emergency_off
@@ -798,7 +800,7 @@ async def test_simultaneous_global_off_requests_share_one_driver_owner():
     release = asyncio.Event()
     calls = 0
 
-    async def blocked_off(channel=None):
+    async def blocked_off(channel=None) -> SourceOffResult:
         nonlocal calls
         assert channel is None
         calls += 1
@@ -828,7 +830,7 @@ async def test_cancelled_global_off_waiter_does_not_cancel_shared_owner():
     completed = asyncio.Event()
     calls = 0
 
-    async def blocked_off(channel=None):
+    async def blocked_off(channel=None) -> SourceOffResult:
         nonlocal calls
         assert channel is None
         calls += 1
@@ -871,7 +873,7 @@ async def test_shared_global_off_failure_is_fail_closed_for_all_waiters():
     release = asyncio.Event()
     calls = 0
 
-    async def failing_off(channel=None):
+    async def failing_off(channel=None) -> SourceOffResult:
         nonlocal calls
         assert channel is None
         calls += 1
@@ -919,14 +921,14 @@ async def test_cancelled_start_settles_before_full_off_at_every_write_boundary(
                 await release.wait()
         order.append("start:settled")
 
-    async def full_off(channel: str | None = None) -> bool:
+    async def full_off(channel: str | None = None) -> SourceOffResult:
         nonlocal output_on
         assert channel is None
         assert order[-1] == "start:settled"
         order.append("off:settled")
         output_on = False
         k.output_state_unverified = False
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k.start_source.side_effect = phased_start
     k.emergency_off.side_effect = full_off
@@ -950,7 +952,7 @@ async def test_cancelled_start_settles_before_full_off_at_every_write_boundary(
         release.set()
         # The one-shot ordering double rejects any second OFF call. Terminal
         # manager shutdown now always requires its own global proof.
-        k.emergency_off = AsyncMock(return_value=True)
+        k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         await manager.stop()
 
 
@@ -960,11 +962,11 @@ async def test_repeated_cancellation_of_public_emergency_off_settles_truth_first
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_off(channel: str | None = None) -> bool:
+    async def slow_off(channel: str | None = None) -> SourceOffResult:
         del channel
         entered.set()
         await release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k.emergency_off.side_effect = slow_off
     manager._state = SafetyState.RUNNING
@@ -1020,11 +1022,11 @@ async def test_repeated_cancellation_with_false_fault_off_retains_uncertain_acti
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_false(channel: str | None = None) -> bool:
+    async def slow_false(channel: str | None = None) -> SourceOffResult:
         del channel
         entered.set()
         await release.wait()
-        return False
+        return SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     k.emergency_off.side_effect = slow_false
     manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
@@ -1052,11 +1054,15 @@ async def test_cancelled_soft_interlock_settles_exact_off_before_propagating(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_off(channel: str | None = None) -> bool:
+    async def slow_off(channel: str | None = None) -> SourceOffResult:
         del channel
         entered.set()
         await release.wait()
-        return off_proof
+        return (
+            SourceOffResult.DEVICE_REPORTED_OFF
+            if off_proof
+            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        )
 
     k.emergency_off.side_effect = slow_off
     manager = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
@@ -1105,13 +1111,17 @@ async def test_cancelled_run_publish_forces_full_off_before_no_receipt(
         nonlocal hardware_on
         hardware_on = True
 
-    async def off(channel: str | None = None) -> bool:
+    async def off(channel: str | None = None) -> SourceOffResult:
         nonlocal hardware_on
         assert channel is None
         if off_proof:
             hardware_on = False
             k.output_state_unverified = False
-        return off_proof
+        return (
+            SourceOffResult.DEVICE_REPORTED_OFF
+            if off_proof
+            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        )
 
     original_publish = manager._publish_keithley_channel_states
 
@@ -1147,7 +1157,7 @@ async def test_cancelled_run_publish_forces_full_off_before_no_receipt(
     finally:
         publish_release.set()
         k.emergency_off.side_effect = None
-        k.emergency_off.return_value = True
+        k.emergency_off.return_value = SourceOffResult.DEVICE_REPORTED_OFF
         await manager.stop()
 
 
@@ -1166,11 +1176,11 @@ async def test_cancelled_queued_request_stop_aborts_inflight_start_and_settles_o
         await start_release.wait()
         hardware_on = True
 
-    async def off(_channel: str | None = None) -> bool:
+    async def off(_channel: str | None = None) -> SourceOffResult:
         nonlocal hardware_on
         hardware_on = False
         off_settled.set()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k.start_source.side_effect = blocked_start
     k.emergency_off.side_effect = off
@@ -1248,7 +1258,7 @@ async def test_cancelled_soft_interlock_publish_completes_transition_before_prop
 async def test_internally_cancelled_interlock_off_faults_and_retains_hazard_truth() -> None:
     k = _mock_keithley()
 
-    async def internally_cancelled_off(channel: str | None = None) -> bool:
+    async def internally_cancelled_off(channel: str | None = None) -> SourceOffResult:
         del channel
         raise asyncio.CancelledError
 

@@ -9,6 +9,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 
@@ -17,7 +18,7 @@ def _mock_keithley():
     driver = MagicMock()
     driver.connected = True
     driver.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    driver.emergency_off = AsyncMock(return_value=True)
+    driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     driver.stop_source = AsyncMock()
     driver.start_source = AsyncMock()
     return driver

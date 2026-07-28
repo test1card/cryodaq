@@ -17,6 +17,7 @@ from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     BusDescriptor,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 
@@ -51,7 +52,7 @@ async def _settle_started_managers() -> None:
 
 
 class _ReviewedSource(InstrumentDriver):
-    def __init__(self, proofs: list[bool]) -> None:
+    def __init__(self, proofs: list[SourceOffResult]) -> None:
         super().__init__("reviewed", mock=True)
         self.proofs = list(proofs)
         self.disconnect_calls = 0
@@ -68,7 +69,7 @@ class _ReviewedSource(InstrumentDriver):
     async def read_channels(self) -> list[Reading]:
         return []
 
-    async def emergency_off(self, channel: str | None = None) -> bool:
+    async def emergency_off(self, channel: str | None = None) -> SourceOffResult:
         del channel
         return self.proofs.pop(0) if len(self.proofs) > 1 else self.proofs[0]
 
@@ -155,7 +156,7 @@ async def _qualify_generation(
 
 
 def test_non_mock_manual_connection_record_cannot_grant_authority() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     manager, _ = _manager(driver)
 
     with pytest.raises(RuntimeError, match="simulator-only"):
@@ -166,7 +167,7 @@ def test_non_mock_manual_connection_record_cannot_grant_authority() -> None:
 
 
 async def test_safety_manager_keeps_source_tracked_when_off_proof_fails() -> None:
-    driver = _ReviewedSource([False])
+    driver = _ReviewedSource([SourceOffResult.PHYSICAL_STATE_UNKNOWN])
     manager, binding = _manager(driver)
     manager._active_sources.add("smua")
 
@@ -178,7 +179,7 @@ async def test_safety_manager_keeps_source_tracked_when_off_proof_fails() -> Non
 
 
 async def test_safety_manager_disconnects_only_after_exact_true_proof() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     manager, binding = _manager(driver)
     manager._active_sources.add("smua")
 
@@ -190,7 +191,7 @@ async def test_safety_manager_disconnects_only_after_exact_true_proof() -> None:
 
 
 async def test_truthy_non_boolean_proof_cannot_authorize_disconnect() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
 
     async def _truthy_not_true(channel: str | None = None) -> int:
         del channel
@@ -207,7 +208,7 @@ async def test_truthy_non_boolean_proof_cannot_authorize_disconnect() -> None:
 
 
 async def test_confirmed_disconnect_clears_active_evidence_but_keeps_fault_latched() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     manager, binding = _manager(driver)
     manager._state = SafetyState.FAULT_LATCHED
     manager._active_sources.add("smua")
@@ -219,8 +220,8 @@ async def test_confirmed_disconnect_clears_active_evidence_but_keeps_fault_latch
 
 
 async def test_safety_manager_rejects_different_driver_identity() -> None:
-    driver = _ReviewedSource([True])
-    impostor = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
+    impostor = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     manager, binding = _manager(driver)
     before_abort = manager._abort_generation
 
@@ -233,7 +234,7 @@ async def test_safety_manager_rejects_different_driver_identity() -> None:
 
 
 async def test_scheduler_never_directly_disconnects_reviewed_binding() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     scheduler = Scheduler(DataBroker())
     scheduler.add(InstrumentConfig(driver=driver, runtime_binding=binding))
@@ -243,7 +244,7 @@ async def test_scheduler_never_directly_disconnects_reviewed_binding() -> None:
 
 
 async def test_scheduler_routes_reviewed_binding_to_injected_authority() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     calls: list[tuple[InstrumentDriver, str]] = []
 
@@ -263,7 +264,7 @@ async def test_scheduler_routes_reviewed_binding_to_injected_authority() -> None
 
 
 async def test_scheduler_does_not_upgrade_truthy_callback_result() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
 
     async def _truthy(_candidate, _binding, _generation, _context: str) -> int:
@@ -278,13 +279,13 @@ async def test_scheduler_does_not_upgrade_truthy_callback_result() -> None:
 async def test_cancelled_proof_is_settled_and_faults_if_ambiguous() -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
-    driver = _ReviewedSource([False])
+    driver = _ReviewedSource([SourceOffResult.PHYSICAL_STATE_UNKNOWN])
 
-    async def _slow_false(channel: str | None = None) -> bool:
+    async def _slow_false(channel: str | None = None) -> SourceOffResult:
         del channel
         entered.set()
         await release.wait()
-        return False
+        return SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     driver.emergency_off = _slow_false  # type: ignore[method-assign]
     manager, binding = _manager(driver)
@@ -302,9 +303,9 @@ async def test_cancelled_proof_is_settled_and_faults_if_ambiguous() -> None:
 
 
 async def test_internally_cancelled_proof_latches_without_cancelling_caller() -> None:
-    driver = _ReviewedSource([False])
+    driver = _ReviewedSource([SourceOffResult.PHYSICAL_STATE_UNKNOWN])
 
-    async def _internally_cancelled(channel: str | None = None) -> bool:
+    async def _internally_cancelled(channel: str | None = None) -> SourceOffResult:
         del channel
         raise asyncio.CancelledError
 
@@ -319,7 +320,7 @@ async def test_internally_cancelled_proof_latches_without_cancelling_caller() ->
 
 
 async def test_scheduler_timeout_cannot_clear_abort_intent_for_inflight_start() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     started = asyncio.Event()
     release = asyncio.Event()
@@ -330,7 +331,9 @@ async def test_scheduler_timeout_cannot_clear_abort_intent_for_inflight_start() 
 
     driver.start_source = _slow_start  # type: ignore[attr-defined]
     driver.output_state_unverified = False  # type: ignore[attr-defined]
-    driver.emergency_off = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    driver.emergency_off = AsyncMock(  # type: ignore[method-assign]
+        return_value=SourceOffResult.DEVICE_REPORTED_OFF
+    )
     manager, _ = _manager(driver, binding)
     manager._config.critical_channels = []
     await _qualify_generation(manager, driver, binding)
@@ -361,7 +364,7 @@ async def test_scheduler_timeout_cannot_clear_abort_intent_for_inflight_start() 
 
 
 async def test_full_disconnect_timeout_aborts_all_channels_before_safe_off() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     started = asyncio.Event()
     release = asyncio.Event()
@@ -372,7 +375,9 @@ async def test_full_disconnect_timeout_aborts_all_channels_before_safe_off() -> 
 
     driver.start_source = _slow_start  # type: ignore[attr-defined]
     driver.output_state_unverified = False  # type: ignore[attr-defined]
-    driver.emergency_off = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    driver.emergency_off = AsyncMock(  # type: ignore[method-assign]
+        return_value=SourceOffResult.DEVICE_REPORTED_OFF
+    )
     manager, _ = _manager(driver, binding)
     manager._config.critical_channels = []
     await _qualify_generation(manager, driver, binding)
@@ -405,7 +410,7 @@ async def test_full_disconnect_timeout_aborts_all_channels_before_safe_off() -> 
 
 
 async def test_narrow_abort_preserves_existing_channel_and_running_state() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -415,7 +420,9 @@ async def test_narrow_abort_preserves_existing_channel_and_running_state() -> No
 
     driver.start_source = _slow_start  # type: ignore[attr-defined]
     driver.output_state_unverified = False  # type: ignore[attr-defined]
-    driver.emergency_off = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    driver.emergency_off = AsyncMock(  # type: ignore[method-assign]
+        return_value=SourceOffResult.DEVICE_REPORTED_OFF
+    )
     manager, binding = _manager(driver)
     manager._config.critical_channels = []
     await _qualify_generation(manager, driver, binding)
@@ -444,7 +451,7 @@ async def test_narrow_abort_preserves_existing_channel_and_running_state() -> No
 
 
 async def test_active_source_reconnect_fault_and_ack_cannot_reuse_generation() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     manager, binding = _manager(driver)
     manager._config.critical_channels = []
     manager._config.cooldown_before_rearm_s = 0.0
@@ -491,7 +498,7 @@ async def test_active_source_reconnect_fault_and_ack_cannot_reuse_generation() -
 
 
 async def test_timed_out_reviewed_connect_is_retained_and_blocks_retry() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, connect_timeout_s=0.01)
     driver._connected = False
     entered = asyncio.Event()
@@ -552,7 +559,7 @@ async def test_timed_out_reviewed_connect_is_retained_and_blocks_retry() -> None
 
 
 async def test_reviewed_connect_rejects_incomplete_lifecycle_before_driver_io() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     driver._connected = False
     manager = SafetyManager(
@@ -580,7 +587,7 @@ async def test_reviewed_connect_rejects_incomplete_lifecycle_before_driver_io() 
 
 
 async def test_stale_generation_cannot_register_abort_or_revoke_newer_generation() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     manager, binding = _manager(driver)
     await _qualify_generation(manager, driver, binding)
     current = manager._reviewed_source_generation
@@ -608,7 +615,7 @@ async def test_stale_generation_cannot_register_abort_or_revoke_newer_generation
 
 
 async def test_timeout_racing_committed_complete_revokes_before_run_can_start() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, connect_timeout_s=0.01)
     driver._connected = False
     manager = SafetyManager(
@@ -670,7 +677,7 @@ async def test_timeout_racing_committed_complete_revokes_before_run_can_start() 
 async def test_abandoned_connect_cleanup_requires_literal_true(
     disconnect_result: object,
 ) -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, connect_timeout_s=0.01)
     driver._connected = False
     entered = asyncio.Event()
@@ -719,7 +726,7 @@ async def test_abandoned_connect_cleanup_requires_literal_true(
 
 
 async def test_partial_connect_error_disconnects_even_when_uncertainty_callback_raises() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     driver._connected = False
 
@@ -761,13 +768,13 @@ async def test_partial_connect_error_disconnects_even_when_uncertainty_callback_
 async def test_repeated_caller_cancellation_cannot_cancel_off_or_disconnect_proof() -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
 
-    async def _slow_true(channel: str | None = None) -> bool:
+    async def _slow_true(channel: str | None = None) -> SourceOffResult:
         del channel
         entered.set()
         await release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver.emergency_off = _slow_true  # type: ignore[method-assign]
     manager, binding = _manager(driver)
@@ -788,7 +795,7 @@ async def test_repeated_caller_cancellation_cannot_cancel_off_or_disconnect_proo
 
 
 async def test_failed_done_disconnect_owner_is_consumed_and_retried() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     results = iter((False, True))
     calls = 0
@@ -815,7 +822,7 @@ async def test_failed_done_disconnect_owner_is_consumed_and_retried() -> None:
 
 
 async def test_stop_retains_pending_connect_owner_then_second_stop_settles() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, connect_timeout_s=0.01)
     driver._connected = False
     entered = asyncio.Event()
@@ -862,7 +869,7 @@ async def test_stop_retains_pending_connect_owner_then_second_stop_settles() -> 
 
 
 async def test_stop_retries_failed_exact_cleanup_without_publishing_success() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, connect_timeout_s=0.01)
     driver._connected = False
     release = asyncio.Event()
@@ -913,7 +920,7 @@ async def test_stop_retries_failed_exact_cleanup_without_publishing_success() ->
 
 
 async def test_first_standalone_reviewed_read_error_disconnects_immediately() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     manager, binding = _manager(driver)
     await _qualify_generation(manager, driver, binding)
     driver.safe_read = AsyncMock(side_effect=OSError("read failed"))  # type: ignore[method-assign]
@@ -941,7 +948,7 @@ async def test_first_standalone_reviewed_read_error_disconnects_immediately() ->
 
 
 async def test_shared_bus_disconnect_barrier_blocks_reviewed_read_io() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, bus_id="reviewed-bus")
     driver.safe_read = AsyncMock(return_value=[])  # type: ignore[method-assign]
     scheduler: Scheduler
@@ -963,7 +970,7 @@ async def test_shared_bus_disconnect_barrier_blocks_reviewed_read_io() -> None:
 
 
 async def test_first_shared_bus_reviewed_read_error_disconnects_immediately() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, bus_id="reviewed-read-bus")
     manager = SafetyManager(
         SafetyBroker(),
@@ -1000,7 +1007,7 @@ async def test_first_shared_bus_reviewed_read_error_disconnects_immediately() ->
 
 
 async def test_non_reviewed_connect_path_calls_driver_once() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     with driver_registry._RUNTIME_BINDINGS_LOCK:
         driver_registry._RUNTIME_BINDINGS.pop(driver, None)
     driver._connected = False
@@ -1023,7 +1030,7 @@ async def test_non_reviewed_connect_path_calls_driver_once() -> None:
 
 
 async def test_sealed_reviewed_binding_cannot_downgrade_after_registry_removal() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     authority_calls = 0
 
@@ -1044,7 +1051,7 @@ async def test_sealed_reviewed_binding_cannot_downgrade_after_registry_removal()
 
 
 async def test_exact_disconnect_receipt_requires_connected_false_then_retries() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver)
     calls = 0
 
@@ -1067,7 +1074,7 @@ async def test_exact_disconnect_receipt_requires_connected_false_then_retries() 
 
 
 async def test_manager_rejects_normal_returning_noop_disconnect() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
 
     async def _noop_disconnect() -> None:
         driver.disconnect_calls += 1
@@ -1082,7 +1089,7 @@ async def test_manager_rejects_normal_returning_noop_disconnect() -> None:
 
 
 async def test_poll_barrier_retries_failed_cleanup_then_allows_fresh_generation() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(driver, connect_timeout_s=0.01)
     driver._connected = False
     entered = asyncio.Event()
@@ -1148,7 +1155,7 @@ async def test_shared_bus_cancelled_reviewed_connect_keeps_one_cleanup_owner() -
             self.abort_calls += 1
 
     lifecycle = _Lifecycle()
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(
         driver,
         connect_timeout_s=1.0,
@@ -1203,7 +1210,7 @@ async def test_shared_bus_cancelled_reviewed_connect_keeps_one_cleanup_owner() -
 
 
 async def test_terminal_shared_read_requires_fresh_disconnect_after_live_task_settles() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(
         driver,
         connect_timeout_s=0.02,
@@ -1268,7 +1275,7 @@ async def test_terminal_shared_read_requires_fresh_disconnect_after_live_task_se
 
 
 async def test_standalone_resistant_read_stop_is_bounded_and_retryable() -> None:
-    driver = _ReviewedSource([True])
+    driver = _ReviewedSource([SourceOffResult.DEVICE_REPORTED_OFF])
     binding = _bind_reviewed(
         driver,
         connect_timeout_s=0.02,

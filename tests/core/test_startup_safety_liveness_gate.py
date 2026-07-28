@@ -44,6 +44,7 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 from cryodaq.engine import DriverLoadResult
@@ -365,7 +366,7 @@ async def test_runtime_heartbeat_accepts_power_as_the_only_fresh_metric_per_acti
     keithley = MagicMock()
     keithley.connected = True
     keithley.output_state_unverified = False
-    keithley.emergency_off = AsyncMock(return_value=True)
+    keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     keithley.start_source = AsyncMock()
     keithley.stop_source = AsyncMock()
     binding = _issue_registry_runtime_binding(

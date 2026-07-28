@@ -14,6 +14,7 @@ from cryodaq.drivers.base import InstrumentDriver, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
     is_issued_runtime_binding,
 )
@@ -46,11 +47,15 @@ class _ConnectedProofSource(InstrumentDriver):
     async def read_channels(self) -> list[Reading]:
         return []
 
-    async def emergency_off(self, channel: str | None = None) -> bool:
+    async def emergency_off(self, channel: str | None = None) -> SourceOffResult:
         del channel
         connected = self.connected is True
         self.off_call_connected.append(connected)
-        return connected
+        return (
+            SourceOffResult.DEVICE_REPORTED_OFF
+            if connected
+            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
+        )
 
     async def start_source(self, *_args: object, **_kwargs: object) -> None:
         return None

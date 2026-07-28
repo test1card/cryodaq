@@ -22,6 +22,9 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
     assert importers == {
         "core/broker.py",
         "core/descriptor_transport.py",
+        # Read-only descriptor classification keeps sensor diagnostics from
+        # inferring physical quantity or role from channel names.
+        "core/sensor_diagnostics.py",
         "core/zmq_bridge.py",
         "core/zmq_subprocess.py",
         # Reviewed F35 observational presentation only; authority remains

@@ -9,6 +9,7 @@ from cryodaq.drivers.contracts import (
     ControlledSource,
     PassiveSensor,
     SharedBusDevice,
+    SourceOffResult,
     VerifiedOffSource,
 )
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
@@ -35,8 +36,8 @@ class _DuckTypedHazard(_Passive):
 
     async def stop_source(self, channel: str) -> None: ...
 
-    async def emergency_off(self, channel: str | None = None) -> bool:
-        return True
+    async def emergency_off(self, channel: str | None = None) -> SourceOffResult:
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     @property
     def output_state_unverified(self) -> bool:
