@@ -120,7 +120,7 @@ def load_alarm_config(
 
         # --- Global alarms ---
         for alarm_id, alarm_raw in raw.get("global_alarms", {}).items():
-            alarms.append(_expand_alarm(alarm_id, alarm_raw, channel_groups))
+            alarms.append(_expand_alarm(alarm_id, alarm_raw, channel_groups, engine_cfg.setpoints))
 
         # --- Phase alarms ---
         # Fail-closed: a non-dict phase CONTAINER (e.g. phase_alarms:
@@ -138,7 +138,9 @@ def load_alarm_config(
                     f"would silently drop every alarm of phase {phase_name!r}"
                 )
             for alarm_id, alarm_raw in phase_dict.items():
-                alarms.append(_expand_alarm(alarm_id, alarm_raw, channel_groups, phase_filter=[phase_name]))
+                alarms.append(
+                    _expand_alarm(alarm_id, alarm_raw, channel_groups, engine_cfg.setpoints, phase_filter=[phase_name])
+                )
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise AlarmConfigError(f"alarms_v3.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}") from exc
 
@@ -188,6 +190,7 @@ def _expand_alarm(
     alarm_id: str,
     alarm_raw: Any,
     channel_groups: dict[str, list[str]],
+    setpoints: dict[str, SetpointDef],
     phase_filter: list[str] | None = None,
 ) -> AlarmConfig:
     """Создать AlarmConfig из raw YAML-словаря, раскрыв channel_group.
@@ -212,7 +215,7 @@ def _expand_alarm(
     # (possibly safety-relevant) alarm aborts startup instead of silently
     # never-firing at runtime (alarm_v2.evaluate() catches the KeyError,
     # logs it, and returns None).
-    _validate_required_keys(alarm_id, cfg)
+    _validate_required_keys(alarm_id, cfg, setpoints)
 
     # Expand channel_group → channels
     _expand_channel_group(alarm_id, cfg, channel_groups)
@@ -369,7 +372,7 @@ _PHASE_ELAPSED_CONDITION_CHECKS = frozenset({"above"})
 _PHASE_ELAPSED_CHANNEL = "phase_elapsed_s"
 
 
-def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
+def _validate_required_keys(alarm_id: str, cfg: dict, setpoints: dict[str, SetpointDef]) -> None:
     """Fail-closed presence/type check of evaluate-time required keys.
 
     Mirrors EVERY hard subscript in alarm_v2 so a misconfigured alarm
@@ -434,7 +437,7 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
     alarm_type = cfg.get("alarm_type")
 
     if alarm_type == "threshold":
-        _validate_threshold_check(alarm_id, cfg)
+        _validate_threshold_check(alarm_id, cfg, setpoints)
         # channel selector — alarm_v2._eval_threshold (L218) calls
         # _resolve_channels(cfg); without one it returns [] and the per-channel
         # for-loop (L223) never runs → the alarm returns None forever (dead
@@ -560,7 +563,7 @@ def _validate_required_keys(alarm_id: str, cfg: dict) -> None:
         )
 
 
-def _validate_threshold_check(alarm_id: str, cfg: dict) -> None:
+def _validate_threshold_check(alarm_id: str, cfg: dict, setpoints: dict[str, SetpointDef]) -> None:
     """Validate keys for alarm_type=threshold (mirrors _check_threshold_channel)."""
     check = cfg.get("check", "above")
 
@@ -579,10 +582,15 @@ def _validate_threshold_check(alarm_id: str, cfg: dict) -> None:
             )
     elif check == "deviation_from_setpoint":
         # alarm_v2._check_threshold_channel L232-233
-        if not isinstance(cfg.get("setpoint_source"), str) or not cfg.get("setpoint_source"):
+        setpoint_source = cfg.get("setpoint_source")
+        if not isinstance(setpoint_source, str) or not setpoint_source:
             raise AlarmConfigError(
                 f"alarm {alarm_id!r} (check=deviation_from_setpoint) requires a "
-                f"'setpoint_source' string, got {cfg.get('setpoint_source')!r}"
+                f"'setpoint_source' string, got {setpoint_source!r}"
+            )
+        if setpoint_source not in setpoints:
+            raise AlarmConfigError(
+                f"alarm {alarm_id!r} (check=deviation_from_setpoint) has undefined setpoint_source {setpoint_source!r}"
             )
         if not _is_number(cfg.get("threshold")):
             raise AlarmConfigError(

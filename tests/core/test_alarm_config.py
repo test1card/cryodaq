@@ -11,6 +11,7 @@ import pytest
 
 from cryodaq.core.alarm_config import AlarmConfigError, EngineConfig, load_alarm_config
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
+from cryodaq.core.alarm_v2 import SetpointProvider
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -212,9 +213,7 @@ def _make_mgr(phase: str | None = "cooldown", started_ago_s: float = 3700.0):
     mgr.get_current_phase.return_value = phase
     if phase:
         dt = datetime.now(UTC) - timedelta(seconds=started_ago_s)
-        mgr.get_phase_history.return_value = [
-            {"phase": phase, "started_at": dt.isoformat(), "ended_at": None}
-        ]
+        mgr.get_phase_history.return_value = [{"phase": phase, "started_at": dt.isoformat(), "ended_at": None}]
         mgr.get_active_experiment.return_value = MagicMock()
     else:
         mgr.get_phase_history.return_value = []
@@ -277,11 +276,25 @@ def test_setpoint_fallback_to_default() -> None:
     assert provider.get("T12_setpoint") == 4.2
 
 
-def test_setpoint_missing_key_returns_zero() -> None:
+def test_setpoint_missing_key_raises() -> None:
     mgr = MagicMock()
     mgr.get_active_experiment.return_value = None
     provider = ExperimentSetpointProvider(mgr, {})
-    assert provider.get("nonexistent") == 0.0
+    with pytest.raises(KeyError, match="nonexistent"):
+        provider.get("nonexistent")
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [SetpointProvider({}), ExperimentSetpointProvider(object(), {})],
+)
+def test_setpoint_providers_reject_unknown_key(provider: SetpointProvider) -> None:
+    try:
+        value = provider.get("nonexistent")
+    except KeyError:
+        return
+    assert value != 0.0, f"{type(provider).__name__} returned 0.0 instead of raising KeyError"
+    pytest.fail(f"{type(provider).__name__} returned {value!r} instead of raising KeyError")
 
 
 def test_setpoint_invalid_custom_field_fallback() -> None:

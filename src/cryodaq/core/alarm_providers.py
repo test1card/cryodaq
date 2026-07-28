@@ -56,8 +56,7 @@ class ExperimentPhaseProvider(PhaseProvider):
         started_at_raw = last.get("started_at")
         if not started_at_raw:
             logger.warning(
-                "Фаза без started_at (%r) — phase-elapsed = 0.0, "
-                "elapsed-time алармы могут быть подавлены",
+                "Фаза без started_at (%r) — phase-elapsed = 0.0, elapsed-time алармы могут быть подавлены",
                 started_at_raw,
             )
             return 0.0
@@ -72,8 +71,7 @@ class ExperimentPhaseProvider(PhaseProvider):
                 return time.time() - dt.timestamp()
         except (ValueError, TypeError):
             logger.warning(
-                "Не удалось распарсить started_at=%r — phase-elapsed = 0.0, "
-                "elapsed-time алармы могут быть подавлены",
+                "Не удалось распарсить started_at=%r — phase-elapsed = 0.0, elapsed-time алармы могут быть подавлены",
                 started_at_raw,
             )
             return 0.0
@@ -114,12 +112,11 @@ class ExperimentSetpointProvider(SetpointProvider):
         Порядок:
         1. Если source=="experiment_metadata" → custom_fields активного эксперимента
         2. Иначе — default из SetpointDef
-        3. Если ключ не определён → 0.0
+        3. Если ключ не определён → KeyError
         """
         sp_def = self._defs.get(key)
         if sp_def is None:
-            # Попытка прочитать напрямую из _defaults (базовый класс)
-            return self._defaults.get(key, 0.0)
+            raise KeyError(key)
 
         if sp_def.source == "experiment_metadata":
             active = self._mgr.get_active_experiment()

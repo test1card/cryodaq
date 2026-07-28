@@ -149,7 +149,7 @@ class SetpointProvider:
         self._defaults: dict[str, float] = defaults or {}
 
     def get(self, key: str) -> float:
-        return self._defaults.get(key, 0.0)
+        return self._defaults[key]
 
 
 # ---------------------------------------------------------------------------
