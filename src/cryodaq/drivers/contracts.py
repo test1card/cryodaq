@@ -11,7 +11,7 @@ import math
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -259,10 +259,16 @@ class ControlledSource(Protocol):
 class VerifiedOffSource(Protocol):
     """A source with explicit readback-verified emergency OFF behavior."""
 
-    async def emergency_off(self, channel: str | None = None) -> bool: ...
+    async def emergency_off(self, channel: str | None = None) -> SourceOffResult: ...
 
     @property
     def output_state_unverified(self) -> bool: ...
+
+
+class SourceOffResult(Enum):
+    PHYSICAL_STATE_UNKNOWN = "physical_state_unknown"
+    COMMAND_ACCEPTED = "command_accepted"
+    DEVICE_REPORTED_OFF = "device_reported_off"
 
 
 class SourceOffTier(StrEnum):

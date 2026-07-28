@@ -19,6 +19,7 @@ from typing import Any
 
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
+from cryodaq.drivers.contracts import SourceOffResult, SourceSetpoint
 from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
@@ -1048,6 +1049,53 @@ class Keithley2604B(InstrumentDriver):
             runtime.i_comp = value
         return value
 
+    @property
+    def source_connection_generation(self) -> int:
+        return self._connection_generation
+
+    @property
+    def source_setpoints(self) -> dict[str, SourceSetpoint]:
+        return {
+            channel: SourceSetpoint(
+                p_target=runtime.p_target,
+                v_compliance=runtime.v_comp,
+                i_compliance=runtime.i_comp,
+            )
+            for channel, runtime in self._channels.items()
+        }
+
+    async def update_source_target(self, channel: str, p_target: float) -> None:
+        smu_channel = normalize_smu_channel(channel)
+        if not math.isfinite(p_target) or p_target <= 0:
+            raise ValueError("source target must be finite and > 0")
+
+        self._require_operational_connection("update_source_target")
+        runtime = self._channels[smu_channel]
+        if not runtime.active:
+            raise RuntimeError(f"{self.name}: {smu_channel} source is not active")
+        update_generation = self._connection_generation
+        update_epoch = self._source_command_epoch[smu_channel]
+        self._require_current_regulation(
+            smu_channel,
+            generation=update_generation,
+            command_epoch=update_epoch,
+        )
+        runtime.p_target = p_target
+
+    async def update_source_limits(
+        self,
+        channel: str,
+        *,
+        v_compliance: float | None = None,
+        i_compliance: float | None = None,
+    ) -> None:
+        if v_compliance is None and i_compliance is None:
+            raise ValueError("at least one source compliance limit is required")
+        if v_compliance is not None:
+            await self.update_source_limit(channel, v_comp=v_compliance)
+        if i_compliance is not None:
+            await self.update_source_limit(channel, i_comp=i_compliance)
+
     async def _settle_owned_bool_task(
         self,
         task: asyncio.Task[bool],
@@ -1234,7 +1282,7 @@ class Keithley2604B(InstrumentDriver):
         )
         return self._parse_buffer_response(raw)
 
-    async def emergency_off(self, channel: str | None = None) -> bool:
+    async def emergency_off(self, channel: str | None = None) -> SourceOffResult:
         """Force output OFF on the targeted channel(s).
 
         A fresh exact readback is the sole positive authority for each target.
@@ -1251,7 +1299,7 @@ class Keithley2604B(InstrumentDriver):
         if not (self._connected or self._recovery_transport_open):
             if not self.mock:
                 self._unsafe_output_state = True
-                return False
+                return SourceOffResult.PHYSICAL_STATE_UNKNOWN
             tokens = self._begin_off_operation(channels)
             try:
                 for smu_channel in channels:
@@ -1261,7 +1309,7 @@ class Keithley2604B(InstrumentDriver):
                     )
             finally:
                 self._finish_off_operation(channels)
-            return True
+            return SourceOffResult.DEVICE_REPORTED_OFF
 
         off_confirmed, pending_cancel = await self._attempt_owned_off(
             channels,
@@ -1269,7 +1317,7 @@ class Keithley2604B(InstrumentDriver):
         )
         if pending_cancel is not None:
             raise pending_cancel
-        return off_confirmed
+        return SourceOffResult.DEVICE_REPORTED_OFF if off_confirmed else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     def _has_current_off_proof(self, smu_channel: SmuChannel) -> bool:
         return (
@@ -1784,7 +1832,7 @@ class Keithley2604B(InstrumentDriver):
         self._wdog_trip_pending = True
         force_upload = fresh_instrument or not tripped
 
-        if not await self.emergency_off():
+        if await self.emergency_off() is not SourceOffResult.DEVICE_REPORTED_OFF:
             log.critical(
                 "%s: refusing watchdog trip acknowledgment because both-output OFF could not be readback-verified",
                 self.name,

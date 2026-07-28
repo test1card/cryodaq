@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.drivers.instruments.keithley_2604b import (
     Keithley2604B,
     OutputStateUnverifiedError,
@@ -782,7 +783,7 @@ async def test_watchdog_trip_queued_before_regulation_write_blocks_level_update(
     assert not any("source.levelv" in command for command in t.writes)
     assert drv._last_v["smua"] == 0.0
 
-    assert await drv.emergency_off() is True
+    assert await drv.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     assert drv._channels["smua"].active is False
     assert drv._has_current_off_proof("smua") is True
     await drv.disconnect()
@@ -847,7 +848,7 @@ async def test_watchdog_trip_queued_before_limit_write_blocks_config_and_state_u
     assert not any(command == "smua.source.limitv = 20.0" for command in t.writes)
     assert drv._channels["smua"].v_comp == original_limit
 
-    assert await drv.emergency_off() is True
+    assert await drv.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     assert drv._channels["smua"].active is False
     await drv.disconnect()
 

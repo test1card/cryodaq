@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.drivers.instruments.keithley_2604b import (
     FailedConnectCleanupError,
     Keithley2604B,
@@ -149,7 +150,7 @@ async def test_force_off_failure_never_grants_connected_authority(caplog):
     )
 
     transport.write = AsyncMock()
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     assert k.connected is False
     assert k._instrument_id == ""
     assert k.output_state_unverified is False
@@ -296,7 +297,7 @@ async def test_recovery_close_failure_remains_disconnected_and_blocks_reconnect(
         await k.connect()
 
     transport.write = AsyncMock()
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     with pytest.raises(TransportTeardownIncompleteError, match="teardown is incomplete"):
         await k.disconnect()
 
@@ -383,13 +384,13 @@ async def test_emergency_off_returns_true_on_clean_off():
     k._transport = transport
     k._connected = True
 
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
 
 
 @pytest.mark.asyncio
 async def test_emergency_off_returns_true_in_mock_mode():
     k = _make_keithley(mock=True)
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
 
 
 @pytest.mark.asyncio
@@ -407,7 +408,7 @@ async def test_emergency_off_fails_closed_when_output_off_write_raises():
     k._transport = transport
     k._connected = True
 
-    assert await k.emergency_off() is False
+    assert await k.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -437,7 +438,7 @@ async def test_emergency_off_single_channel_uses_exact_quarantine_recovery_traff
     k._connected = True
     monkeypatch.setattr("cryodaq.drivers.instruments.keithley_2604b.secrets.token_hex", lambda _size: nonce)
 
-    assert await k.emergency_off("smua") is True
+    assert await k.emergency_off("smua") is SourceOffResult.DEVICE_REPORTED_OFF
     requests = [usbtmc_module._decode_ipc_frame(frame) for frame in connection.sent]
     assert [request["operation"] for request in requests] == ["query", "write", "write", "query"]
     assert [request["payload"] for request in requests[1:3]] == [
@@ -493,7 +494,7 @@ async def test_live_query_desynchronization_demotes_to_same_handle_recovery() ->
     open_spy.assert_not_awaited()
     close_spy.assert_not_awaited()
 
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     assert k.connected is False
     assert k._recovery_transport_open is True
     assert k.output_state_unverified is False
@@ -527,7 +528,7 @@ async def test_connected_without_exact_identity_demotes_before_any_ordinary_quer
     assert k._recovery_transport_open is True
     assert k._instrument_id == ""
     assert k.output_state_unverified is True
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     await k.disconnect()
 
 
@@ -572,7 +573,7 @@ async def test_queued_source_rechecks_authority_after_failing_ordinary_write() -
     assert k.output_state_unverified is True
     assert not any("OUTPUT_ON" in command for command in writes)
 
-    assert await k.emergency_off() is True
+    assert await k.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     await k.disconnect()
 
 
@@ -622,7 +623,7 @@ async def test_queued_limit_write_rechecks_after_emergency_off_preclaim() -> Non
     await limit_queued.wait()
     assert update.done() is False
 
-    assert await k.emergency_off("smua") is True
+    assert await k.emergency_off("smua") is SourceOffResult.DEVICE_REPORTED_OFF
     release_hold.set()
     await hold
     with pytest.raises(RuntimeError, match="regulation was superseded"):
@@ -1014,7 +1015,7 @@ async def test_emergency_off_returns_false_when_readback_still_on():
     k._transport = transport
     k._connected = True
 
-    assert await k.emergency_off() is False
+    assert await k.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -1027,7 +1028,7 @@ async def test_emergency_off_returns_false_on_verify_query_exception():
     k._transport = transport
     k._connected = True
 
-    assert await k.emergency_off() is False
+    assert await k.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -1046,7 +1047,7 @@ async def test_emergency_off_single_channel_failure_returns_false():
     k._transport = transport
     k._connected = True
 
-    assert await k.emergency_off() is False
+    assert await k.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import (
     DriverRuntimeBinding,
     DriverTrustClass,
+    SourceOffResult,
     is_issued_runtime_binding,
 )
 from cryodaq.engine_wiring.operator_safety_snapshot import (
@@ -1057,7 +1058,11 @@ class SafetyManager:
                     target_off_task,
                     cancel_owned_on_caller_cancel=True,
                 )
-                target_off_confirmed = target_cancelled is None and target_error is None and target_result is True
+                target_off_confirmed = (
+                    target_cancelled is None
+                    and target_error is None
+                    and target_result is SourceOffResult.DEVICE_REPORTED_OFF
+                )
                 if target_error is not None:
                     logger.critical("%s: %s", target_off_error, target_error)
                 if not target_off_confirmed:
@@ -1450,7 +1455,7 @@ class SafetyManager:
             proof_task = asyncio.create_task(driver.emergency_off())
             proof_result, proof_error, proof_cancelled = await _settle_shielded_hardware_task(proof_task)
             cancelled = proof_cancelled
-            confirmed = proof_error is None and proof_result is True
+            confirmed = proof_error is None and proof_result is SourceOffResult.DEVICE_REPORTED_OFF
             if proof_error is not None and not isinstance(proof_error, asyncio.CancelledError):
                 logger.exception(
                     "Reviewed-source OFF proof failed during scheduler disconnect (%s)",
@@ -2388,7 +2393,7 @@ class SafetyManager:
             shutdown_task = asyncio.create_task(self._keithley.emergency_off())
             result, error, cancelled = await _settle_shielded_hardware_task(shutdown_task)
             caller_cancelled = cancelled
-            outputs_confirmed_off = error is None and result is True
+            outputs_confirmed_off = error is None and result is SourceOffResult.DEVICE_REPORTED_OFF
             if error is not None:
                 logger.critical("FAULT: emergency_off failed: %s", error)
 
@@ -2503,7 +2508,7 @@ class SafetyManager:
         if error is not None:
             logger.critical("_ensure_output_off failed: %s", error)
             confirmed = False
-        exact_confirmed = error is None and confirmed is True
+        exact_confirmed = error is None and confirmed is SourceOffResult.DEVICE_REPORTED_OFF
         retained_generation = self._has_current_reviewed_connection_generation()
         self._reviewed_source_connected = retained_generation
         if channel is None and retained_generation:
@@ -2935,7 +2940,7 @@ class SafetyManager:
                     # A final-element OFF proof is deliberately nominal, not
                     # truthy: driver bugs and un-awaited/mock-shaped values
                     # must fault closed instead of becoming safety evidence.
-                    if ok is not True:
+                    if ok is not SourceOffResult.DEVICE_REPORTED_OFF:
                         await self._fault(
                             f"{reason} (emergency_off could not confirm OFF)",
                             channel=channel,

@@ -16,6 +16,7 @@ import re
 
 import pytest
 
+from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.drivers.instruments.keithley_2604b import (
     Keithley2604B,
     OutputStateUnverifiedError,
@@ -153,7 +154,7 @@ async def test_verified_emergency_off_clears_unverified_flag() -> None:
 
     # Now the outputs read back OFF; a full emergency_off confirms and clears.
     driver._transport.output_readback = "0"
-    assert await driver.emergency_off() is True
+    assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     assert driver.output_state_unverified is False
     assert driver._instrument_id == ""
     with pytest.raises(RuntimeError, match="recovery-only transport"):

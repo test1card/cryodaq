@@ -9,6 +9,7 @@ import re
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus
+from cryodaq.drivers.contracts import SourceOffResult
 from cryodaq.drivers.instruments.keithley_2604b import (
     Keithley2604B,
     OutputStateUnverifiedError,
@@ -75,10 +76,10 @@ def _connected_driver(*, readbacks: list[str]) -> tuple[Keithley2604B, _Transpor
     return driver, transport
 
 
-async def test_never_connected_emergency_off_has_no_optimistic_proof() -> None:
+async def test_emergency_off_returns_physical_state_unknown_without_fresh_readback() -> None:
     driver = Keithley2604B("k", "USB0::0x05E6::0x2604::04089762::INSTR", mock=False)
 
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 async def test_disconnected_stop_source_fails_closed_without_current_off_proof() -> None:
@@ -115,17 +116,17 @@ async def test_failed_emergency_off_preserves_active_runtime_and_disconnect_surf
     assert driver._channels["smub"].p_target == 0.5
     assert driver.output_state_unverified is True
     driver._connected = False
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
-async def test_partial_channel_proof_cannot_authorize_disconnected_success() -> None:
+async def test_emergency_off_returns_device_reported_off_after_fresh_readback() -> None:
     driver, _transport = _connected_driver(readbacks=["0"])
 
-    assert await driver.emergency_off("smua") is True
+    assert await driver.emergency_off("smua") is SourceOffResult.DEVICE_REPORTED_OFF
     driver._connected = False
 
-    assert await driver.emergency_off("smua") is False
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off("smua") is SourceOffResult.PHYSICAL_STATE_UNKNOWN
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 @pytest.mark.parametrize("failure", ["write", "read"])
@@ -141,23 +142,23 @@ async def test_transport_failure_cannot_stamp_off_proof(failure: str) -> None:
     driver._channels["smua"].active = True
 
     exact_off = await driver.emergency_off()
-    assert exact_off is False
+    assert exact_off is SourceOffResult.PHYSICAL_STATE_UNKNOWN
     assert driver._channels["smua"].active is True
     assert driver._output_off_verified["smua"] is False
     driver._connected = False
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 async def test_disconnect_reuses_current_generation_both_off_proof() -> None:
     driver, transport = _connected_driver(readbacks=["0"])
 
-    assert await driver.emergency_off() is True
+    assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     queries_after_proof = transport.output_queries
     await driver.disconnect()
 
     assert transport.output_queries == queries_after_proof
     assert transport.closed == 1
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 async def test_observed_external_output_on_invalidates_stale_off_proof() -> None:
@@ -246,7 +247,7 @@ async def test_invalid_readback_cannot_clear_runtime_or_authorize_disconnect(
     driver, transport = _connected_driver(readbacks=[readback])
     driver._channels["smua"].active = True
 
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
     assert driver._channels["smua"].active is True
     with pytest.raises(OutputStateUnverifiedError):
         await driver.disconnect()
@@ -260,7 +261,7 @@ async def test_reconnect_invalidates_old_generation_then_reproves_both_off() -> 
     driver._transport = first
     await driver.connect()
     await driver.disconnect()
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     second = _Transport(["1"])
     driver._transport = second
@@ -273,7 +274,7 @@ async def test_reconnect_invalidates_old_generation_then_reproves_both_off() -> 
     assert driver._instrument_id == ""
     with pytest.raises(RuntimeError, match="recovery-only transport"):
         await driver.start_source("smua", 0.5, 40.0, 1.0)
-    assert await driver.emergency_off() is False
+    assert await driver.emergency_off() is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
 
 async def test_connect_keeps_output_state_unsafe_until_both_readbacks_finish() -> None:
@@ -477,16 +478,16 @@ async def test_concurrent_connect_is_rejected_without_closing_first_attempt() ->
 
 async def test_mock_connection_uses_simulator_local_proof_only() -> None:
     driver = Keithley2604B("k", "USB::MOCK", mock=True)
-    assert await driver.emergency_off() is True
+    assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
 
     await driver.connect()
     await driver.start_source("smua", 0.5, 40.0, 1.0)
     assert driver.output_state_unverified is True
-    assert await driver.emergency_off() is True
+    assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     await driver.disconnect()
     await driver.disconnect()  # idempotent cleanup
 
-    assert await driver.emergency_off() is True
+    assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
 
 
 async def test_stale_generation_proof_cannot_skip_disconnect_readback() -> None:
@@ -522,7 +523,7 @@ async def test_off_readback_from_superseded_connection_cannot_stamp_proof() -> N
     driver._connection_generation += 1
     release.set()
 
-    assert await task is False
+    assert await task is SourceOffResult.PHYSICAL_STATE_UNKNOWN
     assert driver._output_off_verified["smua"] is False
     assert driver.output_state_unverified is True
 
@@ -709,7 +710,7 @@ async def test_wrong_generation_late_close_cannot_settle_current_connection() ->
 
 async def test_start_superseded_during_config_never_reaches_output_on() -> None:
     driver, transport = _connected_driver(readbacks=["0"])
-    assert await driver.emergency_off("smua") is True
+    assert await driver.emergency_off("smua") is SourceOffResult.DEVICE_REPORTED_OFF
     transport.writes.clear()
     reset_started = asyncio.Event()
     release_reset = asyncio.Event()
@@ -725,7 +726,7 @@ async def test_start_superseded_during_config_never_reaches_output_on() -> None:
     start = asyncio.create_task(driver.start_source("smua", 0.5, 40.0, 1.0))
     await reset_started.wait()
 
-    assert await driver.emergency_off("smua") is True
+    assert await driver.emergency_off("smua") is SourceOffResult.DEVICE_REPORTED_OFF
     release_reset.set()
     with pytest.raises(RuntimeError, match="superseded"):
         await start
@@ -737,7 +738,7 @@ async def test_start_superseded_during_config_never_reaches_output_on() -> None:
 
 async def test_ambiguous_output_on_is_pessimistically_active_until_off_cleanup() -> None:
     driver, transport = _connected_driver(readbacks=["0"])
-    assert await driver.emergency_off("smua") is True
+    assert await driver.emergency_off("smua") is SourceOffResult.DEVICE_REPORTED_OFF
     transport.writes.clear()
     output_on_started = asyncio.Event()
     release_output_on = asyncio.Event()
@@ -794,7 +795,7 @@ async def test_emergency_supersedes_regulation_before_positive_level_write() -> 
     read_task = asyncio.create_task(driver.read_channels())
     await measure_started.wait()
 
-    assert await driver.emergency_off("smua") is True
+    assert await driver.emergency_off("smua") is SourceOffResult.DEVICE_REPORTED_OFF
     release_measure.set()
     await read_task
 
@@ -830,10 +831,10 @@ async def test_stale_overlapping_off_completion_cannot_clobber_newer_proof() -> 
     await first_read_started.wait()
     newer = asyncio.create_task(driver.emergency_off("smua"))
 
-    assert await newer is True
+    assert await newer is SourceOffResult.DEVICE_REPORTED_OFF
     newest_epoch = driver._source_command_epoch["smua"]
     release_first_read.set()
-    assert await older is False
+    assert await older is SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     assert driver._output_off_verified["smua"] is True
     assert driver._output_off_verified_generation["smua"] == driver._connection_generation
