@@ -8,12 +8,10 @@ it cannot make a committed candidate appear green.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import stat
 import subprocess
-import sys
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -274,98 +272,6 @@ def validate_exported_candidate(export_root: Path, manifest: CandidateManifest) 
         raise CandidateEvidenceError(f"exported candidate committed paths changed after execution: {changed!r}")
 
 
-def _set_export_read_only(export_root: Path, manifest: CandidateManifest, *, read_only: bool) -> None:
-    """Keep committed candidate bytes non-writable only while they execute."""
-
-    directories = [export_root, *(path for path in export_root.rglob("*") if path.is_dir() and not path.is_symlink())]
-    if not read_only:
-        for directory in directories:
-            directory.chmod(0o755)
-    for record in manifest.records:
-        if record.mode in {_SYMLINK_MODE, _GITLINK_MODE}:
-            continue
-        target = _safe_destination(export_root, record.path)
-        if read_only:
-            permissions = 0o555 if record.mode == "100755" else 0o444
-        else:
-            permissions = 0o755 if record.mode == "100755" else 0o644
-        target.chmod(permissions)
-    if read_only:
-        for directory in reversed(directories):
-            directory.chmod(0o555)
-
-
-def _set_windows_integrity(path: Path, level: str) -> None:
-    completed = subprocess.run(
-        ["icacls.exe", str(path), "/setintegritylevel", f"(OI)(CI){level}", "/T", "/C"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise CandidateEvidenceError(f"failed to label candidate path integrity {level}: {completed.stderr.strip()}")
-
-
-def _set_posix_ancestor_traversal(*paths: Path) -> list[tuple[Path, int]]:
-    changed: list[tuple[Path, int]] = []
-    try:
-        ancestors = {parent for path in paths for parent in path.parents if parent != Path(path.anchor)}
-        for ancestor in sorted(ancestors, key=lambda path: len(path.parts)):
-            mode = stat.S_IMODE(ancestor.stat().st_mode)
-            if not mode & stat.S_IXOTH:
-                changed.append((ancestor, mode))
-                ancestor.chmod(mode | stat.S_IXOTH)
-    except Exception:
-        for ancestor, mode in reversed(changed):
-            ancestor.chmod(mode)
-        raise
-    return changed
-
-
-def _run_sandboxed_candidate(
-    command: Sequence[str],
-    *,
-    export_root: Path,
-    state_root: Path,
-    environment: Mapping[str, str],
-    timeout: float,
-) -> subprocess.CompletedProcess[bytes]:
-    launcher = Path(__file__).with_name("candidate_sandbox.py").resolve(strict=True)
-    helper = [
-        sys.executable,
-        "-I",
-        "-B",
-        str(launcher),
-        str(export_root),
-        str(state_root),
-        "--",
-        *command,
-    ]
-    if os.name == "nt":
-        _set_windows_integrity(export_root, "M")
-        _set_windows_integrity(state_root, "L")
-        return subprocess.run(
-            helper,
-            cwd=state_root,
-            env=environment,
-            capture_output=True,
-            text=False,
-            check=False,
-            timeout=timeout,
-        )
-    return subprocess.run(
-        ["sudo", "-n", "--", *helper],
-        cwd=state_root,
-        input=json.dumps(dict(environment), ensure_ascii=False).encode("utf-8"),
-        capture_output=True,
-        text=False,
-        check=False,
-        timeout=timeout,
-    )
-
-
 def execute_exported_candidate(
     repo: Path,
     revision: str,
@@ -417,25 +323,18 @@ def execute_exported_candidate(
     runtime_root = state_root / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     environment["CRYODAQ_STATE_ROOT"] = str(runtime_root)
-    ancestor_modes: list[tuple[Path, int]] = []
     try:
-        _set_export_read_only(export_root, manifest, read_only=True)
-        if os.name != "nt":
-            ancestor_modes = _set_posix_ancestor_traversal(export_root, state_root)
-        completed = _run_sandboxed_candidate(
-            command,
-            export_root=export_root,
-            state_root=state_root,
-            environment=environment,
+        completed = subprocess.run(
+            list(command),
+            cwd=export_root,
+            env=environment,
+            capture_output=True,
+            text=False,
+            check=False,
             timeout=timeout,
         )
     finally:
-        for ancestor, mode in reversed(ancestor_modes):
-            ancestor.chmod(mode)
-        try:
-            validate_exported_candidate(export_root, manifest)
-        finally:
-            _set_export_read_only(export_root, manifest, read_only=False)
+        validate_exported_candidate(export_root, manifest)
     return CandidateExecutionReceipt(
         commit=manifest.commit,
         tree=manifest.tree,
