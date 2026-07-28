@@ -261,11 +261,11 @@ The following table distinguishes three numbers that are easy to confuse:
 | Net source-inventory growth | 124,536 lines | Insertions minus deletions. |
 | Delivered-tree Git churn | 139,644 insertions / 9,554 deletions / 130,090 net | Source inventory plus the four regenerated architecture SVGs. |
 | Baseline repository text | 188,539 lines | Measured text inventory across the baseline tree. |
-| Candidate source-inventory text | 433,173 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
-| Delivered-tree text | 433,257 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
+| Candidate source-inventory text | 433,472 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
+| Delivered-tree text | 433,556 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
 | Baseline test Python | 80,529 lines | Python under `tests`. |
-| Candidate production Python | 151,628 lines | Candidate `src/cryodaq` inventory, not 134,090. |
-| Candidate test Python | 206,616 lines | Candidate `tests` inventory. |
+| Candidate production Python | 151,630 lines | Candidate `src/cryodaq` inventory, not 134,090. |
+| Candidate test Python | 206,913 lines | Candidate `tests` inventory. |
 | Paths changed in candidate comparison | 489 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
 | Paths changed in delivered comparison | 493 | Candidate comparison plus the one surviving generated architecture SVG path. |
 | Baseline repository files | 779 | Inventory at `f5d6434`. |
