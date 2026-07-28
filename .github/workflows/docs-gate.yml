@@ -2,8 +2,14 @@ name: Docs Freshness Gate
 
 # E2: mechanical doc-freshness invariants (tests/docs/test_docs_freshness.py).
 # Deliberately separate from main.yml's full test matrix — this needs only
-# pytest + stdlib (git ls-files, tomllib), not the full cryodaq install, so
-# it stays fast and does not interfere with the main CI workflow.
+# pytest plus PyYAML, not the full cryodaq install, so it stays fast and does
+# not interfere with the main CI workflow.
+#
+# PyYAML is required by the G4 documentation guard, which resolves
+# `yaml-file::key.path` references in the adaptation documents. Resolving them
+# needs a real YAML parser. The guard must NOT degrade to skipping those
+# references when the parser is absent: a guard that is silently weaker in one
+# partition is the same defect class this campaign exists to remove.
 
 on:
   pull_request:
@@ -25,8 +31,8 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install pytest
-        run: pip install "pytest>=8"
+      - name: Install pytest and the G4 guard's YAML parser
+        run: pip install "pytest>=8" "pyyaml>=6"
 
       - name: Run docs freshness gate
         run: pytest tests/docs/test_docs_freshness.py -v
