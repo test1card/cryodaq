@@ -216,17 +216,18 @@ class _EventDedup:
 
     def should_dispatch(self, event_id: str) -> bool:
         now = time.monotonic()
+        cutoff = now - self._window_s
         last = self._seen.get(event_id)
-        if last is None or last < now - self._window_s:
-            return True
         self._seen[event_id] = now
-        return False
+        self._seen = {key: timestamp for key, timestamp in self._seen.items() if timestamp >= cutoff}
+        return last is None or last < cutoff
 
     def mark_delivered(self, event_id: str) -> None:
         now = time.monotonic()
         cutoff = now - self._window_s
         self._seen[event_id] = now
         self._seen = {key: timestamp for key, timestamp in self._seen.items() if timestamp >= cutoff}
+
 
 def _event_dedup_id(event: EngineEvent) -> str | None:
     """Compute a dedup key for ``event`` or ``None`` when dedup does not apply.
@@ -550,10 +551,6 @@ class AssistantLiveAgent:
         )
         if self._config.slice_b_suggestion and not result.truncated and result.text.strip():
             await self._generate_diagnostic_suggestion(event, payload)
-        if dispatched:
-            dedup_id = _event_dedup_id(event)
-            if dedup_id is not None:
-                self._dedup.mark_delivered(dedup_id)
 
     async def _generate_diagnostic_suggestion(self, event: EngineEvent, alarm_payload: dict[str, Any]) -> None:
         """Generate and dispatch Slice B diagnostic suggestion (second LLM call).
