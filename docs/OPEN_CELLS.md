@@ -111,6 +111,14 @@ cautions for whoever reads this next:
 
 ## Examined and refuted — not defects
 
+- `keithley_set_limits` does **not** claim execution from acceptance. The driver
+  writes each limit and then queries `source.limitv` / `source.limiti` back from
+  the device, raising on mismatch, and SafetyManager awaits that before returning
+  success. Its "Engine confirmed execution" wording is earned. It was flagged as a
+  sibling of the target-power defect and is not one; start and stop are likewise
+  backed by output readback. The GUI is the only sender, and no Telegram or
+  automation caller renders a limits success banner.
+
 - The assistant's live diagnostics cache does **not** collapse availability: it
   returns a summary only after receipt-freshness validation, and clears to `None`
   on failed polls, invalid receipts and expiry. An engine-down probe renders both
