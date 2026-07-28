@@ -14,6 +14,7 @@ from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 
@@ -21,14 +22,17 @@ from cryodaq.drivers.contracts import (
 def _mock_keithley():
     """Create a mock Keithley driver.
 
-    ``emergency_off`` returns True per the CR-2 driver contract: True iff
-    every targeted channel's OUTPUT_OFF write succeeded AND readback
-    confirmed the output is OFF.
+    ``emergency_off`` returns ``SourceOffResult.DEVICE_REPORTED_OFF``: the
+    driver contract is an evidence enum, not a bool, and only that member
+    means every targeted channel's OUTPUT_OFF write succeeded AND readback
+    confirmed the output is OFF. Returning ``True`` here would be a mock
+    inventing a shape production no longer produces, so callers that judge
+    OFF by identity against the enum would silently read it as unconfirmed.
     """
     k = MagicMock()
     k.connected = True
     k.output_state_unverified = False  # MagicMock attrs are truthy; declare the real default
-    k.emergency_off = AsyncMock(return_value=True)
+    k.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
     k.stop_source = AsyncMock()
     k.start_source = AsyncMock()
     return k
@@ -800,7 +804,7 @@ async def test_simultaneous_global_off_requests_share_one_driver_owner():
         calls += 1
         entered.set()
         await release.wait()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k = _mock_keithley()
     k.emergency_off.side_effect = blocked_off
@@ -831,7 +835,7 @@ async def test_cancelled_global_off_waiter_does_not_cancel_shared_owner():
         entered.set()
         await release.wait()
         completed.set()
-        return True
+        return SourceOffResult.DEVICE_REPORTED_OFF
 
     k = _mock_keithley()
     k.emergency_off.side_effect = blocked_off

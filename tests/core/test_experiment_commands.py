@@ -18,6 +18,7 @@ from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
+    SourceOffResult,
     _issue_registry_runtime_binding,
 )
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
@@ -2116,7 +2117,7 @@ async def test_omitted_emergency_off_channel_is_verified_global_scope() -> None:
         driver = Keithley2604B("k", "USB::FAKE", mock=False)
         driver._transport = transport
         driver._connected = True
-        assert await driver.emergency_off() is True
+        assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
         binding = _issue_registry_runtime_binding(
             driver=driver,
             timing=AcquisitionTiming(1.0, 1.0, 1.0),
