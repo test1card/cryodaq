@@ -270,12 +270,13 @@ unrelated files" rule below. The gate actually enforced in CI
 (`.github/workflows/main.yml`, "Check formatting of changed Python files")
 only checks files changed since the commit pinned in that workflow's
 `FORMAT_BASE` variable; restricted to that same changed set, the check is
-clean. **Measured 2026-07-28 at commit `1e75e020`, tree `f08c254f`, with
-pinned ruff 0.15.9: 610 changed Python files, 610 already formatted, 0 would
-reformat.** That count moves with every commit, so treat it as a measurement
-at that exact tree rather than a standing property — re-run the command below
-and cite your own commit rather than repeating this number. Reproduce the real
-gate locally with:
+clean. **Measured 2026-07-28 with pinned ruff 0.15.9 against the then-current
+head: every changed Python file was already formatted and none would be
+reformatted.** That is a measurement at one tree, not a standing property, and
+it moves with every commit — re-run the command below against your own head
+rather than repeating a stale figure. This file is permanent guidance, so it
+must not pin the commit that measurement was taken at; a guard enforces that.
+Reproduce the real gate locally with:
 
 ```bash
 git diff --name-only --diff-filter=ACMR -z <FORMAT_BASE>...HEAD -- '*.py' \
