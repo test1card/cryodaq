@@ -162,3 +162,29 @@ def test_dashboard_marks_last_values_stale_when_a_refresh_fails(dashboard_payloa
             page.evaluate("refresh()")
 
             assert page.locator("#updated").inner_text().startswith("Данные устарели:")
+
+
+def test_dashboard_renders_unavailable_cache_as_last_known(dashboard_payload) -> None:
+    """A dead bridge must never leave its cached reading looking current."""
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="T2",
+            value=4.2,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+    server._state.invalidate_producer("ZMQ readings producer stopped")
+
+    with _served_dashboard() as base_url:
+        with _browser() as browser:
+            page = browser.new_page()
+            page.goto(base_url + "/", wait_until="networkidle")
+
+            assert page.locator("#availability").inner_text().startswith("UNAVAILABLE — ZMQ readings producer stopped")
+            assert page.locator("#cached-label").inner_text() == "last-known values below"
+            assert "T2\n4.20" in page.locator("#temps").inner_text()
+            assert page.locator("#alarms").inner_text().startswith("LAST-KNOWN:")
+            assert "последнее известное" in page.locator("#experiment").inner_text()

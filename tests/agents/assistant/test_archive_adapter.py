@@ -242,7 +242,16 @@ def test_get_detail_empty_id_returns_none() -> None:
 
 def test_get_detail_returns_none_when_call_fails() -> None:
     adapter = ArchiveAdapter(_fake_client(experiment_get_archive_item={"ok": False, "error": "engine недоступен"}))
-    assert _run(adapter.get_detail("exp-1")) is None
+    unavailable = _run(adapter.get_detail("exp-1"))
+    missing = _run(
+        ArchiveAdapter(_fake_client(experiment_get_archive_item={"ok": True, "entry": None})).get_detail("exp-1")
+    )
+
+    assert missing is None
+    assert unavailable is not None
+    assert unavailable.available is False
+    assert unavailable.stale is True
+    assert isinstance(unavailable.reason, str) and unavailable.reason
 
 
 # ---------------------------------------------------------------------------

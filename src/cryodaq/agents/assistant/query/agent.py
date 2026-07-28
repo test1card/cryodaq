@@ -590,6 +590,12 @@ class AssistantQueryAgent:
                 phases_text="(нет данных)",
                 cooldown_text="(не указано)",
             )
+        if not result.available:
+            return (
+                f"Запрос: {query}\n\n"
+                f"Детали эксперимента {ident} недоступны: {result.reason}.\n"
+                "Не утверждай, что запись не найдена."
+            )
         if result.duration_h is None:
             duration_str = "не зафиксировано"
         else:

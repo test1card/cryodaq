@@ -132,6 +132,20 @@ class ArchiveDetailResult:
     duration_h: float | None
     phases: list[dict] = field(default_factory=list)
     cooldown_metrics: dict | None = None
+    available: bool = True
+    stale: bool = False
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.available) is not bool or type(self.stale) is not bool:
+            raise ValueError("availability fields must be bool")
+        if not self.available and not self.stale:
+            raise ValueError("unavailable availability must be stale")
+        if self.available and not self.stale:
+            if self.reason is not None:
+                raise ValueError("live availability cannot have a reason")
+        elif not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("stale or unavailable availability requires a reason")
 
 
 @dataclass

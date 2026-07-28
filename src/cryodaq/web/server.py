@@ -34,6 +34,7 @@ import logging
 import math
 import threading
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,7 @@ _CMD_ADDR = "tcp://127.0.0.1:5556"  # REP port = PUB + 1
 # and can OOM the web process. Clamp rather than 500.
 _HISTORY_MAX_MINUTES = 1440  # 24 h — covers the dashboard's longest window
 _LOG_MAX_LIMIT = 2000
+_STATUS_FRESHNESS_S = 10.0
 _MUTATION_PROTOCOL_MAJOR = 1
 _MUTATION_CAPABILITY = "cryodaq_mutation_v1"
 _MUTATION_RECEIPT_SCHEMA = "mutation_compatibility_v1"
@@ -262,6 +264,24 @@ _DATA_DIR = get_data_dir()
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _Availability:
+    available: bool
+    stale: bool
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.available) is not bool or type(self.stale) is not bool:
+            raise ValueError("availability fields must be bool")
+        if not self.available and not self.stale:
+            raise ValueError("unavailable availability must be stale")
+        if self.available and not self.stale:
+            if self.reason is not None:
+                raise ValueError("live availability cannot have a reason")
+        elif not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("stale or unavailable availability requires a reason")
+
+
 class _ServerState:
     """Общее состояние для всех WebSocket-клиентов."""
 
@@ -274,6 +294,8 @@ class _ServerState:
         self.instrument_status: dict[str, dict[str, Any]] = {}
         self.clients: set[WebSocket] = set()
         self.subscriber: ZMQSubscriber | None = None
+        self._last_authoritative_reading_at: float | None = None
+        self._availability = _Availability(False, True, "awaiting authoritative ZMQ reading")
         self._lock = asyncio.Lock()
         # Bounded broadcast queue — prevents task explosion under load.
         # Initialised in startup (requires running event loop).
@@ -291,6 +313,8 @@ class _ServerState:
             "status": reading.status.value,
         }
         self.last_readings[reading.channel] = data
+        self._last_authoritative_reading_at = time.monotonic()
+        self._availability = _Availability(True, False, None)
 
         # Определить прибор
         inst_id = reading.instrument_id or ""
@@ -315,8 +339,25 @@ class _ServerState:
                 "total_readings": self.instrument_status.get(inst_id, {}).get("total_readings", 0) + 1,
             }
 
+    def invalidate_producer(self, reason: str) -> None:
+        """Retain cached diagnostics while withdrawing producer authority."""
+        self._availability = _Availability(False, True, reason)
+
+    def _availability_json(self) -> _Availability:
+        availability = self._availability
+        if not availability.available:
+            return availability
+        last_reading_at = self._last_authoritative_reading_at
+        if last_reading_at is None:
+            return _Availability(False, True, "awaiting authoritative ZMQ reading")
+        age_s = time.monotonic() - last_reading_at
+        if age_s > _STATUS_FRESHNESS_S:
+            return _Availability(True, True, f"ZMQ reading age exceeds {_STATUS_FRESHNESS_S:g} seconds")
+        return availability
+
     def status_json(self) -> dict[str, Any]:
         """Собрать JSON-статус для GET /status."""
+        availability = self._availability_json()
         uptime_s = time.monotonic() - self.start_time
         hours, rem = divmod(int(uptime_s), 3600)
         mins, secs = divmod(rem, 60)
@@ -329,6 +370,9 @@ class _ServerState:
             "safety_state": self.safety_state,
             "active_alarms": self.active_alarms,
             "ws_clients": len(self.clients),
+            "available": availability.available,
+            "stale": availability.stale,
+            "reason": availability.reason,
         }
 
 
@@ -385,6 +429,7 @@ async def _zmq_to_ws_bridge() -> None:
             await sub.stop()
         finally:
             if _state.subscriber is sub:
+                _state.invalidate_producer("ZMQ readings producer stopped")
                 _state.subscriber = None
 
 
@@ -677,6 +722,10 @@ padding:10px 12px;margin-bottom:8px}
 .temp-card .val{font-size:16px;font-weight:bold}
 .cold{color:#58a6ff} .mid{color:#c9d1d9} .warm{color:#f0883e} .hot{color:#f85149}
 .unavailable{color:#8b949e}
+.availability{display:none;padding:10px 12px;margin-bottom:8px;border:2px solid #f0883e;
+background:#161b22;color:#f0f6fc;font-weight:bold}
+.availability.unavailable{border-color:#f85149}
+#cached-label{display:none;color:#8b949e;font-size:12px;margin:-2px 0 8px}
 .log-entry{font-size:12px;color:#8b949e;padding:2px 0;border-bottom:1px solid #21262d}
 .log-entry .ts{color:#58a6ff}
 #updated{font-size:11px;color:#484f58;text-align:right;padding:4px}
@@ -692,6 +741,8 @@ body.dashboard-stale #updated{color:#f0883e;font-weight:bold}
  <span class="item" id="alarms">—</span>
  <span class="item" id="channels">0 каналов</span>
 </div>
+<div class="availability" id="availability" role="alert"></div>
+<div id="cached-label"></div>
 <div class="section"><div class="section-title">Эксперимент</div><div id="experiment">—</div></div>
 <div class="section"><div class="section-title">Температуры</div>
 <div class="temps" id="temps"></div></div>
@@ -714,10 +765,27 @@ function markRefreshStale(error){
  document.getElementById('updated').textContent='Данные устарели: '
   +(error.message||'нет связи')+'. Показаны последние полученные значения.';
 }
+function setAvailability(d){
+ const unavailable=d.available===false;
+ const stale=d.available===true&&d.stale===true;
+ const warning=document.getElementById('availability');
+ const cached=document.getElementById('cached-label');
+ if(!unavailable&&!stale){
+  warning.style.display='none';warning.textContent='';warning.classList.remove('unavailable');
+  cached.style.display='none';cached.textContent='';return false;
+ }
+ const label=unavailable?'UNAVAILABLE':'STALE';
+ const reason=typeof d.reason==='string'&&d.reason?d.reason:'availability unknown';
+ warning.textContent=label+' — '+reason;
+ warning.style.display='block';warning.classList.toggle('unavailable',unavailable);
+ cached.textContent='last-known values below';cached.style.display='block';
+ document.body.classList.add('dashboard-stale');
+ return true;
+}
 async function refresh(){
  try{
   const[d,ld]=await Promise.all([fetchJson('/api/status'),fetchJson('/api/log?limit=5')]);
-  if(!ld.ok)throw new Error('журнал недоступен');
+  const lastKnown=setAvailability(d);
   document.getElementById('uptime').textContent='Аптайм: '+(d.uptime||'--');
   document.getElementById('channels').textContent=displayChannelCount(d.channels);
   // Safety state
@@ -725,13 +793,13 @@ async function refresh(){
   if(safety&&safety.state){
    const st=safety.state;
    const el=document.getElementById('safety');
-   el.textContent=st.toUpperCase();
+   el.textContent=(lastKnown?'LAST-KNOWN: ':'')+st.toUpperCase();
    el.style.color=(st==='fault'||st==='fault_latched')?'#f85149':'#3fb950';
-  }else{document.getElementById('safety').textContent='—'}
+  }else{document.getElementById('safety').textContent=lastKnown?'LAST-KNOWN: —':'—'}
   // Alarms
   const aa=d.active_alarms||{};
   const ac=Object.keys(aa).length;
-  document.getElementById('alarms').textContent=ac+' алармов';
+  document.getElementById('alarms').textContent=(lastKnown?'LAST-KNOWN: ':'')+ac+' алармов';
   // Readings
   const readings=d.readings||{};
   let temps='',pressure='—',kA='ВЫКЛ',kB='ВЫКЛ';
@@ -756,20 +824,24 @@ async function refresh(){
    const exp=d.experiment;
    if(d.experiment_available===false){
     document.getElementById('experiment').textContent='Эксперимент: нет связи';
+   }else if(lastKnown){
+    document.getElementById('experiment').textContent=exp&&exp.active_experiment
+     ?'LAST-KNOWN: '+(exp.active_experiment.name||'—')
+     :'Эксперимент: последнее известное состояние недоступно';
    }else if(exp&&exp.active_experiment){
     const e=exp.active_experiment;
     const phase=exp.current_phase?' ['+exp.current_phase+']':'';
     document.getElementById('experiment').textContent=(e.name||'—')+phase;
    }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
   let html='';
-  for(const e of(ld.entries||[])){
+  for(const e of(ld.ok?ld.entries||[]:[])){
    const ts=(e.timestamp||'').split('T')[1]||'';
    html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> `+
      `[${escapeHtml(e.author||e.source||'?')}] ${escapeHtml(e.message||'')}</div>`;
   }
-  document.getElementById('log').innerHTML=html||'Нет записей';
-  document.body.classList.remove('dashboard-stale');
- document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();
+  document.getElementById('log').innerHTML=html||(ld.ok?'Нет записей':'Журнал недоступен');
+  if(!lastKnown){document.body.classList.remove('dashboard-stale');
+   document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();}
  }catch(e){markRefreshStale(e)}
 }
 refresh();setInterval(refresh,5000);

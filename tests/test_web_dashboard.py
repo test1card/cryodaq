@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime
 from unittest.mock import patch
 
@@ -9,6 +11,8 @@ import pytest
 from starlette.testclient import TestClient
 
 from cryodaq.core.zmq_bridge import PROTOCOL_VERSION
+from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.web import server
 from cryodaq.web.server import _query_history, create_app
 
 
@@ -168,6 +172,132 @@ def test_status_endpoint_returns_json(client) -> None:
     assert isinstance(data["uptime"], str)  # formatted HH:MM:SS string
     assert "uptime_s" in data
     assert data["uptime_s"] >= 0
+
+
+def _bridge_death() -> None:
+    """Run the production bridge through its termination path."""
+    started = asyncio.Event()
+
+    class _Subscriber:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def start(self) -> None:
+            started.set()
+
+        async def stop(self) -> None:
+            return None
+
+    async def _run() -> None:
+        with patch("cryodaq.web.server.ZMQSubscriber", _Subscriber):
+            task = asyncio.create_task(server._zmq_to_ws_bridge())
+            await asyncio.wait_for(started.wait(), timeout=1)
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(_run())
+
+
+def _fresh_server_state(monkeypatch) -> None:
+    monkeypatch.setattr(server, "_state", server._ServerState())
+
+
+def _without_bridge():
+    async def _pending_bridge() -> None:
+        await asyncio.Future()
+
+    return patch("cryodaq.web.server._zmq_to_ws_bridge", _pending_bridge)
+
+
+def test_bridge_death_marks_http_status_and_dashboard_unavailable(monkeypatch) -> None:
+    """A dead producer leaves cached values last-known, never current."""
+
+    async def _engine_unavailable(_command: dict) -> dict:
+        return {"ok": False}
+
+    _fresh_server_state(monkeypatch)
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="T1",
+            value=4.2,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+    _bridge_death()
+    with _without_bridge(), patch("cryodaq.web.server._async_engine_command", _engine_unavailable):
+        with TestClient(create_app()) as status_client:
+            response = status_client.get("/status")
+            api_response = status_client.get("/api/status")
+            dashboard = status_client.get("/")
+
+    for payload in (response.json(), api_response.json()):
+        assert payload["available"] is False
+        assert payload["stale"] is True
+        assert isinstance(payload["reason"], str) and payload["reason"]
+    assert dashboard.status_code == 200
+
+
+def test_authoritative_reading_makes_status_live(monkeypatch) -> None:
+    """Only an authoritative reading may make a bridge-backed cache live."""
+    _fresh_server_state(monkeypatch)
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="T1",
+            value=4.2,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+    with _without_bridge():
+        with TestClient(create_app()) as status_client:
+            payload = status_client.get("/status").json()
+
+    assert payload["available"] is True
+    assert payload["stale"] is False
+    assert payload["reason"] is None
+
+
+def test_expired_cache_is_stale_but_still_available(monkeypatch) -> None:
+    """A silent, otherwise-live producer exposes last-known data as stale."""
+    _fresh_server_state(monkeypatch)
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="T1",
+            value=4.2,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+    server._state._last_authoritative_reading_at -= 11
+    with _without_bridge():
+        with TestClient(create_app()) as status_client:
+            payload = status_client.get("/status").json()
+
+    assert payload["available"] is True
+    assert payload["stale"] is True
+    assert isinstance(payload["reason"], str) and payload["reason"]
+
+
+def test_respawn_without_authoritative_reading_remains_unavailable(monkeypatch) -> None:
+    """Starting a replacement bridge does not restore authority by itself."""
+    _fresh_server_state(monkeypatch)
+    _bridge_death()
+    # This is the same state assignment made at bridge startup.  It must
+    # not turn a dead cache live before the new callback receives a Reading.
+    server._state.subscriber = object()
+    payload = server._state.status_json()
+
+    assert payload["available"] is False
+    assert payload["stale"] is True
+    assert isinstance(payload["reason"], str) and payload["reason"]
 
 
 def test_query_history_closes_connection_on_exception(monkeypatch, tmp_path) -> None:

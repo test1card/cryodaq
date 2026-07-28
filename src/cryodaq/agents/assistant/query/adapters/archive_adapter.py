@@ -201,13 +201,24 @@ class ArchiveAdapter:
     # ------------------------------------------------------------------
 
     async def get_detail(self, experiment_id: str) -> ArchiveDetailResult | None:
-        """Return the full record for one archived experiment, or ``None``."""
+        """Return one record, ``None`` when absent, or an unavailable result."""
         ident = (experiment_id or "").strip()
         if not ident:
             return None
         reply = await self._client.call({"cmd": "experiment_get_archive_item", "experiment_id": ident})
         if not reply.get("ok"):
-            return None
+            return ArchiveDetailResult(
+                experiment_id=ident,
+                sample="",
+                operator="",
+                status="",
+                started_at="",
+                ended_at=None,
+                duration_h=None,
+                available=False,
+                stale=True,
+                reason="archive detail unavailable",
+            )
         entry = reply.get("entry")
         if entry is None:
             return None
