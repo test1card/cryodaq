@@ -261,16 +261,16 @@ The following table distinguishes three numbers that are easy to confuse:
 | Net source-inventory growth | 124,536 lines | Insertions minus deletions. |
 | Delivered-tree Git churn | 139,644 insertions / 9,554 deletions / 130,090 net | Source inventory plus the four regenerated architecture SVGs. |
 | Baseline repository text | 188,539 lines | Measured text inventory across the baseline tree. |
-| Candidate source-inventory text | 433,472 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
-| Delivered-tree text | 433,556 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
+| Candidate source-inventory text | 434,035 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
+| Delivered-tree text | 434,119 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
 | Baseline test Python | 80,529 lines | Python under `tests`. |
-| Candidate production Python | 151,630 lines | Candidate `src/cryodaq` inventory, not 134,090. |
-| Candidate test Python | 206,913 lines | Candidate `tests` inventory. |
+| Candidate production Python | 151,705 lines | Candidate `src/cryodaq` inventory, not 134,090. |
+| Candidate test Python | 207,313 lines | Candidate `tests` inventory. |
 | Paths changed in candidate comparison | 489 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
 | Paths changed in delivered comparison | 493 | Candidate comparison plus the one surviving generated architecture SVG path. |
 | Baseline repository files | 779 | Inventory at `f5d6434`. |
-| Architecture source manifest | 1,162 | Every intended source file except the self-referential generated `docs/refactor/architecture-*.svg` and `docs/architecture-montana-important.svg` outputs. |
-| Delivered-tree files | 1,163 | Source manifest plus the one surviving regenerated architecture SVG. |
+| Architecture source manifest | 1,163 | Every intended source file except the self-referential generated `docs/refactor/architecture-*.svg` and `docs/architecture-montana-important.svg` outputs. |
+| Delivered-tree files | 1,164 | Source manifest plus the one surviving regenerated architecture SVG. |
 | Commits from baseline to recorded checkpoint | 166 | Committed history through `7607bc1`; the measured working slice is not yet included. |
 
 The repository added **42,953 lines of production Python** and **65,003
