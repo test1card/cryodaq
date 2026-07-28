@@ -14,3 +14,26 @@ this record preserves the correction and its evidence.
 | `b1ad7ca0` | "927 passed, 2 skipped across tests/agents." | This was a historical measurement, not a false claim. It cannot be reproduced as a comparable count on this tree and host. | Later commits changed several tests in the partition, including the C1 seal and alarm-delivery tests. A separate current run reports 924 passed, 3 skipped, 1 deselected, and 7 failures; every failure is `WinError 1314` while creating a symlink. This host lacks the symlink privilege available to CI. | **STALE** |
 | `ef022ab5` | "932 passed, 2 skipped across tests/agents." | This was a historical measurement, not a false claim. It cannot be reproduced as a comparable count on this tree and host. | The same later test changes and current host limitation apply. The current separate `tests/agents` run reaches 924 passed, 3 skipped, 1 deselected, and 7 `WinError 1314` symlink-creation failures, so it is not evidence against the landed count. | **STALE** |
 | `5354fb9c` | "508 passed, 12 skipped across tests/analytics and tests/reporting." | This was a historical measurement, not a false claim. It is not comparable to the current tree. | The later C2 broadening changed the analytics guard test included in this cited set. A current analytics-only rerun was stopped by the session command window before completion; it must not be represented as a rerun of the landed count. The host also lacks the symlink privilege that CI provides, independently demonstrated by the current agents partition. | **STALE** |
+| `3d6d1a22` (second and third omissions) | "Broaden two guards that asserted a class while proving one shape." | Besides the C2 allowlist entry recorded above, the same commit **narrowed** `_REGEX_METHODS` from six entries to three, and changed the C1 adapter guard's clean baseline from requiring zero findings to accepting `_KNOWN_PRODUCTION_VIOLATIONS` — specifically `archive_adapter.py:get_detail:228`. A commit titled as a broadening performed three separate narrowings, none disclosed. | `tests/agents/assistant/test_c1_engine_adapter_seal.py:31-36` declares the accepted violation and line 228 asserts equality with that set rather than emptiness. The C2 guard's direct-regex method set is three entries where the parent had six. | **UNDISCLOSED** |
+| `1d2c43ad` | Presented as a G4 documentation-guard improvement. | It **relaxed** G4: it deleted the unconditional rejection of `SOFTWARE-PROVABLE` procedure declarations and added a test asserting the new acceptance. The relaxation is defensible — a genuinely software-provable procedure previously could not be expressed — but the message did not disclose that a guard stopped rejecting a class it had rejected. | `tests/docs/test_docs_freshness.py:834` now accepts `{"SOFTWARE-PROVABLE", "EXTERNALLY_EVIDENCED", "PHYSICAL"}`. The parent rejected the first unconditionally. | **UNDISCLOSED** |
+| `dcdb1912` | G4 rejects a procedure claiming `SOFTWARE-PROVABLE` where the evidence is external or physical. | True in its own diff, and no longer true: `1d2c43ad` deleted that rejection. | Same evidence as the row above. | **STALE** |
+| `0f505dd6` | "A driver-level OFF double that returns anything other than a `SourceOffResult` fails CI." | **The guard is not universal.** It exempts five named scopes and skips every `emergency_off` annotated `dict[...]`. Several of those exemptions are legitimate — `test_truthy_non_boolean_proof_cannot_authorize_disconnect` is a negative control that must be able to pass a truthy non-`SourceOffResult` — so the guard's design is sound. The absolute claim was not. | `tests/governance/test_source_off_result_test_doubles.py:10-16` lists `_INTENTIONAL_INVALID_SCOPES`; lines 124-131 skip exempted scopes and `dict[...]`-annotated returns. | **FALSE** |
+
+## Prevention
+
+Three commits above weakened or exempted a guard while their messages described a
+strengthening. All three messages were written in good faith by an author who did
+not notice, which is why the countermeasure cannot be prose.
+`GUARD-COVERAGE-REGRESSION-034` records the mechanical form: a guard-coverage
+inventory with stable challenge and exemption identifiers — never line numbers,
+since line-number identity is precisely what let the `periodic_renderer` exemption
+rot — compared across versions, with an exact reduction requiring a tracked
+declaration rather than a trusted commit title. The check's acceptance test is
+that it rejects `3d6d1a22` and `1d2c43ad` and names what each one lost.
+
+## Coverage of this audit
+
+An independent reviewer enumerated all 213 commits in the branch's review range
+and read messages and patch hunks in full for 11 of them, selected as high-risk.
+This table is therefore a sample of the highest-risk commits, not a complete
+audit of 213 diffs, and must not be cited as one.

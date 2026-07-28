@@ -116,7 +116,7 @@ async def _qualify_generation(
         generation,
         "test qualification",
     )
-    assert committed is expected_verified_off
+    assert committed.verified_off is expected_verified_off
 
 
 _CUT = CommonCut(
@@ -280,7 +280,7 @@ async def test_second_channel_requires_ordered_exact_target_off_proof() -> None:
     await _qualify_generation(manager, driver, expected_verified_off=False)
     manager._state = SafetyState.RUNNING
     manager._active_sources.add("smua")
-    manager._reviewed_source_verified_off = False
+    manager._reviewed_source_off_evidence = manager._unknown_global_off_evidence()
     manager._refresh_operator_safety_snapshot()
 
     result = await manager.request_run(0.1, 1.0, 0.1, channel="smub")
@@ -322,7 +322,7 @@ async def test_second_channel_unverified_target_fails_closed(target_result: obje
     await _qualify_generation(manager, driver, expected_verified_off=False)
     manager._state = SafetyState.RUNNING
     manager._active_sources.add("smua")
-    manager._reviewed_source_verified_off = False
+    manager._reviewed_source_off_evidence = manager._unknown_global_off_evidence()
 
     result = await manager.request_run(0.1, 1.0, 0.1, channel="smub")
 
@@ -357,7 +357,7 @@ async def test_cancelled_second_channel_proof_settles_full_fault_shutdown() -> N
     await _qualify_generation(manager, driver, expected_verified_off=False)
     manager._state = SafetyState.RUNNING
     manager._active_sources.add("smua")
-    manager._reviewed_source_verified_off = False
+    manager._reviewed_source_off_evidence = manager._unknown_global_off_evidence()
 
     task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smub"))
     await entered.wait()
@@ -397,7 +397,7 @@ async def test_same_turn_target_proof_completion_and_cancellation_still_force_fu
     await _qualify_generation(manager, driver, expected_verified_off=False)
     manager._state = SafetyState.RUNNING
     manager._active_sources.add("smua")
-    manager._reviewed_source_verified_off = False
+    manager._reviewed_source_off_evidence = manager._unknown_global_off_evidence()
 
     task = asyncio.create_task(manager.request_run(0.1, 1.0, 0.1, channel="smub"))
     await entered.wait()
@@ -452,7 +452,7 @@ def test_active_fault_and_recovery_matrix_is_blocked(state: SafetyState) -> None
     manager._safety_monitor_active = True
     manager.record_reviewed_source_connected(verified_off=True)
     if state in {SafetyState.RUN_PERMITTED, SafetyState.RUNNING}:
-        manager._reviewed_source_verified_off = False
+        manager._reviewed_source_off_evidence = manager._unknown_global_off_evidence()
         manager._active_sources.add("smua")
     manager._transition(state, "matrix")
     snapshot = manager.snapshot_operator_safety()
@@ -512,7 +512,8 @@ async def test_persistence_fault_recovery_and_source_start_stop_each_refresh_own
         stopped = manager.snapshot_operator_safety()
         assert result["ok"] is True
         assert stopped.revision > running.revision
-        assert stopped.verified_off is True
+        assert stopped.verified_off is False
+        assert stopped.device_readback_off is False
 
         await manager.on_persistence_failure("disk unavailable")
         faulted = manager.snapshot_operator_safety()
@@ -676,7 +677,7 @@ async def test_exact_child_death_invalidates_ready_off_and_available_ready_recei
         assert manager._full_abort_generation == manager._abort_generation
         assert manager._reviewed_source_generation is None
         assert manager._reviewed_source_connected is False
-        assert manager._reviewed_source_verified_off is False
+        assert not manager._reviewed_source_off_evidence.verified_off
         assert f"safety_{role}_{outcome}" in _codes(failed)
         failed_fact = next(fact for fact in failed.plant_health if fact.subsystem_id == f"safety_{role}")
         assert failed_fact.state is OperatorPresentationState.DISCONNECTED
@@ -929,24 +930,24 @@ async def test_replacement_and_reconnect_cannot_restore_faulted_child_authority(
         manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
         "initial proof",
     )
-    assert await manager.complete_reviewed_source_connect(
+    assert (await manager.complete_reviewed_source_connect(
         driver,
         manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
         generation,
         "initial proof",
-    )
+    )).verified_off
 
     child_release.set()
     assert manager._collect_task is not None
     await asyncio.gather(manager._collect_task, return_exceptions=True)
     await asyncio.sleep(0)
     assert manager.snapshot_operator_safety().verified_off is False
-    assert not await manager.complete_reviewed_source_connect(
+    assert not (await manager.complete_reviewed_source_connect(
         driver,
         manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
         generation,
         "late proof",
-    )
+    )).verified_off
 
     async def replacement_child() -> None:
         await replacement_release.wait()
@@ -1640,11 +1641,7 @@ async def test_repeated_shutdown_hold_retries_coalesce_retained_owner_but_issue_
             retained_off_entered.set()
             await retained_off_release.wait()
             return SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        return (
-            SourceOffResult.DEVICE_REPORTED_OFF
-            if call >= 4
-            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        )
+        return SourceOffResult.DEVICE_REPORTED_OFF if call >= 4 else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=controlled_off)
@@ -1749,11 +1746,7 @@ async def test_successful_retry_waits_for_older_inconclusive_hold_settlement(
             retained_off_entered.set()
             await retained_off_release.wait()
             return SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        return (
-            SourceOffResult.DEVICE_REPORTED_OFF
-            if call >= 3
-            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        )
+        return SourceOffResult.DEVICE_REPORTED_OFF if call >= 3 else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=controlled_off)
@@ -1875,11 +1868,7 @@ async def test_cancelled_retry_with_pending_hold_restores_cut_then_propagates(
         if call == 3:
             retry_proof_entered.set()
             return SourceOffResult.DEVICE_REPORTED_OFF
-        return (
-            SourceOffResult.DEVICE_REPORTED_OFF
-            if call >= 4
-            else SourceOffResult.PHYSICAL_STATE_UNKNOWN
-        )
+        return SourceOffResult.DEVICE_REPORTED_OFF if call >= 4 else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     driver = MagicMock()
     driver.emergency_off = AsyncMock(side_effect=controlled_off)
@@ -2190,6 +2179,13 @@ async def test_limit_write_transport_loss_demotes_driver_and_blocks_further_ordi
     resource = "USB0::0x05E6::0x2604::04089762::INSTR"
     identity = "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
     off_nonce = re.compile(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g")
+    output_state = {"smua": 0, "smub": 0}
+
+    def _apply_output_write(command: str) -> None:
+        if ".source.output =" not in command:
+            return
+        channel = "smua" if command.startswith("smua.") else "smub"
+        output_state[channel] = 1 if command.endswith(".OUTPUT_ON") else 0
 
     def _query(command: str, timeout_ms: int | None = None) -> str:
         del timeout_ms
@@ -2197,7 +2193,11 @@ async def test_limit_write_transport_loss_demotes_driver_and_blocks_further_ordi
             return identity
         match = off_nonce.search(command)
         if match is not None:
-            return f"CRYODAQ_OFF_V1|{match.group(1)}|0"
+            channel = "smua" if "smua.source.output" in command else "smub"
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|{output_state[channel]}"
+        for channel in output_state:
+            if command == f"print({channel}.source.output)":
+                return str(output_state[channel])
         return "0"
 
     driver = Keithley2604B("k", resource, mock=False)
@@ -2205,7 +2205,7 @@ async def test_limit_write_transport_loss_demotes_driver_and_blocks_further_ordi
     transport.open = AsyncMock()
     transport.close = AsyncMock()
     transport.query = AsyncMock(side_effect=_query)
-    transport.write = AsyncMock()
+    transport.write = AsyncMock(side_effect=_apply_output_write)
     driver._transport = transport
     await driver.connect()
     await driver.start_source("smua", 0.5, 40.0, 1.0)
@@ -2216,6 +2216,7 @@ async def test_limit_write_transport_loss_demotes_driver_and_blocks_further_ordi
         writes.append(command)
         if command == "smua.source.limitv = 20.0":
             raise OSError("ambiguous limit completion")
+        _apply_output_write(command)
 
     transport.write = AsyncMock(side_effect=_fail_limit_only)
     queries_before = transport.query.await_count
