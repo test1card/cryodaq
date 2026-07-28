@@ -20,6 +20,7 @@ exercises the startup gate that consumes the same proven logic.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -163,6 +164,47 @@ def _install_engine_startup_harness(
     monkeypatch.setattr(engine, "load_critical_channels_from_alarms_v3", lambda _path: v3_patterns)
     monkeypatch.setattr(engine, "SQLiteWriter", _Writer)
     return observed
+
+
+@pytest.mark.parametrize("local_override", [True, False], ids=["local_override", "tracked_base"])
+async def test_run_engine_records_effective_physical_policy_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    local_override: bool,
+) -> None:
+    """The production startup path logs the selected safety policy and still proceeds."""
+    observed = _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=[],
+        v3_patterns=set(),
+    )
+    config_dir = tmp_path / "config"
+    for policy in ("interlocks", "safety", "housekeeping", "cooldown"):
+        (config_dir / f"{policy}.yaml").write_text(f"{policy}: tracked\n", encoding="utf-8")
+    selected = config_dir / ("safety.local.yaml" if local_override else "safety.yaml")
+    if local_override:
+        selected.write_text("safety: local override\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(selected.read_bytes()).hexdigest()
+    source_kind = "local_override" if local_override else "tracked_base"
+    expected = (
+        f"Physical policy provenance: policy=safety source={selected.name} origin={source_kind} sha256={expected_hash}"
+    )
+    monkeypatch.setattr(engine, "validate_safety_pattern_liveness", lambda **_kwargs: [])
+
+    with caplog.at_level("INFO", logger="cryodaq.engine"):
+        with pytest.raises(_StopAtWriter):
+            await engine._run_engine(mock=True)
+
+    assert observed["writer_called"] is True
+    assert observed["safety_path"] == selected
+    assert expected in caplog.text
+    if local_override:
+        assert "Physical policy provenance: policy=safety source=safety.yaml origin=tracked_base" not in caplog.text
+        assert any(record.message == expected and record.levelname == "WARNING" for record in caplog.records)
+    else:
+        assert any(record.message == expected and record.levelname == "INFO" for record in caplog.records)
 
 
 def test_real_v3_patterns_validate_cleanly_before_legacy_union() -> None:

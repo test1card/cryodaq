@@ -2238,6 +2238,45 @@ def _engine_config_path(name: str) -> Path:
     return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
 
 
+def _config_file_sha256(path: Path) -> str:
+    """Return the SHA-256 of one effective configuration file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _log_physical_policy_provenance(policies: tuple[tuple[str, Path], ...]) -> None:
+    """Record which physical-policy documents this engine startup selected.
+
+    A ``*.local.yaml`` is a complete machine-specific replacement, not a
+    reviewed merge.  This disclosure intentionally does not change that
+    precedence or startup admission; it makes the selected authority explicit.
+    """
+    for policy, path in policies:
+        origin = "local_override" if path.name == f"{policy}.local.yaml" else "tracked_base"
+        try:
+            content_sha256 = await asyncio.to_thread(_config_file_sha256, path)
+        except OSError as exc:
+            logger.error(
+                "Physical policy provenance unavailable: policy=%s source=%s origin=%s sha256=unavailable error=%s",
+                policy,
+                path.name,
+                origin,
+                type(exc).__name__,
+            )
+            continue
+        log = logger.warning if origin == "local_override" else logger.info
+        log(
+            "Physical policy provenance: policy=%s source=%s origin=%s sha256=%s",
+            policy,
+            path.name,
+            origin,
+            content_sha256,
+        )
+
+
 async def _load_live_descriptor_authority(
     instruments_cfg: Path,
     driver_load: DriverLoadResult,
@@ -6391,7 +6430,17 @@ async def _run_engine(
     instruments_cfg = _engine_config_path("instruments")
     interlocks_cfg = _engine_config_path("interlocks")
     housekeeping_cfg = _engine_config_path("housekeeping")
+    safety_cfg = _engine_config_path("safety")
+    cooldown_cfg_path = _engine_config_path("cooldown")
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
+    await _log_physical_policy_provenance(
+        (
+            ("interlocks", interlocks_cfg),
+            ("safety", safety_cfg),
+            ("housekeeping", housekeeping_cfg),
+            ("cooldown", cooldown_cfg_path),
+        )
+    )
 
     # --- Создать основные компоненты ---
     broker = DataBroker()
@@ -6426,7 +6475,6 @@ async def _run_engine(
             raise DriverRegistryError("reviewed source lacks exact sealed runtime binding")
 
     # SafetyManager — создаётся ПЕРВЫМ
-    safety_cfg = _engine_config_path("safety")
     safety_manager = SafetyManager(
         safety_broker,
         keithley_driver=driver_load.reviewed_source,
@@ -6872,7 +6920,6 @@ async def _run_engine(
 
     # --- CooldownService (прогноз охлаждения) ---
     cooldown_service: Any = None
-    cooldown_cfg_path = _engine_config_path("cooldown")
     if cooldown_cfg_path.exists():
         try:
             with cooldown_cfg_path.open(encoding="utf-8") as fh:
