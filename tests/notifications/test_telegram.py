@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -480,6 +481,93 @@ async def test_cmd_log_without_identity_is_rejected() -> None:
 
 # EscalationService tests
 # ===========================================================================
+
+
+class _OutcomeNotifier:
+    """Notifier fake that returns a fixed, explicit delivery outcome."""
+
+    def __init__(self, outcome: str) -> None:
+        self._outcome = outcome
+        self.calls: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id: int, message: str) -> str:
+        self.calls.append((chat_id, message))
+        return self._outcome
+
+
+class _TelegramResponse:
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
+
+
+class _TelegramResponseContext:
+    def __init__(self, response: _TelegramResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _TelegramResponse:
+        return self._response
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> bool:
+        return False
+
+
+class _TelegramSession:
+    def __init__(self, response: _TelegramResponse) -> None:
+        self._response = response
+
+    def post(self, url: str, *, json: dict) -> _TelegramResponseContext:
+        return _TelegramResponseContext(self._response)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_message", "success_logged"),
+    [
+        ("delivered", "Эскалация отправлена: chat_id=111", True),
+        ("failed", "Эскалация НЕ доставлена: chat_id=111", False),
+        ("outcome_unknown", "Исход доставки эскалации неизвестен: chat_id=111", False),
+    ],
+)
+async def test_delayed_send_logs_delivery_outcome(
+    caplog: pytest.LogCaptureFixture,
+    outcome: str,
+    expected_message: str,
+    success_logged: bool,
+) -> None:
+    """The record log must describe the notifier's explicit outcome."""
+    from cryodaq.notifications.escalation import EscalationService
+
+    notifier = _OutcomeNotifier(outcome)
+    service = EscalationService(notifier, {})
+
+    with caplog.at_level(logging.INFO, logger="cryodaq.notifications.escalation"):
+        await service._delayed_send(111, "Тест эскалации", 0)
+
+    assert ("Эскалация отправлена" in caplog.text) is success_logged
+    assert expected_message in caplog.text
+    assert notifier.calls == [(111, "Тест эскалации")]
+
+
+async def test_send_message_reports_failed_and_unknown_outcomes() -> None:
+    """Telegram transport distinguishes confirmed failure from unknown delivery."""
+    notifier = _notifier()
+
+    async def get_non_200_session() -> _TelegramSession:
+        return _TelegramSession(_TelegramResponse(500, "internal error"))
+
+    async def raise_connection_error() -> _TelegramSession:
+        raise ConnectionError("connection lost")
+
+    notifier._get_session = get_non_200_session  # type: ignore[method-assign]
+    non_200_outcome = await notifier.send_message(111, "Тест")
+
+    notifier._get_session = raise_connection_error  # type: ignore[method-assign]
+    exception_outcome = await notifier.send_message(111, "Тест")
+
+    assert (non_200_outcome, exception_outcome) == ("failed", "outcome_unknown")
 
 
 async def test_escalation_chain_sends() -> None:

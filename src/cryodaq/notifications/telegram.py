@@ -129,7 +129,7 @@ class TelegramNotifier:
             await self._session.close()
             self._session = None
 
-    async def send_message(self, chat_id: int | str, text: str) -> None:
+    async def send_message(self, chat_id: int | str, text: str) -> str:
         """Отправить произвольное сообщение в указанный chat_id."""
         payload = {
             "chat_id": chat_id,
@@ -143,5 +143,8 @@ class TelegramNotifier:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.error("Telegram API ответил %d: %s", resp.status, body[:200])
+                    return "failed" if not 300 <= resp.status < 400 else "outcome_unknown"
+                return "delivered"
         except Exception as exc:
             logger.error("Ошибка отправки Telegram-уведомления: %s", exc)
+            return "outcome_unknown"

@@ -99,8 +99,13 @@ class EscalationService:
         try:
             if delay_s > 0:
                 await asyncio.sleep(delay_s)
-            await self._notifier.send_message(chat_id, message)
-            logger.info("Эскалация отправлена: chat_id=%s", chat_id)
+            outcome = await self._notifier.send_message(chat_id, message)
+            if outcome == "delivered":
+                logger.info("Эскалация отправлена: chat_id=%s", chat_id)
+            elif outcome == "failed":
+                logger.error("Эскалация НЕ доставлена: chat_id=%s", chat_id)
+            else:
+                logger.error("Исход доставки эскалации неизвестен: chat_id=%s", chat_id)
         except asyncio.CancelledError:
             logger.debug("Эскалация отменена до отправки: chat_id=%s", chat_id)
             raise
