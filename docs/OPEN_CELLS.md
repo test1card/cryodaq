@@ -50,7 +50,7 @@ good property does not make an unmatched bypass fail closed.
   upload is not treated as green by the same enforcement step.  Artifact
   existence alone remains insufficient evidence, but the workflow does not
   approve it on that basis.
-- `tests/governance/test_source_off_result_test_doubles.py` does **not** exist at
+- The proposed governance guard for driver-OFF test doubles does **not** exist at
   this head.  The present related file is
   `tests/core/test_source_off_result_consumers.py`; it cannot be cited as the
   named missing guard.
