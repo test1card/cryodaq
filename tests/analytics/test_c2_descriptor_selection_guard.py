@@ -14,13 +14,17 @@ import os
 import shutil
 from pathlib import Path
 
+import pytest
+
 _SOURCE_DIRS = ("storage", "reporting", "analytics")
 _IDENTIFIER_FIELDS = frozenset({"channel", "channel_id", "instrument_id"})
 _STRING_METHODS = frozenset({"casefold", "endswith", "lower", "replace", "split", "startswith", "upper"})
 _REGEX_METHODS = frozenset({"fullmatch", "match", "search"})
 
-# Each exemption is (bucket, reason). C2 has no exemptions: legacy rows are
-# neutral and no source module may infer semantics from their identifiers.
+# Each exemption is (bucket, reason). The periodic renderer's line 142
+# thermometry-name regex is allowlisted only for display sort ordering while
+# descriptor ordering remains blocked on schema work; no other source module
+# may infer physical semantics from identifiers.
 _ALLOWLIST: dict[tuple[str, int], tuple[str, str]] = {
     (
         "src/cryodaq/reporting/periodic_renderer.py",
@@ -184,34 +188,50 @@ def _reason(node: ast.AST, aliases: set[str], regexes: set[str]) -> str | None:
 
 
 def _violations(root: Path) -> list[str]:
+    source_root = root / "src" / "cryodaq"
+    if not source_root.is_dir():
+        raise RuntimeError(f"C2 source tree is missing: {source_root}")
+    paths = [path for directory in _SOURCE_DIRS for path in sorted((source_root / directory).rglob("*.py"))]
+    if not paths:
+        raise RuntimeError(f"C2 source tree contains no guarded Python files: {source_root}")
     findings: list[str] = []
-    for directory in _SOURCE_DIRS:
-        for path in sorted((root / "src" / "cryodaq" / directory).rglob("*.py")):
-            relative = path.relative_to(root).as_posix()
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-            parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-            scopes = [
-                tree,
-                *(
-                    node
-                    for node in ast.walk(tree)
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
-                ),
-            ]
-            scope_data = {scope: _aliases(scope) for scope in scopes}
-            for node in ast.walk(tree):
-                scope = node
-                while scope in parents and scope not in scope_data:
-                    scope = parents[scope]
-                aliases, regexes = scope_data[scope]
-                reason = _reason(node, aliases, regexes)
-                if reason and (relative, node.lineno) not in _ALLOWLIST:
-                    findings.append(f"{relative}:{node.lineno}: {reason}")
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        scopes = [
+            tree,
+            *(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
+            ),
+        ]
+        scope_data = {scope: _aliases(scope) for scope in scopes}
+        for node in ast.walk(tree):
+            scope = node
+            while scope in parents and scope not in scope_data:
+                scope = parents[scope]
+            aliases, regexes = scope_data[scope]
+            reason = _reason(node, aliases, regexes)
+            if reason and (relative, node.lineno) not in _ALLOWLIST:
+                findings.append(f"{relative}:{node.lineno}: {reason}")
     return sorted(findings)
 
 
 def test_c2_descriptor_selection_guard() -> None:
     assert _violations(_root()) == []
+
+
+@pytest.mark.parametrize("root_name", ("missing", "empty"))
+def test_c2_descriptor_selection_guard_fails_open_for_a_missing_or_empty_source_tree(
+    tmp_path: Path, root_name: str
+) -> None:
+    root = tmp_path / root_name
+    if root_name == "empty":
+        (root / "src" / "cryodaq").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="C2 source tree"):
+        _violations(root)
 
 
 def test_c2_descriptor_selection_guard_rejects_multiple_forms_then_accepts_restored_copy(tmp_path: Path) -> None:

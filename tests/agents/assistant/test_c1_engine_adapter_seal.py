@@ -8,10 +8,10 @@ explicitly declares absence.  It also requires a direct engine caller's
 failed-reply branch to return a typed unavailable result.
 
 It cannot prove runtime dispatch, values returned from another module, aliases
-assembled at runtime, a helper selected dynamically, or arbitrary expressions
-that merely contain ``None`` (such as conditional expressions and containers).
-Those remain outside this local AST sweep.  It intentionally does not seal
-E4-007 through E4-011.
+assembled at runtime, a helper selected dynamically, or ``None`` hidden in
+arbitrary expressions or containers; conditional-expression branches that
+directly return ``None`` are checked. It intentionally does not seal E4-007
+through E4-011.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from __future__ import annotations
 import ast
 import shutil
 from pathlib import Path
+
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[3]
 _EXPLICIT_ABSENCE_PREDICATES = {
@@ -158,14 +160,17 @@ def _locally_none_names(method: ast.AsyncFunctionDef, returned: ast.Return) -> s
     return {name for name, value in assignments.items() if isinstance(value, ast.Constant) and value.value is None}
 
 
-def _absent_return_reason(method: ast.AsyncFunctionDef, returned: ast.Return) -> str | None:
-    value = returned.value
+def _absent_expression_reason(value: ast.expr | None, method: ast.AsyncFunctionDef, returned: ast.Return) -> str | None:
     if value is None:
         return "bare return after engine query"
     if isinstance(value, ast.Constant) and value.value is None:
         return "None return after engine query"
     if isinstance(value, ast.Name) and value.id in _locally_none_names(method, returned):
         return "last local assignment is None before return after engine query"
+    if isinstance(value, ast.IfExp):
+        for branch in (value.body, value.orelse):
+            if reason := _absent_expression_reason(branch, method, returned):
+                return f"conditional expression {reason}"
     if (
         isinstance(value, ast.BoolOp)
         and isinstance(value.op, ast.Or)
@@ -182,10 +187,19 @@ def _absent_return_reason(method: ast.AsyncFunctionDef, returned: ast.Return) ->
     return None
 
 
+def _absent_return_reason(method: ast.AsyncFunctionDef, returned: ast.Return) -> str | None:
+    return _absent_expression_reason(returned.value, method, returned)
+
+
 def _violations(root: Path) -> list[str]:
     adapters = root / "src" / "cryodaq" / "agents" / "assistant" / "query" / "adapters"
+    if not adapters.is_dir():
+        raise RuntimeError(f"C1 adapter tree is missing: {adapters}")
+    paths = sorted(adapters.rglob("*.py"))
+    if not paths:
+        raise RuntimeError(f"C1 adapter tree contains no Python files: {adapters}")
     violations: list[str] = []
-    for path in sorted(adapters.rglob("*.py")):
+    for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         parents = _parent_map(tree)
         direct, reachable = _engine_reachable_methods(tree, parents)
@@ -199,11 +213,10 @@ def _violations(root: Path) -> list[str]:
             failure_branches = [
                 node for node in ast.walk(method) if isinstance(node, ast.If) and _is_failure_branch(node)
             ]
-            if not any(
-                _return_has_availability_contract(node, class_node)
+            if not failure_branches or any(
+                not (returns := [node for node in ast.walk(branch) if isinstance(node, ast.Return)])
+                or not all(_return_has_availability_contract(node, class_node) for node in returns)
                 for branch in failure_branches
-                for node in ast.walk(branch)
-                if isinstance(node, ast.Return)
             ):
                 violations.append(
                     f"{path.name}:{method.name}: failed reply does not return available=False, stale=True with reason"
@@ -213,6 +226,15 @@ def _violations(root: Path) -> list[str]:
 
 def test_c1_engine_adapter_seal_accepts_current_adapters() -> None:
     assert set(_violations(_ROOT)) == set(_KNOWN_PRODUCTION_VIOLATIONS)
+
+
+@pytest.mark.parametrize("root_name", ("missing", "empty"))
+def test_c1_engine_adapter_seal_fails_open_for_a_missing_or_empty_adapter_tree(tmp_path: Path, root_name: str) -> None:
+    root = tmp_path / root_name
+    if root_name == "empty":
+        (root / "src" / "cryodaq" / "agents" / "assistant" / "query" / "adapters").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="C1 adapter tree"):
+        _violations(root)
 
 
 def test_c1_engine_adapter_seal_rejects_multiple_conflations_then_accepts_restored_copy(tmp_path: Path) -> None:
@@ -282,6 +304,15 @@ def test_c1_engine_adapter_seal_rejects_multiple_conflations_then_accepts_restor
 
 
 _C1_PROOF_CASES = {
+    "conditional_none": (
+        "\nclass _InjectedConditional:\n"
+        "    async def conditional_none(self):\n"
+        "        reply = await self.transport.call({'cmd': 'injected'})\n"
+        "        if not reply_is_success(reply):\n"
+        "            return Result(available=False, stale=True, reason='injected')\n"
+        "        return None if reply.get('skip') else Result(available=True, stale=False, reason='')\n",
+        "conditional expression None return after engine query",
+    ),
     "helper_or_none": (
         "\nclass _InjectedHelper:\n"
         "    @decorator\n"
