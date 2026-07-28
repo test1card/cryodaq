@@ -808,7 +808,9 @@ body.dashboard-stale #updated{color:#f0883e;font-weight:bold}
 <div class="section"><div class="section-title">Температуры</div>
 <div class="temps" id="temps"></div></div>
 <div class="section"><div class="section-title">Давление</div><div id="pressure">—</div></div>
-<div class="section"><div class="section-title">Прочие показания (не классифицированы как температура или давление)</div><div id="other-readings">—</div></div>
+<div class="section">
+<div class="section-title">Прочие показания (не классифицированы как температура или давление)</div>
+<div id="other-readings">—</div></div>
 <div class="section"><div class="section-title">Keithley (слоты не настроены)</div><div id="keithley">—</div></div>
 <div class="section"><div class="section-title">Журнал</div><div id="log"></div></div>
 <div id="updated"></div>
