@@ -943,6 +943,12 @@ class MainWindowV2(QMainWindow):
         descriptor-aware instrument panel, without acquiring control authority.
         """
         quantity = descriptor.quantity
+        overview_panel = getattr(self, "_overview_panel", None)
+        if overview_panel is not None:
+            overview_panel.on_descriptor_reading(reading, descriptor)
+        top_bar = getattr(self, "_top_bar", None)
+        if top_bar is not None:
+            top_bar.on_reading(reading, descriptor)
 
         if quantity is ChannelQuantity.RAW_SENSOR and self._calibration_panel is not None:
             self._calibration_panel.on_reading(reading)
@@ -954,7 +960,7 @@ class MainWindowV2(QMainWindow):
             if self._analytics_view is not None:
                 self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
 
-            if descriptor.channel_id == self._declared_cold_stage_channel:
+            if descriptor.channel_id == getattr(self, "_declared_cold_stage_channel", None):
                 self._push_analytics("set_cold_temperature_reading", reading)
         is_source_readback = (
             descriptor.role is ChannelRole.SOURCE_READBACK

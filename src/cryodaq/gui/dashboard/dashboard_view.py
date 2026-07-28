@@ -15,6 +15,7 @@ from typing import Any
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import QFrame, QLabel, QLayout, QScrollArea, QVBoxLayout, QWidget
 
+from cryodaq.channels.descriptors import ChannelDescriptorV1, ChannelQuantity
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.phase_labels import PHASE_ORDER
 from cryodaq.drivers.base import Reading
@@ -259,21 +260,31 @@ class DashboardView(QScrollArea):
         value = reading.value
         if not isinstance(value, (int, float)):
             return
-        timestamp_epoch = reading.timestamp.timestamp()
-
-        if channel.startswith("\u0422"):  # cyrillic Т
-            short_id = channel.split(" ")[0]
-            self._buffer_store.append(short_id, timestamp_epoch, float(value))
-            if self._sensor_grid is not None:
-                self._sensor_grid.dispatch_reading(reading, identity_status)
-        elif channel.endswith("/pressure"):
-            self._buffer_store.append(channel, timestamp_epoch, float(value))
-
         # B.5.5: route analytics readings to phase widget
         if channel.startswith("analytics/") and self._phase_widget is not None:
             self._phase_widget.on_reading(reading)
             if self._read_only:
                 self.set_read_only(True)
+
+    def on_descriptor_reading(
+        self,
+        reading: Reading,
+        descriptor: ChannelDescriptorV1,
+        identity_status: IdentityStatus = IdentityStatus.AUTHORITATIVE,
+    ) -> None:
+        """Route dashboard measurement slots from authoritative quantity metadata."""
+        if not isinstance(reading.value, (int, float)):
+            return
+        channel_id = reading.channel.split(" ", 1)[0]
+        if descriptor.quantity is ChannelQuantity.TEMPERATURE:
+            self._buffer_store.append(channel_id, reading.timestamp.timestamp(), float(reading.value))
+            if self._sensor_grid is not None:
+                self._sensor_grid.set_temperature_channels({channel_id})
+                self._sensor_grid.dispatch_reading(reading, identity_status)
+            if self._temp_plot is not None:
+                self._temp_plot.set_temperature_channels({channel_id})
+        elif descriptor.quantity is ChannelQuantity.PRESSURE:
+            self._buffer_store.append(channel_id, reading.timestamp.timestamp(), float(reading.value))
 
     def set_read_only(self, read_only: bool) -> None:
         """Keep dashboard evidence visible while removing replay mutations."""

@@ -12,6 +12,7 @@ import pytest
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QFrame, QScrollArea
 
+from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
@@ -40,6 +41,10 @@ from cryodaq.operator_snapshot import (
     SupportBundleManifest,
     SupportBundleSummary,
 )
+
+
+def _quantity_descriptor(quantity: ChannelQuantity):
+    return type("Descriptor", (), {"quantity": quantity})()
 
 
 @pytest.fixture(autouse=True)
@@ -491,6 +496,7 @@ def test_dashboard_scrolls_vertically_without_horizontal_clipping_or_sensor_hidi
     assert view.horizontalScrollBarPolicy() is Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     assert view.horizontalScrollBar().maximum() == 0
     assert view.verticalScrollBar().maximum() > 0
+    view._sensor_grid.set_temperature_channels(set(mgr.get_all_visible()))
     assert tuple(view._sensor_grid._cells) == tuple(f"Т{index}" for index in range(1, 13))
     assert view._sensor_grid._grid_layout.count() == 12
     assert view._sensor_grid.height() >= view._sensor_grid.minimumSizeHint().height()
@@ -532,7 +538,7 @@ def test_on_reading_temperature_stores_short_id(app):
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    view.on_reading(reading)
+    view.on_descriptor_reading(reading, _quantity_descriptor(ChannelQuantity.TEMPERATURE))
     last = view._buffer_store.get_last("\u04221")
     assert last is not None
     assert last[1] == 77.5
@@ -551,7 +557,7 @@ def test_coalescing_preserves_every_sample_in_full_rate_buffer(app):
         (500.0, ChannelStatus.OVERRANGE),
         (78.0, ChannelStatus.OK),
     ):
-        view.on_reading(
+        view.on_descriptor_reading(
             Reading(
                 channel="\u04221 \u041a\u0440\u0438\u043e\u0441\u0442\u0430\u0442 \u0432\u0435\u0440\u0445",
                 value=value,
@@ -560,6 +566,7 @@ def test_coalescing_preserves_every_sample_in_full_rate_buffer(app):
                 status=status,
                 instrument_id="lakeshore_218s",
             ),
+            _quantity_descriptor(ChannelQuantity.TEMPERATURE),
             IdentityStatus.AUTHORITATIVE,
         )
 
@@ -606,7 +613,7 @@ def test_on_reading_pressure_stores_full_id(app):
         status=ChannelStatus.OK,
         instrument_id="thyracont_vsp63d",
     )
-    view.on_reading(reading)
+    view.on_descriptor_reading(reading, _quantity_descriptor(ChannelQuantity.PRESSURE))
     last = view._buffer_store.get_last("VSP63D_1/pressure")
     assert last is not None
     assert last[1] == 1e-4

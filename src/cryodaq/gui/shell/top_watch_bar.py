@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
+from cryodaq.channels.descriptors import ChannelDescriptorV1, ChannelQuantity
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.phase_labels import PHASE_LABELS_RU
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -633,6 +634,7 @@ class TopWatchBar(QWidget):
         self._channel_mgr = channel_manager
         # Per-channel last-seen tracking: channel_id -> (monotonic_ts, status)
         self._channel_last_seen: dict[str, tuple[float, ChannelStatus]] = {}
+        self._temperature_channels: set[str] = set()
         self._alarm_count: int | None = None
         # The composition root pins one transport domain before the first
         # asynchronous poll.  ``live`` accepts only experiment/debug cuts;
@@ -1069,26 +1071,27 @@ class TopWatchBar(QWidget):
     # Reading ingestion (called from MainWindowV2._dispatch_reading)
     # ------------------------------------------------------------------
 
-    def on_reading(self, reading: Reading) -> None:
+    def on_reading(self, reading: Reading, descriptor: ChannelDescriptorV1 | None = None) -> None:
         """Ingest full-rate evidence; human-readable values repaint at <=2 Hz."""
         ch = reading.channel
         vital_key: str | None = None
 
-        if ch.startswith("\u0422") and reading.unit == "K":
+        short_id = ch.split(" ", 1)[0]
+        if descriptor is not None and descriptor.quantity is ChannelQuantity.TEMPERATURE:
             # v0.55.4 A5 fix: get_all_visible() returns short IDs like
             # "\u04221"; the driver emits readings as "\u04221 <display suffix>".
             # _refresh_channels looks up the short id, so stamp under
             # the short id only \u2014 otherwise the seeded "\u04221" entry goes
             # stale after _STALE_TIMEOUT_S and the counter freezes at
             # "0/16 \u043d\u043e\u0440\u043c\u0430".
-            short_id = ch.split(" ", 1)[0]
+            self._temperature_channels.add(descriptor.channel_id)
             self._channel_last_seen[short_id] = (
                 time.monotonic(),
                 _presentation_status(reading.status),
             )
             if short_id in (SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
                 vital_key = short_id
-        elif ch.endswith("/pressure"):
+        elif descriptor is not None and descriptor.quantity is ChannelQuantity.PRESSURE:
             vital_key = _PRESSURE_VITAL
 
         if vital_key is None:
@@ -1191,7 +1194,7 @@ class TopWatchBar(QWidget):
             self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
 
-        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("Т")]
+        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch in self._temperature_channels]
         total = len(visible_ids)
         if total == 0:
             self._channel_label.setText("◇ Нет настроенных каналов")

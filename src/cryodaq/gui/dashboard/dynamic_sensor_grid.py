@@ -106,6 +106,7 @@ class DynamicSensorGrid(QWidget):
         self._channel_mgr = channel_manager
         self._buffer = buffer_store
         self._read_only = False
+        self._temperature_channels: set[str] = set()
         self._cells: dict[str, SensorCell] = {}
         self._identity_issues: dict[str, IdentityStatus] = {}
         self._pending_readings: dict[str, _PendingCellCut] = {}
@@ -161,11 +162,7 @@ class DynamicSensorGrid(QWidget):
         self._pending_readings.clear()
         self._refresh_identity_banner()
 
-        visible_ids = [
-            ch
-            for ch in self._channel_mgr.get_all_visible()
-            if ch.startswith("\u0422")  # cyrillic Т
-        ]
+        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch in self._temperature_channels]
 
         for ch_id in visible_ids:
             cell = SensorCell(ch_id, self._channel_mgr, self._buffer, self)
@@ -301,6 +298,11 @@ class DynamicSensorGrid(QWidget):
     def _on_channels_changed(self) -> None:
         """Visible channel set changed — rebuild cells."""
         self._rebuild_cells()
+
+    def set_temperature_channels(self, channel_ids: set[str]) -> None:
+        if channel_ids - self._temperature_channels:
+            self._temperature_channels.update(channel_ids)
+            self._rebuild_cells()
 
     def closeEvent(self, event):  # noqa: ANN001
         """Clean up ChannelManager subscription on close."""
