@@ -184,6 +184,22 @@ class ReadingOut(BaseModel):
         return value if math.isfinite(numeric) else None
 
 
+class AvailabilityOut(BaseModel):
+    """Typed freshness marker for a read section that cannot be authoritative."""
+
+    available: bool
+    stale: bool
+    reason: str
+
+
+_AVAILABILITY_503 = {
+    503: {
+        "model": AvailabilityOut,
+        "description": "The requested read section is unavailable or stale.",
+    }
+}
+
+
 class ActiveExperimentOut(BaseModel):
     """Whitelisted experiment fields. Omits operator, sample, notes,
     config_snapshot, custom_fields, artifact_dir, metadata_path."""
@@ -270,10 +286,10 @@ def _readings_with_unit(unit: str) -> list[dict[str, Any]]:
     return [r for r in server._state.last_readings.values() if r.get("unit") == unit]
 
 
-def _unavailable_readings_response() -> JSONResponse | None:
-    """Return the canonical unavailable envelope when the cache lost authority."""
+def _readings_availability_response() -> JSONResponse | None:
+    """Return a 503 envelope unless the readings cache is live and current."""
     status = server._state.status_json()
-    if status["available"]:
+    if status["available"] and not status["stale"]:
         return None
     return JSONResponse(
         {key: status[key] for key in ("available", "stale", "reason")},
@@ -313,13 +329,14 @@ def project_public_experiment(obj: Any) -> dict[str, Any]:
 def project_public_log_entries(obj: Any) -> list[dict[str, Any]]:
     """Return the canonical author-free projection for every public log route."""
     if not isinstance(obj, list):
-        return []
+        raise ValueError("public operator-log entries are not a list")
     projected: list[dict[str, Any]] = []
-    for entry in obj:
+    for index, entry in enumerate(obj):
         try:
             projected.append(LogEntryOut.model_validate(entry).model_dump(mode="json"))
         except Exception:  # noqa: BLE001 — malformed engine rows are omitted, never exposed
-            server.logger.warning("Ignoring malformed public operator-log entry")
+            server.logger.warning("Malformed public operator-log entry at index %d", index)
+            raise ValueError("public operator-log entry is malformed")
     return projected
 
 
@@ -334,38 +351,55 @@ async def get_state() -> dict[str, Any]:
     return redact_public_payload(server._state.status_json())
 
 
-@router.get("/readings", response_model=list[ReadingOut])
+@router.get("/readings", response_model=list[ReadingOut], responses=_AVAILABILITY_503)
 async def get_readings() -> list[dict[str, Any]] | JSONResponse:
     """Latest reading per channel from the live cache."""
-    if unavailable := _unavailable_readings_response():
+    if unavailable := _readings_availability_response():
         return unavailable
     return list(server._state.last_readings.values())
 
 
-@router.get("/temperatures", response_model=list[ReadingOut])
+@router.get("/temperatures", response_model=list[ReadingOut], responses=_AVAILABILITY_503)
 async def get_temperatures() -> list[dict[str, Any]] | JSONResponse:
     """Latest temperature (K-unit) readings."""
-    if unavailable := _unavailable_readings_response():
+    if unavailable := _readings_availability_response():
         return unavailable
     return _readings_with_unit("K")
 
 
-@router.get("/pressure", response_model=list[ReadingOut])
+@router.get("/pressure", response_model=list[ReadingOut], responses=_AVAILABILITY_503)
 async def get_pressure() -> list[dict[str, Any]] | JSONResponse:
     """Latest pressure (mbar-unit) readings."""
-    if unavailable := _unavailable_readings_response():
+    if unavailable := _readings_availability_response():
         return unavailable
     return _readings_with_unit("mbar")
 
 
-@router.get("/history")
-async def get_history(minutes: int = 60) -> dict[str, Any]:
+_UNAVAILABLE_HISTORY_ENVELOPE = {
+    "available": False,
+    "stale": True,
+    "reason": "history unavailable",
+}
+
+
+@router.get("/history", response_model=None, responses=_AVAILABILITY_503)
+async def get_history(minutes: int = 60) -> dict[str, Any] | JSONResponse:
     """Historical readings from SQLite over the last N minutes (clamped)."""
-    channels = await server.asyncio.to_thread(server._query_history, minutes)
+    try:
+        channels = await server.asyncio.to_thread(server._query_history, minutes)
+    except server.HistoryUnavailable:
+        return JSONResponse(_UNAVAILABLE_HISTORY_ENVELOPE, status_code=503)
     return {"channels": channels}
 
 
-@router.get("/alarms")
+_UNAVAILABLE_ALARMS_ENVELOPE = {
+    "available": False,
+    "stale": True,
+    "reason": "alarm status unavailable",
+}
+
+
+@router.get("/alarms", responses=_AVAILABILITY_503)
 async def get_alarms() -> dict[str, Any]:
     """Currently active alarms (from the engine)."""
     try:
@@ -379,7 +413,7 @@ async def get_alarms() -> dict[str, Any]:
             }
     except Exception:
         server.logger.warning("api/v1 alarms fetch failed")
-    return {"ok": False, "active": {}}
+    return JSONResponse(_UNAVAILABLE_ALARMS_ENVELOPE, status_code=503)
 
 
 _UNAVAILABLE_EXPERIMENT_ENVELOPE = {
@@ -389,7 +423,7 @@ _UNAVAILABLE_EXPERIMENT_ENVELOPE = {
 }
 
 
-@router.get("/experiment", response_model=ExperimentOut)
+@router.get("/experiment", response_model=ExperimentOut, responses=_AVAILABILITY_503)
 async def get_experiment() -> dict[str, Any] | JSONResponse:
     """Active experiment status — sensitive fields redacted by the model.
 
@@ -418,7 +452,7 @@ _UNAVAILABLE_LOG_ENVELOPE = {
 }
 
 
-@router.get("/log", response_model=list[LogEntryOut])
+@router.get("/log", response_model=list[LogEntryOut], responses=_AVAILABILITY_503)
 async def get_log(limit: int = 10) -> list[dict[str, Any]] | JSONResponse:
     """Recent operator-log entries — authors redacted by the model.
 
@@ -430,7 +464,7 @@ async def get_log(limit: int = 10) -> list[dict[str, Any]] | JSONResponse:
     """
     limit = max(1, min(limit, server._LOG_MAX_LIMIT))
     try:
-        result = await server._async_engine_command({"cmd": "log_get", "limit": limit})
+        result = await server._async_engine_command({"cmd": "log_get", "log_scope": "all", "limit": limit})
         if result.get("ok"):
             return project_public_log_entries(result.get("entries", []))
         server.logger.warning("api/v1 log fetch non-ok")

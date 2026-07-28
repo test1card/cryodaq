@@ -112,6 +112,41 @@ def test_api_status_distinguishes_unavailable_experiment_from_none(client) -> No
     }
 
 
+def test_status_marks_cached_safety_and_alarms_as_unavailable_sections(client, monkeypatch) -> None:
+    """A sub-fetch failure leaves legacy cached values visible only as unavailable."""
+    monkeypatch.setattr(server, "_state", server._ServerState())
+    server._state.safety_state = "fault_latched"
+    server._state.active_alarms = {"T1_high": {"level": "critical"}}
+
+    async def _subfetch_failure(request: dict) -> dict:
+        if request["cmd"] in {"safety_status", "alarm_v2_status"}:
+            raise RuntimeError("engine down")
+        if request["cmd"] == "experiment_status":
+            return {"ok": True}
+        raise AssertionError(f"unexpected request: {request!r}")
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_subfetch_failure):
+        status = client.get("/status")
+        dashboard = client.get("/api/status")
+
+    safety = {
+        "state": "fault_latched",
+        "available": False,
+        "stale": True,
+        "reason": "safety status unavailable",
+    }
+    alarms = {
+        "active": {"T1_high": {"level": "critical"}},
+        "available": False,
+        "stale": True,
+        "reason": "alarm status unavailable",
+    }
+    for response in (status, dashboard):
+        assert response.status_code == 200
+        assert response.json()["safety"] == safety
+        assert response.json()["alarms"] == alarms
+
+
 def test_api_version_returns_proto_server_app_version(client) -> None:
     """GET /api/version is unauthenticated (same trust as other reads)
     and returns the {proto, server, app_version} triple, `server: "web"`."""
@@ -154,7 +189,7 @@ def test_api_log_returns_entries(client) -> None:
         ],
     }
     assert len(received) == 1
-    assert received[0] == {"cmd": "log_get", "limit": 5}
+    assert received[0] == {"cmd": "log_get", "log_scope": "all", "limit": 5}
 
 
 def test_api_log_distinguishes_unavailable_from_authoritative_empty(client) -> None:
@@ -343,8 +378,33 @@ def test_query_history_closes_connection_on_exception(monkeypatch, tmp_path) -> 
     monkeypatch.setattr("cryodaq.web.server._DATA_DIR", tmp_path)
     monkeypatch.setattr("cryodaq.web.server.sqlite3.connect", lambda *args, **kwargs: _Conn())
 
-    assert _query_history(5) == {}
+    with pytest.raises(RuntimeError, match="history database unavailable"):
+        _query_history(5)
     assert closed == [True]
+
+
+@pytest.mark.parametrize("path", ["/history", "/api/v1/history"])
+def test_history_database_failure_is_not_reported_as_an_authoritative_gap(
+    client, monkeypatch, tmp_path, path: str
+) -> None:
+    """A corrupt daily DB makes the whole requested history section unavailable."""
+    db_path = tmp_path / f"data_{datetime.now(UTC).date().isoformat()}.db"
+    db_path.write_text("")
+    monkeypatch.setattr(server, "_DATA_DIR", tmp_path)
+
+    def _corrupt_database(*_args, **_kwargs):
+        raise server.sqlite3.DatabaseError("corrupt")
+
+    monkeypatch.setattr(server.sqlite3, "connect", _corrupt_database)
+
+    response = client.get(path)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "available": False,
+        "stale": True,
+        "reason": "history unavailable",
+    }
 
 
 def test_api_status_logs_alarm_failure(client, caplog) -> None:

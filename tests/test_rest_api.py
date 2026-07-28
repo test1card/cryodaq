@@ -388,15 +388,15 @@ def test_get_log_distinguishes_unavailable_from_empty(client) -> None:
     envelope = {"available": False, "stale": True, "reason": "operator log unavailable"}
 
     async def _non_ok(req: dict) -> dict:
-        assert req == {"cmd": "log_get", "limit": 10}
+        assert req == {"cmd": "log_get", "log_scope": "all", "limit": 10}
         return {"ok": False}
 
     async def _raises(req: dict) -> dict:
-        assert req == {"cmd": "log_get", "limit": 10}
+        assert req == {"cmd": "log_get", "log_scope": "all", "limit": 10}
         raise RuntimeError("engine offline")
 
     async def _ok_empty(req: dict) -> dict:
-        assert req == {"cmd": "log_get", "limit": 10}
+        assert req == {"cmd": "log_get", "log_scope": "all", "limit": 10}
         return {"ok": True, "entries": []}
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_non_ok):
@@ -414,6 +414,83 @@ def test_get_log_distinguishes_unavailable_from_empty(client) -> None:
     assert empty.json() == []
 
 
+def _web_log_read_context() -> EngineCommandContext:
+    """Minimal concrete context for the real engine's read-scope boundary."""
+
+    class _Writer:
+        async def get_operator_log(self, **kwargs: object) -> list[object]:
+            assert kwargs["experiment_id"] is None
+            return []
+
+    return EngineCommandContext(
+        safety_manager=object(),
+        event_logger=object(),
+        sink_registry=object(),
+        interlock_engine=object(),
+        leak_rate_estimator=object(),
+        leak_cfg={},
+        alarm_v2_state_mgr=object(),
+        alarm_ring=object(),
+        broker=object(),
+        experiment_manager=object(),
+        calibration_acquisition=object(),
+        event_bus=object(),
+        cooldown_alarm=None,
+        vacuum_guard=None,
+        alarm_dispatch_tasks=set(),
+        calibration_store=object(),
+        writer=_Writer(),
+        drivers_by_name={},
+        sensor_diag=None,
+        vacuum_trend=None,
+        alarm_v2_state_tracker=object(),
+        multiline_burst_auto_stop_meta={},
+        multiline_burst_auto_stop_tasks={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/v1/log", []),
+        ("/api/log", {"ok": True, "entries": []}),
+    ],
+)
+def test_public_log_reads_satisfy_the_real_engine_scope_contract(client, path: str, payload: object) -> None:
+    """The facade command must be accepted by the real engine handler, not a permissive mock."""
+
+    async def _real_engine_handler(command: dict) -> dict:
+        return await _handle_gui_command(command, context=_web_log_read_context())
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_real_engine_handler):
+        response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.json() == payload
+
+
+def test_malformed_public_log_rows_fail_the_section_instead_of_silently_dropping_rows(client) -> None:
+    """One bad engine row cannot make a partial audit trail look complete."""
+
+    entries = [
+        {"id": 1, "timestamp": "2026-07-18T01:02:03+00:00", "message": "kept"},
+        {"id": "not-an-integer", "timestamp": "2026-07-18T01:02:04+00:00", "message": "must not vanish"},
+    ]
+
+    async def _malformed_rows(_request: dict) -> dict:
+        return {"ok": True, "entries": entries}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_malformed_rows):
+        versioned = client.get("/api/v1/log")
+        legacy = client.get("/api/log")
+
+    envelope = {"available": False, "stale": True, "reason": "operator log unavailable"}
+    assert versioned.status_code == 503
+    assert versioned.json() == envelope
+    assert legacy.status_code == 200
+    assert legacy.json() == {"ok": False, "entries": [], **envelope}
+
+
 def test_legacy_log_route_shares_public_projection(client) -> None:
     """The embedded dashboard route cannot bypass operator-log redaction."""
     entry = {
@@ -428,7 +505,7 @@ def test_legacy_log_route_shares_public_projection(client) -> None:
     }
 
     async def _fake(req: dict) -> dict:
-        assert req == {"cmd": "log_get", "limit": 5}
+        assert req == {"cmd": "log_get", "log_scope": "all", "limit": 5}
         return {"ok": True, "entries": [entry]}
 
     with patch("cryodaq.web.server._async_engine_command", side_effect=_fake):
@@ -510,6 +587,43 @@ def test_alarms_redacts_acknowledged_by(client) -> None:
     assert alarm["acknowledged"] is True
 
 
+def test_alarms_distinguish_engine_unavailable_from_an_authoritative_empty_set(client) -> None:
+    """A dead engine cannot be reported as zero active alarms."""
+
+    async def _unavailable(request: dict) -> dict:
+        assert request == {"cmd": "alarm_v2_status"}
+        return {"ok": False}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_unavailable):
+        response = client.get("/api/v1/alarms")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "available": False,
+        "stale": True,
+        "reason": "alarm status unavailable",
+    }
+
+
+@pytest.mark.parametrize("path", ["/api/v1/readings", "/api/v1/temperatures", "/api/v1/pressure"])
+def test_stale_but_available_readings_do_not_keep_a_current_200_shape(client, monkeypatch, path: str) -> None:
+    """A stalled producer exposes freshness before a REST client consumes its cache."""
+    from cryodaq.web import server
+
+    monkeypatch.setattr(server, "_state", server._ServerState())
+    _mark_readings_producer_live()
+    server._state._last_authoritative_reading_at -= server._STATUS_FRESHNESS_S + 1
+
+    response = client.get(path)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "available": True,
+        "stale": True,
+        "reason": f"ZMQ reading age exceeds {server._STATUS_FRESHNESS_S:g} seconds",
+    }
+
+
 def test_state_redacts_acknowledged_by(client) -> None:
     """/api/v1/state must not leak acknowledged_by via active_alarms."""
     from cryodaq.web import server
@@ -589,6 +703,23 @@ def test_docs_available(client) -> None:
     """Swagger UI is served (FastAPI default)."""
     resp = client.get("/docs")
     assert resp.status_code == 200
+
+
+def test_read_availability_failures_are_discoverable_in_openapi(client) -> None:
+    """Generated clients must see the typed 503 availability contract."""
+    schema = client.get("/openapi.json").json()
+    for path in (
+        "/api/v1/readings",
+        "/api/v1/temperatures",
+        "/api/v1/pressure",
+        "/api/v1/history",
+        "/api/v1/alarms",
+        "/api/v1/experiment",
+        "/api/v1/log",
+    ):
+        response = schema["paths"][path]["get"]["responses"].get("503")
+        assert response is not None, path
+        assert response["content"]["application/json"]["schema"]["$ref"].endswith("/AvailabilityOut")
 
 
 # ---------------------------------------------------------------------------

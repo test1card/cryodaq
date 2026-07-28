@@ -760,7 +760,10 @@ async function fetchStatus() {
         if (data.instruments) renderInstruments(data.instruments);
 
         // Тревоги из /status (статические, не потоковые)
-        if (data.active_alarms) {
+        if (data.alarms && data.alarms.available === false) {
+            activeAlarms.clear();
+            renderAlarms();
+        } else if (data.active_alarms) {
             for (const [key, alarm] of Object.entries(data.active_alarms)) {
                 activeAlarms.set(key, alarm);
             }

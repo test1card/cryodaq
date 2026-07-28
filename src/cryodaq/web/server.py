@@ -41,7 +41,7 @@ from typing import Any
 
 import zmq
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQSubscriber
@@ -282,6 +282,10 @@ class _Availability:
             raise ValueError("stale or unavailable availability requires a reason")
 
 
+class HistoryUnavailable(RuntimeError):
+    """A requested history window could not be fully read from its daily archive."""
+
+
 class _ServerState:
     """Общее состояние для всех WebSocket-клиентов."""
 
@@ -296,6 +300,8 @@ class _ServerState:
         self.subscriber: ZMQSubscriber | None = None
         self._last_authoritative_reading_at: float | None = None
         self._availability = _Availability(False, True, "awaiting authoritative ZMQ reading")
+        self._safety_availability = _Availability(False, True, "safety status unavailable")
+        self._alarms_availability = _Availability(False, True, "alarm status unavailable")
         self._lock = asyncio.Lock()
         # Bounded broadcast queue — prevents task explosion under load.
         # Initialised in startup (requires running event loop).
@@ -355,6 +361,24 @@ class _ServerState:
             return _Availability(True, True, f"ZMQ reading age exceeds {_STATUS_FRESHNESS_S:g} seconds")
         return availability
 
+    def _safety_json(self) -> dict[str, Any]:
+        availability = self._safety_availability
+        return {
+            "state": self.safety_state,
+            "available": availability.available,
+            "stale": availability.stale,
+            "reason": availability.reason,
+        }
+
+    def _alarms_json(self) -> dict[str, Any]:
+        availability = self._alarms_availability
+        return {
+            "active": self.active_alarms,
+            "available": availability.available,
+            "stale": availability.stale,
+            "reason": availability.reason,
+        }
+
     def status_json(self) -> dict[str, Any]:
         """Собрать JSON-статус для GET /status."""
         availability = self._availability_json()
@@ -369,6 +393,8 @@ class _ServerState:
             "instruments": self.instrument_status,
             "safety_state": self.safety_state,
             "active_alarms": self.active_alarms,
+            "safety": self._safety_json(),
+            "alarms": self._alarms_json(),
             "ws_clients": len(self.clients),
             "available": availability.available,
             "stale": availability.stale,
@@ -507,8 +533,9 @@ def _query_history(minutes: int) -> dict[str, list[dict[str, Any]]]:
                 "WHERE timestamp >= ? ORDER BY timestamp ASC",
                 (cutoff_epoch,),
             ).fetchall()
-        except Exception:
-            continue
+        except Exception as exc:
+            logger.warning("History query failed for %s: %s", db_path.name, exc)
+            raise HistoryUnavailable("history database unavailable") from exc
         finally:
             if conn is not None:
                 conn.close()
@@ -606,19 +633,37 @@ def create_app() -> FastAPI:
         # Safety status via engine command
         try:
             safety = await _async_engine_command({"cmd": "safety_status"})
-            base["safety"] = safety if safety.get("ok") else None
             if safety.get("ok"):
                 _state.safety_state = safety.get("state", "unknown")
-        except Exception:
-            base["safety"] = None
+                _state._safety_availability = _Availability(True, False, None)
+                base["safety"] = {
+                    **{key: value for key, value in safety.items() if key != "ok"},
+                    **_state._safety_json(),
+                }
+            else:
+                logger.warning("api_status safety fetch non-ok")
+                _state._safety_availability = _Availability(False, True, "safety status unavailable")
+                base["safety"] = _state._safety_json()
+        except Exception as exc:
+            logger.warning("api_status safety fetch failed: %s", exc)
+            _state._safety_availability = _Availability(False, True, "safety status unavailable")
+            base["safety"] = _state._safety_json()
         # Alarm status via engine command
         try:
             alarms = await _async_engine_command({"cmd": "alarm_v2_status"})
             if alarms.get("ok"):
                 _state.active_alarms = alarms.get("active", {})
                 base["active_alarms"] = redact_public_payload(alarms.get("active", {}))
+                _state._alarms_availability = _Availability(True, False, None)
+                base["alarms"] = redact_public_payload(_state._alarms_json())
+            else:
+                logger.warning("api_status alarm fetch non-ok")
+                _state._alarms_availability = _Availability(False, True, "alarm status unavailable")
+                base["alarms"] = redact_public_payload(_state._alarms_json())
         except Exception as exc:
             logger.warning("api_status alarm fetch failed: %s", exc)
+            _state._alarms_availability = _Availability(False, True, "alarm status unavailable")
+            base["alarms"] = redact_public_payload(_state._alarms_json())
         # Experiment/shift data via ZMQ command. ``experiment`` keeps its
         # projected shape (object or None) for back-compat, and the separate
         # ``experiment_available`` flag lets the dashboard tell an unreachable
@@ -650,7 +695,7 @@ def create_app() -> FastAPI:
         # Clamp the unauthenticated limit before forwarding to the engine.
         limit = max(1, min(limit, _LOG_MAX_LIMIT))
         try:
-            result = await _async_engine_command({"cmd": "log_get", "limit": limit})
+            result = await _async_engine_command({"cmd": "log_get", "log_scope": "all", "limit": limit})
             if result.get("ok"):
                 return {
                     "ok": True,
@@ -680,7 +725,17 @@ def create_app() -> FastAPI:
             }
         """
         loop = asyncio.get_running_loop()
-        channels = await loop.run_in_executor(None, _query_history, minutes)
+        try:
+            channels = await loop.run_in_executor(None, _query_history, minutes)
+        except HistoryUnavailable:
+            return JSONResponse(
+                {
+                    "available": False,
+                    "stale": True,
+                    "reason": "history unavailable",
+                },
+                status_code=503,
+            )
         return {"channels": channels}
 
     @application.websocket("/ws")
@@ -796,16 +851,19 @@ async function refresh(){
   document.getElementById('channels').textContent=displayChannelCount(d.channels);
   // Safety state
   const safety=d.safety;
-  if(safety&&safety.state){
+  if(safety&&safety.available!==false&&safety.state){
    const st=safety.state;
    const el=document.getElementById('safety');
    el.textContent=(lastKnown?'LAST-KNOWN: ':'')+st.toUpperCase();
    el.style.color=(st==='fault'||st==='fault_latched')?'#f85149':'#3fb950';
   }else{document.getElementById('safety').textContent=lastKnown?'LAST-KNOWN: —':'—'}
   // Alarms
+  const alarmSection=d.alarms;
   const aa=d.active_alarms||{};
   const ac=Object.keys(aa).length;
-  document.getElementById('alarms').textContent=(lastKnown?'LAST-KNOWN: ':'')+ac+' алармов';
+  const alarmsUnavailable=alarmSection&&alarmSection.available===false;
+  const alarmsText=alarmsUnavailable?'UNAVAILABLE':(lastKnown?'LAST-KNOWN: ':'')+ac+' алармов';
+  document.getElementById('alarms').textContent=alarmsText;
   // Readings
   const readings=d.readings||{};
   let temps='',pressure='—',kA='ВЫКЛ',kB='ВЫКЛ';
