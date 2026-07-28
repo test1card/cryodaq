@@ -236,6 +236,26 @@ shipped `config/channel_descriptors.yaml` shows the pattern (`Т1` and
 Declaring a channel that is never emitted is harmless — an unused binding
 simply never fires. Failing to declare one that *is* emitted is fatal.
 
+### 3.3.1 Sensor-diagnostics classification comes from the descriptor
+
+The temperature sensor-diagnostics engine receives an immutable snapshot of
+the selected descriptor catalog at startup. For every channel present in that
+catalog, its descriptor is the sole classifier: it reaches the temperature
+noise/drift scorer only when `quantity: temperature`, `unit: K`, and `role` is
+`primary_measurement`, `reference_measurement`, or `environment`. In
+particular, `source_readback`, `derived`, and `event` roles are excluded even
+when a channel name looks like a thermometer.
+
+Pressure, voltage, current, resistance, power, and other non-temperature
+quantities do not use this scorer. A pressure diagnostic needs its own scorer,
+with pressure units and thresholds; do not repurpose the temperature health
+values for it.
+
+Only a channel absent from the catalog uses the limited legacy/test fallback:
+the historical `Т1`/`T1` and `/temperature` name patterns. That fallback must
+never override a known descriptor, and it is not a substitute for declaring a
+lab's physical roster in the manifest.
+
 ### 3.4 `safety_class` — the one field an agent must not guess
 
 `safety_class` is one of four values

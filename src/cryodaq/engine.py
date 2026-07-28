@@ -6782,6 +6782,7 @@ async def _run_engine(
             alarm_publisher=_sd_alarm_publisher,
             warning_duration_s=float(_sd_cfg.get("warning_duration_s", 300.0)),
             critical_duration_s=float(_sd_cfg.get("critical_duration_s", 900.0)),
+            channel_catalog=live_descriptor_catalog.storage_catalog_snapshot(),
         )
         # Set display names from channel_manager
         sensor_diag.set_channel_names({ch_id: _ch_mgr.get_display_name(ch_id) for ch_id in _ch_mgr.get_all()})
