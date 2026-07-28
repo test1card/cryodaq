@@ -32,6 +32,7 @@ from cryodaq.reporting.periodic_input import (  # noqa: E402
     validate_caption_html,
 )
 
+
 @dataclass(frozen=True, slots=True)
 class RenderedPeriodicPng:
     png_path: Path

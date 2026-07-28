@@ -183,7 +183,9 @@ def test_temperature_rename_preserves_authority_supplied_series_position(
     assert labels == ["reference", temperature_name, "Т2", "other"]
 
 
-def test_ordinary_report_keeps_every_authority_supplied_channel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ordinary_report_keeps_every_authority_supplied_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     snapshot = _validated(
         _payload(
             [
