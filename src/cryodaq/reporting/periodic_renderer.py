@@ -5,7 +5,6 @@ from __future__ import annotations
 import html
 import math
 import os
-import re
 import stat
 import struct
 import time
@@ -32,9 +31,6 @@ from cryodaq.reporting.periodic_input import (  # noqa: E402
     ValidatedPeriodicInput,
     validate_caption_html,
 )
-
-_CYRILLIC_T = re.compile(r"^Т(\d+)")
-
 
 @dataclass(frozen=True, slots=True)
 class RenderedPeriodicPng:
@@ -128,21 +124,13 @@ def _series(snapshot: ValidatedPeriodicInput) -> list[_Series]:
     for row in snapshot.readings:
         grouped[row.channel].append(row)
     result: list[_Series] = []
-    for channel in sorted(grouped, key=_channel_key):
-        rows = grouped[channel]
+    for channel, rows in grouped.items():
         selected_unit = rows[-1].unit
         eligible = [row for row in rows if row.unit == selected_unit and row.value is not None]
         if selected_unit == "mbar":
             eligible = [row for row in eligible if row.value is not None and row.value > 0]
         result.append(_Series(channel, selected_unit, tuple(eligible)))
     return result
-
-
-def _channel_key(channel: str) -> tuple[int, int | str, str]:
-    match = _CYRILLIC_T.match(channel)
-    if match:
-        return 0, int(match.group(1)), channel
-    return 1, channel, channel
 
 
 def _plot_axes(axes, series: list[_Series], ylabel: str, *, alarmed: set[str], pressure: bool = False) -> None:

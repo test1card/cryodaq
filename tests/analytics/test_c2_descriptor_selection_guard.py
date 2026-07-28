@@ -21,19 +21,7 @@ _IDENTIFIER_FIELDS = frozenset({"channel", "channel_id", "instrument_id"})
 _STRING_METHODS = frozenset({"casefold", "endswith", "lower", "replace", "split", "startswith", "upper"})
 _REGEX_METHODS = frozenset({"fullmatch", "match", "search"})
 
-# Each exemption is (bucket, reason). The periodic renderer's line 142
-# thermometry-name regex is allowlisted only for display sort ordering while
-# descriptor ordering remains blocked on schema work; no other source module
-# may infer physical semantics from identifiers.
-_ALLOWLIST: dict[tuple[str, int], tuple[str, str]] = {
-    (
-        "src/cryodaq/reporting/periodic_renderer.py",
-        142,
-    ): (
-        "BLOCKED-ON-SCHEMA",
-        "_channel_key sorts thermometry-style names; replace this spelling inference with descriptor ordering.",
-    ),
-}
+_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()
 
 
 def _root() -> Path:
@@ -220,6 +208,7 @@ def _violations(root: Path) -> list[str]:
 
 
 def test_c2_descriptor_selection_guard() -> None:
+    assert _ALLOWLIST == frozenset()
     assert _violations(_root()) == []
 
 

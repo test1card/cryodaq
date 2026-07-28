@@ -91,7 +91,7 @@ def _row(ts: float, iid: str, channel: str, value: float | None, unit: str) -> d
     return {"ts": ts, "iid": iid, "ch": channel, "v": value, "u": unit, "st": "ok"}
 
 
-def test_temperature_only_matches_legacy_semantics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_temperature_only_preserves_input_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = _validated(
         _payload(
             [
@@ -109,8 +109,8 @@ def test_temperature_only_matches_legacy_semantics(tmp_path: Path, monkeypatch: 
         axes = capture["figure"].axes[0]
         assert axes.get_ylabel() == "Температура, К"
         assert axes.xaxis.get_major_formatter().fmt == "%H:%M"
-        assert [line.get_label() for line in axes.lines] == ["Т1", "Т2", "Т10", "cold_finger"]
-        assert [text.get_text() for text in axes.texts] == ["4", "19.95", "9.876", "8.25"]
+        assert [line.get_label() for line in axes.lines] == ["Т10", "Т2", "Т1", "cold_finger"]
+        assert [text.get_text() for text in axes.texts] == ["9.876", "19.95", "4", "8.25"]
         assert result.png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert result.width >= 100 and result.height >= 100
 
@@ -156,10 +156,55 @@ def test_channel_order_labels_alarm_styles_and_legend_contract(tmp_path: Path, m
     snapshot = _validated(_payload(readings, alarms=alarms))
     with _capture_render(monkeypatch, snapshot, tmp_path) as (_result, capture):
         lines = capture["figure"].axes[0].lines
-        assert [line.get_label() for line in lines] == ["Т1", "Т2", "Т10", "same", "same"]
-        assert lines[0].get_color() == "red"
-        assert lines[0].get_linewidth() == 1.8
+        assert [line.get_label() for line in lines] == ["Т10", "Т2", "Т1", "same", "same"]
+        assert lines[2].get_color() == "red"
+        assert lines[2].get_linewidth() == 1.8
         assert lines[1].get_linewidth() == 1.2
+
+
+@pytest.mark.parametrize("temperature_name", ["Т10", "cold-stage"])
+def test_temperature_rename_preserves_authority_supplied_series_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temperature_name: str
+) -> None:
+    snapshot = _validated(
+        _payload(
+            [
+                _row(7_000, "ls", "rack/reference", 1.0, "K"),
+                _row(7_001, "ls", temperature_name, 2.0, "K"),
+                _row(7_002, "ls", "Т2", 3.0, "K"),
+                _row(7_003, "ls", "rack/other", 4.0, "K"),
+            ]
+        )
+    )
+
+    with _capture_render(monkeypatch, snapshot, tmp_path) as (_result, capture):
+        labels = [line.get_label() for line in capture["figure"].axes[0].lines]
+
+    assert labels == ["reference", temperature_name, "Т2", "other"]
+
+
+def test_ordinary_report_keeps_every_authority_supplied_channel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = _validated(
+        _payload(
+            [
+                _row(7_000, "ls", "rack/reference", 1.0, "K"),
+                _row(7_001, "ls", "Т10", 2.0, "K"),
+                _row(7_002, "vac", "rack/pressure", 1e-5, "mbar"),
+                _row(7_003, "smu", "rack/power", 4.0, "W"),
+            ]
+        )
+    )
+
+    with _capture_render(monkeypatch, snapshot, tmp_path) as (result, capture):
+        temperature_labels = [line.get_label() for line in capture["figure"].axes[0].lines]
+        pressure_labels = [line.get_label() for line in capture["figure"].axes[1].lines]
+
+    assert temperature_labels == ["reference", "Т10"]
+    assert pressure_labels == ["pressure"]
+    assert "reference: 1 К" in result.caption
+    assert "Т10: 2 К" in result.caption
+    assert "pressure: 1e-05 мбар" in result.caption
+    assert "power: 4 W" in result.caption
 
 
 def test_caption_short_exact_contract(tmp_path: Path) -> None:
