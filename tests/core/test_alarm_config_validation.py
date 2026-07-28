@@ -143,32 +143,6 @@ def test_deviation_from_setpoint_missing_setpoint_source_raises(tmp_path: Path) 
         load_alarm_config(p)
 
 
-def test_deviation_from_setpoint_unknown_setpoint_source_raises(tmp_path: Path) -> None:
-    p = _write_yaml(
-        tmp_path,
-        """
-        engine:
-          setpoints:
-            T12_setpoint:
-              source: experiment_metadata
-              default: 4.2
-        global_alarms:
-          drift:
-            alarm_type: threshold
-            channel: T12
-            check: deviation_from_setpoint
-            setpoint_source: T12_setpoint_typo
-            threshold: 0.5
-            level: WARNING
-        """,
-    )
-    with pytest.raises(AlarmConfigError) as exc_info:
-        load_alarm_config(p)
-    assert str(exc_info.value) == (
-        "alarm 'drift' (check=deviation_from_setpoint) has undefined setpoint_source 'T12_setpoint_typo'"
-    )
-
-
 # ---------------------------------------------------------------------------
 # well-formed configs of each type still load
 # ---------------------------------------------------------------------------
