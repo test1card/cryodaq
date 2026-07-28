@@ -19,6 +19,26 @@ this record preserves the correction and its evidence.
 | `dcdb1912` | G4 rejects a procedure claiming `SOFTWARE-PROVABLE` where the evidence is external or physical. | True in its own diff, and no longer true: `1d2c43ad` deleted that rejection. | Same evidence as the row above. | **STALE** |
 | `0f505dd6` | "A driver-level OFF double that returns anything other than a `SourceOffResult` fails CI." | **The guard is not universal.** It exempts five named scopes and skips every `emergency_off` annotated `dict[...]`. Several of those exemptions are legitimate — `test_truthy_non_boolean_proof_cannot_authorize_disconnect` is a negative control that must be able to pass a truthy non-`SourceOffResult` — so the guard's design is sound. The absolute claim was not. | `tests/governance/test_source_off_result_test_doubles.py:10-16` lists `_INTENTIONAL_INVALID_SCOPES`; lines 124-131 skip exempted scopes and `dict[...]`-annotated returns. | **FALSE** |
 
+| `14b2c432` | "Make the disclosure register true at the commit it ships with." Message describes documentation only. | The commit also carried 59 lines of `tests/core/test_safety_operator_snapshot_owner.py` -- tier test expectations whose production code was not yet landed. At the resulting pushed head that file **hangs**: the double is classified `COMMAND_ONLY`, SafetyManager correctly faults closed and never disconnects, and the test waits forever for a disconnect that should not happen. So the commit that claims to close the honesty gap silently broke `tests/core` and invalidated verification claims made after it. | Reproduced at `e642cba4`: the file times out. The tier production code landed later, in `757f4310`, after which the same file passes. | **UNDISCLOSED** |
+| `14b2c432` (OC-013) | The register was rewritten to say the OFF evidence tiers "no longer collapse" and are "preserved through SafetyManager -> scheduler -> operator snapshot -> engine receipt -> launcher". | True of a patch that was **not committed at that commit**. The register described unlanded work as landed, in the document whose entire purpose is to be true at the commit it ships with. It became true at `757f4310`. | The tier production change is absent from `git show 14b2c432` and present in `757f4310`. | **FALSE at that head** |
+| `6f2ef69a` | "Fold the GUI identifier sites into the one C2 registry." Message states no file under `src/cryodaq/gui/` is modified and describes only the registry. | The commit also carried the entire OC-006 change -- `src/cryodaq/core/safety_manager.py`, `tests/core/test_keithley_channel_state_publish.py` and `tests/gui/shell/overlays/test_keithley_panel.py` -- which is a safety-path publication change, not a registry change. | `git show --stat 6f2ef69a` lists four files; the message accounts for one. | **UNDISCLOSED** |
+
+## The mechanism behind those three, and the protocol change
+
+All three have one cause: **`git apply --3way` stages what it applies.** Every
+patch collected from a lane was therefore already in the index, and each
+subsequent `git add <specific file>` followed by `git commit` swept up everything
+staged, not just the file named. Explicit staging was being used, and it was not
+sufficient, because the index was not empty when staging began.
+
+Two of these were found by an independent reviewer and one by following the
+mechanism the reviewer exposed. None was visible in the commit message, which is
+the definition of the defect class this file records.
+
+The protocol is now: **`git reset` immediately after every `git apply --3way`,
+then stage explicitly.** Verify with `git status` that the index contains only
+what the message describes, before committing.
+
 ## Prevention
 
 Three commits above weakened or exempted a guard while their messages described a
