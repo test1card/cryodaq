@@ -447,6 +447,103 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
     assert "T_STAGE" in csv_text, "T_STAGE not found in archive CSV"
 
 
+async def test_report_with_no_measured_values_table_keeps_ordinary_empty_state(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    """A genuinely absent archive table remains an ordinary empty run."""
+    exp_id = manager.start_experiment(
+        name="No measurements",
+        title="No measurements",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["result_tables"] = [
+        item for item in metadata.get("result_tables", []) if item.get("table_id") != "measured_values"
+    ]
+    metadata["artifact_index"] = [
+        item
+        for item in metadata.get("artifact_index", [])
+        if Path(str(item.get("path", ""))).name != "measured_values.csv"
+    ]
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    archive_csv = experiment_root / "archive" / "tables" / "measured_values.csv"
+    if archive_csv.exists():
+        archive_csv.unlink()
+
+    result = ReportGenerator(tmp_path).generate(exp_id)
+
+    assert result.docx_path.exists()
+    assert (
+        "\u0434\u0430\u043d\u043d\u044b\u0435 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0442"
+        in _doc_text(result.docx_path)
+    )
+
+
+async def test_report_rejects_malformed_measured_values_archive(
+    manager: ExperimentManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real malformed row must not be rendered as an empty measurement report."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    exp_id = manager.start_experiment(
+        name="Malformed archive",
+        title="Malformed archive",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    # This is an on-disk corrupt archive artifact, not a patched parser error.
+    archive_csv = tmp_path / "experiments" / exp_id / "archive" / "tables" / "measured_values.csv"
+    archive_csv.write_text(
+        "timestamp,instrument_id,channel,value,unit,status\nnot-a-timestamp,k1,T_STAGE,4.3,K,ok\n",
+        encoding="utf-8",
+    )
+    live_db = tmp_path / "data_2026-03-16.db"
+    if live_db.exists():
+        live_db.unlink()
+
+    with pytest.raises(ReportContractError, match="archived measured values"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
+async def test_report_with_readable_measured_values_archive_remains_normal(
+    manager: ExperimentManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid archive table still renders its measurements after live DB rotation."""
+    monkeypatch.setenv("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
+    exp_id = manager.start_experiment(
+        name="Readable archive",
+        title="Readable archive",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    live_db = tmp_path / "data_2026-03-16.db"
+    if live_db.exists():
+        live_db.unlink()
+
+    result = ReportGenerator(tmp_path).generate(exp_id)
+
+    assert result.docx_path.exists()
+    assert "4.30 \u041a" in _doc_text(result.docx_path)
+
+
 async def test_report_generation_graceful_on_soffice_timeout(
     manager: ExperimentManager,
     tmp_path: Path,

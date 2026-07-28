@@ -200,8 +200,7 @@ class ReportDataExtractor:
                         )
                     )
         except Exception as exc:
-            logger.warning("Failed to load archived measured values from %s: %s", table_path, exc)
-            return []
+            raise ReportContractError("archived measured values table is unreadable") from exc
         return rows
 
     def _resolve_archived_table(
