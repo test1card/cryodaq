@@ -256,13 +256,21 @@ simply never fires. Failing to declare one that *is* emitted is fatal.
   archives. Never write it in a manifest; the catalog rejects it
   (`src/cryodaq/channels/descriptors.py:388-389`).
 
-`safety_critical_input` is enforced, not advisory. At startup the liveness
-validator computes the set of temperature channels classified
-`safety_critical_input` and requires it to be **exactly** the set matched by
-`critical_channels` in `config/safety.yaml`; a mismatch in either direction
-fails startup (`src/cryodaq/core/safety_pattern_liveness.py:532-550`). So
-this field and that config list are one decision recorded twice, and they
-must be decided together.
+`safety_critical_input` is enforced, not advisory — **but only once you have
+declared at least one such channel.** At startup the liveness validator computes
+the set of temperature channels classified `safety_critical_input`. **If that set
+is non-empty**, it requires the set to be **exactly** the set matched by
+`critical_channels` in `config/safety.yaml`, and a mismatch in either direction
+fails startup (`src/cryodaq/core/safety_pattern_liveness.py:646-664`; note the
+`if critical_manifest_ids and ...` guard at `:657`). So this field and that
+config list are one decision recorded twice, and they must be decided together.
+
+**If your manifest declares no `safety_critical_input` temperature channel, this
+check does not run at all.** You then have `critical_channels` patterns in
+`safety.yaml` with no manifest counterpart, and nothing tells you so. Declaring
+the empty set switches the guard off; it is not a way to defer the decision.
+Resolve the ESCALATE below before the first energized run rather than leaving
+the manifest empty.
 
 **ESCALATE** the `safety_critical_input` list. Which sensors are permanently
 bolted to which stage is a physical fact about the hardware; an agent cannot
@@ -683,9 +691,10 @@ and must be reported as such.
   built around one vendor's SMU:
 
   - `SafetyManager` is internally Keithley-shaped — `_keithley`,
-    `_keithley_data`, `_keithley_patterns`, `_keithley_channel_states`,
-    `_keithley_for_run` (`src/cryodaq/core/safety_manager.py:83`, `:151`,
-    `:284`, `:407`, `:2796`), constructed from a `keithley_driver` parameter
+    `_keithley_patterns`, `_keithley_channel_states`,
+    `_has_fresh_keithley_data` and the `require_keithley_for_run` config field
+    (`src/cryodaq/core/safety_manager.py:83`, `:2645`, `:2796`, `:2830`),
+    constructed from a `keithley_driver` parameter
     (`src/cryodaq/core/safety_manager.py:140-158`).
   - Its global OFF and channel-state publication iterate a hardcoded
     `("smua", "smub")` pair (`src/cryodaq/core/safety_manager.py:2203`,
