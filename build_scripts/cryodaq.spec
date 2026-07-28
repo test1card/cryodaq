@@ -149,6 +149,7 @@ hidden_imports += list(FROZEN_DRIVER_MODULES)
 # build_scripts/post_build.py.
 datas = [
     (str(PROJECT_ROOT / "tsp"), "tsp"),  # Lua scripts (read-only constants)
+    (str(PROJECT_ROOT / "src" / "cryodaq" / "gui" / "resources"), "cryodaq/gui/resources"),
 ]
 datas += collect_data_files("PySide6")
 

@@ -39,6 +39,14 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
     assert '- "tsp/**"' in text
 
 
+def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
+    source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
+
+    assert 'command = [str(executable), "--mode=gui"]' in source
+    assert '"QT_QPA_PLATFORM": "offscreen"' in source
+    assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
+
+
 def test_windows_source_installer_is_ascii_and_reproducible() -> None:
     raw = (ROOT / "install.bat").read_bytes()
     assert raw.isascii()

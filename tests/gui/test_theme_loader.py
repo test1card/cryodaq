@@ -7,6 +7,10 @@ and the locked-status-palette invariant across all shipped themes.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -180,6 +184,43 @@ def test_missing_default_pack_raises(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="Default theme pack invalid"):
         loader.load_theme()
+
+
+def test_post_build_seeds_theme_pack_for_frozen_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The copied ONEDIR config must load through the frozen resource path."""
+
+    repo_root = Path(__file__).resolve().parents[2]
+    project_root = tmp_path / "project"
+    bundle_root = project_root / "dist" / "CryoDAQ"
+    script = project_root / "build_scripts" / "post_build.py"
+    script.parent.mkdir(parents=True)
+    bundle_root.mkdir(parents=True)
+    shutil.copy2(repo_root / "build_scripts" / "post_build.py", script)
+    shutil.copytree(repo_root / "config", project_root / "config")
+
+    subprocess.run([sys.executable, str(script)], check=True, capture_output=True, text=True)
+
+    frozen_file = bundle_root / "_internal" / "cryodaq" / "gui" / "_theme_loader.py"
+    module = types.ModuleType("frozen_theme_loader_probe")
+    module.__file__ = str(frozen_file)
+    monkeypatch.delenv("CRYODAQ_ROOT", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle_root / "_internal"), raising=False)
+    monkeypatch.setattr(sys, "executable", str(bundle_root / "CryoDAQ.exe"), raising=False)
+    exec(
+        compile(
+            (repo_root / "src" / "cryodaq" / "gui" / "_theme_loader.py").read_text(encoding="utf-8"),
+            str(frozen_file),
+            "exec",
+        ),
+        module.__dict__,
+    )
+
+    assert module.THEMES_DIR == bundle_root / "config" / "themes"
+    theme_id, pack = module.resolve_theme()
+    assert (module.THEMES_DIR / "warm_stone.yaml").is_file()
+    assert theme_id == "warm_stone"
+    assert pack["BACKGROUND"].startswith("#")
 
 
 def test_write_theme_selection_creates_file(monkeypatch, tmp_path):

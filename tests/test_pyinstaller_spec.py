@@ -114,6 +114,13 @@ def test_spec_remains_onedir_with_frozen_dispatch_entry() -> None:
     assert isinstance(exclude, ast.Constant) and exclude.value is True
 
 
+def test_gui_package_resources_are_bundled_next_to_the_frozen_module() -> None:
+    source = SPEC.read_text(encoding="utf-8")
+
+    assert '"src" / "cryodaq" / "gui" / "resources"' in source
+    assert '"cryodaq/gui/resources"' in source
+
+
 def test_frozen_driver_allowlist_is_exactly_the_runtime_registry() -> None:
     frozen = _frozen_driver_modules()
     assert len(frozen) == len(set(frozen))

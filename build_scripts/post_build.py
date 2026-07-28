@@ -24,26 +24,29 @@ def main() -> None:
     config_dst.mkdir(exist_ok=True)
     config_src = project_root / "config"
     copied = 0
-    for yaml_file in config_src.glob("*.yaml"):
+    for yaml_file in config_src.rglob("*.yaml"):
         if ".local." in yaml_file.name:
             continue  # skip machine-specific files
-        shutil.copy2(yaml_file, config_dst / yaml_file.name)
+        destination = config_dst / yaml_file.relative_to(config_src)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(yaml_file, destination)
         copied += 1
-    for example in config_src.glob("*.local.yaml.example"):
-        shutil.copy2(example, config_dst / example.name)
+    for example in config_src.rglob("*.local.yaml.example"):
+        destination = config_dst / example.relative_to(config_src)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(example, destination)
+
+    themes_src = config_src / "themes"
+    themes_copied = 0
+    if themes_src.exists():
+        themes_dst = config_dst / "themes"
+        shutil.copytree(themes_src, themes_dst, dirs_exist_ok=True)
+        themes_copied = sum(1 for path in themes_dst.glob("*.yaml") if path.is_file())
 
     # LICENSE next to exe (Phase 2c O.1)
     license_src = project_root / "LICENSE"
     if license_src.exists():
         shutil.copy2(license_src, dist_dir / "LICENSE")
-
-    # Experiment templates subdirectory
-    templates_src = config_src / "experiment_templates"
-    if templates_src.exists():
-        templates_dst = config_dst / "experiment_templates"
-        templates_dst.mkdir(exist_ok=True)
-        for tpl in templates_src.glob("*.yaml"):
-            shutil.copy2(tpl, templates_dst / tpl.name)
 
     # --- runtime directories ---
     (dist_dir / "data").mkdir(exist_ok=True)
@@ -81,6 +84,7 @@ def main() -> None:
 
     print("Post-build complete:")
     print(f"  {copied} configs copied to {config_dst}")
+    print(f"  {themes_copied} theme packs copied to {config_dst / 'themes'}")
     print("  data/, logs/, plugins/ created")
     print("  README_OPERATOR.txt written")
 

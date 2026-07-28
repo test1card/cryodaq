@@ -438,6 +438,55 @@ def _run_report_cell(
     }
 
 
+def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> dict[str, Any]:
+    """Prove the bundled GUI imports and stays alive in an offscreen Qt session."""
+
+    command = [str(executable), "--mode=gui"]
+    env = os.environ.copy()
+    env.update(
+        {
+            "CRYODAQ_ROOT": str(root),
+            "PYTHONUTF8": "1",
+            "QT_QPA_PLATFORM": "offscreen",
+        }
+    )
+    started = time.monotonic()
+    process = subprocess.Popen(
+        command,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(f"gui_startup_offscreen exited before readiness observation ({process.returncode})")
+            time.sleep(0.1)
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+        stdout, stderr = process.communicate(timeout=20)
+    except BaseException:
+        with suppress(Exception):
+            process.terminate()
+        with suppress(Exception):
+            process.wait(timeout=5)
+        raise
+    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    logs = _write_log(evidence_dir, "gui_startup_offscreen", completed)
+    if b"Traceback (most recent call last)" in stdout + stderr:
+        raise RuntimeError("gui_startup_offscreen emitted a traceback")
+    if _pid_exists(process.pid):
+        raise RuntimeError("gui_startup_offscreen process remained after shutdown")
+    return {
+        "name": "gui_startup_offscreen",
+        "status": "PASS",
+        "duration_s": round(time.monotonic() - started, 3),
+        "argv": command,
+        "runtime": logs,
+    }
+
+
 def _pid_exists(pid: int) -> bool:
     if os.name != "nt" or pid <= 0:
         return False
@@ -746,6 +795,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         if executable.resolve() == source_exe.resolve():
             raise RuntimeError("UNICODE_COPY_NOT_USED")
 
+        cells.append(_run_gui_startup_cell(executable, runtime_root, evidence_dir))
         cells.append(
             _run_report_cell(
                 executable,

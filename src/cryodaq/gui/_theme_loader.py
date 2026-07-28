@@ -14,20 +14,20 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 from typing import Any
 
 import yaml
 
 from cryodaq.core.atomic_write import atomic_write_text
+from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_THEME = "warm_stone"
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-THEMES_DIR = _REPO_ROOT / "config" / "themes"
-SETTINGS_FILE = _REPO_ROOT / "config" / "settings.local.yaml"
+_CONFIG_DIR = get_config_dir()
+THEMES_DIR = _CONFIG_DIR / "themes"
+SETTINGS_FILE = _CONFIG_DIR / "settings.local.yaml"
 
 REQUIRED_TOKENS = frozenset(
     {
