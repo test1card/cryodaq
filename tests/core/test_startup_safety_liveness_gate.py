@@ -30,7 +30,9 @@ import pytest
 import yaml
 
 import cryodaq.engine as engine
-from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
+from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3, load_housekeeping_config
+from cryodaq.core.interlock import InterlockEngine
+from cryodaq.core.physical_policy import PhysicalPolicyReceipt
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.core.safety_pattern_liveness import (
@@ -122,12 +124,17 @@ def _install_engine_startup_harness(
     *,
     legacy_patterns: list[str],
     v3_patterns: set[str],
+    safety_manager_type: type[SafetyManager] | None = None,
 ) -> dict[str, object]:
     config_dir = tmp_path / "config"
     data_dir = tmp_path / "data"
     config_dir.mkdir()
     data_dir.mkdir()
     (config_dir / "instruments.local.yaml").write_text("instruments: []\n", encoding="utf-8")
+    (config_dir / "interlocks.yaml").write_text("interlocks: []\n", encoding="utf-8")
+    (config_dir / "housekeeping.yaml").write_text("{}\n", encoding="utf-8")
+    (config_dir / "safety.yaml").write_text("critical_channels:\n  - '^default$'\n", encoding="utf-8")
+    (config_dir / "cooldown.yaml").write_text("cooldown:\n  enabled: false\n", encoding="utf-8")
     _write_manifest(
         config_dir / "channel_descriptors.yaml",
         _manifest(instrument_id="base", emitted_channel="base emitted", channel_id="base.1"),
@@ -142,12 +149,17 @@ def _install_engine_startup_harness(
     def _load_drivers(*_args, **_kwargs) -> DriverLoadResult:
         return DriverLoadResult((), (SimpleNamespace(name="probe"),), None, None)  # type: ignore[arg-type]
 
-    class _SafetyManager:
-        def __init__(self, *_args, **_kwargs) -> None:
-            return None
+    if safety_manager_type is None:
 
-        def load_config(self, path: Path) -> None:
-            observed["safety_path"] = path
+        class _SafetyManager:
+            def __init__(self, *_args, **_kwargs) -> None:
+                return None
+
+            def load_config(self, path: Path) -> PhysicalPolicyReceipt:
+                observed["safety_path"] = path
+                return engine.receipt_for_applied_policy("safety", path, b"")
+
+        safety_manager_type = _SafetyManager
 
     class _Writer:
         def __init__(self, _data_dir: Path, *, channel_catalog: object) -> None:
@@ -158,9 +170,13 @@ def _install_engine_startup_harness(
     monkeypatch.setattr(engine, "_CONFIG_DIR", config_dir)
     monkeypatch.setattr(engine, "_DATA_DIR", data_dir)
     monkeypatch.setattr(engine, "_load_drivers", _load_drivers)
-    monkeypatch.setattr(engine, "SafetyManager", _SafetyManager)
-    monkeypatch.setattr(engine, "load_housekeeping_config", lambda _path: {})
-    monkeypatch.setattr(engine, "load_protected_channel_patterns", lambda _path: legacy_patterns)
+    monkeypatch.setattr(engine, "SafetyManager", safety_manager_type)
+    monkeypatch.setattr(
+        engine,
+        "load_housekeeping_config",
+        lambda path: ({}, engine.receipt_for_applied_policy("housekeeping", path, b"")),
+    )
+    monkeypatch.setattr(engine, "load_protected_channel_patterns", lambda _path, **_kwargs: legacy_patterns)
     monkeypatch.setattr(engine, "load_critical_channels_from_alarms_v3", lambda _path: v3_patterns)
     monkeypatch.setattr(engine, "SQLiteWriter", _Writer)
     return observed
@@ -174,18 +190,34 @@ async def test_run_engine_records_effective_physical_policy_provenance(
     local_override: bool,
 ) -> None:
     """The production startup path logs the selected safety policy and still proceeds."""
+    captured: list[SafetyManager] = []
+
+    class _CapturingSafetyManager(SafetyManager):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            captured.append(self)
+
     observed = _install_engine_startup_harness(
         tmp_path,
         monkeypatch,
         legacy_patterns=[],
         v3_patterns=set(),
+        safety_manager_type=_CapturingSafetyManager,
     )
     config_dir = tmp_path / "config"
-    for policy in ("interlocks", "safety", "housekeeping", "cooldown"):
-        (config_dir / f"{policy}.yaml").write_text(f"{policy}: tracked\n", encoding="utf-8")
+    (config_dir / "interlocks.yaml").write_text("interlocks: []\n", encoding="utf-8")
+    (config_dir / "housekeeping.yaml").write_text("{}\n", encoding="utf-8")
+    (config_dir / "cooldown.yaml").write_text("cooldown:\n  enabled: false\n", encoding="utf-8")
+    (config_dir / "safety.yaml").write_text(
+        "critical_channels:\n  - '^tracked$'\nsource_limits:\n  max_power_w: 1.0\n",
+        encoding="utf-8",
+    )
     selected = config_dir / ("safety.local.yaml" if local_override else "safety.yaml")
     if local_override:
-        selected.write_text("safety: local override\n", encoding="utf-8")
+        selected.write_text(
+            "critical_channels:\n  - '^local$'\nsource_limits:\n  max_power_w: 2.0\n",
+            encoding="utf-8",
+        )
     expected_hash = hashlib.sha256(selected.read_bytes()).hexdigest()
     source_kind = "local_override" if local_override else "tracked_base"
     expected = (
@@ -198,13 +230,89 @@ async def test_run_engine_records_effective_physical_policy_provenance(
             await engine._run_engine(mock=True)
 
     assert observed["writer_called"] is True
-    assert observed["safety_path"] == selected
+    assert captured[0]._config.max_power_w == (2.0 if local_override else 1.0)
     assert expected in caplog.text
     if local_override:
         assert "Physical policy provenance: policy=safety source=safety.yaml origin=tracked_base" not in caplog.text
         assert any(record.message == expected and record.levelname == "WARNING" for record in caplog.records)
     else:
         assert any(record.message == expected and record.levelname == "INFO" for record in caplog.records)
+
+
+async def test_run_engine_provenance_hash_matches_the_safety_bytes_it_applies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A provenance hash must describe the safety policy the loader parsed."""
+    captured: list[SafetyManager] = []
+
+    class _CapturingSafetyManager(SafetyManager):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            captured.append(self)
+
+    _install_engine_startup_harness(
+        tmp_path,
+        monkeypatch,
+        legacy_patterns=[],
+        v3_patterns=set(),
+        safety_manager_type=_CapturingSafetyManager,
+    )
+    config_dir = tmp_path / "config"
+    (config_dir / "interlocks.yaml").write_text("interlocks: []\n", encoding="utf-8")
+    (config_dir / "housekeeping.yaml").write_text("{}\n", encoding="utf-8")
+    (config_dir / "cooldown.yaml").write_text("cooldown:\n  enabled: false\n", encoding="utf-8")
+    safety_path = config_dir / "safety.yaml"
+    bytes_before = b"critical_channels:\n  - '^before$'\nsource_limits:\n  max_power_w: 1.0\n"
+    bytes_applied = b"critical_channels:\n  - '^applied$'\nsource_limits:\n  max_power_w: 2.0\n"
+    safety_path.write_bytes(bytes_before)
+    original_read_bytes = Path.read_bytes
+
+    def _mutate_after_snapshot_read(path: Path) -> bytes:
+        snapshot = original_read_bytes(path)
+        if path == safety_path:
+            safety_path.write_bytes(bytes_applied)
+        return snapshot
+
+    monkeypatch.setattr(Path, "read_bytes", _mutate_after_snapshot_read)
+    monkeypatch.setattr(engine, "validate_safety_pattern_liveness", lambda **_kwargs: [])
+
+    with caplog.at_level("INFO", logger="cryodaq.engine"):
+        with pytest.raises(_StopAtWriter):
+            await engine._run_engine(mock=True)
+
+    snapshot_hash = hashlib.sha256(bytes_before).hexdigest()
+    assert safety_path.read_bytes() == bytes_applied
+    assert captured[0]._config.max_power_w == 1.0
+    assert f"policy=safety source=safety.yaml origin=tracked_base sha256={snapshot_hash}" in caplog.text
+
+
+def test_all_physical_policy_loaders_return_applied_snapshot_receipts(tmp_path: Path) -> None:
+    """Every physical policy loader returns its accepted snapshot receipt."""
+    safety_path = tmp_path / "safety.yaml"
+    interlocks_path = tmp_path / "interlocks.yaml"
+    housekeeping_path = tmp_path / "housekeeping.yaml"
+    cooldown_path = tmp_path / "cooldown.yaml"
+    safety_path.write_bytes(b"critical_channels:\n  - '^safety$'\n")
+    interlocks_path.write_bytes(b"interlocks: []\n")
+    housekeeping_path.write_bytes(b"adaptive_throttle:\n  enabled: true\n")
+    cooldown_path.write_bytes(b"cooldown:\n  enabled: false\n")
+
+    safety_receipt = SafetyManager(SafetyBroker()).load_config(safety_path)
+    interlocks_receipt = InterlockEngine(None, actions={"emergency_off": lambda: None}).load_config(interlocks_path)
+    _housekeeping, housekeeping_receipt = load_housekeeping_config(housekeeping_path)
+    _cooldown, cooldown_receipt = engine._load_cooldown_config(cooldown_path)
+
+    for policy, path, receipt in (
+        ("safety", safety_path, safety_receipt),
+        ("interlocks", interlocks_path, interlocks_receipt),
+        ("housekeeping", housekeeping_path, housekeeping_receipt),
+        ("cooldown", cooldown_path, cooldown_receipt),
+    ):
+        assert receipt.selected_path == path
+        assert receipt.origin == "tracked_base"
+        assert receipt.sha256 == hashlib.sha256(path.read_bytes()).hexdigest(), policy
 
 
 def test_real_v3_patterns_validate_cleanly_before_legacy_union() -> None:

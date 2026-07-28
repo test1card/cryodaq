@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 
@@ -252,7 +253,7 @@ class InterlockEngine:
     # Загрузка конфигурации
     # ------------------------------------------------------------------
 
-    def load_config(self, config_path: Path) -> None:
+    def load_config(self, config_path: Path, *, snapshot: bytes | None = None) -> PhysicalPolicyReceipt:
         """Загрузить блокировки из YAML-файла.
 
         Ожидаемая структура файла::
@@ -284,9 +285,10 @@ class InterlockEngine:
                 f"interlock engine without interlock configuration"
             )
 
+        if snapshot is None:
+            snapshot = config_path.read_bytes()
         try:
-            with config_path.open(encoding="utf-8") as fh:
-                raw: dict[str, Any] = yaml.safe_load(fh)
+            raw: dict[str, Any] = yaml.safe_load(snapshot)
         except yaml.YAMLError as exc:
             raise InterlockConfigError(f"interlocks.yaml at {config_path}: YAML parse error — {exc}") from exc
 
@@ -325,6 +327,7 @@ class InterlockEngine:
             config_path,
             loaded,
         )
+        return receipt_for_applied_policy("interlocks", config_path, snapshot)
 
     def _load_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> None:
         """Parse the optional P2-5 ``nonusable_escalation`` block fail-closed.

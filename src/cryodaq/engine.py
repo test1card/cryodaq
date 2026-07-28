@@ -109,6 +109,7 @@ from cryodaq.core.path_jail import resolve_within
 from cryodaq.core.physical_alarms_config import (
     load_production_physical_alarms_config,
 )
+from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
@@ -2238,43 +2239,25 @@ def _engine_config_path(name: str) -> Path:
     return local if local.exists() else _CONFIG_DIR / f"{name}.yaml"
 
 
-def _config_file_sha256(path: Path) -> str:
-    """Return the SHA-256 of one effective configuration file."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _log_physical_policy_receipt(policy: str, receipt: PhysicalPolicyReceipt) -> None:
+    """Record the exact physical-policy bytes accepted by one loader."""
+    log = logger.warning if receipt.origin == "local_override" else logger.info
+    log(
+        "Physical policy provenance: policy=%s source=%s origin=%s sha256=%s",
+        policy,
+        receipt.selected_path.name,
+        receipt.origin,
+        receipt.sha256,
+    )
 
 
-async def _log_physical_policy_provenance(policies: tuple[tuple[str, Path], ...]) -> None:
-    """Record which physical-policy documents this engine startup selected.
-
-    A ``*.local.yaml`` is a complete machine-specific replacement, not a
-    reviewed merge.  This disclosure intentionally does not change that
-    precedence or startup admission; it makes the selected authority explicit.
-    """
-    for policy, path in policies:
-        origin = "local_override" if path.name == f"{policy}.local.yaml" else "tracked_base"
-        try:
-            content_sha256 = await asyncio.to_thread(_config_file_sha256, path)
-        except OSError as exc:
-            logger.error(
-                "Physical policy provenance unavailable: policy=%s source=%s origin=%s sha256=unavailable error=%s",
-                policy,
-                path.name,
-                origin,
-                type(exc).__name__,
-            )
-            continue
-        log = logger.warning if origin == "local_override" else logger.info
-        log(
-            "Physical policy provenance: policy=%s source=%s origin=%s sha256=%s",
-            policy,
-            path.name,
-            origin,
-            content_sha256,
-        )
+def _load_cooldown_config(path: Path) -> tuple[dict[str, Any], PhysicalPolicyReceipt]:
+    """Read and parse one cooldown policy snapshot exactly once."""
+    snapshot = path.read_bytes()
+    raw = yaml.safe_load(snapshot) or {}
+    if not isinstance(raw, dict):
+        raise TypeError(f"cooldown.yaml at {path}: expected mapping, got {type(raw).__name__}")
+    return raw, receipt_for_applied_policy("cooldown", path, snapshot)
 
 
 async def _load_live_descriptor_authority(
@@ -6432,16 +6415,8 @@ async def _run_engine(
     housekeeping_cfg = _engine_config_path("housekeeping")
     safety_cfg = _engine_config_path("safety")
     cooldown_cfg_path = _engine_config_path("cooldown")
+    interlocks_snapshot = interlocks_cfg.read_bytes()
     logger.info("Конфигурация: instruments=%s", instruments_cfg.name)
-    await _log_physical_policy_provenance(
-        (
-            ("interlocks", interlocks_cfg),
-            ("safety", safety_cfg),
-            ("housekeeping", housekeeping_cfg),
-            ("cooldown", cooldown_cfg_path),
-        )
-    )
-
     # --- Создать основные компоненты ---
     broker = DataBroker()
     safety_broker = SafetyBroker()
@@ -6482,18 +6457,22 @@ async def _run_engine(
         mock=mock,
         data_broker=broker,
     )
-    safety_manager.load_config(safety_cfg)
+    _log_physical_policy_receipt("safety", safety_manager.load_config(safety_cfg))
 
     # F35: descriptor identity is mandatory production startup authority.
     # A machine-local instrument configuration requires a complete local
     # descriptor replacement; it never falls back to the tracked base.
     live_descriptor_catalog = await _load_live_descriptor_authority(instruments_cfg, driver_load)
 
-    housekeeping_raw = load_housekeeping_config(housekeeping_cfg)
+    housekeeping_raw, housekeeping_receipt = load_housekeeping_config(housekeeping_cfg)
+    _log_physical_policy_receipt("housekeeping", housekeeping_receipt)
     # Merge legacy interlocks.yaml protection patterns with the modern
     # alarms_v3.yaml critical channels. Without this the throttle thins
     # critical channels even though alarms_v3 marks them CRITICAL.
-    legacy_patterns = load_protected_channel_patterns(interlocks_cfg)
+    legacy_patterns = load_protected_channel_patterns(
+        interlocks_cfg,
+        snapshots={interlocks_cfg: interlocks_snapshot},
+    )
     alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
     v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
     merged_patterns = list({*legacy_patterns, *v3_patterns})
@@ -6624,7 +6603,10 @@ async def _run_engine(
             context=interlock_handler_context,
         ),
     )
-    interlock_engine.load_config(interlocks_cfg)
+    _log_physical_policy_receipt(
+        "interlocks",
+        interlock_engine.load_config(interlocks_cfg, snapshot=interlocks_snapshot),
+    )
 
     # ExperimentManager
     experiment_manager = ExperimentManager(
@@ -6923,8 +6905,8 @@ async def _run_engine(
     cooldown_service: Any = None
     if cooldown_cfg_path.exists():
         try:
-            with cooldown_cfg_path.open(encoding="utf-8") as fh:
-                _cd_raw = yaml.safe_load(fh) or {}
+            _cd_raw, cooldown_receipt = _load_cooldown_config(cooldown_cfg_path)
+            _log_physical_policy_receipt("cooldown", cooldown_receipt)
             _cd_cfg = _cd_raw.get("cooldown", {})
             if _cd_cfg.get("enabled", False):
                 from cryodaq.analytics.cooldown_service import CooldownService

@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.shutdown_settlement import (
     CancelledTaskSettlement,
     await_executor_owner,
@@ -40,29 +41,35 @@ class HousekeepingConfigError(RuntimeError):
     """Raised when housekeeping.yaml cannot be loaded in a fail-closed manner."""
 
 
-def load_housekeeping_config(config_path: Path) -> dict[str, Any]:
+def load_housekeeping_config(config_path: Path) -> tuple[dict[str, Any], PhysicalPolicyReceipt]:
     """Load housekeeping.yaml. Raises HousekeepingConfigError on failure."""
     if not config_path.exists():
         raise HousekeepingConfigError(
             f"housekeeping.yaml not found at {config_path} — refusing to start without housekeeping configuration"
         )
+    snapshot = config_path.read_bytes()
     try:
-        with config_path.open(encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle)
+        raw = yaml.safe_load(snapshot)
     except yaml.YAMLError as exc:
         raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: YAML parse error — {exc}") from exc
     if not isinstance(raw, dict):
         raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: expected mapping, got {type(raw).__name__}")
-    return raw
+    return raw, receipt_for_applied_policy("housekeeping", config_path, snapshot)
 
 
-def load_protected_channel_patterns(*config_paths: Path) -> list[str]:
+def load_protected_channel_patterns(
+    *config_paths: Path,
+    snapshots: dict[Path, bytes] | None = None,
+) -> list[str]:
     patterns: list[str] = []
     for path in config_paths:
-        if not path.exists():
-            continue
-        with path.open(encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle) or {}
+        if snapshots is None:
+            if not path.exists():
+                continue
+            snapshot = path.read_bytes()
+        else:
+            snapshot = snapshots[path]
+        raw = yaml.safe_load(snapshot) or {}
         for key in ("alarms", "interlocks"):
             for item in raw.get(key, []):
                 pattern = str(item.get("channel_pattern", "")).strip()

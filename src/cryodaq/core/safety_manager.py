@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
@@ -285,14 +286,14 @@ class SafetyManager:
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
         self._broker.set_overflow_callback(lambda: self._fault("SafetyBroker overflow - data lost"))
 
-    def load_config(self, path: Path) -> None:
+    def load_config(self, path: Path) -> PhysicalPolicyReceipt:
         if not path.exists():
             raise SafetyConfigError(
                 f"safety.yaml not found at {path} — refusing to start SafetyManager without safety configuration"
             )
 
-        with path.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh) or {}
+        snapshot = path.read_bytes()
+        raw = yaml.safe_load(snapshot) or {}
 
         if not isinstance(raw, dict):
             raise SafetyConfigError(f"safety.yaml at {path} is malformed (expected mapping, got {type(raw).__name__})")
@@ -358,6 +359,7 @@ class SafetyManager:
                 f"safety.yaml at {path}: invalid config value — {type(exc).__name__}: {exc}"
             ) from exc
         self._refresh_operator_safety_snapshot()
+        return receipt_for_applied_policy("safety", path, snapshot)
 
     async def start(self) -> None:
         if self._pending_child_fault_settlements:

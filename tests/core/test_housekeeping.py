@@ -476,6 +476,7 @@ def test_housekeeping_malformed_yaml_raises(tmp_path):
 def test_housekeeping_valid_config_loads(tmp_path):
     cfg = tmp_path / "ok.yaml"
     cfg.write_text("adaptive_throttle:\n  enabled: true\n")
-    result = load_housekeeping_config(cfg)
+    result, receipt = load_housekeeping_config(cfg)
     assert isinstance(result, dict)
     assert "adaptive_throttle" in result
+    assert receipt.selected_path == cfg
