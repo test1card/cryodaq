@@ -265,6 +265,58 @@ class VerifiedOffSource(Protocol):
     def output_state_unverified(self) -> bool: ...
 
 
+class SourceOffTier(StrEnum):
+    COMMAND_ONLY = "command_only"
+    VERIFIED_OFF = "verified_off"
+
+
+class SourceAdjustmentMode(StrEnum):
+    START_STOP_ONLY = "start_stop_only"
+    LIVE_UPDATE = "live_update"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSetpoint:
+    p_target: float
+    v_compliance: float
+    i_compliance: float
+
+
+@dataclass(frozen=True, slots=True)
+class SourceDescriptor:
+    off_tier: SourceOffTier
+    adjustment_mode: SourceAdjustmentMode
+
+
+@runtime_checkable
+class AdjustableControlledSource(ControlledSource, Protocol):
+    @property
+    def source_connection_generation(self) -> int: ...
+
+    @property
+    def source_setpoints(self) -> Mapping[str, SourceSetpoint]: ...
+
+    async def update_source_target(self, channel: str, p_target: float) -> None: ...
+
+    async def update_source_limits(
+        self,
+        channel: str,
+        *,
+        v_compliance: float | None = None,
+        i_compliance: float | None = None,
+    ) -> None: ...
+
+
+def describe_controlled_source(source: ControlledSource) -> SourceDescriptor:
+    off_tier = SourceOffTier.VERIFIED_OFF if isinstance(source, VerifiedOffSource) else SourceOffTier.COMMAND_ONLY
+    adjustment_mode = (
+        SourceAdjustmentMode.LIVE_UPDATE
+        if isinstance(source, AdjustableControlledSource)
+        else SourceAdjustmentMode.START_STOP_ONLY
+    )
+    return SourceDescriptor(off_tier=off_tier, adjustment_mode=adjustment_mode)
+
+
 def declared_protocol_members(protocol: type[object]) -> Sequence[str]:
     """Return the public members declared directly by a capability protocol.
 
