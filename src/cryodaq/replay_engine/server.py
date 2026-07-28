@@ -281,7 +281,10 @@ class ReplayEngine:
             self._broker = DataBroker()
             self._pub_queue = await self._broker.subscribe("zmq_pub", maxsize=10_000)
 
-            publisher = ZMQPublisher(self._pub_addr)
+            publisher = ZMQPublisher(
+                self._pub_addr,
+                applied_cold_stage_channel=self._cold_channel,
+            )
             self._pub = publisher
             await publisher.start(self._pub_queue)
             logger.info("Replay transport owner started; owner=publisher")

@@ -257,6 +257,11 @@ class AnalyticsView(QWidget):
         self._cold_stage_unavailable_reason = reason
         self._forward_to(list(self._active.values()), "set_cold_stage_unavailable", reason)
 
+    def clear_cold_stage_unavailable(self) -> None:
+        """Restore the declared cold-stage widget to its live-data state."""
+        self._cold_stage_unavailable_reason = None
+        self._forward_to(list(self._active.values()), "clear_cold_stage_unavailable")
+
     # ------------------------------------------------------------------
     # Layout management
     # ------------------------------------------------------------------
@@ -383,3 +388,5 @@ class AnalyticsView(QWidget):
                 "set_cold_stage_unavailable",
                 self._cold_stage_unavailable_reason,
             )
+        else:
+            self._forward_to(widgets, "clear_cold_stage_unavailable")

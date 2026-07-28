@@ -272,6 +272,24 @@ async def test_metadata_preserved() -> None:
     assert abs(result.metadata["offset"] - 0.012) < 1e-12
 
 
+async def test_publisher_adds_its_applied_cold_stage_and_replaces_driver_claim() -> None:
+    sent: list[list[bytes]] = []
+
+    class Socket:
+        async def send_multipart(self, frames: list[bytes]) -> None:
+            sent.append(frames)
+
+    publisher = ZMQPublisher(applied_cold_stage_channel="engine.cold")
+    publisher._socket = Socket()  # type: ignore[assignment]
+    publisher._session_id = "a" * 32
+    await publisher._publish_reading(
+        _make_reading(metadata={"engine_applied": {"cooldown": {"channel_cold": "driver.forgery"}}})
+    )
+
+    published = _unpack_reading(sent[0][1])
+    assert published.metadata["engine_applied"] == {"cooldown": {"channel_cold": "engine.cold"}}
+
+
 # ---------------------------------------------------------------------------
 # 5. Publisher/Subscriber integration via _pack/_unpack (no live sockets)
 # ---------------------------------------------------------------------------

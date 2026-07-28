@@ -236,15 +236,14 @@ async def test_replay_engine_starts_cooldown_service_when_model_present(
     engine = ReplayEngine(curve, speed=0.0, pub_addr=_TEST_PUB, cmd_addr=_TEST_CMD)
     await engine.start()
     try:
-        assert engine._cooldown_service is not None, (
-            "CooldownService should be wired when model + yaml are present"
-        )
+        assert engine._cooldown_service is not None, "CooldownService should be wired when model + yaml are present"
         assert engine._cooldown_service._channel_cold == "Т12", (
             "Replay channel override must rewrite channel_cold to Т12"
         )
         assert engine._cooldown_service._channel_warm == "Т11", (
             "Replay channel override must rewrite channel_warm to Т11"
         )
+        assert engine._pub._applied_cold_stage_channel == "Т12"
         assert engine._broker is not None
     finally:
         await engine.stop()

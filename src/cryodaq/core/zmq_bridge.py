@@ -693,7 +693,13 @@ class ZMQPublisher:
         await pub.stop()
     """
 
-    def __init__(self, address: str = DEFAULT_PUB_ADDR, *, topic: bytes = DEFAULT_TOPIC) -> None:
+    def __init__(
+        self,
+        address: str = DEFAULT_PUB_ADDR,
+        *,
+        topic: bytes = DEFAULT_TOPIC,
+        applied_cold_stage_channel: str | None = None,
+    ) -> None:
         self._address = address
         self._topic = topic
         self._ctx: zmq.asyncio.Context | None = None
@@ -708,6 +714,9 @@ class ZMQPublisher:
         self._send_lock = asyncio.Lock()
         self._reading_drop_count: Callable[[], int] | None = None
         self._alarm_snapshot: Callable[[], Any] | None = None
+        self._applied_cold_stage_channel: str | None = None
+        if applied_cold_stage_channel is not None:
+            self.configure_applied_cold_stage_channel(applied_cold_stage_channel)
 
     @property
     def session_id(self) -> str | None:
@@ -730,6 +739,14 @@ class ZMQPublisher:
         """Install live-engine-only barrier samplers without breaking replay."""
         self._reading_drop_count = reading_drop_count
         self._alarm_snapshot = alarm_snapshot
+
+    def configure_applied_cold_stage_channel(self, channel: str) -> None:
+        """Bind the publisher to the cold-stage slot selected by its runtime."""
+        if self._running or self._session_id is not None:
+            raise RuntimeError("applied cold-stage channel must be configured before publisher start")
+        if type(channel) is not str or not channel.strip():
+            raise ValueError("applied cold-stage channel must be a non-empty string")
+        self._applied_cold_stage_channel = channel.strip()
 
     def _transport(self, sequence: int, *, authoritative: bool) -> dict[str, Any]:
         session_id = self._session_id
@@ -770,6 +787,8 @@ class ZMQPublisher:
     async def _publish_reading(self, reading: Reading, *, descriptor_envelope: bytes | None = None) -> None:
         metadata = dict(reading.metadata)
         authoritative = metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, False) is True
+        if self._applied_cold_stage_channel is not None:
+            metadata["engine_applied"] = {"cooldown": {"channel_cold": self._applied_cold_stage_channel}}
         async with self._send_lock:
             await self._send_allocated(
                 self._topic,

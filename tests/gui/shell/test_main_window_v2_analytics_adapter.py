@@ -461,6 +461,119 @@ def _t_reading(channel: str, value: float = 4.5) -> Reading:
     )
 
 
+def _with_applied_cold_stage(reading: Reading, channel: str) -> Reading:
+    return Reading(
+        timestamp=reading.timestamp,
+        instrument_id=reading.instrument_id,
+        channel=reading.channel,
+        value=reading.value,
+        unit=reading.unit,
+        status=reading.status,
+        metadata={"engine_applied": {"cooldown": {"channel_cold": channel}}},
+    )
+
+
+def _assert_rendered_cold_stage(w: MainWindowV2, reading: Reading) -> None:
+    assert w._analytics_view._last_cold_temperature_reading is reading
+    cooldown_widget = w._analytics_view.active_widgets()["main"]
+    assert cooldown_widget._raw_cold_buffer == [(reading.timestamp.timestamp(), reading.value)]
+    assert not cooldown_widget._placeholder.isVisible()
+
+
+def test_engine_applied_cold_stage_beats_config_edited_before_gui_start(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    cooldown_path = config_dir / "cooldown.yaml"
+    cooldown_path.write_text("cooldown:\n  enabled: true\n  channel_cold: engine.cold\n", encoding="utf-8")
+    applied_cold = "engine.cold"
+    cooldown_path.write_text("cooldown:\n  enabled: true\n  channel_cold: edited.warm\n", encoding="utf-8")
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+    w._analytics_view.set_phase("cooldown")
+    cold = _with_applied_cold_stage(_t_reading(applied_cold), applied_cold)
+    _dispatch_described(w, cold, ChannelQuantity.TEMPERATURE)
+
+    _assert_rendered_cold_stage(w, cold)
+
+
+def test_replay_applied_cold_stage_does_not_route_live_file_warm_channel(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "cooldown.yaml").write_text(
+        "cooldown:\n  enabled: true\n  channel_cold: live.warm\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+    w._analytics_view.set_phase("cooldown")
+    replay_cold = _with_applied_cold_stage(_t_reading("replay.cold"), "replay.cold")
+    live_warm = _with_applied_cold_stage(_t_reading("live.warm"), "replay.cold")
+    _dispatch_described(w, replay_cold, ChannelQuantity.TEMPERATURE)
+    _dispatch_described(w, live_warm, ChannelQuantity.TEMPERATURE)
+
+    _assert_rendered_cold_stage(w, replay_cold)
+
+
+def test_engine_applied_cold_stage_preserves_ordinary_routing(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "cooldown.yaml").write_text(
+        "cooldown:\n  enabled: true\n  channel_cold: stale.file.value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+    w._analytics_view.set_phase("cooldown")
+    cold = _with_applied_cold_stage(_t_reading("applied.cold"), "applied.cold")
+    _dispatch_described(w, cold, ChannelQuantity.TEMPERATURE)
+
+    _assert_rendered_cold_stage(w, cold)
+
+
+def test_cold_stage_stays_unavailable_without_engine_declaration_but_pressure_routes(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "cooldown.yaml").write_text(
+        "cooldown:\n  enabled: true\n  channel_cold: file.only.cold\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+    w._analytics_view.set_phase("cooldown")
+    _dispatch_described(w, _t_reading("file.only.cold"), ChannelQuantity.TEMPERATURE)
+    pressure = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="vacuum",
+        channel="vacuum.pressure",
+        value=0.001,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    _dispatch_described(w, pressure, ChannelQuantity.PRESSURE)
+
+    assert w._analytics_view._last_cold_temperature_reading is None
+    assert w._analytics_snapshot["set_pressure_reading"] == (pressure,)
+    cooldown_widget = w._analytics_view.active_widgets()["main"]
+    assert cooldown_widget._placeholder.toPlainText() == "Холодная ступень не объявлена — данные недоступны"
+
+
 def test_this_stands_declared_cold_stage_feeds_predictor():
     _app()
     w = MainWindowV2()
@@ -468,7 +581,7 @@ def test_this_stands_declared_cold_stage_feeds_predictor():
     w._ensure_overlay("analytics")
     assert isinstance(w._analytics_view, AnalyticsView)
 
-    cold_stage = _t_reading("Т12", value=4.51)
+    cold_stage = _with_applied_cold_stage(_t_reading("Т12", value=4.51), "Т12")
     _dispatch_described(
         w,
         cold_stage,
@@ -507,6 +620,7 @@ def test_declared_noncanonical_cold_stage_feeds_predictor_and_rejects_other_temp
         status=declared_cold.status,
         metadata=declared_cold.metadata,
     )
+    declared_cold = _with_applied_cold_stage(declared_cold, "stage.cold")
     _dispatch_described(
         w,
         declared_cold,
@@ -518,7 +632,10 @@ def test_declared_noncanonical_cold_stage_feeds_predictor_and_rejects_other_temp
     )
     assert w._analytics_view._last_cold_temperature_reading is declared_cold
 
-    non_cold_stage = _t_reading("sensor.cold-looking", value=4.52)
+    non_cold_stage = _with_applied_cold_stage(
+        _t_reading("sensor.cold-looking", value=4.52),
+        "stage.cold",
+    )
     _dispatch_described(
         w,
         non_cold_stage,

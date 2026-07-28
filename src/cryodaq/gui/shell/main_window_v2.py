@@ -22,7 +22,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import yaml
 from PySide6.QtCore import QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -77,7 +76,6 @@ from cryodaq.operator_snapshot import (
     SafetyLifecycle,
     SnapshotMode,
 )
-from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
@@ -135,32 +133,19 @@ def _bounded_wait_ms(deadline: float, *, cap_ms: int = _SETTLE_OP_CAP_MS) -> int
 _COLD_STAGE_UNAVAILABLE_MESSAGE = "Холодная ступень не объявлена — данные недоступны"
 
 
-def _declared_cold_stage_channel() -> str | None:
-    """Return the cooldown policy's exact cold-stage channel declaration.
-
-    This mirrors the engine's ``cooldown.local.yaml``-before-``cooldown.yaml``
-    resolution.  It deliberately does not infer a cold stage from descriptor
-    fields: without an exact declaration, the GUI must leave the feed
-    unavailable.
-    """
-    config_dir = get_config_dir()
-    local_path = config_dir / "cooldown.local.yaml"
-    config_path = local_path if local_path.exists() else config_dir / "cooldown.yaml"
-    try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning("cold-stage declaration unavailable; config=%s error=%s", config_path, exc)
+def _engine_applied_cold_stage_channel(reading: Reading) -> str | None:
+    """Return the cold-stage slot declared by the publishing engine."""
+    metadata = reading.metadata
+    if type(metadata) is not dict:
         return None
-    if not isinstance(raw, dict):
-        logger.warning("cold-stage declaration unavailable; config=%s is not a mapping", config_path)
+    applied = metadata.get("engine_applied")
+    if type(applied) is not dict:
         return None
-    cooldown = raw.get("cooldown")
-    if not isinstance(cooldown, dict):
-        logger.warning("cold-stage declaration unavailable; config=%s has no cooldown mapping", config_path)
+    cooldown = applied.get("cooldown")
+    if type(cooldown) is not dict:
         return None
     channel = cooldown.get("channel_cold")
-    if not isinstance(channel, str) or not channel.strip():
-        logger.warning("cold-stage declaration unavailable; config=%s has no channel_cold", config_path)
+    if type(channel) is not str or not channel.strip():
         return None
     return channel.strip()
 
@@ -218,12 +203,11 @@ class MainWindowV2(QMainWindow):
         self.setMinimumSize(1280, 800)
 
         self._channel_mgr = get_channel_manager()
-        self._declared_cold_stage_channel = _declared_cold_stage_channel()
+        self._declared_cold_stage_channel: str | None = None
         # D7.1b: descriptor identity store — GUI-thread-owned, lives for one session.
         self._descriptor_store = DescriptorStore()
         self._build_ui()
-        if self._declared_cold_stage_channel is None:
-            self._push_analytics("set_cold_stage_unavailable", _COLD_STAGE_UNAVAILABLE_MESSAGE)
+        self._push_analytics("set_cold_stage_unavailable", _COLD_STAGE_UNAVAILABLE_MESSAGE)
         self._reading_received.connect(self._dispatch_reading)
 
         # Status bar refresh: data rate, connection (1 Hz)
@@ -942,6 +926,10 @@ class MainWindowV2(QMainWindow):
         path. They remain visible through the eager generic sinks and the
         descriptor-aware instrument panel, without acquiring control authority.
         """
+        applied_cold_stage_channel = _engine_applied_cold_stage_channel(reading)
+        if applied_cold_stage_channel is not None:
+            self._declared_cold_stage_channel = applied_cold_stage_channel
+
         quantity = descriptor.quantity
 
         if quantity is ChannelQuantity.RAW_SENSOR and self._calibration_panel is not None:
@@ -981,6 +969,9 @@ class MainWindowV2(QMainWindow):
             self._multiline_snapshot[descriptor.channel_id] = (reading, descriptor)
             if self._multiline_panel is not None:
                 self._multiline_panel.on_descriptor_reading(reading, descriptor)
+
+        if applied_cold_stage_channel is not None:
+            self._push_analytics("clear_cold_stage_unavailable")
 
     # ------------------------------------------------------------------
     # Analytics channel adapter (B.8 follow-up)

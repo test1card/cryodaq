@@ -6920,6 +6920,9 @@ async def _run_engine(
             _cd_raw, cooldown_receipt = _load_cooldown_config(cooldown_cfg_path)
             _log_physical_policy_receipt("cooldown", cooldown_receipt)
             _cd_cfg = _cd_raw.get("cooldown", {})
+            _applied_cold_channel = _cd_cfg.get("channel_cold")
+            if isinstance(_applied_cold_channel, str) and _applied_cold_channel.strip():
+                zmq_pub.configure_applied_cold_stage_channel(_applied_cold_channel)
             if _cd_cfg.get("enabled", False):
                 from cryodaq.analytics.cooldown_service import CooldownService
 

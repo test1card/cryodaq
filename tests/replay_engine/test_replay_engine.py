@@ -814,8 +814,13 @@ async def test_replay_partial_publisher_start_rollback_resists_repeated_cancella
     source = Source()
     publishers: list[Publisher] = []
 
-    def publisher_factory(address: str) -> Publisher:
+    def publisher_factory(
+        address: str,
+        *,
+        applied_cold_stage_channel: str | None = None,
+    ) -> Publisher:
         publisher = Publisher(address)
+        publisher.applied_cold_stage_channel = applied_cold_stage_channel
         publishers.append(publisher)
         return publisher
 
@@ -865,6 +870,7 @@ async def test_replay_partial_publisher_start_rollback_resists_repeated_cancella
     await asyncio.sleep(0)
     assert not owner.done()
     assert len(publishers) == 1
+    assert publishers[0].applied_cold_stage_channel == "cold"
     assert publishers[0].stop_cancelled is False
     assert publishers[0].stop_completed is False
     assert engine._pub is publishers[0]

@@ -446,7 +446,10 @@ def test_cooldown_cache_holds_only_last_value():
     for t in (8.0, 7.5, 7.0, 6.5):
         w._dispatch_reading(_cooldown_reading(t_hours=t))
 
-    assert len(w._analytics_snapshot) == 1
+    assert set(w._analytics_snapshot) == {
+        "set_cold_stage_unavailable",
+        "set_cooldown",
+    }
     assert w._analytics_snapshot["set_cooldown"][0].t_hours == 6.5
 
 

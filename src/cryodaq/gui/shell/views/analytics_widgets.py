@@ -742,6 +742,7 @@ class CooldownPredictionWidget(QWidget):
     # with margin. VacuumPredictionWidget left at 5000 — its replay
     # cadence has not surfaced the same UX issue.
     _MAX_RAW_PTS: int = 50000
+    _IDLE_MESSAGE = "Охлаждение не активно — прогноз недоступен"
     # Canonical cold-stage landmark id from config/physical_alarms.yaml.
     # MainWindowV2 routes only readings whose channel resolves to this id;
     # configuration-decoupling is left to a future spec per architect.
@@ -763,7 +764,7 @@ class CooldownPredictionWidget(QWidget):
         # Idle placeholder as pg.TextItem on the plot canvas — plot uses
         # full vertical space rather than being clipped by a label above it.
         self._placeholder = pg.TextItem(
-            "Охлаждение не активно — прогноз недоступен",
+            self._IDLE_MESSAGE,
             anchor=(0.5, 0.5),
             color=QColor(theme.MUTED_FOREGROUND),
         )
@@ -864,6 +865,11 @@ class CooldownPredictionWidget(QWidget):
         self._steady_badge.setVisible(False)
         self._placeholder.setText(reason)
         self._placeholder.setVisible(True)
+
+    def clear_cold_stage_unavailable(self) -> None:
+        """Remove the unavailable claim once the declared slot is established."""
+        self._placeholder.setText(self._IDLE_MESSAGE)
+        self._placeholder.setVisible(not (self._inner._history or self._inner._central))
 
     def _reposition_overlays(self) -> None:
         vb = self._inner._plot.getPlotItem().getViewBox()
