@@ -100,12 +100,26 @@ class EscalationService:
             if delay_s > 0:
                 await asyncio.sleep(delay_s)
             outcome = await self._notifier.send_message(chat_id, message)
-            if outcome == "delivered":
-                logger.info("Эскалация отправлена: chat_id=%s", chat_id)
+            if outcome == "service_reported_delivered":
+                logger.info(
+                    "Telegram подтвердил публикацию эскалации: chat_id=%s outcome=%s",
+                    chat_id,
+                    outcome,
+                )
+            elif outcome == "transport_accepted":
+                logger.warning(
+                    "Транспорт принял эскалацию без подтверждения публикации: chat_id=%s outcome=%s",
+                    chat_id,
+                    outcome,
+                )
             elif outcome == "failed":
-                logger.error("Эскалация НЕ доставлена: chat_id=%s", chat_id)
+                logger.error("Telegram отклонил эскалацию: chat_id=%s outcome=%s", chat_id, outcome)
             else:
-                logger.error("Исход доставки эскалации неизвестен: chat_id=%s", chat_id)
+                logger.error(
+                    "Исход эскалации неизвестен: chat_id=%s outcome=%s",
+                    chat_id,
+                    outcome,
+                )
         except asyncio.CancelledError:
             logger.debug("Эскалация отменена до отправки: chat_id=%s", chat_id)
             raise

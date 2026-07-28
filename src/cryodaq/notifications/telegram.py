@@ -144,7 +144,22 @@ class TelegramNotifier:
                     body = await resp.text()
                     logger.error("Telegram API ответил %d: %s", resp.status, body[:200])
                     return "failed" if not 300 <= resp.status < 400 else "outcome_unknown"
-                return "delivered"
+                try:
+                    result = await resp.json()
+                except Exception:
+                    logger.warning("Telegram API accepted sendMessage without a parseable service acknowledgement")
+                    return "transport_accepted"
+                if not isinstance(result, dict):
+                    logger.warning("Telegram API accepted sendMessage without an object acknowledgement")
+                    return "transport_accepted"
+                if result.get("ok") is False:
+                    logger.error("Telegram API rejected sendMessage: %s", result.get("description", "unknown error"))
+                    return "failed"
+                message = result.get("result")
+                if result.get("ok") is True and isinstance(message, dict) and type(message.get("message_id")) is int:
+                    return "service_reported_delivered"
+                logger.warning("Telegram API accepted sendMessage without a posted-message acknowledgement")
+                return "transport_accepted"
         except Exception as exc:
             logger.error("Ошибка отправки Telegram-уведомления: %s", exc)
             return "outcome_unknown"
