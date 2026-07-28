@@ -39,9 +39,11 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from cryodaq.channels.descriptors import ChannelRole, ChannelSafetyClass
 from cryodaq.core.housekeeping import _extract_channel_refs
 from cryodaq.core.interlock import InterlockCondition
 from cryodaq.core.safety_manager import SafetyConfigError
+from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel
 
 if TYPE_CHECKING:
     from cryodaq.core.safety_manager import SafetyManager
@@ -492,6 +494,118 @@ def _resolve_adaptive_patterns_to_raw(
     return resolved, dead
 
 
+def _resolve_keithley_heartbeats(
+    *,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+    safety_manager: SafetyManager,
+) -> tuple[dict[SmuChannel, frozenset[tuple[str, str]]], list[_DeadPattern]]:
+    """Resolve per-output canonical heartbeat identities to exact live pairs."""
+
+    resolved: dict[SmuChannel, set[tuple[str, str]]] = {channel: set() for channel in SMU_CHANNELS}
+    if not safety_manager._config.require_keithley_for_run and safety_manager._keithley is None:
+        return {channel: frozenset() for channel in SMU_CHANNELS}, []
+    dead: list[_DeadPattern] = []
+    runtime_binding = safety_manager._reviewed_source_runtime_binding
+    reviewed_driver = None if runtime_binding is None else runtime_binding.driver
+    reviewed_instrument_id = getattr(reviewed_driver, "name", None)
+    binding_is_exact = bool(
+        safety_manager._reviewed_source_identity_qualified
+        and runtime_binding is not None
+        and reviewed_driver is safety_manager._keithley
+        and type(reviewed_instrument_id) is str
+        and reviewed_instrument_id
+    )
+    if not binding_is_exact:
+        dead.append(
+            _DeadPattern(
+                pattern="reviewed source runtime binding has no exact emitted instrument identity",
+                plane="descriptor-owned Keithley heartbeat identity",
+                source="SafetyManager reviewed source runtime binding",
+            )
+        )
+
+    catalog = descriptor_catalog.storage_catalog_snapshot()
+    declared = safety_manager._config.keithley_heartbeat_channels
+    declared_owner: dict[str, SmuChannel] = {}
+    for smu_channel in SMU_CHANNELS:
+        channel_ids = declared.get(smu_channel, ())
+        if not channel_ids:
+            dead.append(
+                _DeadPattern(
+                    pattern=f"{smu_channel}: missing declared heartbeat channels",
+                    plane="canonical per-output Keithley heartbeat association",
+                    source="safety.yaml keithley_heartbeat_channels",
+                )
+            )
+            continue
+        if len(channel_ids) != len(set(channel_ids)):
+            dead.append(
+                _DeadPattern(
+                    pattern=f"{smu_channel}: ambiguous duplicate canonical heartbeat identity",
+                    plane="canonical per-output Keithley heartbeat association",
+                    source="safety.yaml keithley_heartbeat_channels",
+                )
+            )
+            continue
+
+        for channel_id in channel_ids:
+            previous_owner = declared_owner.setdefault(channel_id, smu_channel)
+            if previous_owner != smu_channel:
+                dead.append(
+                    _DeadPattern(
+                        pattern=f"cross-SMU canonical heartbeat association {channel_id!r}",
+                        plane="canonical per-output Keithley heartbeat association",
+                        source="safety.yaml keithley_heartbeat_channels",
+                    )
+                )
+                continue
+
+            descriptor = catalog.by_channel_id.get(channel_id)
+            candidates = [
+                identity
+                for identity, bound_channel_id in descriptor_catalog._bindings.items()
+                if bound_channel_id == channel_id
+            ]
+            if descriptor is None or len(candidates) != 1:
+                dead.append(
+                    _DeadPattern(
+                        pattern=channel_id,
+                        plane="canonical heartbeat identity resolution to one exact live binding",
+                        source=f"safety.yaml keithley_heartbeat_channels.{smu_channel}",
+                    )
+                )
+                continue
+            identity = candidates[0]
+            if (
+                descriptor.role is not ChannelRole.SOURCE_READBACK
+                or descriptor.safety_class is not ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK
+            ):
+                dead.append(
+                    _DeadPattern(
+                        pattern=channel_id,
+                        plane="hazardous source-readback descriptor classification",
+                        source=f"safety.yaml keithley_heartbeat_channels.{smu_channel}",
+                    )
+                )
+                continue
+            if (
+                not binding_is_exact
+                or identity[0] != reviewed_instrument_id
+                or descriptor.instrument_id != reviewed_instrument_id
+            ):
+                dead.append(
+                    _DeadPattern(
+                        pattern=channel_id,
+                        plane="exact reviewed source runtime binding ownership",
+                        source=f"safety.yaml keithley_heartbeat_channels.{smu_channel}",
+                    )
+                )
+                continue
+            resolved[smu_channel].add(identity)
+
+    return {channel: frozenset(identities) for channel, identities in resolved.items()}, dead
+
+
 def _load_interlock_conditions(config_path: Path) -> list[InterlockCondition]:
     """Parse interlocks.yaml into InterlockConditions.
 
@@ -572,9 +686,9 @@ def validate_safety_pattern_liveness(
       1. ``interlocks.yaml`` — every interlock is safety-class. CANONICAL plane,
          ``.match`` (``InterlockCondition.matches_channel``).
       2. ``safety.yaml`` ``critical_channels`` — RAW plane, ``.match``.
-      3. ``safety.yaml`` ``keithley_channels`` — RAW plane, ``.match`` (source
-         heartbeat watchdog, existential per active SMU in
-         ``SafetyManager._has_fresh_keithley_data``).
+      3. ``safety.yaml`` ``keithley_heartbeat_channels`` — canonical
+         descriptor identities resolved to exact ``(instrument_id,
+         emitted_channel)`` pairs owned by the reviewed-source runtime binding.
       4. The exact runtime ``AdaptiveThrottle`` protected-pattern union:
          legacy ``interlocks.yaml`` patterns plus ``alarms_v3.yaml`` patterns
          derived from CRITICAL/HIGH alarms and all v3 interlocks. RAW plane,
@@ -670,20 +784,19 @@ def validate_safety_pattern_liveness(
     else:
         safety_manager._config.critical_channels = resolved_critical
 
-    # Plane 3: safety.yaml keithley_channels (RAW, .match). Source heartbeat.
-    # ``_keithley_patterns`` holds the YAML-loaded compiled patterns
-    # (src/cryodaq/core/safety_manager.py:257) — the actual runtime value the
-    # heartbeat watchdog matches, not the dataclass default.
-    for pattern in safety_manager._keithley_patterns:
-        matched_channels = {channel for channel in raw_labels if pattern.match(channel)}
-        if not matched_channels:
-            dead.append(
-                _DeadPattern(
-                    pattern=pattern.pattern,
-                    plane="raw (SafetyManager heartbeat pre-bind, .match)",
-                    source="safety.yaml keithley_channels",
-                )
-            )
+    # Plane 3: canonical, per-output source-readback declarations resolve to
+    # exact identities owned by the reviewed-source runtime binding.
+    # ``_keithley_patterns`` is retained only for legacy config compatibility;
+    # heartbeat authority never comes from those regexes.
+    resolved_heartbeats, heartbeat_dead = _resolve_keithley_heartbeats(
+        descriptor_catalog=descriptor_catalog,
+        safety_manager=safety_manager,
+    )
+    dead.extend(heartbeat_dead)
+    if heartbeat_dead:
+        safety_manager._keithley_heartbeat_bindings = {channel: frozenset() for channel in SMU_CHANNELS}
+    else:
+        safety_manager._keithley_heartbeat_bindings = resolved_heartbeats
 
     # Plane 4: canonical protected expressions must be resolved before they
     # reach AdaptiveThrottle's raw substring matcher.  The returned list is

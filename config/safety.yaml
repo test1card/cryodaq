@@ -48,6 +48,23 @@ source_limits:
 keithley_channels:
   - ".*/smu.*"
 
+# Canonical descriptor identities accepted as heartbeat evidence for each
+# hazardous output. Startup resolves these through the selected descriptor
+# authority to exact (instrument_id, emitted_channel) pairs owned by the
+# reviewed source runtime binding. Runtime code never infers an output from
+# channel spelling.
+keithley_heartbeat_channels:
+  smua:
+    - "Keithley_1/smua/voltage"
+    - "Keithley_1/smua/current"
+    - "Keithley_1/smua/resistance"
+    - "Keithley_1/smua/power"
+  smub:
+    - "Keithley_1/smub/voltage"
+    - "Keithley_1/smub/current"
+    - "Keithley_1/smub/resistance"
+    - "Keithley_1/smub/power"
+
 # Graceful shutdown drain timeout (seconds) before forced cancellation.
 # Scheduler waits this long for in-flight polls to complete persist+publish.
 scheduler_drain_timeout_s: 5.0

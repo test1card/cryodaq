@@ -113,6 +113,7 @@ def _build_fixture(tmp_path: Path, alarms: dict) -> dict:
     )
     safety_manager = SafetyManager(SafetyBroker())
     safety_manager.load_config(safety_path)
+    safety_manager._config.require_keithley_for_run = False
 
     return {
         "descriptor_catalog": load_live_channel_descriptor_catalog(descriptor_path),
@@ -497,4 +498,5 @@ def test_shipped_config_check_is_non_vacuous() -> None:
 def _real_safety_manager() -> SafetyManager:
     manager = SafetyManager(SafetyBroker())
     manager.load_config(_SAFETY_PATH)
+    manager._config.require_keithley_for_run = False
     return manager

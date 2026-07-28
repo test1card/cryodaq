@@ -205,7 +205,7 @@ def test_ready_requires_monitor_current_inputs_connection_and_exact_off_proof() 
     manager = _manager(mock=True)
     manager._safety_monitor_active = True
     manager._config.critical_channels = [re.compile("critical/temperature")]
-    manager._latest["critical/temperature"] = (time.monotonic(), 4.2, "ok")
+    manager._latest[("test", "critical/temperature")] = (time.monotonic(), 4.2, "ok")
     manager.record_reviewed_source_connected(verified_off=True)
     manager._transition(SafetyState.READY, "qualified")
     ready = manager.snapshot_operator_safety()
@@ -477,7 +477,7 @@ async def test_stale_invalid_and_missing_critical_inputs_are_explicit_blockers()
     manager._refresh_operator_safety_snapshot()
     assert "critical_input_missing" in _codes(manager.snapshot_operator_safety())
 
-    manager._latest["critical/temperature"] = (
+    manager._latest[("test", "critical/temperature")] = (
         time.monotonic() - manager._config.stale_timeout_s - 1.0,
         4.2,
         "ok",
@@ -485,7 +485,7 @@ async def test_stale_invalid_and_missing_critical_inputs_are_explicit_blockers()
     manager._refresh_operator_safety_snapshot()
     assert "critical_input_stale" in _codes(manager.snapshot_operator_safety())
 
-    manager._latest["critical/temperature"] = (time.monotonic(), float("nan"), "ok")
+    manager._latest[("test", "critical/temperature")] = (time.monotonic(), float("nan"), "ok")
     manager._refresh_operator_safety_snapshot()
     assert "critical_input_invalid" in _codes(manager.snapshot_operator_safety())
 

@@ -2313,8 +2313,8 @@ def _registrations_for_sites(sites: list[_Site]) -> tuple[_Registration, ...]:
     (
         (
             "src/cryodaq/core/safety_manager.py",
-            "if not any(pattern.match(channel) for pattern in self._keithley_patterns):",
-            'if not re.compile(r".*").match(channel):',
+            "if not any(pattern.match(ch) for pattern in self._config.critical_channels):",
+            'if not re.compile(r".*").match(ch):',
         ),
         (
             "src/cryodaq/gui/shell/overlays/keithley_panel.py",

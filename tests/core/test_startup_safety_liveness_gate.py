@@ -67,6 +67,7 @@ def _real_catalog():
 def _real_safety_manager() -> SafetyManager:
     sm = SafetyManager(SafetyBroker())
     sm.load_config(_SAFETY_PATH)
+    sm._config.require_keithley_for_run = False
     return sm
 
 
@@ -364,6 +365,7 @@ async def test_runtime_heartbeat_accepts_power_as_the_only_fresh_metric_per_acti
     """The watchdog requires one fresh matching metric per active SMU, not every metric."""
     broker = SafetyBroker()
     keithley = MagicMock()
+    keithley.name = "Keithley_1"
     keithley.connected = True
     keithley.output_state_unverified = False
     keithley.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
@@ -403,7 +405,7 @@ async def test_runtime_heartbeat_accepts_power_as_the_only_fresh_metric_per_acti
                 channel=channel,
                 value=value,
                 unit=unit,
-                instrument_id="test",
+                instrument_id="Keithley_1" if channel.startswith("Keithley_1/") else "LS218_2",
                 status=ChannelStatus.OK,
             )
         )
@@ -595,8 +597,8 @@ def test_disk_synthetic_channel_does_not_trigger_raise() -> None:
     assert re.escape(_DISK_CHANNEL) in resolved
 
 
-def test_non_default_yaml_keithley_pattern_uses_effective_runtime_field(tmp_path: Path) -> None:
-    """A non-default YAML Keithley regex is checked from ``_keithley_patterns``."""
+def test_legacy_keithley_regex_cannot_replace_structural_heartbeat_ownership(tmp_path: Path) -> None:
+    """A matching regex cannot satisfy the canonical per-output startup gate."""
     descriptor_path = tmp_path / "channel_descriptors.local.yaml"
     _write_manifest(
         descriptor_path,
@@ -621,8 +623,8 @@ def test_non_default_yaml_keithley_pattern_uses_effective_runtime_field(tmp_path
         )
 
     message = str(exc_info.value)
-    assert "^custom keithley heartbeat$" in message
-    assert "safety.yaml keithley_channels" in message
+    assert "missing declared heartbeat channels" in message
+    assert "safety.yaml keithley_heartbeat_channels" in message
 
 
 def test_throttle_bypass_pattern_constant_is_current() -> None:

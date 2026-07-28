@@ -93,6 +93,7 @@ class SafetyConfig:
     max_voltage_v: float = 40.0
     max_current_a: float = 1.0
     keithley_channel_patterns: list[str] = field(default_factory=lambda: [".*/smu.*"])
+    keithley_heartbeat_channels: dict[SmuChannel, tuple[str, ...]] = field(default_factory=dict)
     scheduler_drain_timeout_s: float = 5.0
 
 
@@ -178,7 +179,7 @@ class SafetyManager:
         self._active_sources: set[SmuChannel] = set()
         self._run_permitted_since: float = 0.0  # monotonic timestamp of RUN_PERMITTED entry
 
-        self._latest: dict[str, tuple[float, float, str]] = {}
+        self._latest: dict[tuple[str, str], tuple[float, float, str]] = {}
         # HI-1: the gate is the elapsed data SPAN (min_span_s=30), not a raw
         # point count. The deployed LakeShore poll is 2.0 s
         # (config/instruments.yaml), so the 120 s window holds only ~61
@@ -291,6 +292,9 @@ class SafetyManager:
         self._global_off_owner_abort_generation = -1
 
         self._keithley_patterns = [re.compile(p) for p in self._config.keithley_channel_patterns]
+        self._keithley_heartbeat_bindings: dict[SmuChannel, frozenset[tuple[str, str]]] = {
+            channel: frozenset() for channel in SMU_CHANNELS
+        }
         self._on_state_change: list[Callable[[SafetyState, SafetyState, str], Any]] = []
         self._broker.set_overflow_callback(lambda: self._fault("SafetyBroker overflow - data lost"))
 
@@ -340,6 +344,24 @@ class SafetyManager:
             path,
         )
 
+        raw_heartbeat_channels = raw.get("keithley_heartbeat_channels", {})
+        if not isinstance(raw_heartbeat_channels, dict):
+            raise SafetyConfigError(f"safety.yaml at {path}: keithley_heartbeat_channels must be a mapping")
+        unknown_smu_channels = set(raw_heartbeat_channels) - set(SMU_CHANNELS)
+        if unknown_smu_channels:
+            raise SafetyConfigError(
+                f"safety.yaml at {path}: unknown keithley_heartbeat_channels outputs {sorted(unknown_smu_channels)!r}"
+            )
+        heartbeat_channels: dict[SmuChannel, tuple[str, ...]] = {}
+        for smu_channel in SMU_CHANNELS:
+            configured = raw_heartbeat_channels.get(smu_channel, [])
+            if not isinstance(configured, list) or any(type(channel_id) is not str for channel_id in configured):
+                raise SafetyConfigError(
+                    f"safety.yaml at {path}: keithley_heartbeat_channels.{smu_channel} "
+                    "must be a list of canonical descriptor identities"
+                )
+            heartbeat_channels[smu_channel] = tuple(configured)
+
         try:
             src_limits = raw.get("source_limits", {})
             self._config = SafetyConfig(
@@ -354,9 +376,11 @@ class SafetyManager:
                 max_power_w=float(src_limits.get("max_power_w", 5.0)),
                 max_voltage_v=float(src_limits.get("max_voltage_v", 40.0)),
                 max_current_a=float(src_limits.get("max_current_a", 1.0)),
+                keithley_heartbeat_channels=heartbeat_channels,
                 scheduler_drain_timeout_s=float(raw.get("scheduler_drain_timeout_s", 5.0)),
             )
             self._keithley_patterns = [re.compile(pattern) for pattern in raw.get("keithley_channels", [".*/smu.*"])]
+            self._keithley_heartbeat_bindings = {channel: frozenset() for channel in SMU_CHANNELS}
             # Liveness validation resolves these canonical patterns against
             # the selected descriptor authority.  A config reload must start
             # from the newly loaded canonical source rather than retaining a
@@ -1922,7 +1946,11 @@ class SafetyManager:
 
     def _critical_input_snapshot_fact(self, now: float) -> tuple[PlantHealthFact, SafetyBlocker | None]:
         for pattern in self._config.critical_channels:
-            matches = [(channel, sample) for channel, sample in self._latest.items() if pattern.match(channel)]
+            matches = [
+                (channel, sample)
+                for (_instrument_id, channel), sample in self._latest.items()
+                if pattern.match(channel)
+            ]
             if not matches and not self._mock:
                 return (
                     PlantHealthFact(
@@ -2682,7 +2710,7 @@ class SafetyManager:
 
         for pattern in self._config.critical_channels:
             matched = False
-            for ch, (ts, value, status) in self._latest.items():
+            for (_instrument_id, ch), (ts, value, status) in self._latest.items():
                 if not pattern.match(ch):
                     continue
                 matched = True
@@ -2744,7 +2772,11 @@ class SafetyManager:
             while True:
                 reading = await self._queue.get()
                 now = time.monotonic()
-                self._latest[reading.channel] = (now, reading.value, reading.status.value)
+                self._latest[(reading.instrument_id, reading.channel)] = (
+                    now,
+                    reading.value,
+                    reading.status.value,
+                )
                 self._refresh_operator_safety_snapshot()
                 if reading.unit == "K" and reading.is_usable():
                     # S3: gate the rate estimator on the doctrine predicate. A
@@ -2806,12 +2838,12 @@ class SafetyManager:
             return
 
         for pattern in self._config.critical_channels:
-            for ch, (ts, _value, _status) in self._latest.items():
+            for (_instrument_id, ch), (ts, _value, _status) in self._latest.items():
                 if pattern.match(ch) and now - ts > self._config.stale_timeout_s:
                     await self._fault(f"Устаревшие данные канала {ch}", channel=ch)
                     return
 
-        for ch, (_ts, value, status) in self._latest.items():
+        for (_instrument_id, ch), (_ts, value, status) in self._latest.items():
             if any(pattern.match(ch) for pattern in self._config.critical_channels):
                 if status != "ok":
                     await self._fault(f"Channel {ch} status={status}", channel=ch, value=value)
@@ -2882,13 +2914,11 @@ class SafetyManager:
                 return
 
     def _has_fresh_keithley_data(self, now: float, smu_channel: SmuChannel) -> bool:
-        aliases = {smu_channel, smu_channel.replace("smu", "smu_")}
-        for channel, (ts, _value, status) in self._latest.items():
+        accepted = self._keithley_heartbeat_bindings.get(smu_channel, frozenset())
+        for identity, (ts, _value, status) in self._latest.items():
             if status != "ok":
                 continue
-            if not any(pattern.match(channel) for pattern in self._keithley_patterns):
-                continue
-            if any(f"/{alias}/" in channel for alias in aliases) and now - ts < self._config.heartbeat_timeout_s:
+            if identity in accepted and now - ts < self._config.heartbeat_timeout_s:
                 return True
         return False
 

@@ -32,8 +32,8 @@ PLANES — proven from the CONSUMING code (not assumed):
      safety broker (src/cryodaq/core/scheduler.py:681
      ``await self._safety_broker.publish_batch(readings)``), distinct from the
      canonical stream it sends to the DataBroker at scheduler.py:676.
-     ``self._latest`` is keyed by ``reading.channel`` (src/cryodaq/core/
-     safety_manager.py:1652), i.e. the raw emitted label. ``critical_channels``
+     ``self._latest`` is keyed by exact ``(reading.instrument_id,
+     reading.channel)`` identity. ``critical_channels``
      patterns are matched with ``pattern.match(ch)`` (src/cryodaq/core/
      safety_manager.py:988, 1612, 1715, 1720).  => match against raw
      emitted_channel.
@@ -117,21 +117,8 @@ def _load_interlock_conditions() -> list[InterlockCondition]:
     return conditions
 
 
-def _load_safety_patterns() -> tuple[list[re.Pattern[str]], list[re.Pattern[str]]]:
-    # Mirrors src/cryodaq/gui/first_run_config.py:194
-    # ``SafetyManager(SafetyBroker()).load_config(safety_path)`` — the production
-    # loader (src/cryodaq/core/safety_manager.py:195) compiles + validates the
-    # critical_channels regexes and rejects an empty/invalid set.
-    sm = SafetyManager(SafetyBroker())
-    sm.load_config(_SAFETY_PATH)
-    critical = list(sm._config.critical_channels)
-    keithley = [re.compile(p) for p in sm._config.keithley_channel_patterns]
-    return critical, keithley
-
-
 CANONICAL_CHANNEL_IDS, RAW_EMITTED_CHANNELS = _load_roster()
 INTERLOCK_CONDITIONS = _load_interlock_conditions()
-SAFETY_CRITICAL_PATTERNS, SAFETY_KEITHLEY_PATTERNS = _load_safety_patterns()
 ALARMS_V3_PROTECTED_PATTERNS = sorted(load_critical_channels_from_alarms_v3(_ALARMS_V3_PATH))
 
 # Channels published DIRECTLY to the DataBroker, bypassing the scheduler and
@@ -191,6 +178,7 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
     descriptor_catalog = load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
     manager = SafetyManager(SafetyBroker())
     manager.load_config(_SAFETY_PATH)
+    manager._config.require_keithley_for_run = False
     canonical_before = [pattern.pattern for pattern in manager._config.critical_channels]
     protected = [
         *load_protected_channel_patterns(_INTERLOCKS_PATH),
@@ -211,26 +199,6 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
         assert len(matched) == 1, (
             f"resolved safety matcher {pattern.pattern!r} must select exactly one raw emitted channel; got {matched!r}"
         )
-
-
-@pytest.mark.parametrize(
-    "pattern",
-    SAFETY_KEITHLEY_PATTERNS,
-    ids=[_node_id(p.pattern) for p in SAFETY_KEITHLEY_PATTERNS],
-)
-def test_safety_keithley_pattern_matches_raw_channel(pattern: re.Pattern[str]) -> None:
-    """safety.yaml keithley_channels pattern must match >=1 raw Keithley label.
-
-    Used by the RUNNING heartbeat check (src/cryodaq/core/safety_manager.py:1794)
-    against the RAW ``self._latest`` keys. A dead pattern here would silently
-    disable the source heartbeat watchdog.
-    """
-    matched = [ch for ch in RAW_EMITTED_CHANNELS if pattern.match(ch)]
-    assert matched, (
-        f"safety.yaml keithley_channels pattern {pattern.pattern!r} matches NO "
-        f"raw emitted_channel (SafetyManager heartbeat plane = pre-bind). "
-        f"Roster sample: {[c for c in RAW_EMITTED_CHANNELS if 'smu' in c][:4]}."
-    )
 
 
 @pytest.mark.parametrize(

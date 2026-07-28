@@ -492,7 +492,7 @@ async def test_run_permitted_state_is_actively_monitored():
 
     sm._state = SafetyState.RUN_PERMITTED
     stale_ts = time.monotonic() - 100.0
-    sm._latest["Т1 Криостат верх"] = (stale_ts, 77.0, "ok")
+    sm._latest[("test", "Т1 Криостат верх")] = (stale_ts, 77.0, "ok")
     sm._config.critical_channels = [re.compile(r"Т1 .*")]
     sm._config.stale_timeout_s = 10.0
 
@@ -537,7 +537,7 @@ async def test_rate_fault_latches_within_35s_at_deployed_2s_poll():
     for i in range(18):  # 18 samples × 2 s = 34 s of simulated data
         t = t0 + 2.0 * i
         sm._rate_estimator.push(channel, t, 80.0 + ramp_per_sec * (t - t0))
-        sm._latest[channel] = (time.monotonic(), 80.0, "ok")  # always fresh
+        sm._latest[("test", channel)] = (time.monotonic(), 80.0, "ok")  # always fresh
         await sm._run_checks()
         if sm._state == SafetyState.FAULT_LATCHED:
             fault_at_s = 2.0 * i
@@ -715,7 +715,7 @@ async def test_keithley_heartbeat_monitored_in_run_permitted():
     sm._config.heartbeat_timeout_s = 0.5
 
     now = time.monotonic()
-    sm._latest["Т1 Криостат верх"] = (now, 77.0, "ok")
+    sm._latest[("test", "Т1 Криостат верх")] = (now, 77.0, "ok")
 
     sm._state = SafetyState.RUN_PERMITTED
     sm._run_permitted_since = now - 10.0  # 10s ago, well past 0.5s timeout

@@ -183,6 +183,7 @@ async def test_heartbeat_fresh_ok_reading_keeps_running():
     mgr, broker = await _make_manager(mock=False, keithley=k, stale=30.0)
     mgr._config.heartbeat_timeout_s = 5.0  # generous for test timing
     mgr._config.critical_channels = []
+    mgr._keithley_heartbeat_bindings["smua"] = frozenset({("test", "keithley/smu_a/voltage")})
     try:
         # Seed Keithley data BEFORE entering RUNNING (so heartbeat has data)
         await _feed(broker, channel="keithley/smu_a/voltage", value=0.1, unit="V", status=ChannelStatus.OK)
@@ -205,12 +206,13 @@ async def test_heartbeat_fresh_ok_reading_keeps_running():
         await mgr.stop()
 
 
-async def test_heartbeat_uses_smu_channel_pattern():
-    """Heartbeat recognises any channel matching /smu pattern as Keithley."""
+async def test_heartbeat_uses_exact_declared_identity():
+    """A fresh exact identity declared for smua satisfies its heartbeat."""
     k = _mock_keithley()
     mgr, broker = await _make_manager(mock=False, keithley=k, stale=30.0)
     mgr._config.heartbeat_timeout_s = 5.0  # generous for test
     mgr._config.critical_channels = []
+    mgr._keithley_heartbeat_bindings["smua"] = frozenset({("test", "keithley/smu_a/power")})
     try:
         # Seed Keithley data before RUNNING
         await _feed(broker, channel="keithley/smu_a/power", value=0.1, unit="W", status=ChannelStatus.OK)
@@ -221,9 +223,7 @@ async def test_heartbeat_uses_smu_channel_pattern():
         await asyncio.sleep(0.5)
 
         # Within heartbeat window — should remain RUNNING
-        assert mgr.state == SafetyState.RUNNING, (
-            f"Channel 'keithley/smu_a/power' containing '/smu' must satisfy heartbeat, got {mgr.state}"
-        )
+        assert mgr.state == SafetyState.RUNNING, f"Declared heartbeat identity must satisfy smua, got {mgr.state}"
     finally:
         await mgr.stop()
 
