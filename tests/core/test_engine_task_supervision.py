@@ -8,9 +8,9 @@ logic is exercised directly (same rationale as ``_drain_dispatch_tasks``):
   * ``_handle_supervised_task_exit`` — the done-callback decision core:
     CRITICAL + operator alarm + exponential-backoff restart on unexpected
     death, and FAULT-latch for the two safety tasks after 2 failed restarts.
-    Ordinary clean shutdown / cancellation must never restart or alarm. A
-    safety-critical child returning or being cancelled while the engine is
+    Every registered task returning or being cancelled while the engine is
     live is authority loss and must alarm/restart just like an exception.
+    During orderly shutdown, every terminal outcome remains expected.
 """
 
 from __future__ import annotations
@@ -210,11 +210,13 @@ def _invoke(task, *, stopping=False, counts=None, calls=None, safety=False, runn
     )
 
 
-async def test_cancelled_task_is_ignored() -> None:
+async def test_live_cancelled_task_alarms_and_restarts() -> None:
     task = await _cancelled_task()
-    verdict, calls, _ = _invoke(task)
-    assert verdict == "ignored"
-    assert calls == {"alarm": [], "restart": [], "fault": []}
+    verdict, calls, counts = _invoke(task)
+    assert verdict == "restart"
+    assert counts["widget"] == 1
+    assert "cancelled unexpectedly" in calls["alarm"][0][1]
+    assert calls["restart"] == [_SUPERVISE_BACKOFF_BASE_S]
 
 
 async def test_shutdown_never_restarts() -> None:
@@ -224,11 +226,13 @@ async def test_shutdown_never_restarts() -> None:
     assert calls["restart"] == [] and calls["alarm"] == []
 
 
-async def test_clean_return_is_ignored() -> None:
+async def test_live_clean_return_alarms_and_restarts() -> None:
     task = await _clean_task()
-    verdict, calls, _ = _invoke(task)
-    assert verdict == "ignored"
-    assert calls["alarm"] == []
+    verdict, calls, counts = _invoke(task)
+    assert verdict == "restart"
+    assert counts["widget"] == 1
+    assert "returned unexpectedly" in calls["alarm"][0][1]
+    assert calls["restart"] == [_SUPERVISE_BACKOFF_BASE_S]
 
 
 async def test_unexpected_safety_task_cancellation_alarms_and_restarts() -> None:
@@ -746,6 +750,81 @@ async def test_task_supervisor_respawns_replaces_registry_and_updates_on_spawn(
     assert replacement is not initial
     assert safety_manager._collect_task is replacement
     await _cancel_live_supervised_tasks(supervisor)
+
+
+async def test_task_supervisor_live_clean_return_alarms_and_respawns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervision_mod, "_SUPERVISE_BACKOFF_BASE_S", 0.0)
+    supervisor, event_bus, _, dispatch_tasks = _make_supervisor()
+    attempts = 0
+    keep_alive = asyncio.Event()
+
+    async def factory() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return
+        await keep_alive.wait()
+
+    initial = supervisor.spawn("ordinary", factory)
+    await _spin_until(lambda: attempts == 2)
+    if dispatch_tasks:
+        await asyncio.gather(*list(dispatch_tasks), return_exceptions=True)
+
+    assert supervisor.supervised_tasks["ordinary"] is not initial
+    assert len(event_bus.events) == 1
+    assert event_bus.events[0].payload["alarm_id"] == "task_supervisor_ordinary"
+    await _cancel_live_supervised_tasks(supervisor)
+
+
+async def test_task_supervisor_live_cancellation_alarms_and_respawns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(supervision_mod, "_SUPERVISE_BACKOFF_BASE_S", 0.0)
+    supervisor, event_bus, _, dispatch_tasks = _make_supervisor()
+    attempts = 0
+    keep_alive = asyncio.Event()
+
+    async def factory() -> None:
+        nonlocal attempts
+        attempts += 1
+        await keep_alive.wait()
+
+    initial = supervisor.spawn("ordinary", factory)
+    await _spin_until(lambda: attempts == 1)
+    initial.cancel()
+    await asyncio.gather(initial, return_exceptions=True)
+    await _spin_until(lambda: attempts == 2)
+    if dispatch_tasks:
+        await asyncio.gather(*list(dispatch_tasks), return_exceptions=True)
+
+    assert supervisor.supervised_tasks["ordinary"] is not initial
+    assert len(event_bus.events) == 1
+    assert event_bus.events[0].payload["alarm_id"] == "task_supervisor_ordinary"
+    await _cancel_live_supervised_tasks(supervisor)
+
+
+async def test_task_supervisor_stopping_cancellation_does_not_alarm_or_respawn() -> None:
+    supervisor, event_bus, _, dispatch_tasks = _make_supervisor()
+    started = asyncio.Event()
+    keep_alive = asyncio.Event()
+
+    async def factory() -> None:
+        started.set()
+        await keep_alive.wait()
+
+    task = supervisor.spawn("ordinary", factory)
+    await started.wait()
+    supervisor.stop()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+    if dispatch_tasks:
+        await asyncio.gather(*list(dispatch_tasks), return_exceptions=True)
+
+    assert supervisor._restarts == {}
+    assert event_bus.events == []
 
 
 async def test_task_supervisor_latches_after_two_failed_restarts(

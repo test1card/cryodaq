@@ -103,12 +103,12 @@ def _handle_supervised_task_exit(
 ) -> str:
     """Decide + act on a supervised long-lived task's termination.
 
-    A2(b): the done-callback core. An ordinary task alarms/restarts only on an
-    exception. For a safety-critical task, every terminal outcome while the
-    engine is live—including cancellation or a clean return—is authority loss
-    and follows the same alarm/restart path. During shutdown every outcome is
-    expected. After ``_SAFETY_TASK_MAX_RESTARTS`` failed safety restarts the
-    supervisor latches FAULT via SafetyManager instead of looping forever.
+    A2(b): the done-callback core. Every registered task is long-lived, so
+    every terminal outcome while the engine is live—including cancellation or
+    a clean return—is authority loss and follows the alarm/restart path.
+    During shutdown every outcome is expected. After
+    ``_SAFETY_TASK_MAX_RESTARTS`` failed safety restarts the supervisor latches
+    FAULT via SafetyManager instead of looping forever.
     Side effects are injected so the policy is testable in isolation.
 
     ``running_s`` (F3) is how long THIS incarnation ran before dying. A run
@@ -119,25 +119,19 @@ def _handle_supervised_task_exit(
     Returns one of ``"ignored" | "restart" | "fault_latch"``.
     """
     # Engine shutdown is the only context where every terminal outcome is
-    # expected. Ordinary-task cancellation remains ignored; safety-child
-    # cancellation while live is authority loss.
+    # expected. A registered task that terminates while live has lost the
+    # long-lived authority it was created to maintain.
     if stopping:
         return "ignored"
     if task.cancelled():
-        if not safety_critical:
-            return "ignored"
-        exc: BaseException | None = RuntimeError(f"safety-critical task {name} was cancelled unexpectedly")
+        exc: BaseException | None = RuntimeError(f"supervised task {name} was cancelled unexpectedly")
     else:
         try:
             exc = task.exception()
         except asyncio.CancelledError:
-            if not safety_critical:
-                return "ignored"
-            exc = RuntimeError(f"safety-critical task {name} was cancelled unexpectedly")
+            exc = RuntimeError(f"supervised task {name} was cancelled unexpectedly")
     if exc is None:
-        if not safety_critical:
-            return "ignored"
-        exc = RuntimeError(f"safety-critical task {name} returned unexpectedly")
+        exc = RuntimeError(f"supervised task {name} returned unexpectedly")
 
     logger_.critical(
         "Надзор: служебная задача %s аварийно завершилась — %r",
