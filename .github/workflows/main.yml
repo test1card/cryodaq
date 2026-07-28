@@ -83,27 +83,11 @@ jobs:
         if: matrix.suite == 'remaining'
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA:?}"
-          git diff --quiet
-          git diff --cached --quiet
-          test -z "$(git status --porcelain=v1 --untracked-files=all)"
-          python -B -m tools.check_python_compile --root .
-          python -m pytest \
-            -p no:cacheprovider \
-            --basetemp "${RUNNER_TEMP:?}/cryodaq-active-remaining-pytest" \
-            tests/docs/test_docs_freshness.py \
-            tests/governance/test_agent_formatter_gate.py \
-            tests/test_claudemd_index.py \
-            tests/governance/test_agent_preventions.py::test_generated_candidate_and_test_evidence_prefixes_are_ignored \
-            tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six \
-            tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six \
-            'tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[missing-defective-commit]' \
-            'tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[wrong-defective-tree]' \
-            --tb=short -v --timeout=120 --timeout-method=thread
-          test "$(git rev-parse HEAD)" = "${GITHUB_SHA:?}"
-          git diff --quiet
-          git diff --cached --quiet
-          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          python -m tools.ci_active_checkout_runner \
+            --repository "${GITHUB_WORKSPACE:?}" \
+            --revision "${GITHUB_SHA:?}" \
+            --suite remaining \
+            --basetemp "${RUNNER_TEMP:?}/cryodaq-active-remaining-pytest"
 
       - name: Lint
         if: matrix.suite == 'remaining'
@@ -149,7 +133,6 @@ jobs:
 
       - name: Run exact exported candidate suite
         id: candidate
-        continue-on-error: true
         run: |
           python -m tools.ci_candidate_evidence run \
             --repository "${GITHUB_WORKSPACE:?}" \
@@ -205,6 +188,5 @@ jobs:
           else
             test "${{ steps.active-remaining.outcome }}" = skipped
           fi
-          test "${{ steps.candidate.outcome }}" = success
           test "${{ steps.candidate-upload.outcome }}" = success
           test "${{ steps.candidate-attestation-upload.outcome }}" = success

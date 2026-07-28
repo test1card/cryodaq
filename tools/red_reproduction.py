@@ -19,10 +19,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import tarfile
+import tempfile
 from pathlib import Path
-
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 _RECEIPT_DIRECTORY = Path("governance/red_reproductions")

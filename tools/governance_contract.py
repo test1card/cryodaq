@@ -551,7 +551,8 @@ def _validate_guard_source_blobs(
             raise GovernanceContractError(f"{entry_id} covered guard source is unavailable; reopen it") from exc
         if actual_blob != expected_blob:
             raise GovernanceContractError(
-                f"{entry_id} covered guard source changed since its attested closure; reopen it"
+                f"{entry_id} guard-source-blob-mismatch path={path} expected={expected_blob} actual={actual_blob}; "
+                "restore it or reopen the prevention"
             )
 
 

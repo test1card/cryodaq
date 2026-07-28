@@ -4,7 +4,8 @@
 Counts code/comment/blank by category, with explicit exclusions for generated
 data, vendored assets, logs and auto-generated artifacts so the base is not inflated.
 """
-import os, sys, json
+import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

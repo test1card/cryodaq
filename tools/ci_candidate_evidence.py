@@ -18,11 +18,14 @@ from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported
 
 _SHA256 = "sha256:"
 FAILURE_RECEIPT_PREFIX = "CRYODAQ_PYTEST_FAILURE_RECEIPT "
+PHASE_DIAGNOSIS_PREFIX = "CRYODAQ_CANDIDATE_PHASE_DIAGNOSIS "
 FAILURE_RECEIPT_INDEX_ENV = "CRYODAQ_CANDIDATE_FAILURE_RECEIPT_INDEX"
-_FAILURE_RECEIPT_ENV = "CRYODAQ_CANDIDATE_FAILURE_RECEIPT_SUITE"
+FAILURE_RECEIPT_SUITE_ENV = "CRYODAQ_CANDIDATE_FAILURE_RECEIPT_SUITE"
 _FAILURE_RECEIPT_STATE = "_cryodaq_candidate_failure_receipt"
 _FAILURE_RECEIPT_ENVELOPE_FIELDS = frozenset({"payload", "sha256"})
-_FAILURE_RECEIPT_PAYLOAD_FIELDS = frozenset({"failed_nodeids", "invocation_index", "schema_version", "suite"})
+_FAILURE_RECEIPT_PAYLOAD_FIELDS = frozenset(
+    {"collection_complete", "failed_nodeids", "invocation_index", "population", "schema_version", "suite"}
+)
 _FAILURE_RECEIPT_SUITES = frozenset({"agents", "core", "gui", "remaining"})
 _FAILURE_RECEIPT_ACTIVE_STATE: _FailureReceiptState | None = None
 _LEGACY_PYTEST_FAILURE_PREFIX = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+?)\r?$", re.MULTILINE)
@@ -47,8 +50,14 @@ def _canonical(payload: Mapping[str, Any]) -> bytes:
 def canonical_failure_receipt(payload: Mapping[str, Any]) -> str:
     """Return one canonical, self-digesting pytest failure receipt."""
 
-    payload_raw = _canonical(payload)
-    return _canonical({"payload": dict(payload), "sha256": _digest(payload_raw)}).decode("utf-8").rstrip("\n")
+    normalized = dict(payload)
+    # Fixture callers from the former schema remain useful for testing receipt
+    # transport, but are rendered as the current, explicit zero-population form.
+    normalized.setdefault("collection_complete", True)
+    normalized.setdefault("population", {"collected": 0, "deselected": 0, "executed": 0, "skipped": 0})
+    normalized["schema_version"] = 3
+    payload_raw = _canonical(normalized)
+    return _canonical({"payload": normalized, "sha256": _digest(payload_raw)}).decode("utf-8").rstrip("\n")
 
 
 class _FailureReceiptState:
@@ -57,6 +66,11 @@ class _FailureReceiptState:
         self.invocation_index = invocation_index
         self.nodes: list[str] = []
         self._seen: set[str] = set()
+        self.executed: set[str] = set()
+        self.skipped: set[str] = set()
+        self.deselected = 0
+        self.collected = 0
+        self.collection_complete = False
 
     def add(self, nodeid: str) -> None:
         if nodeid and nodeid not in self._seen:
@@ -74,7 +88,7 @@ def pytest_configure(config: Any) -> None:
     """
 
     global _FAILURE_RECEIPT_ACTIVE_STATE
-    suite = os.environ.get(_FAILURE_RECEIPT_ENV)
+    suite = os.environ.get(FAILURE_RECEIPT_SUITE_ENV)
     if suite is None:
         return
     if suite not in _FAILURE_RECEIPT_SUITES:
@@ -97,8 +111,12 @@ def pytest_runtest_logreport(report: Any) -> None:
     """Record failed setup/call/teardown reports using pytest's exact nodeid."""
 
     state = _FAILURE_RECEIPT_ACTIVE_STATE
-    if state is not None and report.failed:
-        state.add(report.nodeid)
+    if state is not None:
+        state.executed.add(report.nodeid)
+        if report.failed:
+            state.add(report.nodeid)
+        if report.skipped:
+            state.skipped.add(report.nodeid)
 
 
 def pytest_collectreport(report: Any) -> None:
@@ -109,6 +127,19 @@ def pytest_collectreport(report: Any) -> None:
         state.add(report.nodeid)
 
 
+def pytest_deselected(items: list[Any]) -> None:
+    state = _FAILURE_RECEIPT_ACTIVE_STATE
+    if state is not None:
+        state.deselected += len(items)
+
+
+def pytest_collection_finish(session: Any) -> None:
+    state = _FAILURE_RECEIPT_ACTIVE_STATE
+    if state is not None:
+        state.collected = len(session.items) + state.deselected
+        state.collection_complete = True
+
+
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     """Emit one machine-readable receipt after pytest has produced all reports."""
 
@@ -116,9 +147,16 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     if state is None:
         return
     payload = {
+        "collection_complete": state.collection_complete,
         "failed_nodeids": state.nodes,
         "invocation_index": state.invocation_index,
-        "schema_version": 2,
+        "population": {
+            "collected": state.collected,
+            "deselected": state.deselected,
+            "executed": len(state.executed),
+            "skipped": len(state.skipped),
+        },
+        "schema_version": 3,
         "suite": state.suite,
     }
     line = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}"
@@ -337,8 +375,8 @@ def _run(args: argparse.Namespace) -> int:
     repo = args.repository.resolve(strict=True)
     github = _github_environment()
     command = (sys.executable, "-B", "-m", "tools.ci_candidate_runner", "--suite", args.suite)
-    prior_suite = os.environ.get(_FAILURE_RECEIPT_ENV)
-    os.environ[_FAILURE_RECEIPT_ENV] = args.suite
+    prior_suite = os.environ.get(FAILURE_RECEIPT_SUITE_ENV)
+    os.environ[FAILURE_RECEIPT_SUITE_ENV] = args.suite
     try:
         receipt = execute_exported_candidate(
             repo,
@@ -349,9 +387,9 @@ def _run(args: argparse.Namespace) -> int:
         )
     finally:
         if prior_suite is None:
-            os.environ.pop(_FAILURE_RECEIPT_ENV, None)
+            os.environ.pop(FAILURE_RECEIPT_SUITE_ENV, None)
         else:
-            os.environ[_FAILURE_RECEIPT_ENV] = prior_suite
+            os.environ[FAILURE_RECEIPT_SUITE_ENV] = prior_suite
     write_execution_bundle(
         receipt,
         output=args.output,
@@ -413,7 +451,7 @@ def _extract_failure_receipt_payloads(output: str, *, suite: str) -> list[dict[s
         failed_nodeids = payload.get("failed_nodeids")
         invocation_index = payload.get("invocation_index")
         if (
-            payload.get("schema_version") != 2
+            payload.get("schema_version") != 3
             or payload.get("suite") != suite
             or not isinstance(invocation_index, int)
             or isinstance(invocation_index, bool)
@@ -423,6 +461,16 @@ def _extract_failure_receipt_payloads(output: str, *, suite: str) -> list[dict[s
             or len(failed_nodeids) != len(set(failed_nodeids))
         ):
             raise CiCandidateEvidenceError("candidate failure receipt schema, suite, or node IDs are invalid")
+        population = payload.get("population")
+        if (
+            payload.get("collection_complete") is not True
+            or not isinstance(population, dict)
+            or set(population) != {"collected", "deselected", "executed", "skipped"}
+            or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in population.values())
+            or population["collected"] != population["executed"] + population["deselected"]
+            or population["skipped"] > population["executed"]
+        ):
+            raise CiCandidateEvidenceError("candidate receipt population is incomplete or inconsistent")
         payloads.append(payload)
     return payloads
 
@@ -509,6 +557,38 @@ def _legacy_failure_nodes(output: str) -> tuple[str, ...]:
     return tuple(nodes)
 
 
+def _phase_diagnoses(output: str, *, suite: str) -> list[dict[str, Any]]:
+    """Return validated pre-pytest runner diagnoses preserved in a bundle."""
+
+    diagnoses: list[dict[str, Any]] = []
+    fields = {"actual_blobs", "affected_receipt_ids", "expected_blobs", "phase", "reason", "remediation", "suite"}
+    for line in output.splitlines():
+        if not line.startswith(PHASE_DIAGNOSIS_PREFIX):
+            continue
+        try:
+            payload = json.loads(line[len(PHASE_DIAGNOSIS_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise CiCandidateEvidenceError(f"candidate phase diagnosis is not JSON: {exc}") from exc
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != fields
+            or payload["suite"] != suite
+            or payload["phase"] not in {"compile", "guard-setup", "pytest"}
+            or not isinstance(payload["reason"], str)
+            or not isinstance(payload["remediation"], str)
+            or not isinstance(payload["affected_receipt_ids"], list)
+            or any(not isinstance(value, str) or not value for value in payload["affected_receipt_ids"])
+            or any(
+                not isinstance(mapping, dict)
+                or any(not isinstance(key, str) or not isinstance(value, str) for key, value in mapping.items())
+                for mapping in (payload["expected_blobs"], payload["actual_blobs"])
+            )
+        ):
+            raise CiCandidateEvidenceError("candidate phase diagnosis shape is invalid")
+        diagnoses.append(payload)
+    return diagnoses
+
+
 def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     """Print a bounded candidate-failure summary without replacing its bundle.
 
@@ -536,6 +616,7 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     if not isinstance(suite, str) or suite not in _FAILURE_RECEIPT_SUITES:
         raise CiCandidateEvidenceError("candidate failure summary requires an exact candidate suite")
     payloads = _extract_failure_receipt_payloads(output, suite=suite)
+    diagnoses = _phase_diagnoses(output, suite=suite)
     structural_nodes: list[str] = []
     seen: set[str] = set()
     for payload in payloads:
@@ -557,6 +638,15 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
     coverage_corrupt = bool(duplicate_indices)
     warn = coverage_gap or coverage_corrupt
     print(f"Exact candidate failed (exit {returncode}); failing pytest node IDs follow (max {max_nodes}).")
+    for diagnosis in diagnoses:
+        print(f"RUNNER PHASE FAILURE: {diagnosis['phase']}: {diagnosis['reason']}")
+        if diagnosis["expected_blobs"]:
+            print(
+                "RUNNER PHASE BLOBS: expected="
+                f"{diagnosis['expected_blobs']} actual={diagnosis['actual_blobs']} "
+                f"affected receipt IDs={diagnosis['affected_receipt_ids']}"
+            )
+        print(f"RUNNER PHASE REMEDIATION: {diagnosis['remediation']}")
     if warn:
         expected_clause = f", expected {expected_count}" if expected_count is not None else ""
         print(
@@ -587,7 +677,10 @@ def emit_failure_summary(bundle: Path, *, max_nodes: int = 20) -> None:
                     seen.add(node)
                     reported.append((node, " (legacy fallback)"))
     if not reported:
-        print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
+        if diagnoses:
+            print("FAILED NODE: no pytest node was available because the runner failed before pytest execution.")
+        else:
+            print("FAILED NODE: unavailable; inspect preserved stdout.bin and stderr.bin in the candidate artifact.")
         return
     for node, label in reported[:max_nodes]:
         print(f"FAILED NODE{label}: {node}")

@@ -17,8 +17,10 @@ from tools.candidate_evidence import execute_exported_candidate
 from tools.ci_candidate_evidence import (
     FAILURE_RECEIPT_INDEX_ENV,
     FAILURE_RECEIPT_PREFIX,
+    PHASE_DIAGNOSIS_PREFIX,
     CiCandidateEvidenceError,
     _expected_receipt_count,
+    _extract_failure_receipt_payloads,
     _failure_receipt_nodes,
     canonical_failure_receipt,
     emit_failure_summary,
@@ -26,6 +28,7 @@ from tools.ci_candidate_evidence import (
     write_artifact_attestation,
     write_execution_bundle,
 )
+from tools.ci_execution_roots import EXECUTION_ROOTS, checkout_execution_selection
 from tools.ci_guard_execution import (
     RECEIPT_PREFIX,
     GuardExecutionError,
@@ -77,6 +80,13 @@ def _github(commit: str) -> dict[str, str]:
         "github_workflow_ref": "owner/cryodaq/.github/workflows/main.yml@refs/pull/1/merge",
         "runner_os": "Windows",
     }
+
+
+def _population_receipt(suite: str, index: int) -> str:
+    return (
+        f"{FAILURE_RECEIPT_PREFIX}"
+        f"{canonical_failure_receipt({'failed_nodeids': [], 'invocation_index': index, 'suite': suite})}\n"
+    )
 
 
 def _bundle(tmp_path: Path) -> tuple[Path, Path, dict, dict, dict, dict]:
@@ -228,7 +238,13 @@ def test_gui_candidate_runner_executes_every_subcommand_and_aggregates_failures(
     def fake_run(command, **kwargs):
         observed.append(tuple(command))
         observed_state_roots.append(kwargs["env"]["CRYODAQ_STATE_ROOT"])
-        return subprocess.CompletedProcess(command, next(returncodes))
+        index = int(kwargs["env"][FAILURE_RECEIPT_INDEX_ENV])
+        return subprocess.CompletedProcess(
+            command,
+            next(returncodes),
+            stdout=_population_receipt("gui", index),
+            stderr="",
+        )
 
     monkeypatch.setattr(ci_candidate_runner.subprocess, "run", fake_run)
     monkeypatch.setattr(ci_candidate_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
@@ -258,7 +274,13 @@ def test_candidate_runner_executes_strict_active_guard_phase_and_propagates_fail
     def fake_run(command, **kwargs):
         observed.append(tuple(command))
         observed_state_roots.append(kwargs["env"]["CRYODAQ_STATE_ROOT"])
-        return subprocess.CompletedProcess(command, next(returncodes))
+        index = int(kwargs["env"][FAILURE_RECEIPT_INDEX_ENV])
+        return subprocess.CompletedProcess(
+            command,
+            next(returncodes),
+            stdout=_population_receipt("gui", index),
+            stderr="",
+        )
 
     monkeypatch.setattr(ci_candidate_runner.subprocess, "run", fake_run)
     monkeypatch.setattr(
@@ -458,6 +480,21 @@ def test_candidate_runner_rejects_zero_exit_without_exact_passed_guard_receipt(
     assert calls == 2
 
 
+def test_candidate_runner_rejects_green_pytest_without_population_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout="1 passed\n", stderr="")
+
+    monkeypatch.setattr(ci_candidate_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(ci_candidate_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
+
+    assert ci_candidate_runner.run_suite("core", root=tmp_path, basetemp=tmp_path.parent / "population-state") == 1
+
+
 def test_candidate_runner_rejects_invalid_python_before_pytest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -568,9 +605,16 @@ def test_failure_receipt_plugin_uses_pytest_report_nodeids_verbatim(tmp_path: Pa
     )
 
     assert completed.returncode == 1
-    assert _failure_receipt_nodes(completed.stdout + completed.stderr, suite="remaining") == (
+    output = completed.stdout + completed.stderr
+    assert _failure_receipt_nodes(output, suite="remaining") == (
         "tests/path with whitespace/test_failure.py::test_p[a - b]",
     )
+    assert _extract_failure_receipt_payloads(output, suite="remaining")[0]["population"] == {
+        "collected": 1,
+        "deselected": 0,
+        "executed": 1,
+        "skipped": 0,
+    }
 
 
 def test_failure_receipt_parser_rejects_forged_marker_semantics() -> None:
@@ -775,6 +819,58 @@ def test_missing_receipt_with_no_prose_fallback_warns_and_reports_unavailable(
     assert "FAILED NODE: unavailable" in output
 
 
+def test_failure_summary_names_pre_pytest_guard_blob_and_compile_phases(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "candidate-evidence"
+    bundle.mkdir()
+    (bundle / "execution-receipt.json").write_text('{"returncode": 1, "suite": "remaining"}\n', encoding="utf-8")
+    ci_candidate_runner._emit_phase_diagnosis(
+        suite="remaining",
+        phase="guard-setup",
+        reason="GUARD-BLOB-001 guard-source-blob-mismatch",
+        expected_blobs={"tests/governance/test_guard.py": "a" * 40},
+        actual_blobs={"tests/governance/test_guard.py": "b" * 40},
+        affected_receipt_ids=("guard:GUARD-BLOB-001",),
+        remediation="Restore the guard bytes bound by the closure receipt.",
+    )
+    ci_candidate_runner._emit_phase_diagnosis(
+        suite="remaining",
+        phase="compile",
+        reason="invalid syntax",
+        remediation="Repair the candidate source so it compiles before pytest starts.",
+    )
+    runner_diagnostics = capsys.readouterr().err
+    assert runner_diagnostics.count(PHASE_DIAGNOSIS_PREFIX) == 2
+    (bundle / "stdout.bin").write_text(runner_diagnostics, encoding="utf-8")
+    (bundle / "stderr.bin").write_bytes(b"")
+
+    emit_failure_summary(bundle)
+
+    output = capsys.readouterr().out
+    assert "RUNNER PHASE FAILURE: guard-setup: GUARD-BLOB-001 guard-source-blob-mismatch" in output
+    assert "expected={'tests/governance/test_guard.py': '" + "a" * 40 in output
+    assert "affected receipt IDs=['guard:GUARD-BLOB-001']" in output
+    assert "RUNNER PHASE FAILURE: compile: invalid syntax" in output
+    assert "FAILED NODE: no pytest node was available because the runner failed before pytest execution." in output
+
+
+def test_failure_receipt_population_rejects_unaccounted_collected_tests() -> None:
+    payload = {
+        "collection_complete": True,
+        "failed_nodeids": [],
+        "invocation_index": 1,
+        "population": {"collected": 3, "deselected": 0, "executed": 2, "skipped": 0},
+        "schema_version": 3,
+        "suite": "remaining",
+    }
+    marker = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}\n"
+
+    with pytest.raises(CiCandidateEvidenceError, match="population"):
+        _extract_failure_receipt_payloads(marker, suite="remaining")
+
+
 def test_expected_receipt_count_parses_runner_announcements() -> None:
     assert (
         _expected_receipt_count(
@@ -821,6 +917,7 @@ def test_exported_candidate_runner_emits_structural_failure_receipt_after_enviro
         "tools/check_python_compile.py",
         "tools/ci_candidate_evidence.py",
         "tools/ci_candidate_runner.py",
+        "tools/ci_execution_roots.py",
         "tools/ci_guard_execution.py",
         "tools/governance_contract.py",
         "governance/agent_preventions.yaml",
@@ -943,19 +1040,18 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert checkout["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
     assert active["if"] == "matrix.suite == 'remaining'"
     assert "${GITHUB_SHA:?}" in active["run"]
-    assert "git rev-parse HEAD" in active["run"]
-    assert active["run"].count("git status --porcelain=v1 --untracked-files=all") == 2
-    compile_offset = active["run"].index("python -B -m tools.check_python_compile --root .")
-    pytest_offset = active["run"].index("python -m pytest")
-    assert compile_offset < pytest_offset
-    for selection in (
-        *ci_candidate_runner.ACTIVE_CHECKOUT_REMAINING_FILES,
-        *ci_candidate_runner.ACTIVE_CHECKOUT_REMAINING_NODES,
-    ):
-        assert selection in active["run"]
+    assert "tools.ci_active_checkout_runner" in active["run"]
+    assert "--repository \"${GITHUB_WORKSPACE:?}\"" in active["run"]
+    assert "--revision \"${GITHUB_SHA:?}\"" in active["run"]
+    assert all(selection not in active["run"] for root in EXECUTION_ROOTS for selection in (*root.files, *root.nodes))
+    # The former guard only searched raw workflow text, so a comment containing
+    # every selection passed even while the executable pytest arguments drifted.
+    comment_only = "\n".join(f"# {value}" for root in EXECUTION_ROOTS for value in (*root.files, *root.nodes))
+    assert all(value in comment_only for root in EXECUTION_ROOTS for value in (*root.files, *root.nodes))
+    assert "tools.ci_active_checkout_runner" not in comment_only
     assert candidate.get("if") not in (False, "false", "${{ false }}")
     assert "if" not in candidate
-    assert candidate["continue-on-error"] is True
+    assert "continue-on-error" not in candidate
     assert "tools.ci_candidate_evidence run" in candidate["run"]
     assert '--revision "${GITHUB_SHA:?}"' in candidate["run"]
     upload_pin = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
@@ -974,7 +1070,6 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     )
     for dependency in (
         "steps.active-remaining.outcome",
-        "steps.candidate.outcome",
         "steps.candidate-upload.outcome",
         "steps.candidate-attestation-upload.outcome",
     ):
@@ -990,9 +1085,11 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     )
     assert len(commands) == 1
     command = commands[0]
-    for path in ci_candidate_runner.EXPORTED_REMAINING_EXCLUDED_FILES:
+    selection = checkout_execution_selection("remaining")
+    assert selection is not None and selection.execution_root == "git-index"
+    for path in selection.files:
         assert f"--ignore={path}" in command
-    for node in ci_candidate_runner.EXPORTED_REMAINING_EXCLUDED_NODES:
+    for node in (node for node in selection.nodes if node.split("::", 1)[0] not in selection.files):
         offset = command.index("--deselect")
         assert node in command[offset + 1 :]
     ordinary_response_files = [argument for argument in command if argument.startswith("@")]

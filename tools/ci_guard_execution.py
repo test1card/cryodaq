@@ -22,24 +22,10 @@ import yaml
 from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode
 
+from tools.ci_execution_roots import checkout_execution_selection as _checkout_execution_selection
 from tools.governance_contract import validate_registry
 
 ACTIVE_GUARD_STATUSES = frozenset({"open", "reopened", "closed"})
-# Registry guards that interrogate the Git *index* (`git ls-files`,
-# `git check-ignore`) rather than the file tree. The exported candidate is a
-# sealed copy with no `.git`, so no sealed-candidate cut -- ordinary or guard --
-# can execute them. They are excluded here and executed instead against the
-# exact checkout, in the workflow's active-remaining step, whose outcome the
-# enforce step requires. They are not made to skip: inside the bundle a skip is
-# indistinguishable from a pass, which is the false green this design exists to
-# remove. ci_candidate_runner re-exports these so the ordinary exported suite
-# deselects the same nodes, and test_ci_candidate_evidence.py requires each to
-# appear literally in that workflow step.
-GIT_INDEX_CHECKOUT_GUARD_NODES = (
-    "tests/governance/test_agent_formatter_gate.py::test_mutating_formatter_wrapper_is_absent",
-    "tests/governance/test_agent_formatter_gate.py::test_tracked_recipes_forbid_mutating_ruff_modes",
-    "tests/governance/test_agent_preventions.py::test_generated_candidate_and_test_evidence_prefixes_are_ignored",
-)
 DEFAULT_CI_SUITES = ("agents", "core", "gui", "remaining")
 GUARD_PLATFORMS = frozenset({"posix", "windows"})
 FORBIDDEN_GUARD_MARKERS = frozenset({"skip", "timeout", "xfail"})
@@ -130,11 +116,23 @@ def _registry(root: Path) -> dict[str, Any]:
     return validate_registry(payload)
 
 
+def checkout_execution_selection(root: Path, suite: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the registry-bound exact-checkout files and nodes for one suite."""
+
+    if suite not in DEFAULT_CI_SUITES:
+        raise GuardExecutionError(f"guard suite is not a default CI partition: {suite!r}")
+    selection = _checkout_execution_selection(suite)
+    if selection is None:
+        return (), ()
+    return selection.files, selection.nodes
+
+
 def active_guard_specs(
     root: Path,
     suite: str,
     *,
     platform: str | None = None,
+    execution_root: str = "exported-commit",
 ) -> tuple[GuardSpec, ...]:
     """Return exact active guards applicable to one suite and platform."""
 
@@ -143,6 +141,8 @@ def active_guard_specs(
     selected_platform = current_guard_platform() if platform is None else platform
     if selected_platform not in GUARD_PLATFORMS:
         raise GuardExecutionError(f"guard platform is invalid: {selected_platform!r}")
+    if execution_root not in {"exported-commit", "git-index"}:
+        raise GuardExecutionError(f"guard execution root is invalid: {execution_root!r}")
     payload = _registry(root)
     assignments: list[GuardSpec] = []
     for record in payload["records"]:
@@ -184,7 +184,11 @@ def active_guard_specs(
         and pair["ci_partition"] == suite
         and pair.get("platform") in {None, selected_platform}
     )
-    active = [spec for spec in active if spec.node not in GIT_INDEX_CHECKOUT_GUARD_NODES]
+    _, git_index_nodes = checkout_execution_selection(root, suite)
+    if execution_root == "git-index":
+        active = [spec for spec in active if spec.node in git_index_nodes]
+    else:
+        active = [spec for spec in active if spec.node not in git_index_nodes]
     by_node: dict[str, GuardSpec] = {}
     for spec in active:
         previous = by_node.get(spec.node)
@@ -442,6 +446,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         dest="cryodaq_active_guard_suite",
         help="Require executed-pass receipts for active guards in one default CI suite.",
     )
+    group.addoption(
+        "--cryodaq-active-guard-execution-root",
+        action="store",
+        choices=("exported-commit", "git-index"),
+        default="exported-commit",
+        dest="cryodaq_active_guard_execution_root",
+        help="Bind strict guard execution to its declared filesystem authority.",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -452,9 +464,10 @@ def pytest_configure(config: pytest.Config) -> None:
         raise pytest.UsageError("--cryodaq-active-guard-suite is required")
     root = Path(config.rootpath).resolve(strict=True)
     platform = current_guard_platform()
+    execution_root = config.getoption("cryodaq_active_guard_execution_root")
     state = _GuardState(
         suite=suite,
-        expected=active_guard_specs(root, suite, platform=platform),
+        expected=active_guard_specs(root, suite, platform=platform, execution_root=execution_root),
         platform=platform,
         collect_only=bool(config.option.collectonly),
     )

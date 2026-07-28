@@ -14,7 +14,8 @@ import yaml
 
 from tools.check_python_compile import compile_python_tree
 from tools.ci_candidate_runner import suite_for_node
-from tools.ci_guard_execution import GIT_INDEX_CHECKOUT_GUARD_NODES, active_guard_nodes
+from tools.ci_execution_roots import checkout_execution_selection
+from tools.ci_guard_execution import active_guard_nodes
 from tools.governance_contract import (
     GovernanceContractError,
     _git_blob_id,
@@ -809,7 +810,8 @@ def test_every_nonexpired_mapping_is_one_unique_active_guard_in_its_default_suit
             # keeps its strength: every non-expired mapping still executes
             # exactly once, in exactly one place. Relocation is spelled out
             # here so that deleting a guard can never pass as relocating one.
-            relocated = {node for node in GIT_INDEX_CHECKOUT_GUARD_NODES if node in expected_nodes}
+            selection = checkout_execution_selection(suite)
+            relocated = set(selection.nodes if selection is not None else ()) & expected_nodes
             assert active == tuple(sorted(expected_nodes - relocated))
             assert len(active) == len(set(active))
             assert relocated.isdisjoint(active)

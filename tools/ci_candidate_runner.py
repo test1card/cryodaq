@@ -11,13 +11,19 @@ from pathlib import Path
 from typing import Any
 
 from tools.check_python_compile import compile_python_tree
-from tools.ci_candidate_evidence import FAILURE_RECEIPT_INDEX_ENV
+from tools.ci_candidate_evidence import (
+    FAILURE_RECEIPT_INDEX_ENV,
+    FAILURE_RECEIPT_SUITE_ENV,
+    PHASE_DIAGNOSIS_PREFIX,
+    CiCandidateEvidenceError,
+    _extract_failure_receipt_payloads,
+)
 from tools.ci_guard_execution import (
-    GIT_INDEX_CHECKOUT_GUARD_NODES,
     RECEIPT_PREFIX,
     GuardExecutionError,
     active_guard_specs,
     canonical_receipt,
+    checkout_execution_selection,
     current_guard_platform,
     empty_guard_receipt,
 )
@@ -55,44 +61,68 @@ _PAYLOAD_FIELDS = frozenset(
         "warnings",
     }
 )
-# Guards that interrogate the Git index (`git ls-files`, `git check-ignore`)
-# rather than the file tree. The exported candidate is a sealed copy with no
-# `.git`, so these cannot run there -- they run against the exact checkout
-# instead, in the workflow's active-remaining step, and are excluded from the
-# exported suite below. Adding an entry here without adding it to
-# .github/workflows/main.yml fails test_ci_candidate_evidence.py, which
-# asserts every selection appears literally in that step.
-ACTIVE_CHECKOUT_REMAINING_FILES = (
-    "tests/docs/test_docs_freshness.py",
-    "tests/governance/test_agent_formatter_gate.py",
-    "tests/test_claudemd_index.py",
-)
-ACTIVE_CHECKOUT_REMAINING_NODES = tuple(
-    sorted(
-        {
-            *GIT_INDEX_CHECKOUT_GUARD_NODES,
-            "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_collects_strict_exact_six",
-            "tests/scripts/test_soak_mock_stack_runner.py::test_controlled_environment_genuinely_executes_strict_exact_six",
-            # These two mutations prove the receipt validator REFUSES a defective
-            # commit that does not resolve and a tree that does not match its
-            # commit. Both refusals are Git OBJECT RESOLUTION, and the receipts
-            # name real historical commits that exist only in the actual
-            # repository -- so the proof is impossible in an exported candidate
-            # with no `.git`, however the fixture is built. They are RELOCATED to
-            # the exact checkout rather than skipped, per docs/DECISIONS.md:165-173.
-            # Every OTHER mutation in that parametrisation needs no Git and stays
-            # in the sealed suite, where it now runs.
-            "tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[missing-defective-commit]",
-            "tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent[wrong-defective-tree]",
-        }
-        # The two formatter-gate nodes are the whole of their file, which is
-        # already ignored wholesale above; deselecting a node inside an ignored
-        # file is a pytest error, so keep only nodes whose file still collects.
-        - {node for node in GIT_INDEX_CHECKOUT_GUARD_NODES if node.split("::", 1)[0] in ACTIVE_CHECKOUT_REMAINING_FILES}
+
+
+def _emit_phase_diagnosis(
+    *,
+    suite: str,
+    phase: str,
+    reason: str,
+    expected_blobs: dict[str, str] | None = None,
+    actual_blobs: dict[str, str] | None = None,
+    affected_receipt_ids: tuple[str, ...] = (),
+    remediation: str,
+) -> None:
+    """Emit one parseable failure diagnosis before pytest can emit a receipt."""
+
+    payload = {
+        "actual_blobs": actual_blobs or {},
+        "affected_receipt_ids": list(affected_receipt_ids),
+        "expected_blobs": expected_blobs or {},
+        "phase": phase,
+        "reason": reason,
+        "remediation": remediation,
+        "suite": suite,
+    }
+    print(
+        f"{PHASE_DIAGNOSIS_PREFIX}{json.dumps(payload, sort_keys=True, separators=(',', ':'))}",
+        file=sys.stderr,
+        flush=True,
     )
-)
-EXPORTED_REMAINING_EXCLUDED_FILES = ACTIVE_CHECKOUT_REMAINING_FILES
-EXPORTED_REMAINING_EXCLUDED_NODES = ACTIVE_CHECKOUT_REMAINING_NODES
+
+
+def _guard_blob_diagnosis(error: Exception) -> tuple[dict[str, str], dict[str, str], tuple[str, ...]]:
+    """Extract the blob mismatch binding from governance's fail-closed error."""
+
+    import re
+
+    match = re.search(
+        r"(?P<record>[A-Z0-9-]+) guard-source-blob-mismatch path=(?P<path>\S+) "
+        r"expected=(?P<expected>[0-9a-f]{40}) actual=(?P<actual>[0-9a-f]{40})",
+        str(error),
+    )
+    if match is None:
+        return {}, {}, ()
+    return (
+        {match["path"]: match["expected"]},
+        {match["path"]: match["actual"]},
+        (f"guard:{match['record']}",),
+    )
+
+
+def _validate_candidate_population_receipt(output: str, *, suite: str, index: int) -> None:
+    """Require each ordinary pytest invocation to account for its population."""
+
+    receipts = _extract_failure_receipt_payloads(output, suite=suite)
+    if len(receipts) != 1:
+        raise CiCandidateEvidenceError(
+            f"candidate pytest invocation {index} emitted {len(receipts)} population receipts instead of one"
+        )
+    if receipts[0]["invocation_index"] != index:
+        raise CiCandidateEvidenceError(
+            f"candidate population receipt index {receipts[0]['invocation_index']} does not match invocation {index}"
+        )
+
 
 _SELECTIONS: dict[str, tuple[tuple[str, ...], ...]] = {
     "core": (("tests/core", "tests/health", "tests/engine_wiring"),),
@@ -131,8 +161,6 @@ _SELECTIONS: dict[str, tuple[tuple[str, ...], ...]] = {
             "--ignore=tests/periodic",
             "--ignore=tests/reporting",
             "--ignore=tests/notifications",
-            *(f"--ignore={path}" for path in EXPORTED_REMAINING_EXCLUDED_FILES),
-            *(argument for node in EXPORTED_REMAINING_EXCLUDED_NODES for argument in ("--deselect", node)),
         ),
     ),
 }
@@ -174,6 +202,20 @@ def _suite_commands(
     else:
         raise ValueError("candidate pytest basetemp must be outside the exported tree")
     resolved_base.mkdir(parents=True, exist_ok=True)
+    if suite == "remaining":
+        checkout_files, checkout_nodes = checkout_execution_selection(root, suite)
+        checkout_file_set = set(checkout_files)
+        selections = tuple(
+            (*selection, *(f"--ignore={path}" for path in checkout_files)) if index == len(selections) else selection
+            for index, selection in enumerate(selections, start=1)
+        )
+        excluded_nodes = tuple(node for node in checkout_nodes if node.split("::", 1)[0] not in checkout_file_set)
+        selections = tuple(
+            (*arguments, *(argument for node in excluded_nodes for argument in ("--deselect", node)))
+            if index == len(selections)
+            else arguments
+            for index, arguments in enumerate(selections, start=1)
+        )
     ordinary_response: tuple[str, ...] = ()
     if active_nodes:
         deselect_file = resolved_base / f"{suite}-ordinary-deselect-active-guards.args"
@@ -191,6 +233,7 @@ def _strict_guard_command(
     *,
     active_nodes: tuple[str, ...],
     basetemp: Path,
+    execution_root: str = "exported-commit",
 ) -> tuple[str, ...] | None:
     """Build the Windows-safe exact active-guard command for one suite."""
 
@@ -205,6 +248,8 @@ def _strict_guard_command(
             "tools.ci_guard_execution",
             "--cryodaq-active-guard-suite",
             suite,
+            "--cryodaq-active-guard-execution-root",
+            execution_root,
             "-W",
             "error",
             "--basetemp",
@@ -336,6 +381,7 @@ def _command_environment(*, basetemp: Path, suite: str, index: int) -> dict[str,
             "COVERAGE_FILE": str(cache / ".coverage"),
             "CRYODAQ_STATE_ROOT": str(runtime),
             FAILURE_RECEIPT_INDEX_ENV: str(index),
+            FAILURE_RECEIPT_SUITE_ENV: suite,
             "MPLCONFIGDIR": str(cache / "matplotlib"),
             "NUMBA_CACHE_DIR": str(cache / "numba"),
             "PYTHONPYCACHEPREFIX": str(pycache),
@@ -362,6 +408,12 @@ def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
     try:
         manifest = compile_python_tree(root)
     except (OSError, UnicodeError, SyntaxError, ValueError) as exc:
+        _emit_phase_diagnosis(
+            suite=suite,
+            phase="compile",
+            reason=str(exc),
+            remediation="Repair the candidate source so it compiles before pytest starts.",
+        )
         print(f"candidate-suite={suite} compile-failure={exc}", file=sys.stderr, flush=True)
         return 1
     print(f"candidate-suite={suite} compiled-sources={len(manifest)}", flush=True)
@@ -384,6 +436,21 @@ def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
             basetemp=guard_basetemp,
         )
     except (KeyError, OSError, UnicodeError, ValueError) as exc:
+        expected_blobs, actual_blobs, affected = _guard_blob_diagnosis(exc)
+        _emit_phase_diagnosis(
+            suite=suite,
+            phase="guard-setup",
+            reason=str(exc),
+            expected_blobs=expected_blobs,
+            actual_blobs=actual_blobs,
+            affected_receipt_ids=affected,
+            remediation=(
+                "Restore the guard bytes bound by the closure receipt, or reopen the affected prevention "
+                "with new evidence."
+                if affected
+                else "Repair the guard registry or runner setup before pytest starts."
+            ),
+        )
         print(f"candidate-suite={suite} guard-setup-failure={exc}", file=sys.stderr, flush=True)
         return 1
     if guard_command is None:
@@ -423,7 +490,29 @@ def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
                     failures.append((index, 1))
                     continue
         else:
-            completed = subprocess.run(command, cwd=root, env=environment, check=False)
+            completed = subprocess.run(
+                command,
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            output = _relay_strict_output(completed)
+        try:
+            _validate_candidate_population_receipt(output, suite=suite, index=index)
+        except CiCandidateEvidenceError as exc:
+            _emit_phase_diagnosis(
+                suite=suite,
+                phase="pytest",
+                reason=str(exc),
+                affected_receipt_ids=(f"pytest:{index}",),
+                remediation="Restore one complete candidate population receipt for this pytest invocation.",
+            )
+            failures.append((index, 1))
+            continue
         if completed.returncode != 0:
             failures.append((index, completed.returncode))
     if failures:
