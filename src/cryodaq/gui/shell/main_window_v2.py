@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import yaml
 from PySide6.QtCore import QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -76,6 +77,7 @@ from cryodaq.operator_snapshot import (
     SafetyLifecycle,
     SnapshotMode,
 )
+from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
@@ -130,17 +132,37 @@ def _bounded_wait_ms(deadline: float, *, cap_ms: int = _SETTLE_OP_CAP_MS) -> int
     return min(cap_ms, int(remaining_s * 1000))
 
 
-def _is_manifest_cold_stage_descriptor(descriptor: ChannelDescriptorV1) -> bool:
-    return (
-        descriptor.channel_id == "Т12"
-        and descriptor.instrument_id == "LS218_2"
-        and descriptor.source_key == "input.4.temperature"
-        and descriptor.quantity is ChannelQuantity.TEMPERATURE
-        and descriptor.unit == "K"
-        and descriptor.role is ChannelRole.PRIMARY_MEASUREMENT
-        and descriptor.safety_class is ChannelSafetyClass.SAFETY_CRITICAL_INPUT
-        and descriptor.display_group == "компрессор"
-    )
+_COLD_STAGE_UNAVAILABLE_MESSAGE = "Холодная ступень не объявлена — данные недоступны"
+
+
+def _declared_cold_stage_channel() -> str | None:
+    """Return the cooldown policy's exact cold-stage channel declaration.
+
+    This mirrors the engine's ``cooldown.local.yaml``-before-``cooldown.yaml``
+    resolution.  It deliberately does not infer a cold stage from descriptor
+    fields: without an exact declaration, the GUI must leave the feed
+    unavailable.
+    """
+    config_dir = get_config_dir()
+    local_path = config_dir / "cooldown.local.yaml"
+    config_path = local_path if local_path.exists() else config_dir / "cooldown.yaml"
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning("cold-stage declaration unavailable; config=%s error=%s", config_path, exc)
+        return None
+    if not isinstance(raw, dict):
+        logger.warning("cold-stage declaration unavailable; config=%s is not a mapping", config_path)
+        return None
+    cooldown = raw.get("cooldown")
+    if not isinstance(cooldown, dict):
+        logger.warning("cold-stage declaration unavailable; config=%s has no cooldown mapping", config_path)
+        return None
+    channel = cooldown.get("channel_cold")
+    if not isinstance(channel, str) or not channel.strip():
+        logger.warning("cold-stage declaration unavailable; config=%s has no channel_cold", config_path)
+        return None
+    return channel.strip()
 
 
 class MainWindowV2(QMainWindow):
@@ -196,9 +218,12 @@ class MainWindowV2(QMainWindow):
         self.setMinimumSize(1280, 800)
 
         self._channel_mgr = get_channel_manager()
+        self._declared_cold_stage_channel = _declared_cold_stage_channel()
         # D7.1b: descriptor identity store — GUI-thread-owned, lives for one session.
         self._descriptor_store = DescriptorStore()
         self._build_ui()
+        if self._declared_cold_stage_channel is None:
+            self._push_analytics("set_cold_stage_unavailable", _COLD_STAGE_UNAVAILABLE_MESSAGE)
         self._reading_received.connect(self._dispatch_reading)
 
         # Status bar refresh: data rate, connection (1 Hz)
@@ -929,7 +954,7 @@ class MainWindowV2(QMainWindow):
             if self._analytics_view is not None:
                 self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
 
-            if _is_manifest_cold_stage_descriptor(descriptor):
+            if descriptor.channel_id == self._declared_cold_stage_channel:
                 self._push_analytics("set_cold_temperature_reading", reading)
         is_source_readback = (
             descriptor.role is ChannelRole.SOURCE_READBACK

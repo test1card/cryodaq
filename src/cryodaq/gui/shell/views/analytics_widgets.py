@@ -856,6 +856,15 @@ class CooldownPredictionWidget(QWidget):
         self._ss_predictor.update(time.time())
         self._inner.set_history(list(self._raw_cold_buffer))
 
+    def set_cold_stage_unavailable(self, reason: str) -> None:
+        """Show that no authoritative cold-stage declaration was supplied."""
+        self._inner.set_prediction([], [], [], ci_level_pct=67.0)
+        self._asym_line.setVisible(False)
+        self._asym_band.setVisible(False)
+        self._steady_badge.setVisible(False)
+        self._placeholder.setText(reason)
+        self._placeholder.setVisible(True)
+
     def _reposition_overlays(self) -> None:
         vb = self._inner._plot.getPlotItem().getViewBox()
         xr, yr = vb.viewRange()

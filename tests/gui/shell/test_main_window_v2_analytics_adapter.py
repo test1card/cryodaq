@@ -461,7 +461,7 @@ def _t_reading(channel: str, value: float = 4.5) -> Reading:
     )
 
 
-def test_only_authoritative_canonical_t12_feeds_cold_stage_predictor():
+def test_this_stands_declared_cold_stage_feeds_predictor():
     _app()
     w = MainWindowV2()
     _stop_timers(w)
@@ -481,6 +481,43 @@ def test_only_authoritative_canonical_t12_feeds_cold_stage_predictor():
     assert w._analytics_view._last_cold_temperature_reading is cold_stage
     assert w._analytics_snapshot["set_cold_temperature_reading"] == (cold_stage,)
 
+
+def test_declared_noncanonical_cold_stage_feeds_predictor_and_rejects_other_temperature(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "cooldown.yaml").write_text(
+        "cooldown:\n  enabled: true\n  channel_cold: stage.cold\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+    assert isinstance(w._analytics_view, AnalyticsView)
+
+    declared_cold = _t_reading("stage.cold", value=3.21)
+    declared_cold = Reading(
+        timestamp=declared_cold.timestamp,
+        instrument_id="other-thermometer",
+        channel=declared_cold.channel,
+        value=declared_cold.value,
+        unit=declared_cold.unit,
+        status=declared_cold.status,
+        metadata=declared_cold.metadata,
+    )
+    _dispatch_described(
+        w,
+        declared_cold,
+        ChannelQuantity.TEMPERATURE,
+        display_name="Другая холодная ступень",
+        source_key="probe.12.temperature",
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="другая группа",
+    )
+    assert w._analytics_view._last_cold_temperature_reading is declared_cold
+
     non_cold_stage = _t_reading("sensor.cold-looking", value=4.52)
     _dispatch_described(
         w,
@@ -488,7 +525,27 @@ def test_only_authoritative_canonical_t12_feeds_cold_stage_predictor():
         ChannelQuantity.TEMPERATURE,
         display_name="Т12 — misleading display label",
     )
-    assert w._analytics_view._last_cold_temperature_reading is cold_stage
+    assert w._analytics_view._last_cold_temperature_reading is declared_cold
+
+
+def test_missing_cold_stage_declaration_is_rendered_as_unavailable(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "cooldown.yaml").write_text(
+        "cooldown:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    _app()
+    w = MainWindowV2()
+    _stop_timers(w)
+    w._ensure_overlay("analytics")
+    assert isinstance(w._analytics_view, AnalyticsView)
+    w._analytics_view.set_phase("cooldown")
+
+    cooldown_widget = w._analytics_view.active_widgets()["main"]
+    assert cooldown_widget._placeholder.toPlainText() == ("Холодная ступень не объявлена — данные недоступны")
 
 
 def test_cold_stage_reading_skipped_when_unit_not_kelvin():

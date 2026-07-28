@@ -153,6 +153,7 @@ class AnalyticsView(QWidget):
         # F-MockPredictor: cold-stage live reading routed via
         # set_cold_temperature_reading; replayed on phase swap.
         self._last_cold_temperature_reading: Reading | None = None
+        self._cold_stage_unavailable_reason: str | None = None
 
         # Per-(setter_name, phase) set: suppresses repeat WARNINGs for the
         # same silent-skip within one phase so 33 Hz data streams don't flood
@@ -251,6 +252,11 @@ class AnalyticsView(QWidget):
         self._last_cold_temperature_reading = reading
         self._forward("set_cold_temperature_reading", reading)
 
+    def set_cold_stage_unavailable(self, reason: str) -> None:
+        """Render the exact absence of a cold-stage policy declaration."""
+        self._cold_stage_unavailable_reason = reason
+        self._forward_to(list(self._active.values()), "set_cold_stage_unavailable", reason)
+
     # ------------------------------------------------------------------
     # Layout management
     # ------------------------------------------------------------------
@@ -326,8 +332,7 @@ class AnalyticsView(QWidget):
             if key not in self._warned_setters:
                 self._warned_setters.add(key)
                 logger.warning(
-                    "%s: no active widget in phase=%r implements setter; data dropped. "
-                    "Active widgets: %s",
+                    "%s: no active widget in phase=%r implements setter; data dropped. Active widgets: %s",
                     method,
                     self._phase,
                     [type(w).__name__ for w in self._active.values()],
@@ -355,30 +360,26 @@ class AnalyticsView(QWidget):
         if self._last_r_thermal is not None:
             self._forward_to(widgets, "set_r_thermal_data", self._last_r_thermal)
         if self._last_temperature_readings:
-            self._forward_to(
-                widgets, "set_temperature_readings", self._last_temperature_readings
-            )
+            self._forward_to(widgets, "set_temperature_readings", self._last_temperature_readings)
         if self._last_pressure_reading is not None:
             self._forward_to(widgets, "set_pressure_reading", self._last_pressure_reading)
         if self._last_keithley_readings:
-            self._forward_to(
-                widgets, "set_keithley_readings", self._last_keithley_readings
-            )
+            self._forward_to(widgets, "set_keithley_readings", self._last_keithley_readings)
         if self._last_instrument_health is not None:
-            self._forward_to(
-                widgets, "set_instrument_health", self._last_instrument_health
-            )
+            self._forward_to(widgets, "set_instrument_health", self._last_instrument_health)
         if self._last_vacuum_prediction is not None:
-            self._forward_to(
-                widgets, "set_vacuum_prediction", self._last_vacuum_prediction
-            )
+            self._forward_to(widgets, "set_vacuum_prediction", self._last_vacuum_prediction)
         if self._last_experiment_status is not None:
-            self._forward_to(
-                widgets, "set_experiment_status", self._last_experiment_status
-            )
+            self._forward_to(widgets, "set_experiment_status", self._last_experiment_status)
         if self._last_cold_temperature_reading is not None:
             self._forward_to(
                 widgets,
                 "set_cold_temperature_reading",
                 self._last_cold_temperature_reading,
+            )
+        if self._cold_stage_unavailable_reason is not None:
+            self._forward_to(
+                widgets,
+                "set_cold_stage_unavailable",
+                self._cold_stage_unavailable_reason,
             )

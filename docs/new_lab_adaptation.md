@@ -754,13 +754,14 @@ and must be reported as such.
 
 Report these rather than working around them silently.
 
-- **One analytics feed is bound to this stand's exact cold-stage descriptor.**
-  [[ref:src/cryodaq/gui/shell/main_window_v2.py::_is_manifest_cold_stage_descriptor]] recognises the cold stage
-  by an exact identity match on `channel_id`, `instrument_id`, `source_key`,
-  quantity, unit, role, safety class **and** `display_group`. A lab whose cold
-  stage is any other descriptor loses that analytics feed with no error. This
-  needs a production fix (select by role/classification, not identity); until
-  then, note it in your coverage table.
+- **Declare the cold-stage analytics channel in `config/cooldown.yaml`.** Set
+  `cooldown.channel_cold` to the exact `channel_id` from the lab's channel
+  descriptor manifest; use `config/cooldown.local.yaml` only when the local
+  override is the policy the engine runs. `MainWindowV2` consumes that exact
+  declaration and does not infer a cold stage from an instrument ID, source
+  key, display group, or descriptor shape. If the declaration is absent,
+  malformed, or unreadable, the cooldown feed renders «Холодная ступень не
+  объявлена — данные недоступны» rather than selecting another thermometer.
 - **The descriptor draft generator is template-bound.** §3.5 — it cannot
   produce a manifest for an instrument type absent from the shipped template.
 - **No completeness check ties `config/channels.yaml` to the manifest.** §5.3.
