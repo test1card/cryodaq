@@ -966,7 +966,11 @@ class CooldownService:
         reader = self._reader
         if reader is None:
             return None
-        channel = str(cfg.get("pressure_channel", "VSP63D_1/pressure"))
+        configured_channel = cfg.get("pressure_channel")
+        if not isinstance(configured_channel, str) or not configured_channel.strip():
+            logger.warning("Cooldown fingerprint pressure channel is not explicitly configured")
+            return None
+        channel = configured_channel.strip()
         try:
             hist = await reader.read_readings_history(
                 channels=[channel],

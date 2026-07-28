@@ -46,15 +46,17 @@ class CalibrationFitter:
         start_ts: float,
         end_ts: float,
         reference_channel: str,
-        target_channel: str,
+        _target_channel: str,
         *,
+        raw_channel: str | None = None,
         max_time_delta_s: float = 2.0,
     ) -> list[tuple[float, float]]:
         """Extract time-aligned (SRDG, KRDG) pairs from SQLite data files.
 
         Returns list of ``(sensor_raw_value, reference_temperature_K)`` tuples.
         """
-        srdg_channel = f"{target_channel}_raw"
+        if not isinstance(raw_channel, str) or not raw_channel.strip():
+            raise ValueError("raw_channel must be explicitly configured")
 
         # Collect readings from all day-partitioned DB files (hot path). This is
         # the fast, common case — live calibration runs on recent acquisition
@@ -81,7 +83,7 @@ class CalibrationFitter:
                     "SELECT timestamp, value, status FROM readings "
                     "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
                     "ORDER BY timestamp",
-                    (srdg_channel, start_ts, end_ts),
+                    (raw_channel, start_ts, end_ts),
                 )
                 srdg_data.extend((ts, decode(v, s)) for ts, v, s in cursor.fetchall())
                 conn.close()
@@ -102,11 +104,11 @@ class CalibrationFitter:
             start_dt = datetime.fromtimestamp(start_ts, tz=UTC)
             end_dt = datetime.fromtimestamp(end_ts, tz=UTC) + timedelta(microseconds=1)
             for ts, _inst, channel, value, _unit, _status in reader.query_rows(
-                start_dt, end_dt, [reference_channel, srdg_channel]
+                start_dt, end_dt, [reference_channel, raw_channel]
             ):
                 if channel == reference_channel:
                     krdg_data.append((float(ts), value))
-                elif channel == srdg_channel:
+                elif channel == raw_channel:
                     srdg_data.append((float(ts), value))
 
         if not krdg_data or not srdg_data:
@@ -350,6 +352,7 @@ class CalibrationFitter:
         target_channel: str,
         calibration_store: CalibrationStore,
         *,
+        raw_channel: str | None = None,
         target_count: int = 500,
         max_breakpoints: int = 200,
         tolerance_mk: float = 50.0,
@@ -366,6 +369,7 @@ class CalibrationFitter:
             end_ts,
             reference_channel,
             target_channel,
+            raw_channel=raw_channel,
         )
         if len(raw_pairs) < max(4, min_points_per_zone):
             raise ValueError(

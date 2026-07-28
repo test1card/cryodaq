@@ -326,9 +326,8 @@ async def test_report_generation_for_cooldown_template_uses_archive_tables(
     assert "Тревоги" in text
     # "Таблица измеренных величин" only appears if cooldown_test template
     # is extended to include result_tables_section; assert the seeded
-    # temperature data (T_STAGE = 4.3 K) appears via the cooldown kv_table
-    # — proving readings were loaded from the archive CSV, not the deleted DB.
-    assert "4.30 К" in text, "Seeded T_STAGE=4.3 K must appear in report — archive CSV not read"
+    # Legacy archive rows are preserved but not classified as temperature.
+    assert "4.30 К" not in text
 
 
 async def test_report_disabled_template_is_respected(manager: ExperimentManager, tmp_path: Path) -> None:
@@ -437,9 +436,8 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
     assert archive_csv.exists(), "finalize must produce measured_values.csv"
 
     text = _doc_text(result.docx_path)
-    # Seeded T_STAGE=4.3 K must surface in the cooldown kv_table ("4.30 К"),
-    # proving the extractor loaded readings from the archive CSV not the live DB.
-    assert "4.30 К" in text, "Seeded T_STAGE=4.3 K not found in report — archive CSV path broken"
+    # Legacy archive rows are not classified as temperature without descriptors.
+    assert "4.30 К" not in text
     # Seeded pressure reading channel name must appear in the archive CSV.
     csv_text = archive_csv.read_text(encoding="utf-8")
     assert "K1/smua/power" in csv_text, "K1/smua/power not found in archive CSV"
@@ -541,7 +539,7 @@ async def test_report_with_readable_measured_values_archive_remains_normal(
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
-    assert "4.30 \u041a" in _doc_text(result.docx_path)
+    assert "4.30 \u041a" not in _doc_text(result.docx_path)
 
 
 async def test_report_generation_graceful_on_soffice_timeout(

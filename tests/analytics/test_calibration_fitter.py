@@ -79,6 +79,7 @@ def test_extract_pairs_basic(data_dir) -> None:
         2000.0,
         "Т1",
         "Т2",
+        raw_channel="Т2_raw",
     )
     assert len(pairs) == 200
 
@@ -99,6 +100,11 @@ def test_extract_pairs_basic(data_dir) -> None:
     assert sorted_pairs[0] == pytest.approx((first_srdg, expected_first_krdg), abs=1e-6)
     assert sorted_pairs[99] == pytest.approx((mid_srdg, expected_mid_krdg), abs=1e-6)
     assert sorted_pairs[199] == pytest.approx((last_srdg, expected_last_krdg), abs=1e-6)
+
+
+def test_extract_pairs_requires_an_explicit_raw_channel(data_dir) -> None:
+    with pytest.raises(ValueError, match="raw_channel must be explicitly configured"):
+        CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
 
 
 def test_extract_filters_ovl(tmp_path) -> None:
@@ -127,7 +133,7 @@ def test_extract_filters_ovl(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 103.0, "ref", "tgt")
+    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 103.0, "ref", "tgt", raw_channel="tgt_raw")
     assert len(pairs) == 1
     assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.1)
 
@@ -154,7 +160,7 @@ def test_time_alignment_filter(tmp_path) -> None:
     conn.close()
 
     pairs = CalibrationFitter.extract_pairs(
-        tmp_path, 99.0, 120.0, "ref", "tgt", max_time_delta_s=2.0
+        tmp_path, 99.0, 120.0, "ref", "tgt", raw_channel="tgt_raw", max_time_delta_s=2.0
     )
     assert len(pairs) == 1
     # Only the aligned pair (srdg=82.5, krdg=77.0) should survive
@@ -219,7 +225,7 @@ def test_downsample_preserves_curvature() -> None:
 
 
 def test_downsample_preserves_boundaries(data_dir) -> None:
-    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
+    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw")
     downsampled = CalibrationFitter.adaptive_downsample(pairs, target_count=50)
 
     srdg_min = min(s for s, _ in pairs)
@@ -236,7 +242,7 @@ def test_downsample_preserves_boundaries(data_dir) -> None:
 
 
 def test_breakpoints_douglas_peucker(data_dir) -> None:
-    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
+    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw")
     downsampled = CalibrationFitter.adaptive_downsample(pairs, target_count=100)
     breakpoints = CalibrationFitter.generate_breakpoints(downsampled, tolerance_mk=100.0)
 
@@ -272,7 +278,7 @@ def test_breakpoints_max_limit() -> None:
 
 
 def test_coverage_statistics(data_dir) -> None:
-    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2")
+    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw")
     coverage = CalibrationFitter.compute_coverage(pairs, n_bins=10)
 
     assert len(coverage) == 10
@@ -312,7 +318,7 @@ def test_coverage_empty_regions(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, 999.0, 1050.0, "ref", "tgt")
+    pairs = CalibrationFitter.extract_pairs(tmp_path, 999.0, 1050.0, "ref", "tgt", raw_channel="tgt_raw")
     coverage = CalibrationFitter.compute_coverage(pairs, n_bins=10)
 
     # compute_coverage bins over temperature (krdg = second element of pairs).
@@ -372,6 +378,7 @@ def test_fit_end_to_end(data_dir, tmp_path) -> None:
         "Т1",
         "Т2",
         store,
+        raw_channel="Т2_raw",
         target_count=100,
         min_points_per_zone=3,
         target_rmse_k=0.5,
@@ -420,6 +427,7 @@ def test_fit_logs_warning_when_all_metric_points_fail(
             "Т1",
             "Т2",
             store,
+            raw_channel="Т2_raw",
             target_count=100,
             min_points_per_zone=3,
             target_rmse_k=0.5,
@@ -493,7 +501,7 @@ def test_extract_pairs_reads_rotated_cold_day(
     assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
 
     pairs = CalibrationFitter.extract_pairs(
-        tmp_path, base_ts, base_ts + 100, "Т1", "Т2"
+        tmp_path, base_ts, base_ts + 100, "Т1", "Т2", raw_channel="Т2_raw"
     )
     assert len(pairs) == 20, f"rotated cold-day calibration pairs lost: {len(pairs)}"
 
@@ -524,6 +532,6 @@ def test_extract_pairs_drops_error_status(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 301.0, "ref", "tgt")
+    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 301.0, "ref", "tgt", raw_channel="tgt_raw")
     assert len(pairs) == 1, "only the both-OK pair may survive"
     assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.1)

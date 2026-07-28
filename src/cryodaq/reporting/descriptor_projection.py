@@ -156,8 +156,7 @@ def project_descriptor_replay(batch: DescriptorReplayBatch) -> DescriptorReportP
     alarm_readings = tuple(
         row
         for row in readings
-        if (row.descriptor is not None and not row.descriptor.legacy and row.descriptor.role == "event")
-        or (row.legacy and row.channel.startswith("alarm/"))
+        if row.descriptor is not None and not row.descriptor.legacy and row.descriptor.role == "event"
     )
     return DescriptorReportProjection(
         readings=readings,

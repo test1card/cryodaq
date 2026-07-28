@@ -38,12 +38,12 @@ def test_production_cross_experiment_export_requires_expected_experiment_id(tmp_
         return {}
 
     monkeypatch.setattr(cross_experiment, "read_experiment_parquet", bound_reader)
-    result = cross_experiment.scan_archive(tmp_path)
+    result = cross_experiment.scan_archive(tmp_path, cold_channel="cold", warm_channel="warm")
     assert result.summaries == []
     assert calls == [
         (
             experiment_dir / "readings.parquet",
-            [cross_experiment.DEFAULT_COLD_CHANNEL, cross_experiment.DEFAULT_WARM_CHANNEL],
+            ["cold", "warm"],
             experiment_id,
         )
     ]

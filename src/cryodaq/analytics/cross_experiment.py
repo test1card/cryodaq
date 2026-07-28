@@ -68,11 +68,11 @@ logger = logging.getLogger(__name__)
 T_LN2_K = 77.0
 T_LHE_K = 4.2
 
-# GM-cooler stage channels — hardware-pinned per config/physical_alarms.yaml
-# `landmarks:` block (Cyrillic Т, matches the actual channel names on the
-# broker). Overridable — this module hardcodes no config, only defaults.
-DEFAULT_COLD_CHANNEL = "Т12"  # 2-я ступень, холодная точка (~2.9K)
-DEFAULT_WARM_CHANNEL = "Т11"  # 1-я ступень (~40K)
+# A stage identity is laboratory configuration, not an analytics default.
+# These exported compatibility names intentionally select no channel; callers
+# must configure both stage identities explicitly.
+DEFAULT_COLD_CHANNEL: str | None = None
+DEFAULT_WARM_CHANNEL: str | None = None
 
 _EXPERIMENTS_SUBDIR = "experiments"
 _PARQUET_NAME = "readings.parquet"
@@ -193,8 +193,8 @@ def scan_archive(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
-    cold_channel: str = DEFAULT_COLD_CHANNEL,
-    warm_channel: str = DEFAULT_WARM_CHANNEL,
+    cold_channel: str | None = DEFAULT_COLD_CHANNEL,
+    warm_channel: str | None = DEFAULT_WARM_CHANNEL,
     initial_window_h: float = RATE_WINDOW_H,
     steady_window_h: float = 1.0,
     resample_bin_min: float = 5.0,
@@ -219,6 +219,10 @@ def scan_archive(
     целевых каналов, попадают в ``skipped`` с причиной).
     """
     data_dir = Path(data_dir)
+    if not isinstance(cold_channel, str) or not cold_channel.strip():
+        raise ValueError("cold_channel must be explicitly configured")
+    if not isinstance(warm_channel, str) or not warm_channel.strip():
+        raise ValueError("warm_channel must be explicitly configured")
     _require_positive_finite("initial_window_h", initial_window_h)
     _require_positive_finite("steady_window_h", steady_window_h)
     _require_positive_finite("resample_bin_min", resample_bin_min)

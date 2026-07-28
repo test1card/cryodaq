@@ -27,11 +27,23 @@ from cryodaq.analytics.cross_experiment import (  # noqa: E402
     export_summaries_json,
     format_summary_table,
     format_trend_report,
-    scan_archive,
+)
+from cryodaq.analytics.cross_experiment import (  # noqa: E402
+    scan_archive as _scan_archive_impl,
 )
 
 COLD = "Т12"
 WARM = "Т11"
+
+
+def scan_archive(data_dir: Path, **kwargs):
+    """Tests must name the two physical stages explicitly."""
+    return _scan_archive_impl(data_dir, cold_channel=COLD, warm_channel=WARM, **kwargs)
+
+
+def test_scan_archive_requires_explicit_stage_configuration(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cold_channel must be explicitly configured"):
+        _scan_archive_impl(tmp_path)
 
 _SCHEMA = pa.schema(
     [

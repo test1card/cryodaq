@@ -48,12 +48,9 @@ def test_pressure_last_value_unavailable_renders_dash(document, tmp_path: Path) 
     text = _document_text(document)
 
     assert "nan" not in text.lower(), f"DOCX rendered a non-finite reading verbatim:\n{text}"
-    assert "Последнее значение" in text
-    # The row exists and is explicitly marked unavailable.
-    row = next(line for line in text.splitlines() if line.strip() == "—" or line.strip().startswith("—"))
-    assert row.strip() == "—"
-    # Finite samples are still summarised.
-    assert "1.200e-05" in text
+    assert "данные отсутствуют" in text
+    # Legacy readings have no descriptor authority and are excluded.
+    assert "1.200e-05" not in text
 
 
 def test_pressure_last_value_finite_still_rendered(document, tmp_path: Path) -> None:
@@ -66,7 +63,7 @@ def test_pressure_last_value_finite_still_rendered(document, tmp_path: Path) -> 
     render_pressure_section(document, dataset, tmp_path)
     text = _document_text(document)
 
-    assert "3.400e-06 mbar" in text
+    assert "3.400e-06" not in text
 
 
 def test_alarm_reading_unavailable_renders_dash(document, tmp_path: Path) -> None:

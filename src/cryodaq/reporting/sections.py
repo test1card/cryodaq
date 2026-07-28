@@ -336,25 +336,7 @@ def _add_archived_or_multichannel(
 
 
 def _channel_display(raw: str) -> str:
-    """Keithley_1/smua/power → SMU A: мощность."""
-    if "/smua/" in raw:
-        suffix = raw.split("/")[-1]
-        labels = {
-            "power": "мощность",
-            "voltage": "напряжение",
-            "current": "ток",
-            "resistance": "сопротивление",
-        }
-        return f"SMU A: {labels.get(suffix, suffix)}"
-    if "/smub/" in raw:
-        suffix = raw.split("/")[-1]
-        labels = {
-            "power": "мощность",
-            "voltage": "напряжение",
-            "current": "ток",
-            "resistance": "сопротивление",
-        }
-        return f"SMU B: {labels.get(suffix, suffix)}"
+    """Return an unqualified legacy identifier without inferring its quantity."""
     return raw
 
 
@@ -386,11 +368,6 @@ def _visible_quantity(reading: HistoricalReading, quantity: str) -> bool:
     if descriptor is None or descriptor.legacy:
         return False
     return descriptor.visible_by_default and descriptor.quantity == quantity
-
-
-def _legacy(reading: HistoricalReading) -> bool:
-    descriptor = reading.descriptor
-    return reading.legacy and (descriptor is None or descriptor.legacy)
 
 
 def _descriptor_integrity_notice(document: Document, dataset: ReportDataset) -> None:
@@ -614,8 +591,7 @@ def render_cooldown_section(document: Document, dataset: ReportDataset, assets_d
     temp_readings = [
         item
         for item in dataset.readings
-        if (_visible_quantity(item, "temperature") or (_legacy(item) and item.unit == "K"))
-        and math.isfinite(item.value)
+        if _visible_quantity(item, "temperature") and math.isfinite(item.value)
     ]
     _add_archived_or_multichannel(
         document,
@@ -660,8 +636,7 @@ def render_thermal_section(document: Document, dataset: ReportDataset, assets_di
     power_readings = [
         item
         for item in dataset.readings
-        if (_visible_quantity(item, "power") or (_legacy(item) and item.channel.endswith("/power")))
-        and math.isfinite(item.value)
+        if _visible_quantity(item, "power") and math.isfinite(item.value)
     ]
     _add_archived_or_multichannel(
         document,
@@ -694,7 +669,6 @@ def render_pressure_section(document: Document, dataset: ReportDataset, assets_d
         item
         for item in dataset.readings
         if _visible_quantity(item, "pressure")
-        or (_legacy(item) and ("pressure" in item.channel.lower() or item.unit.lower() in {"mbar", "pa"}))
     ]
     _add_archived_or_multichannel(
         document,

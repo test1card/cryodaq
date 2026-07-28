@@ -200,7 +200,7 @@ def test_projection_omits_forged_descriptor_and_report_shows_integrity_issue(
     assert "descriptor_hash_missing:cold-sidecar" in text
 
 
-def test_generator_sections_use_descriptor_semantics_and_bound_legacy_fallback(
+def test_generator_sections_use_descriptor_semantics_and_exclude_legacy_identifiers(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -282,7 +282,7 @@ def test_generator_sections_use_descriptor_semantics_and_bound_legacy_fallback(
     table_text = "\n".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
 
     assert captured["Температура каналов"] == ("vacuum/pressure",)
-    assert captured["Мощность Keithley"] == ("source-readback", "legacy/smua/power")
+    assert captured["Мощность Keithley"] == ("source-readback",)
     assert captured["Давление"] == ("heater/power",)
     assert "Heater A power" in table_text
     assert "Hidden power" not in table_text

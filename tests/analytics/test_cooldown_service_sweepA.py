@@ -109,7 +109,11 @@ def test_a2_fingerprint_gains_ultimate_vacuum(tmp_path: Path, monkeypatch) -> No
     """A2: reader pressure series → ``ultimate_vacuum_mbar`` (its minimum)."""
     reader = _StubReader({"VSP63D_1/pressure": [(1000.0, 1.0e-5), (1500.0, 3.0e-6), (2000.0, 8.0e-6)]})
     svc = _make_service(tmp_path, reader=reader)
-    svc._baseline_cfg = {"enabled": True, "base_threshold_K": 5.0}
+    svc._baseline_cfg = {
+        "enabled": True,
+        "base_threshold_K": 5.0,
+        "pressure_channel": "VSP63D_1/pressure",
+    }
 
     saved: list = []
     monkeypatch.setattr(
@@ -121,7 +125,7 @@ def test_a2_fingerprint_gains_ultimate_vacuum(tmp_path: Path, monkeypatch) -> No
 
     assert len(saved) == 1
     assert saved[0].ultimate_vacuum_mbar == pytest.approx(3.0e-6)
-    # reader was queried for the default vacuum channel over the cooldown window
+    # reader was queried for the explicitly configured vacuum channel.
     assert reader.calls and reader.calls[0]["channels"] == ["VSP63D_1/pressure"]
     assert reader.calls[0]["from_ts"] == pytest.approx(1000.0)
 
@@ -130,7 +134,11 @@ def test_a2_reader_failure_yields_null_vacuum(tmp_path: Path, monkeypatch) -> No
     """A2: a reader that raises degrades to null vacuum, never breaks the tap."""
     reader = _StubReader(fail=True)
     svc = _make_service(tmp_path, reader=reader)
-    svc._baseline_cfg = {"enabled": True, "base_threshold_K": 5.0}
+    svc._baseline_cfg = {
+        "enabled": True,
+        "base_threshold_K": 5.0,
+        "pressure_channel": "VSP63D_1/pressure",
+    }
 
     saved: list = []
     monkeypatch.setattr(
@@ -143,3 +151,11 @@ def test_a2_reader_failure_yields_null_vacuum(tmp_path: Path, monkeypatch) -> No
 
     assert len(saved) == 1
     assert saved[0].ultimate_vacuum_mbar is None
+
+
+def test_a2_missing_pressure_configuration_does_not_query_an_arbitrary_channel(tmp_path: Path) -> None:
+    reader = _StubReader({"VSP63D_1/pressure": [(1000.0, 1.0e-5)]})
+    svc = _make_service(tmp_path, reader=reader)
+
+    assert asyncio.run(svc._read_cooldown_pressures({"enabled": True})) is None
+    assert reader.calls == []

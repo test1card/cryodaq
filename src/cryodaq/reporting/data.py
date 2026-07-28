@@ -119,7 +119,13 @@ class ReportDataExtractor:
         readings = self._load_archived_readings(metadata, metadata_path.parent)
         if not readings:
             readings = self._load_readings(start_time, end_time)
-        alarm_readings = [item for item in readings if item.channel.startswith("alarm/")]
+        # This synchronous compatibility reader has no descriptor envelope.
+        # Legacy identifiers are deliberately not interpreted as event authority.
+        alarm_readings = [
+            item
+            for item in readings
+            if item.descriptor is not None and not item.descriptor.legacy and item.descriptor.role == "event"
+        ]
         operator_log = self._load_operator_log(start_time, end_time, experiment_id)
         return ReportDataset(
             metadata=metadata,
