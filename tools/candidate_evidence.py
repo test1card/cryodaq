@@ -274,27 +274,6 @@ def validate_exported_candidate(export_root: Path, manifest: CandidateManifest) 
         raise CandidateEvidenceError(f"exported candidate committed paths changed after execution: {changed!r}")
 
 
-def _set_export_read_only(export_root: Path, manifest: CandidateManifest, *, read_only: bool) -> None:
-    """Keep committed candidate bytes non-writable only while they execute."""
-
-    directories = [export_root, *(path for path in export_root.rglob("*") if path.is_dir() and not path.is_symlink())]
-    if not read_only:
-        for directory in directories:
-            directory.chmod(0o755)
-    for record in manifest.records:
-        if record.mode in {_SYMLINK_MODE, _GITLINK_MODE}:
-            continue
-        target = _safe_destination(export_root, record.path)
-        if read_only:
-            permissions = 0o555 if record.mode == "100755" else 0o444
-        else:
-            permissions = 0o755 if record.mode == "100755" else 0o644
-        target.chmod(permissions)
-    if read_only:
-        for directory in reversed(directories):
-            directory.chmod(0o555)
-
-
 def _set_windows_integrity(path: Path, level: str) -> None:
     completed = subprocess.run(
         ["icacls.exe", str(path), "/setintegritylevel", f"(OI)(CI){level}", "/T", "/C"],
@@ -419,7 +398,6 @@ def execute_exported_candidate(
     environment["CRYODAQ_STATE_ROOT"] = str(runtime_root)
     ancestor_modes: list[tuple[Path, int]] = []
     try:
-        _set_export_read_only(export_root, manifest, read_only=True)
         if os.name != "nt":
             ancestor_modes = _set_posix_ancestor_traversal(export_root, state_root)
         completed = _run_sandboxed_candidate(
@@ -432,10 +410,7 @@ def execute_exported_candidate(
     finally:
         for ancestor, mode in reversed(ancestor_modes):
             ancestor.chmod(mode)
-        try:
-            validate_exported_candidate(export_root, manifest)
-        finally:
-            _set_export_read_only(export_root, manifest, read_only=False)
+        validate_exported_candidate(export_root, manifest)
     return CandidateExecutionReceipt(
         commit=manifest.commit,
         tree=manifest.tree,

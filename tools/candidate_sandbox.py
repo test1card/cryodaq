@@ -135,6 +135,43 @@ def _drop_posix(state_root: Path) -> None:
     os.setuid(nobody.pw_uid)
 
 
+def _diagnose_posix_directory_walk(cwd: Path) -> None:
+    """Report the first strict directory-open failure after dropping authority."""
+
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    directory_fd = os.open(cwd.anchor, flags)
+    walked = Path(cwd.anchor)
+    try:
+        for component in cwd.parts[1:]:
+            walked /= component
+            metadata: os.stat_result | None = None
+            try:
+                metadata = os.stat(component, dir_fd=directory_fd, follow_symlinks=False)
+                next_fd = os.open(component, flags, dir_fd=directory_fd)
+            except OSError as exc:
+                identity = (
+                    "mode=unavailable uid=unavailable gid=unavailable"
+                    if metadata is None
+                    else f"mode={metadata.st_mode & 0o7777:o} uid={metadata.st_uid} gid={metadata.st_gid}"
+                )
+                print(
+                    "candidate-sandbox-directory-open-failed "
+                    f"path={walked} errno={exc.errno} strerror={exc.strerror!r} "
+                    f"{identity} "
+                    f"euid={os.geteuid()} egid={os.getegid()} groups={os.getgroups()}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            os.close(directory_fd)
+            directory_fd = next_fd
+        print("candidate-sandbox-directory-open-ok", file=sys.stderr, flush=True)
+    finally:
+        os.close(directory_fd)
+
+
 def main() -> int:
     separator = sys.argv.index("--")
     cwd = Path(sys.argv[1]).resolve(strict=True)
@@ -152,6 +189,7 @@ def main() -> int:
         ):
             raise ValueError("candidate environment is malformed")
         _drop_posix(state_root)
+        _diagnose_posix_directory_walk(cwd)
     os.chdir(cwd)
     return subprocess.run(command, env=environment, check=False).returncode
 
