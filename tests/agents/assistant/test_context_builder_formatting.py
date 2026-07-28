@@ -18,6 +18,7 @@ from cryodaq.agents.assistant.live.context_builder import (
     _is_pressure_channel,
     is_valid_sensor_health_summary,
 )
+from cryodaq.agents.assistant.query.schemas import AlarmStatusResult
 from cryodaq.core.sensor_diagnostics import SensorDiagnosticsEngine
 
 # ---------------------------------------------------------------------------
@@ -208,7 +209,9 @@ async def test_shift_handover_context_reads_required_window_and_alarm_snapshot()
     builder = ContextBuilder(reader, _build_em_stub())
     builder._alarm_reader = MagicMock()
     builder._alarm_reader.active = AsyncMock(
-        return_value=SimpleNamespace(active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])])
+        return_value=AlarmStatusResult(
+            active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])]
+        )
     )
 
     context = await builder.build_shift_handover_context({"shift_duration_h": 8})
@@ -226,7 +229,7 @@ async def test_shift_handover_context_keeps_known_empty_distinct_from_unavailabl
     reader.get_operator_log = AsyncMock(return_value=[])
     builder = ContextBuilder(reader, _build_em_stub())
     builder._alarm_reader = MagicMock()
-    builder._alarm_reader.active = AsyncMock(return_value=SimpleNamespace(active=[]))
+    builder._alarm_reader.active = AsyncMock(return_value=AlarmStatusResult())
 
     context = await builder.build_shift_handover_context({"shift_duration_h": 8})
 
@@ -235,12 +238,78 @@ async def test_shift_handover_context_keeps_known_empty_distinct_from_unavailabl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entries", "alarm_result", "expected_alarms", "expected_events", "unavailable"),
+    [
+        (
+            [],
+            AlarmStatusResult(available=False, stale=True, reason="engine unavailable"),
+            "данные недоступны",
+            "нет событий за смену",
+            True,
+        ),
+        (
+            [],
+            AlarmStatusResult(),
+            "нет активных тревог",
+            "нет событий за смену",
+            False,
+        ),
+        (
+            RuntimeError("log store unavailable"),
+            AlarmStatusResult(),
+            "нет активных тревог",
+            "данные недоступны",
+            True,
+        ),
+        (
+            [
+                SimpleNamespace(
+                    timestamp=datetime(2026, 5, 1, 19, 30, tzinfo=UTC),
+                    message="CRITICAL alarm was acknowledged",
+                )
+            ],
+            AlarmStatusResult(
+                active=[SimpleNamespace(alarm_id="T1-high", level="CRITICAL", channels=["T1"])]
+            ),
+            "CRITICAL: T1-high (T1)",
+            "CRITICAL alarm was acknowledged",
+            False,
+        ),
+    ],
+    ids=["alarm-unavailable", "known-empty", "log-unavailable", "healthy"],
+)
+async def test_shift_handover_context_distinguishes_known_empty_from_unavailable(
+    entries: list[object] | Exception,
+    alarm_result: AlarmStatusResult,
+    expected_alarms: str,
+    expected_events: str,
+    unavailable: bool,
+) -> None:
+    """The assembled handover never turns an unavailable source into an all-clear."""
+    reader = MagicMock()
+    reader.get_operator_log = AsyncMock(
+        side_effect=entries if isinstance(entries, Exception) else None,
+        return_value=[] if isinstance(entries, Exception) else entries,
+    )
+    alarm_reader = MagicMock()
+    alarm_reader.active = AsyncMock(return_value=alarm_result)
+    builder = ContextBuilder(reader, _build_em_stub(), alarm_reader=alarm_reader)
+
+    context = await builder.build_shift_handover_context({"shift_duration_h": 8})
+
+    assert expected_alarms in context.active_alarms
+    assert expected_events in context.recent_events
+    assert context.context_unavailable is unavailable
+
+
+@pytest.mark.asyncio
 async def test_shift_handover_context_prioritizes_critical_alarm_within_display_bound():
     reader = MagicMock()
     reader.get_operator_log = AsyncMock(return_value=[])
     alarm_reader = MagicMock()
     alarm_reader.active = AsyncMock(
-        return_value=SimpleNamespace(
+        return_value=AlarmStatusResult(
             active=[
                 *[
                     SimpleNamespace(alarm_id=f"warning-{number:02d}", level="WARNING", channels=[])
@@ -271,7 +340,7 @@ async def test_shift_handover_context_keeps_critical_ahead_of_lexically_earlier_
     reader.get_operator_log = AsyncMock(return_value=[])
     alarm_reader = MagicMock()
     alarm_reader.active = AsyncMock(
-        return_value=SimpleNamespace(
+        return_value=AlarmStatusResult(
             active=[
                 *[
                     SimpleNamespace(alarm_id=f"unknown-{number:02d}", level="ALARM", channels=[])
@@ -307,7 +376,7 @@ async def test_shift_handover_context_reports_displayed_event_count(entry_count:
     )
     builder = ContextBuilder(reader, _build_em_stub())
     builder._alarm_reader = MagicMock()
-    builder._alarm_reader.active = AsyncMock(return_value=SimpleNamespace(active=[]))
+    builder._alarm_reader.active = AsyncMock(return_value=AlarmStatusResult())
 
     context = await builder.build_shift_handover_context({"shift_duration_h": 8})
 

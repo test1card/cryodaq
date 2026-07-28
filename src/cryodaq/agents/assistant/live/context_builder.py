@@ -143,8 +143,9 @@ class ContextBuilder:
             logger.warning("ShiftHandoverContext: alarm context unavailable", exc_info=True)
             active = None
 
-        context.context_unavailable = entries is None or active is None
-        context.active_alarms = "данные недоступны" if active is None else _format_active_alarms(active.active)
+        alarms_available = active is not None and getattr(active, "available", True) is True
+        context.context_unavailable = entries is None or not alarms_available
+        context.active_alarms = "данные недоступны" if not alarms_available else _format_active_alarms(active.active)
         if entries is None:
             context.recent_events = "данные недоступны"
         elif entries:
