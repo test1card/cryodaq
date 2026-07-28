@@ -6,7 +6,6 @@ import asyncio
 import copy
 import json
 import os
-from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15,7 +14,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QApplication
 
-from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.core.zmq_bridge import ZMQCommandServer
 from cryodaq.gui import theme
 from cryodaq.gui.shell import top_watch_bar as top_watch_bar_module
@@ -50,7 +48,6 @@ def test_cold_start_channels_are_unavailable_until_real_reading() -> None:
     bar._fast_timer.stop()
     bar._slow_timer.stop()
     bar._channel_refresh_timer.stop()
-    bar._temperature_channels.update({"Т1", "Т2"})
     assert bar._channel_last_seen == {}
     bar._refresh_channels()
     label_text = bar._channel_label.text()
@@ -90,10 +87,7 @@ def test_on_reading_stores_under_short_id() -> None:
         unit="K",
         status=ChannelStatus.OK,
     )
-    bar.on_reading(
-        reading,
-        SimpleNamespace(quantity=ChannelQuantity.TEMPERATURE, channel_id="Т1"),
-    )
+    bar.on_reading(reading)
 
     # Stored under the short id, NOT the full name.
     assert "Т1" in bar._channel_last_seen

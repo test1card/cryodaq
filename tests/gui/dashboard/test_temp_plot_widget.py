@@ -32,17 +32,6 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture(autouse=True)
-def _descriptor_temperature_membership(monkeypatch):
-    original = TempPlotWidget.__init__
-
-    def init(self, buffer_store, channel_manager, parent=None):  # noqa: ANN001
-        original(self, buffer_store, channel_manager, parent)
-        self.set_temperature_channels(set(channel_manager.get_all_visible()))
-
-    monkeypatch.setattr(TempPlotWidget, "__init__", init)
-
-
 # LOW: assert embedded plot, channel dict, toolbar, axis exist
 def test_constructs(app):
     buf = ChannelBufferStore()

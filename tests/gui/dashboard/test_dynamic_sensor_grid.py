@@ -4,22 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from cryodaq.gui.dashboard.dynamic_sensor_grid import DynamicSensorGrid
 from cryodaq.gui.state.descriptor_store import IdentityStatus
-
-
-@pytest.fixture(autouse=True)
-def _descriptor_temperature_membership(monkeypatch):
-    original = DynamicSensorGrid.__init__
-
-    def init(self, channel_manager, buffer_store, parent=None):  # noqa: ANN001
-        original(self, channel_manager, buffer_store, parent)
-        self.set_temperature_channels(set(channel_manager.get_all_visible()))
-
-    monkeypatch.setattr(DynamicSensorGrid, "__init__", init)
 
 
 def test_grid_constructs(app, mock_channel_mgr, buffer_store):

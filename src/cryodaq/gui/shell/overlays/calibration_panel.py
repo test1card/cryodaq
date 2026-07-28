@@ -1664,15 +1664,16 @@ class CalibrationPanel(QWidget):
 
     def on_reading(self, reading: Reading) -> None:
         """Route live readings to the acquisition widget when in
-        acquisition mode.  ``sensor_unit`` is the descriptor-valid raw-ADC
-        unit; channel spelling is not a calibration capability.
+        acquisition mode. Filter matches v1: `_raw` channel suffix OR
+        `sensor_unit` unit — these are the raw-ADC readings that
+        SRDG/KRDG calibration bookkeeping cares about.
         """
         if self._current_mode != "acquisition":
             return
         ch = reading.channel
         if not ch:
             return
-        if reading.unit == "sensor_unit":
+        if ch.endswith("_raw") or reading.unit == "sensor_unit":
             try:
                 value = float(reading.value)
             except (TypeError, ValueError):

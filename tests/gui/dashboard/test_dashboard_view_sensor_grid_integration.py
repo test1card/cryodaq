@@ -8,7 +8,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from datetime import UTC, datetime
 
-from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui.dashboard import DashboardView
@@ -32,8 +31,7 @@ def test_dashboard_view_routes_temperature_reading_to_cell(app):
         status=ChannelStatus.OK,
         instrument_id="lakeshore_218s",
     )
-    descriptor = type("Descriptor", (), {"quantity": ChannelQuantity.TEMPERATURE})()
-    view.on_descriptor_reading(reading, descriptor)
+    view.on_reading(reading)
     view._refresh_plots()
     cell = view._sensor_grid._cells.get("\u04221")
     assert cell is not None, (

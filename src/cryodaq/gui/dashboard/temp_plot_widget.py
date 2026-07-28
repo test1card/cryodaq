@@ -45,7 +45,6 @@ class TempPlotWidget(QWidget):
         super().__init__(parent)
         self._buffer = buffer_store
         self._channel_mgr = channel_manager
-        self._temperature_channels: set[str] = set()
         self._plot_items: dict[str, pg.PlotDataItem] = {}
         # Phase III.B: single source of truth is the global controller;
         # no local TimeWindow state. `_current_window` is a cached
@@ -134,7 +133,7 @@ class TempPlotWidget(QWidget):
         if pi.legend is not None:
             pi.legend.clear()
 
-        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch in self._temperature_channels]
+        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("\u0422")]
         for idx, ch_id in enumerate(visible_ids):
             display = self._channel_mgr.get_display_name(ch_id)
             # DESIGN: tokens/chart-tokens.md — palette cycles PLOT_LINE_PALETTE
@@ -147,11 +146,6 @@ class TempPlotWidget(QWidget):
 
     def _on_channels_changed(self) -> None:
         self._rebuild_curves()
-
-    def set_temperature_channels(self, channel_ids: set[str]) -> None:
-        if channel_ids - self._temperature_channels:
-            self._temperature_channels.update(channel_ids)
-            self._rebuild_curves()
 
     # ------------------------------------------------------------------
     # Refresh (called by DashboardView at no more than 2 Hz)

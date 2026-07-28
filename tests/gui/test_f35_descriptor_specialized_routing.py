@@ -268,7 +268,7 @@ def test_same_t12_id_with_non_manifest_identity_never_routes_as_cold_stage() -> 
     shell._push_analytics.assert_not_called()
 
     _route(shell, reading, canonical)
-    shell._push_analytics.assert_not_called()
+    shell._push_analytics.assert_called_once_with("set_cold_temperature_reading", reading)
 
 
 def test_multiline_like_names_without_manifest_identity_never_route() -> None:
