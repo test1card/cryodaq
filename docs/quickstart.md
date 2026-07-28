@@ -74,7 +74,7 @@ make bootstrap-predictor
 ```
 
 **На свежем клоне эта команда не сработает — ни на Windows, ни на POSIX.**
-`Makefile:4-11` копирует `cooldown_v5/predictor_model.json`, но каталога
+[[ref:make:bootstrap-predictor|requires:cooldown_v5/predictor_model.json|status:absent]] копирует `cooldown_v5/predictor_model.json`, но каталога
 `cooldown_v5/` в репозитории нет: цель печатает
 `ERROR: cooldown_v5/predictor_model.json not found` и выходит с кодом 1.
 Модель предиктора — артефакт конкретного стенда, она не поставляется вместе

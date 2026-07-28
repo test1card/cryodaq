@@ -60,7 +60,7 @@ reviewer can see them change:
 | `config/instruments.yaml` | the tracked instrument roster used when no `instruments.local.yaml` exists — this stand's real addresses live in the local file, but the tracked one is committed policy and is the file an adapting lab most naturally edits first |
 
 **Gitignored, machine-local — addresses and secrets.** `.gitignore` ignores
-`config/*.local.yaml` (`.gitignore:33`). Each has a tracked `.example`
+`config/*.local.yaml`. Each has a tracked `.example`
 template you copy:
 
 | Local file | What it holds |
@@ -75,30 +75,30 @@ Two mechanics you must know before editing anything:
 - **Local overrides are whole-file replacements, not merges.** For
   `instruments`, `interlocks`, `housekeeping`, `safety`, `plugins`, `cooldown`
   and `notifications`, the engine picks `<name>.local.yaml` if it exists and
-  otherwise `<name>.yaml` (`src/cryodaq/engine.py:2235-2238`). There is no
+  otherwise `<name>.yaml` ([[ref:src/cryodaq/engine.py::_engine_config_path]]). There is no
   key-level merge. A local file that omits a key does not inherit it.
 - **The descriptor manifest is coupled to the instrument manifest.**
   `config/channel_descriptors.local.yaml` is selected **only** when the engine
   selected `config/instruments.local.yaml`, and then it is *mandatory* — a
   missing or invalid local manifest never falls back to the tracked base
-  (`src/cryodaq/engine.py:2247-2250`;
-  `src/cryodaq/storage/channel_descriptors.py:431-446`). If you create one you
+  ([[ref:src/cryodaq/engine.py::_log_physical_policy_receipt]];
+  [[ref:src/cryodaq/storage/channel_descriptors.py::load_live_channel_descriptor_catalog]]). If you create one you
   must create the other. Thus a tracked descriptor is not the effective
   reviewed physical policy on a machine using local instruments: the mandatory
   local descriptor is. Preserve its reviewed roster/sign-off with the lab's
   local acceptance record; the base file is not consulted in that mode.
 - **`config/alarms_v3.yaml` and `config/physical_alarms.yaml` have no local
   override at all.** The engine reads them from the tracked path
-  unconditionally (`src/cryodaq/engine.py:6677-6678` for `alarms_v3.yaml`,
-  `:6710-6711` for `physical_alarms.yaml`). `config/channels.yaml` is loaded
-  through `ChannelManager` (`src/cryodaq/core/channel_manager.py:25`). Your
+  unconditionally ([[ref:src/cryodaq/engine.py::_run_engine]]) for both files.
+  `config/channels.yaml` is loaded through `ChannelManager`
+  ([[ref:src/cryodaq/core/channel_manager.py::ChannelManager.load]]). Your
   alarm thresholds are therefore *committed policy in your fork* by
   construction. That is the intended design: a threshold is a physical claim
   and must be reviewable, whereas a COM port is not.
 
 Calibration curves are neither: they are runtime data under
-`data/calibration/curves/` (`src/cryodaq/engine.py:6382-6386`), and `data/*`
-is gitignored (`.gitignore:74`). Export and archive them out-of-band; do not
+`data/calibration/curves/` ([[ref:src/cryodaq/engine.py::_run_engine]]), and `data/*`
+is gitignored. Export and archive them out-of-band; do not
 commit them into the fork.
 
 **DONE when** every file you changed is in exactly one of the three
@@ -113,7 +113,7 @@ and `name`; the rest is per-type.
 
 The driver registry is a **closed allowlist** — there is no plugin discovery,
 no entry-point scan, no module-name lookup
-(`src/cryodaq/drivers/registry.py:1-6`). The built-in types today are:
+([[ref:src/cryodaq/drivers/registry.py::BUILTIN_DRIVER_SPECS]]). The built-in types today are:
 
 | `type` | Class | Trust |
 |---|---|---|
@@ -124,7 +124,7 @@ no entry-point scan, no module-name lookup
 | `keithley_2604b` | `Keithley2604B` | reviewed source (hazardous) |
 
 An unknown `type` fails startup with `UnknownDriverTypeError`
-(`src/cryodaq/drivers/registry.py:561-569`). If your hardware is not on this
+([[ref:src/cryodaq/drivers/registry.py::get_driver_spec]]). If your hardware is not on this
 list you need a **new driver**, which is production code in
 `src/cryodaq/drivers/` and outside the config-level adaptation this document
 describes. A passive sensor driver is ordinary work. An actuator that can put
@@ -132,7 +132,7 @@ energy into the cryostat is **not currently supported at all** — read §8
 before spending any effort on it.
 
 `name` is a stable identity, not a path: no whitespace, no `/`, `\`, `:` or
-`..` (`src/cryodaq/drivers/registry.py:703-719`). It is the `instrument_id`
+`..` ([[ref:src/cryodaq/drivers/registry.py::_validate_instrument_identity]]). It is the `instrument_id`
 that the descriptor manifest must match exactly.
 
 **DONE when** `cryodaq-engine --mock` gets past the line
@@ -145,17 +145,17 @@ channel that is not in it cannot be persisted, and because persistence is
 ordered before publication, a reading on an undeclared channel is not
 published either. `SQLiteWriter.begin_committed` binds *every* reading
 through the catalog owner
-(`src/cryodaq/storage/sqlite_writer.py:6795-6808`), and `bind()` raises for a
+([[ref:src/cryodaq/storage/sqlite_writer.py::SQLiteWriter.begin_committed]]), and `bind()` raises for a
 `(instrument_id, emitted_channel)` pair it does not know
-(`src/cryodaq/storage/channel_descriptors.py:827-837`). There is no
+([[ref:src/cryodaq/storage/channel_descriptors.py::LiveChannelDescriptorCatalog.bind]]). There is no
 best-effort path. Completeness is not a nicety here.
 
 ### 3.1 File shape
 
 The manifest grammar is exact — extra or missing keys are rejected, YAML
 aliases are refused, and the file must be a single-link regular file under
-256 KiB (`src/cryodaq/storage/channel_descriptors.py:52-73`, `:241-349`,
-`:352-428`). The root has exactly three keys:
+256 KiB ([[ref:src/cryodaq/storage/channel_descriptors.py::_read_live_descriptor_config]],
+[[ref:src/cryodaq/storage/channel_descriptors.py::_parse_live_descriptor_manifest]]). The root has exactly three keys:
 
 ```yaml
 schema_version: 1
@@ -183,26 +183,27 @@ Hard rules the loader enforces, each of which fails startup:
 
 - `descriptors` and `bindings` must have **the same length**, and the binding
   set must be one-to-one and cover every descriptor exactly once
-  (`src/cryodaq/storage/channel_descriptors.py:367-370`, `:421-423`,
-  `:771-788`).
+  ([[ref:src/cryodaq/storage/channel_descriptors.py::_parse_live_descriptor_manifest]],
+  [[ref:src/cryodaq/storage/channel_descriptors.py::LiveChannelDescriptorCatalog.__init__]]).
 - `channel_id`, `instrument_id` and `source_key` are the immutable identity
   anchor. `quantity` and `unit` are immutable too: changing either requires a
   **new** `channel_id`, not a new revision
-  (`src/cryodaq/channels/descriptors.py:94-103`, `:304-331`).
+  ([[ref:src/cryodaq/channels/descriptors.py::ChannelDescriptorV1]],
+  [[ref:src/cryodaq/channels/descriptors.py::_validate_history]]).
 - `unit` must be legal for `quantity`. The allowed sets are fixed:
   `temperature` → `K`/`°C`; `raw_sensor` → `sensor_unit`; `pressure` →
   `mbar`/`hPa`; `length` → `mm`; `relative_humidity` → `%`; `voltage` → `V`;
   `current` → `A`; `resistance` → `Ohm`; `power` → `W`; `event_state` →
   `state`; `derived` → any of those plus `1`
-  (`src/cryodaq/channels/descriptors.py:73-89`).
+  ([[ref:src/cryodaq/channels/descriptors.py::ChannelQuantity]]).
 - `channel_id` and `instrument_id` must be NFC-normalized and contain **no
   whitespace at all**, including internal spaces
-  (`src/cryodaq/channels/descriptors.py:122-140`). `display_name` and
+  ([[ref:src/cryodaq/channels/descriptors.py::_validate_identifier]]). `display_name` and
   `display_group` may contain spaces.
 - The manifest's instrument set must equal the configured instrument set
   **exactly** — no missing, no extra
-  (`src/cryodaq/storage/channel_descriptors.py:811-825`, called at
-  `src/cryodaq/engine.py:2256`).
+  ([[ref:src/cryodaq/storage/channel_descriptors.py::LiveChannelDescriptorCatalog.require_exact_instruments]], called by
+  [[ref:src/cryodaq/engine.py::_load_cooldown_config]]).
 
 ### 3.2 The `emitted_channel` column is not decorative
 
@@ -214,7 +215,8 @@ reading.
 
 For `lakeshore_218s`, the emitted label is the value from the instrument's
 `channels:` map, or `CH<n>` if that channel number is not mapped
-(`src/cryodaq/drivers/instruments/lakeshore_218s.py:239`, `:253`, `:328`).
+([[ref:src/cryodaq/drivers/instruments/lakeshore_218s.py::LakeShore218S._read_krdg_per_channel]],
+[[ref:src/cryodaq/drivers/instruments/lakeshore_218s.py::LakeShore218S._read_srdg_per_channel]]).
 Read your own driver's `Reading.now(channel=…)` call sites rather than
 guessing.
 
@@ -222,7 +224,7 @@ guessing.
 
 Calibration acquisition republishes each raw sensor reading under a *derived*
 channel name — the source channel with a `_raw` suffix
-(`src/cryodaq/core/calibration_acquisition.py:129-143`). Those readings go
+([[ref:src/cryodaq/core/calibration_acquisition.py::CalibrationAcquisitionService.prepare_srdg_readings]]). Those readings go
 through the same persistence path as everything else, so if the `_raw`
 channels are missing from the manifest **the calibration session fails to
 persist**, and you will only discover it during a calibration run.
@@ -261,30 +263,29 @@ lab's physical roster in the manifest.
 ### 3.4 `safety_class` — the one field an agent must not guess
 
 `safety_class` is one of four values
-(`src/cryodaq/channels/descriptors.py:55-59`):
+([[ref:src/cryodaq/channels/descriptors.py::ChannelSafetyClass]]):
 
 - `observational` — the default. Measured, recorded, shown, alarmed on, but
   no part of the safety FSM's existence conditions.
 - `safety_critical_input` — a channel whose *staleness* is a fault. Use it
   only for sensors that are **physically fixed between experiments**. A
   mobile, per-experiment sensor declared critical produces spurious faults
-  every time it is moved (`config/safety.yaml:9-14` records that reasoning
+  every time it is moved ([[ref:config/safety.yaml::critical_channels]] records that reasoning
   for this stand).
 - `hazardous_source_readback` — voltage/current/power read back from a
   reviewed source. It is **mutually bound** to `role: source_readback`: each
   requires the other, and declaring one without the other fails validation
-  (`src/cryodaq/channels/descriptors.py:217-221`).
+  ([[ref:src/cryodaq/channels/descriptors.py::ChannelDescriptorV1.__post_init__]]).
 - `legacy_unknown` — reserved for synthetic rows recovered from pre-descriptor
   archives. Never write it in a manifest; the catalog rejects it
-  (`src/cryodaq/channels/descriptors.py:388-389`).
+  ([[ref:src/cryodaq/channels/descriptors.py::ChannelCatalog.__init__]]).
 
 `safety_critical_input` is enforced, not advisory — **but only once you have
 declared at least one such channel.** At startup the liveness validator computes
 the set of temperature channels classified `safety_critical_input`. **If that set
 is non-empty**, it requires the set to be **exactly** the set matched by
-`critical_channels` in `config/safety.yaml`, and a mismatch in either direction
-fails startup (`src/cryodaq/core/safety_pattern_liveness.py:646-664`; note the
-`if critical_manifest_ids and ...` guard at `:657`). So this field and that
+  `critical_channels` in `config/safety.yaml`, and a mismatch in either direction
+  fails startup ([[ref:src/cryodaq/core/safety_pattern_liveness.py::validate_safety_pattern_liveness]]). So this field and that
 config list are one decision recorded twice, and they must be decided together.
 
 **If your manifest declares no `safety_critical_input` temperature channel, this
@@ -300,13 +301,13 @@ read it out of the repository.
 
 ### 3.5 Generating a first draft
 
-`build_channel_descriptors_local` in `src/cryodaq/gui/first_run_config.py:200`
+`build_channel_descriptors_local` in [[ref:src/cryodaq/gui/first_run_config.py::build_channel_descriptors_local]]
 derives a local manifest from a declared instrument set, and the first-run
 wizard calls it. Understand its limit before relying on it: it selects rows
 from the shipped descriptor **template** by matching instrument *type*, and
 raises `descriptor template lacks a '<type>' instrument slot` when your
 configuration has an instrument type the template does not cover
-(`src/cryodaq/gui/first_run_config.py:279-294`). It rebuilds emitted-channel
+([[ref:src/cryodaq/gui/first_run_config.py::build_channel_descriptors_local]]). It rebuilds emitted-channel
 bindings from the live wizard configuration, so it is reliable for "same
 driver types, different count/labels/addresses" — which is the common case —
 and useless for genuinely new hardware.
@@ -327,16 +328,16 @@ not a data-quality problem.
 
 A `CalibrationCurve` records `curve_id`, `sensor_id`, `fit_timestamp`,
 `raw_unit`, `sensor_kind`, the source session ids, its zones, and a metrics
-dict (`src/cryodaq/analytics/calibration.py:143-207`). Each zone carries its
+dict ([[ref:src/cryodaq/analytics/calibration.py::CalibrationCurve]]). Each zone carries its
 own `raw_min`, `raw_max`, polynomial `order`, `rmse_k`, `max_abs_error_k` and
-`point_count` (`:99-107`). A fit additionally records `sample_count`,
+`point_count` ([[ref:src/cryodaq/analytics/calibration.py::CalibrationZone]]). A fit additionally records `sample_count`,
 `zone_count`, overall `rmse_k` and `max_abs_error_k`, the raw and temperature
-spans, and the sensitivity range (`:295-313`).
+spans, and the sensitivity range ([[ref:src/cryodaq/analytics/calibration.py::CalibrationStore.fit_curve]]).
 
 **Reference traceability** is carried per sample, not per curve: every
 `CalibrationSample` records `reference_channel`, `reference_temperature`,
 `reference_instrument_id`, `sensor_channel`, `sensor_raw_value` and the
-`experiment_id` it came from (`src/cryodaq/analytics/calibration.py:55-65`).
+`experiment_id` it came from ([[ref:src/cryodaq/analytics/calibration.py::CalibrationSample]]).
 
 ### 4.2 Acceptance criteria
 
@@ -363,12 +364,12 @@ metadata checks.
    overall `rmse_k` and the worst-zone `max_abs_error_k` must be small
    compared with the tightest alarm band that will be applied to this channel
    (§6). The fitter's default target is `target_rmse_k = 0.05` K
-   (`src/cryodaq/analytics/calibration.py:241`); that is a *default*, not a
+   ([[ref:src/cryodaq/analytics/calibration.py::CalibrationStore.fit_curve]]); that is a *default*, not a
    specification for your sensor. The alarm band is external physical policy;
    statistics alone cannot pass this criterion.
 4. **The curve is assigned to the right channel and only that channel.**
    Assignment is by `channel_key`, held in the store's assignment index
-   (`src/cryodaq/analytics/calibration.py:691-735`). That proves only the
+   ([[ref:src/cryodaq/analytics/calibration.py::CalibrationStore.assign_curve]]). That proves only the
    software assignment. Confirm the physical sensor-to-channel correspondence
    with the wiring record and a signed channel-mapping observation; metadata
    alone cannot establish it. **NOT PASSED** without that physical evidence.
@@ -383,7 +384,7 @@ metadata checks.
 
 Runtime curve application fails *safe*, and you should know which safe. In
 `_merge_runtime_readings`
-(`src/cryodaq/drivers/instruments/lakeshore_218s.py:506-613`) the driver falls
+([[ref:src/cryodaq/drivers/instruments/lakeshore_218s.py::LakeShore218S._merge_runtime_readings]]) the driver falls
 back to the instrument's native reading, tagging the reason, when:
 
 - there is no fresh raw reading for the channel (`missing_srdg`);
@@ -394,20 +395,20 @@ The out-of-range case matters more than it looks. `CalibrationCurve.evaluate`
 clips an out-of-span raw to the zone boundary, which would freeze the reported
 temperature and drive `dT/dt` to zero — blinding every rate-based safety
 check. `raw_in_range` therefore performs **no** clipping and is checked first
-(`src/cryodaq/analytics/calibration.py:165-179`;
-`src/cryodaq/drivers/instruments/lakeshore_218s.py:552-575`). If you add a new
+([[ref:src/cryodaq/analytics/calibration.py::CalibrationCurve.raw_in_range]];
+[[ref:src/cryodaq/drivers/instruments/lakeshore_218s.py::LakeShore218S._merge_runtime_readings]]). If you add a new
 calibrated driver, reproduce this ordering exactly.
 
 ### 4.4 Enabling a curve at runtime is a two-key operation
 
 Nothing is applied until *all* of these are true
-(`src/cryodaq/analytics/calibration.py:610-689`): the store's `global_mode` is
+([[ref:src/cryodaq/analytics/calibration.py::CalibrationStore.resolve_runtime_policy]]): the store's `global_mode` is
 `on`; the channel's `reading_mode_policy` is not `off`; the assignment's
 `runtime_apply_ready` flag is `true`; and the named curve is loaded. Any one
 missing resolves to `effective_mode: off` with an explicit `reason`, and the
 native reading is published instead. An imported vendor curve is deliberately
 assigned with `runtime_apply_ready=False`
-(`src/cryodaq/analytics/calibration.py:436-442`) — importing a `.340` file
+([[ref:src/cryodaq/analytics/calibration.py::CalibrationStore.import_curve_file]]) — importing a `.340` file
 does not enable it.
 
 **ESCALATE** the flip of `runtime_apply_ready` to `true`. That is the moment a
@@ -433,18 +434,18 @@ You do not have to do anything per channel for these, and you cannot break
 them per channel:
 
 - **Persistence.** Every published reading is descriptor-bound and stored with
-  its `descriptor_hash` (`src/cryodaq/storage/channel_descriptors.py:1114`,
-  `:1201-1219`).
+  its `descriptor_hash` ([[ref:src/cryodaq/storage/channel_descriptors.py::install_catalog]],
+  [[ref:src/cryodaq/storage/channel_descriptors.py::descriptor_hash_for_reading]]).
 - **Replay and reports.** A non-legacy report reading *requires* a descriptor
   and cross-checks instrument, channel and unit against it
-  (`src/cryodaq/reporting/data.py:53-68`).
+  ([[ref:src/cryodaq/reporting/data.py::HistoricalReading.__post_init__]]).
 - **Archive rotation.** Descriptors travel with the rows
   (`src/cryodaq/storage/descriptor_archive.py`).
 
 ### 5.2 Surfaces enforced at startup — fail loudly
 
 `validate_safety_pattern_liveness`
-(`src/cryodaq/core/safety_pattern_liveness.py:424-613`) checks five "planes"
+([[ref:src/cryodaq/core/safety_pattern_liveness.py::validate_safety_pattern_liveness]]) checks five "planes"
 against the manifest the engine actually selected, and raises
 `SafetyPatternLivenessError` naming every dead pattern:
 
@@ -459,14 +460,14 @@ against the manifest the engine actually selected, and raises
 Plane 5 exists because adding a channel alarm is the single most common
 adaptation a new lab makes. If a channel is legitimately absent at your lab,
 you declare that per-reference with an `optional_channels` list on that alarm
-(`src/cryodaq/core/safety_pattern_liveness.py:100-109`, `:206-210`) — silence
+  ([[ref:src/cryodaq/core/safety_pattern_liveness.py::_optional_channels_for_alarm]]) — silence
 is opt-in and visible in the config, never a blanket severity exclusion.
 
 Additionally, an alarm's channel selector must be one of `channel`,
 `channels` or `channel_group`, at most one of them, and it must resolve to at
 least one channel; the loader rejects the empty and mixed forms that would
 otherwise produce a permanently dead annunciator
-(`src/cryodaq/core/alarm_config.py:298-331`).
+([[ref:src/cryodaq/core/alarm_config.py::_require_multi_channel_selector]]).
 
 ### 5.3 Surfaces **not** enforced — you must check these by hand
 
@@ -513,7 +514,7 @@ shipped values are. This section is the *method* for arriving at a number for
 a stand that has never run.
 
 The guide's own baseline procedure — run one or two full cycles, look at
-observed maxima, add 20–30 % headroom (`docs/alarms_tuning_guide.md:316-326`)
+observed maxima, add 20–30 % headroom (see `docs/alarms_tuning_guide.md`)
 — is sound for tuning **nuisance** thresholds *after* the stand is known safe.
 It cannot be used to set the thresholds that must already be correct the first
 time the heater is switched on, because it requires having run.
@@ -558,14 +559,14 @@ document §6.4 asks you to write — all five of:
 5. **What happens when it trips**, and that this is acceptable. An
    `emergency_off` on a channel that also alarms on ordinary cooldown is not a
    protection, it is an outage. Interlock actions are `emergency_off` or
-   `stop_source` (`config/interlocks.yaml:12`).
+    `stop_source` ([[ref:config/interlocks.yaml::interlocks]]).
 
 Two rules that are not negotiable:
 
 - **Absolute physical bounds are not operating ranges.** The shipped
   `[0, 350] K` sensor-fault bounds mean "no real cryogenic sensor reads
   outside this", not "this is our working range"
-  (`docs/alarms_tuning_guide.md:434-443`). Set your working range separately,
+  (see `docs/alarms_tuning_guide.md`). Set your working range separately,
   as an `alarm_band` in `config/channels.yaml`.
 - **A protective threshold must be reachable by the sensor that guards it.**
   If the guarding channel is calibrated, its valid range (§4.2 criterion 2)
@@ -591,14 +592,14 @@ hardware minimum  <  interlock threshold  <  alarm threshold
 ```
 
 This follows the implemented comparisons: an alarm with `below` fires for
-`value < threshold` (`src/cryodaq/core/alarm_v2.py:322-342`) and an interlock
+`value < threshold` ([[ref:src/cryodaq/core/alarm_v2.py::AlarmEvaluator._check_threshold_channel]]) and an interlock
 with `<` fires for `value < threshold`
-(`src/cryodaq/core/interlock.py:117-121`).
+([[ref:src/cryodaq/core/interlock.py::InterlockCondition.is_triggered]]).
 
 Staleness has the same shape and the shipped values already demonstrate it:
 `stale_timeout_s: 10` in `config/safety.yaml` is a fault; the alarm-level
 stale/loss timeouts in `config/alarms_v3.yaml` are looser
-(`docs/alarms_tuning_guide.md:395-404`). Keep safety strictest.
+(see `docs/alarms_tuning_guide.md`). Keep safety strictest.
 
 Check the ordering explicitly after you set the numbers; nothing in the code
 enforces it.
@@ -606,7 +607,7 @@ enforces it.
 ### 6.4 Write the physics document
 
 `config/alarms_v3.yaml` refers to a physics rationale file that **does not
-exist in this repository** (`docs/alarms_tuning_guide.md:447-470` says so
+exist in this repository** (`docs/alarms_tuning_guide.md` says so
 plainly and gives the structure). Your fork should create it as a tracked
 document and record, per threshold, items 1–5 from §6.2. Without it, the next
 operator inherits magic numbers, and the next agent has no way to tell a
@@ -660,10 +661,10 @@ cryodaq-engine --mock
 Pass signal: the process **stays up** and logs
 `Alarm Engine v2: загружено N алармов`. Fail signal: it exits with code **2**
 and logs `CONFIG ERROR (<layer> config): <error>`
-(`src/cryodaq/engine.py:7857`). The decision not to auto-restart that exit code
+([[ref:src/cryodaq/engine.py::main]]). The decision not to auto-restart that exit code
 lives in the **launcher**, not the engine: see
-`src/cryodaq/launcher.py:5609` (`Engine exited with CONFIG ERROR (code %d). NOT
-auto-restarting.`) and `:5614`. A dead alarm channel reference, for instance,
+[[ref:src/cryodaq/launcher.py::LauncherWindow._handle_engine_exit]] (`Engine exited with CONFIG ERROR (code %d). NOT
+auto-restarting.`). A dead alarm channel reference, for instance,
 exits 2 with `SafetyPatternLivenessError`.
 
 *** Do not grep for a literal `exception=` — that string does not appear in the
@@ -712,26 +713,29 @@ and must be reported as such.
 - **Adopting a different hazardous actuator — NOT POSSIBLE TODAY. Do not
   attempt it.** The driver registry does keep an explicit roster of bindings
   that passed hazardous-source review (`REVIEWED_SOURCE_BINDINGS`,
-  `src/cryodaq/drivers/registry.py:133-149`), and structural conformance to the
+  [[ref:src/cryodaq/drivers/registry.py::REVIEWED_SOURCE_BINDINGS]]), and structural conformance to the
   driver protocol never by itself confers source authority
-  (`src/cryodaq/drivers/registry.py:255-272`). But **the loader is the only
+  ([[ref:src/cryodaq/drivers/registry.py::DriverSpec.__post_init__]]). But **the loader is the only
   part of that path that generalises.** Downstream of it the system is still
   built around one vendor's SMU:
 
   - `SafetyManager` is internally Keithley-shaped — `_keithley`,
     `_keithley_patterns`, `_keithley_channel_states`,
     `_has_fresh_keithley_data` and the `require_keithley_for_run` config field
-    (`src/cryodaq/core/safety_manager.py:83`, `:2645`, `:2796`, `:2830`),
+    ([[ref:src/cryodaq/core/safety_manager.py::SafetyConfig]],
+    [[ref:src/cryodaq/core/safety_manager.py::SafetyManager._check_preconditions]],
+    [[ref:src/cryodaq/core/safety_manager.py::SafetyManager._run_checks]]),
     constructed from a `keithley_driver` parameter
-    (`src/cryodaq/core/safety_manager.py:140-158`).
+    ([[ref:src/cryodaq/core/safety_manager.py::SafetyManager.__init__]]).
   - Its global OFF and channel-state publication iterate a hardcoded
-    `("smua", "smub")` pair (`src/cryodaq/core/safety_manager.py:2203`,
-    `:2434`, `:2605`) and publish under
+    `("smua", "smub")` pair ([[ref:src/cryodaq/core/safety_manager.py::SafetyManager._publish_keithley_channel_states]],
+    [[ref:src/cryodaq/core/safety_manager.py::SafetyManager._settle_latched_fault]],
+    [[ref:src/cryodaq/core/safety_manager.py::SafetyManager._resolve_channels]]) and publish under
     `analytics/keithley_channel_state/<smu_channel>`
-    (`src/cryodaq/core/safety_manager.py:2214-2215`).
+    ([[ref:src/cryodaq/core/safety_manager.py::SafetyManager._publish_keithley_channel_states]]).
   - `ReviewedSourceBinding` retains `adapter_module`, `adapter_class` and
     `contract_version` as the declared adapter-contract identity
-    (`src/cryodaq/drivers/registry.py:116-130`). The present loader does not
+    ([[ref:src/cryodaq/drivers/registry.py::ReviewedSourceBinding]]). The present loader does not
     yet dispatch through those fields; retain them for the future
     capability-tier adapter contract rather than deleting them.
 
@@ -751,7 +755,7 @@ and must be reported as such.
 Report these rather than working around them silently.
 
 - **One analytics feed is bound to this stand's exact cold-stage descriptor.**
-  `src/cryodaq/gui/shell/main_window_v2.py:133-143` recognises the cold stage
+  [[ref:src/cryodaq/gui/shell/main_window_v2.py::_is_manifest_cold_stage_descriptor]] recognises the cold stage
   by an exact identity match on `channel_id`, `instrument_id`, `source_key`,
   quantity, unit, role, safety class **and** `display_group`. A lab whose cold
   stage is any other descriptor loses that analytics feed with no error. This

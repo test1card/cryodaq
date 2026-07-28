@@ -31,6 +31,10 @@ instruments, descriptor manifest, coverage table and thresholds already exist.
 default and it is not a formality: an open gate that is reported closed is the
 single most damaging outcome of an adaptation.
 
+The executable-documentation contract is
+[[ref:test:tests/docs/test_docs_freshness.py::test_g4_executable_references_and_procedure_declarations]]
+([[ref:id:G4-DOCS-001]]).
+
 For each row record:
 
 | Field | Meaning |
@@ -120,7 +124,7 @@ Only for channels you intend to run calibrated. Fill in per channel.
 | **G5.1 Stale critical channel** | Interrupt one `safety_critical_input` channel during operation. | A fault is latched within the configured stale timeout. |
 | **G5.2 Fault latches** | After G5.1. | The fault does **not** self-clear when the channel returns. Operator acknowledgement is required. |
 | **G5.3 Recovery is gated** | Attempt to resume immediately after acknowledging. | The configured re-arm cooldown is enforced and the required reason is demanded. |
-| **G5.4 Disk exhaustion** | Use a **dedicated disposable test volume** (not the production data volume and never the OS volume), with a recorded fixed capacity. Point only the test engine's data directory at it. Reserve **at least 256 MiB** that the fill procedure never consumes; abort immediately if the next 1-MiB fill step would enter that reserve, if the path is not the dedicated volume, or if the engine writes anywhere else. Set the test's critical-free-space threshold above the 256-MiB reserve, then fill in 1-MiB steps only until free space is below that configured threshold. Stop the engine, remove the fill files, delete the test database/volume, and record free space after cleanup. | Persistence degrades safely, the fault is latched, and no reading is published that was not persisted: the scheduler returns on write failure/disk-full before `DataBroker.publish_batch()` (`src/cryodaq/core/scheduler.py:1320-1408`). The evidence records the dedicated-volume path, capacity, configured threshold, lowest free-space value, abort/cleanup result, and the persistence-failure log. |
+| **G5.4 Disk exhaustion** | Use a **dedicated disposable test volume** (not the production data volume and never the OS volume), with a recorded fixed capacity. Point only the test engine's data directory at it. Reserve **at least 256 MiB** that the fill procedure never consumes; abort immediately if the next 1-MiB fill step would enter that reserve, if the path is not the dedicated volume, or if the engine writes anywhere else. Set the test's critical-free-space threshold above the 256-MiB reserve, then fill in 1-MiB steps only until free space is below that configured threshold. Stop the engine, remove the fill files, delete the test database/volume, and record free space after cleanup. | Persistence degrades safely, the fault is latched, and no reading is published that was not persisted: the scheduler returns on write failure/disk-full before `DataBroker.publish_batch()` ([[ref:src/cryodaq/core/scheduler.py::Scheduler._process_readings]]). The evidence records the dedicated-volume path, capacity, configured threshold, lowest free-space value, abort/cleanup result, and the persistence-failure log. |
 
 ## G6 — Hazardous source
 
@@ -133,13 +137,14 @@ open.
 
 If your stand uses **any other** actuator, stop. The driver registry keeps an
 explicit roster of reviewed bindings
-(`REVIEWED_SOURCE_BINDINGS`, `src/cryodaq/drivers/registry.py:133-149`) and a
+([[ref:src/cryodaq/drivers/registry.py::REVIEWED_SOURCE_BINDINGS]]) and a
 second rostered binding is admitted by the loader, but nothing downstream of
 the loader is vendor-neutral yet: `SafetyManager` is internally Keithley-shaped
 and its global OFF iterates a hardcoded `("smua", "smub")` pair
-(`src/cryodaq/core/safety_manager.py:151`, `:2203`, `:2434`, `:2605`), and the
+([[ref:src/cryodaq/core/safety_manager.py::SafetyManager._publish_keithley_channel_states]],
+[[ref:src/cryodaq/core/safety_manager.py::SafetyManager._run_global_output_off]]), and the
 binding's `adapter_module` / `adapter_class` / `contract_version` fields
-(`src/cryodaq/drivers/registry.py:116-130`) remain the declared
+([[ref:src/cryodaq/drivers/registry.py::ReviewedSourceBinding]]) remain the declared
 adapter-contract identity, but the current loader does not dispatch through
 them. A rostered actuator therefore reaches a supervisor that cannot drive it. See
 `docs/new_lab_adaptation.md` §8.
@@ -165,7 +170,7 @@ Do not energize a heater inside a cryostat to close any gate in this document.
 |---|---|---|
 | **G7.1 Soak** | Run the full stack against real instruments for at least one intended experiment duration. | No memory growth trend, no unexplained gap in any channel, no restart. |
 | **G7.2 Full cycle** | One complete operating cycle end to end. | Every phase transition behaves as configured; the archive and the report for that cycle are complete. |
-| **G7.3 Restart mid-run** | Record the configured maximum poll interval `P` and the last committed receipt before the stop. Stop and restart the engine, using a stopwatch; obtain the first new committed receipt within **60 s** of the stop command. The acknowledged in-flight window is the single measured restart interval, bounded per channel by **60 s + 2P** between its last pre-stop and first post-restart persisted timestamps. Query both receipt batches and compare each ordered entry identity `(instrument_id, channel_id, timestamp)` with the stored rows. `commit_revision` is per writer, so record it inside each run but do not compare its value across the restart. | `CommittedBatchReceipt` carries entries and a per-writer `commit_revision` (`src/cryodaq/storage/sqlite_writer.py:700-724`, `:7227-7249`); every entry in the last pre-stop receipt and first post-restart receipt must persist exactly once. Every channel's measured timestamp gap must be at or below `60 s + 2P`; a longer or unexplained gap, duplicate, reordered row, or missing receipt leaves G7.3 **NOT PASSED**. |
+| **G7.3 Restart mid-run** | Record the configured maximum poll interval `P` and the last committed receipt before the stop. Stop and restart the engine, using a stopwatch; obtain the first new committed receipt within **60 s** of the stop command. The acknowledged in-flight window is the single measured restart interval, bounded per channel by **60 s + 2P** between its last pre-stop and first post-restart persisted timestamps. Query both receipt batches and compare each ordered entry identity `(instrument_id, channel_id, timestamp)` with the stored rows. `commit_revision` is per writer, so record it inside each run but do not compare its value across the restart. | `CommittedBatchReceipt` carries entries and a per-writer `commit_revision` ([[ref:src/cryodaq/storage/sqlite_writer.py::CommittedBatchReceipt]]); every entry in the last pre-stop receipt and first post-restart receipt must persist exactly once. Every channel's measured timestamp gap must be at or below `60 s + 2P`; a longer or unexplained gap, duplicate, reordered row, or missing receipt leaves G7.3 **NOT PASSED**. |
 
 ## G8 — Platform and packaging
 
@@ -184,3 +189,330 @@ procedure your engineer defines, and the record is signed and dated.
 Report open gates as open. A gate left open is a known limit on where the
 system may be used; a gate reported closed without its evidence is a false
 statement about a cryostat.
+
+<!-- G4-PROCEDURES
+G0.1:
+  preconditions: target runtime manifest is selected
+  target: one target production runtime
+  bound: 1 runtime comparison
+  abort: runtime differs from production target
+  cleanup: restore no changed runtime settings
+  evidence: interpreter and dependency record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G0.2:
+  preconditions: target sqlite3 import is identified
+  target: one target runtime sqlite implementation
+  bound: 1 version-range check
+  abort: imported sqlite3 cannot be identified
+  cleanup: no database is retained
+  evidence: version and policy record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G0.3:
+  preconditions: planned run and thresholds are recorded
+  target: one production data volume
+  bound: 1 free-space measurement
+  abort: volume is the OS volume without approved margin
+  cleanup: remove any temporary measurement file
+  evidence: dated free-space record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G0.4:
+  preconditions: adaptation records exist
+  target: one selected configuration record
+  bound: 5 definition-of-done items
+  abort: any required item is unsigned or open
+  cleanup: no configuration is changed
+  evidence: signed adaptation record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G1.1:
+  preconditions: passive instrument is isolated from hazardous source control
+  target: 1 named passive instrument
+  bound: 1 identification read
+  abort: identity differs from recorded serial number
+  cleanup: disconnect test transport
+  evidence: identification response and serial record
+  decision_owner: engineer
+  result: PHYSICAL
+G1.2:
+  preconditions: passive instrument is connected and safe to stimulate
+  target: 1 named channel
+  bound: 1 distinguishable stimulus per channel
+  abort: stimulus affects an unexpected channel
+  cleanup: return sensor or gauge to normal condition
+  evidence: dated mapping observation
+  decision_owner: engineer
+  result: PHYSICAL
+G1.3:
+  preconditions: independent reference is available
+  target: 1 named channel
+  bound: 1 independent comparison
+  abort: magnitude or sign is implausible
+  cleanup: remove reference probe
+  evidence: paired readings and units
+  decision_owner: engineer
+  result: PHYSICAL
+G1.4:
+  preconditions: passive acquisition is stable
+  target: 1 named passive instrument
+  bound: 60 minutes observation
+  abort: a channel exceeds its staleness threshold
+  cleanup: stop observation run
+  evidence: timestamped update-rate log
+  decision_owner: engineer
+  result: PHYSICAL
+G1.5:
+  preconditions: transport interruption is safe
+  target: 1 named passive transport
+  bound: 1 controlled disconnect
+  abort: any channel remains healthy-looking
+  cleanup: reconnect transport
+  evidence: stale or disconnected indication
+  decision_owner: engineer
+  result: PHYSICAL
+G1.6:
+  preconditions: G1.5 evidence is recorded
+  target: 1 named passive transport
+  bound: 1 controlled reconnect
+  abort: acquisition needs an engine restart
+  cleanup: restore normal transport wiring
+  evidence: recovery log excerpt
+  decision_owner: engineer
+  result: PHYSICAL
+G1.7:
+  preconditions: out-of-range route is safe
+  target: 1 named passive channel
+  bound: 1 controlled overrange stimulus
+  abort: reading remains plausible
+  cleanup: restore in-range condition
+  evidence: fault or overrange observation
+  decision_owner: engineer
+  result: PHYSICAL
+G2.1:
+  preconditions: real acquisition is connected
+  target: 1 selected data store
+  bound: 1 bounded acquisition run
+  abort: expected channel has zero rows
+  cleanup: stop acquisition and preserve test record
+  evidence: per-channel row query
+  decision_owner: engineer
+  result: PHYSICAL
+G2.2:
+  preconditions: calibration session is safe to run
+  target: 1 calibration data store
+  bound: 1 calibration acquisition session
+  abort: any expected raw channel is absent
+  cleanup: stop session and preserve record
+  evidence: raw-channel row query
+  decision_owner: engineer
+  result: PHYSICAL
+G2.3:
+  preconditions: a persisted test row exists
+  target: 1 stored-row report interval
+  bound: 1 round trip
+  abort: descriptor identity changes
+  cleanup: retain report with evidence
+  evidence: row and report comparison
+  decision_owner: engineer
+  result: PHYSICAL
+G2.4:
+  preconditions: rotation schedule is known
+  target: 1 test data store
+  bound: 1 daily boundary
+  abort: any channel is lost or renamed
+  cleanup: stop test and retain both archives
+  evidence: pre and post rotation queries
+  decision_owner: engineer
+  result: PHYSICAL
+G3.1:
+  preconditions: reference thermometer certificate is available
+  target: 1 named reference thermometer
+  bound: 1 certificate check
+  abort: certificate is expired or missing
+  cleanup: return certificate to controlled record
+  evidence: certificate identifier and date
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G3.2:
+  preconditions: calibration and reference are connected
+  target: 1 calibrated channel
+  bound: 1 operating-range comparison
+  abort: residual exceeds claimed uncertainty
+  cleanup: return hardware to stable condition
+  evidence: reference trace and residuals
+  decision_owner: engineer
+  result: PHYSICAL
+G3.3:
+  preconditions: safe out-of-span route is available
+  target: 1 calibrated channel
+  bound: 1 controlled out-of-span observation
+  abort: value freezes at span boundary
+  cleanup: restore in-range sensor condition
+  evidence: fallback and dT/dt record
+  decision_owner: engineer
+  result: PHYSICAL
+G3.4:
+  preconditions: signed enable record is available
+  target: 1 calibration runtime resolution
+  bound: 1 resolution inspection
+  abort: effective mode is on without signature
+  cleanup: leave runtime mode unchanged
+  evidence: mode and reason record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G4.1:
+  preconditions: alarm inventory is frozen
+  target: 1 named alarm
+  bound: 1 reachability review per alarm
+  abort: condition cannot occur on this hardware
+  cleanup: record removal or retention reason
+  evidence: alarm reachability record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G4.2:
+  preconditions: safe substitute or dummy load is installed
+  target: 1 Class A threshold
+  bound: 1 safe trip exercise
+  abort: route approaches real hazard
+  cleanup: remove substitute and verify safe state
+  evidence: measured trip value and latency
+  decision_owner: engineer
+  result: PHYSICAL
+G4.3:
+  preconditions: normal cycle is approved
+  target: 1 normal operating cycle
+  bound: 1 full cycle
+  abort: protective trip fires
+  cleanup: stop cycle by normal procedure
+  evidence: cycle log and trip history
+  decision_owner: engineer
+  result: PHYSICAL
+G4.4:
+  preconditions: safe slowly varying substitute is installed
+  target: 1 alarm and interlock pair
+  bound: 1 ordered threshold crossing
+  abort: interlock fires before alarm
+  cleanup: restore substitute below thresholds
+  evidence: ordered timestamp record
+  decision_owner: engineer
+  result: PHYSICAL
+G4.5:
+  preconditions: alarm inventory is frozen
+  target: 1 operator alarm message
+  bound: 1 wording review per message
+  abort: message names impossible situation or action
+  cleanup: record required wording correction
+  evidence: signed operator wording review
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G4.6:
+  preconditions: notification channels are configured
+  target: 1 notification class
+  bound: 1 triggered alarm per class
+  abort: any configured channel does not receive it
+  cleanup: clear test notification record
+  evidence: delivery record per channel
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G5.1:
+  preconditions: critical channel interruption is safe
+  target: 1 safety critical input
+  bound: 1 controlled interruption
+  abort: fault misses configured stale timeout
+  cleanup: reconnect channel and retain latch
+  evidence: fault timestamp and timeout
+  decision_owner: engineer
+  result: PHYSICAL
+G5.2:
+  preconditions: G5.1 fault remains latched
+  target: 1 latched safety fault
+  bound: 1 channel recovery
+  abort: fault self-clears
+  cleanup: restore channel and retain evidence
+  evidence: latch and acknowledgement record
+  decision_owner: engineer
+  result: PHYSICAL
+G5.3:
+  preconditions: acknowledged fault and cooldown are active
+  target: 1 recovery attempt
+  bound: 1 immediate resume attempt
+  abort: resume bypasses cooldown or reason
+  cleanup: return to safe stopped state
+  evidence: rejected recovery record
+  decision_owner: engineer
+  result: PHYSICAL
+G5.4:
+  preconditions: dedicated disposable volume and threshold are recorded
+  target: 1 dedicated test data volume
+  bound: 1 MiB fill steps with 256 MiB reserve
+  abort: next step enters reserve or engine writes elsewhere
+  cleanup: stop engine and delete fill files and test database
+  evidence: capacity threshold lowest free space and log
+  decision_owner: engineer
+  result: PHYSICAL
+G6.1:
+  preconditions: actuator is not covered by a hardware-specific approved procedure
+  target: 0 energized hazardous sources
+  bound: 0 energizations
+  abort: any attempt to use this template as a hazardous procedure
+  cleanup: leave source commanded off and disconnected as applicable
+  evidence: engineer record that G6 is NOT PASSED
+  decision_owner: engineer
+  result: PHYSICAL
+G7.1:
+  preconditions: real stack is approved for endurance
+  target: 1 intended experiment duration
+  bound: 1 full intended duration
+  abort: memory growth gap or restart occurs
+  cleanup: stop stack by normal procedure
+  evidence: dated endurance log
+  decision_owner: engineer
+  result: PHYSICAL
+G7.2:
+  preconditions: complete cycle is approved
+  target: 1 operating cycle
+  bound: 1 complete cycle
+  abort: phase archive or report is incomplete
+  cleanup: close cycle and archive record
+  evidence: phase archive and report
+  decision_owner: engineer
+  result: PHYSICAL
+G7.3:
+  preconditions: poll interval and committed receipt are recorded
+  target: 1 engine restart interval
+  bound: 60 s restart and 60 s plus 2P gap
+  abort: duplicate missing reordered row or excessive gap
+  cleanup: stop restarted engine normally
+  evidence: paired receipts and stored-row query
+  decision_owner: engineer
+  result: PHYSICAL
+G8.1:
+  preconditions: production OS and machine are identified
+  target: 1 production host
+  bound: 1 target-host acceptance run
+  abort: evidence comes from developer workstation
+  cleanup: remove test-only host artifacts
+  evidence: target-host run record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G8.2:
+  preconditions: frozen build is the production artifact
+  target: 1 frozen build
+  bound: 1 repeated applicable gate set
+  abort: only source-mode evidence exists
+  cleanup: remove test package artifacts
+  evidence: packaged-build gate record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+G8.3:
+  preconditions: production launch path is installed
+  target: 1 unattended launch path
+  bound: 1 unattended start
+  abort: developer intervention is required
+  cleanup: stop launched stack normally
+  evidence: startup record
+  decision_owner: engineer
+  result: EXTERNALLY_EVIDENCED
+-->

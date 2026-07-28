@@ -7,8 +7,10 @@ check would produce false positives (see docstrings per test).
 
 from __future__ import annotations
 
+import ast
 import json
 import re
+import shlex
 import subprocess
 import tomllib
 import xml.etree.ElementTree as ET
@@ -16,6 +18,7 @@ from functools import cache
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -638,6 +641,171 @@ def test_no_dead_repo_paths_referenced_in_docs():
     assert not dead, "Dead repo-relative paths referenced in docs:\n" + "\n".join(
         f"{path!r} in {sorted(set(srcs))}" for path, srcs in sorted(dead.items())
     )
+
+
+# ---------------------------------------------------------------------------
+# G4-DOCS-001: building-agent instructions use resolvable citations and every
+# acceptance procedure exposes the bounds and evidence needed to run it.
+# This is deliberately filesystem-only: it also runs in an exported candidate.
+# ---------------------------------------------------------------------------
+
+_G4_DOCS = (
+    "AGENTS.md",
+    "docs/new_lab_adaptation.md",
+    "docs/new_lab_acceptance_checklist.md",
+    "docs/quickstart.md",
+)
+_G4_REFERENCE_RE = re.compile(r"\[\[ref:([^\]\n]+)\]\]")
+_G4_LEGACY_LINE_RE = re.compile(r"(?:[\w./-]+\.(?:py|ya?ml|toml|md)|\.gitignore):\d+")
+_G4_CONSOLE_COMMAND_RE = re.compile(r"(?m)^\s*(cryodaq(?:-[\w]+)*)\b")
+_G4_PROCEDURE_RE = re.compile(r"<!-- G4-PROCEDURES\n(.*?)\n-->", re.DOTALL)
+_G4_PROCEDURE_FIELDS = (
+    "preconditions",
+    "target",
+    "bound",
+    "abort",
+    "cleanup",
+    "evidence",
+    "decision_owner",
+    "result",
+)
+
+
+def _g4_symbols(path: Path) -> set[str]:
+    """Return top-level names plus class-qualified methods in one source file."""
+
+    tree = ast.parse(_read(path), filename=str(path))
+    symbols: set[str] = set()
+
+    def add_nodes(nodes: list[ast.stmt], prefix: str = "") -> None:
+        for node in nodes:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = f"{prefix}{node.name}"
+                symbols.add(name)
+                if isinstance(node, ast.ClassDef):
+                    add_nodes(node.body, f"{name}.")
+            elif not prefix and isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        symbols.add(target.id)
+
+    add_nodes(tree.body)
+    return symbols
+
+
+def _g4_yaml_key(root: Path, reference: str) -> str | None:
+    path_text, separator, key_path = reference.partition("::")
+    if not separator or not path_text.endswith((".yaml", ".yml")) or not key_path:
+        return "must be yaml-file::key.path"
+    path = root / path_text
+    if not path.is_file():
+        return f"file does not exist: {path_text}"
+    value: object = yaml.safe_load(_read(path))
+    for key in key_path.split("."):
+        if not isinstance(value, dict) or key not in value:
+            return f"key does not resolve: {reference}"
+        value = value[key]
+    return None
+
+
+def _g4_reference_error(root: Path, reference: str) -> str | None:
+    if reference.startswith("make:"):
+        target, separator, requirement = reference[5:].partition("|requires:")
+        required_path, status_separator, status = requirement.partition("|status:")
+        makefile = root / "Makefile"
+        if not target or not separator or not status_separator or status not in {"present", "absent"}:
+            return f"make reference lacks a checkable prerequisite: {reference}"
+        if not re.search(rf"(?m)^{re.escape(target)}:\s*$", _read(makefile)):
+            return f"make target does not exist: {target}"
+        exists = (root / required_path).exists()
+        if exists != (status == "present"):
+            return f"make prerequisite status differs: {required_path} is {'present' if exists else 'absent'}"
+        return None
+    if reference.startswith("command:"):
+        command = shlex.split(reference[8:])
+        if not command or command[0] not in _pyproject()["project"]["scripts"]:
+            return f"command is not a project console script: {reference}"
+        return None
+    if reference.startswith("test:"):
+        reference = reference[5:]
+    if reference.startswith("id:"):
+        return None if re.fullmatch(r"[A-Z][A-Z0-9-]*-\d{3}", reference[3:]) else f"invalid stable ID: {reference}"
+    if reference.endswith((".yaml", ".yml")) or ".yaml::" in reference or ".yml::" in reference:
+        return _g4_yaml_key(root, reference)
+
+    path_text, separator, symbol = reference.partition("::")
+    if not separator or not path_text.endswith(".py") or not symbol:
+        return f"must be path::qualified.symbol, yaml-file::key.path, command, make target, or stable ID: {reference}"
+    path = root / path_text
+    if not path.is_file():
+        return f"file does not exist: {path_text}"
+    if symbol not in _g4_symbols(path):
+        return f"symbol does not exist: {reference}"
+    return None
+
+
+def _g4_procedures(text: str) -> dict[str, dict[str, str]]:
+    match = _G4_PROCEDURE_RE.search(text)
+    if not match:
+        raise AssertionError("G4 procedure declaration block is missing")
+    procedures: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for raw_line in match.group(1).splitlines():
+        if not raw_line.strip():
+            continue
+        gate = re.fullmatch(r"(G\d\.\d):", raw_line)
+        if gate:
+            current = procedures.setdefault(gate.group(1), {})
+            continue
+        field, separator, value = raw_line.strip().partition(": ")
+        if current is None or not separator:
+            raise AssertionError(f"invalid G4 procedure declaration line: {raw_line}")
+        current[field] = value
+    return procedures
+
+
+def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> None:
+    """Validate G4 documents without Git or process state."""
+
+    overrides = overrides or {}
+    documents = {name: overrides.get(name, _read(root / name)) for name in _G4_DOCS}
+    errors: list[str] = []
+    for name, text in documents.items():
+        for legacy in _G4_LEGACY_LINE_RE.findall(text):
+            errors.append(f"{name}: line-number citation is forbidden: {legacy}")
+        for reference in _G4_REFERENCE_RE.findall(text):
+            if error := _g4_reference_error(root, reference):
+                errors.append(f"{name}: {error}")
+        for command in _G4_CONSOLE_COMMAND_RE.findall(text):
+            if command not in _pyproject()["project"]["scripts"]:
+                errors.append(f"{name}: command is not a project console script: {command}")
+
+    checklist = documents["docs/new_lab_acceptance_checklist.md"]
+    procedures = _g4_procedures(checklist)
+    gate_ids = set(re.findall(r"\*\*(G\d\.\d)", checklist)) | {"G6.1"}
+    missing = sorted(gate_ids - procedures.keys())
+    extra = sorted(procedures.keys() - gate_ids)
+    if missing:
+        errors.append(f"procedure declarations missing for: {', '.join(missing)}")
+    if extra:
+        errors.append(f"procedure declarations have unknown gates: {', '.join(extra)}")
+    for gate, fields in sorted(procedures.items()):
+        for field in _G4_PROCEDURE_FIELDS:
+            if not fields.get(field, "").strip():
+                errors.append(f"{gate}: procedure field is missing: {field}")
+        if not re.search(r"\d", fields.get("bound", "")):
+            errors.append(f"{gate}: bound must be numeric or resource-bounded")
+        result = fields.get("result", "")
+        if result not in {"SOFTWARE-PROVABLE", "EXTERNALLY_EVIDENCED", "PHYSICAL"}:
+            errors.append(f"{gate}: invalid result class: {result}")
+        if result == "SOFTWARE-PROVABLE":
+            errors.append(f"{gate}: acceptance evidence is external or physical, not SOFTWARE-PROVABLE")
+    assert not errors, "G4 documentation guard failed:\n" + "\n".join(errors)
+
+
+def test_g4_executable_references_and_procedure_declarations() -> None:
+    _validate_g4_docs(REPO_ROOT)
 
 
 def test_architecture_snapshot_is_bound_to_index_and_excludes_generated_outputs(
