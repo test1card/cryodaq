@@ -21,6 +21,7 @@ from cryodaq.core.alarm_ack_codec import alarm_ack_request_fingerprint
 from cryodaq.core.command_authority import ENGINE_MUTATION_CAPABILITY, MUTATION_PROTOCOL_MAJOR
 from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, ZMQCommandServer
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.engine import EngineCommandContext, _handle_gui_command, _operator_log_committed_pending
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 from cryodaq.web.server import create_app
@@ -33,6 +34,22 @@ def client():
         app = create_app()
         with TestClient(app) as c:
             yield c
+
+
+def _mark_readings_producer_live() -> None:
+    """Establish fresh producer authority before directly exercising its cache."""
+    from cryodaq.web import server
+
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="availability-proof",
+            value=1.0,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
 
 
 async def test_app_lifespan_owns_and_settles_all_background_tasks(monkeypatch) -> None:
@@ -97,6 +114,7 @@ def test_temperatures_returns_kelvin_readings(client) -> None:
     """/api/v1/temperatures exposes only K-unit readings from the cache."""
     from cryodaq.web import server
 
+    _mark_readings_producer_live()
     server._state.last_readings = {
         "Т1": {"timestamp": "2026-03-17T10:00:00+00:00", "channel": "Т1", "value": 4.2, "unit": "K", "status": "ok"},
         "P1": {
@@ -116,6 +134,90 @@ def test_temperatures_returns_kelvin_readings(client) -> None:
     assert channels == {"Т1"}
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/api/v1/readings", "/api/v1/temperatures", "/api/v1/pressure"],
+)
+def test_reading_endpoints_do_not_present_dead_producer_cache_as_current(client, monkeypatch, path: str) -> None:
+    """A dead reading producer must make cached values visibly unavailable."""
+    from cryodaq.web import server
+
+    monkeypatch.setattr(server, "_state", server._ServerState())
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="T-proof",
+            value=4.2,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="P-proof",
+            value=1e-5,
+            unit="mbar",
+            status=ChannelStatus.OK,
+        )
+    )
+    server._state.invalidate_producer("proof producer died")
+
+    response = client.get(path)
+
+    assert response.json() == {
+        "available": False,
+        "stale": True,
+        "reason": "proof producer died",
+    }
+    assert response.status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("path", "channels"),
+    [
+        ("/api/v1/readings", {"T-proof", "P-proof"}),
+        ("/api/v1/temperatures", {"T-proof"}),
+        ("/api/v1/pressure", {"P-proof"}),
+    ],
+)
+def test_reading_endpoints_keep_reachable_producer_payloads_ordinary(
+    client, monkeypatch, path: str, channels: set[str]
+) -> None:
+    """Reachable producer data remains the pre-existing 200 list response."""
+    from cryodaq.web import server
+
+    monkeypatch.setattr(server, "_state", server._ServerState())
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="T-proof",
+            value=4.2,
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+    )
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="P-proof",
+            value=1e-5,
+            unit="mbar",
+            status=ChannelStatus.OK,
+        )
+    )
+
+    response = client.get(path)
+
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+    assert {reading["channel"] for reading in response.json()} == channels
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize(
     ("path", "unit"),
@@ -129,6 +231,7 @@ def test_live_read_endpoints_emit_strict_json_null(client, path: str, unit: str,
     """Pydantic is a second defense if a malformed cache bypasses ingress."""
     from cryodaq.web import server
 
+    _mark_readings_producer_live()
     server._state.last_readings = {
         "bad": {
             "timestamp": "2026-07-19T00:00:00+00:00",

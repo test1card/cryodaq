@@ -270,6 +270,17 @@ def _readings_with_unit(unit: str) -> list[dict[str, Any]]:
     return [r for r in server._state.last_readings.values() if r.get("unit") == unit]
 
 
+def _unavailable_readings_response() -> JSONResponse | None:
+    """Return the canonical unavailable envelope when the cache lost authority."""
+    status = server._state.status_json()
+    if status["available"]:
+        return None
+    return JSONResponse(
+        {key: status[key] for key in ("available", "stale", "reason")},
+        status_code=503,
+    )
+
+
 _REDACT_KEYS = frozenset({"acknowledged_by"})
 
 
@@ -324,20 +335,26 @@ async def get_state() -> dict[str, Any]:
 
 
 @router.get("/readings", response_model=list[ReadingOut])
-async def get_readings() -> list[dict[str, Any]]:
+async def get_readings() -> list[dict[str, Any]] | JSONResponse:
     """Latest reading per channel from the live cache."""
+    if unavailable := _unavailable_readings_response():
+        return unavailable
     return list(server._state.last_readings.values())
 
 
 @router.get("/temperatures", response_model=list[ReadingOut])
-async def get_temperatures() -> list[dict[str, Any]]:
+async def get_temperatures() -> list[dict[str, Any]] | JSONResponse:
     """Latest temperature (K-unit) readings."""
+    if unavailable := _unavailable_readings_response():
+        return unavailable
     return _readings_with_unit("K")
 
 
 @router.get("/pressure", response_model=list[ReadingOut])
-async def get_pressure() -> list[dict[str, Any]]:
+async def get_pressure() -> list[dict[str, Any]] | JSONResponse:
     """Latest pressure (mbar-unit) readings."""
+    if unavailable := _unavailable_readings_response():
+        return unavailable
     return _readings_with_unit("mbar")
 
 

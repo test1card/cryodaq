@@ -83,6 +83,14 @@ def test_served_dashboard_distinguishes_unavailable_experiment_from_none() -> No
     assert availability < no_experiment, "availability check must precede the no-experiment fallback"
 
 
+def test_served_dashboard_distinguishes_unavailable_log_from_empty() -> None:
+    """The dashboard must render the log availability discriminator distinctly."""
+    src = _source(SERVED_DASHBOARD)
+    unavailable = src.index("ld.available===false")
+    empty = src.index("ld.ok?'Нет записей'")
+    assert unavailable < empty, "unavailable log check must precede the empty-log fallback"
+
+
 @pytest.fixture
 def unavailable_readings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Push non-finite readings through the production callback, not a stub."""

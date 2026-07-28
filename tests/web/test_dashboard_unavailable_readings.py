@@ -188,3 +188,28 @@ def test_dashboard_renders_unavailable_cache_as_last_known(dashboard_payload) ->
             assert "T2\n4.20" in page.locator("#temps").inner_text()
             assert page.locator("#alarms").inner_text().startswith("LAST-KNOWN:")
             assert "последнее известное" in page.locator("#experiment").inner_text()
+
+
+def test_dashboard_renders_unavailable_log_distinctly(dashboard_payload, monkeypatch) -> None:
+    """A failed log query must not render as an authoritatively empty log."""
+
+    async def _engine_reply(command: dict[str, object]) -> dict[str, object]:
+        command_name = command["cmd"]
+        if command_name == "safety_status":
+            return {"ok": True, "state": "safe"}
+        if command_name == "alarm_v2_status":
+            return {"ok": True, "active": {}}
+        if command_name == "experiment_status":
+            return {"ok": True}
+        if command_name == "log_get":
+            return {"ok": False}
+        raise AssertionError(f"unexpected engine command: {command_name}")
+
+    monkeypatch.setattr(server, "_async_engine_command", _engine_reply)
+
+    with _served_dashboard() as base_url:
+        with _browser() as browser:
+            page = browser.new_page()
+            page.goto(base_url + "/", wait_until="networkidle")
+
+            assert page.locator("#log").inner_text() == "Журнал: недоступен"

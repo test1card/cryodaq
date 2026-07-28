@@ -157,6 +157,32 @@ def test_api_log_returns_entries(client) -> None:
     assert received[0] == {"cmd": "log_get", "limit": 5}
 
 
+def test_api_log_distinguishes_unavailable_from_authoritative_empty(client) -> None:
+    """Dashboard consumers must not read an unreachable log as zero entries."""
+
+    async def _unavailable(_req: dict) -> dict:
+        return {"ok": False}
+
+    async def _empty(_req: dict) -> dict:
+        return {"ok": True, "entries": []}
+
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_unavailable):
+        unavailable = client.get("/api/log")
+    with patch("cryodaq.web.server._async_engine_command", side_effect=_empty):
+        empty = client.get("/api/log")
+
+    assert unavailable.status_code == 200
+    assert unavailable.json() == {
+        "ok": False,
+        "entries": [],
+        "available": False,
+        "stale": True,
+        "reason": "operator log unavailable",
+    }
+    assert empty.status_code == 200
+    assert empty.json() == {"ok": True, "entries": []}
+
+
 def test_status_endpoint_returns_json(client) -> None:
     """/status is an alias for /api/status; verify uptime is a non-negative number."""
 
@@ -348,7 +374,13 @@ def test_api_log_logs_failure(client, caplog) -> None:
         with caplog.at_level(logging.WARNING, logger="cryodaq.web.server"):
             resp = client.get("/api/log")
             assert resp.status_code == 200
-            assert resp.json() == {"ok": False, "entries": []}
+            assert resp.json() == {
+                "ok": False,
+                "entries": [],
+                "available": False,
+                "stale": True,
+                "reason": "operator log unavailable",
+            }
     assert any("api_log fetch failed" in rec.message for rec in caplog.records)
 
 

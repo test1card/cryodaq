@@ -658,7 +658,13 @@ def create_app() -> FastAPI:
                 }
         except Exception as exc:
             logger.warning("api_log fetch failed: %s", exc)
-        return {"ok": False, "entries": []}
+        return {
+            "ok": False,
+            "entries": [],
+            "available": False,
+            "stale": True,
+            "reason": "operator log unavailable",
+        }
 
     @application.get("/history")
     async def history(minutes: int = 60) -> dict[str, Any]:
@@ -833,13 +839,15 @@ async function refresh(){
     const phase=exp.current_phase?' ['+exp.current_phase+']':'';
     document.getElementById('experiment').textContent=(e.name||'—')+phase;
    }else{document.getElementById('experiment').textContent='Нет активного эксперимента'}
+  const logUnavailable=ld.available===false;
   let html='';
-  for(const e of(ld.ok?ld.entries||[]:[])){
+  for(const e of(!logUnavailable&&ld.ok?ld.entries||[]:[])){
    const ts=(e.timestamp||'').split('T')[1]||'';
    html+=`<div class="log-entry"><span class="ts">${ts.substring(0,8)}</span> `+
      `[${escapeHtml(e.author||e.source||'?')}] ${escapeHtml(e.message||'')}</div>`;
   }
-  document.getElementById('log').innerHTML=html||(ld.ok?'Нет записей':'Журнал недоступен');
+  const logPlaceholder=logUnavailable?'Журнал: недоступен':(ld.ok?'Нет записей':'Журнал недоступен');
+  document.getElementById('log').innerHTML=html||logPlaceholder;
   if(!lastKnown){document.body.classList.remove('dashboard-stale');
    document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString();}
  }catch(e){markRefreshStale(e)}
