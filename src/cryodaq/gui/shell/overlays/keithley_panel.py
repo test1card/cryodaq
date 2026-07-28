@@ -1242,7 +1242,13 @@ class KeithleyPanel(QWidget):
             )
             self._update_both_buttons_enablement()
             return
-        self.show_info(f"{description}: Engine подтвердил выполнение.")
+        if command == "keithley_set_target":
+            self.show_info(
+                f"{description}: Engine принял новую целевую мощность. "
+                "Фактическая мощность будет показана по следующему измерению."
+            )
+        else:
+            self.show_info(f"{description}: Engine подтвердил выполнение.")
         self._update_both_buttons_enablement()
 
     def _on_block_command_rejected(self, channel: str, command: str, reason: str) -> None:

@@ -253,6 +253,66 @@ def test_safety_ready_restores_controls(app):
 # ----------------------------------------------------------------------
 
 
+def test_target_acceptance_banner_does_not_claim_power_was_applied(app):
+    """An accepted target is queued for regulation, not a device observation."""
+
+    panel = KeithleyPanel()
+    _connect_authorized(panel, source_state="on")
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {"cmd": "keithley_set_target", "channel": "smua", "p_target": 0.8}
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+
+        block._on_command_result(1, command, {"ok": True}, generation, dispatched.workers[0])
+
+        rendered = panel._banner_label.text()
+        assert rendered == (
+            "Изменение мощности канала А: Engine принял новую целевую мощность. "
+            "Фактическая мощность будет показана по следующему измерению."
+        )
+    finally:
+        _restore_spy(block)
+
+
+def test_target_acceptance_keeps_later_measured_power_visible(app):
+    """A later power reading remains the only rendered applied-value observation."""
+
+    panel = KeithleyPanel()
+    _connect_authorized(panel, source_state="on")
+    block = panel._smua_block
+    dispatched = _spy_dispatch(block)
+    command = {"cmd": "keithley_set_target", "channel": "smua", "p_target": 0.8}
+    try:
+        generation = block._connection_generation
+        assert block._dispatch_command(command) is True
+        block._on_command_result(1, command, {"ok": True}, generation, dispatched.workers[0])
+
+        panel.on_reading(_reading("Keithley_1/smua/power", 0.8, "W"))
+
+        assert block._value_labels["power"].text() == "0.800 Вт"
+    finally:
+        _restore_spy(block)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("keithley_start", "Запуск канала А: Engine подтвердил выполнение."),
+        ("keithley_stop", "Остановка канала А: Engine подтвердил выполнение."),
+    ],
+)
+def test_start_and_stop_success_banners_are_unchanged(app, command, expected):
+    """Start/stop retain their stronger instrument-readback semantics."""
+
+    panel = KeithleyPanel()
+
+    panel._on_block_command_finished("smua", 1, command, "ok", "")
+
+    assert panel._banner_label.text() == expected
+
+
 def test_start_click_emits_signal_with_default_spin_values(app):
     panel = KeithleyPanel()
     _connect_authorized(panel)
