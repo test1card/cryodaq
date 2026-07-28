@@ -198,9 +198,7 @@ class QueryRouter:
         result = await archive.list_recent(days=days)
         return {"archive_list": result}
 
-    async def _fetch_archive_detail(
-        self, intent: QueryIntent, query: str
-    ) -> dict[str, Any]:
+    async def _fetch_archive_detail(self, intent: QueryIntent, query: str) -> dict[str, Any]:
         archive = self._adapters.archive
         if archive is None:
             return {"archive_detail": None}
@@ -226,9 +224,7 @@ class QueryRouter:
     # F32 Stage 2 (v0.55.7) — knowledge query
     # ------------------------------------------------------------------
 
-    async def _fetch_knowledge_query(
-        self, intent: QueryIntent, query: str
-    ) -> dict[str, Any]:
+    async def _fetch_knowledge_query(self, intent: QueryIntent, query: str) -> dict[str, Any]:
         """Run semantic search over the RAG corpus.
 
         ``query`` is preferred over ``intent.quantity`` because the original

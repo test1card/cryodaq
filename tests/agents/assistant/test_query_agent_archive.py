@@ -185,9 +185,7 @@ async def test_archive_detail_without_identifier_is_rendered_as_invalid_request(
     assert archive is not None
     archive.get_detail = AsyncMock(return_value=invalid_request)
 
-    data = await agent._router.fetch(
-        QueryIntent(category=QueryCategory.ARCHIVE_DETAIL), "details of the experiment"
-    )
+    data = await agent._router.fetch(QueryIntent(category=QueryCategory.ARCHIVE_DETAIL), "details of the experiment")
     prompt = agent._format_dispatch("details of the experiment", QueryCategory.ARCHIVE_DETAIL, data)
 
     assert data == {"archive_detail": invalid_request, "experiment_id": ""}

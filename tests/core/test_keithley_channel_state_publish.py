@@ -124,9 +124,7 @@ async def test_channel_state_publish_tracks_run_and_stop() -> None:
     )
     manager, safety_broker = await _make_manager(data_broker=data_broker)
     try:
-        await safety_broker.publish(
-            Reading.now(channel="T1", value=4.5, unit="K", instrument_id="test")
-        )
+        await safety_broker.publish(Reading.now(channel="T1", value=4.5, unit="K", instrument_id="test"))
         await asyncio.sleep(1.2)
 
         result = await manager.request_run(0.5, 40.0, 1.0, channel="smub")
