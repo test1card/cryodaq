@@ -190,6 +190,62 @@ def test_dashboard_renders_unavailable_cache_as_last_known(dashboard_payload) ->
             assert "последнее известное" in page.locator("#experiment").inner_text()
 
 
+def test_dashboards_do_not_infer_temperature_from_channel_spelling(monkeypatch) -> None:
+    """Only the declared unit, never the channel spelling, selects temperature."""
+
+    async def _engine_reply(command: dict[str, object]) -> dict[str, object]:
+        replies: dict[str, dict[str, object]] = {
+            "safety_status": {"ok": True, "state": "safe"},
+            "alarm_v2_status": {"ok": True, "active": {}},
+            "experiment_status": {"ok": True},
+            "log_get": {"ok": True, "entries": []},
+        }
+        return replies[str(command["cmd"])]
+
+    monkeypatch.setattr(server, "_async_engine_command", _engine_reply)
+    monkeypatch.setattr(server._state, "last_readings", {})
+    server._on_reading_callback(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="test",
+            channel="Т power",
+            value=1.2,
+            unit="W",
+            status=ChannelStatus.OK,
+        )
+    )
+
+    with _served_dashboard() as base_url:
+        with _browser() as browser:
+            page = browser.new_page()
+            page.goto(base_url + "/", wait_until="networkidle")
+            assert page.locator("#temps").inner_text() == "Нет данных"
+            assert "Т power: 1.2 W" in page.locator("#other-readings").inner_text()
+
+            static_page = browser.new_page()
+            chart_stub = "class Chart{static defaults={};constructor(){this.data={datasets:[]}}update(){}}"
+            static_page.route(
+                "https://cdn.jsdelivr.net/npm/chart.js",
+                lambda route: route.fulfill(
+                    content_type="application/javascript",
+                    body=chart_stub,
+                ),
+            )
+            static_page.goto(base_url + "/static/index.html", wait_until="networkidle")
+            static_page.evaluate(
+                """() => {
+                    handleReading({timestamp: '2026-07-28T00:00:00Z', channel: 'Т power', value: 1.2, unit: 'W'});
+                    handleReading({timestamp: '2026-07-28T00:00:01Z', channel: 'sample', value: 4.2, unit: 'K'});
+                    updateCharts();
+                }"""
+            )
+            assert "Т power" not in static_page.locator("#legend-temp").inner_text()
+            assert "sample" in static_page.locator("#legend-temp").inner_text()
+            other_readings = static_page.locator("#other-readings").inner_text()
+            assert "Т power" in other_readings
+            assert "1.2 W" in other_readings
+
+
 def test_dashboard_renders_unavailable_log_distinctly(dashboard_payload, monkeypatch) -> None:
     """A failed log query must not render as an authoritatively empty log."""
 

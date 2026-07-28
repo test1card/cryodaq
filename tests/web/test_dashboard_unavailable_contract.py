@@ -58,6 +58,10 @@ _NULLABLE_AVAILABILITY_RE = re.compile(
 _DATE_VALUE_RE = re.compile(
     r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*new\s+Date\s*\("
 )
+_CHANNEL_SPELLING_INFERENCE_RE = re.compile(
+    r"\b(?:ch|channel|(?:msg|reading)\.channel)\s*\.\s*"
+    r"(?:startsWith|endsWith|includes|match|search|indexOf)\s*\("
+)
 
 
 def _source(path: Path) -> str:
@@ -151,6 +155,22 @@ def _unguarded_formatters(path: Path) -> list[str]:
             if not _format_is_guarded(line, match, booleans, nullable):
                 unguarded.append(f"{path.as_posix()}:{number}: {line.strip()}")
     return unguarded
+
+
+def test_dashboard_channels_are_not_classified_by_spelling() -> None:
+    """A channel identifier may not select a measurement role by string shape."""
+
+    findings = [
+        f"{path.as_posix()}: {match.group(0)}"
+        for path in _dashboard_sources()
+        for match in _CHANNEL_SPELLING_INFERENCE_RE.finditer(_COMMENT_RE.sub("", _script_source(path)))
+    ]
+    assert not findings, "channel spelling inferred a dashboard role:\n" + "\n".join(findings)
+
+
+@pytest.mark.parametrize("bad_shape", ("ch.startsWith('Т')", "msg.channel.match(/^T/)"))
+def test_channel_spelling_guard_rejects_direct_inference_shapes(bad_shape: str) -> None:
+    assert _CHANNEL_SPELLING_INFERENCE_RE.search(bad_shape)
 
 
 def test_every_reading_formatter_has_a_structural_unavailability_branch() -> None:

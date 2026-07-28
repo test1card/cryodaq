@@ -808,7 +808,8 @@ body.dashboard-stale #updated{color:#f0883e;font-weight:bold}
 <div class="section"><div class="section-title">Температуры</div>
 <div class="temps" id="temps"></div></div>
 <div class="section"><div class="section-title">Давление</div><div id="pressure">—</div></div>
-<div class="section"><div class="section-title">Keithley</div><div id="keithley">—</div></div>
+<div class="section"><div class="section-title">Прочие показания (не классифицированы как температура или давление)</div><div id="other-readings">—</div></div>
+<div class="section"><div class="section-title">Keithley (слоты не настроены)</div><div id="keithley">—</div></div>
 <div class="section"><div class="section-title">Журнал</div><div id="log"></div></div>
 <div id="updated"></div>
 <script>
@@ -866,23 +867,27 @@ async function refresh(){
   document.getElementById('alarms').textContent=alarmsText;
   // Readings
   const readings=d.readings||{};
-  let temps='',pressure='—',kA='ВЫКЛ',kB='ВЫКЛ';
+  let temps='',pressure='—',other='';
   const sorted=Object.entries(readings).sort((a,b)=>a[0].localeCompare(b[0]));
   for(const[ch,r]of sorted){
    const usable=isUsableReading(r);
-   if(r&&r.unit==='K'&&ch.match(/^\\u0422|^T/)){
+   if(r&&r.unit==='K'){
     const c=usable?tempColor(r.value):'unavailable';
     const value=usable?r.value.toFixed(2):'—';
     temps+=`<div class="temp-card"><div class="name">${escapeHtml(ch.split(' ')[0])}</div>`+
       `<div class="val ${c}"${usable?'':' title="Нет данных"'}>${value}</div></div>`;
+   }else if(r&&r.unit==='mbar'){
+    pressure=usable?r.value.toExponential(2)+' mbar':'— mbar';
+   }else if(r){
+    const value=usable?String(r.value):'—';
+    const unit=typeof r.unit==='string'&&r.unit?r.unit:'единица не объявлена';
+    other+=`<div>${escapeHtml(ch)}: ${escapeHtml(value)} ${escapeHtml(unit)}</div>`;
    }
-   if(r&&r.unit==='mbar')pressure=usable?r.value.toExponential(2)+' mbar':'— mbar';
-   if(ch.includes('/smua/'))kA=ch.endsWith('power')?(usable?'ВКЛ '+r.value.toFixed(1)+'W':'НЕИЗВЕСТНО'):kA;
-   if(ch.includes('/smub/'))kB=ch.endsWith('power')?(usable?'ВКЛ '+r.value.toFixed(1)+'W':'НЕИЗВЕСТНО'):kB;
   }
   document.getElementById('temps').innerHTML=temps||'Нет данных';
   document.getElementById('pressure').textContent=pressure;
-  document.getElementById('keithley').textContent='A: '+kA+' │ B: '+kB;
+  document.getElementById('other-readings').innerHTML=other||'Нет данных';
+  document.getElementById('keithley').textContent='A: НЕИЗВЕСТНО │ B: НЕИЗВЕСТНО';
    // Experiment — distinguish "unavailable" from "no experiment"; an
    // unreachable engine must never render as an authoritative empty.
    const exp=d.experiment;

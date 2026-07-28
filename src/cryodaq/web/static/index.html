@@ -278,6 +278,22 @@
             flex-shrink: 0;
         }
 
+        .other-readings {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 8px;
+        }
+
+        .other-reading {
+            background: var(--bg-card);
+            border: 1px solid var(--border-sub);
+            border-radius: 4px;
+            padding: 6px 8px;
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
         /* ------------------------------------------------------------------ */
         /* Адаптивность                                                        */
         /* ------------------------------------------------------------------ */
@@ -345,6 +361,12 @@
         </div>
     </div>
 
+    <!-- Other declared measurements remain visible without assigning a quantity. -->
+    <div class="panel">
+        <div class="section-title">Прочие показания (не классифицированы как температура или давление)</div>
+        <div id="other-readings" class="other-readings">Нет данных</div>
+    </div>
+
     <!-- Статус приборов -->
     <div class="panel">
         <div class="section-title">Статус приборов</div>
@@ -387,6 +409,8 @@ const COLOR_PALETTE = [
 const tempBuffers     = new Map();
 /** @type {Map<string, Array<{x: number, y: number}>>} */
 const pressureBuffers = new Map();
+/** @type {Map<string, {value: number | null, unit: string}>} */
+const otherReadings   = new Map();
 /** @type {Map<string, string>} Канал → цвет */
 const channelColors   = new Map();
 let colorIndex = 0;
@@ -585,6 +609,21 @@ function updateCharts() {
     }
 }
 
+function showOtherReading(ch, value, unit) {
+    otherReadings.set(ch, { value, unit });
+    const entries = Array.from(otherReadings.entries()).sort(([a], [b]) => a.localeCompare(b, 'ru'));
+    const container = document.getElementById('other-readings');
+    if (entries.length === 0) {
+        container.textContent = 'Нет данных';
+        return;
+    }
+    container.innerHTML = entries.map(([channel, reading]) => {
+        const valueText = reading.value === null ? '—' : String(reading.value);
+        const unitText = reading.unit || 'единица не объявлена';
+        return `<div class="other-reading"><span>${esc(channel)}</span><span>${esc(valueText)} ${esc(unitText)}</span></div>`;
+    }).join('');
+}
+
 setInterval(updateCharts, CHART_UPDATE_MS);
 
 /* ================================================================
@@ -594,12 +633,12 @@ function handleReading(msg) {
     const ts = new Date(msg.timestamp).getTime();
     const ch = msg.channel;
     const val = finiteNumber(msg.value);
-    const unit = msg.unit || '';
+    const unit = typeof msg.unit === 'string' ? msg.unit : '';
 
     readingsThisSecond++;
     lastReadingTime = Date.now();
 
-    const isTemp     = unit === 'K' || ch.startsWith('Т');
+    const isTemp     = unit === 'K';
     const isPressure = unit === 'mbar';
 
     if (isTemp) {
@@ -607,6 +646,8 @@ function handleReading(msg) {
     } else if (isPressure) {
         if (!pressureChart) initPressureChart();
         pushPoint(pressureBuffers, ch, ts, val);
+    } else {
+        showOtherReading(ch, val, unit);
     }
 }
 
@@ -792,18 +833,19 @@ async function loadHistory() {
         const channels = data.channels || {};
 
         for (const [ch, points] of Object.entries(channels)) {
-            const unit = points.length > 0 ? (points[0].u || '') : '';
-            const isTemp     = unit === 'K' || ch.startsWith('Т');
-            const isPressure = unit === 'mbar';
-
             for (const p of points) {
                 const ts  = new Date(p.t).getTime();
                 const val = finiteNumber(p.v);
+                const unit = typeof p.u === 'string' ? p.u : '';
+                const isTemp     = unit === 'K';
+                const isPressure = unit === 'mbar';
                 if (isTemp) {
                     pushPoint(tempBuffers, ch, ts, val);
                 } else if (isPressure) {
                     if (!pressureChart) initPressureChart();
                     pushPoint(pressureBuffers, ch, ts, val);
+                } else {
+                    showOtherReading(ch, val, unit);
                 }
             }
         }
