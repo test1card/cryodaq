@@ -1,0 +1,102 @@
+name: CryoDAQ Qualified Artifact Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate-run-id:
+        description: Run that uploaded the wheel or ONEDIR zip
+        required: true
+      candidate-artifact-name:
+        description: Candidate Actions artifact name
+        required: true
+      candidate-path:
+        description: Candidate file path inside the downloaded Actions artifact
+        required: true
+      candidate-commit:
+        description: Exact 40-character candidate commit
+        required: true
+      qualification-run-id:
+        description: Trusted qualification run that uploaded the receipt
+        required: true
+      qualification-artifact-name:
+        description: Qualification receipt Actions artifact name
+        required: true
+      receipt-path:
+        description: Receipt path inside the downloaded qualification artifact
+        required: true
+      release-tag:
+        description: Existing GitHub release tag that receives the qualified artifact
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  qualification-promotion:
+    name: qualification receipt / promotion boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Resolve exact candidate tree
+        id: candidate
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate-commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 origin "$CANDIDATE_COMMIT"
+          echo "tree=$(git show -s --format=%T "$CANDIDATE_COMMIT")" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact candidate and qualification receipt
+        env:
+          CANDIDATE_ARTIFACT_NAME: ${{ inputs.candidate-artifact-name }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate-run-id }}
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ARTIFACT_NAME: ${{ inputs.qualification-artifact-name }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification-run-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$CANDIDATE_RUN_ID" --name "$CANDIDATE_ARTIFACT_NAME" --dir candidate
+          gh run download "$QUALIFICATION_RUN_ID" --name "$QUALIFICATION_ARTIFACT_NAME" --dir qualification
+
+      - name: Verify receipt came from the trusted qualification workflow
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate-commit }}
+          EXPECTED_QUALIFICATION_WORKFLOW_ID: ${{ vars.QUALIFICATION_WORKFLOW_ID }}
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification-run-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_QUALIFICATION_WORKFLOW_ID" =~ ^[0-9]+$ ]]
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID")"
+          test "$(jq -r .conclusion <<<"$run_json")" = "success"
+          test "$(jq -r .head_sha <<<"$run_json")" = "$CANDIDATE_COMMIT"
+          test "$(jq -r .workflow_id <<<"$run_json")" = "$EXPECTED_QUALIFICATION_WORKFLOW_ID"
+
+      - name: Qualification receipt gate (required)
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.candidate-commit }}
+          CANDIDATE_PATH: ${{ inputs.candidate-path }}
+          CANDIDATE_TREE: ${{ steps.candidate.outputs.tree }}
+          RECEIPT_PATH: ${{ inputs.receipt-path }}
+        shell: bash
+        run: >-
+          python build_scripts/artifact_promotion.py promote
+          --artifact "candidate/$CANDIDATE_PATH"
+          --receipt "qualification/$RECEIPT_PATH"
+          --output-dir promoted
+          --commit "$CANDIDATE_COMMIT"
+          --tree "$CANDIDATE_TREE"
+
+      - name: Publish only the receipt-matched artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        shell: bash
+        run: gh release upload "$RELEASE_TAG" promoted/*

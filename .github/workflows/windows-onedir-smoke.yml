@@ -61,6 +61,10 @@ jobs:
           if (-not (Test-Path -LiteralPath "dist/CryoDAQ/CryoDAQ.exe" -PathType Leaf)) {
             throw "PyInstaller did not produce dist/CryoDAQ/CryoDAQ.exe"
           }
+          $status = Get-Content -Raw dist/CryoDAQ/ARTIFACT_STATUS.json | ConvertFrom-Json
+          if ($status.label -ne "UNQUALIFIED — TEST ONLY" -or $status.version -notlike "*+checkpoint.unqualified") {
+            throw "ONEDIR artifact does not self-identify as unqualified"
+          }
 
       - name: Reject required frozen-runtime missing-module warnings
         shell: pwsh
@@ -76,6 +80,13 @@ jobs:
           --dist-dir dist/CryoDAQ
           --evidence-dir build/windows-smoke
 
+      - name: Package the tested unqualified ONEDIR
+        shell: pwsh
+        run: >-
+          Compress-Archive
+          -Path dist/CryoDAQ
+          -DestinationPath "dist/CryoDAQ-windows-onedir-${{ github.sha }}-checkpoint.unqualified.zip"
+
       - name: Upload strict smoke evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -86,10 +97,9 @@ jobs:
           retention-days: 30
 
       - name: Upload tested ONEDIR artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: CryoDAQ-windows-onedir-${{ github.sha }}
-          path: dist/CryoDAQ/
+          name: CryoDAQ-windows-onedir-${{ github.sha }}-UNQUALIFIED-TEST-ONLY
+          path: dist/CryoDAQ-windows-onedir-${{ github.sha }}-checkpoint.unqualified.zip
           if-no-files-found: error
           retention-days: 14

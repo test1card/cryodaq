@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from build_scripts import artifact_promotion as promotion
+
+ROOT = Path(__file__).resolve().parents[1]
+COMMIT = "a" * 40
+TREE = "b" * 40
+
+
+def _marker() -> dict[str, object]:
+    return {
+        "label": "UNQUALIFIED — TEST ONLY",
+        "schema_version": 1,
+        "status": "unqualified",
+        "version": "0.64.1+checkpoint.unqualified",
+    }
+
+
+def _onedir_zip(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("CryoDAQ/ARTIFACT_STATUS.json", json.dumps(_marker(), ensure_ascii=False))
+        archive.writestr("CryoDAQ/CryoDAQ.exe", b"checkpoint")
+
+
+def _wheel(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "cryodaq-0.64.1+checkpoint.unqualified.dist-info/METADATA",
+            "Metadata-Version: 2.4\n"
+            "Name: cryodaq\n"
+            "Version: 0.64.1+checkpoint.unqualified\n"
+            "Summary: UNQUALIFIED — TEST ONLY\n",
+        )
+
+
+def _receipt(artifact: Path, **changes: object) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "artifact_digest": promotion.artifact_digest(artifact),
+        "binding_digest": "",
+        "commit": COMMIT,
+        "config_digest": "sha256:" + "c" * 64,
+        "hardware_profile_id": "montana-stand-v1",
+        "schema_version": 1,
+        "tree": TREE,
+    }
+    receipt.update(changes)
+    receipt["binding_digest"] = promotion.receipt_binding_digest(receipt)
+    return receipt
+
+
+def _write_receipt(path: Path, receipt: dict[str, object]) -> None:
+    path.write_text(json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def test_post_build_marks_onedir_unqualified(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    scripts = project / "build_scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(ROOT / "build_scripts" / "post_build.py", scripts / "post_build.py")
+    shutil.copy2(ROOT / "build_scripts" / "artifact_identity.py", scripts / "artifact_identity.py")
+    (project / "pyproject.toml").write_text('[project]\nversion = "0.64.1"\n', encoding="utf-8")
+    (project / "config").mkdir()
+    (project / "dist" / "CryoDAQ").mkdir(parents=True)
+    (project / "LICENSE").write_text("test", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(scripts / "post_build.py")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    marker = project / "dist" / "CryoDAQ" / "ARTIFACT_STATUS.json"
+    assert json.loads(marker.read_text(encoding="utf-8")) == _marker()
+
+
+def test_wheel_presented_for_promotion_must_self_identify(tmp_path: Path) -> None:
+    wheel = tmp_path / "cryodaq-0.64.1+checkpoint.unqualified-py3-none-any.whl"
+    _wheel(wheel)
+
+    assert promotion.validate_unqualified_marker(wheel) == "0.64.1+checkpoint.unqualified"
+
+
+def test_promotion_without_receipt_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    artifact = tmp_path / "CryoDAQ-checkpoint.unqualified.zip"
+    _onedir_zip(artifact)
+
+    result = promotion.main(
+        [
+            "promote",
+            "--artifact",
+            str(artifact),
+            "--receipt",
+            str(tmp_path / "missing.json"),
+            "--output-dir",
+            str(tmp_path / "promoted"),
+            "--commit",
+            COMMIT,
+            "--tree",
+            TREE,
+        ]
+    )
+
+    assert result == 2
+    assert capsys.readouterr().err == (
+        "PROMOTION_GATE_REFUSED: qualification receipt is missing or not a regular file\n"
+    )
+
+
+def test_promotion_with_wrong_artifact_digest_is_refused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifact = tmp_path / "CryoDAQ-checkpoint.unqualified.zip"
+    receipt_path = tmp_path / "qualification.json"
+    _onedir_zip(artifact)
+    _write_receipt(receipt_path, _receipt(artifact, artifact_digest="sha256:" + "0" * 64))
+
+    result = promotion.main(
+        [
+            "promote",
+            "--artifact",
+            str(artifact),
+            "--receipt",
+            str(receipt_path),
+            "--output-dir",
+            str(tmp_path / "promoted"),
+            "--commit",
+            COMMIT,
+            "--tree",
+            TREE,
+        ]
+    )
+
+    assert result == 2
+    assert capsys.readouterr().err == ("PROMOTION_GATE_REFUSED: qualification receipt does not match artifact digest\n")
+
+
+def test_promotion_with_matching_receipt_succeeds(tmp_path: Path) -> None:
+    artifact = tmp_path / "CryoDAQ-checkpoint.unqualified.zip"
+    receipt_path = tmp_path / "qualification.json"
+    output = tmp_path / "promoted"
+    _onedir_zip(artifact)
+    _write_receipt(receipt_path, _receipt(artifact))
+
+    promoted = promotion.promote(artifact, receipt_path, output, commit=COMMIT, tree=TREE)
+
+    assert promoted.read_bytes() == artifact.read_bytes()
+    assert promotion.artifact_digest(promoted) == promotion.artifact_digest(artifact)
+
+
+def test_receipt_binding_digest_tamper_is_refused(tmp_path: Path) -> None:
+    artifact = tmp_path / "CryoDAQ-checkpoint.unqualified.zip"
+    receipt_path = tmp_path / "qualification.json"
+    _onedir_zip(artifact)
+    receipt = _receipt(artifact)
+    receipt["hardware_profile_id"] = "different-profile"
+    _write_receipt(receipt_path, receipt)
+
+    with pytest.raises(promotion.PromotionRefused, match="binding digest"):
+        promotion.validate_receipt(artifact, receipt_path, commit=COMMIT, tree=TREE)
+
+
+def test_promotion_boundary_is_a_workflow_status() -> None:
+    workflow = ROOT / ".github" / "workflows" / "qualified-artifact-promotion.yml"
+
+    assert workflow.is_file()
+    text = workflow.read_text(encoding="utf-8")
+    assert "name: qualification receipt / promotion boundary" in text
+    assert "vars.QUALIFICATION_WORKFLOW_ID" in text
+    assert 'test "$(jq -r .conclusion <<<"$run_json")" = "success"' in text
+    assert 'test "$(jq -r .head_sha <<<"$run_json")" = "$CANDIDATE_COMMIT"' in text
+    assert 'test "$(jq -r .workflow_id <<<"$run_json")" = "$EXPECTED_QUALIFICATION_WORKFLOW_ID"' in text
+    assert "python build_scripts/artifact_promotion.py promote" in text
+    assert text.index("python build_scripts/artifact_promotion.py promote") < text.index("gh release upload")
+    gate = text[text.index("- name: Qualification receipt gate (required)") : text.index("gh release upload")]
+    assert "continue-on-error" not in gate
+    assert "if: always()" not in gate
+    assert all(
+        "gh release upload" not in path.read_text(encoding="utf-8")
+        for path in (ROOT / ".github" / "workflows").glob("*.yml")
+        if path != workflow
+    )

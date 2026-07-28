@@ -7,9 +7,16 @@ with the contents that ``paths.py`` expects to find next to the exe under
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
+import tomllib
 from pathlib import Path
+
+try:
+    from .artifact_identity import UNQUALIFIED_LABEL, checkpoint_version
+except ImportError:
+    from artifact_identity import UNQUALIFIED_LABEL, checkpoint_version
 
 
 def main() -> None:
@@ -19,6 +26,19 @@ def main() -> None:
     if not dist_dir.exists():
         print(f"ERROR: {dist_dir} not found. Run pyinstaller first.", file=sys.stderr)
         sys.exit(1)
+
+    project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    artifact_version = checkpoint_version(project["project"]["version"])
+    marker = {
+        "label": UNQUALIFIED_LABEL,
+        "schema_version": 1,
+        "status": "unqualified",
+        "version": artifact_version,
+    }
+    (dist_dir / "ARTIFACT_STATUS.json").write_text(
+        json.dumps(marker, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     # --- config/ next to exe (NOT inside _internal/) ---
     config_dst = dist_dir / "config"
@@ -87,6 +107,7 @@ def main() -> None:
     print(f"  {copied} configs copied to {config_dst}")
     print(f"  {themes_copied} theme packs copied to {config_dst / 'themes'}")
     print("  data/, logs/, plugins/ created")
+    print(f"  {UNQUALIFIED_LABEL}: {artifact_version}")
     print("  README_OPERATOR.txt written")
 
 

@@ -27,6 +27,9 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
     assert "python -m pip check" in text
     assert "PyInstaller build_scripts/cryodaq.spec" in text
     assert "python build_scripts/post_build.py" in text
+    assert "UNQUALIFIED — TEST ONLY" in text
+    assert "+checkpoint.unqualified" in text
+    assert "Compress-Archive" in text
     assert "windows_onedir_smoke.py check-warnings" in text
     assert "windows_onedir_smoke.py smoke" in text
     assert "build/cryodaq/warn-cryodaq.txt" in text
@@ -37,6 +40,7 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
     assert '- "src/**"' in text
     assert '- "config/**"' in text
     assert '- "tsp/**"' in text
+    assert "UNQUALIFIED-TEST-ONLY" in text
 
 
 def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
