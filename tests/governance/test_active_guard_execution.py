@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tools import ci_candidate_runner
+from tools import ci_active_checkout_runner, ci_candidate_runner
 from tools.ci_guard_execution import (
     RECEIPT_PREFIX,
     GuardExecutionError,
@@ -184,6 +184,86 @@ def _strict_environment() -> dict[str, str]:
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     return environment
+
+
+def test_active_checkout_pytest_command_uses_entry_point_plugins_once(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_async.py"
+    test_file.write_text(
+        "import pytest\n\n@pytest.mark.asyncio\nasync def test_async(): pass\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    environment = os.environ.copy()
+    prior = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(part for part in (str(ROOT), prior) if part)
+    environment.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
+
+    control = subprocess.run(
+        (sys.executable, "-B", "-m", "pytest", "-q", str(test_file)),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        check=False,
+        timeout=60,
+    )
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert "1 passed" in control.stdout
+
+    completed = subprocess.run(
+        ci_active_checkout_runner._PYTEST + ("-q", str(test_file), *ci_candidate_runner._TAIL),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "1 passed" in completed.stdout
+
+
+def test_active_checkout_strict_guard_uses_entry_point_plugins_once(tmp_path: Path) -> None:
+    node = "tests/governance/test_agent_formatter_gate.py::test_mutating_formatter_wrapper_is_absent"
+    _write_registry(tmp_path, node)
+    _write_test(
+        tmp_path,
+        node,
+        "import pytest\n\n@pytest.mark.asyncio\nasync def test_mutating_formatter_wrapper_is_absent(): pass\n",
+    )
+    environment = os.environ.copy()
+    prior = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(part for part in (str(ROOT), prior) if part)
+    environment.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
+    basetemp = tmp_path.parent / f"{tmp_path.name}-active-state"
+    basetemp.mkdir()
+    command = ci_candidate_runner._strict_guard_command(
+        "remaining",
+        active_nodes=(node,),
+        basetemp=basetemp,
+        execution_root="git-index",
+        pytest_command=ci_active_checkout_runner._PYTEST,
+    )
+
+    assert command is not None
+    completed = subprocess.run(
+        command,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        check=False,
+        timeout=60,
+    )
+    payload = _receipt(completed)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert payload["result"] == "passed"
 
 
 def _run_strict(

@@ -8,8 +8,11 @@ import sys
 from pathlib import Path
 
 from tools.check_python_compile import compile_python_tree
-from tools.ci_candidate_runner import _PYTEST, _TAIL, _strict_guard_command, _validate_strict_guard_receipt
+from tools.ci_candidate_runner import _TAIL, _strict_guard_command, _validate_strict_guard_receipt
 from tools.ci_guard_execution import active_guard_specs, checkout_execution_selection, current_guard_platform
+
+# The sealed candidate disables autoload; this checkout runner must not reuse its explicit plugin list.
+_PYTEST = (sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider")
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -47,6 +50,7 @@ def run_suite(suite: str, *, root: Path, revision: str, basetemp: Path) -> int:
         active_nodes=guard_nodes,
         basetemp=basetemp,
         execution_root="git-index",
+        pytest_command=_PYTEST,
     )
     if strict is not None:
         completed = subprocess.run(strict, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")

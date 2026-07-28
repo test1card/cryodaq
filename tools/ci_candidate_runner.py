@@ -234,6 +234,7 @@ def _strict_guard_command(
     active_nodes: tuple[str, ...],
     basetemp: Path,
     execution_root: str = "exported-commit",
+    pytest_command: tuple[str, ...] = _PYTEST,
 ) -> tuple[str, ...] | None:
     """Build the Windows-safe exact active-guard command for one suite."""
 
@@ -242,7 +243,7 @@ def _strict_guard_command(
     argsfile = basetemp / f"{suite}-active-guards.args"
     _write_response_file(argsfile, active_nodes)
     return (
-        _PYTEST
+        pytest_command
         + (
             "-p",
             "tools.ci_guard_execution",
