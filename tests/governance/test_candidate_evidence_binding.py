@@ -273,6 +273,101 @@ def test_export_execution_rejects_committed_path_mutation(candidate_repo: Path, 
     ).read_text(encoding="utf-8")
 
 
+def test_export_execution_rejects_chmod_mutate_execute_restore(candidate_repo: Path, tmp_path: Path) -> None:
+    attack = """
+import os, pathlib
+p = pathlib.Path('src/pkg/main.py')
+parents = [pathlib.Path('.'), pathlib.Path('src'), pathlib.Path('src/pkg')]
+saved_dirs = [(d, d.stat().st_mode) for d in parents]
+for d, _mode in saved_dirs:
+    os.chmod(d, 0o755)
+saved_file = p.stat().st_mode
+os.chmod(p, 0o666)
+original = p.read_bytes()
+p.write_text("print('EXECUTED_MUTATED_BYTES')\\n", encoding='utf-8')
+exec(compile(p.read_text(encoding='utf-8'), str(p), 'exec'))
+p.write_bytes(original)
+os.chmod(p, saved_file)
+for d, mode in reversed(saved_dirs):
+    os.chmod(d, mode)
+print('CHMOD_BYPASS_COMPLETED')
+"""
+    receipt = execute_exported_candidate(
+        candidate_repo,
+        "HEAD",
+        command=[sys.executable, "-c", attack],
+        destination=tmp_path / "export-chmod-restore",
+    )
+
+    assert receipt.returncode != 0
+    assert b"EXECUTED_MUTATED_BYTES" not in receipt.stdout
+    assert b"CHMOD_BYPASS_COMPLETED" not in receipt.stdout
+    assert b"PermissionError" in receipt.stderr
+
+
+@pytest.mark.parametrize(
+    ("name", "attack", "success_marker"),
+    [
+        (
+            "delete-recreate",
+            "from pathlib import Path; p=Path('src/pkg/main.py'); "
+            "p.unlink(); p.write_text(\"print('DELETE_RECREATE_EXECUTED')\\n\"); "
+            "exec(p.read_text()); print('DELETE_RECREATE_COMPLETED')",
+            b"DELETE_RECREATE_COMPLETED",
+        ),
+        (
+            "rename-replace",
+            "import os; from pathlib import Path; "
+            "replacement=Path(os.environ['CRYODAQ_STATE_ROOT'])/'replacement.py'; "
+            "replacement.write_text(\"print('RENAME_REPLACEMENT_EXECUTED')\\n\"); "
+            "replacement.replace('src/pkg/main.py'); "
+            "exec(Path('src/pkg/main.py').read_text()); print('RENAME_REPLACE_COMPLETED')",
+            b"RENAME_REPLACE_COMPLETED",
+        ),
+        (
+            "subprocess-chmod",
+            'import subprocess, sys; code="import os; from pathlib import Path; '
+            "p=Path('src/pkg/main.py'); os.chmod(p,0o666); "
+            "p.write_bytes(b'MUTATED'); print('SUBPROCESS_CHMOD_COMPLETED')\"; "
+            "raise SystemExit(subprocess.run([sys.executable,'-c',code]).returncode)",
+            b"SUBPROCESS_CHMOD_COMPLETED",
+        ),
+        (
+            "directory-chmod",
+            "import os; from pathlib import Path; p=Path('src/pkg'); os.chmod(p,0o777); "
+            "Path('src/pkg/added.py').write_text(\"print('DIRECTORY_MUTATION_EXECUTED')\\n\"); "
+            "print('DIRECTORY_CHMOD_COMPLETED')",
+            b"DIRECTORY_CHMOD_COMPLETED",
+        ),
+        (
+            "hardlink-write",
+            "import os; from pathlib import Path; "
+            "link=Path(os.environ['CRYODAQ_STATE_ROOT'])/'linked.py'; "
+            "os.link('src/pkg/main.py', link); link.write_bytes(b'MUTATED'); "
+            "print('HARDLINK_WRITE_COMPLETED')",
+            b"HARDLINK_WRITE_COMPLETED",
+        ),
+    ],
+)
+def test_export_execution_rejects_authority_bypass_attacks(
+    candidate_repo: Path,
+    tmp_path: Path,
+    name: str,
+    attack: str,
+    success_marker: bytes,
+) -> None:
+    receipt = execute_exported_candidate(
+        candidate_repo,
+        "HEAD",
+        command=[sys.executable, "-c", attack],
+        destination=tmp_path / f"export-{name}",
+    )
+
+    assert receipt.returncode != 0
+    assert success_marker not in receipt.stdout
+    assert b"PermissionError" in receipt.stderr
+
+
 def test_export_execution_allows_honest_read_only_candidate(candidate_repo: Path, tmp_path: Path) -> None:
     receipt = execute_exported_candidate(
         candidate_repo,
@@ -292,29 +387,20 @@ def test_export_execution_allows_honest_read_only_candidate(candidate_repo: Path
 
 
 def test_export_execution_rejects_unexpected_file_creation(candidate_repo: Path, tmp_path: Path) -> None:
-    with pytest.raises(CandidateEvidenceError, match="unexpected"):
-        execute_exported_candidate(
+    for name in ("unexpected.txt", "unexpected.pyc"):
+        receipt = execute_exported_candidate(
             candidate_repo,
             "HEAD",
             command=[
                 sys.executable,
                 "-c",
-                "from pathlib import Path; Path('unexpected.txt').write_text('not candidate', encoding='utf-8')",
+                f"from pathlib import Path; Path({name!r}).write_bytes(b'not candidate')",
             ],
-            destination=tmp_path / "export-extra",
+            destination=tmp_path / f"export-{name}",
         )
-
-    with pytest.raises(CandidateEvidenceError, match="unexpected"):
-        execute_exported_candidate(
-            candidate_repo,
-            "HEAD",
-            command=[
-                sys.executable,
-                "-c",
-                "from pathlib import Path; Path('unexpected.pyc').write_bytes(b'not candidate')",
-            ],
-            destination=tmp_path / "export-extra-pyc",
-        )
+        assert receipt.returncode != 0
+        assert b"PermissionError" in receipt.stderr
+        assert not (receipt.export_root / name).exists()
 
 
 def test_export_execution_preserves_logical_git_modes_on_windows(candidate_repo: Path, tmp_path: Path) -> None:
