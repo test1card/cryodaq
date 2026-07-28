@@ -17,6 +17,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (${{ matrix.os }}, ${{ matrix.suite }})
@@ -142,15 +145,6 @@ jobs:
             --output "${RUNNER_TEMP:?}/cryodaq-candidate-evidence" \
             --artifact-name "${CANDIDATE_ARTIFACT:?}"
 
-      - name: Enforce Montana candidate gate
-        id: montana-candidate-gate
-        run: |
-          python -m tools.montana_candidate_gate \
-            --repository "${GITHUB_WORKSPACE:?}" \
-            --revision "${GITHUB_SHA:?}" \
-            --suite "${{ matrix.suite }}" \
-            --bundle "${RUNNER_TEMP:?}/cryodaq-candidate-evidence"
-
       - name: Summarize failed exact candidate nodes
         id: candidate-failure-summary
         if: always() && steps.candidate.outcome == 'failure'
@@ -197,6 +191,5 @@ jobs:
           else
             test "${{ steps.active-remaining.outcome }}" = skipped
           fi
-          test "${{ steps.montana-candidate-gate.outcome }}" = success
           test "${{ steps.candidate-upload.outcome }}" = success
           test "${{ steps.candidate-attestation-upload.outcome }}" = success

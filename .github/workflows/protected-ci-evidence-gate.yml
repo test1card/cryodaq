@@ -1,0 +1,151 @@
+name: CryoDAQ protected CI evidence gate
+
+on:
+  workflow_run:
+    workflows: ["CryoDAQ CI"]
+    types: [completed]
+
+# workflow_run loads this file from the default branch, not from the candidate.
+# The owner must protect that branch/workflow and require the candidate-bound
+# check created below; those repository settings are not established by YAML.
+permissions:
+  actions: read
+  checks: write
+  contents: read
+
+jobs:
+  partition-execution-proof:
+    name: protected CI evidence gate
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CHECK_NAME: CryoDAQ protected CI evidence gate
+      JUDGE_SHA: 4520d6acf8f09c26fe95ad14e19318138193ffb7
+      TARGET_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
+      TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Start candidate-bound required check
+        id: candidate-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          check_id="$(
+            gh api --method POST "repos/${GITHUB_REPOSITORY:?}/check-runs" \
+              -f "name=${CHECK_NAME:?}" \
+              -f "head_sha=${TARGET_SHA:?}" \
+              -f status=in_progress \
+              -f "details_url=${GITHUB_SERVER_URL:?}/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}" \
+              --jq .id
+          )"
+          test "$check_id" -gt 0
+          echo "id=$check_id" >>"$GITHUB_OUTPUT"
+
+      - name: Check out candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+          ref: ${{ env.TARGET_SHA }}
+
+      - name: Check out immutable judge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: judge
+          persist-credentials: false
+          ref: ${{ env.JUDGE_SHA }}
+
+      - name: Verify immutable judge bytes
+        working-directory: judge
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"
+          printf '%s\n' \
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  tools/__init__.py' \
+            '354eb301c3079175a01b1659160de761df12db7763ae8b811293ffc58d41434a  tools/candidate_evidence.py' \
+            '06990429a5005edaec7a0e7c3a8bc64ad052962d41b6e85484b0af176a5f4503  tools/ci_candidate_evidence.py' \
+            '8c48bcdbd6a1788bf8c3595a6f4caccae9b90aa4fa46b9e45477afe8e4fa075b  tools/ci_partition_execution_proof.py' \
+            '78189f607669a7e2a0a6fc20f6ad9bbd91985ec9c5d3949241beb7fae2d42a51  tools/montana_candidate_gate.py' \
+            | sha256sum --check --strict -
+
+      - name: Prove every declared partition executed
+        id: partition-proof
+        working-directory: judge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP:?}/cryodaq-partition-proof"
+          python -B -m tools.ci_partition_execution_proof \
+            --repository "${GITHUB_WORKSPACE:?}/candidate" \
+            --repo "${GITHUB_REPOSITORY:?}" \
+            --run-id "${TARGET_RUN_ID:?}" \
+            --sha "${TARGET_SHA:?}" \
+            --output "${RUNNER_TEMP:?}/cryodaq-partition-proof/partition-execution-proof.json"
+
+      - name: Download exact candidate bundles
+        id: candidate-download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${TARGET_RUN_ID:?}" \
+            --repo "${GITHUB_REPOSITORY:?}" \
+            --dir "${RUNNER_TEMP:?}/cryodaq-target-artifacts"
+
+      - name: Enforce Montana gate with immutable judge
+        id: montana-proof
+        working-directory: judge
+        run: |
+          set -euo pipefail
+          for os_name in ubuntu-latest windows-latest; do
+            for suite in agents core gui remaining; do
+              bundle="${RUNNER_TEMP:?}/cryodaq-target-artifacts/cryodaq-candidate-${os_name}-${suite}-${TARGET_RUN_ATTEMPT:?}"
+              test -d "$bundle"
+              python -B -m tools.montana_candidate_gate \
+                --repository "${GITHUB_WORKSPACE:?}/candidate" \
+                --revision "${TARGET_SHA:?}" \
+                --suite "$suite" \
+                --bundle "$bundle"
+            done
+          done
+
+      - name: Upload accepted partition receipt
+        id: proof-upload
+        if: ${{ steps.partition-proof.outcome == 'success' && steps.montana-proof.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cryodaq-partition-proof-${{ env.TARGET_RUN_ID }}-${{ env.TARGET_RUN_ATTEMPT }}
+          path: ${{ runner.temp }}/cryodaq-partition-proof/partition-execution-proof.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Complete candidate-bound required check
+        if: ${{ always() && steps.candidate-check.outputs.id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MONTANA_OUTCOME: ${{ steps.montana-proof.outcome }}
+          PARTITION_OUTCOME: ${{ steps.partition-proof.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.proof-upload.outcome }}
+        run: |
+          set -euo pipefail
+          conclusion=failure
+          title="Protected CI evidence refused"
+          if test "$PARTITION_OUTCOME" = success &&
+             test "$MONTANA_OUTCOME" = success &&
+             test "$UPLOAD_OUTCOME" = success; then
+            conclusion=success
+            title="Protected CI evidence accepted"
+          fi
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY:?}/check-runs/${{ steps.candidate-check.outputs.id }}" \
+            -f status=completed \
+            -f "conclusion=$conclusion" \
+            -f "output[title]=$title" \
+            -f "output[summary]=target_run=${TARGET_RUN_ID:?} target_sha=${TARGET_SHA:?}"
+          test "$conclusion" = success

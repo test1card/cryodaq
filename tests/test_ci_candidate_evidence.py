@@ -1016,6 +1016,7 @@ def test_exported_candidate_runner_emits_structural_failure_receipt_after_enviro
 
 def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(tmp_path: Path) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert payload["permissions"] == {"contents": "read"}
     job = payload["jobs"]["test"]
     matrix = job["strategy"]["matrix"]
     assert matrix == {
@@ -1030,7 +1031,6 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     active = indexed["active-remaining"]
     candidate = indexed["candidate"]
-    montana_gate = indexed["montana-candidate-gate"]
     summary = _assert_candidate_failure_summary_step(steps)
     upload = indexed["candidate-upload"]
     attestation_upload = indexed["candidate-attestation-upload"]
@@ -1056,13 +1056,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert "continue-on-error" not in candidate
     assert "tools.ci_candidate_evidence run" in candidate["run"]
     assert '--revision "${GITHUB_SHA:?}"' in candidate["run"]
-    assert "if" not in montana_gate
-    assert "continue-on-error" not in montana_gate
-    assert "tools.montana_candidate_gate" in montana_gate["run"]
-    assert '--repository "${GITHUB_WORKSPACE:?}"' in montana_gate["run"]
-    assert '--revision "${GITHUB_SHA:?}"' in montana_gate["run"]
-    assert '--suite "${{ matrix.suite }}"' in montana_gate["run"]
-    assert '--bundle "${RUNNER_TEMP:?}/cryodaq-candidate-evidence"' in montana_gate["run"]
+    assert all("tools.montana_candidate_gate" not in str(step.get("run", "")) for step in steps)
     upload_pin = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     assert upload["uses"] == upload_pin
     assert attestation_upload["uses"] == upload_pin
@@ -1071,7 +1065,6 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert enforce.get("continue-on-error") is not True
     assert (
         steps.index(candidate)
-        < steps.index(montana_gate)
         < steps.index(summary)
         < steps.index(upload)
         < steps.index(attest)
@@ -1080,7 +1073,6 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     )
     for dependency in (
         "steps.active-remaining.outcome",
-        "steps.montana-candidate-gate.outcome",
         "steps.candidate-upload.outcome",
         "steps.candidate-attestation-upload.outcome",
     ):
