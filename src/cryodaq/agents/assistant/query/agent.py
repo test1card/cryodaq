@@ -338,6 +338,11 @@ class AssistantQueryAgent:
                 n_references=0,
                 cooldown_active=ru_bool(False),
             )
+        if not eta.available:
+            return (
+                f"Запрос: {query}\n\nПрогноз охлаждения недоступен: {eta.reason}. "
+                "Не утверждай, что прогноза нет."
+            )
         h = max(eta.t_remaining_hours, 0.0)
         t_str = f"{int(h)}ч {int((h % 1) * 60)}мин"
         t_cold = f"{eta.T_cold:.2f}" if eta.T_cold is not None else "нет данных"
@@ -366,6 +371,11 @@ class AssistantQueryAgent:
                 eta_str="нет прогноза",
                 trend="нет данных",
                 confidence=0.0,
+            )
+        if not eta.available:
+            return (
+                f"Запрос: {query}\n\nВакуумный прогноз недоступен: {eta.reason}. "
+                "Не утверждай, что прогноза нет."
             )
 
         cur = eta.current_mbar if eta.current_mbar is not None else current_p
@@ -400,6 +410,12 @@ class AssistantQueryAgent:
                 std_value=0.0,
                 unit="",
             )
+        unavailable = [stats.reason for stats in stats_dict.values() if not stats.available]
+        if unavailable:
+            return (
+                f"Запрос: {query}\n\nСтатистика диапазона недоступна: {unavailable[0]}. "
+                "Не подставляй нулевые значения."
+            )
         channel, stats = next(iter(stats_dict.items()))
         return FORMAT_RANGE_STATS_USER.format(
             query=query,
@@ -424,11 +440,19 @@ class AssistantQueryAgent:
                 experiment_age_text="—",
                 target_temp="нет данных",
             )
+        if not status.available:
+            return (
+                f"Запрос: {query}\n\nСтатус эксперимента недоступен: {status.reason}. "
+                "Не утверждай, что активного эксперимента нет."
+            )
         exp_id_text = status.experiment_id
         if status.experiment_started_human:
             exp_id_text += f" (начат {status.experiment_started_human})"
-        age_h = status.experiment_age_s / 3600
-        age_text = f"{int(age_h)}ч {int((age_h % 1) * 60)}мин"
+        if status.experiment_age_s is None:
+            age_text = "нет данных"
+        else:
+            age_h = status.experiment_age_s / 3600
+            age_text = f"{int(age_h)}ч {int((age_h % 1) * 60)}мин"
         if status.phase_started_at is not None:
             phase_dt = datetime.fromtimestamp(status.phase_started_at, tz=UTC)
             phase_started = phase_dt.strftime("%H:%M UTC")
@@ -451,6 +475,11 @@ class AssistantQueryAgent:
                 query=query,
                 alarm_count="нет данных",
                 alarms_text="нет данных о тревогах",
+            )
+        if not result.available:
+            return (
+                f"Запрос: {query}\n\nСостояние тревог недоступно: {result.reason}. "
+                "Не утверждай, что тревог нет."
             )
         if result.count == 0:
             return FORMAT_ALARM_STATUS_USER.format(
@@ -481,6 +510,11 @@ class AssistantQueryAgent:
                 vacuum_eta_text="нет данных",
                 alarms_text="нет данных",
             )
+        if not cs.available:
+            return (
+                f"Запрос: {query}\n\nСнимок текущих данных недоступен: {cs.reason}. "
+                "Не утверждай, что поток только запускается."
+            )
 
         if getattr(cs, "snapshot_empty", False):
             return (
@@ -505,6 +539,8 @@ class AssistantQueryAgent:
         cd = cs.cooldown_eta
         if cd is None:
             cd_text = "нет прогноза"
+        elif not cd.available:
+            cd_text = f"недоступен: {cd.reason}"
         else:
             h = max(cd.t_remaining_hours, 0.0)
             cd_text = f"{int(h)}ч {int((h % 1) * 60)}мин"
@@ -512,6 +548,8 @@ class AssistantQueryAgent:
         vac = cs.vacuum_eta
         if vac is None:
             vac_text = "нет прогноза"
+        elif not vac.available:
+            vac_text = f"недоступен: {vac.reason}"
         elif vac.eta_seconds is None:
             vac_text = "не определено"
         else:
@@ -549,6 +587,11 @@ class AssistantQueryAgent:
                 filter_summary="—",
                 total_count=0,
                 entries_text="(адаптер архива не сконфигурирован)",
+            )
+        if not result.available:
+            return (
+                f"Запрос: {query}\n\nАрхив недоступен: {result.reason}. "
+                "Не утверждай, что записей нет."
             )
         entries = result.entries or []
         if not entries:
@@ -649,6 +692,11 @@ class AssistantQueryAgent:
                 cleared_count=0,
                 by_alarm_id_text="(адаптер архива не сконфигурирован)",
             )
+        if not result.available:
+            return (
+                f"Запрос: {query}\n\nИстория тревог недоступна: {result.reason}. "
+                "Не подставляй нулевые счётчики."
+            )
         if result.by_alarm_id:
             top = sorted(result.by_alarm_id.items(), key=lambda kv: kv[1], reverse=True)
             lines = [f"- {aid} ×{count}" for aid, count in top]
@@ -675,6 +723,11 @@ class AssistantQueryAgent:
                 total_hits=0,
                 filter_note="",
                 hits_text="(семантический поиск недоступен — RAG-индекс не сконфигурирован)",
+            )
+        if not result.available:
+            return (
+                f"Запрос: {query}\n\nСемантический поиск недоступен: {result.reason}. "
+                "Не утверждай, что совпадений нет."
             )
         hits = list(result.hits)
         filter_note = f" (фильтр source_kind={result.source_kind_filter})" if result.source_kind_filter else ""

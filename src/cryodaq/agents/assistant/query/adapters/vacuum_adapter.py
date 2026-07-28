@@ -8,8 +8,14 @@ already uses — ``{"ok": True, **dataclasses.asdict(prediction)}``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
+from cryodaq.agents.assistant.query.adapters._reply import (
+    reply_declares_no_data,
+    reply_failure_reason,
+    reply_is_success,
+)
 from cryodaq.agents.assistant.query.schemas import VacuumETA
 from cryodaq.agents.assistant.shared.engine_client import EngineQueryClient
 
@@ -23,11 +29,22 @@ class VacuumAdapter:
         self._client = engine_client
 
     async def eta_to_target(self, target_mbar: float) -> VacuumETA | None:
-        reply = await self._client.call({"cmd": "get_vacuum_trend"})
-        if not reply.get("ok") or reply.get("status") == "no_data":
+        try:
+            reply = await self._client.call({"cmd": "get_vacuum_trend"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return self._unavailable(target_mbar, f"vacuum prediction unavailable: {exc}")
+        if not reply_is_success(reply):
+            return self._unavailable(target_mbar, reply_failure_reason(reply, "vacuum prediction unavailable"))
+        if reply_declares_no_data(reply):
             return None
         try:
-            eta_targets: dict = reply.get("eta_targets") or {}
+            eta_targets = reply["eta_targets"]
+            trend = reply["trend"]
+            confidence = reply["confidence"]
+            if not isinstance(eta_targets, dict) or not isinstance(trend, str):
+                raise ValueError("vacuum prediction has invalid fields")
             # eta_targets keys are stringified scientific notation, e.g. "1e-06"
             target_key = f"{target_mbar:.2e}"
             eta_seconds = eta_targets.get(target_key)
@@ -47,9 +64,13 @@ class VacuumAdapter:
                 current_mbar=None,
                 eta_seconds=eta_seconds,
                 target_mbar=target_mbar,
-                trend=str(reply.get("trend", "unknown")),
-                confidence=float(reply.get("confidence", 0.0)),
+                trend=trend,
+                confidence=float(confidence),
             )
-        except Exception as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             logger.warning("VacuumAdapter: failed to parse prediction: %s", exc)
-            return None
+            return self._unavailable(target_mbar, "vacuum prediction response is malformed")
+
+    @staticmethod
+    def _unavailable(target_mbar: float, reason: str) -> VacuumETA:
+        return VacuumETA(None, None, target_mbar, "", 0.0, available=False, stale=True, reason=reason)

@@ -1,18 +1,19 @@
-"""SQLiteAdapter — range stats queries for query agent, over ZMQ.
-
-B1: previously read the engine's SQLite reader directly (in-process);
-now calls the engine's existing read-only ``readings_history`` REP
-command (same one the GUI history charts use) and computes the same
-stats client-side.
-"""
+"""Range-statistics queries for the assistant, over the read-only engine API."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import statistics
 from datetime import UTC, datetime
+from typing import Any
 
+from cryodaq.agents.assistant.query.adapters._reply import (
+    reply_declares_empty_sequence,
+    reply_failure_reason,
+    reply_is_success,
+)
 from cryodaq.agents.assistant.query.schemas import RangeStats
 from cryodaq.agents.assistant.shared.engine_client import EngineQueryClient
 
@@ -25,35 +26,41 @@ class SQLiteAdapter:
     def __init__(self, engine_client: EngineQueryClient) -> None:
         self._client = engine_client
 
-    async def range_stats(
-        self,
-        channel: str,
-        window_minutes: int,
-    ) -> RangeStats | None:
+    async def range_stats(self, channel: str, window_minutes: int) -> RangeStats | None:
         end_ts = datetime.now(UTC).timestamp()
         start_ts = end_ts - window_minutes * 60
-        reply = await self._client.call(
-            {
-                "cmd": "readings_history",
-                "channels": [channel],
-                "from_ts": start_ts,
-                "limit_per_channel": 10_000,
-            }
-        )
-        if not reply.get("ok"):
-            return None
-
-        readings = reply.get("data", {}).get(channel, [])
-        if not readings:
-            return None
-
         try:
-            # Non-finite samples are "no reading", not measurements. Aggregating
-            # over them yields a confident-looking RangeStats full of nan (and a
-            # std of 0.0), which the query agent renders as a real answer.
-            values = [v for _, v in readings if isinstance(v, int | float) and math.isfinite(v)]
+            reply = await self._client.call(
+                {
+                    "cmd": "readings_history",
+                    "channels": [channel],
+                    "from_ts": start_ts,
+                    "limit_per_channel": 10_000,
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return self._unavailable(channel, window_minutes, f"history query unavailable: {exc}")
+        if not reply_is_success(reply):
+            return self._unavailable(channel, window_minutes, reply_failure_reason(reply, "history query unavailable"))
+        if reply_declares_empty_sequence(reply, "data", channel):
+            return None
+        try:
+            data: Any = reply["data"]
+            if not isinstance(data, dict) or channel not in data or not isinstance(data[channel], list):
+                raise ValueError("history response has no channel list")
+            readings = data[channel]
+            values = []
+            for row in readings:
+                if not isinstance(row, (tuple, list)) or len(row) != 2:
+                    raise ValueError("history sample must have timestamp and value")
+                value = row[1]
+                if not isinstance(value, int | float) or not math.isfinite(value):
+                    raise ValueError("history sample value is invalid")
+                values.append(value)
             if not values:
-                return None
+                raise ValueError("history response has no usable values")
             return RangeStats(
                 channel=channel,
                 window_minutes=window_minutes,
@@ -63,6 +70,10 @@ class SQLiteAdapter:
                 mean_value=statistics.mean(values),
                 std_value=statistics.stdev(values) if len(values) > 1 else 0.0,
             )
-        except Exception as exc:
+        except (KeyError, TypeError, ValueError, statistics.StatisticsError) as exc:
             logger.warning("SQLiteAdapter.range_stats failed: %s", exc)
-            return None
+            return self._unavailable(channel, window_minutes, "history response is malformed")
+
+    @staticmethod
+    def _unavailable(channel: str, window_minutes: int, reason: str) -> RangeStats:
+        return RangeStats(channel, window_minutes, 0, 0.0, 0.0, 0.0, 0.0, available=False, stale=True, reason=reason)

@@ -604,7 +604,7 @@ async def test_query_agent_failed_alarm_transport_formats_unavailable() -> None:
     response = await _make_agent(ollama, adapters).handle_query("Есть ли тревоги?")
 
     assert response == "Нет данных о тревогах."
-    assert "нет данных о тревогах" in prompts[0]
+    assert "состояние тревог недоступно" in prompts[0].lower()
     assert "Активные тревоги (0 шт.):\nтревог нет" not in prompts[0]
 
 

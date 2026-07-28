@@ -26,6 +26,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from cryodaq.agents.assistant.query.adapters._reply import (
+    reply_declares_absence,
+    reply_failure_reason,
+    reply_is_success,
+)
 from cryodaq.agents.assistant.query.schemas import (
     AlarmHistoryResult,
     ArchiveDetailResult,
@@ -175,18 +180,30 @@ class ArchiveAdapter:
         """Return up to ``limit`` archived experiments started within the last
         ``days`` days, newest first."""
         start_date = datetime.now(UTC) - timedelta(days=int(days))
-        reply = await self._client.call(
-            {
-                "cmd": "experiment_archive_list",
-                "start_date": start_date.isoformat(),
-                "sort_by": "start_time",
-                "descending": True,
-            }
-        )
-        if not reply.get("ok"):
-            return None
         try:
-            entries = reply.get("entries", [])[: int(limit)]
+            reply = await self._client.call(
+                {
+                    "cmd": "experiment_archive_list",
+                    "start_date": start_date.isoformat(),
+                    "sort_by": "start_time",
+                    "descending": True,
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return ArchiveListResult(available=False, stale=True, reason=f"archive list unavailable: {exc}")
+        if not reply_is_success(reply):
+            return ArchiveListResult(
+                available=False,
+                stale=True,
+                reason=reply_failure_reason(reply, "archive list unavailable"),
+            )
+        try:
+            entries = reply["entries"]
+            if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+                raise ValueError("entries must be a list of objects")
+            entries = entries[: int(limit)]
             return ArchiveListResult(
                 entries=entries,
                 total_count=len(entries),
@@ -194,7 +211,11 @@ class ArchiveAdapter:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("ArchiveAdapter.list_recent failed: %s", exc)
-            return None
+            return ArchiveListResult(
+                available=False,
+                stale=True,
+                reason="archive list response is malformed",
+            )
 
     # ------------------------------------------------------------------
     # Archive detail
@@ -205,8 +226,11 @@ class ArchiveAdapter:
         ident = (experiment_id or "").strip()
         if not ident:
             return None
-        reply = await self._client.call({"cmd": "experiment_get_archive_item", "experiment_id": ident})
-        if not reply.get("ok"):
+        try:
+            reply = await self._client.call({"cmd": "experiment_get_archive_item", "experiment_id": ident})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
             return ArchiveDetailResult(
                 experiment_id=ident,
                 sample="",
@@ -217,12 +241,27 @@ class ArchiveAdapter:
                 duration_h=None,
                 available=False,
                 stale=True,
-                reason="archive detail unavailable",
+                reason=f"archive detail unavailable: {exc}",
             )
-        entry = reply.get("entry")
-        if entry is None:
+        if not reply_is_success(reply):
+            return ArchiveDetailResult(
+                experiment_id=ident,
+                sample="",
+                operator="",
+                status="",
+                started_at="",
+                ended_at=None,
+                duration_h=None,
+                available=False,
+                stale=True,
+                reason=reply_failure_reason(reply, "archive detail unavailable"),
+            )
+        if reply_declares_absence(reply, "entry"):
             return None
         try:
+            entry = reply["entry"]
+            if not isinstance(entry, dict):
+                raise ValueError("entry must be an object")
             metadata: dict[str, Any] = {}
             meta_path_str = entry.get("metadata_path")
             if meta_path_str and self._archive_root is not None:
@@ -276,7 +315,18 @@ class ArchiveAdapter:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("ArchiveAdapter.get_detail failed: %s", exc)
-            return None
+            return ArchiveDetailResult(
+                experiment_id=ident,
+                sample="",
+                operator="",
+                status="",
+                started_at="",
+                ended_at=None,
+                duration_h=None,
+                available=False,
+                stale=True,
+                reason="archive detail response is malformed",
+            )
 
     # ------------------------------------------------------------------
     # Alarm history
@@ -289,24 +339,39 @@ class ArchiveAdapter:
     ) -> AlarmHistoryResult | None:
         """Aggregate triggered/cleared transitions from the alarm-v2 history."""
         cutoff = (datetime.now(UTC) - timedelta(days=int(days))).timestamp()
-        reply = await self._client.call(
-            {
-                "cmd": "alarm_v2_history",
-                "start_ts": cutoff,
-                "limit": _ALARM_HISTORY_FETCH_LIMIT,
-            }
-        )
-        if not reply.get("ok"):
-            return None
         try:
-            history = reply.get("history", [])
+            reply = await self._client.call(
+                {
+                    "cmd": "alarm_v2_history",
+                    "start_ts": cutoff,
+                    "limit": _ALARM_HISTORY_FETCH_LIMIT,
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            return AlarmHistoryResult(
+                window_description="",
+                available=False,
+                stale=True,
+                reason=f"alarm history unavailable: {exc}",
+            )
+        if not reply_is_success(reply):
+            return AlarmHistoryResult(
+                window_description="",
+                available=False,
+                stale=True,
+                reason=reply_failure_reason(reply, "alarm history unavailable"),
+            )
+        try:
+            history = reply["history"]
+            if not isinstance(history, list) or not all(isinstance(entry, dict) for entry in history):
+                raise ValueError("history must be a list of objects")
             triggered = 0
             cleared = 0
             by_alarm_id: dict[str, int] = {}
 
             for entry in history:
-                if not isinstance(entry, dict):
-                    continue
                 transition = str(entry.get("transition", "")).upper()
                 alarm_id = str(entry.get("alarm_id", "unknown"))
                 if transition == "TRIGGERED":
@@ -323,4 +388,9 @@ class ArchiveAdapter:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("ArchiveAdapter.alarm_history_summary failed: %s", exc)
-            return None
+            return AlarmHistoryResult(
+                window_description="",
+                available=False,
+                stale=True,
+                reason="alarm history response is malformed",
+            )

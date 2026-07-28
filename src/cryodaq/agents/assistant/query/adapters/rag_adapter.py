@@ -111,7 +111,13 @@ class RAGAdapter:
             raise
         except Exception as exc:  # noqa: BLE001 — adapter must never raise.
             logger.warning("RAGAdapter.search failed for %r: %s", query[:80], exc)
-            return None
+            return KnowledgeQueryResult(
+                query=query,
+                source_kind_filter=source_kind,
+                available=False,
+                stale=True,
+                reason=f"semantic search unavailable: {exc}",
+            )
 
         cutoff = self._max_distance if max_distance is None else max_distance
         hits: list[KnowledgeQueryHit] = []

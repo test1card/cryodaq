@@ -130,7 +130,17 @@ async def test_cooldown_adapter_parses_prediction() -> None:
 
 async def test_cooldown_adapter_returns_none_when_call_fails() -> None:
     adapter = CooldownAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    assert await adapter.eta() is None
+    result = await adapter.eta()
+    assert result is not None
+    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
+
+
+async def test_cooldown_adapter_marks_malformed_prediction_unavailable() -> None:
+    result = await CooldownAdapter(_fake_client({"ok": True, "prediction": "broken"})).eta()
+    assert result is not None
+    assert result.available is False
+    assert result.stale is True
+    assert result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +170,9 @@ async def test_vacuum_adapter_target_format() -> None:
 
 async def test_vacuum_adapter_returns_none_when_call_fails() -> None:
     adapter = VacuumAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    assert await adapter.eta_to_target(1e-6) is None
+    result = await adapter.eta_to_target(1e-6)
+    assert result is not None
+    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
 
 
 async def test_vacuum_adapter_returns_none_when_no_prediction() -> None:
@@ -206,7 +218,8 @@ async def test_sqlite_adapter_returns_none_for_empty_channel() -> None:
 async def test_sqlite_adapter_returns_none_when_call_fails() -> None:
     adapter = SQLiteAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
     result = await adapter.range_stats("T_cold", window_minutes=60)
-    assert result is None
+    assert result is not None
+    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
 
 
 # ---------------------------------------------------------------------------
@@ -253,17 +266,23 @@ async def test_alarm_adapter_returns_empty_when_no_alarms() -> None:
 async def test_alarm_adapter_returns_none_when_success_reply_lacks_active_alarms() -> None:
     """A malformed successful reply is unavailable, never a known-empty alarm set."""
     adapter = AlarmAdapter(_fake_client({"ok": True}))
-    assert await adapter.active() is None
+    result = await adapter.active()
+    assert (result.available, result.stale) == (False, True)
+    assert result.reason
 
 
 async def test_alarm_adapter_returns_none_when_call_fails() -> None:
     adapter = AlarmAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    assert await adapter.active() is None
+    result = await adapter.active()
+    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
 
 
 async def test_alarm_adapter_returns_none_for_malformed_reply() -> None:
     adapter = AlarmAdapter(_fake_client(None))
-    assert await adapter.active() is None
+    result = await adapter.active()
+    assert result.available is False
+    assert result.stale is True
+    assert result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +315,7 @@ async def test_experiment_adapter_active_experiment() -> None:
     assert result.phase == "COOL"
     assert result.target_temp is None
     assert result.sample_id is None
-    assert result.experiment_age_s == 0.0
+    assert result.experiment_age_s is None
 
 
 async def test_experiment_adapter_returns_none_when_no_experiment() -> None:
@@ -307,7 +326,17 @@ async def test_experiment_adapter_returns_none_when_no_experiment() -> None:
 
 async def test_experiment_adapter_returns_none_when_call_fails() -> None:
     adapter = ExperimentAdapter(_fake_client({"ok": False, "error": "engine недоступен"}))
-    assert await adapter.status() is None
+    result = await adapter.status()
+    assert result is not None
+    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
+
+
+async def test_experiment_adapter_marks_malformed_active_experiment_unavailable() -> None:
+    result = await ExperimentAdapter(_fake_client({"ok": True, "active_experiment": "broken"})).status()
+    assert result is not None
+    assert result.available is False
+    assert result.stale is True
+    assert result.reason
 
 
 # ---------------------------------------------------------------------------

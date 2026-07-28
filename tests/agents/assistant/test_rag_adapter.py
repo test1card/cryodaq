@@ -218,7 +218,10 @@ def test_search_handles_searcher_exception_gracefully() -> None:
 
     result = _run(adapter.search("anything"))
 
-    assert result is None  # collapses to None instead of raising
+    assert result is not None
+    assert result.available is False
+    assert result.stale is True
+    assert result.reason
 
 
 def test_search_propagates_cancelled_error() -> None:

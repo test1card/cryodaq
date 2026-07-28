@@ -42,8 +42,14 @@ class CompositeAdapter:
             return_exceptions=True,
         )
 
+        snapshot_reason: str | None = None
         if isinstance(labeled_data, Exception):
             logger.warning("CompositeAdapter: snapshot failed: %s", labeled_data)
+            snapshot_reason = f"live snapshot unavailable: {labeled_data}"
+            labeled_data = {}
+        elif not isinstance(labeled_data, dict):
+            logger.warning("CompositeAdapter: snapshot had invalid type: %s", type(labeled_data).__name__)
+            snapshot_reason = "live snapshot response is malformed"
             labeled_data = {}
         if isinstance(cd_eta, Exception):
             logger.warning("CompositeAdapter: cooldown failed: %s", cd_eta)
@@ -74,7 +80,12 @@ class CompositeAdapter:
 
         active_alarms = getattr(alarm_result, "active", []) if alarm_result is not None else []
 
-        if vac_eta is not None and vac_eta.current_mbar is None and current_pressure is not None:
+        if (
+            vac_eta is not None
+            and getattr(vac_eta, "available", True)
+            and vac_eta.current_mbar is None
+            and current_pressure is not None
+        ):
             vac_eta.current_mbar = current_pressure
 
         # Snapshot age for defensive empty-snapshot messaging
@@ -95,5 +106,8 @@ class CompositeAdapter:
             current_pressure=current_pressure,
             snapshot_empty=snapshot_empty,
             snapshot_age_s=snapshot_age_s,
-            alarms_available=alarm_result is not None,
+            alarms_available=alarm_result is not None and getattr(alarm_result, "available", True),
+            available=snapshot_reason is None,
+            stale=snapshot_reason is not None,
+            reason=snapshot_reason,
         )

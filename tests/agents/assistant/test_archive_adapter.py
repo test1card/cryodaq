@@ -112,7 +112,8 @@ def test_list_recent_empty_archive_returns_empty_result() -> None:
 
 def test_list_recent_returns_none_when_call_fails() -> None:
     adapter = ArchiveAdapter(_fake_client(experiment_archive_list={"ok": False, "error": "engine недоступен"}))
-    assert _run(adapter.list_recent(days=7)) is None
+    result = _run(adapter.list_recent(days=7))
+    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
 
 
 def test_list_recent_sends_start_date_and_sort_order() -> None:
@@ -254,6 +255,15 @@ def test_get_detail_returns_none_when_call_fails() -> None:
     assert isinstance(unavailable.reason, str) and unavailable.reason
 
 
+def test_get_detail_marks_malformed_entry_unavailable() -> None:
+    adapter = ArchiveAdapter(_fake_client(experiment_get_archive_item={"ok": True, "entry": "broken"}))
+    result = _run(adapter.get_detail("exp-1"))
+    assert result is not None
+    assert result.available is False
+    assert result.stale is True
+    assert result.reason
+
+
 # ---------------------------------------------------------------------------
 # alarm_history_summary
 # ---------------------------------------------------------------------------
@@ -279,7 +289,8 @@ def test_alarm_history_aggregates_triggered_and_cleared() -> None:
 
 def test_alarm_history_returns_none_when_call_fails() -> None:
     adapter = ArchiveAdapter(_fake_client(alarm_v2_history={"ok": False, "error": "engine недоступен"}))
-    assert _run(adapter.alarm_history_summary(days=7)) is None
+    result = _run(adapter.alarm_history_summary(days=7))
+    assert (result.available, result.stale, result.reason) == (False, True, "engine недоступен")
 
 
 def test_alarm_history_returns_zero_counts_when_history_empty() -> None:

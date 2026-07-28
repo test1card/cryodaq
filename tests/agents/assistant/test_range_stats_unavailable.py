@@ -10,8 +10,6 @@ formats that as a real answer, and ``std=0.0`` claims zero spread.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from cryodaq.agents.assistant.query.adapters.sqlite_adapter import SQLiteAdapter
@@ -36,26 +34,29 @@ async def _stats(rows: list):
 
 @pytest.mark.parametrize("bad", [NAN, INF, -INF])
 async def test_single_non_finite_sample_is_unavailable(bad: float) -> None:
-    """A lone unavailable sample must yield None, not nan-valued stats."""
+    """A malformed sample must not be represented as an empty window."""
     stats = await _stats([(1.0, bad)])
-    assert stats is None, f"range_stats answered with {stats!r} for a non-finite-only window"
+    assert stats is not None
+    assert stats.available is False
+    assert stats.stale is True
+    assert stats.reason
 
 
 async def test_all_samples_non_finite_is_unavailable() -> None:
     stats = await _stats([(1.0, NAN), (2.0, NAN), (3.0, NAN)])
-    assert stats is None
+    assert stats is not None
+    assert stats.available is False
+    assert stats.stale is True
+    assert stats.reason
 
 
-async def test_non_finite_sample_does_not_poison_finite_window() -> None:
+async def test_non_finite_sample_marks_the_window_unavailable() -> None:
     stats = await _stats([(1.0, 4.2), (2.0, NAN), (3.0, 4.4)])
 
-    assert stats is not None, "a window with usable samples must still answer"
-    for field in ("min_value", "max_value", "mean_value", "std_value"):
-        value = getattr(stats, field)
-        assert math.isfinite(value), f"{field} is non-finite: {value!r}"
-    assert stats.n_samples == 2, "n_samples must count only the samples actually aggregated"
-    assert stats.min_value == pytest.approx(4.2)
-    assert stats.max_value == pytest.approx(4.4)
+    assert stats is not None
+    assert stats.available is False
+    assert stats.stale is True
+    assert stats.reason
 
 
 async def test_all_finite_window_unchanged() -> None:
