@@ -20,9 +20,9 @@ import sys
 from datetime import date, datetime, time
 from pathlib import Path
 
+import yaml
+
 from cryodaq.analytics.cross_experiment import (
-    DEFAULT_COLD_CHANNEL,
-    DEFAULT_WARM_CHANNEL,
     compute_trend,
     export_summaries_csv,
     export_summaries_json,
@@ -32,6 +32,7 @@ from cryodaq.analytics.cross_experiment import (
     scan_archive,
     validate_trend_metric,
 )
+from cryodaq.paths import get_config_dir
 
 
 def _parse_date(value: str | None, *, end: bool = False) -> datetime | None:
@@ -48,13 +49,43 @@ def _parse_date(value: str | None, *, end: bool = False) -> datetime | None:
     return parsed
 
 
+def _stage_channels(args: argparse.Namespace) -> tuple[str, str]:
+    config_dir = get_config_dir()
+    local_path = config_dir / "cooldown.local.yaml"
+    config_path = local_path if local_path.exists() else config_dir / "cooldown.yaml"
+    raw: object = {}
+    if args.cold_channel is None or args.warm_channel is None:
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            raise ValueError(
+                "stage channels are not configured; set cooldown.channel_cold and "
+                f"cooldown.channel_warm in {config_path}, or pass --cold-channel and --warm-channel"
+            ) from exc
+    cooldown = raw.get("cooldown", {}) if isinstance(raw, dict) else {}
+    if not isinstance(cooldown, dict):
+        cooldown = {}
+    cold_channel = args.cold_channel or cooldown.get("channel_cold")
+    warm_channel = args.warm_channel or cooldown.get("channel_warm")
+    if not isinstance(cold_channel, str) or not cold_channel.strip():
+        raise ValueError(f"set cooldown.channel_cold in {config_path}, or pass --cold-channel")
+    if not isinstance(warm_channel, str) or not warm_channel.strip():
+        raise ValueError(f"set cooldown.channel_warm in {config_path}, or pass --warm-channel")
+    return cold_channel.strip(), warm_channel.strip()
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
+    try:
+        cold_channel, warm_channel = _stage_channels(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     result = scan_archive(
         Path(args.data_dir),
         start=_parse_date(args.start),
         end=_parse_date(args.end, end=True),
-        cold_channel=args.cold_channel,
-        warm_channel=args.warm_channel,
+        cold_channel=cold_channel,
+        warm_channel=warm_channel,
     )
     print(format_summary_table(result.summaries))
     if result.skipped:
@@ -76,12 +107,17 @@ def cmd_drift(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    try:
+        cold_channel, warm_channel = _stage_channels(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     result = scan_archive(
         Path(args.data_dir),
         start=_parse_date(args.start),
         end=_parse_date(args.end, end=True),
-        cold_channel=args.cold_channel,
-        warm_channel=args.warm_channel,
+        cold_channel=cold_channel,
+        warm_channel=warm_channel,
     )
     try:
         trend = compute_trend(
@@ -111,8 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", required=True, help="Корень данных (содержит experiments/)")
     p.add_argument("--start", help="ISO-дата начала диапазона (включительно)")
     p.add_argument("--end", help="ISO-дата конца диапазона (включительно)")
-    p.add_argument("--cold-channel", default=DEFAULT_COLD_CHANNEL)
-    p.add_argument("--warm-channel", default=DEFAULT_WARM_CHANNEL)
+    p.add_argument("--cold-channel", help="Override cooldown.channel_cold from cooldown.yaml")
+    p.add_argument("--warm-channel", help="Override cooldown.channel_warm from cooldown.yaml")
     p.add_argument("--csv", help="Путь для сохранения CSV")
     p.add_argument("--json", help="Путь для сохранения JSON")
 
@@ -122,8 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threshold", type=float, required=True)
     p.add_argument("--start", help="ISO-дата начала диапазона")
     p.add_argument("--end", help="ISO-дата конца диапазона")
-    p.add_argument("--cold-channel", default=DEFAULT_COLD_CHANNEL)
-    p.add_argument("--warm-channel", default=DEFAULT_WARM_CHANNEL)
+    p.add_argument("--cold-channel", help="Override cooldown.channel_cold from cooldown.yaml")
+    p.add_argument("--warm-channel", help="Override cooldown.channel_warm from cooldown.yaml")
     p.add_argument("--baseline-n", type=int, default=5, help="Число первых запусков для базового среднего")
     p.add_argument("--recent-n", type=int, default=5, help="Число последних запусков для текущего среднего")
     p.add_argument("--json", help="Путь для сохранения JSON тренда")

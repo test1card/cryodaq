@@ -32,6 +32,17 @@ _SCHEMA = pa.schema(
 )
 
 
+@pytest.fixture(autouse=True)
+def _configure_stage_channels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "cooldown.yaml").write_text(
+        f'cooldown:\n  channel_cold: "{COLD}"\n  channel_warm: "{WARM}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trends_cli, "get_config_dir", lambda: config_dir)
+
+
 def _make_experiment(data_dir: Path, experiment_id: str, start: datetime, duration_h: float = 15.0) -> None:
     exp_dir = data_dir / "experiments" / experiment_id
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +158,22 @@ def test_cli_drift_exit_code_reflects_detection(tmp_path: Path, capsys: pytest.C
 def test_cli_requires_command() -> None:
     with pytest.raises(SystemExit):
         trends_cli.main([])
+
+
+def test_cli_reports_where_missing_stage_channels_must_be_configured(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_config_dir = tmp_path / "missing-config"
+    monkeypatch.setattr(trends_cli, "get_config_dir", lambda: missing_config_dir)
+
+    assert trends_cli.main(["scan", "--data-dir", str(tmp_path)]) == 2
+    assert capsys.readouterr().err == (
+        "error: stage channels are not configured; set cooldown.channel_cold and "
+        f"cooldown.channel_warm in {missing_config_dir / 'cooldown.yaml'}, "
+        "or pass --cold-channel and --warm-channel\n"
+    )
 
 
 @pytest.mark.parametrize("metric", ["initial_cooldown_rate_k_per_hour", "experiment_id"])
