@@ -81,6 +81,24 @@ async def test_armed_to_tripped() -> None:
     await engine.stop()
 
 
+async def test_noop_action_is_not_logged_as_authoritative_success(caplog) -> None:
+    """A shim completion is not evidence that the physical action succeeded."""
+    import logging
+
+    async def noop() -> None:
+        return None
+
+    broker, engine, _called = await _make_engine(action_fn=noop)
+    engine.add_condition(_make_condition())
+
+    with caplog.at_level(logging.CRITICAL, logger="cryodaq.core.interlock"):
+        await broker.publish(Reading.now("T1", 350.0, "K", instrument_id="test"))
+        await asyncio.sleep(0.05)
+
+    assert "выполнено успешно" not in caplog.text
+    await engine.stop()
+
+
 # ---------------------------------------------------------------------------
 # 2. TRIPPED → ARMED after acknowledge()
 # ---------------------------------------------------------------------------

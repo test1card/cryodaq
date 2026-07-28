@@ -138,7 +138,7 @@ class PhaseProvider:
     def get_current_phase(self) -> str | None:
         return None
 
-    def get_phase_elapsed_s(self) -> float:
+    def get_phase_elapsed_s(self) -> float | None:
         return 0.0
 
 
@@ -267,19 +267,24 @@ class AlarmEvaluator:
 
         for ch in channels:
             state = self._state.get(ch)
-            if state is not None and not state.is_usable:
+            if state is None or not state.is_usable:
                 # Unknown input may raise the separate stale alarm, but it is
                 # never affirmative evidence that an active threshold alarm
                 # cleared. Return a deduplicated keep-active event instead.
                 if is_active and (active_channels is None or ch in active_channels):
-                    msg = self._format_message(message_tmpl, channel=ch, value=state.value)
+                    values = {} if state is None else {ch: state.value}
+                    msg = (
+                        f"{message_tmpl} (данные канала {ch} недоступны)"
+                        if state is None
+                        else self._format_message(message_tmpl, channel=ch, value=state.value)
+                    )
                     return AlarmEvent(
                         alarm_id=alarm_id,
                         level=level,
                         message=msg,
                         triggered_at=time.time(),
                         channels=[ch],
-                        values={ch: state.value},
+                        values=values,
                     )
                 continue
             triggered, value = self._check_threshold_channel(ch, check, cfg)

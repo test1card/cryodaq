@@ -660,8 +660,9 @@ class InterlockEngine:
         action_callable = self._actions[condition.action]
         try:
             await action_callable()
-            logger.critical(
-                "Действие '%s' для блокировки '%s' выполнено успешно.",
+            logger.info(
+                "Локальный обработчик действия '%s' для блокировки '%s' завершился; "
+                "авторитетный результат защиты не подтверждён.",
                 condition.action,
                 condition.name,
             )

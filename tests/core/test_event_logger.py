@@ -82,3 +82,24 @@ async def test_writer_error_is_swallowed_and_logged_as_warning(
         rec.levelname == "WARNING" and "Failed to auto-log event" in rec.message
         for rec in caplog.records
     )
+
+
+async def test_writer_failure_does_not_publish_event_logged(mock_em) -> None:
+    writer = MagicMock()
+    writer.append_operator_log = AsyncMock(side_effect=RuntimeError("db error"))
+    event_bus = MagicMock()
+    event_bus.publish = AsyncMock()
+
+    await EventLogger(writer, mock_em, event_bus=event_bus).log_event("test", "msg")
+
+    event_bus.publish.assert_not_awaited()
+
+
+async def test_successful_writer_still_publishes_event_logged(mock_writer, mock_em) -> None:
+    event_bus = MagicMock()
+    event_bus.publish = AsyncMock()
+
+    await EventLogger(mock_writer, mock_em, event_bus=event_bus).log_event("test", "msg")
+
+    event_bus.publish.assert_awaited_once()
+    assert event_bus.publish.await_args.args[0].event_type == "event_logged"

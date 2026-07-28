@@ -153,6 +153,31 @@ def test_active_threshold_alarm_holds_on_unusable_reading() -> None:
     assert "T1_high" in manager.get_active()
 
 
+def test_active_threshold_alarm_holds_when_channel_state_disappears() -> None:
+    """A missing input is unknown, never evidence that an active alarm cleared."""
+    cfg = {
+        "alarm_type": "threshold",
+        "channel": "T1",
+        "check": "above",
+        "threshold": 4.0,
+        "level": "CRITICAL",
+        "message": "T1 high",
+    }
+    manager = AlarmStateManager()
+    active = _make_evaluator([_reading("T1", 5.0)]).evaluate("T1_high", cfg)
+    assert manager.process("T1_high", active, cfg) == "TRIGGERED"
+
+    event = _make_evaluator().evaluate(
+        "T1_high",
+        cfg,
+        is_active=True,
+        active_channels=frozenset({"T1"}),
+    )
+
+    assert manager.process("T1_high", event, cfg) is None
+    assert "T1_high" in manager.get_active()
+
+
 def test_threshold_below() -> None:
     ev = _make_evaluator([_reading("T1", 1.0)])
     cfg = {

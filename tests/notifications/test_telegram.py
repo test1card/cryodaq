@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
 
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.notifications.telegram import TelegramNotifier
 
 # ---------------------------------------------------------------------------
@@ -178,6 +180,66 @@ async def test_cmd_status_formats_message() -> None:
     bot._send.assert_called_once()
     text: str = bot._send.call_args[0][1]
     assert "CryoDAQ" in text or "Статус" in text or "Аптайм" in text
+
+
+def test_cached_readings_render_stale_or_unavailable_truthfully() -> None:
+    bot = _make_bot()
+    bot._latest = {
+        "Т1": Reading(
+            timestamp=datetime.now(UTC) - timedelta(minutes=5),
+            instrument_id="LS218",
+            channel="Т1",
+            value=4.2,
+            unit="K",
+        ),
+        "Т2": Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="LS218",
+            channel="Т2",
+            value=float("nan"),
+            unit="K",
+            status=ChannelStatus.SENSOR_ERROR,
+        ),
+        "vacuum": Reading(
+            timestamp=datetime.now(UTC) - timedelta(minutes=5),
+            instrument_id="VSP",
+            channel="vacuum",
+            value=1e-4,
+            unit="mbar",
+        ),
+        "Keithley/smu/voltage": Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="Keithley",
+            channel="Keithley/smu/voltage",
+            value=float("nan"),
+            unit="V",
+            status=ChannelStatus.SENSOR_ERROR,
+        ),
+    }
+
+    temps = bot._cmd_temps()
+    pressure = bot._cmd_pressure()
+    keithley = bot._cmd_keithley()
+    status = bot._cmd_status()
+
+    assert "4.20" in temps and "устар" in temps
+    assert "nan" not in temps and "недоступ" in temps
+    assert "1.00e-04" in pressure and "устар" in pressure
+    assert "nan" not in keithley and "недоступ" in keithley
+    assert "LS218: активен" not in status
+    assert "устар" in status or "недоступ" in status
+
+
+def test_fresh_cached_temperature_remains_a_normal_readout() -> None:
+    bot = _make_bot()
+    bot._latest = {
+        "Т1": Reading.now("Т1", 4.2, "K", instrument_id="LS218"),
+    }
+
+    rendered = bot._cmd_temps()
+
+    assert "4.20 K" in rendered
+    assert "устар" not in rendered and "недоступ" not in rendered
 
 
 async def test_cmd_log_writes_entry() -> None:

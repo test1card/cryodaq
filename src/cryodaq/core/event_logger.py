@@ -45,6 +45,7 @@ class EventLogger:
             )
         except Exception:
             logger.warning("Failed to auto-log event: %s", message, exc_info=True)
+            return
 
         if self._event_bus is not None:
             from cryodaq.core.event_bus import EngineEvent

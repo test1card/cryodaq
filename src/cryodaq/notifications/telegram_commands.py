@@ -79,6 +79,7 @@ _OPERATOR_LOG_SUCCESS_KEYS = frozenset(
 _OPERATOR_LOG_PENDING_KEYS = _OPERATOR_LOG_SUCCESS_KEYS | {"error_code", "error"}
 _OPERATOR_LOG_ENTRY_KEYS = frozenset({"id", "timestamp", "experiment_id", "author", "source", "message", "tags"})
 _OPERATOR_LOG_RECEIPT_KEYS = frozenset({"schema", "request_id", "entry_id", "experiment_id", "committed"})
+_READING_STALE_AFTER_S = 60.0
 
 
 class _TelegramAuthError(Exception):
@@ -447,16 +448,40 @@ class TelegramCommandBot:
     # Command handlers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _reading_state(reading: Reading) -> tuple[bool, bool, str | None]:
+        """Return available/stale/reason for a cached operator reading."""
+        if not reading.is_usable():
+            return False, True, f"статус {reading.status.value}"
+        try:
+            age_s = (datetime.now(UTC) - reading.timestamp).total_seconds()
+        except (TypeError, ValueError):
+            return False, True, "неизвестное время измерения"
+        if age_s < 0:
+            return False, True, "время измерения в будущем"
+        if age_s > _READING_STALE_AFTER_S:
+            return True, True, f"возраст {age_s:.0f} с"
+        return True, False, None
+
+    @classmethod
+    def _cached_value(cls, channel: str, reading: Reading, value: str) -> str:
+        available, stale, reason = cls._reading_state(reading)
+        if not available:
+            return f"{channel}: недоступно ({reason})"
+        if stale:
+            return f"{channel}: {value} ⚠ устарело ({reason})"
+        return f"{channel}: {value}"
+
     def _cmd_status(self) -> str:
         uptime = datetime.now(UTC) - self._start_time
         h, rem = divmod(int(uptime.total_seconds()), 3600)
         m, s = divmod(rem, 60)
 
-        instruments: dict[str, int] = {}
+        instruments: dict[str, list[Reading]] = {}
         for ch, r in self._latest.items():
             inst = r.instrument_id or ""
             if inst:
-                instruments[inst] = instruments.get(inst, 0) + 1
+                instruments.setdefault(inst, []).append(r)
 
         alarms = list(self._alarm_engine.get_active().keys())
 
@@ -469,7 +494,13 @@ class TelegramCommandBot:
         ]
         if instruments:
             for inst_id in sorted(instruments):
-                lines.append(f"  {inst_id}: активен")
+                states = [self._reading_state(reading) for reading in instruments[inst_id]]
+                if any(available and not stale for available, stale, _ in states):
+                    lines.append(f"  {inst_id}: активен")
+                elif any(available for available, _, _ in states):
+                    lines.append(f"  {inst_id}: устаревшие данные")
+                else:
+                    lines.append(f"  {inst_id}: данные недоступны")
         else:
             lines.append("  Нет данных")
 
@@ -492,7 +523,7 @@ class TelegramCommandBot:
         lines = ["<b>Температуры</b>", "<pre>"]
         for ch in sorted(temps):
             r = temps[ch]
-            lines.append(f"{ch:<22s} {r.value:>8.2f} K")
+            lines.append(self._cached_value(f"{ch:<22s}", r, f"{r.value:>8.2f} K"))
         lines.append("</pre>")
         return "\n".join(lines)
 
@@ -505,7 +536,7 @@ class TelegramCommandBot:
         lines = ["<b>Давление</b>", ""]
         for ch in sorted(pressure):
             r = pressure[ch]
-            lines.append(f"{ch}: <b>{r.value:.2e}</b> мбар")
+            lines.append(self._cached_value(ch, r, f"<b>{r.value:.2e}</b> мбар"))
         return "\n".join(lines)
 
     def _cmd_keithley(self) -> str:
@@ -518,7 +549,7 @@ class TelegramCommandBot:
         for ch in sorted(keithley):
             r = keithley[ch]
             short = ch.split("/", 1)[1] if "/" in ch else ch
-            lines.append(f"{short:<20s} {r.value:>12.6g} {r.unit}")
+            lines.append(self._cached_value(f"{short:<20s}", r, f"{r.value:>12.6g} {r.unit}"))
         lines.append("</pre>")
         return "\n".join(lines)
 

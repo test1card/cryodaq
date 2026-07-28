@@ -43,8 +43,8 @@ class ExperimentPhaseProvider(PhaseProvider):
         """Текущая фаза активного эксперимента, или None."""
         return self._mgr.get_current_phase()
 
-    def get_phase_elapsed_s(self) -> float:
-        """Время с начала текущей фазы, в секундах. 0 если нет фазы."""
+    def get_phase_elapsed_s(self) -> float | None:
+        """Время с начала текущей фазы, либо None when its start is unknown."""
         active = self._mgr.get_active_experiment()
         if active is None:
             return 0.0
@@ -56,10 +56,10 @@ class ExperimentPhaseProvider(PhaseProvider):
         started_at_raw = last.get("started_at")
         if not started_at_raw:
             logger.warning(
-                "Фаза без started_at (%r) — phase-elapsed = 0.0, elapsed-time алармы могут быть подавлены",
+                "Фаза без started_at (%r) — phase elapsed is unknown",
                 started_at_raw,
             )
-            return 0.0
+            return None
         # started_at хранится как ISO string
         from datetime import datetime
 
@@ -71,10 +71,10 @@ class ExperimentPhaseProvider(PhaseProvider):
                 return time.time() - dt.timestamp()
         except (ValueError, TypeError):
             logger.warning(
-                "Не удалось распарсить started_at=%r — phase-elapsed = 0.0, elapsed-time алармы могут быть подавлены",
+                "Не удалось распарсить started_at=%r — phase elapsed is unknown",
                 started_at_raw,
             )
-            return 0.0
+            return None
         return 0.0
 
 

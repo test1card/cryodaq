@@ -242,6 +242,14 @@ def test_phase_provider_elapsed_zero_no_phase() -> None:
     assert provider.get_phase_elapsed_s() == 0.0
 
 
+@pytest.mark.parametrize("started_at", [None, "not-an-iso-timestamp"])
+def test_phase_provider_active_phase_with_unknown_start_has_no_numeric_elapsed(started_at: str | None) -> None:
+    mgr = _make_mgr("cooldown")
+    mgr.get_phase_history.return_value[-1]["started_at"] = started_at
+
+    assert ExperimentPhaseProvider(mgr).get_phase_elapsed_s() is None
+
+
 # ---------------------------------------------------------------------------
 # ExperimentSetpointProvider
 # ---------------------------------------------------------------------------
