@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import hmac
 import json
 import os
 import re
 import stat
+import subprocess
 import sys
+import time
+import urllib.parse
+import urllib.request
 from collections import Counter
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported_candidate
+from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported_candidate, validate_candidate_manifest
 
 _SHA256 = "sha256:"
 FAILURE_RECEIPT_PREFIX = "CRYODAQ_PYTEST_FAILURE_RECEIPT "
@@ -32,6 +39,29 @@ _LEGACY_PYTEST_FAILURE_PREFIX = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+
 _COMMAND_ANNOUNCEMENT_RE = re.compile(
     r"^candidate-suite=(?P<suite>[a-z]+) command=(?P<index>\d+)/(?P<total>\d+)\r?$",
     re.MULTILINE,
+)
+_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+_OIDC_JWKS_URI = f"{_OIDC_ISSUER}/.well-known/jwks"
+_OIDC_AUDIENCE_PREFIX = "urn:cryodaq:execution-receipt:"
+_PROTECTED_RUNNER_BOOTSTRAP = (
+    "import runpy,sys;"
+    "sys.stdout.reconfigure(encoding='utf-8');"
+    "sys.stderr.reconfigure(encoding='utf-8');"
+    "sys.path.insert(0,sys.argv.pop(1));"
+    "runpy.run_module('tools.ci_candidate_runner',run_name='__main__',alter_sys=True)"
+)
+_PROTECTED_PRODUCER_FILES = (
+    ".github/workflows/protected-ci-evidence-gate.yml",
+    "environment.yml",
+    "requirements-lock.txt",
+    "tools/__init__.py",
+    "tools/candidate_evidence.py",
+    "tools/check_python_compile.py",
+    "tools/ci_candidate_evidence.py",
+    "tools/ci_candidate_runner.py",
+    "tools/ci_execution_roots.py",
+    "tools/ci_guard_execution.py",
+    "tools/governance_contract.py",
 )
 
 
@@ -214,6 +244,48 @@ def _manifest_payload(receipt: CandidateExecutionReceipt) -> dict[str, Any]:
     }
 
 
+def _git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise CiCandidateEvidenceError(f"protected producer Git lookup failed: {completed.stderr.strip()}")
+    return completed.stdout.strip()
+
+
+def _protected_producer_manifest(producer_root: Path, revision: str) -> dict[str, Any]:
+    root = producer_root.resolve(strict=True)
+    commit = _git(root, "rev-parse", "--verify", f"{revision}^{{commit}}")
+    tree = _git(root, "rev-parse", "--verify", f"{commit}^{{tree}}")
+    files: list[dict[str, str]] = []
+    for path in _PROTECTED_PRODUCER_FILES:
+        stage = _git(root, "ls-tree", commit, "--", path)
+        try:
+            header, recorded_path = stage.split("\t", 1)
+            mode, kind, blob = header.split(" ", 2)
+        except ValueError as exc:
+            raise CiCandidateEvidenceError(f"protected producer commit omits required input: {path}") from exc
+        if recorded_path != path or kind != "blob" or mode not in {"100644", "100755"}:
+            raise CiCandidateEvidenceError(f"protected producer input has an unsupported Git record: {path}")
+        target = root.joinpath(*path.split("/"))
+        try:
+            raw = target.read_bytes()
+            metadata = target.stat()
+        except OSError as exc:
+            raise CiCandidateEvidenceError(f"protected producer checkout omits required input: {path}") from exc
+        actual_mode = mode if os.name == "nt" else ("100755" if metadata.st_mode & stat.S_IXUSR else "100644")
+        if actual_mode != mode or _git_blob_id(raw) != blob:
+            raise CiCandidateEvidenceError(f"protected producer checkout differs from its immutable commit: {path}")
+        files.append({"blob": blob, "mode": mode, "path": path, "sha256": _digest(raw)})
+    return {"commit": commit, "files": files, "tree": tree}
+
+
 def write_execution_bundle(
     receipt: CandidateExecutionReceipt,
     *,
@@ -223,6 +295,7 @@ def write_execution_bundle(
     suite: str,
     github: Mapping[str, str],
     artifact_name: str,
+    producer: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if tuple(workflow_path.parts[-3:]) != (".github", "workflows", "main.yml"):
         raise CiCandidateEvidenceError("workflow path is not the canonical candidate workflow")
@@ -235,7 +308,7 @@ def write_execution_bundle(
     candidate_raw = _canonical(candidate)
     workflow_binding = _exported_file_binding(receipt, ".github/workflows/main.yml")
     lock_binding = _exported_file_binding(receipt, "requirements-lock.txt")
-    execution = {
+    execution: dict[str, Any] = {
         "artifact_name": artifact_name,
         "candidate_manifest_sha256": receipt.manifest.sha256,
         "command": list(receipt.command),
@@ -250,6 +323,9 @@ def write_execution_bundle(
         "tree": receipt.tree,
         "workflow": workflow_binding,
     }
+    if producer is not None:
+        execution["producer"] = dict(producer)
+        execution["schema_version"] = 2
     files = {
         "candidate-manifest.json": candidate_raw,
         "execution-receipt.json": _canonical(execution),
@@ -371,6 +447,41 @@ def _github_environment() -> dict[str, str]:
     return values
 
 
+def _protected_github_environment(*, candidate_sha: str) -> dict[str, str]:
+    keys = (
+        "GITHUB_JOB",
+        "GITHUB_JOB_CHECK_RUN_ID",
+        "GITHUB_REPOSITORY",
+        "GITHUB_RUN_ATTEMPT",
+        "GITHUB_RUN_ID",
+        "GITHUB_WORKFLOW",
+        "GITHUB_WORKFLOW_REF",
+        "GITHUB_WORKFLOW_SHA",
+        "RUNNER_OS",
+        "TARGET_RUN_ATTEMPT",
+        "TARGET_RUN_ID",
+    )
+    values = {key.lower(): os.environ.get(key, "") for key in keys}
+    values["github_sha"] = candidate_sha
+    if any(not value for value in values.values()):
+        raise CiCandidateEvidenceError("required protected GitHub execution identity is absent")
+    try:
+        if any(
+            int(values[field]) < 1
+            for field in (
+                "github_job_check_run_id",
+                "github_run_attempt",
+                "github_run_id",
+                "target_run_attempt",
+                "target_run_id",
+            )
+        ):
+            raise ValueError
+    except ValueError as exc:
+        raise CiCandidateEvidenceError("protected GitHub numeric execution identity is invalid") from exc
+    return values
+
+
 def _run(args: argparse.Namespace) -> int:
     repo = args.repository.resolve(strict=True)
     github = _github_environment()
@@ -402,6 +513,55 @@ def _run(args: argparse.Namespace) -> int:
     return receipt.returncode
 
 
+def _protected_run(args: argparse.Namespace) -> int:
+    repository = args.repository.resolve(strict=True)
+    producer_root = args.producer_root.resolve(strict=True)
+    commit = _git(repository, "rev-parse", "--verify", f"{args.revision}^{{commit}}")
+    producer_before = _protected_producer_manifest(producer_root, args.producer_revision)
+    destination = args.destination.resolve(strict=False)
+    command = (
+        sys.executable,
+        "-I",
+        "-c",
+        _PROTECTED_RUNNER_BOOTSTRAP,
+        str(producer_root),
+        "--suite",
+        args.suite,
+        "--root",
+        str(destination),
+        "--protected-producer-root",
+        str(producer_root),
+    )
+    prior_suite = os.environ.get(FAILURE_RECEIPT_SUITE_ENV)
+    os.environ[FAILURE_RECEIPT_SUITE_ENV] = args.suite
+    try:
+        receipt = execute_exported_candidate(
+            repository,
+            commit,
+            command=command,
+            destination=destination,
+            timeout=args.timeout,
+        )
+    finally:
+        if prior_suite is None:
+            os.environ.pop(FAILURE_RECEIPT_SUITE_ENV, None)
+        else:
+            os.environ[FAILURE_RECEIPT_SUITE_ENV] = prior_suite
+    if _protected_producer_manifest(producer_root, args.producer_revision) != producer_before:
+        raise CiCandidateEvidenceError("protected producer changed during candidate execution")
+    write_execution_bundle(
+        receipt,
+        output=args.output,
+        workflow_path=repository / ".github" / "workflows" / "main.yml",
+        dependency_lock=repository / "requirements-lock.txt",
+        suite=args.suite,
+        github=_protected_github_environment(candidate_sha=commit),
+        artifact_name=args.artifact_name,
+        producer=producer_before,
+    )
+    return receipt.returncode
+
+
 def _attest(args: argparse.Namespace) -> int:
     write_artifact_attestation(
         bundle=args.bundle,
@@ -412,6 +572,246 @@ def _attest(args: argparse.Namespace) -> int:
         github=_github_environment(),
     )
     return 0
+
+
+def _execution_receipt_audience(execution_raw: bytes) -> str:
+    return f"{_OIDC_AUDIENCE_PREFIX}{_digest(execution_raw)}"
+
+
+def _request_oidc_token(audience: str) -> str:
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    if not request_url or not request_token:
+        raise CiCandidateEvidenceError("GitHub OIDC request authority is absent")
+    separator = "&" if "?" in request_url else "?"
+    url = f"{request_url}{separator}{urllib.parse.urlencode({'audience': audience})}"
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "Authorization": f"Bearer {request_token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise CiCandidateEvidenceError("GitHub OIDC token request failed") from exc
+    token = payload.get("value") if isinstance(payload, Mapping) else None
+    if not isinstance(token, str) or token.count(".") != 2:
+        raise CiCandidateEvidenceError("GitHub OIDC response omitted an exact JWT")
+    return token
+
+
+def write_job_identity_attestation(
+    *,
+    bundle: Path,
+    output: Path,
+    oidc_token: str | None = None,
+) -> dict[str, Any]:
+    execution_raw = (bundle / "execution-receipt.json").read_bytes()
+    audience = _execution_receipt_audience(execution_raw)
+    attestation = {
+        "audience": audience,
+        "execution_receipt_sha256": _digest(execution_raw),
+        "oidc_token": oidc_token or _request_oidc_token(audience),
+        "schema_version": 1,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(_canonical(attestation))
+    return attestation
+
+
+def _base64url(value: str, field: str) -> bytes:
+    if not value or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise CiCandidateEvidenceError(f"GitHub OIDC {field} is not canonical base64url")
+    try:
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (ValueError, UnicodeError) as exc:
+        raise CiCandidateEvidenceError(f"GitHub OIDC {field} is invalid") from exc
+
+
+def _rsa_pkcs1_sha256_valid(signing_input: bytes, signature: bytes, jwk: Mapping[str, Any]) -> bool:
+    try:
+        modulus = int.from_bytes(_base64url(str(jwk["n"]), "JWK modulus"), "big")
+        exponent = int.from_bytes(_base64url(str(jwk["e"]), "JWK exponent"), "big")
+    except KeyError as exc:
+        raise CiCandidateEvidenceError("GitHub OIDC signing key is incomplete") from exc
+    width = (modulus.bit_length() + 7) // 8
+    if width < 64 or exponent < 3 or exponent % 2 == 0 or len(signature) != width:
+        return False
+    encoded = pow(int.from_bytes(signature, "big"), exponent, modulus).to_bytes(width, "big")
+    digest_info = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(signing_input).digest()
+    expected = b"\x00\x01" + b"\xff" * (width - len(digest_info) - 3) + b"\x00" + digest_info
+    return hmac.compare_digest(encoded, expected)
+
+
+def _verified_oidc_claims(
+    token: str,
+    *,
+    audience: str,
+    jwks: Mapping[str, Any],
+    now: int | None = None,
+) -> dict[str, Any]:
+    try:
+        encoded_header, encoded_payload, encoded_signature = token.split(".")
+        header = json.loads(_base64url(encoded_header, "header"))
+        claims = json.loads(_base64url(encoded_payload, "payload"))
+    except (ValueError, json.JSONDecodeError, UnicodeError) as exc:
+        raise CiCandidateEvidenceError("GitHub OIDC token is not a valid JWT") from exc
+    if (
+        not isinstance(header, Mapping)
+        or header.get("alg") != "RS256"
+        or not isinstance(header.get("kid"), str)
+        or not header["kid"]
+        or not isinstance(claims, dict)
+    ):
+        raise CiCandidateEvidenceError("GitHub OIDC token header or claims are invalid")
+    keys = jwks.get("keys") if isinstance(jwks, Mapping) else None
+    matches = [
+        key
+        for key in keys or ()
+        if isinstance(key, Mapping)
+        and key.get("kid") == header["kid"]
+        and key.get("kty") == "RSA"
+        and key.get("use", "sig") == "sig"
+        and key.get("alg", "RS256") == "RS256"
+    ]
+    if len(matches) != 1 or not _rsa_pkcs1_sha256_valid(
+        f"{encoded_header}.{encoded_payload}".encode("ascii"),
+        _base64url(encoded_signature, "signature"),
+        matches[0],
+    ):
+        raise CiCandidateEvidenceError("GitHub OIDC signature is invalid or untrusted")
+    current = int(time.time()) if now is None else now
+    temporal = {field: claims.get(field) for field in ("exp", "iat", "nbf")}
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in temporal.values()):
+        raise CiCandidateEvidenceError("GitHub OIDC temporal claims are invalid")
+    if (
+        claims.get("iss") != _OIDC_ISSUER
+        or claims.get("aud") != audience
+        or not isinstance(claims.get("jti"), str)
+        or not claims["jti"]
+        or temporal["nbf"] > current + 60
+        or temporal["iat"] > current + 60
+        or temporal["exp"] <= temporal["iat"]
+        or temporal["nbf"] > temporal["iat"] + 60
+        or temporal["exp"] - temporal["iat"] > 900
+    ):
+        raise CiCandidateEvidenceError("GitHub OIDC issuer, audience, or validity window is invalid")
+    return claims
+
+
+def _github_timestamp(value: Any, field: str) -> int:
+    if not isinstance(value, str) or not value:
+        raise CiCandidateEvidenceError(f"GitHub REST job {field} is absent")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CiCandidateEvidenceError(f"GitHub REST job {field} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise CiCandidateEvidenceError(f"GitHub REST job {field} lacks a timezone")
+    return int(parsed.timestamp())
+
+
+def validate_protected_job_identity(
+    execution: Mapping[str, Any],
+    attestation: Mapping[str, Any],
+    *,
+    execution_raw: bytes,
+    jwks: Mapping[str, Any],
+    job: Mapping[str, Any],
+    expected_repository: str,
+    expected_target_run_id: str,
+    expected_target_run_attempt: str,
+    expected_target_sha: str,
+    now: int | None = None,
+) -> dict[str, Any]:
+    if (
+        not isinstance(attestation, Mapping)
+        or set(attestation) != {"audience", "execution_receipt_sha256", "oidc_token", "schema_version"}
+        or attestation.get("schema_version") != 1
+        or attestation.get("execution_receipt_sha256") != _digest(execution_raw)
+        or attestation.get("audience") != _execution_receipt_audience(execution_raw)
+        or not isinstance(attestation.get("oidc_token"), str)
+    ):
+        raise CiCandidateEvidenceError("signed job identity is absent or not bound to the execution receipt")
+    github = execution.get("github")
+    producer = execution.get("producer")
+    expected_github_fields = {
+        "github_job",
+        "github_job_check_run_id",
+        "github_repository",
+        "github_run_attempt",
+        "github_run_id",
+        "github_sha",
+        "github_workflow",
+        "github_workflow_ref",
+        "github_workflow_sha",
+        "runner_os",
+        "target_run_attempt",
+        "target_run_id",
+    }
+    if (
+        execution.get("schema_version") != 2
+        or not isinstance(github, Mapping)
+        or set(github) != expected_github_fields
+        or not isinstance(producer, Mapping)
+        or producer.get("commit") != github.get("github_workflow_sha")
+        or github.get("github_repository") != expected_repository
+        or github.get("github_sha") != expected_target_sha
+        or github.get("target_run_id") != expected_target_run_id
+        or github.get("target_run_attempt") != expected_target_run_attempt
+    ):
+        raise CiCandidateEvidenceError("protected receipt is bound to a different target or producer")
+    claims = _verified_oidc_claims(
+        attestation["oidc_token"],
+        audience=attestation["audience"],
+        jwks=jwks,
+        now=now,
+    )
+    claim_expectations = {
+        "check_run_id": github["github_job_check_run_id"],
+        "event_name": "workflow_run",
+        "repository": expected_repository,
+        "run_attempt": github["github_run_attempt"],
+        "run_id": github["github_run_id"],
+        "runner_environment": "github-hosted",
+        "sha": producer["commit"],
+        "workflow": github["github_workflow"],
+        "workflow_ref": github["github_workflow_ref"],
+        "workflow_sha": producer["commit"],
+    }
+    if any(str(claims.get(field)) != str(value) for field, value in claim_expectations.items()):
+        raise CiCandidateEvidenceError("GitHub-signed job identity is bound to a different job, run, SHA, or workflow")
+    try:
+        job_id = int(github["github_job_check_run_id"])
+        protected_run_id = int(github["github_run_id"])
+    except (TypeError, ValueError) as exc:
+        raise CiCandidateEvidenceError("protected receipt numeric job identity is invalid") from exc
+    job_started = _github_timestamp(job.get("started_at"), "started_at")
+    job_completed = _github_timestamp(job.get("completed_at"), "completed_at")
+    if (
+        job.get("id") != job_id
+        or job.get("run_id") != protected_run_id
+        or job.get("head_sha") != producer["commit"]
+        or job.get("status") != "completed"
+        or job.get("conclusion") != "success"
+        or job_completed < job_started
+        or claims["iat"] < job_started - 60
+        or claims["iat"] > job_completed + 60
+    ):
+        raise CiCandidateEvidenceError("GitHub REST job record does not match the signed execution identity")
+    return claims
+
+
+def _fetch_oidc_jwks() -> dict[str, Any]:
+    request = urllib.request.Request(_OIDC_JWKS_URI, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise CiCandidateEvidenceError("GitHub OIDC signing keys are unavailable") from exc
+    if not isinstance(payload, dict):
+        raise CiCandidateEvidenceError("GitHub OIDC signing keys are malformed")
+    return payload
 
 
 def _extract_failure_receipt_payloads(output: str, *, suite: str) -> list[dict[str, Any]]:
@@ -693,6 +1093,165 @@ def _summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def validate_protected_execution_bundle(
+    bundle_path: Path,
+    *,
+    repository: Path,
+    producer_root: Path,
+    expected_suite: str,
+    expected_repository: str,
+    expected_target_run_id: str,
+    expected_target_run_attempt: str,
+    expected_target_sha: str,
+    expected_workflow_sha: str,
+    jobs: list[Mapping[str, Any]],
+    jwks: Mapping[str, Any],
+    now: int | None = None,
+) -> dict[str, Any]:
+    bundle_path = bundle_path.resolve(strict=True)
+    raw = {
+        name: (bundle_path / name).read_bytes()
+        for name in (
+            "bundle-manifest.json",
+            "candidate-manifest.json",
+            "execution-receipt.json",
+            "job-identity-attestation.json",
+            "stderr.bin",
+            "stdout.bin",
+        )
+    }
+    try:
+        bundle = json.loads(raw["bundle-manifest.json"])
+        candidate = json.loads(raw["candidate-manifest.json"])
+        execution = json.loads(raw["execution-receipt.json"])
+        attestation = json.loads(raw["job-identity-attestation.json"])
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise CiCandidateEvidenceError("protected execution bundle contains invalid JSON") from exc
+    for name, payload in (
+        ("bundle-manifest.json", bundle),
+        ("candidate-manifest.json", candidate),
+        ("execution-receipt.json", execution),
+        ("job-identity-attestation.json", attestation),
+    ):
+        if raw[name] != _canonical(payload):
+            raise CiCandidateEvidenceError(f"protected execution bundle is not canonical: {name}")
+    expected_files = {
+        name: _digest(raw[name])
+        for name in ("candidate-manifest.json", "execution-receipt.json", "stderr.bin", "stdout.bin")
+    }
+    if (
+        not isinstance(bundle, Mapping)
+        or bundle.get("schema_version") != 1
+        or bundle.get("files") != expected_files
+        or execution.get("returncode") != 0
+        or execution.get("suite") != expected_suite
+        or execution.get("commit") != expected_target_sha
+        or execution.get("tree") != candidate.get("tree")
+        or execution.get("candidate_manifest_sha256") != candidate.get("manifest_sha256")
+        or execution.get("stdout_sha256") != _digest(raw["stdout.bin"])
+        or execution.get("stderr_sha256") != _digest(raw["stderr.bin"])
+    ):
+        raise CiCandidateEvidenceError("protected execution receipt is incomplete, failed, or target-misbound")
+    validate_candidate_manifest(repository, candidate)
+    expected_producer = _protected_producer_manifest(producer_root, expected_workflow_sha)
+    if execution.get("producer") != expected_producer:
+        raise CiCandidateEvidenceError("protected execution receipt does not bind the immutable producer")
+    command = execution.get("command")
+    producer_text = str(producer_root.resolve(strict=True))
+    if (
+        not isinstance(command, list)
+        or len(command) != 11
+        or command[1:4] != ["-I", "-c", _PROTECTED_RUNNER_BOOTSTRAP]
+        or command[4:]
+        != [
+            producer_text,
+            "--suite",
+            expected_suite,
+            "--root",
+            command[8],
+            "--protected-producer-root",
+            producer_text,
+        ]
+        or not isinstance(command[0], str)
+        or not command[0]
+        or not isinstance(command[8], str)
+        or not command[8]
+    ):
+        raise CiCandidateEvidenceError("protected execution command did not invoke the pinned producer")
+    output = (raw["stdout.bin"] + b"\n" + raw["stderr.bin"]).decode("utf-8", errors="replace")
+    payloads = _extract_failure_receipt_payloads(output, suite=expected_suite)
+    expected_count = _expected_receipt_count(output, suite=expected_suite)
+    announced = _announced_receipt_indices(output, suite=expected_suite)
+    indices = [payload["invocation_index"] for payload in payloads]
+    if (
+        expected_count is None
+        or announced != set(range(1, expected_count + 1))
+        or indices != list(range(1, expected_count + 1))
+        or any(payload["population"]["collected"] < 1 or payload["population"]["executed"] < 1 for payload in payloads)
+    ):
+        raise CiCandidateEvidenceError("protected producer did not prove positive pytest execution coverage")
+    github = execution.get("github")
+    check_run_id = github.get("github_job_check_run_id") if isinstance(github, Mapping) else None
+    matching_jobs = [job for job in jobs if str(job.get("id")) == str(check_run_id)]
+    if len(matching_jobs) != 1:
+        raise CiCandidateEvidenceError("signed protected job is absent from the GitHub REST run")
+    claims = validate_protected_job_identity(
+        execution,
+        attestation,
+        execution_raw=raw["execution-receipt.json"],
+        jwks=jwks,
+        job=matching_jobs[0],
+        expected_repository=expected_repository,
+        expected_target_run_id=expected_target_run_id,
+        expected_target_run_attempt=expected_target_run_attempt,
+        expected_target_sha=expected_target_sha,
+        now=now,
+    )
+    return {
+        "check_run_id": claims["check_run_id"],
+        "collected": sum(payload["population"]["collected"] for payload in payloads),
+        "executed": sum(payload["population"]["executed"] for payload in payloads),
+        "suite": expected_suite,
+    }
+
+
+def _attest_job(args: argparse.Namespace) -> int:
+    write_job_identity_attestation(
+        bundle=args.bundle,
+        output=args.output,
+    )
+    return 0
+
+
+def _verify_protected(args: argparse.Namespace) -> int:
+    try:
+        jobs_payload = json.loads(args.jobs.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CiCandidateEvidenceError("GitHub REST jobs evidence is unavailable") from exc
+    jobs = jobs_payload.get("jobs") if isinstance(jobs_payload, Mapping) else None
+    if not isinstance(jobs, list) or any(not isinstance(job, Mapping) for job in jobs):
+        raise CiCandidateEvidenceError("GitHub REST jobs evidence is malformed")
+    result = validate_protected_execution_bundle(
+        args.bundle,
+        repository=args.repository,
+        producer_root=args.producer_root,
+        expected_suite=args.suite,
+        expected_repository=args.github_repository,
+        expected_target_run_id=args.target_run_id,
+        expected_target_run_attempt=args.target_run_attempt,
+        expected_target_sha=args.target_sha,
+        expected_workflow_sha=args.workflow_sha,
+        jobs=jobs,
+        jwks=_fetch_oidc_jwks(),
+    )
+    print(
+        "PROTECTED EXECUTION ACCEPTED "
+        f"suite={result['suite']} check_run_id={result['check_run_id']} "
+        f"collected={result['collected']} executed={result['executed']}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -705,6 +1264,17 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--artifact-name", required=True)
     run.add_argument("--timeout", type=float, default=2_400)
     run.set_defaults(handler=_run)
+    protected_run = subparsers.add_parser("protected-run")
+    protected_run.add_argument("--repository", type=Path, required=True)
+    protected_run.add_argument("--revision", required=True)
+    protected_run.add_argument("--suite", choices=("agents", "core", "gui", "remaining"), required=True)
+    protected_run.add_argument("--destination", type=Path, required=True)
+    protected_run.add_argument("--output", type=Path, required=True)
+    protected_run.add_argument("--artifact-name", required=True)
+    protected_run.add_argument("--producer-root", type=Path, required=True)
+    protected_run.add_argument("--producer-revision", required=True)
+    protected_run.add_argument("--timeout", type=float, default=2_400)
+    protected_run.set_defaults(handler=_protected_run)
     attest = subparsers.add_parser("attest")
     attest.add_argument("--bundle", type=Path, required=True)
     attest.add_argument("--output", type=Path, required=True)
@@ -712,6 +1282,22 @@ def main(argv: list[str] | None = None) -> int:
     attest.add_argument("--artifact-id", required=True)
     attest.add_argument("--artifact-digest", required=True)
     attest.set_defaults(handler=_attest)
+    attest_job = subparsers.add_parser("attest-job")
+    attest_job.add_argument("--bundle", type=Path, required=True)
+    attest_job.add_argument("--output", type=Path, required=True)
+    attest_job.set_defaults(handler=_attest_job)
+    verify_protected = subparsers.add_parser("verify-protected")
+    verify_protected.add_argument("--bundle", type=Path, required=True)
+    verify_protected.add_argument("--repository", type=Path, required=True)
+    verify_protected.add_argument("--producer-root", type=Path, required=True)
+    verify_protected.add_argument("--suite", choices=("agents", "core", "gui", "remaining"), required=True)
+    verify_protected.add_argument("--github-repository", required=True)
+    verify_protected.add_argument("--jobs", type=Path, required=True)
+    verify_protected.add_argument("--target-run-id", required=True)
+    verify_protected.add_argument("--target-run-attempt", required=True)
+    verify_protected.add_argument("--target-sha", required=True)
+    verify_protected.add_argument("--workflow-sha", required=True)
+    verify_protected.set_defaults(handler=_verify_protected)
     summarize = subparsers.add_parser("summarize")
     summarize.add_argument("--bundle", type=Path, required=True)
     summarize.add_argument("--max-nodes", type=int, default=20)

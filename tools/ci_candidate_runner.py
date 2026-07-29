@@ -46,6 +46,35 @@ _PYTEST = (
     "no:cacheprovider",
 )
 _TAIL = ("--tb=short", "-v", "--timeout=120", "--timeout-method=thread")
+_PROTECTED_PYTEST_BOOTSTRAP = """
+import importlib
+import os
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+import pytest
+
+producer_root = Path(sys.argv[1]).resolve(strict=True)
+candidate_root = Path(sys.argv[2]).resolve(strict=True)
+strict = sys.argv[3] == "1"
+pytest_args = sys.argv[4:]
+sys.path.insert(0, str(producer_root))
+population_plugin = importlib.import_module("tools.ci_candidate_evidence")
+guard_plugin = importlib.import_module("tools.ci_guard_execution") if strict else None
+sys.path.pop(0)
+for module_name in tuple(sys.modules):
+    if module_name == "tools" or module_name.startswith("tools."):
+        sys.modules.pop(module_name, None)
+sys.path[:0] = [str(candidate_root), str(candidate_root / "src")]
+os.chdir(candidate_root)
+plugins = [population_plugin]
+if guard_plugin is not None:
+    plugins.insert(0, guard_plugin)
+raise SystemExit(pytest.main(pytest_args, plugins=plugins))
+""".strip()
 _RECEIPT_FIELDS = frozenset({"payload", "sha256"})
 _PAYLOAD_FIELDS = frozenset(
     {
@@ -261,6 +290,48 @@ def _strict_guard_command(
     )
 
 
+def _protected_pytest_command(
+    command: tuple[str, ...],
+    *,
+    root: Path,
+    producer_root: Path,
+    strict: bool,
+) -> tuple[str, ...]:
+    """Load receipt plugins from the pinned producer, never from the candidate."""
+
+    resolved_root = root.resolve(strict=True)
+    resolved_producer = producer_root.resolve(strict=True)
+    try:
+        resolved_producer.relative_to(resolved_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("protected producer must be outside the candidate tree")
+    for relative in ("tools/ci_candidate_evidence.py", "tools/ci_guard_execution.py"):
+        if not (resolved_producer / relative).is_file():
+            raise ValueError(f"protected producer input is missing: {relative}")
+    if command[:4] != (sys.executable, "-B", "-m", "pytest"):
+        raise ValueError("protected producer received an unexpected pytest command")
+    arguments = list(command[4:])
+    for plugin in ("tools.ci_candidate_evidence", "tools.ci_guard_execution"):
+        while plugin in arguments:
+            offset = arguments.index(plugin)
+            if offset == 0 or arguments[offset - 1] != "-p":
+                raise ValueError(f"protected pytest plugin argument is malformed: {plugin}")
+            del arguments[offset - 1 : offset + 1]
+    return (
+        sys.executable,
+        "-B",
+        "-I",
+        "-c",
+        _PROTECTED_PYTEST_BOOTSTRAP,
+        str(resolved_producer),
+        str(resolved_root),
+        "1" if strict else "0",
+        *arguments,
+    )
+
+
 def _validate_strict_guard_receipt(
     output: str,
     *,
@@ -377,6 +448,13 @@ def _command_environment(*, basetemp: Path, suite: str, index: int) -> dict[str,
     for path in (runtime, temp, cache, pycache):
         path.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ)
+    for key in (
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        "ACTIONS_ID_TOKEN_REQUEST_URL",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    ):
+        environment.pop(key, None)
     environment.update(
         {
             "COVERAGE_FILE": str(cache / ".coverage"),
@@ -385,6 +463,7 @@ def _command_environment(*, basetemp: Path, suite: str, index: int) -> dict[str,
             FAILURE_RECEIPT_SUITE_ENV: suite,
             "MPLCONFIGDIR": str(cache / "matplotlib"),
             "NUMBA_CACHE_DIR": str(cache / "numba"),
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "PYTHONPYCACHEPREFIX": str(pycache),
             "TEMP": str(temp),
             "TMP": str(temp),
@@ -405,7 +484,13 @@ def _relay_strict_output(completed: subprocess.CompletedProcess[str]) -> str:
     return stdout + stderr
 
 
-def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
+def run_suite(
+    suite: str,
+    *,
+    root: Path,
+    basetemp: Path | None = None,
+    protected_producer_root: Path | None = None,
+) -> int:
     try:
         manifest = compile_python_tree(root)
     except (OSError, UnicodeError, SyntaxError, ValueError) as exc:
@@ -461,6 +546,28 @@ def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
         all_commands = tuple((command, False) for command in commands)
     else:
         all_commands = ((guard_command, True),) + tuple((command, False) for command in commands)
+    if protected_producer_root is not None:
+        try:
+            all_commands = tuple(
+                (
+                    _protected_pytest_command(
+                        command,
+                        root=root,
+                        producer_root=protected_producer_root,
+                        strict=is_strict,
+                    ),
+                    is_strict,
+                )
+                for command, is_strict in all_commands
+            )
+        except (OSError, ValueError) as exc:
+            _emit_phase_diagnosis(
+                suite=suite,
+                phase="guard-setup",
+                reason=str(exc),
+                remediation="Restore the pinned protected producer checkout before pytest starts.",
+            )
+            return 1
     failures: list[tuple[int, int]] = []
     for index, (command, is_strict) in enumerate(all_commands, start=1):
         print(f"candidate-suite={suite} command={index}/{len(all_commands)}", flush=True)
@@ -525,8 +632,14 @@ def run_suite(suite: str, *, root: Path, basetemp: Path | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=sorted(_SELECTIONS), required=True)
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--protected-producer-root", type=Path)
     args = parser.parse_args(argv)
-    return run_suite(args.suite, root=Path(__file__).resolve().parents[1])
+    return run_suite(
+        args.suite,
+        root=args.root,
+        protected_producer_root=args.protected_producer_root,
+    )
 
 
 if __name__ == "__main__":

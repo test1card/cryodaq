@@ -5,27 +5,22 @@ on:
     workflows: ["CryoDAQ CI"]
     types: [completed]
 
-# workflow_run loads this file from the default branch, not from the candidate.
-# The owner must protect that branch/workflow and require the candidate-bound
-# check created below; those repository settings are not established by YAML.
-permissions:
-  actions: read
-  checks: write
-  contents: read
+# workflow_run loads this file from the protected default branch. GitHub's
+# workflow_sha is therefore the immutable producer/judge object; candidate
+# content supplies only the exact tree under test.
 
 jobs:
-  partition-execution-proof:
-    name: protected CI evidence gate
-    if: ${{ always() }}
+  candidate-check:
+    name: start candidate-bound protected check
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    permissions:
+      checks: write
+      contents: read
+    outputs:
+      id: ${{ steps.candidate-check.outputs.id }}
     env:
       CHECK_NAME: CryoDAQ protected CI evidence gate
-      JUDGE_SHA: 4520d6acf8f09c26fe95ad14e19318138193ffb7
-      TARGET_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-      TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
       TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
-
     steps:
       - name: Start candidate-bound required check
         id: candidate-check
@@ -44,6 +39,146 @@ jobs:
           test "$check_id" -gt 0
           echo "id=$check_id" >>"$GITHUB_OUTPUT"
 
+  protected-execution:
+    name: protected execution (${{ matrix.os }}, ${{ matrix.suite }})
+    needs: candidate-check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash -el {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        suite: [core, gui, agents, remaining]
+    env:
+      ARTIFACT_NAME: cryodaq-protected-candidate-${{ matrix.os }}-${{ matrix.suite }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+      GITHUB_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+      GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      JUDGE_SHA: ${{ github.workflow_sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+      TARGET_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
+      TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+          ref: ${{ env.TARGET_SHA }}
+
+      - name: Check out immutable producer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: judge
+          persist-credentials: false
+          ref: ${{ env.JUDGE_SHA }}
+
+      - name: Verify immutable producer object
+        working-directory: judge
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"
+          for path in \
+            .github/workflows/protected-ci-evidence-gate.yml \
+            environment.yml \
+            requirements-lock.txt \
+            tools/__init__.py \
+            tools/candidate_evidence.py \
+            tools/check_python_compile.py \
+            tools/ci_candidate_evidence.py \
+            tools/ci_candidate_runner.py \
+            tools/ci_execution_roots.py \
+            tools/ci_guard_execution.py \
+            tools/governance_contract.py; do
+            test "$(git hash-object "$path")" = "$(git rev-parse "${JUDGE_SHA:?}:$path")"
+          done
+
+      - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
+        with:
+          activate-environment: cryodaq
+          environment-file: judge/environment.yml
+          channel-priority: strict
+
+      - name: Install Qt offscreen system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+
+      - name: Install immutable producer dependencies
+        working-directory: judge
+        run: |
+          python -m pip install -r requirements-lock.txt
+          python -m pip check
+
+      - name: Run exact candidate with immutable producer
+        id: protected-run
+        continue-on-error: true
+        working-directory: judge
+        run: |
+          python -B -m tools.ci_candidate_evidence protected-run \
+            --repository "${GITHUB_WORKSPACE:?}/candidate" \
+            --revision "${TARGET_SHA:?}" \
+            --suite "${{ matrix.suite }}" \
+            --destination "${RUNNER_TEMP:?}/cryodaq-protected-candidate" \
+            --output "${RUNNER_TEMP:?}/cryodaq-protected-evidence" \
+            --artifact-name "${ARTIFACT_NAME:?}" \
+            --producer-root "${GITHUB_WORKSPACE:?}/judge" \
+            --producer-revision "${JUDGE_SHA:?}"
+
+      - name: Bind receipt digest to GitHub-signed job identity
+        id: job-attestation
+        if: always()
+        working-directory: judge
+        run: |
+          python -B -m tools.ci_candidate_evidence attest-job \
+            --bundle "${RUNNER_TEMP:?}/cryodaq-protected-evidence" \
+            --output "${RUNNER_TEMP:?}/cryodaq-protected-evidence/job-identity-attestation.json"
+
+      - name: Upload protected execution bundle
+        id: protected-upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/cryodaq-protected-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce protected execution and identity publication
+        if: always()
+        run: |
+          test "${{ steps.protected-run.outcome }}" = success
+          test "${{ steps.job-attestation.outcome }}" = success
+          test "${{ steps.protected-upload.outcome }}" = success
+
+  partition-execution-proof:
+    name: protected CI evidence gate
+    needs: [candidate-check, protected-execution]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+    env:
+      CHECK_NAME: CryoDAQ protected CI evidence gate
+      JUDGE_SHA: ${{ github.workflow_sha }}
+      TARGET_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
+      TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
       - name: Check out candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -60,20 +195,29 @@ jobs:
           persist-credentials: false
           ref: ${{ env.JUDGE_SHA }}
 
-      - name: Verify immutable judge bytes
+      - name: Verify immutable judge object
         working-directory: judge
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"
-          printf '%s\n' \
-            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  tools/__init__.py' \
-            '354eb301c3079175a01b1659160de761df12db7763ae8b811293ffc58d41434a  tools/candidate_evidence.py' \
-            '06990429a5005edaec7a0e7c3a8bc64ad052962d41b6e85484b0af176a5f4503  tools/ci_candidate_evidence.py' \
-            '8c48bcdbd6a1788bf8c3595a6f4caccae9b90aa4fa46b9e45477afe8e4fa075b  tools/ci_partition_execution_proof.py' \
-            '78189f607669a7e2a0a6fc20f6ad9bbd91985ec9c5d3949241beb7fae2d42a51  tools/montana_candidate_gate.py' \
-            | sha256sum --check --strict -
+          for path in \
+            .github/workflows/protected-ci-evidence-gate.yml \
+            environment.yml \
+            requirements-lock.txt \
+            tools/__init__.py \
+            tools/candidate_evidence.py \
+            tools/check_python_compile.py \
+            tools/ci_candidate_evidence.py \
+            tools/ci_candidate_runner.py \
+            tools/ci_execution_roots.py \
+            tools/ci_guard_execution.py \
+            tools/governance_contract.py \
+            tools/ci_partition_execution_proof.py \
+            tools/montana_candidate_gate.py; do
+            test "$(git hash-object "$path")" = "$(git rev-parse "${JUDGE_SHA:?}:$path")"
+          done
 
-      - name: Prove every declared partition executed
+      - name: Prove every declared candidate-workflow partition executed
         id: partition-proof
         working-directory: judge
         env:
@@ -88,7 +232,7 @@ jobs:
             --sha "${TARGET_SHA:?}" \
             --output "${RUNNER_TEMP:?}/cryodaq-partition-proof/partition-execution-proof.json"
 
-      - name: Download exact candidate bundles
+      - name: Download exact candidate-workflow bundles
         id: candidate-download
         env:
           GH_TOKEN: ${{ github.token }}
@@ -115,9 +259,47 @@ jobs:
             done
           done
 
+      - name: Download protected execution bundles and REST jobs
+        id: protected-download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${GITHUB_RUN_ID:?}" \
+            --repo "${GITHUB_REPOSITORY:?}" \
+            --pattern 'cryodaq-protected-candidate-*' \
+            --dir "${RUNNER_TEMP:?}/cryodaq-protected-artifacts"
+          gh api \
+            "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/jobs?per_page=100" \
+            >"${RUNNER_TEMP:?}/cryodaq-protected-jobs.json"
+
+      - name: Verify GitHub-signed protected executions
+        id: protected-proof
+        working-directory: judge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for os_name in ubuntu-latest windows-latest; do
+            for suite in agents core gui remaining; do
+              bundle="${RUNNER_TEMP:?}/cryodaq-protected-artifacts/cryodaq-protected-candidate-${os_name}-${suite}-${TARGET_RUN_ID:?}-${TARGET_RUN_ATTEMPT:?}"
+              python -B -m tools.ci_candidate_evidence verify-protected \
+                --repository "${GITHUB_WORKSPACE:?}/candidate" \
+                --producer-root "${GITHUB_WORKSPACE:?}/judge" \
+                --bundle "$bundle" \
+                --suite "$suite" \
+                --github-repository "${GITHUB_REPOSITORY:?}" \
+                --jobs "${RUNNER_TEMP:?}/cryodaq-protected-jobs.json" \
+                --target-run-id "${TARGET_RUN_ID:?}" \
+                --target-run-attempt "${TARGET_RUN_ATTEMPT:?}" \
+                --target-sha "${TARGET_SHA:?}" \
+                --workflow-sha "${JUDGE_SHA:?}"
+            done
+          done
+
       - name: Upload accepted partition receipt
         id: proof-upload
-        if: ${{ steps.partition-proof.outcome == 'success' && steps.montana-proof.outcome == 'success' }}
+        if: ${{ steps.partition-proof.outcome == 'success' && steps.montana-proof.outcome == 'success' && steps.protected-proof.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cryodaq-partition-proof-${{ env.TARGET_RUN_ID }}-${{ env.TARGET_RUN_ATTEMPT }}
@@ -126,24 +308,28 @@ jobs:
           retention-days: 30
 
       - name: Complete candidate-bound required check
-        if: ${{ always() && steps.candidate-check.outputs.id != '' }}
+        if: ${{ always() && needs.candidate-check.outputs.id != '' }}
         env:
+          EXECUTION_OUTCOME: ${{ needs.protected-execution.result }}
           GH_TOKEN: ${{ github.token }}
           MONTANA_OUTCOME: ${{ steps.montana-proof.outcome }}
           PARTITION_OUTCOME: ${{ steps.partition-proof.outcome }}
+          PROTECTED_OUTCOME: ${{ steps.protected-proof.outcome }}
           UPLOAD_OUTCOME: ${{ steps.proof-upload.outcome }}
         run: |
           set -euo pipefail
           conclusion=failure
           title="Protected CI evidence refused"
-          if test "$PARTITION_OUTCOME" = success &&
+          if test "$EXECUTION_OUTCOME" = success &&
+             test "$PARTITION_OUTCOME" = success &&
              test "$MONTANA_OUTCOME" = success &&
+             test "$PROTECTED_OUTCOME" = success &&
              test "$UPLOAD_OUTCOME" = success; then
             conclusion=success
             title="Protected CI evidence accepted"
           fi
           gh api --method PATCH \
-            "repos/${GITHUB_REPOSITORY:?}/check-runs/${{ steps.candidate-check.outputs.id }}" \
+            "repos/${GITHUB_REPOSITORY:?}/check-runs/${{ needs.candidate-check.outputs.id }}" \
             -f status=completed \
             -f "conclusion=$conclusion" \
             -f "output[title]=$title" \

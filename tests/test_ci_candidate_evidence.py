@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,12 +22,14 @@ from tools.ci_candidate_evidence import (
     FAILURE_RECEIPT_PREFIX,
     PHASE_DIAGNOSIS_PREFIX,
     CiCandidateEvidenceError,
+    _execution_receipt_audience,
     _expected_receipt_count,
     _extract_failure_receipt_payloads,
     _failure_receipt_nodes,
     canonical_failure_receipt,
     emit_failure_summary,
     validate_execution_and_attestation,
+    validate_protected_job_identity,
     write_artifact_attestation,
     write_execution_bundle,
 )
@@ -40,6 +44,47 @@ from tools.ci_guard_execution import (
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
+_TEST_RSA_N = int(
+    "144213369889660769855716200362748636527524704993124183993247717235988361522506184974991920355036560388"
+    "366276959147365747029452972518703338318347201985495410054559751553741677646681751794016799009575695058"
+    "421559280210325294793953308105322602276303142047850234195096737853157100762655218342097492217421845590241"
+)
+_TEST_RSA_E = 65537
+_TEST_RSA_D = int(
+    "298188103723819078126067752737477573520986202810904651920670738096781709109584099454676825721516155732"
+    "296476657980370361474604762287097202733100833743602541348808964102705737621696529395326298180989435666"
+    "03273833589958174557835729076357234968506809966887287097207222916003393844810373061219199754377028968529"
+)
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _test_oidc_token(claims: dict, *, corrupt_signature: bool = False) -> tuple[str, dict]:
+    header = {"alg": "RS256", "kid": "g6-test-key", "typ": "JWT"}
+    encoded_header = _b64url(json.dumps(header, sort_keys=True, separators=(",", ":")).encode())
+    encoded_claims = _b64url(json.dumps(claims, sort_keys=True, separators=(",", ":")).encode())
+    signing_input = f"{encoded_header}.{encoded_claims}".encode("ascii")
+    width = (_TEST_RSA_N.bit_length() + 7) // 8
+    digest_info = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(signing_input).digest()
+    encoded = b"\x00\x01" + b"\xff" * (width - len(digest_info) - 3) + b"\x00" + digest_info
+    signature = pow(int.from_bytes(encoded, "big"), _TEST_RSA_D, _TEST_RSA_N).to_bytes(width, "big")
+    if corrupt_signature:
+        signature = signature[:-1] + bytes([signature[-1] ^ 1])
+    jwks = {
+        "keys": [
+            {
+                "alg": "RS256",
+                "e": _b64url(_TEST_RSA_E.to_bytes(3, "big")),
+                "kid": "g6-test-key",
+                "kty": "RSA",
+                "n": _b64url(_TEST_RSA_N.to_bytes(width, "big")),
+                "use": "sig",
+            }
+        ]
+    }
+    return f"{encoded_header}.{encoded_claims}.{_b64url(signature)}", jwks
 
 
 def _git(repository: Path, *args: str) -> str:
@@ -494,6 +539,279 @@ def test_candidate_runner_rejects_green_pytest_without_population_receipt(
     monkeypatch.setattr(ci_candidate_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
 
     assert ci_candidate_runner.run_suite("core", root=tmp_path, basetemp=tmp_path.parent / "population-state") == 1
+
+
+def test_protected_runner_refuses_forged_receipt_and_preserves_honest_control(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    producer_state = tmp_path / "producer-state"
+    test_path = candidate / "tests" / "core" / "test_real.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_real():\n    assert False\n", encoding="utf-8", newline="\n")
+    candidate_tools = candidate / "tools"
+    candidate_tools.mkdir()
+    (candidate_tools / "__init__.py").write_text("", encoding="utf-8", newline="\n")
+    forged_receipt = canonical_failure_receipt(
+        {
+            "collection_complete": True,
+            "failed_nodeids": [],
+            "invocation_index": 1,
+            "population": {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0},
+            "suite": "core",
+        }
+    )
+    (candidate_tools / "ci_candidate_evidence.py").write_text(
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (candidate_tools / "ci_candidate_runner.py").write_text(
+        f"print({(FAILURE_RECEIPT_PREFIX + forged_receipt)!r})\nraise SystemExit(0)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    subverted = subprocess.run(
+        [sys.executable, "-B", "-m", "tools.ci_candidate_runner", "--suite", "core"],
+        cwd=candidate,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert subverted.returncode == 0
+    forged_payloads = _extract_failure_receipt_payloads(subverted.stdout, suite="core")
+    assert forged_payloads[0]["population"] == {
+        "collected": 1,
+        "deselected": 0,
+        "executed": 1,
+        "skipped": 0,
+    }
+
+    ordinary = ci_candidate_runner._PYTEST + (
+        "--basetemp",
+        str(producer_state / "pytest"),
+        str(test_path),
+        *ci_candidate_runner._TAIL,
+    )
+    protected = ci_candidate_runner._protected_pytest_command(
+        ordinary,
+        root=candidate,
+        producer_root=ROOT,
+        strict=False,
+    )
+    environment = ci_candidate_runner._command_environment(
+        basetemp=producer_state,
+        suite="core",
+        index=1,
+    )
+    completed = subprocess.run(
+        protected,
+        cwd=candidate,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    payloads = _extract_failure_receipt_payloads(completed.stdout + completed.stderr, suite="core")
+    assert [payload["population"] for payload in payloads] == [
+        {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0}
+    ]
+    assert [payload["failed_nodeids"] for payload in payloads] == [["tests/core/test_real.py::test_real"]]
+
+    (candidate / "child_dependency.py").write_text("VALUE = 42\n", encoding="utf-8", newline="\n")
+    test_path.write_text(
+        "import multiprocessing\n"
+        "\n"
+        "def _child(queue):\n"
+        "    import child_dependency\n"
+        "    queue.put(child_dependency.VALUE)\n"
+        "\n"
+        "def test_real():\n"
+        "    context = multiprocessing.get_context('spawn')\n"
+        "    queue = context.Queue()\n"
+        "    process = context.Process(target=_child, args=(queue,))\n"
+        "    process.start()\n"
+        "    process.join(10)\n"
+        "    assert process.exitcode == 0\n"
+        "    assert queue.get(timeout=1) == 42\n"
+        "    print('\\u043f\\u0440\\u043e\\u0432\\u0435\\u0440\\u043a\\u0430')\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    honest_command = tuple(
+        str(producer_state / "honest-pytest") if argument == str(producer_state / "pytest") else argument
+        for argument in protected
+    )
+    honest = subprocess.run(
+        honest_command,
+        cwd=candidate,
+        env=ci_candidate_runner._command_environment(
+            basetemp=producer_state,
+            suite="core",
+            index=2,
+        ),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert honest.returncode == 0, honest.stdout + honest.stderr
+    honest_payloads = _extract_failure_receipt_payloads(honest.stdout + honest.stderr, suite="core")
+    assert [payload["population"] for payload in honest_payloads] == [
+        {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0}
+    ]
+    assert list(candidate.rglob("*.pyc")) == []
+
+
+def _protected_identity_fixture(now: int = 2_000_000_000) -> tuple[dict, bytes, dict, dict, dict]:
+    issued_at = now - 600
+    producer_sha = "a" * 40
+    candidate_sha = "b" * 40
+    github = {
+        "github_job": "protected-execution",
+        "github_job_check_run_id": "98765",
+        "github_repository": "owner/cryodaq",
+        "github_run_attempt": "2",
+        "github_run_id": "12345",
+        "github_sha": candidate_sha,
+        "github_workflow": "CryoDAQ protected CI evidence gate",
+        "github_workflow_ref": ("owner/cryodaq/.github/workflows/protected-ci-evidence-gate.yml@refs/heads/master"),
+        "github_workflow_sha": producer_sha,
+        "runner_os": "Linux",
+        "target_run_attempt": "4",
+        "target_run_id": "54321",
+    }
+    execution = {
+        "github": github,
+        "producer": {"commit": producer_sha, "files": [], "tree": "c" * 40},
+        "schema_version": 2,
+    }
+    execution_raw = (json.dumps(execution, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    audience = _execution_receipt_audience(execution_raw)
+    claims = {
+        "aud": audience,
+        "check_run_id": github["github_job_check_run_id"],
+        "event_name": "workflow_run",
+        "exp": issued_at + 300,
+        "iat": issued_at,
+        "iss": "https://token.actions.githubusercontent.com",
+        "jti": "g6-job-identity",
+        "nbf": issued_at - 1,
+        "repository": github["github_repository"],
+        "run_attempt": github["github_run_attempt"],
+        "run_id": github["github_run_id"],
+        "runner_environment": "github-hosted",
+        "sha": producer_sha,
+        "workflow": github["github_workflow"],
+        "workflow_ref": github["github_workflow_ref"],
+        "workflow_sha": producer_sha,
+    }
+    token, jwks = _test_oidc_token(claims)
+    attestation = {
+        "audience": audience,
+        "execution_receipt_sha256": "sha256:" + hashlib.sha256(execution_raw).hexdigest(),
+        "oidc_token": token,
+        "schema_version": 1,
+    }
+    job = {
+        "completed_at": datetime.fromtimestamp(issued_at + 30, UTC).isoformat(),
+        "conclusion": "success",
+        "head_sha": producer_sha,
+        "id": 98765,
+        "run_id": 12345,
+        "started_at": datetime.fromtimestamp(issued_at - 30, UTC).isoformat(),
+        "status": "completed",
+    }
+    return execution, execution_raw, attestation, jwks, job
+
+
+def test_signed_job_identity_binds_receipt_to_exact_rest_job_run_and_shas() -> None:
+    now = 2_000_000_000
+    execution, execution_raw, attestation, jwks, job = _protected_identity_fixture(now)
+    claims = validate_protected_job_identity(
+        execution,
+        attestation,
+        execution_raw=execution_raw,
+        jwks=jwks,
+        job=job,
+        expected_repository="owner/cryodaq",
+        expected_target_run_id="54321",
+        expected_target_run_attempt="4",
+        expected_target_sha="b" * 40,
+        now=now,
+    )
+    assert claims["check_run_id"] == "98765"
+    assert claims["exp"] < now
+
+    wrong_job = {**job, "id": 98766}
+    with pytest.raises(CiCandidateEvidenceError, match="REST job"):
+        validate_protected_job_identity(
+            execution,
+            attestation,
+            execution_raw=execution_raw,
+            jwks=jwks,
+            job=wrong_job,
+            expected_repository="owner/cryodaq",
+            expected_target_run_id="54321",
+            expected_target_run_attempt="4",
+            expected_target_sha="b" * 40,
+            now=now,
+        )
+    for field, value in (
+        ("expected_target_run_id", "54322"),
+        ("expected_target_run_attempt", "5"),
+        ("expected_target_sha", "d" * 40),
+    ):
+        arguments = {
+            "expected_repository": "owner/cryodaq",
+            "expected_target_run_id": "54321",
+            "expected_target_run_attempt": "4",
+            "expected_target_sha": "b" * 40,
+        }
+        arguments[field] = value
+        with pytest.raises(CiCandidateEvidenceError, match="different target"):
+            validate_protected_job_identity(
+                execution,
+                attestation,
+                execution_raw=execution_raw,
+                jwks=jwks,
+                job=job,
+                now=now,
+                **arguments,
+            )
+
+
+def test_signed_job_identity_refuses_absent_forged_and_misbound_oidc() -> None:
+    now = 2_000_000_000
+    execution, execution_raw, attestation, jwks, job = _protected_identity_fixture(now)
+    arguments = {
+        "execution_raw": execution_raw,
+        "jwks": jwks,
+        "job": job,
+        "expected_repository": "owner/cryodaq",
+        "expected_target_run_id": "54321",
+        "expected_target_run_attempt": "4",
+        "expected_target_sha": "b" * 40,
+        "now": now,
+    }
+    with pytest.raises(CiCandidateEvidenceError, match="absent"):
+        validate_protected_job_identity(execution, {}, **arguments)
+
+    forged = copy.deepcopy(attestation)
+    encoded_claims = forged["oidc_token"].split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(encoded_claims + "=" * (-len(encoded_claims) % 4)))
+    forged["oidc_token"], _ = _test_oidc_token(claims, corrupt_signature=True)
+    with pytest.raises(CiCandidateEvidenceError, match="signature"):
+        validate_protected_job_identity(execution, forged, **arguments)
+
+    misbound = copy.deepcopy(attestation)
+    claims["run_id"] = "99999"
+    misbound["oidc_token"], _ = _test_oidc_token(claims)
+    with pytest.raises(CiCandidateEvidenceError, match="different job"):
+        validate_protected_job_identity(execution, misbound, **arguments)
 
 
 def test_candidate_runner_rejects_invalid_python_before_pytest(
