@@ -49,9 +49,7 @@ async def test_load_readings_reads_rotated_cold_day(tmp_path: Path) -> None:
     assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
 
     extractor = ReportDataExtractor(tmp_path)
-    readings = extractor._load_readings(
-        day.replace(hour=0, minute=0), day.replace(hour=23, minute=59)
-    )
+    readings = extractor._load_readings(day.replace(hour=0, minute=0), day.replace(hour=23, minute=59))
 
     values = [r.value for r in readings]
     assert 4.3 in values, "rotated cold-day reading must still reach the report"
@@ -104,9 +102,7 @@ async def test_load_operator_log_reads_rotated_cold_day(tmp_path: Path) -> None:
     assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
 
     extractor = ReportDataExtractor(tmp_path)
-    records = extractor._load_operator_log(
-        day.replace(hour=0, minute=0), day.replace(hour=23, minute=59), "exp-42"
-    )
+    records = extractor._load_operator_log(day.replace(hour=0, minute=0), day.replace(hour=23, minute=59), "exp-42")
 
     messages = [r.message for r in records]
     assert "cooldown started" in messages, "rotated cold operator_log entry must reach the report"

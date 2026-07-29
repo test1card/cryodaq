@@ -194,16 +194,12 @@ async def test_xlsx_max_rows_constant(tmp_path: Path) -> None:
     import cryodaq.storage.xlsx_export as xlsx_mod
 
     # Canonical value correct
-    assert xlsx_mod._XLSX_MAX_ROWS == 1_048_576, (
-        f"Expected _XLSX_MAX_ROWS == 1_048_576, got {xlsx_mod._XLSX_MAX_ROWS}"
-    )
+    assert xlsx_mod._XLSX_MAX_ROWS == 1_048_576, f"Expected _XLSX_MAX_ROWS == 1_048_576, got {xlsx_mod._XLSX_MAX_ROWS}"
 
     # Runtime truncation: write 10 readings at distinct timestamps (10 data rows)
     data_dir = tmp_path / "data"
     ts_base = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
-    readings = [
-        _reading("CH1", float(i), ts=ts_base.replace(second=i)) for i in range(10)
-    ]
+    readings = [_reading("CH1", float(i), ts=ts_base.replace(second=i)) for i in range(10)]
     _populate_db(data_dir, readings)
 
     output_path = tmp_path / "out_capped.xlsx"
@@ -218,12 +214,8 @@ async def test_xlsx_max_rows_constant(tmp_path: Path) -> None:
     wb = openpyxl.load_workbook(output_path)
     ws = wb["Данные"]
     data_rows = ws.max_row - 1  # subtract header row
-    assert data_rows < 10, (
-        f"Exporter wrote {data_rows} data rows despite cap={cap}; truncation broken"
-    )
-    assert count == data_rows, (
-        f"Return value {count} must equal actual data rows written {data_rows}"
-    )
+    assert data_rows < 10, f"Exporter wrote {data_rows} data rows despite cap={cap}; truncation broken"
+    assert count == data_rows, f"Return value {count} must equal actual data rows written {data_rows}"
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +261,7 @@ async def test_xlsx_mixed_timestamp_types(tmp_path: Path) -> None:
     db_path = data_dir / f"data_{ts.date().isoformat()}.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
         ("2026-03-14T13:00:00+00:00", "ls218s", "CH1", 2.0, "K", "ok"),
     )
     conn.commit()
@@ -323,9 +314,7 @@ def test_xlsx_masks_sentinel_row(tmp_path: Path) -> None:
     ws = openpyxl.load_workbook(str(output_path))["Данные"]
     values = [c.value for row in ws.iter_rows(min_row=2) for c in row[1:]]
     assert SENTINEL not in values, "sentinel leaked into XLSX"
-    assert not any(isinstance(v, float) and not math.isfinite(v) for v in values), (
-        "non-finite number leaked into XLSX"
-    )
+    assert not any(isinstance(v, float) and not math.isfinite(v) for v in values), "non-finite number leaked into XLSX"
     assert 4.5 in values, "usable reading must still be exported"
 
 

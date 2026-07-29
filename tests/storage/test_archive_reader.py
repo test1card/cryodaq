@@ -40,8 +40,7 @@ def _create_sqlite_db(db_path: Path, readings: list[tuple]) -> None:
         ")"
     )
     conn.executemany(
-        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?, ?, ?, ?, ?, ?)",
         readings,
     )
     conn.commit()
@@ -87,9 +86,7 @@ def _create_parquet(parquet_path: Path, readings: list[tuple]) -> None:
 def _write_index(archive_dir: Path, entries: list[dict]) -> None:
     """Write archive index.json."""
     archive_dir.mkdir(parents=True, exist_ok=True)
-    (archive_dir / "index.json").write_text(
-        json.dumps({"files": entries}), encoding="utf-8"
-    )
+    (archive_dir / "index.json").write_text(json.dumps({"files": entries}), encoding="utf-8")
 
 
 def _assert_archive_unavailable(call) -> RuntimeError:
@@ -117,9 +114,7 @@ def test_query_archived_uses_parquet(tmp_path: Path) -> None:
     # Parquet archive for that day
     rel_path = f"year=2026/month=03/{db_name}.parquet"
     parquet_path = archive_dir / rel_path
-    readings = [
-        (base_ts + i, "ls218s", "Т1", 77.0 + i * 0.1, "K", "ok") for i in range(10)
-    ]
+    readings = [(base_ts + i, "ls218s", "Т1", 77.0 + i * 0.1, "K", "ok") for i in range(10)]
     _create_parquet(parquet_path, readings)
 
     _write_index(
@@ -172,9 +167,7 @@ def test_query_recent_uses_sqlite(tmp_path: Path) -> None:
     base_ts = day.timestamp()
     db_name = f"data_{day.date().isoformat()}.db"
 
-    readings = [
-        (base_ts + i, "ls218s", "Т2", 80.0 + i * 0.05, "K", "ok") for i in range(15)
-    ]
+    readings = [(base_ts + i, "ls218s", "Т2", 80.0 + i * 0.05, "K", "ok") for i in range(15)]
     _create_sqlite_db(data_dir / db_name, readings)
 
     # Empty index — no archived files
@@ -215,9 +208,7 @@ def test_missing_archive_file_returns_partial(tmp_path: Path) -> None:
     # day2 has valid Parquet
     rel2 = f"year=2026/month=03/data_{day2.date().isoformat()}.db.parquet"
     parquet2 = archive_dir / rel2
-    readings2 = [
-        (day2.timestamp() + i, "ls218s", "Т3", 90.0 + i, "K", "ok") for i in range(5)
-    ]
+    readings2 = [(day2.timestamp() + i, "ls218s", "Т3", 90.0 + i, "K", "ok") for i in range(5)]
     _create_parquet(parquet2, readings2)
 
     _write_index(
@@ -281,17 +272,13 @@ def test_query_merges_sqlite_and_parquet(tmp_path: Path) -> None:
     old_db_name = f"data_{old_day.date().isoformat()}.db"
     rel_old = f"year=2026/month=03/{old_db_name}.parquet"
     parquet_old = archive_dir / rel_old
-    old_readings = [
-        (old_day.timestamp() + i, "ls218s", "Т4", 70.0 + i, "K", "ok") for i in range(5)
-    ]
+    old_readings = [(old_day.timestamp() + i, "ls218s", "Т4", 70.0 + i, "K", "ok") for i in range(5)]
     _create_parquet(parquet_old, old_readings)
 
     # Recent day — SQLite
     recent_day = datetime(2026, 4, 28, tzinfo=UTC)
     recent_db_name = f"data_{recent_day.date().isoformat()}.db"
-    recent_readings = [
-        (recent_day.timestamp() + i, "ls218s", "Т4", 85.0 + i, "K", "ok") for i in range(3)
-    ]
+    recent_readings = [(recent_day.timestamp() + i, "ls218s", "Т4", 85.0 + i, "K", "ok") for i in range(3)]
     _create_sqlite_db(data_dir / recent_db_name, recent_readings)
 
     _write_index(
@@ -353,9 +340,7 @@ def test_query_channel_filter(tmp_path: Path) -> None:
     db_name = f"data_{day.date().isoformat()}.db"
 
     # Two channels
-    readings = [
-        (base_ts + i, "ls218s", "Т1", 77.0, "K", "ok") for i in range(5)
-    ] + [
+    readings = [(base_ts + i, "ls218s", "Т1", 77.0, "K", "ok") for i in range(5)] + [
         (base_ts + i, "ls218s", "Т2", 80.0, "K", "ok") for i in range(5)
     ]
     _create_sqlite_db(data_dir / db_name, readings)
@@ -471,9 +456,7 @@ def test_query_operator_log_reads_rotated_cold_day(tmp_path: Path) -> None:
             tags=("cooldown", "note"),
         )
         await writer.stop()
-        service = ColdRotationService(
-            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
-        )
+        service = ColdRotationService(data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30)
         results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
         assert results, "old day must have rotated to Parquet"
         return service
@@ -482,9 +465,7 @@ def test_query_operator_log_reads_rotated_cold_day(tmp_path: Path) -> None:
     assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
 
     reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
-    rows = reader.query_operator_log(
-        day.replace(hour=0, minute=0), day.replace(hour=23, minute=59)
-    )
+    rows = reader.query_operator_log(day.replace(hour=0, minute=0), day.replace(hour=23, minute=59))
     assert len(rows) == 1, "rotated cold operator_log entry must be readable"
     ts, exp_id, author, source, message, tags = rows[0]
     assert exp_id == "exp-1"
@@ -532,9 +513,7 @@ def test_query_operator_log_unions_hot_and_cold(tmp_path: Path) -> None:
             tags=(),
         )
         await writer.stop()
-        service = ColdRotationService(
-            data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30
-        )
+        service = ColdRotationService(data_dir=tmp_path, archive_dir=tmp_path / "archive", age_days=30)
         # cold_day is >30d before "now"; hot_day is within 30d → stays hot.
         results = await service.run_once(now=datetime(2026, 6, 1, tzinfo=UTC))
         assert results

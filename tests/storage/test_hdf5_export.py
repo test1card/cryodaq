@@ -214,9 +214,7 @@ async def test_hdf5_datasets_have_compression(tmp_path: Path) -> None:
 
         def _check_compression(name: str, obj: h5py.Dataset | h5py.Group) -> None:
             if isinstance(obj, h5py.Dataset):
-                assert obj.compression == "gzip", (
-                    f"Dataset '{name}' missing gzip compression: {obj.compression}"
-                )
+                assert obj.compression == "gzip", f"Dataset '{name}' missing gzip compression: {obj.compression}"
 
         hf.visititems(_check_compression)
 
