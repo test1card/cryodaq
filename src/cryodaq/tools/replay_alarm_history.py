@@ -29,6 +29,7 @@ import yaml
 
 from cryodaq.paths import get_project_root, get_state_root
 from cryodaq.storage._sqlite import sqlite3
+from cryodaq.storage.sentinel import decode
 
 logger = logging.getLogger(__name__)
 UTC = UTC
@@ -256,12 +257,12 @@ def replay(
     project_root = get_project_root().resolve()
     data_dir = _resolve_input(data_dir, project_root)
     physical_alarms_yaml = _resolve_input(physical_alarms_yaml, project_root)
-    alarms_yaml = _resolve_input(alarms_yaml, project_root) if alarms_yaml is not None else None
+    alarms_yaml = _resolve_input(alarms_yaml or Path("config/alarms_v3.yaml"), project_root)
     provenance: dict[str, Any] = {
         "project_root": str(project_root),
         "data_dir": str(data_dir),
         "physical_alarms": str(physical_alarms_yaml),
-        "legacy_alarms": str(alarms_yaml) if alarms_yaml is not None else None,
+        "legacy_alarms": str(alarms_yaml),
         "predictor_model": None,
         "since": datetime.fromtimestamp(since_ts, tz=UTC).isoformat(),
         "until": datetime.fromtimestamp(until_ts, tz=UTC).isoformat(),
@@ -273,7 +274,7 @@ def replay(
         errors.append(f"physical alarms configuration is unavailable: {physical_alarms_yaml}")
     if not data_dir.is_dir():
         errors.append(f"readings data directory is unavailable: {data_dir}")
-    if alarms_yaml is not None and not alarms_yaml.is_file():
+    if not alarms_yaml.is_file():
         errors.append(f"legacy alarms configuration is unavailable: {alarms_yaml}")
     if errors:
         return _unavailable(provenance, *errors)
@@ -292,7 +293,7 @@ def replay(
         return _unavailable(provenance, f"predictor model is unavailable: {model_path}")
 
     try:
-        thresholds = _build_legacy_thresholds(alarms_yaml) if alarms_yaml is not None else {}
+        thresholds = _build_legacy_thresholds(alarms_yaml)
         timeline = _load_phase_timelines(data_dir)
         db_paths = sorted(data_dir.rglob("*.db"))
     except Exception as exc:
@@ -328,7 +329,7 @@ def replay(
             con = sqlite3.connect(str(db_path))
             cur = con.cursor()
             cur.execute(
-                "SELECT timestamp, channel, value FROM readings "
+                "SELECT timestamp, channel, value, status FROM readings "
                 "WHERE timestamp >= ? AND timestamp <= ? AND unit = 'K' "
                 "ORDER BY timestamp",
                 (since_ts, until_ts),
@@ -344,9 +345,9 @@ def replay(
         validated_rows: list[tuple[float, str, float]] = []
         try:
             for row in rows:
-                if not isinstance(row, (tuple, list)) or len(row) != 3:
+                if not isinstance(row, (tuple, list)) or len(row) != 4:
                     raise ValueError("query returned a malformed row")
-                ts, channel, value = row
+                ts, channel, value, status = row
                 if channel not in (cold_ch, warm_ch):
                     continue
                 if (
@@ -358,6 +359,8 @@ def replay(
                     or not math.isfinite(float(value))
                 ):
                     raise ValueError("eligible reading contains a non-finite or non-numeric timestamp/value")
+                if not isinstance(status, str) or not math.isfinite(decode(float(value), status)):
+                    continue
                 validated_rows.append((float(ts), channel, float(value)))
         except ValueError as exc:
             database_errors.append(f"{db_path}: {exc}")
@@ -485,7 +488,7 @@ def main() -> int:
         "--alarms-yaml",
         type=Path,
         default=None,
-        help="Legacy alarms_v3.yaml with old thresholds for comparison (optional)",
+        help="Legacy alarms_v3.yaml with old thresholds (defaults to project-root config/alarms_v3.yaml)",
     )
     p.add_argument("--data-dir", type=Path, default=None)
     p.add_argument("--output", required=True, type=Path)

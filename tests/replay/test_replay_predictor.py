@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 from cryodaq.tools.replay_alarm_history import replay
 
 UTC = UTC
@@ -19,7 +21,12 @@ _COOLDOWN_START = _BASE_TS
 _MEASUREMENT_START = _BASE_TS + 40 * 3600  # 40h in
 
 
-def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
+def _make_env(
+    tmp_path: Path,
+    readings: list[tuple[float, str, float]],
+    *,
+    status: str = "ok",
+) -> dict:
     """Create synthetic SQLite DB + config files + phase metadata."""
     channels_yaml = tmp_path / "channels.yaml"
     channels_yaml.write_text(
@@ -36,6 +43,21 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
     model_path = tmp_path / "model" / "predictor_model.json"
     model_path.parent.mkdir()
     model_path.write_text("{}", encoding="utf-8")
+    legacy_yaml = tmp_path / "alarms_v3.yaml"
+    legacy_yaml.write_text(
+        "alarms:\n"
+        "  cold:\n"
+        "    alarm_type: threshold\n"
+        "    channel: 'Т11'\n"
+        "    check: above\n"
+        "    threshold: 500.0\n"
+        "  warm:\n"
+        "    alarm_type: threshold\n"
+        "    channel: 'Т12'\n"
+        "    check: above\n"
+        "    threshold: 500.0\n",
+        encoding="utf-8",
+    )
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -49,7 +71,7 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
     for ts, ch, val in readings:
         con.execute(
             "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?,?,?,?,?,?)",
-            (ts, "test", ch, val, "K", "OK"),
+            (ts, "test", ch, val, "K", status),
         )
     con.commit()
     con.close()
@@ -75,9 +97,32 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
         "until_ts": _BASE_TS + 100 * 3600,
         "data_dir": data_dir,
         "physical_alarms_yaml": physical_yaml,
-        "alarms_yaml": None,
+        "alarms_yaml": legacy_yaml,
         "predictor_model_path": model_path,
     }
+
+
+def _write_valid_predictor_model(model_path: Path) -> None:
+    from cryodaq.analytics.cooldown_predictor import (
+        ReferenceCurve,
+        build_model_from_curves,
+        save_model,
+    )
+
+    t_hours = np.linspace(0.0, 20.0, 600)
+    curve = ReferenceCurve(
+        name="cli-control",
+        date="2026-04-01",
+        t_hours=t_hours,
+        T_cold=np.linspace(295.0, 4.0, 600),
+        T_warm=np.linspace(295.0, 80.0, 600),
+        duration_hours=20.0,
+        phase1_hours=17.0,
+        phase2_hours=3.0,
+        T_cold_final=4.0,
+        T_warm_final=80.0,
+    )
+    save_model(build_model_from_curves([curve]), model_path.parent)
 
 
 def _fake_model(duration_mean: float = 72.0):
@@ -246,6 +291,28 @@ def test_no_eligible_readings_is_unavailable(tmp_path):
     assert "no eligible" in result["errors"][0]
 
 
+def test_comparison_requires_usable_status_with_identical_values(tmp_path):
+    readings = [(_COOLDOWN_START, "Т11", 100.0), (_COOLDOWN_START, "Т12", 200.0)]
+    ok_root = tmp_path / "ok"
+    fault_root = tmp_path / "fault"
+    ok_root.mkdir()
+    fault_root.mkdir()
+    ok_env = _make_env(ok_root, readings, status="ok")
+    fault_env = _make_env(fault_root, readings, status="sensor_error")
+
+    with (
+        patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=_fake_model()),
+        patch("cryodaq.tools.replay_alarm_history._predictor_fires", return_value=False),
+    ):
+        ok_result = replay(**ok_env)
+        fault_result = replay(**fault_env)
+
+    assert ok_result["outcome"] == "no_differences"
+    assert fault_result["outcome"] == "unavailable"
+    assert "summary" not in fault_result
+    assert "no eligible" in fault_result["errors"][0]
+
+
 def test_relative_inputs_anchor_to_project_root_from_unrelated_cwd(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     unrelated_cwd = tmp_path / "unrelated"
@@ -272,6 +339,70 @@ def test_relative_inputs_anchor_to_project_root_from_unrelated_cwd(tmp_path, mon
     assert result["outcome"] == "no_differences"
     assert result["provenance"]["project_root"] == str(project_root.resolve())
     assert result["provenance"]["data_dir"] == str((project_root / "data").resolve())
+
+
+def test_cli_comparison_requires_legacy_authority_with_valid_control(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    env_args = _make_env(
+        project_root,
+        [(_COOLDOWN_START, "Т11", 100.0), (_COOLDOWN_START, "Т12", 200.0)],
+    )
+    _write_valid_predictor_model(env_args["predictor_model_path"])
+    process_env = os.environ.copy()
+    process_env["CRYODAQ_ROOT"] = str(project_root)
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    process_env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(source_root), process_env.get("PYTHONPATH"))))
+    base_command = [
+        sys.executable,
+        "-m",
+        "cryodaq.tools.replay_alarm_history",
+        "--since",
+        "2026-04-01",
+        "--until",
+        "2026-04-02",
+        "--data-dir",
+        str(env_args["data_dir"]),
+        "--physical-alarms",
+        str(env_args["physical_alarms_yaml"]),
+        "--predictor-model",
+        str(env_args["predictor_model_path"]),
+    ]
+    valid_output = tmp_path / "valid.json"
+    missing_output = tmp_path / "missing.json"
+
+    valid = subprocess.run(  # noqa: S603 - production CLI boundary
+        [
+            *base_command,
+            "--alarms-yaml",
+            str(env_args["alarms_yaml"]),
+            "--output",
+            str(valid_output),
+        ],
+        env=process_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    missing = subprocess.run(  # noqa: S603 - production CLI boundary
+        [*base_command, "--output", str(missing_output)],
+        env=process_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    valid_report = json.loads(valid_output.read_text(encoding="utf-8"))
+    missing_report = json.loads(missing_output.read_text(encoding="utf-8"))
+    assert valid.returncode == 0, valid.stderr
+    assert valid_report["outcome"] == "no_differences"
+    assert valid_report["summary"]["predictor_evaluated_count"] == 1
+    assert "Replay:" in valid.stderr
+    assert missing.returncode == 2, missing.stderr
+    assert missing_report["outcome"] == "unavailable"
+    assert "summary" not in missing_report
+    assert "legacy alarms configuration is unavailable" in missing_report["errors"][0]
+    assert "Replay:" not in missing.stderr
 
 
 def test_cli_unrelated_cwd_missing_inputs_is_unavailable(tmp_path):
