@@ -15,23 +15,25 @@ boundary or establish release readiness, physical OFF, real-instrument,
 packaged-Windows, or laboratory acceptance.
 
 Cycle 1 terminated `NOT_PR_READY`, and the owner authorized Cycle 2 under the
-owner-ratified plan in `ROADMAP.md`. At that planning snapshot, `master` had
-advanced beyond `f5d6434d`; the exact distance was not bound to immutable
-evidence here and is not asserted as current. The Cycle 1 judge SHA is no
-longer the Cycle 2 pin; a repaired default-branch commit is pending, so no
-successor SHA is asserted here.
+owner-ratified plan in `ROADMAP.md`. The current Cycle 2 judge pin is commit
+`3656654d00937230390076bc60a72b279c124aa9`, tree
+`2bd5e59f73c0326b2a740f7e8d731e390b2a511c`: exactly eight commits after
+`f5d6434d20dffae62c9f03fbc12f68b03f48351b`, with fourteen changed trust-root
+paths. Those object measurements establish the current authority and inventory;
+they do not establish P1 completion.
 
 The checkpoint claim is limited to protection against accidental or
 agent-induced validator and evidence-producer weakening, enforced by a judge
 loaded from the protected default branch. It does **not** claim
-Byzantine-candidate resistance inside pytest. The current guard-root repair is
-authored but not independently reviewed: it roots Git resolution in the
-repository under validation and refuses protected execution when required
-candidate-repository context is missing. Local diagnostics do not close the
-independent-review or hosted-proof gates. Ordinary CI separately executes the
-exact-checkout guard with Git resolution; only the sealed export subrun skips
-resolution when it has no repository, so ordinary CI coverage is not
-compromised.
+Byzantine-candidate resistance inside pytest. The cumulative guard-root and
+relay repair is present in the current judge commit but remains authored and
+not independently reviewed: it roots Git resolution in the repository under
+validation and refuses protected execution when required candidate-repository
+context is missing. No P1 review receipts and no protected hosted receipt bound
+to `3656654d00937230390076bc60a72b279c124aa9` exist yet. Local diagnostics and
+object measurements do not close those gates. Ordinary CI separately executes
+the exact-checkout guard with Git resolution; only the sealed export subrun
+skips resolution when it has no repository.
 
 The protected CI lock (requirements-protected-ci-lock.txt) is version-pinned
 without artifact hashes. It is an owner-authored, candidate-compatible snapshot
@@ -50,9 +52,10 @@ Open checkpoint and deployment invariants:
    MIC-plus-privilege-stripping sandbox has never been measured green. These
    results are diagnostics, not closure, Windows acceptance, or physical-safety
    evidence.
-2. **OC-035 — checkpoint prerequisite.** Cycle 2 must independently review the
-   repaired default-branch judge and re-prove hosted OIDC/REST job binding, the
-   candidate-bound check, and P7 evidence. The claim excludes a malicious
+2. **OC-035 — checkpoint prerequisite.** Cycle 2 must independently review judge
+   commit `3656654d00937230390076bc60a72b279c124aa9`, tree
+   `2bd5e59f73c0326b2a740f7e8d731e390b2a511c`, and re-prove hosted OIDC/REST
+   job binding, the candidate-bound check, and P7 evidence. The claim excludes a malicious
    default-branch commit, compromised runner or GitHub identity, and same-process
    Byzantine behavior. A required-check setting enabled after the requested
    fast-forward protects later changes, not that fast-forward.
