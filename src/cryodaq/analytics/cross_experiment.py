@@ -160,8 +160,10 @@ class TrendResult:
     baseline_mean: float | None
     recent_mean: float | None
     drift: float | None  # recent_mean - baseline_mean
-    drift_detected: bool
+    comparison_status: str
+    drift_detected: bool | None
     slope_per_month: float | None
+    unavailable_reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -178,8 +180,10 @@ class TrendResult:
             "baseline_mean": self.baseline_mean,
             "recent_mean": self.recent_mean,
             "drift": self.drift,
+            "comparison_status": self.comparison_status,
             "drift_detected": self.drift_detected,
             "slope_per_month": self.slope_per_month,
+            "unavailable_reason": self.unavailable_reason,
         }
 
 
@@ -576,8 +580,10 @@ def compute_trend(
             baseline_mean=None,
             recent_mean=None,
             drift=None,
-            drift_detected=False,
+            comparison_status="unavailable",
+            drift_detected=None,
             slope_per_month=None,
+            unavailable_reason="no_usable_points",
         )
 
     baseline_mean = float(np.mean([p.value for p in points[:baseline_n]]))
@@ -600,6 +606,7 @@ def compute_trend(
         baseline_mean=baseline_mean,
         recent_mean=recent_mean,
         drift=drift,
+        comparison_status="measured",
         drift_detected=drift_detected,
         slope_per_month=slope_per_month,
     )
@@ -684,7 +691,11 @@ def format_trend_report(trend: TrendResult) -> str:
     """Короткая сводка тренда для консоли."""
     lines = [f"Метрика: {trend.metric}  (порог дрейфа: {trend.threshold})"]
     if not trend.points:
-        lines.append("  Нет данных по этой метрике в выбранном диапазоне.")
+        reason = {
+            "no_experiments_matched": "в выбранном диапазоне нет подходящих экспериментов",
+            "matched_experiments_unusable": "подходящие эксперименты найдены, но ни один не пригоден",
+        }.get(trend.unavailable_reason, "нет пригодных данных по этой метрике")
+        lines.append(f"  Дрейф невозможно оценить: {reason}.")
         return "\n".join(lines)
     lines.append(f"  Точек: {len(trend.points)}")
     lines.append(f"  Базовое среднее (первые запуски): {_fmt(trend.baseline_mean)}")

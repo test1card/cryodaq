@@ -411,6 +411,7 @@ def test_compute_trend_flags_drift_beyond_threshold() -> None:
 
     assert trend.baseline_mean == pytest.approx(-19.0)
     assert trend.recent_mean == pytest.approx(-11.0)
+    assert trend.comparison_status == "measured"
     assert trend.drift_detected is True
     assert trend.slope_per_month is not None
     assert trend.slope_per_month > 0  # rate magnitude shrinking => less-negative slope
@@ -425,6 +426,7 @@ def test_compute_trend_no_drift_within_threshold() -> None:
 
     trend = compute_trend(summaries, "initial_cooldown_rate_k_per_h", threshold=3.0)
 
+    assert trend.comparison_status == "measured"
     assert trend.drift_detected is False
 
 
@@ -432,7 +434,8 @@ def test_compute_trend_empty_metric_returns_no_points() -> None:
     summaries = [ExperimentSummary(experiment_id="e1", start_time=datetime(2026, 1, 1, tzinfo=UTC), status="COMPLETED")]
     trend = compute_trend(summaries, "steady_state_dT_k", threshold=1.0)
     assert trend.points == []
-    assert trend.drift_detected is False
+    assert trend.comparison_status == "unavailable"
+    assert trend.drift_detected is None
     assert trend.baseline_mean is None
 
 

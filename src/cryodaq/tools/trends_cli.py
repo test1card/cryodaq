@@ -130,12 +130,21 @@ def cmd_drift(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if trend.comparison_status == "unavailable":
+        if result.skipped:
+            trend.unavailable_reason = "matched_experiments_unusable"
+        elif not result.summaries:
+            trend.unavailable_reason = "no_experiments_matched"
+        else:
+            trend.unavailable_reason = "metric_unavailable"
     print(format_trend_report(trend))
     if args.json:
         export_trend_json(trend, Path(args.json))
         print(f"\nJSON: {args.json}")
     # Non-zero exit on detected drift, mirroring monitoring-check convention —
     # lets a caller (cron/CI) alert on this without parsing stdout.
+    if trend.drift_detected is None:
+        return 2
     return 1 if trend.drift_detected else 0
 
 

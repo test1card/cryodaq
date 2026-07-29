@@ -43,7 +43,13 @@ def _configure_stage_channels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(trends_cli, "get_config_dir", lambda: config_dir)
 
 
-def _make_experiment(data_dir: Path, experiment_id: str, start: datetime, duration_h: float = 15.0) -> None:
+def _make_experiment(
+    data_dir: Path,
+    experiment_id: str,
+    start: datetime,
+    duration_h: float = 15.0,
+    cold_end_k: float = 3.0,
+) -> None:
     exp_dir = data_dir / "experiments" / experiment_id
     exp_dir.mkdir(parents=True, exist_ok=True)
     end = start + timedelta(hours=duration_h)
@@ -62,7 +68,7 @@ def _make_experiment(data_dir: Path, experiment_id: str, start: datetime, durati
     )
 
     t = np.linspace(0.0, duration_h, 300)
-    T_cold = 300.0 - (297.0) * (t / duration_h)
+    T_cold = 300.0 - (300.0 - cold_end_k) * (t / duration_h)
     T_warm = 300.0 - (210.0) * (t / duration_h)
 
     timestamps, channels, values, exp_ids = [], [], [], []
@@ -134,6 +140,7 @@ def test_cli_drift_exit_code_reflects_detection(tmp_path: Path, capsys: pytest.C
     # Same cooldown shape each time => no meaningful drift given a loose threshold.
     for i in range(4):
         _make_experiment(tmp_path, f"exp-{i}", base + timedelta(days=30 * i))
+    json_path = tmp_path / "trend.json"
 
     rc = trends_cli.main(
         [
@@ -148,11 +155,111 @@ def test_cli_drift_exit_code_reflects_detection(tmp_path: Path, capsys: pytest.C
             "2",
             "--recent-n",
             "2",
+            "--json",
+            str(json_path),
         ]
     )
 
     assert rc == 0
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["comparison_status"] == "measured"
+    assert payload["drift_detected"] is False
     assert "в пределах порога" in capsys.readouterr().out
+
+
+def test_cli_drift_measured_drift_preserves_alert_exit(tmp_path: Path) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    for i, cold_end_k in enumerate([270.0, 270.0, 30.0, 30.0]):
+        _make_experiment(
+            tmp_path,
+            f"exp-{i}",
+            base + timedelta(days=30 * i),
+            cold_end_k=cold_end_k,
+        )
+    json_path = tmp_path / "trend.json"
+
+    rc = trends_cli.main(
+        [
+            "drift",
+            "--data-dir",
+            str(tmp_path),
+            "--metric",
+            "initial_cooldown_rate_k_per_h",
+            "--threshold",
+            "5.0",
+            "--baseline-n",
+            "2",
+            "--recent-n",
+            "2",
+            "--json",
+            str(json_path),
+        ]
+    )
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert (rc, payload["comparison_status"], payload["drift_detected"]) == (1, "measured", True)
+
+
+def test_cli_drift_unavailable_when_all_matching_experiments_are_unreadable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    for i in range(2):
+        experiment_id = f"exp-{i}"
+        _make_experiment(tmp_path, experiment_id, base + timedelta(days=30 * i))
+        (tmp_path / "experiments" / experiment_id / "readings.parquet").write_bytes(b"not parquet")
+    json_path = tmp_path / "trend.json"
+
+    rc = trends_cli.main(
+        [
+            "drift",
+            "--data-dir",
+            str(tmp_path),
+            "--metric",
+            "initial_cooldown_rate_k_per_h",
+            "--threshold",
+            "5.0",
+            "--json",
+            str(json_path),
+        ]
+    )
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    output = capsys.readouterr().out
+    assert (
+        rc,
+        payload.get("comparison_status"),
+        payload["drift_detected"],
+        payload.get("unavailable_reason"),
+    ) == (2, "unavailable", None, "matched_experiments_unusable")
+    assert "Дрейф невозможно оценить" in output
+
+
+def test_cli_drift_unavailable_when_no_experiments_match(tmp_path: Path) -> None:
+    json_path = tmp_path / "trend.json"
+
+    rc = trends_cli.main(
+        [
+            "drift",
+            "--data-dir",
+            str(tmp_path),
+            "--metric",
+            "initial_cooldown_rate_k_per_h",
+            "--threshold",
+            "5.0",
+            "--json",
+            str(json_path),
+        ]
+    )
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert (
+        rc,
+        payload.get("comparison_status"),
+        payload["drift_detected"],
+        payload.get("unavailable_reason"),
+    ) == (2, "unavailable", None, "no_experiments_matched")
 
 
 def test_cli_requires_command() -> None:
