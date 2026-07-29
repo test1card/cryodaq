@@ -110,6 +110,11 @@ from cryodaq.core.physical_alarms_config import (
     load_production_physical_alarms_config,
 )
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
+from cryodaq.core.qualification import (
+    QualificationReceiptError,
+    source_checkout_qualification_context,
+    verify_qualification_receipt,
+)
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyConfigError, SafetyManager
@@ -6461,11 +6466,40 @@ async def _run_engine(
         ):
             raise DriverRegistryError("reviewed source lacks exact sealed runtime binding")
 
+    qualification_receipt = None
+    qualification_path = _DATA_DIR / "qualification" / "receipt.json"
+    if (
+        not mock
+        and qualification_path.is_file()
+        and driver_load.reviewed_source is not None
+        and reviewed_source_runtime_binding is not None
+    ):
+        try:
+            qualification_context = source_checkout_qualification_context(
+                project_root=_PROJECT_ROOT,
+                config_directory=_CONFIG_DIR,
+                reviewed_source=driver_load.reviewed_source,
+                runtime_binding=reviewed_source_runtime_binding,
+                instrument_configuration_path=instruments_cfg,
+            )
+            qualification_receipt = verify_qualification_receipt(
+                qualification_path.read_bytes(),
+                expected=qualification_context,
+                replay_directory=_DATA_DIR / "qualification" / "consumed",
+            )
+        except (OSError, QualificationReceiptError, ValueError) as exc:
+            logger.critical("Laboratory qualification refused: %s", exc)
+    elif not mock and qualification_path.is_file():
+        logger.critical("Laboratory qualification refused: reviewed-source binding is unavailable")
+    elif not mock:
+        logger.critical("Laboratory qualification receipt is absent; energizing mutations remain UNQUALIFIED")
+
     # SafetyManager — создаётся ПЕРВЫМ
     safety_manager = SafetyManager(
         safety_broker,
         keithley_driver=driver_load.reviewed_source,
         reviewed_source_runtime_binding=reviewed_source_runtime_binding,
+        qualification_receipt=qualification_receipt,
         mock=mock,
         data_broker=broker,
     )

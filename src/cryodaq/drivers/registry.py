@@ -784,7 +784,7 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
     driver = canonical.factory(config, context)
     if not isinstance(driver, InstrumentDriver):
         raise DriverRegistryError(f"factory for {canonical.type_name!r} returned an invalid driver")
-    binding = _runtime_binding(config, driver)
+    binding = _runtime_binding(config, driver, simulation=context.mock)
     with _RUNTIME_BINDINGS_LOCK:
         _RUNTIME_BINDINGS[driver] = binding
     return driver
@@ -795,7 +795,12 @@ _RUNTIME_BINDINGS: weakref.WeakKeyDictionary[InstrumentDriver, DriverRuntimeBind
 _RUNTIME_BINDINGS_LOCK = threading.Lock()
 
 
-def _runtime_binding(config: ValidatedInstrumentConfig, driver: InstrumentDriver) -> DriverRuntimeBinding:
+def _runtime_binding(
+    config: ValidatedInstrumentConfig,
+    driver: InstrumentDriver,
+    *,
+    simulation: bool,
+) -> DriverRuntimeBinding:
     values = config.values
     timing = AcquisitionTiming(
         connect_timeout_s=float(values["connect_timeout_s"]),
@@ -823,6 +828,7 @@ def _runtime_binding(config: ValidatedInstrumentConfig, driver: InstrumentDriver
         timing=timing,
         registry_provenance=f"builtin:{DRIVER_REGISTRY_COMPAT_VERSION}:{config.spec.type_name}",
         trust_class=trust_class,
+        simulation=simulation,
         bus_descriptor=bus_descriptor,
         lifecycle=driver if config.spec.type_name == "lakeshore_218s" else None,
     )

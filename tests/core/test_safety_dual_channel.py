@@ -12,6 +12,7 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
+from tests.qualification_support import issued_test_qualification_receipt
 
 
 def _mock_keithley():
@@ -27,17 +28,20 @@ def _mock_keithley():
 async def _make_manager(*, mock: bool = True, keithley=None):
     broker = SafetyBroker()
     binding = None
-    if not mock:
+    if keithley is not None:
+        keithley.mock = mock
         binding = _issue_registry_runtime_binding(
             driver=keithley,
             timing=AcquisitionTiming(1.0, 1.0, 1.0),
             registry_provenance="test:safety-dual-channel",
             trust_class=DriverTrustClass.REVIEWED_SOURCE,
+            simulation=mock,
         )
     manager = SafetyManager(
         broker,
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
+        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
         mock=mock,
     )
     manager._config.cooldown_before_rearm_s = 0.1

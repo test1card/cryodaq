@@ -14,6 +14,7 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
+from tests.qualification_support import issued_test_qualification_receipt
 
 _OUTCOMES = (
     SourceOffResult.DEVICE_REPORTED_OFF,
@@ -63,6 +64,7 @@ def _manager(result: object) -> tuple[SafetyManager, _OffDriver, object]:
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
         mock=False,
+        qualification_receipt=issued_test_qualification_receipt(),
     )
     manager._safety_children_authoritative = lambda: True  # type: ignore[method-assign]
     manager._reviewed_source_generation = object()

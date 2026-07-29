@@ -16,6 +16,11 @@ import pytest
 
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
+from cryodaq.drivers.contracts import (
+    AcquisitionTiming,
+    DriverTrustClass,
+    _issue_registry_runtime_binding,
+)
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 from cryodaq.engine import _run_keithley_command
 
@@ -24,7 +29,19 @@ async def _make_sm() -> tuple[SafetyManager, Keithley2604B]:
     broker = SafetyBroker()
     k = Keithley2604B("k", "USB::MOCK", mock=True)
     await k.connect()
-    sm = SafetyManager(broker, keithley_driver=k, mock=True)
+    binding = _issue_registry_runtime_binding(
+        driver=k,
+        timing=AcquisitionTiming(1.0, 1.0, 1.0),
+        registry_provenance="test:nonfinite-setpoints",
+        trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        simulation=True,
+    )
+    sm = SafetyManager(
+        broker,
+        keithley_driver=k,
+        reviewed_source_runtime_binding=binding,
+        mock=True,
+    )
     return sm, k
 
 

@@ -17,6 +17,7 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
+from tests.qualification_support import issued_test_qualification_receipt
 
 
 def _mock_keithley():
@@ -42,17 +43,20 @@ async def _make_manager(*, mock=True, keithley=None, stale=10.0):
     """Create and start a SafetyManager with SafetyBroker."""
     broker = SafetyBroker()
     binding = None
-    if not mock:
+    if keithley is not None:
+        keithley.mock = mock
         binding = _issue_registry_runtime_binding(
             driver=keithley,
             timing=AcquisitionTiming(1.0, 1.0, 1.0),
             registry_provenance="test:safety-manager",
             trust_class=DriverTrustClass.REVIEWED_SOURCE,
+            simulation=mock,
         )
     mgr = SafetyManager(
         broker,
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
+        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
         mock=mock,
     )
     mgr._config.stale_timeout_s = stale
@@ -374,7 +378,12 @@ async def test_broker_overflow_triggers_fault():
 
 async def test_keithley_required_non_mock():
     broker = SafetyBroker()
-    mgr = SafetyManager(broker, keithley_driver=None, mock=False)
+    mgr = SafetyManager(
+        broker,
+        keithley_driver=None,
+        qualification_receipt=issued_test_qualification_receipt(),
+        mock=False,
+    )
     mgr._config.require_keithley_for_run = True
     await mgr.start()
     try:

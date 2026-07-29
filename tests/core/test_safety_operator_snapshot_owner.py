@@ -34,6 +34,7 @@ from cryodaq.engine_wiring.operator_snapshot_live_authorities import (
     LiveSafetyReadinessAuthority,
 )
 from cryodaq.operator_snapshot import OperatorPresentationState, ReadinessTruth
+from tests.qualification_support import issued_test_qualification_receipt
 
 _CREATED_MANAGERS: list[SafetyManager] = []
 
@@ -49,18 +50,28 @@ def _manager(*, mock: bool = False, driver: object | None = None) -> SafetyManag
             driver.emergency_off = AsyncMock(return_value=SourceOffResult.DEVICE_REPORTED_OFF)
         if type(getattr(driver, "output_state_unverified", None)) is not bool:
             driver.output_state_unverified = False
+        if type(getattr(driver, "mock", None)) is not bool:
+            driver.mock = mock
     binding = None
-    if driver is not None and not mock:
+    if driver is not None:
+        if mock and not isinstance(driver, MagicMock) and type(getattr(driver, "mock", None)) is not bool:
+            driver.mock = True
         binding = _issue_registry_runtime_binding(
             driver=driver,
             timing=AcquisitionTiming(1.0, 1.0, 1.0),
             registry_provenance="test:safety-operator-owner",
             trust_class=DriverTrustClass.REVIEWED_SOURCE,
+            simulation=mock,
         )
     manager = SafetyManager(
         SafetyBroker(),
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
+        qualification_receipt=(
+            issued_test_qualification_receipt()
+            if not mock or (driver is not None and getattr(driver, "mock", None) is False)
+            else None
+        ),
         mock=mock,
     )
     _CREATED_MANAGERS.append(manager)

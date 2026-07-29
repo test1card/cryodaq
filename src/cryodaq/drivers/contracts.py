@@ -172,6 +172,7 @@ class DriverRuntimeBinding:
     timing: AcquisitionTiming
     registry_provenance: str
     trust_class: DriverTrustClass
+    simulation: bool
     bus_descriptor: BusDescriptor | None = None
     participant: SharedBusParticipant | None = None
     coordinator: SharedBusRecoveryCoordinator | None = None
@@ -189,6 +190,7 @@ class DriverRuntimeBinding:
         timing: AcquisitionTiming,
         registry_provenance: str,
         trust_class: DriverTrustClass,
+        simulation: bool = False,
         bus_descriptor: BusDescriptor | None = None,
         participant: SharedBusParticipant | None = None,
         coordinator: SharedBusRecoveryCoordinator | None = None,
@@ -199,6 +201,7 @@ class DriverRuntimeBinding:
         object.__setattr__(instance, "timing", timing)
         object.__setattr__(instance, "registry_provenance", registry_provenance)
         object.__setattr__(instance, "trust_class", trust_class)
+        object.__setattr__(instance, "simulation", simulation)
         object.__setattr__(instance, "bus_descriptor", bus_descriptor)
         object.__setattr__(instance, "participant", participant)
         object.__setattr__(instance, "coordinator", coordinator)
@@ -212,6 +215,8 @@ class DriverRuntimeBinding:
         object.__setattr__(self, "registry_provenance", provenance)
         if self._seal is not _BINDING_SEAL or not isinstance(self.trust_class, DriverTrustClass):
             raise ValueError("runtime binding provenance is not sealed")
+        if type(self.simulation) is not bool:
+            raise TypeError("runtime binding simulation fact must be a bool")
         if self.participant is not None:
             if self.bus_descriptor is None or self.participant.bus_descriptor != self.bus_descriptor:
                 raise ValueError("participant bus descriptor contradicts runtime binding")

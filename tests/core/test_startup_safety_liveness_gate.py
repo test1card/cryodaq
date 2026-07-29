@@ -49,6 +49,7 @@ from cryodaq.drivers.contracts import (
 )
 from cryodaq.engine import DriverLoadResult
 from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+from tests.qualification_support import issued_test_qualification_receipt
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 _DESCRIPTORS_PATH = _CONFIG_DIR / "channel_descriptors.yaml"
@@ -382,6 +383,7 @@ async def test_runtime_heartbeat_accepts_power_as_the_only_fresh_metric_per_acti
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
         mock=False,
+        qualification_receipt=issued_test_qualification_receipt(),
     )
     safety_config = yaml.safe_load(_SAFETY_PATH.read_text(encoding="utf-8"))
     safety_config["heartbeat_timeout_s"] = 0.2

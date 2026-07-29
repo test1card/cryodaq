@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
+from cryodaq.core.qualification import QualificationReceipt, is_issued_qualification_receipt
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
@@ -149,6 +150,7 @@ class SafetyManager:
         *,
         keithley_driver: Any | None = None,
         reviewed_source_runtime_binding: DriverRuntimeBinding | None = None,
+        qualification_receipt: QualificationReceipt | None = None,
         mock: bool = False,
         data_broker: Any | None = None,
         fault_log_callback: Any | None = None,
@@ -156,6 +158,9 @@ class SafetyManager:
         self._broker = safety_broker
         self._keithley = keithley_driver
         self._mock = mock
+        if qualification_receipt is not None and not is_issued_qualification_receipt(qualification_receipt):
+            raise ValueError("qualification_receipt was not issued by the qualification verifier")
+        self._qualification_receipt = qualification_receipt
         self._reviewed_source_runtime_binding = reviewed_source_runtime_binding
         self._reviewed_source_identity_qualified = bool(
             keithley_driver is not None
@@ -1649,6 +1654,10 @@ class SafetyManager:
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
 
+            qualification_refusal = self._energizing_mutation_refusal()
+            if qualification_refusal is not None:
+                return {"ok": False, "error": qualification_refusal}
+
             if not self._safety_children_authoritative():
                 return {"ok": False, "error": "Safety child authority is unavailable"}
 
@@ -1694,6 +1703,10 @@ class SafetyManager:
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
             update_abort_generation = self._abort_generation
+
+            qualification_refusal = self._energizing_mutation_refusal()
+            if qualification_refusal is not None:
+                return {"ok": False, "error": qualification_refusal}
 
             if not self._safety_children_authoritative():
                 return {"ok": False, "error": "Safety child authority is unavailable"}
@@ -2249,6 +2262,14 @@ class SafetyManager:
         self._operator_safety_snapshot = snapshot
 
     def get_status(self) -> dict[str, Any]:
+        qualification_refusal = self._energizing_mutation_refusal()
+        qualification_mode = (
+            "SIMULATION"
+            if self._explicit_simulation_authorized()
+            else "QUALIFIED"
+            if qualification_refusal is None
+            else "UNQUALIFIED"
+        )
         return {
             "state": self._state.value,
             "fault_reason": self._fault_reason,
@@ -2259,6 +2280,8 @@ class SafetyManager:
             "keithley_connected": self._keithley is not None and getattr(self._keithley, "connected", False),
             "active_channels": sorted(self._active_sources),
             "mock": self._mock,
+            "qualification_mode": qualification_mode,
+            "qualification_refusal": qualification_refusal,
         }
 
     def get_events(self) -> list[SafetyEvent]:
@@ -2707,8 +2730,37 @@ class SafetyManager:
         # both physical outputs require independent OFF verification.
         return set(SMU_CHANNELS)
 
+    def _energizing_mutation_refusal(self) -> str | None:
+        """Return why this authority cannot energize; never used by OFF paths."""
+
+        if self._explicit_simulation_authorized():
+            return None
+        receipt = self._qualification_receipt
+        if receipt is None:
+            return "UNQUALIFIED: a separately signed laboratory-qualification receipt is required"
+        if time.monotonic() >= receipt.expires_monotonic_s:
+            return "UNQUALIFIED: laboratory-qualification receipt is stale"
+        return None
+
+    def _explicit_simulation_authorized(self) -> bool:
+        binding = self._reviewed_source_runtime_binding
+        return self._mock and (
+            self._keithley is None
+            or (
+                binding is not None
+                and is_issued_runtime_binding(binding)
+                and binding.driver is self._keithley
+                and binding.simulation is True
+                and getattr(self._keithley, "mock", None) is True
+            )
+        )
+
     def _check_preconditions(self) -> tuple[bool, str]:
         now = time.monotonic()
+
+        qualification_refusal = self._energizing_mutation_refusal()
+        if qualification_refusal is not None:
+            return False, qualification_refusal
 
         if not self._safety_children_authoritative():
             return False, "Safety monitor/collector authority is unavailable"
@@ -2827,6 +2879,11 @@ class SafetyManager:
     async def _run_checks(self) -> None:
         now = time.monotonic()
         self._refresh_operator_safety_snapshot()
+
+        qualification_refusal = self._energizing_mutation_refusal()
+        if qualification_refusal is not None and self._state in (SafetyState.RUN_PERMITTED, SafetyState.RUNNING):
+            await self._fault(qualification_refusal, source="qualification_interlock")
+            return
 
         # A pre-upload trip latch found during connect is preserved by the
         # driver without re-uploading the script. Surface that evidence even

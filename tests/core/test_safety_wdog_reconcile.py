@@ -17,6 +17,7 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
+from tests.qualification_support import issued_test_qualification_receipt
 
 
 class _FakeKeithley:
@@ -61,6 +62,7 @@ def _manager(driver: _FakeKeithley) -> tuple[SafetyManager, object]:
             keithley_driver=driver,
             reviewed_source_runtime_binding=binding,
             mock=False,
+            qualification_receipt=issued_test_qualification_receipt(),
         ),
         binding,
     )
@@ -126,7 +128,12 @@ async def test_reconcile_invalid_trip_readback_fails_closed() -> None:
 async def test_reconcile_skipped_in_mock_mode() -> None:
     # Mock managers never touch the TSP late-pet checker.
     k = _FakeKeithley(tripped=True)
-    sm = SafetyManager(SafetyBroker(), keithley_driver=k, mock=True)
+    sm = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=k,
+        mock=True,
+        qualification_receipt=issued_test_qualification_receipt(),
+    )
     sm._state = SafetyState.RUNNING
 
     await sm._run_checks()

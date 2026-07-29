@@ -30,6 +30,7 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.storage.sqlite_writer import SQLiteWriter
+from tests.qualification_support import issued_test_qualification_receipt
 
 # ---------------------------------------------------------------------------
 # Helpers shared across sections
@@ -51,17 +52,20 @@ async def _make_manager(*, mock: bool = True, keithley=None, stale: float = 10.0
     """Create and start a SafetyManager in the standard test configuration."""
     broker = SafetyBroker()
     binding = None
-    if not mock:
+    if keithley is not None:
+        keithley.mock = mock
         binding = _issue_registry_runtime_binding(
             driver=keithley,
             timing=AcquisitionTiming(1.0, 1.0, 1.0),
             registry_provenance="test:p1-fixes",
             trust_class=DriverTrustClass.REVIEWED_SOURCE,
+            simulation=mock,
         )
     mgr = SafetyManager(
         broker,
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
+        qualification_receipt=issued_test_qualification_receipt() if not mock else None,
         mock=mock,
     )
     mgr._config.stale_timeout_s = stale

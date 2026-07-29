@@ -20,6 +20,7 @@ from cryodaq.drivers.contracts import (
     SourceOffResult,
     _issue_registry_runtime_binding,
 )
+from tests.qualification_support import issued_test_qualification_receipt
 
 _STARTED_MANAGERS: list[SafetyManager] = []
 
@@ -124,6 +125,7 @@ def _manager(driver: InstrumentDriver, binding=None):
             SafetyBroker(),
             keithley_driver=driver,
             reviewed_source_runtime_binding=binding,
+            qualification_receipt=issued_test_qualification_receipt(),
             mock=False,
         ),
         binding,
