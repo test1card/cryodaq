@@ -40,7 +40,6 @@ Exit code is always 0: this is a measurement, not a gate.
 from __future__ import annotations
 
 import ctypes
-import shutil
 import subprocess
 import sys
 from ctypes import wintypes
@@ -143,8 +142,8 @@ def privilege_count(token: wintypes.HANDLE) -> int:
     return ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD)).contents.value
 
 
-def build_token() -> wintypes.HANDLE:
-    """The sandbox's token, constructed identically."""
+def build_token(*, restrict: bool = True, strip: bool = True) -> wintypes.HANDLE:
+    """The sandbox's token. restrict/strip isolate its two mechanisms."""
     process_token = wintypes.HANDLE()
     if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_ACCESS, ctypes.byref(process_token)):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -157,18 +156,18 @@ def build_token() -> wintypes.HANDLE:
     restricted = wintypes.HANDLE()
     if not advapi32.CreateRestrictedToken(
         process_token,
-        WRITE_RESTRICTED,
+        WRITE_RESTRICTED if restrict else 0,
         0,
         None,
         0,
         None,
-        1,
-        ctypes.byref(restricting),
+        1 if restrict else 0,
+        ctypes.byref(restricting) if restrict else None,
         ctypes.byref(restricted),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
 
-    count = privilege_count(restricted)
+    count = privilege_count(restricted) if strip else 0
     print(f"restricted token privileges before stripping: {count}")
     if count > 0:
         needed = wintypes.DWORD()
@@ -230,63 +229,55 @@ def main() -> int:
         print("not windows; nothing to measure")
         return 0
 
-    comspec = r"C:\Windows\System32\cmd.exe"
-    token = build_token()
-    print()
+    python = [sys.executable, "-I", "-B", "-c", "raise SystemExit(7)"]
 
-    # D separates two causes that A/B/C alone cannot: "CPython's loader specifically"
-    # versus "any binary outside System32". cmd.exe is System32 and python.exe is not,
-    # so a System32-only filesystem effect would masquerade as a CPython fault.
-    git = shutil.which("git")
-    cases = [
-        ("A  cmd.exe  (System32, minimal loader)", comspec, [comspec, "/c", "exit 7"]),
-        ("B  python   (full CPython loader)", sys.executable, [sys.executable, "-c", "raise SystemExit(7)"]),
-        ("C  python -I -B (as the sandbox)", sys.executable, [sys.executable, "-I", "-B", "-c", "raise SystemExit(7)"]),
+    # The sandbox applies TWO mechanisms. A/B/C/D established that the failure is
+    # CPython-specific; this isolates WHICH mechanism CPython cannot survive.
+    variants = [
+        ("1  neither  (control: plain duplicate)", dict(restrict=False, strip=False)),
+        ("2  WRITE_RESTRICTED only", dict(restrict=True, strip=False)),
+        ("3  privilege stripping only", dict(restrict=False, strip=True)),
+        ("4  both      (what the sandbox does)", dict(restrict=True, strip=True)),
     ]
-    if git:
-        cases.append(("D  git.exe (non-System32, non-Python)", git, [git, "--version"]))
-    else:
-        print("NOTE: git.exe not found; control D unavailable")
+
     outcomes = {}
-    for label, application, argv in cases:
-        code = launch(token, application, argv)
+    for label, kwargs in variants:
+        print(f"--- {label} ---")
+        try:
+            token = build_token(**kwargs)
+        except OSError as exc:
+            print(f"    token construction failed: {exc}")
+            outcomes[label[0]] = "notoken"
+            continue
+        code = launch(token, sys.executable, python)
         if code == 7:
-            verdict, kind = "OK — child ran and exited 7", "ok"
+            verdict, kind = "python RAN (exit 7)", "ok"
         elif code == DLL_INIT_FAILED:
             verdict, kind = "*** 0xC0000142 STATUS_DLL_INIT_FAILED ***", "dll"
         elif code < 0:
             verdict, kind = f"CreateProcessAsUser FAILED, win32 error {-code}", "nocreate"
         else:
-            verdict, kind = f"exit {code} (0x{code & 0xFFFFFFFF:08X})", "other"
+            verdict, kind = f"ran, exit {code} (0x{code & 0xFFFFFFFF:08X})", "ran"
         outcomes[label[0]] = kind
-        print(f"{label:<38} {verdict}")
+        print(f"    {verdict}")
+        print()
 
-    print()
     print("=" * 72)
-    kinds = set(outcomes.values())
-    if outcomes.get("A") == "ok" and {outcomes.get("B"), outcomes.get("C")} == {"dll"}:
-        print("Process creation under this token is FINE (cmd.exe ran and exited 7).")
-        if outcomes.get("D") == "ok":
-            print("DISCRIMINATED: git.exe also ran, and it is neither System32 nor Python.")
-            print("The fault is SPECIFIC TO CPYTHON's loader under a write-restricted token.")
-        elif outcomes.get("D") == "dll":
-            print("DISCRIMINATED: git.exe ALSO died in DLL init, and it is not Python.")
-            print("So this is NOT a CPython fault. It affects any non-System32 binary and points")
-            print("at the restricting SID's access to the tool directories.")
-        else:
-            print("PARTIAL: no non-System32 non-Python control ran, so 'CPython specifically'")
-            print("versus 'anything outside System32' is NOT separated.")
-    elif kinds == {"dll"}:
-        print("DISCRIMINATED: every target dies in DLL init, including cmd.exe. The fault is")
-        print("fundamental to the restricted token, not to CPython.")
-    elif kinds == {"ok"}:
-        print("DISCRIMINATED: the token launches everything cleanly. The 0xC0000142 seen in CI")
-        print("does NOT come from the token — look at the sandbox's own child script.")
-    elif "nocreate" in kinds:
-        print("NOT DISCRIMINATING: the process could not be created at all. Check whether this")
-        print("runner actually holds SeAssignPrimaryTokenPrivilege.")
+    restricted_only = outcomes.get("2")
+    stripped_only = outcomes.get("3")
+    if outcomes.get("1") not in {"ok", "ran"}:
+        print("CONTROL FAILED: python does not run even under a plain duplicated token.")
+        print("Nothing below is interpretable; the harness itself is at fault.")
+    elif restricted_only == "dll" and stripped_only in {"ok", "ran"}:
+        print("ISOLATED: WRITE_RESTRICTED alone kills CPython. Privilege stripping is innocent.")
+        print("The fix must address the restricting SID's effect on CPython's DLL init.")
+    elif stripped_only == "dll" and restricted_only in {"ok", "ran"}:
+        print("ISOLATED: privilege STRIPPING alone kills CPython. The restricting SID is innocent.")
+        print("CPython's loader needs one of the removed privileges -- identify and retain it.")
+    elif restricted_only == "dll" and stripped_only == "dll":
+        print("BOTH mechanisms independently kill CPython. Each needs its own fix.")
     else:
-        print(f"MIXED result, no clean discrimination: {outcomes}")
+        print(f"NEITHER alone reproduces it; only the combination does: {outcomes}")
     return 0
 
 
