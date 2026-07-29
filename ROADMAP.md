@@ -139,6 +139,97 @@ retention/rotation lifecycle bug is fixed.
 
 ---
 
+<!-- Authored by the independent reviewer (gpt-5.6-sol) at the owner's request,
+     2026-07-29, after the owner ratified the checkpoint threat model. It supersedes
+     the earlier campaign plan, whose stop lever was unreachable by construction:
+     P5 became available only after convergence, while every finding reopened
+     authoring. The bounded-cycle rule below exists to prevent a recurrence. -->
+
+## Montana PR-readiness and checkpoint publication — owner-ratified plan (2026-07-29)
+
+> **Campaign-local scope.** This section supersedes the 2026-07-29
+> `DO NOT MERGE` determination and blocker classification in
+> `docs/OPEN_CELLS.md` for this checkpoint only. Historical evidence is retained
+> and labelled superseded rather than deleted.
+>
+> The owner’s binding threat-model decision is:
+>
+> **This checkpoint protects against accidental or agent-induced validator and
+> evidence-producer weakening, enforced by a judge loaded from the protected
+> default branch. It does not claim Byzantine-candidate resistance inside
+> pytest, and must never be described as if it does.**
+>
+> In particular, this checkpoint does not establish resistance to candidate
+> code deliberately attacking the same pytest process or OS account; compromise
+> of `master`, GitHub Actions, OIDC, a hosted runner, or the package index;
+> artifact immutability under a lock without `--require-hashes`; physical OFF;
+> real-instrument behavior; packaged Windows behavior; or laboratory acceptance.
+
+### Bounded-cycle rule
+
+P0 and P1 are prerequisites for starting the integration cycle. The cycle
+starts when P2 begins and permits exactly one integration object and one P5
+frozen SHA.
+
+The cycle terminates immediately with one of these outcomes:
+
+- **PR_READY:** P0-P8 pass for one unchanged P5 SHA.
+- **NOT_PR_READY:** any prerequisite check is red, cancelled, missing, stale, or
+  bound to another SHA; either mandatory reviewer withholds approval; a covered
+  byte or mode changes after P5; or the integration topology differs from P2.
+- **MERGED_P9_OPEN:** `master` has already been fast-forwarded at P9, but a
+  post-fast-forward check or settings verification fails.
+
+There is no correction, retry-until-green, refreeze, or “one more review”
+sub-loop in this plan. A diagnostic rerun earns no acceptance credit. After a
+terminal failure, further authoring requires a new owner-authorized bounded
+cycle. Deferred disclosure rows do not extend this cycle and do not become
+merge prerequisites merely because work on them remains possible.
+
+### Ordered phases
+
+| Phase | Owner | Merge status | Measurable exit criteria |
+| --- | --- | --- | --- |
+| **P0 — Record the owner decision and reconcile claims** | Governance reviewer; repository owner supplies the ruling but does not sign review evidence | **Prerequisite** | Add an `[Owner]` entry to `docs/DECISIONS.md`; update `docs/OPEN_CELLS.md`, `PROJECT_STATUS.md`, and this roadmap so the earlier determination is explicitly superseded. Correct the ancestry count to four commits after `f5d6434d`. Record that the protected lock is version-pinned without artifact hashes and is owner-authored pending independent review. `tests/docs/test_docs_freshness.py` and the applicable governance consistency tests pass. No live document continues to list OC-020 as `BLOCKS-CHECKPOINT` or describes Byzantine resistance as a checkpoint guarantee. |
+| **P1 — Qualify the default-branch trust root** | Two reviewers independent of the author of `9cc51caa`: one depth-and-delta reviewer and one fresh-context `BREADTH` reviewer; CI/evidence owner collects hosted evidence | **Prerequisite** | Both review receipts bind exact commit `9cc51caa3b404a8096948c830c6621d31871901a`, its tree, and the complete four-file diff. The receipts explicitly disposition the hashless protected lock and the fact that both workflow object-verification loops contain it while `_PROTECTED_PRODUCER_FILES` still names `requirements-lock.txt`. A hosted `CryoDAQ protected CI evidence gate` run against an unchanged known-green candidate records `github.workflow_sha == 9cc51caa…`, eight successful `protected execution (<os>, <suite>)` jobs, eight `PROTECTED EXECUTION ACCEPTED` results, a successful `protected CI evidence gate` job, and an uploaded `cryodaq-partition-proof-<run-id>-<attempt>` artifact. Record the run ID and artifact digest. Any contrary review verdict or hosted failure ends the plan before integration. |
+| **P2 — Perform the single final integration** | Integration reviewer/coordinator, not the bootstrap author acting alone | **Prerequisite** | Create one integration commit `I` whose parents are exactly the pre-integration Montana tip and `master@9cc51caa`; prove `9cc51caa` is an ancestor of `I`. Resolve the added/added workflow conflict by taking the `9cc51caa` workflow blob unchanged. Carry `requirements-protected-ci-lock.txt` from `9cc51caa`; retain the candidate’s product `requirements-lock.txt`, since the master copy remains byte-identical to `f5d6434d`. The two bootstrapped judge modules remain byte-identical to the candidate copies. No other conflict resolution or cleanup enters `I`. |
+| **P3 — Reconcile the workflow contract and governance test** | Governance-test owner | **Prerequisite** | Update `tests/governance/test_protected_ci_evidence_gate.py` to require installation from `requirements-protected-ci-lock.txt`, reject installation from the product lock, require the protected lock in both immutable-object verification loops, retain the step-level `job.check_run_id` assertions, and retain the candidate-weakened-judge negative control. The workflow blob in `I` remains the exact `9cc51caa` blob; only the candidate test is reconciled. The protected-workflow governance test and `tests/test_ci_candidate_evidence.py` pass from a clean checkout of `I`. |
+| **P4 — Exact integration verification** | Verification owner, separate from P2 authoring | **Prerequisite** | From a clean detached checkout of `I`, record passing results for `python scripts/check_lock_drift.py`, `python -m pytest -q tests/governance/test_protected_ci_evidence_gate.py tests/test_ci_candidate_evidence.py`, applicable prevention-registry and documentation-freshness tests, `python -m ruff check --no-cache` over the changed Python files, and `python -m ruff format --check --no-cache` over those files. Record exact commands, versions, counts, skips, and output hashes. The workflow and protected-lock blobs equal their `9cc51caa` blobs; the product-lock blob equals the pre-integration candidate blob. A failure ends the cycle; P4 does not authorize a correction. |
+| **P5 — Freeze one exact candidate** | Integration reviewer/coordinator | **Prerequisite** | Commit and freeze one SHA `F` and tree `T` descended from `I`. In an isolated clean checkout, create the ignored evidence artifact `.audit-run/montana-pr-readiness/<F>/P5-freeze.json` containing `F`, `T`, exact parents, complete Git path/mode/blob manifest, diff digest against `9cc51caa`, and governing-document blob IDs. Record its SHA-256. `git status --short` for tracked content is empty. The existing user-owned `docs/refactor/` material is neither added nor deleted. Any later content, path, or mode change terminates this cycle rather than producing another P5 SHA. |
+| **P6 — Two independent final reviews** | Depth-and-delta reviewer plus a newly instantiated, context-independent `BREADTH` reviewer; neither may be an author of `F` | **Prerequisite** | Persist complete receipts as `.audit-run/montana-pr-readiness/<F>/P6-depth-and-delta.json` and `P6-breadth.json`, each binding `F`, `T`, the P5 manifest digest, exact reviewed range, reviewer identity/model, mandate, findings, and verdict. Both verdicts must be `approved`; disagreements must be recorded. Any P0-P2 finding or non-approval produces `NOT_PR_READY`; there is no in-cycle repair. |
+| **P7 — Run exact-SHA hosted evidence** | CI/evidence owner | **Prerequisite** | Push only `F`. The ordinary `CryoDAQ CI` run for `F` completes all eight Ubuntu/Windows × agents/core/gui/remaining jobs green without retry credit. The default-branch `CryoDAQ protected CI evidence gate` also succeeds for `F`, uses `JUDGE_SHA == 9cc51caa…`, produces eight protected bundles, eight accepted protected-execution messages, and `cryodaq-partition-proof-<run-id>-<attempt>`. Record both run IDs, all job conclusions, and artifact digests in the P5 evidence directory. A red occurrence of OC-039 still terminates this cycle because the required check is red; that does not reclassify OC-039 as a defect blocker, and rerunning until green is forbidden. |
+| **P8 — Issue the PR-readiness disposition** | Coordinator/integration reviewer | **Prerequisite** | Verify that the proposed PR head is exactly `F`, the base is `master@9cc51caa`, the PR path/mode inventory equals the P5 manifest, both P6 receipts approve `F`, and both P7 workflows are green for `F`. Emit `montana-pr-readiness-disposition-<F>.json` with status `PR_READY`, the two review-receipt digests, run IDs, check conclusions, and all deferred rows. Only this exact SHA may be opened or marked ready. Any PR-head change produces `NOT_PR_READY`. |
+| **P9 — Exact fast-forward, required-check setting, and handoff** | Repository owner for the outward actions; coordinator verifies resulting state | **Publication step after PR readiness** | Fast-forward `master` from `9cc51caa` to exactly `F`; no squash, replacement merge, amend, or different tree is permitted. Verify `origin/master == F`. Then configure `CryoDAQ protected CI evidence gate` as a required status and verify the repository settings through the GitHub API/UI evidence record. Because this requested order enables the setting after the fast-forward, state explicitly that the setting did not gate this fast-forward and governs subsequent changes; the merge itself relied on P7’s exact-SHA check. Trigger or observe one post-fast-forward ordinary/protected run with `github.workflow_sha == F`; require the same eight protected executions and accepted partition proof. Success yields `MERGED_CHECKPOINT`; a post-fast-forward failure yields `MERGED_P9_OPEN` and stops without rollback or further correction under this plan. |
+
+### Open-cell disposition under this threat model
+
+| Cell | Checkpoint disposition | Required repository statement |
+| --- | --- | --- |
+| **OC-020** | **BLOCKS-DEPLOYMENT; disclosure debt. It does not block this checkpoint.** No OC-020 sandbox change is integrated in this cycle. | State that mutate-execute-restore remains possible in the ordinary same-authority pytest execution model and that this checkpoint does not resist a Byzantine candidate. Record the scratch evidence accurately: Linux honest `core`/`agents` controls pass; Linux `gui` reproducibly fails 13 nodes; Windows reaches successful `AdjustTokenPrivileges` and then incorrectly treats `ERROR_NOT_ALL_ASSIGNED` during privilege removal as fatal. Those are diagnostic results, not checkpoint closure, Windows acceptance, or physical-safety evidence. Retain the scratch branches while the row remains open. |
+| **OC-035** | **Checkpoint prerequisite until P1, P7, and the candidate-bound check succeed; then satisfied only for the ratified checkpoint threat model.** | State that validators execute from the default-branch judge and that real hosted OIDC/REST job binding was observed. Do not say that a malicious default-branch commit, compromised runner/GitHub identity, or same-process Byzantine candidate is resisted. The required-check setting performed after the requested fast-forward protects subsequent changes, not the already-completed fast-forward. |
+| **OC-036** | **Checkpoint prerequisite for the specified accidental/agent-induced producer-substitution attack; residual Byzantine same-process resistance is BLOCKS-DEPLOYMENT disclosure debt.** | State that the protected producer and pytest plugin come from the default-branch judge and that candidate copies cannot accidentally weaken them. Also state that candidate tests still execute in the same pytest process and OS account; deliberate plugin mutation, protocol forgery, background tampering, or equivalent hostile behavior is outside the checkpoint claim. |
+| **OC-039** | **BLOCKS-DEPLOYMENT; disclosure debt. It is not scheduled work and does not independently block the checkpoint classification.** | State that `test_heartbeat_has_timestamp` has a measured fixed-port/startup race and fails only in the safe direction. Do not call a retry a fix. If it makes P7 red, the one-shot cycle terminates because required hosted evidence is red, not because OC-039 was promoted to a blocker. |
+
+### Explicitly deferred debt and non-claims
+
+The following items are not prerequisites for P5, PR readiness, or this
+checkpoint fast-forward:
+
+- OC-020’s cross-platform in-execution authority boundary;
+- OC-036’s Byzantine-candidate/same-process residual;
+- OC-039’s deterministic dynamic-port repair;
+- adding artifact hashes to `requirements-protected-ci-lock.txt`;
+- OC-034/OC-037 release-promotion and direct-upload restrictions;
+- physical OFF, real 2604B, dummy-load, independent-final-element, Windows
+  ONEDIR, long-soak, and laboratory acceptance gates.
+
+They continue to bar deployment, release-readiness, physical-safety, or
+laboratory-acceptance claims wherever their existing contracts say so. A
+successful Montana checkpoint is a reviewed software checkpoint, not a
+deployable or physically verified release.
+
+---
+
 ## Current milestone — software-side pre-lab readiness
 
 Before going to the laboratory, complete and independently review every gate
