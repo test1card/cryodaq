@@ -253,9 +253,14 @@ def main() -> int:
     # ---- 2. export attacks must ALL fail --------------------------------
     attacks = {
         "write": f"open(r'{export / 'main.py'}','w').write('MUTATED')",
+        # NB: this must NOT raise SystemExit -- that exits before either marker is
+        # printed, so the result is neither "refused" nor "succeeded" and scores
+        # INCONCLUSIVE. Report the icacls outcome explicitly instead.
         "acl-rewrite": (
-            f"import subprocess;raise SystemExit(subprocess.run(['icacls.exe',r'{export}',"
-            f"'/grant','*S-1-1-0:(F)'],capture_output=True).returncode)"
+            f"import subprocess;_r=subprocess.run(['icacls.exe',r'{export}','/grant','*S-1-1-0:(F)'],"
+            "capture_output=True)
+"
+            " raise OSError('icacls refused') if _r.returncode else None"
         ),
         "rename": f"import os;os.replace(r'{export / 'main.py'}', r'{export / 'renamed.py'}')",
         "delete-recreate": (
