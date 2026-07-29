@@ -50,3 +50,7 @@ jobs:
       - name: Trace which DLL the restricted child dies on
         shell: pwsh
         run: python tools/trace_restricted_loader.py
+
+      - name: MIC-only boundary probe (reviewer-specified next experiment)
+        shell: pwsh
+        run: python tools/probe_low_integrity_boundary.py
