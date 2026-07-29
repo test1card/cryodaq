@@ -153,6 +153,57 @@ The same rebuild established two things this register should state plainly:
   whole-area review evidence are health authority, build and packaging, sinks,
   test infrastructure, and the soak and evidence scripts.
 
+## *** DETERMINATION FOR THE CURRENT ARTIFACT: DO NOT MERGE ***
+
+Ruled 2026-07-29 by the independent reviewer, on the ratified blocker rule applied mechanically.
+This is a terminal outcome the plan explicitly provides for, not an invitation to another
+correction cycle.
+
+**Two blockers are unmet, and neither can be closed by further work on this branch alone.**
+
+**OC-020 — the interlock's honest control has never run on Windows.** The candidate sandbox child
+exits `0xC0000142` (STATUS_DLL_INIT_FAILED) with empty stderr on `windows-latest` and on a
+developer machine alike: it terminates before Python starts. In the reviewer's words, *"a child
+that exits 0xC0000142 before Python starts is not a failing attack; it is a missing control."*
+A Linux ordering defect in the same layer was found and corrected, and one ubuntu partition then
+passed its honest control for the first time — **that is diagnostic evidence and is explicitly not
+a closure.** A green subset does not satisfy a criterion that requires both hosted operating
+systems. The restricted token must not be relaxed merely to get Python to start, and no fourth
+speculative attempt should be made without a specific loader-level diagnosis.
+
+**OC-038 — the protected evidence chain has never executed.** `workflow_run` workflows load from
+the default branch; `.github/workflows/protected-ci-evidence-gate.yml` is absent from `master`, and
+the corresponding run reports zero jobs. So the ordinary 8/8 CI result — real, and green on both
+runners — remains **produced and judged entirely by candidate-controlled machinery**. That defeats
+the exact-evidence invariant directly, and it is why OC-035 and OC-036 cannot be adjudicated from
+hosted evidence yet.
+
+*** A CLASSIFICATION ARGUMENT WAS PUT AND REJECTED, and it is recorded because rejecting it is
+part of the finding. *** It was argued that OC-038 might be a P9 precondition like OC-034, since
+a push to `master` does not move this PR's head SHA. The reviewer's answer: the premise is true and
+insufficient — *"SHA movement is an evidence-invalidation question, not the blocker-classification
+test"* — and the argument was rationalising toward the convenient answer. OC-034 governs later
+promotion routes and its absence does not falsify the evidence used to review this PR; OC-038
+removes the authority behind that evidence. Both requiring an owner action does not make them the
+same class.
+
+**The gate is not unsatisfiable.** A candidate copy cannot guard its own bootstrap, but an
+explicitly reviewed owner bootstrap of the protected workflow — together with its full judge and
+producer dependency closure, not the YAML alone — onto `master` installs the trust root. A
+subsequent fresh run can then execute that workflow against the unchanged PR SHA. That is an
+ordinary root-of-trust bootstrap, not an amendment to a merge property.
+
+**The order of operations from here**, in the reviewer's sequence: record the in-flight run as
+candidate-workflow evidence only; keep the Linux scratch result as diagnostics; obtain a specific
+Windows loader diagnosis before any further sandbox change; close OC-020 only after honest controls
+AND attacks pass on both hosted systems with independent review; then the reviewed owner bootstrap
+onto `master`; then a fresh run against the frozen SHA requiring actual protected jobs, eight
+successful protected executions and the ACCEPTED partition receipt; only then close OC-038 and
+adjudicate OC-035/036; and finally the P9 settings actions, with the PR diff re-audited because the
+default branch will have moved.
+
+---
+
 ## Merge-blocker classification — the ratified rule applied to every row
 
 A row blocks merge **only when exact structural evidence or deterministic reproduction**
