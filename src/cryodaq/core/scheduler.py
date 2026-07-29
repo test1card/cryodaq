@@ -146,7 +146,7 @@ class Scheduler:
 
     Использование::
 
-        scheduler = Scheduler(broker)
+        scheduler = Scheduler(broker, sqlite_writer=writer)
         scheduler.add(InstrumentConfig(driver=lakeshore1))
         scheduler.add(InstrumentConfig(driver=lakeshore2))
         scheduler.add(InstrumentConfig(driver=keithley))
@@ -161,6 +161,7 @@ class Scheduler:
         *,
         safety_broker: Any | None = None,
         sqlite_writer: Any | None = None,
+        publish_unpersisted_readings: bool = False,
         adaptive_throttle: Any | None = None,
         calibration_acquisition: Any | None = None,
         reviewed_source_connect_begin: (
@@ -188,6 +189,8 @@ class Scheduler:
         self._broker = broker
         self._safety_broker = safety_broker
         self._sqlite_writer = sqlite_writer
+        self._publish_unpersisted_readings = publish_unpersisted_readings is True
+        self._missing_persistence_reported = False
         self._adaptive_throttle = adaptive_throttle
         self._calibration_acquisition = calibration_acquisition
         self._reviewed_source_connect_begin = reviewed_source_connect_begin
@@ -1290,6 +1293,15 @@ class Scheduler:
         state.total_reads += 1
         state.consecutive_errors = 0
         state.backoff_s = INITIAL_BACKOFF_S
+
+        if self._sqlite_writer is None and not self._publish_unpersisted_readings:
+            if not self._missing_persistence_reported:
+                logger.critical(
+                    "Scheduler has no persistence writer; readings from '%s' will not be published",
+                    name,
+                )
+                self._missing_persistence_reported = True
+            return
 
         # Step 1a: If calibration acquisition active, read SRDG BEFORE persisting
         # so KRDG+SRDG can be written atomically in one transaction (H.10).

@@ -95,7 +95,7 @@ async def test_mock_driver_polled(broker: DataBroker) -> None:
     queue = await broker.subscribe("test_consumer", maxsize=100)
 
     driver = MockDriver("poller")
-    sched = Scheduler(broker)
+    sched = Scheduler(broker, publish_unpersisted_readings=True)
     sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.01))
 
     await sched.start()

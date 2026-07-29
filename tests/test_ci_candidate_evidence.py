@@ -980,6 +980,59 @@ def test_protected_failure_relay_labels_and_caps_valid_candidate_origin_details(
     ) in captured.err
 
 
+def test_protected_failure_relay_raw_subprocess_output_respects_byte_budget() -> None:
+    emoji = chr(0x1F600)
+
+    def failure_receipt(*, invocation_index: int, final_ascii_bytes: int) -> str:
+        nodes = [f"{index}:{emoji * 63}" for index in range(10)]
+        nodes.append(f"10:{emoji * 16}{'a' * final_ascii_bytes}")
+        return FAILURE_RECEIPT_PREFIX + canonical_failure_receipt(
+            {
+                "collection_complete": True,
+                "failed_nodeids": nodes,
+                "invocation_index": invocation_index,
+                "population": {
+                    "collected": len(nodes),
+                    "deselected": 0,
+                    "executed": len(nodes),
+                    "skipped": 0,
+                },
+                "suite": "core",
+            }
+        )
+
+    candidate_lines = [
+        failure_receipt(invocation_index=1, final_ascii_bytes=188),
+        failure_receipt(invocation_index=2, final_ascii_bytes=186),
+    ]
+    rendered = [ci_candidate_evidence._bounded_protected_relay_line(line, suite="core") for line in candidate_lines]
+    assert all(line is not None for line in rendered)
+    assert [len(line.encode("utf-8")) for line in rendered if line is not None] == [8_192, 8_190]
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys\n"
+                "from pathlib import Path\n"
+                "from types import SimpleNamespace\n"
+                "from tools import ci_candidate_evidence\n"
+                "receipt = SimpleNamespace(returncode=1, stdout=sys.stdin.buffer.read(), stderr=b'')\n"
+                "ci_candidate_evidence._relay_protected_failure(\n"
+                "    receipt, suite='core', output=Path('unused-protected-bundle')\n"
+                ")\n"
+            ),
+        ],
+        cwd=ROOT,
+        input="\n".join(candidate_lines).encode("utf-8"),
+        capture_output=True,
+        check=True,
+    )
+
+    assert len(completed.stdout + completed.stderr) <= 16_384
+
+
 def _protected_identity_fixture(now: int = 2_000_000_000) -> tuple[dict, bytes, dict, dict, dict]:
     issued_at = now - 600
     producer_sha = "a" * 40

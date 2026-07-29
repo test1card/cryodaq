@@ -10,7 +10,7 @@ These tests verify:
   - write_immediate() tolerates slow writes (no premature timeout)
   - old queue-based start() API still works
   - start_immediate() creates the data directory on demand
-  - Scheduler with sqlite_writer=None still publishes (backward compat)
+  - Scheduler without a writer fails closed before either broker
 """
 
 from __future__ import annotations
@@ -291,7 +291,7 @@ async def test_start_immediate_creates_data_dir(tmp_path: Path, monkeypatch) -> 
 
 
 # ---------------------------------------------------------------------------
-# 7. Scheduler with sqlite_writer=None still publishes (backward compat)
+# 7. Scheduler persistence failures fail closed
 # ---------------------------------------------------------------------------
 
 
@@ -340,21 +340,21 @@ async def test_locked_db_swallowed_failure_does_not_publish(tmp_path: Path, monk
     await writer.stop()
 
 
-async def test_scheduler_without_writer_still_publishes(tmp_path: Path) -> None:
-    """Scheduler(sqlite_writer=None) must behave exactly like the old Scheduler."""
+async def test_scheduler_without_writer_fails_closed() -> None:
+    """The default scheduler path must not bypass persistence."""
+    from cryodaq.core.safety_broker import SafetyBroker
+
     broker = DataBroker()
     test_queue = await broker.subscribe("no_writer_consumer", maxsize=100)
+    safety_broker = SafetyBroker()
+    safety_queue = safety_broker.subscribe("no_writer_safety_consumer", maxsize=100)
 
     driver = MockDriver()
-    # Explicit sqlite_writer=None — should be identical to the old two-arg Scheduler.
-    sched = Scheduler(broker, sqlite_writer=None)
-    sched.add(InstrumentConfig(driver=driver, poll_interval_s=0.05))
+    sched = Scheduler(broker, safety_broker=safety_broker)
+    sched.add(InstrumentConfig(driver=driver))
+    state = sched._instruments[driver.name]
 
-    await sched.start()
-    try:
-        reading = await asyncio.wait_for(test_queue.get(), timeout=2.0)
-    finally:
-        await sched.stop()
+    await sched._process_readings(state, await driver.read_channels())
 
-    assert reading.channel == "CH1"
-    assert abs(reading.value - 4.2) < 1e-9, f"Unexpected reading value: {reading.value}"
+    assert test_queue.empty(), "A reading bypassed persistence and reached DataBroker"
+    assert safety_queue.empty(), "A reading bypassed persistence and reached SafetyBroker"

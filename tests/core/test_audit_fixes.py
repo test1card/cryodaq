@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -487,42 +487,75 @@ def test_vacuum_trend_push_rejects_nonfinite_independently() -> None:
     assert all(math.isfinite(log_p) for _, log_p in vt._buffer)
 
 
-def test_engine_feed_sites_gate_on_is_usable() -> None:
-    """All estimator feed loops gate on the doctrine predicate.
-
-    The loops live in importable runtime-task functions, so inspect those
-    production functions directly.
-    """
-    import inspect
-    import re
-
-    from cryodaq import engine
-
-    assert not hasattr(engine, "_push_if_finite")
-
-    from cryodaq.engine_wiring import runtime_tasks
-
-    src = re.sub(
-        r"\s+",
-        "",
-        "\n".join(
-            inspect.getsource(fn)
-            for fn in (
-                runtime_tasks.sensor_diag_feed,
-                runtime_tasks.vacuum_trend_feed,
-                runtime_tasks._alarm_v2_feed_loop,
-            )
+def _usable_and_unusable_feed_readings(*, channel: str, unit: str) -> tuple[Reading, Reading]:
+    return (
+        Reading(
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            instrument_id="test",
+            channel=channel,
+            value=99.0,
+            unit=unit,
+            status=ChannelStatus.SENSOR_ERROR,
+        ),
+        Reading(
+            timestamp=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+            instrument_id="test",
+            channel=channel,
+            value=4.2,
+            unit=unit,
         ),
     )
-    assert "sensor_diag.push(" in src
-    assert "vacuum_trend.push(" in src
-    # Every feed loop is guarded by the doctrine predicate; no _push_if_finite.
-    assert "_push_if_finite" not in src
-    assert "ifreading.is_usable():" in src
 
-    # A2: the alarm-v2 feed loop was extracted to _alarm_v2_feed_loop; the
-    # doctrine gate on the rate estimator moved with it and must remain.
-    feed_src = re.sub(r"\s+", "", inspect.getsource(engine._alarm_v2_feed_loop))
-    assert "rate_estimator.push(" in feed_src
-    assert "ifreading.is_usable():" in feed_src
-    assert "_push_if_finite" not in feed_src
+
+async def test_sensor_diag_feed_pushes_only_usable_readings() -> None:
+    from cryodaq.engine_wiring import runtime_tasks
+
+    unusable, usable = _usable_and_unusable_feed_readings(channel="T1", unit="K")
+    queue = MagicMock()
+    queue.get = AsyncMock(side_effect=(unusable, usable, asyncio.CancelledError()))
+    broker = MagicMock()
+    broker.subscribe = AsyncMock(return_value=queue)
+    sensor_diag = MagicMock()
+
+    await runtime_tasks.sensor_diag_feed(sensor_diag, broker)
+
+    sensor_diag.push.assert_called_once_with(
+        usable.channel,
+        usable.timestamp.timestamp(),
+        usable.value,
+    )
+
+
+async def test_vacuum_trend_feed_pushes_only_usable_readings() -> None:
+    from cryodaq.engine_wiring import runtime_tasks
+
+    unusable, usable = _usable_and_unusable_feed_readings(channel="P1", unit="mbar")
+    queue = MagicMock()
+    queue.get = AsyncMock(side_effect=(unusable, usable, asyncio.CancelledError()))
+    broker = MagicMock()
+    broker.subscribe = AsyncMock(return_value=queue)
+    vacuum_trend = MagicMock()
+
+    await runtime_tasks.vacuum_trend_feed(vacuum_trend, {"pressure_channel": "P1"}, broker)
+
+    vacuum_trend.push.assert_called_once_with(
+        usable.timestamp.timestamp(),
+        usable.value,
+    )
+
+
+async def test_alarm_v2_feed_loop_pushes_only_usable_readings() -> None:
+    from cryodaq.engine_wiring import runtime_tasks
+
+    unusable, usable = _usable_and_unusable_feed_readings(channel="T1", unit="K")
+    queue = MagicMock()
+    queue.get = AsyncMock(side_effect=(unusable, usable, asyncio.CancelledError()))
+    rate_estimator = MagicMock()
+
+    await runtime_tasks._alarm_v2_feed_loop(queue, MagicMock(), rate_estimator)
+
+    rate_estimator.push.assert_called_once_with(
+        usable.channel,
+        usable.timestamp.timestamp(),
+        usable.value,
+    )
