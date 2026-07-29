@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import yaml
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
@@ -22,7 +24,7 @@ from cryodaq.core.descriptor_transport import (
     DescriptorQualifiedReading,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
-from cryodaq.gui.shell.main_window_v2 import MainWindowV2
+from cryodaq.gui.shell.main_window_v2 import MainWindowV2, _active_channel_descriptors
 from cryodaq.gui.shell.overlays.multiline_panel import MultiLinePanel
 from cryodaq.gui.state.descriptor_store import DescriptorStore, IdentityStatus
 
@@ -64,7 +66,10 @@ def _descriptor(
     )
 
 
-def _shell() -> SimpleNamespace:
+def _shell(
+    *,
+    active_descriptors: dict[str, ChannelDescriptorV1] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         _calibration_panel=MagicMock(),
         _conductivity_panel=MagicMock(),
@@ -75,11 +80,57 @@ def _shell() -> SimpleNamespace:
         _analytics_keithley_snapshot={},
         _multiline_snapshot={},
         _push_analytics=MagicMock(),
+        _active_channel_descriptors=active_descriptors or {},
+        _declared_cold_stage_descriptor=None,
     )
 
 
 def _route(shell: SimpleNamespace, reading: Reading, descriptor: ChannelDescriptorV1) -> None:
     MainWindowV2._dispatch_descriptor_reading(shell, reading, descriptor)  # type: ignore[arg-type]
+
+
+def _with_applied_cold_stage(reading: Reading, channel: str) -> Reading:
+    return replace(
+        reading,
+        metadata={"engine_applied": {"cooldown": {"channel_cold": channel}}},
+    )
+
+
+def _write_manifest(path: Path, descriptor: ChannelDescriptorV1) -> None:
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "descriptors": [
+                    {
+                        "schema_version": descriptor.schema_version,
+                        "channel_id": descriptor.channel_id,
+                        "instrument_id": descriptor.instrument_id,
+                        "source_key": descriptor.source_key,
+                        "quantity": descriptor.quantity.value,
+                        "unit": descriptor.unit,
+                        "role": descriptor.role.value,
+                        "safety_class": descriptor.safety_class.value,
+                        "display_group": descriptor.display_group,
+                        "display_name": descriptor.display_name,
+                        "visible_by_default": descriptor.visible_by_default,
+                        "display_order": descriptor.display_order,
+                        "descriptor_revision": descriptor.descriptor_revision,
+                    }
+                ],
+                "bindings": [
+                    {
+                        "instrument_id": descriptor.instrument_id,
+                        "emitted_channel": descriptor.channel_id,
+                        "channel_id": descriptor.channel_id,
+                    }
+                ],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_source_metadata_routes_despite_non_vendor_name_and_voltage_suffix_lie() -> None:
@@ -247,7 +298,10 @@ def test_bare_reading_never_inherits_cached_authoritative_specialist_routing() -
 
 
 def test_same_t12_id_with_non_manifest_identity_never_routes_as_cold_stage() -> None:
-    reading = _reading("Т12", "K", instrument_id="LS218_2")
+    reading = _with_applied_cold_stage(
+        _reading("Т12", "K", instrument_id="LS218_2"),
+        "Т12",
+    )
     canonical = _descriptor(
         reading,
         quantity=ChannelQuantity.TEMPERATURE,
@@ -256,7 +310,7 @@ def test_same_t12_id_with_non_manifest_identity_never_routes_as_cold_stage() -> 
         safety_class=ChannelSafetyClass.SAFETY_CRITICAL_INPUT,
         display_group="компрессор",
     )
-    shell = _shell()
+    shell = _shell(active_descriptors={canonical.channel_id: canonical})
     for adversarial in (
         replace(canonical, instrument_id="LS218_1"),
         replace(canonical, source_key="input.3.temperature"),
@@ -265,10 +319,66 @@ def test_same_t12_id_with_non_manifest_identity_never_routes_as_cold_stage() -> 
         replace(canonical, display_group="криостат"),
     ):
         _route(shell, reading, adversarial)
-    shell._push_analytics.assert_not_called()
+    assert call("set_cold_temperature_reading", reading) not in shell._push_analytics.call_args_list
+    assert shell._analytics_temperature_snapshot == {reading.channel: reading}
+    assert shell._analytics_view.set_temperature_readings.call_count == 5
 
     _route(shell, reading, canonical)
-    shell._push_analytics.assert_called_once_with("set_cold_temperature_reading", reading)
+    shell._push_analytics.assert_any_call("set_cold_temperature_reading", reading)
+    assert shell._analytics_view.set_temperature_readings.call_count == 6
+
+
+def test_unrecognized_cold_stage_remains_an_ordinary_temperature_channel() -> None:
+    reading = _with_applied_cold_stage(
+        _reading("unrecognized.cold", "K", instrument_id="foreign"),
+        "unrecognized.cold",
+    )
+    descriptor = _descriptor(
+        reading,
+        quantity=ChannelQuantity.TEMPERATURE,
+        source_key="foreign.temperature",
+    )
+    shell = _shell()
+
+    _route(shell, reading, descriptor)
+
+    assert call("set_cold_temperature_reading", reading) not in shell._push_analytics.call_args_list
+    assert shell._analytics_temperature_snapshot == {reading.channel: reading}
+    shell._analytics_view.set_temperature_readings.assert_called_once_with({reading.channel: reading})
+
+
+def test_declaring_local_manifest_can_rename_cold_stage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    base_reading = _reading("base.cold", "K", instrument_id="base")
+    base = _descriptor(
+        base_reading,
+        quantity=ChannelQuantity.TEMPERATURE,
+        source_key="base.temperature",
+    )
+    renamed_reading = _with_applied_cold_stage(
+        _reading("authority-renamed-cold", "K", instrument_id="local"),
+        "authority-renamed-cold",
+    )
+    renamed = _descriptor(
+        renamed_reading,
+        quantity=ChannelQuantity.TEMPERATURE,
+        source_key="local.temperature",
+    )
+    _write_manifest(config_dir / "channel_descriptors.yaml", base)
+    _write_manifest(config_dir / "channel_descriptors.local.yaml", renamed)
+    (config_dir / "instruments.local.yaml").write_text("instruments: []\n", encoding="utf-8")
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    active = _active_channel_descriptors()
+    shell = _shell(active_descriptors=dict(active))
+    _route(shell, renamed_reading, renamed)
+
+    assert active == {renamed.channel_id: renamed}
+    shell._push_analytics.assert_any_call("set_cold_temperature_reading", renamed_reading)
 
 
 def test_multiline_like_names_without_manifest_identity_never_route() -> None:

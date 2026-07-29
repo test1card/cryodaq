@@ -68,27 +68,35 @@ def _dispatch_described(
     reading: Reading,
     quantity: ChannelQuantity,
     *,
+    descriptor: ChannelDescriptorV1 | None = None,
+    manifest_authoritative: bool = False,
     display_name: str = "Test analytics channel",
     source_key: str | None = None,
     role: ChannelRole = ChannelRole.PRIMARY_MEASUREMENT,
     safety_class: ChannelSafetyClass = ChannelSafetyClass.OBSERVATIONAL,
     display_group: str = "test",
 ) -> None:
-    descriptor = ChannelDescriptorV1(
-        schema_version=1,
-        channel_id=reading.channel,
-        instrument_id=reading.instrument_id,
-        source_key=source_key or f"test.{quantity.value}",
-        quantity=quantity,
-        unit=reading.unit,
-        role=role,
-        safety_class=safety_class,
-        display_group=display_group,
-        display_name=display_name,
-        visible_by_default=True,
-        display_order=0,
-        descriptor_revision=1,
-    )
+    if descriptor is None:
+        descriptor = ChannelDescriptorV1(
+            schema_version=1,
+            channel_id=reading.channel,
+            instrument_id=reading.instrument_id,
+            source_key=source_key or f"test.{quantity.value}",
+            quantity=quantity,
+            unit=reading.unit,
+            role=role,
+            safety_class=safety_class,
+            display_group=display_group,
+            display_name=display_name,
+            visible_by_default=True,
+            display_order=0,
+            descriptor_revision=1,
+        )
+    if manifest_authoritative:
+        w._active_channel_descriptors = {
+            **w._active_channel_descriptors,
+            descriptor.channel_id: descriptor,
+        }
     w.dispatch_qualified_reading(DescriptorQualifiedReading(reading=reading, descriptor=descriptor))
 
 
@@ -495,7 +503,12 @@ def test_engine_applied_cold_stage_beats_config_edited_before_gui_start(tmp_path
     w._ensure_overlay("analytics")
     w._analytics_view.set_phase("cooldown")
     cold = _with_applied_cold_stage(_t_reading(applied_cold), applied_cold)
-    _dispatch_described(w, cold, ChannelQuantity.TEMPERATURE)
+    _dispatch_described(
+        w,
+        cold,
+        ChannelQuantity.TEMPERATURE,
+        manifest_authoritative=True,
+    )
 
     _assert_rendered_cold_stage(w, cold)
 
@@ -516,8 +529,18 @@ def test_replay_applied_cold_stage_does_not_route_live_file_warm_channel(tmp_pat
     w._analytics_view.set_phase("cooldown")
     replay_cold = _with_applied_cold_stage(_t_reading("replay.cold"), "replay.cold")
     live_warm = _with_applied_cold_stage(_t_reading("live.warm"), "replay.cold")
-    _dispatch_described(w, replay_cold, ChannelQuantity.TEMPERATURE)
-    _dispatch_described(w, live_warm, ChannelQuantity.TEMPERATURE)
+    _dispatch_described(
+        w,
+        replay_cold,
+        ChannelQuantity.TEMPERATURE,
+        manifest_authoritative=True,
+    )
+    _dispatch_described(
+        w,
+        live_warm,
+        ChannelQuantity.TEMPERATURE,
+        manifest_authoritative=True,
+    )
 
     _assert_rendered_cold_stage(w, replay_cold)
 
@@ -537,7 +560,12 @@ def test_engine_applied_cold_stage_preserves_ordinary_routing(tmp_path, monkeypa
     w._ensure_overlay("analytics")
     w._analytics_view.set_phase("cooldown")
     cold = _with_applied_cold_stage(_t_reading("applied.cold"), "applied.cold")
-    _dispatch_described(w, cold, ChannelQuantity.TEMPERATURE)
+    _dispatch_described(
+        w,
+        cold,
+        ChannelQuantity.TEMPERATURE,
+        manifest_authoritative=True,
+    )
 
     _assert_rendered_cold_stage(w, cold)
 
@@ -586,10 +614,7 @@ def test_this_stands_declared_cold_stage_feeds_predictor():
         w,
         cold_stage,
         ChannelQuantity.TEMPERATURE,
-        display_name="Т1 — misleading relocatable sensor label",
-        source_key="input.4.temperature",
-        safety_class=ChannelSafetyClass.SAFETY_CRITICAL_INPUT,
-        display_group="компрессор",
+        descriptor=w._active_channel_descriptors["Т12"],
     )
     assert w._analytics_view._last_cold_temperature_reading is cold_stage
     assert w._analytics_snapshot["set_cold_temperature_reading"] == (cold_stage,)
@@ -625,6 +650,7 @@ def test_declared_noncanonical_cold_stage_feeds_predictor_and_rejects_other_temp
         w,
         declared_cold,
         ChannelQuantity.TEMPERATURE,
+        manifest_authoritative=True,
         display_name="Другая холодная ступень",
         source_key="probe.12.temperature",
         safety_class=ChannelSafetyClass.OBSERVATIONAL,
@@ -640,6 +666,7 @@ def test_declared_noncanonical_cold_stage_feeds_predictor_and_rejects_other_temp
         w,
         non_cold_stage,
         ChannelQuantity.TEMPERATURE,
+        manifest_authoritative=True,
         display_name="Т12 — misleading display label",
     )
     assert w._analytics_view._last_cold_temperature_reading is declared_cold

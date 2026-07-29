@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -75,6 +75,11 @@ from cryodaq.operator_snapshot import (
     ReadinessTruth,
     SafetyLifecycle,
     SnapshotMode,
+)
+from cryodaq.paths import get_config_dir
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorStorageError,
+    load_live_channel_descriptor_catalog,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,6 +155,23 @@ def _engine_applied_cold_stage_channel(reading: Reading) -> str | None:
     return channel.strip()
 
 
+def _active_channel_descriptors() -> Mapping[str, ChannelDescriptorV1]:
+    """Load the same whole-file descriptor authority selected by the engine."""
+    config_dir = get_config_dir()
+    local_path = (
+        config_dir / "channel_descriptors.local.yaml" if (config_dir / "instruments.local.yaml").exists() else None
+    )
+    try:
+        owner = load_live_channel_descriptor_catalog(
+            config_dir / "channel_descriptors.yaml",
+            local_path=local_path,
+        )
+    except (OSError, ChannelDescriptorStorageError) as exc:
+        logger.warning("cold-stage descriptor authority unavailable; error=%s", exc)
+        return {}
+    return owner.storage_catalog_snapshot().by_channel_id
+
+
 class MainWindowV2(QMainWindow):
     """New shell-based main window for CryoDAQ."""
 
@@ -203,7 +225,8 @@ class MainWindowV2(QMainWindow):
         self.setMinimumSize(1280, 800)
 
         self._channel_mgr = get_channel_manager()
-        self._declared_cold_stage_channel: str | None = None
+        self._active_channel_descriptors = _active_channel_descriptors()
+        self._declared_cold_stage_descriptor: ChannelDescriptorV1 | None = None
         # D7.1b: descriptor identity store — GUI-thread-owned, lives for one session.
         self._descriptor_store = DescriptorStore()
         self._build_ui()
@@ -928,7 +951,7 @@ class MainWindowV2(QMainWindow):
         """
         applied_cold_stage_channel = _engine_applied_cold_stage_channel(reading)
         if applied_cold_stage_channel is not None:
-            self._declared_cold_stage_channel = applied_cold_stage_channel
+            self._declared_cold_stage_descriptor = self._active_channel_descriptors.get(applied_cold_stage_channel)
 
         quantity = descriptor.quantity
 
@@ -942,7 +965,7 @@ class MainWindowV2(QMainWindow):
             if self._analytics_view is not None:
                 self._analytics_view.set_temperature_readings({descriptor.channel_id: reading})
 
-            if descriptor.channel_id == self._declared_cold_stage_channel:
+            if descriptor == self._declared_cold_stage_descriptor:
                 self._push_analytics("set_cold_temperature_reading", reading)
         is_source_readback = (
             descriptor.role is ChannelRole.SOURCE_READBACK
@@ -970,7 +993,7 @@ class MainWindowV2(QMainWindow):
             if self._multiline_panel is not None:
                 self._multiline_panel.on_descriptor_reading(reading, descriptor)
 
-        if applied_cold_stage_channel is not None:
+        if applied_cold_stage_channel is not None and self._declared_cold_stage_descriptor is not None:
             self._push_analytics("clear_cold_stage_unavailable")
 
     # ------------------------------------------------------------------
