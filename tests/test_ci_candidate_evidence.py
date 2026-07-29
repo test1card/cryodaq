@@ -325,6 +325,7 @@ def _validate_production_protected_command(
     monkeypatch: pytest.MonkeyPatch,
     *,
     command: tuple[str, ...],
+    bundle_target_sha: str = "b" * 40,
 ) -> dict:
     repository = tmp_path / "candidate"
     producer_root = tmp_path / "producer"
@@ -334,7 +335,7 @@ def _validate_production_protected_command(
         bundle,
         command=command,
         producer=producer,
-        target_sha="b" * 40,
+        target_sha=bundle_target_sha,
     )
     monkeypatch.setattr(ci_candidate_evidence, "validate_candidate_manifest", lambda *_args: None)
     monkeypatch.setattr(ci_candidate_evidence, "_protected_producer_manifest", lambda *_args: producer)
@@ -369,6 +370,48 @@ def test_protected_verifier_accepts_the_command_generated_by_protected_run(
     assert result == {"check_run_id": "98765", "collected": 1, "executed": 1, "suite": "core"}
 
 
+@pytest.mark.parametrize(
+    ("producer_root", "destination", "candidate_repository"),
+    (
+        (
+            "/home/runner/work/cryodaq/cryodaq/judge",
+            "/home/runner/work/_temp/cryodaq-protected-candidate",
+            "/home/runner/work/cryodaq/cryodaq/candidate",
+        ),
+        (
+            r"D:\a\cryodaq\cryodaq\judge",
+            r"D:\a\_temp\cryodaq-protected-candidate",
+            r"D:\a\cryodaq\cryodaq\candidate",
+        ),
+    ),
+)
+def test_protected_verifier_accepts_producer_local_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    producer_root: str,
+    destination: str,
+    candidate_repository: str,
+) -> None:
+    command = _production_protected_command(tmp_path, monkeypatch)
+
+    result = _validate_production_protected_command(
+        tmp_path,
+        monkeypatch,
+        command=(
+            *command[:4],
+            producer_root,
+            *command[5:8],
+            destination,
+            command[9],
+            producer_root,
+            command[11],
+            candidate_repository,
+        ),
+    )
+
+    assert result == {"check_run_id": "98765", "collected": 1, "executed": 1, "suite": "core"}
+
+
 def test_protected_verifier_refuses_command_missing_candidate_git_repository(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -384,14 +427,13 @@ def test_protected_verifier_refuses_command_bound_to_a_different_candidate_repos
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command = _production_protected_command(tmp_path, monkeypatch)
-    wrong_repository = tmp_path / "different-candidate"
-    wrong_repository.mkdir()
 
-    with pytest.raises(CiCandidateEvidenceError, match="pinned producer"):
+    with pytest.raises(CiCandidateEvidenceError, match="target-misbound"):
         _validate_production_protected_command(
             tmp_path,
             monkeypatch,
-            command=(*command[:-1], str(wrong_repository.resolve(strict=True))),
+            command=(*command[:-1], "/different/candidate"),
+            bundle_target_sha="f" * 40,
         )
 
 
