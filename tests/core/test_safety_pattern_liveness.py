@@ -167,7 +167,7 @@ def test_interlock_pattern_matches_canonical_channel(condition: InterlockConditi
     )
 
 
-def test_safety_critical_declarations_resolve_to_exact_live_bindings() -> None:
+def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
     """Canonical safety identities must install exact live identities.
 
     safety.yaml deliberately names stable canonical identities. Startup
