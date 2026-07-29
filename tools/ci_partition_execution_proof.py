@@ -342,6 +342,8 @@ def _validate_population(
         )
     encoded = Counter(canonical_failure_receipt(payload) for payload in payloads)
     encoded_log = Counter(canonical_failure_receipt(payload) for payload in log_payloads)
+    if not log_payloads:
+        raise PartitionExecutionProofError(f"{suite}: job log contains no population receipts")
     if encoded_log != encoded:
         raise PartitionExecutionProofError(f"{suite}: job log and candidate artifact population receipts differ")
     totals = {

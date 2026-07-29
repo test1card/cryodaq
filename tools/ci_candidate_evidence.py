@@ -510,6 +510,9 @@ def _run(args: argparse.Namespace) -> int:
         github=github,
         artifact_name=args.artifact_name,
     )
+    output = f"{receipt.stdout.decode('utf-8', errors='strict')}\n{receipt.stderr.decode('utf-8', errors='strict')}"
+    for payload in _extract_failure_receipt_payloads(output, suite=args.suite):
+        print(f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}", flush=True)
     return receipt.returncode
 
 

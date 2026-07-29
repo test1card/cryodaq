@@ -422,7 +422,35 @@ def test_artifact_receipt_not_present_in_its_job_log_refuses(
     detail = _cell(api, "windows-latest", "agents")
     api.downloads[f"repos/{REPOSITORY_NAME}/actions/jobs/{detail['id']}/logs"] = b"no population receipt\n"
 
-    with pytest.raises(PartitionExecutionProofError, match="job log and candidate artifact"):
+    with pytest.raises(PartitionExecutionProofError, match="job log contains no population receipts"):
+        prove(
+            api,
+            repository=repository,
+            repository_name=REPOSITORY_NAME,
+            run_id=api.run_id,
+            sha=sha,
+        )
+
+
+def test_job_log_population_receipt_mismatch_refuses_distinctly(
+    evidence_repository: tuple[Path, str],
+) -> None:
+    repository, sha = evidence_repository
+    api = FakeApi(repository, sha)
+    detail = _cell(api, "windows-latest", "agents")
+    payload = {
+        "collection_complete": True,
+        "failed_nodeids": [],
+        "invocation_index": 1,
+        "population": {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0},
+        "schema_version": 3,
+        "suite": "agents",
+    }
+    api.downloads[f"repos/{REPOSITORY_NAME}/actions/jobs/{detail['id']}/logs"] = (
+        f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}\n".encode()
+    )
+
+    with pytest.raises(PartitionExecutionProofError, match="job log and candidate artifact population receipts differ"):
         prove(
             api,
             repository=repository,

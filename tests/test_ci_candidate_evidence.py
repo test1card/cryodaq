@@ -11,11 +11,12 @@ import tomllib
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from tools import ci_candidate_runner
+from tools import ci_candidate_evidence, ci_candidate_runner
 from tools.candidate_evidence import execute_exported_candidate
 from tools.ci_candidate_evidence import (
     FAILURE_RECEIPT_INDEX_ENV,
@@ -183,6 +184,39 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path, dict, dict, dict, dict]:
         parsed["bundle-manifest.json"],
         attestation,
     )
+
+
+def test_run_publishes_exact_population_receipts_to_the_job_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    marker = _population_receipt("agents", 1)
+    receipt = SimpleNamespace(
+        returncode=0,
+        stderr=b"candidate diagnostic that is not population evidence\n",
+        stdout=f"candidate-suite=agents command=1/1\n{marker}".encode(),
+    )
+    monkeypatch.setattr(ci_candidate_evidence, "_github_environment", lambda: {})
+    monkeypatch.setattr(ci_candidate_evidence, "execute_exported_candidate", lambda *_args, **_kwargs: receipt)
+    monkeypatch.setattr(ci_candidate_evidence, "write_execution_bundle", lambda *_args, **_kwargs: {})
+
+    result = ci_candidate_evidence._run(
+        SimpleNamespace(
+            artifact_name="cryodaq-candidate-ubuntu-latest-agents-1",
+            destination=tmp_path / "export",
+            output=tmp_path / "bundle",
+            repository=tmp_path,
+            revision="HEAD",
+            suite="agents",
+            timeout=60,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == marker
+    assert captured.err == ""
 
 
 def _validate(bundle: Path, execution: dict, candidate: dict, manifest: dict, attestation: dict) -> None:
