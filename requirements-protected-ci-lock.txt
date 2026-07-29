@@ -16,21 +16,21 @@
 # pin would have papered over the failure AND manufactured a modify/delete
 # conflict against the candidate, which removed the dependency entirely.
 #
-# WHAT THIS IS. A reviewed, candidate-compatible dependency snapshot, pinned on
-# the default branch so the candidate under test cannot alter its own judge's
-# environment. It is hash-verified against JUDGE_SHA by the gate's
-# "Verify immutable producer/judge object" steps.
+# WHAT THIS IS. This owner-authored, candidate-compatible dependency snapshot
+# is pending independent review. Pinned on the default branch, it cannot be
+# altered by the candidate under test. It is hash-verified against JUDGE_SHA
+# by the gate's "Verify immutable producer/judge object" steps.
 #
 # requirements-lock.txt remains the PRODUCT lock, governed by this branch's
 # pyproject.toml and by scripts/check_lock_drift.py. Do not point the judge at
 # it again.
 #
-# KNOWN LIMITATION: exact version pins are only version-pinned. A genuinely
-# immutable lock would also carry artifact hashes (--require-hashes).
-#
+# KNOWN LIMITATION: This lock is intentionally hashless, so its exact version
+# pins are not immutable dependency evidence. Artifact substitution is an
+# accepted deferred supply-chain risk; immutable locking requires --require-hashes.
 #
 # Generated as Python 3.14 `pip-compile --all-build-deps --extra=dev
-# --extra=web` platform candidates, then reviewed and reconciled into one
+# --extra=web` platform candidates, then reconciled by the owner into one
 # Windows/Linux/macOS lock as documented in
 # docs/deployment.md. Never replace this file with raw single-host output.
 # Platform markers for Uvicorn/PyInstaller transitive dependencies are guarded
