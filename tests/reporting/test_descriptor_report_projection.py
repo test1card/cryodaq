@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock, call
 
 from cryodaq.channels.descriptors import (
     ChannelDescriptorV1,
@@ -11,12 +12,13 @@ from cryodaq.channels.descriptors import (
     ChannelSafetyClass,
 )
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
-from cryodaq.reporting.data import ReportDataset
+from cryodaq.reporting.data import HistoricalReading, ReportDataset
 from cryodaq.reporting.descriptor_projection import (
     bind_descriptor_projection,
     project_descriptor_replay,
 )
 from cryodaq.reporting.generator import ReportGenerator
+from cryodaq.reporting.sections import render_alarms_section
 from cryodaq.storage.archive_reader import BoundedReadIssue, BoundedReadIssueCode
 from cryodaq.storage.broker_replay import DescriptorReplayBatch, DescriptorReplayReading
 from cryodaq.storage.descriptor_archive import (
@@ -316,3 +318,53 @@ def test_event_role_is_alarm_authority_not_channel_prefix() -> None:
     projection = project_descriptor_replay(_batch(_row(misleading, second=1), _row(event, second=2)))
 
     assert [row.channel for row in projection.alarm_readings] == ["state-neutral"]
+
+
+def test_alarm_section_incomplete_descriptor_evidence_without_readings_is_indeterminate() -> None:
+    document = MagicMock()
+    dataset = ReportDataset(
+        metadata={},
+        descriptor_complete=False,
+        descriptor_issues=("descriptor_hash_missing:cold-sidecar",),
+    )
+
+    render_alarms_section(document, dataset, Path("."))
+
+    assert document.add_paragraph.call_args_list == [
+        call("Состояние тревог невозможно определить: данные дескрипторов неполны.")
+    ]
+
+
+def test_alarm_section_complete_descriptor_evidence_without_readings_is_clean() -> None:
+    document = MagicMock()
+    dataset = ReportDataset(metadata={}, descriptor_complete=True)
+
+    render_alarms_section(document, dataset, Path("."))
+
+    assert document.add_paragraph.call_args_list == [call("Тревог не зафиксировано ✓")]
+
+
+def test_alarm_section_incomplete_descriptor_evidence_preserves_known_alarms_without_clean_claim() -> None:
+    document = MagicMock()
+    dataset = ReportDataset(
+        metadata={},
+        alarm_readings=[
+            HistoricalReading(
+                datetime(2026, 7, 12, 12, 0, 2, tzinfo=UTC),
+                "instrument-a",
+                "event",
+                1.0,
+                "state",
+                "alarm",
+            )
+        ],
+        descriptor_complete=False,
+        descriptor_issues=("bounded_read_incomplete:cold-sidecar",),
+    )
+
+    render_alarms_section(document, dataset, Path("."))
+
+    assert document.add_paragraph.call_args_list == [
+        call("Состояние тревог невозможно определить: данные дескрипторов неполны."),
+        call("12:00:02 │ event = 1 state [alarm]", style="List Bullet"),
+    ]

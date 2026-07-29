@@ -723,8 +723,11 @@ def render_operator_log_section(document: Document, dataset: ReportDataset, _ass
 
 def render_alarms_section(document: Document, dataset: ReportDataset, _assets_dir: Path) -> None:
     document.add_heading("Тревоги", level=1)
+    if not dataset.descriptor_complete:
+        document.add_paragraph("Состояние тревог невозможно определить: данные дескрипторов неполны.")
     if not dataset.alarm_readings:
-        document.add_paragraph("Тревог не зафиксировано ✓")
+        if dataset.descriptor_complete:
+            document.add_paragraph("Тревог не зафиксировано ✓")
         return
     for item in dataset.alarm_readings[-20:]:
         document.add_paragraph(
