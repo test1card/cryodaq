@@ -145,9 +145,10 @@ class ReportGenerator:
         deadline_epoch: float | None = None,
     ) -> ReportGenerationResult:
         metadata_path = experiment_root / "metadata.json"
-        dataset = self._load_descriptor_dataset(metadata_path)
-        experiment = dataset.metadata["experiment"]
-        template = dataset.metadata["template"]
+        metadata = self._extractor.load_metadata(metadata_path)
+        self._extractor._validate_artifact_paths(metadata, experiment_root)
+        experiment = metadata["experiment"]
+        template = metadata["template"]
         assets_dir = reports_dir / "assets"
         editable_docx_path = reports_dir / "report_editable.docx"
         raw_source_docx_path = reports_dir / "report_raw.docx"
@@ -163,6 +164,7 @@ class ReportGenerator:
                 reason="Формирование отчёта отключено шаблоном.",
             )
 
+        dataset = self._load_descriptor_dataset(metadata_path)
         reports_dir.mkdir(parents=True, exist_ok=True)
         assets_dir.mkdir(parents=True, exist_ok=True)
 

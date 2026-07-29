@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -535,6 +537,9 @@ async def test_report_with_no_measured_values_table_keeps_ordinary_empty_state(
         for item in metadata.get("artifact_index", [])
         if Path(str(item.get("path", ""))).name != "measured_values.csv"
     ]
+    metadata["summary_metadata"]["measured_values_complete"] = True
+    metadata["summary_metadata"]["measured_values_truncated"] = False
+    metadata["summary_metadata"]["measured_values_issues"] = []
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     archive_csv = experiment_root / "archive" / "tables" / "measured_values.csv"
     if archive_csv.exists():
@@ -547,6 +552,74 @@ async def test_report_with_no_measured_values_table_keeps_ordinary_empty_state(
         "\u0434\u0430\u043d\u043d\u044b\u0435 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0442"
         in _doc_text(result.docx_path)
     )
+
+
+@pytest.mark.parametrize(
+    "authority_mutation",
+    [
+        pytest.param("not_finalized", id="not-finalized"),
+        pytest.param("missing_complete", id="missing-complete"),
+        pytest.param("incomplete", id="incomplete"),
+        pytest.param("truncated", id="truncated"),
+        pytest.param("issues", id="issues"),
+        pytest.param("nonzero", id="nonzero"),
+        pytest.param("unrelated_schema", id="unrelated-sqlite-schema"),
+    ],
+)
+async def test_report_empty_measurements_require_exact_finalized_zero_row_authority(
+    manager: ExperimentManager,
+    tmp_path: Path,
+    authority_mutation: str,
+) -> None:
+    """Missing artifacts are empty only with complete positive zero-row authority."""
+    exp_id = manager.start_experiment(
+        name="Unproven empty",
+        title="Unproven empty",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["result_tables"] = [
+        item for item in metadata.get("result_tables", []) if item.get("table_id") != "measured_values"
+    ]
+    metadata["artifact_index"] = [
+        item
+        for item in metadata.get("artifact_index", [])
+        if Path(str(item.get("path", ""))).name != "measured_values.csv"
+    ]
+    (experiment_root / "archive" / "tables" / "measured_values.csv").unlink(missing_ok=True)
+
+    summary = metadata["summary_metadata"]
+    summary["measured_values_complete"] = True
+    summary["measured_values_truncated"] = False
+    summary["measured_values_issues"] = []
+    if authority_mutation == "not_finalized":
+        metadata["experiment"]["status"] = "RUNNING"
+        metadata["experiment"]["end_time"] = None
+    elif authority_mutation == "missing_complete":
+        summary.pop("measured_values_complete")
+    elif authority_mutation == "incomplete":
+        summary["measured_values_complete"] = False
+    elif authority_mutation == "truncated":
+        summary["measured_values_truncated"] = True
+    elif authority_mutation == "issues":
+        summary["measured_values_issues"] = ["sqlite_read:data_2026-03-16.db"]
+    elif authority_mutation == "nonzero":
+        summary["measured_value_rows"] = 1
+    else:
+        with closing(sqlite3.connect(tmp_path / "data_2026-03-16.db")) as conn:
+            conn.execute("DROP TABLE experiments")
+            conn.execute("CREATE TABLE unrelated (value REAL)")
+            conn.commit()
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
+        ReportGenerator(tmp_path).generate(exp_id)
 
 
 async def test_report_rejects_malformed_measured_values_archive(

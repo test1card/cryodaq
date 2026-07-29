@@ -38,20 +38,28 @@ def test_dataset_with_missing_end_time_uses_a_bounded_current_fallback(
     )
     extractor = ReportDataExtractor(tmp_path)
     observed: dict[str, datetime] = {}
+    reading = HistoricalReading(
+        datetime(2026, 7, 17, 12, 1, tzinfo=UTC),
+        "probe",
+        "T1",
+        4.2,
+        "K",
+        "ok",
+    )
 
     def load_readings(start: datetime, end: datetime) -> list:
         observed["start"] = start
         observed["end"] = end
-        return []
+        return [reading]
 
     monkeypatch.setattr(extractor, "_load_readings", load_readings)
-    monkeypatch.setattr(extractor, "_load_operator_log", lambda *_args: [])
+    monkeypatch.setattr(extractor, "_load_operator_log", lambda *_args, **_kwargs: [])
 
     before = datetime.now(UTC)
     dataset = extractor.load_dataset(metadata_path)
     after = datetime.now(UTC)
 
-    assert dataset.readings == []
+    assert dataset.readings == [reading]
     assert observed["start"] == datetime(2026, 7, 17, 12, tzinfo=UTC)
     assert before <= observed["end"] <= after
 
