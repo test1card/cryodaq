@@ -433,7 +433,7 @@ def _validate_publication_receipts(tmp_path: Path, payload: dict) -> None:
     path = tmp_path / "governance" / "publication_disposition_receipts.json"
     path.parent.mkdir()
     path.write_text(json.dumps(payload), encoding="utf-8")
-    validate_publication_disposition_receipts(tmp_path)
+    validate_publication_disposition_receipts(tmp_path, git_repository=ROOT)
 
 
 def test_publication_receipt_records_real_nonapproval_and_disagreement() -> None:

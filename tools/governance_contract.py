@@ -85,7 +85,10 @@ _PUBLICATION_DISPOSITIONS = frozenset({"approved", "not_approved"})
 _PUBLICATION_REVIEW_MANDATES = frozenset({"depth-and-delta", "BREADTH"})
 _PUBLICATION_REVIEW_VERDICTS = frozenset({"approved", "do_not_approve"})
 _PUBLICATION_REVIEWER_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
-_PUBLICATION_REVIEWER_FIELDS = frozenset({"identity", "mandate", "distinct_context", "verdict", "disagreements"})
+_PUBLICATION_BINDING_FIELDS = frozenset({"commit", "tree", "base_commit", "diff_sha256", "path_manifest_sha256"})
+_PUBLICATION_REVIEWER_FIELDS = frozenset(
+    {"identity", "mandate", "distinct_context", "verdict", "disagreements"} | _PUBLICATION_BINDING_FIELDS
+)
 
 
 class GovernanceContractError(ValueError):
@@ -342,6 +345,99 @@ def _git_object_id(git_repository: Path, revision: str, *, kind: str, field: str
     return resolved
 
 
+def _git_stdout(git_repository: Path, arguments: list[str], *, field: str) -> bytes:
+    """Return raw Git object-database output without filesystem or text normalisation."""
+
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=git_repository,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise GovernanceContractError(f"{field} could not be recomputed from the candidate repository")
+    return completed.stdout
+
+
+def _validate_publication_binding(value: Mapping[str, Any], *, field: str, git_repository: Path) -> dict[str, str]:
+    binding = {key: value.get(key) for key in _PUBLICATION_BINDING_FIELDS}
+    if any(not isinstance(item, str) for item in binding.values()):
+        raise GovernanceContractError(f"{field} Git object and range binding is missing")
+    commit = binding["commit"]
+    tree = binding["tree"]
+    base_commit = binding["base_commit"]
+    assert isinstance(commit, str) and isinstance(tree, str) and isinstance(base_commit, str)
+    if any(_GIT_OBJECT_ID.fullmatch(item) is None for item in (commit, tree, base_commit)):
+        raise GovernanceContractError(f"{field} Git object and range binding is invalid")
+    for digest_field in ("diff_sha256", "path_manifest_sha256"):
+        digest = binding[digest_field]
+        if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+            raise GovernanceContractError(f"{field}.{digest_field} is invalid")
+
+    resolved_commit = _git_object_id(git_repository, commit, kind="commit", field=f"{field}.commit")
+    resolved_tree = _git_object_id(git_repository, resolved_commit, kind="tree", field=f"{field}.tree")
+    if tree != resolved_tree:
+        raise GovernanceContractError(f"{field}.tree does not match its resolved commit")
+    resolved_base = _git_object_id(git_repository, base_commit, kind="commit", field=f"{field}.base_commit")
+    if resolved_base == resolved_commit:
+        raise GovernanceContractError(f"{field}.base commit must differ from its candidate commit")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", resolved_base, resolved_commit],
+        cwd=git_repository,
+        capture_output=True,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise GovernanceContractError(f"{field}.base_commit is not an ancestor of its candidate commit")
+
+    diff = _git_stdout(
+        git_repository,
+        [
+            "-c",
+            "diff.orderFile=",
+            "diff-tree",
+            "--no-commit-id",
+            "--raw",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--abbrev=40",
+            resolved_base,
+            resolved_commit,
+        ],
+        field=f"{field}.diff_sha256",
+    )
+    paths = _git_stdout(
+        git_repository,
+        [
+            "-c",
+            "diff.orderFile=",
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            "-z",
+            "--no-renames",
+            resolved_base,
+            resolved_commit,
+        ],
+        field=f"{field}.path_manifest_sha256",
+    )
+    if not diff or not paths:
+        raise GovernanceContractError(f"{field} candidate range has no complete diff")
+    for digest_field, raw in (("diff_sha256", diff), ("path_manifest_sha256", paths)):
+        actual = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+        if binding[digest_field] != actual:
+            raise GovernanceContractError(f"{field}.{digest_field} does not match the resolved candidate range")
+    return {
+        "commit": commit,
+        "tree": tree,
+        "base_commit": base_commit,
+        "diff_sha256": binding["diff_sha256"],
+        "path_manifest_sha256": binding["path_manifest_sha256"],
+    }
+
+
 def _decode_receipt_bytes(value: Any, digest: Any, field: str) -> bytes:
     if not isinstance(value, str) or not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
         raise GovernanceContractError(f"{field} bytes or SHA-256 digest is invalid")
@@ -596,7 +692,11 @@ def _validate_guard_source_blobs(
             )
 
 
-def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
+def validate_publication_disposition_receipts(
+    root: Path,
+    *,
+    git_repository: Path | None = None,
+) -> dict[str, Any]:
     """Validate typed, fail-closed publication-review dispositions.
 
     Receipts are intentionally separate from the prevention registry: registry
@@ -605,6 +705,13 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
     from changing a prevention rule merely to record its review outcome.
     """
 
+    if not _repository_has_git_metadata(git_repository):
+        raise GovernanceContractError(
+            "publication disposition validation requires an explicit candidate repository; "
+            "refusing unresolved Git object checks"
+        )
+    assert git_repository is not None
+
     path = root / _PUBLICATION_DISPOSITION_RECEIPTS_PATH
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -612,7 +719,7 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
         raise GovernanceContractError("publication disposition receipts are unavailable or invalid JSON") from exc
     if not isinstance(payload, Mapping) or set(payload) != {"schema_version", "receipts"}:
         raise GovernanceContractError("publication disposition receipts top-level schema is not exact")
-    if payload["schema_version"] != 1 or not isinstance(payload["receipts"], list) or not payload["receipts"]:
+    if payload["schema_version"] != 2 or not isinstance(payload["receipts"], list) or not payload["receipts"]:
         raise GovernanceContractError("publication disposition receipts are missing or invalid")
 
     receipt_ids: set[str] = set()
@@ -632,16 +739,20 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
         if disposition not in _PUBLICATION_DISPOSITIONS:
             raise GovernanceContractError(f"{receipt_id}.disposition is invalid")
         attestation = receipt["attestation"]
-        if not isinstance(attestation, Mapping) or set(attestation) != {"subject", "independent_contexts"}:
+        if not isinstance(attestation, Mapping) or set(attestation) != {
+            "subject",
+            "independent_contexts",
+            *_PUBLICATION_BINDING_FIELDS,
+        }:
             raise GovernanceContractError(f"{receipt_id}.attestation shape is not exact")
-        subject = _nonempty(attestation["subject"], f"{receipt_id}.attestation.subject")
-        # Free text cannot bind a receipt to what it dispositions: an approved receipt
-        # naming an arbitrary candidate string validated. Require a full 40-hex commit.
-        subject_commit = subject.rsplit(" ", 1)[-1]
-        if _GIT_OBJECT_ID.fullmatch(subject_commit) is None:
-            raise GovernanceContractError(f"{receipt_id}.attestation.subject must end in a full 40-hex commit id")
+        _nonempty(attestation["subject"], f"{receipt_id}.attestation.subject")
         if attestation["independent_contexts"] is not True:
             raise GovernanceContractError(f"{receipt_id}.attestation.independent_contexts must be true")
+        binding = _validate_publication_binding(
+            attestation,
+            field=f"{receipt_id}.attestation",
+            git_repository=git_repository,
+        )
 
         reviewers = receipt["reviewers"]
         if not isinstance(reviewers, list) or len(reviewers) < 2:
@@ -651,13 +762,9 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
         verdicts: list[str] = []
         for index, reviewer in enumerate(reviewers):
             field = f"{receipt_id}.reviewers[{index}]"
-            if (
-                not isinstance(reviewer, Mapping)
-                or not set(reviewer) <= _PUBLICATION_REVIEWER_FIELDS
-                or _PUBLICATION_REVIEWER_FIELDS - set(reviewer) not in (set(), {"verdict"})
-            ):
+            if not isinstance(reviewer, Mapping) or set(reviewer) != _PUBLICATION_REVIEWER_FIELDS:
                 raise GovernanceContractError(
-                    f"{field} must name identity, mandate, distinct_context, verdict, and disagreements"
+                    f"{field} must name identity, mandate, distinct_context, verdict, disagreements, and exact binding"
                 )
             identity = _nonempty(reviewer["identity"], f"{field}.identity")
             # Identities must be a constrained ASCII token. A reviewer differing only by
@@ -674,6 +781,8 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
             mandates.add(mandate)
             if reviewer["distinct_context"] is not True:
                 raise GovernanceContractError(f"{field}.distinct_context must attest true")
+            if {key: reviewer[key] for key in _PUBLICATION_BINDING_FIELDS} != binding:
+                raise GovernanceContractError(f"{receipt_id} reviewers must bind the attested object and range")
             verdict = reviewer.get("verdict")
             if verdict not in _PUBLICATION_REVIEW_VERDICTS:
                 raise GovernanceContractError(f"{field}.verdict is missing or invalid")

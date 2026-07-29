@@ -1,12 +1,17 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "receipts": [
     {
       "id": "MONTANA-PUBLICATION-DISPOSITION-001",
       "disposition": "not_approved",
       "attestation": {
         "subject": "montana/review-history candidate bbe3011d435a6cb3c7592f75ebdd4e18de785f18",
-        "independent_contexts": true
+        "independent_contexts": true,
+        "commit": "bbe3011d435a6cb3c7592f75ebdd4e18de785f18",
+        "tree": "f9be143b20765a8e781d0b0194fa602a194b748f",
+        "base_commit": "77c1c26e5302e33164d492bee4ff938d07cfa29e",
+        "diff_sha256": "sha256:af65f31704100a86d50539e8f93efd6d19fbc1c8e00684c74da35d80c1d19d66",
+        "path_manifest_sha256": "sha256:604e6809126ffb4b5985f8243ff7273eb2797f5cd95bdc237254d2f62053d6e4"
       },
       "reviewers": [
         {
@@ -14,7 +19,12 @@
           "mandate": "depth-and-delta",
           "distinct_context": true,
           "verdict": "do_not_approve",
-          "disagreements": []
+          "disagreements": [],
+          "commit": "bbe3011d435a6cb3c7592f75ebdd4e18de785f18",
+          "tree": "f9be143b20765a8e781d0b0194fa602a194b748f",
+          "base_commit": "77c1c26e5302e33164d492bee4ff938d07cfa29e",
+          "diff_sha256": "sha256:af65f31704100a86d50539e8f93efd6d19fbc1c8e00684c74da35d80c1d19d66",
+          "path_manifest_sha256": "sha256:604e6809126ffb4b5985f8243ff7273eb2797f5cd95bdc237254d2f62053d6e4"
         },
         {
           "identity": "Kimi k3",
@@ -27,7 +37,12 @@
               "reviewer_assessment": "non_blocking",
               "disposition_assessment": "blocking"
             }
-          ]
+          ],
+          "commit": "bbe3011d435a6cb3c7592f75ebdd4e18de785f18",
+          "tree": "f9be143b20765a8e781d0b0194fa602a194b748f",
+          "base_commit": "77c1c26e5302e33164d492bee4ff938d07cfa29e",
+          "diff_sha256": "sha256:af65f31704100a86d50539e8f93efd6d19fbc1c8e00684c74da35d80c1d19d66",
+          "path_manifest_sha256": "sha256:604e6809126ffb4b5985f8243ff7273eb2797f5cd95bdc237254d2f62053d6e4"
         }
       ]
     }
