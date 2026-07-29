@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from tools.ci_candidate_evidence import _PROTECTED_PRODUCER_FILES
+from tools.ci_candidate_runner import _command_environment
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
@@ -234,6 +235,31 @@ def test_immutable_path_consistency_rejects_drift() -> None:
     ):
         with pytest.raises(AssertionError):
             _assert_immutable_path_consistency(*drifted)
+
+
+@pytest.mark.parametrize(
+    "channel",
+    ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"),
+)
+def test_candidate_environment_strips_workflow_command_channels(
+    channel: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(channel, str(tmp_path / channel))
+
+    environment = _command_environment(basetemp=tmp_path / "pytest", suite="core", index=1)
+
+    assert channel not in environment
+
+
+def test_attestation_uses_absolute_conda_interpreter() -> None:
+    payload = yaml.safe_load(PROTECTED_WORKFLOW.read_text(encoding="utf-8"))
+    steps = payload["jobs"]["protected-execution"]["steps"]
+    identity = next(step for step in steps if step.get("id") == "job-attestation")
+
+    assert 'interpreter="${CONDA_PREFIX:?}' in identity["run"]
+    assert '"$interpreter" -B -m tools.ci_candidate_evidence attest-job' in identity["run"]
 
 
 def test_candidate_weakened_validators_are_not_the_executed_judges(tmp_path: Path) -> None:

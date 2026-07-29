@@ -86,6 +86,16 @@ def test_live_red_reproduction_receipts_bind_executed_preserved_defects() -> Non
     }
 
 
+def test_validate_registry_refuses_implicit_root_outside_module_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(GovernanceContractError, match="root must be explicit"):
+        validate_registry(_registry())
+
+
 Mutation = Callable[[dict[str, Any]], None]
 
 

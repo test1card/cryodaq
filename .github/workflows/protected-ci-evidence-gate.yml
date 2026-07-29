@@ -154,7 +154,12 @@ jobs:
         env:
           GITHUB_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
-          python -B -m tools.ci_candidate_evidence attest-job \
+          if test "${RUNNER_OS:?}" = Windows; then
+            interpreter="${CONDA_PREFIX:?}/python.exe"
+          else
+            interpreter="${CONDA_PREFIX:?}/bin/python"
+          fi
+          "$interpreter" -B -m tools.ci_candidate_evidence attest-job \
             --bundle "${RUNNER_TEMP:?}/cryodaq-protected-evidence" \
             --output "${RUNNER_TEMP:?}/cryodaq-protected-evidence/job-identity-attestation.json"
 

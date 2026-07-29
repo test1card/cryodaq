@@ -15,7 +15,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +39,22 @@ _LEGACY_PYTEST_FAILURE_PREFIX = re.compile(r"^(?:FAILED|ERROR) (?P<node>tests/.+
 _COMMAND_ANNOUNCEMENT_RE = re.compile(
     r"^candidate-suite=(?P<suite>[a-z]+) command=(?P<index>\d+)/(?P<total>\d+)\r?$",
     re.MULTILINE,
+)
+_PROTECTED_RELAY_MAX_INPUT_LINE_BYTES = 16_384
+_PROTECTED_RELAY_MAX_OUTPUT_LINE_BYTES = 8_192
+_PROTECTED_RELAY_MAX_TOTAL_BYTES = 16_384
+_PROTECTED_RELAY_MAX_ITEMS = 4
+_PROTECTED_RELAY_MAX_NODES = 20
+_PROTECTED_RELAY_MAX_NODE_BYTES = 256
+_PROTECTED_RELAY_MAX_TEXT_BYTES = 512
+_PROTECTED_RELAY_MAX_FIELD_ITEMS = 4
+_PROTECTED_RELAY_MAX_FIELD_BYTES = 256
+_PROTECTED_RELAY_FALLBACK = (
+    "PROTECTED FAILURE RELAY: no valid bounded candidate-origin diagnostics; inspect the retained execution bundle."
+)
+_PROTECTED_RELAY_OMITTED = (
+    "PROTECTED FAILURE RELAY: some candidate-origin diagnostics were omitted by bounds; "
+    "inspect the retained execution bundle."
 )
 _OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 _OIDC_JWKS_URI = f"{_OIDC_ISSUER}/.well-known/jwks"
@@ -585,38 +601,107 @@ def _protected_run(args: argparse.Namespace) -> int:
     return receipt.returncode
 
 
-def _relay_protected_failure(receipt: CandidateExecutionReceipt, *, suite: str, output: Path) -> None:
-    """Surface WHY a protected run failed, in bounded form.
+def _relay_field_is_bounded(value: str, limit: int) -> bool:
+    return bool(value) and len(value.encode("utf-8")) <= limit
 
-    This path previously wrote the bundle and returned the child's status without
-    printing anything at all: a failing protected execution produced an eight-second
-    silent exit 1, and the actual reason -- a guard-setup diagnosis naming the exact
-    prevention -- was recoverable only by downloading the uploaded artifact. A
-    required check that cannot say why it failed forces every diagnosis through an
-    artifact download, which is how a real defect stayed invisible.
 
-    Deliberately NOT a dump of the child's output: unbounded relay would let a
-    candidate flood the log and bury its own failure. Only the canonical failure
-    receipts and the structured phase diagnosis are echoed, and when neither exists a
-    single line points at the retained bundle.
-    """
-
-    text = f"{receipt.stdout.decode('utf-8', errors='replace')}\n{receipt.stderr.decode('utf-8', errors='replace')}"
-    relayed = False
-    for payload in _extract_failure_receipt_payloads(text, suite=suite):
-        print(f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}", flush=True)
-        relayed = True
-    for line in text.splitlines():
-        if line.startswith(PHASE_DIAGNOSIS_PREFIX):
-            print(line, flush=True)
-            relayed = True
-    if not relayed:
-        print(
-            f"candidate-suite={suite} protected-run-failed exit={receipt.returncode} "
-            f"without any failure receipt or phase diagnosis; retained bundle: {output}",
-            file=sys.stderr,
-            flush=True,
+def _bounded_protected_relay_line(line: str, *, suite: str) -> str | None:
+    if len(line.encode("utf-8")) > _PROTECTED_RELAY_MAX_INPUT_LINE_BYTES:
+        return None
+    if line.startswith(FAILURE_RECEIPT_PREFIX):
+        payloads = _extract_failure_receipt_payloads(line, suite=suite)
+        if len(payloads) != 1:
+            return None
+        payload = payloads[0]
+        nodes = payload["failed_nodeids"]
+        if not nodes or any(not _relay_field_is_bounded(nodeid, _PROTECTED_RELAY_MAX_NODE_BYTES) for nodeid in nodes):
+            return None
+        summary = {
+            "failed_nodeids": nodes[:_PROTECTED_RELAY_MAX_NODES],
+            "invocation_index": payload["invocation_index"],
+            "omitted_failed_nodeids": max(0, len(nodes) - _PROTECTED_RELAY_MAX_NODES),
+            "population": payload["population"],
+            "suite": suite,
+        }
+        rendered = "UNTRUSTED CANDIDATE-ORIGIN PYTEST FAILURE " + json.dumps(
+            summary, ensure_ascii=True, sort_keys=True, separators=(",", ":")
         )
+    elif line.startswith(PHASE_DIAGNOSIS_PREFIX):
+        diagnoses = _phase_diagnoses(line, suite=suite)
+        if len(diagnoses) != 1:
+            return None
+        diagnosis = diagnoses[0]
+        if (
+            not all(
+                _relay_field_is_bounded(diagnosis[field], _PROTECTED_RELAY_MAX_TEXT_BYTES)
+                for field in ("reason", "remediation")
+            )
+            or len(diagnosis["affected_receipt_ids"]) > _PROTECTED_RELAY_MAX_FIELD_ITEMS
+            or any(
+                not _relay_field_is_bounded(value, _PROTECTED_RELAY_MAX_FIELD_BYTES)
+                for value in diagnosis["affected_receipt_ids"]
+            )
+            or any(
+                len(mapping) > _PROTECTED_RELAY_MAX_FIELD_ITEMS
+                or any(
+                    not _relay_field_is_bounded(value, _PROTECTED_RELAY_MAX_FIELD_BYTES)
+                    for item in mapping.items()
+                    for value in item
+                )
+                for mapping in (diagnosis["expected_blobs"], diagnosis["actual_blobs"])
+            )
+        ):
+            return None
+        rendered = "UNTRUSTED CANDIDATE-ORIGIN PHASE DIAGNOSIS " + json.dumps(
+            diagnosis, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+    else:
+        return None
+    if len(rendered.encode("utf-8")) > _PROTECTED_RELAY_MAX_OUTPUT_LINE_BYTES:
+        return None
+    return rendered
+
+
+def _relay_protected_failure(receipt: CandidateExecutionReceipt, *, suite: str, output: Path) -> None:
+    """Relay only bounded, explicitly untrusted candidate-origin failure details."""
+
+    del output  # The fixed messages cannot be influenced by a candidate-controlled path.
+    text = f"{receipt.stdout.decode('utf-8', errors='replace')}\n{receipt.stderr.decode('utf-8', errors='replace')}"
+    relayed: deque[str] = deque(maxlen=_PROTECTED_RELAY_MAX_ITEMS)
+    omitted = False
+    for line in text.splitlines():
+        if not line.startswith((FAILURE_RECEIPT_PREFIX, PHASE_DIAGNOSIS_PREFIX)):
+            continue
+        try:
+            rendered = _bounded_protected_relay_line(line, suite=suite)
+        except (CiCandidateEvidenceError, RecursionError, UnicodeError, ValueError):
+            rendered = None
+        if rendered is None:
+            omitted = True
+            continue
+        if len(relayed) == relayed.maxlen:
+            omitted = True
+        relayed.append(rendered)
+    if not relayed:
+        print(_PROTECTED_RELAY_FALLBACK, file=sys.stderr, flush=True)
+        return
+
+    selected = list(relayed)
+    while selected:
+        notice = _PROTECTED_RELAY_OMITTED if omitted else ""
+        total = sum(len(f"{line}\n".encode()) for line in selected)
+        total += len(f"{notice}\n".encode()) if notice else 0
+        if total <= _PROTECTED_RELAY_MAX_TOTAL_BYTES:
+            break
+        selected.pop(0)
+        omitted = True
+    if not selected:
+        print(_PROTECTED_RELAY_FALLBACK, file=sys.stderr, flush=True)
+        return
+    for line in selected:
+        print(line, flush=True)
+    if omitted:
+        print(_PROTECTED_RELAY_OMITTED, file=sys.stderr, flush=True)
 
 
 def _attest(args: argparse.Namespace) -> int:

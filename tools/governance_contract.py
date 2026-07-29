@@ -713,13 +713,11 @@ def validate_registry(
     git_repository: Path | None = None,
     require_git_resolution: bool = False,
 ) -> dict[str, Any]:
-    # *** Callers that know the tree MUST pass it. The module-relative fallback below
-    # exists for in-repo callers (tests, local tooling) whose tree genuinely is this
-    # checkout. `tools/ci_guard_execution.py::_registry` READ the registry from its
-    # `root` argument and then called this function without it, so receipt paths
-    # silently resolved against wherever these tools were imported from. That is the
-    # whole of the protected-path failure. ***
-    root = Path(__file__).resolve().parent.parent if root is None else root
+    module_root = Path(__file__).resolve().parent.parent
+    if root is None:
+        if Path.cwd().resolve() != module_root:
+            raise GovernanceContractError("registry root must be explicit outside the governance module tree")
+        root = module_root
     # When the tree under validation IS itself a repository, that repository is the
     # right place to resolve its own objects, and object resolution must keep running
     # exactly as before. Omitting this silently disabled resolution for every in-repo
@@ -1150,7 +1148,10 @@ def _write_removal_baseline() -> None:
     import yaml
 
     registry_path = _REMOVAL_BASELINE_PATH.parent / "agent_preventions.yaml"
-    payload = validate_registry(yaml.safe_load(registry_path.read_text(encoding="utf-8")))
+    payload = validate_registry(
+        yaml.safe_load(registry_path.read_text(encoding="utf-8")),
+        root=_REMOVAL_BASELINE_PATH.parent.parent,
+    )
     _REMOVAL_BASELINE_PATH.write_text(render_removal_baseline(payload), encoding="utf-8")
 
 

@@ -16,6 +16,7 @@ from tools.candidate_evidence import (
     validate_candidate_manifest,
     validate_materializable_paths,
 )
+from tools.ci_candidate_runner import _protected_pytest_command
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -173,7 +174,9 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
 ) -> None:
     _write(
         candidate_repo / "tests" / "test_environment.py",
+        "import locale\n"
         "import os\n"
+        "import sys\n"
         "from pathlib import Path\n\n"
         "def test_environment_is_sanitized() -> None:\n"
         "    assert os.environ['PYTEST_ADDOPTS'] == '-p no:cacheprovider'\n"
@@ -182,7 +185,8 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
         "    assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'\n"
         "    assert os.environ['PYTHONNOUSERSITE'] == '1'\n"
         "    assert not Path(os.environ['PYTHONPYCACHEPREFIX']).is_relative_to(Path.cwd())\n"
-        "    assert os.environ['PYTHONUTF8'] == '1'\n"
+        "    assert sys.flags.utf8_mode == 1\n"
+        "    assert locale.getpreferredencoding(False).lower() == 'utf-8'\n"
         "    assert os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] == '1'\n"
         "    assert not Path(os.environ['CRYODAQ_CANDIDATE_PYTEST_BASETEMP']).is_relative_to(Path.cwd())\n"
         "    assert not Path(os.environ['CRYODAQ_STATE_ROOT']).is_relative_to(Path.cwd())\n"
@@ -216,6 +220,30 @@ def test_export_execution_sanitizes_test_selection_and_python_environment(
     assert not pycache_root.is_relative_to(receipt.export_root)
     assert not runtime_root.is_relative_to(receipt.export_root)
     assert not any(path.suffix == ".pyc" for path in receipt.export_root.rglob("*"))
+
+
+def test_protected_candidate_interpreter_observes_utf8_mode(tmp_path: Path) -> None:
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir()
+    protected = _protected_pytest_command(
+        (sys.executable, "-B", "-m", "pytest"),
+        root=candidate_root,
+        producer_root=ROOT,
+        strict=False,
+    )
+    bootstrap_index = protected.index("-c")
+    probe = (
+        *protected[: bootstrap_index + 1],
+        (
+            "import locale, sys; "
+            "assert sys.flags.utf8_mode == 1; "
+            "assert locale.getpreferredencoding(False).lower() == 'utf-8'"
+        ),
+    )
+
+    completed = subprocess.run(probe, capture_output=True, check=False)
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_export_execution_redirects_nested_python_cache_outside_candidate(

@@ -44,6 +44,8 @@ jobs:
       - name: Install exact locked dependencies and project
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --disable-pip-version-check -r requirements-lock.txt
           python -m pip install --disable-pip-version-check . --no-deps --no-build-isolation
           python -m pip check
@@ -56,6 +58,8 @@ jobs:
       - name: Build and seed the real ONEDIR bundle
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m PyInstaller build_scripts/cryodaq.spec --clean --noconfirm
           python build_scripts/post_build.py
           if (-not (Test-Path -LiteralPath "dist/CryoDAQ/CryoDAQ.exe" -PathType Leaf)) {

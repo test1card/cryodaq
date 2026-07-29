@@ -219,6 +219,182 @@ def test_run_publishes_exact_population_receipts_to_the_job_log(
     assert captured.err == ""
 
 
+def _production_protected_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, ...]:
+    repository = tmp_path / "candidate"
+    producer_root = tmp_path / "producer"
+    destination = tmp_path / "export"
+    repository.mkdir()
+    producer_root.mkdir()
+    target_sha = "b" * 40
+    producer = {"commit": "a" * 40, "files": [], "tree": "c" * 40}
+    captured: dict[str, tuple[str, ...]] = {}
+
+    def fake_execute(*_args, command, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ci_candidate_evidence, "_git", lambda *_args: target_sha)
+    monkeypatch.setattr(ci_candidate_evidence, "_protected_producer_manifest", lambda *_args: producer)
+    monkeypatch.setattr(ci_candidate_evidence, "execute_exported_candidate", fake_execute)
+    monkeypatch.setattr(ci_candidate_evidence, "_protected_github_environment", lambda **_kwargs: {})
+    monkeypatch.setattr(ci_candidate_evidence, "write_execution_bundle", lambda *_args, **_kwargs: {})
+
+    assert (
+        ci_candidate_evidence._protected_run(
+            SimpleNamespace(
+                artifact_name="protected-core",
+                destination=destination,
+                output=tmp_path / "unused-bundle",
+                producer_revision=producer["commit"],
+                producer_root=producer_root,
+                repository=repository,
+                revision=target_sha,
+                suite="core",
+                timeout=60,
+            )
+        )
+        == 0
+    )
+    return captured["command"]
+
+
+def _write_protected_command_bundle(
+    bundle: Path,
+    *,
+    command: tuple[str, ...],
+    producer: dict,
+    target_sha: str,
+) -> None:
+    stdout = (
+        "candidate-suite=core command=1/1\n"
+        + FAILURE_RECEIPT_PREFIX
+        + canonical_failure_receipt(
+            {
+                "collection_complete": True,
+                "failed_nodeids": [],
+                "invocation_index": 1,
+                "population": {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0},
+                "schema_version": 3,
+                "suite": "core",
+            }
+        )
+        + "\n"
+    ).encode()
+    stderr = b""
+    candidate = {
+        "commit": target_sha,
+        "manifest_sha256": "sha256:" + "d" * 64,
+        "records": [],
+        "tree": "e" * 40,
+    }
+    execution = {
+        "candidate_manifest_sha256": candidate["manifest_sha256"],
+        "command": list(command),
+        "commit": target_sha,
+        "github": {"github_job_check_run_id": "98765"},
+        "producer": producer,
+        "returncode": 0,
+        "schema_version": 2,
+        "stderr_sha256": ci_candidate_evidence._digest(stderr),
+        "stdout_sha256": ci_candidate_evidence._digest(stdout),
+        "suite": "core",
+        "tree": candidate["tree"],
+    }
+    files = {
+        "candidate-manifest.json": ci_candidate_evidence._canonical(candidate),
+        "execution-receipt.json": ci_candidate_evidence._canonical(execution),
+        "stderr.bin": stderr,
+        "stdout.bin": stdout,
+    }
+    bundle.mkdir()
+    for name, raw in files.items():
+        (bundle / name).write_bytes(raw)
+    (bundle / "bundle-manifest.json").write_bytes(
+        ci_candidate_evidence._canonical(
+            {
+                "files": {name: ci_candidate_evidence._digest(raw) for name, raw in sorted(files.items())},
+                "schema_version": 1,
+            }
+        )
+    )
+    (bundle / "job-identity-attestation.json").write_bytes(ci_candidate_evidence._canonical({}))
+
+
+def _validate_production_protected_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    command: tuple[str, ...],
+) -> dict:
+    repository = tmp_path / "candidate"
+    producer_root = tmp_path / "producer"
+    producer = {"commit": "a" * 40, "files": [], "tree": "c" * 40}
+    bundle = tmp_path / "protected-bundle"
+    _write_protected_command_bundle(
+        bundle,
+        command=command,
+        producer=producer,
+        target_sha="b" * 40,
+    )
+    monkeypatch.setattr(ci_candidate_evidence, "validate_candidate_manifest", lambda *_args: None)
+    monkeypatch.setattr(ci_candidate_evidence, "_protected_producer_manifest", lambda *_args: producer)
+    monkeypatch.setattr(
+        ci_candidate_evidence,
+        "validate_protected_job_identity",
+        lambda *_args, **_kwargs: {"check_run_id": "98765"},
+    )
+    return ci_candidate_evidence.validate_protected_execution_bundle(
+        bundle,
+        repository=repository,
+        producer_root=producer_root,
+        expected_suite="core",
+        expected_repository="owner/cryodaq",
+        expected_target_run_id="54321",
+        expected_target_run_attempt="4",
+        expected_target_sha="b" * 40,
+        expected_workflow_sha=producer["commit"],
+        jobs=[{"id": 98765}],
+        jwks={},
+    )
+
+
+def test_protected_verifier_accepts_the_command_generated_by_protected_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _production_protected_command(tmp_path, monkeypatch)
+
+    result = _validate_production_protected_command(tmp_path, monkeypatch, command=command)
+
+    assert result == {"check_run_id": "98765", "collected": 1, "executed": 1, "suite": "core"}
+
+
+def test_protected_verifier_refuses_command_missing_candidate_git_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _production_protected_command(tmp_path, monkeypatch)
+
+    with pytest.raises(CiCandidateEvidenceError, match="pinned producer"):
+        _validate_production_protected_command(tmp_path, monkeypatch, command=command[:-2])
+
+
+def test_protected_verifier_refuses_command_bound_to_a_different_candidate_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _production_protected_command(tmp_path, monkeypatch)
+    wrong_repository = tmp_path / "different-candidate"
+    wrong_repository.mkdir()
+
+    with pytest.raises(CiCandidateEvidenceError, match="pinned producer"):
+        _validate_production_protected_command(
+            tmp_path,
+            monkeypatch,
+            command=(*command[:-1], str(wrong_repository.resolve(strict=True))),
+        )
+
+
 def _validate(bundle: Path, execution: dict, candidate: dict, manifest: dict, attestation: dict) -> None:
     validate_execution_and_attestation(
         execution,
@@ -698,6 +874,110 @@ def test_protected_runner_refuses_forged_receipt_and_preserves_honest_control(tm
         {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0}
     ]
     assert list(candidate.rglob("*.pyc")) == []
+
+
+@pytest.mark.parametrize(
+    ("case", "candidate_output"),
+    (
+        pytest.param(
+            "oversized",
+            "\n".join(f"{PHASE_DIAGNOSIS_PREFIX}{'x' * 200_000}" for _ in range(3)),
+            id="oversized",
+        ),
+        pytest.param("malformed", f"{PHASE_DIAGNOSIS_PREFIX}{{", id="malformed"),
+        pytest.param(
+            "forged-marker",
+            "candidate-forged-prefix "
+            + FAILURE_RECEIPT_PREFIX
+            + canonical_failure_receipt(
+                {
+                    "failed_nodeids": ["tests/core/test_forged.py::test_forged"],
+                    "invocation_index": 1,
+                    "suite": "core",
+                }
+            ),
+            id="forged-marker",
+        ),
+    ),
+)
+def test_protected_failure_relay_rejects_unbounded_or_unstructured_markers(
+    case: str,
+    candidate_output: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt = SimpleNamespace(returncode=1, stdout=candidate_output.encode(), stderr=b"")
+
+    ci_candidate_evidence._relay_protected_failure(
+        receipt,
+        suite="core",
+        output=tmp_path / "protected-bundle",
+    )
+
+    captured = capsys.readouterr()
+    relayed = (captured.out + captured.err).encode()
+    assert len(relayed) <= 16_384, case
+    assert (
+        "PROTECTED FAILURE RELAY: no valid bounded candidate-origin diagnostics; inspect the retained execution bundle."
+    ) in captured.err
+    assert candidate_output not in captured.out
+
+
+def test_protected_failure_relay_labels_and_caps_valid_candidate_origin_details(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    nodes = [f"tests/core/test_{index}.py::test_failure" for index in range(25)]
+    failure_receipt = canonical_failure_receipt(
+        {
+            "collection_complete": True,
+            "failed_nodeids": nodes,
+            "invocation_index": 1,
+            "population": {"collected": 25, "deselected": 0, "executed": 25, "skipped": 0},
+            "schema_version": 3,
+            "suite": "core",
+        }
+    )
+    diagnosis = {
+        "actual_blobs": {},
+        "affected_receipt_ids": ["pytest:1"],
+        "expected_blobs": {},
+        "phase": "pytest",
+        "reason": "",
+        "remediation": "Inspect the retained execution bundle.",
+        "suite": "core",
+    }
+    diagnosis_payloads = [{**diagnosis, "reason": f"candidate-provided diagnosis {index}"} for index in range(6)]
+    candidate_output = (
+        "".join(
+            f"{PHASE_DIAGNOSIS_PREFIX}{json.dumps(payload, sort_keys=True, separators=(',', ':'))}\n"
+            for payload in diagnosis_payloads
+        )
+        + f"{FAILURE_RECEIPT_PREFIX}{failure_receipt}\n"
+    )
+    receipt = SimpleNamespace(returncode=1, stdout=candidate_output.encode(), stderr=b"")
+
+    ci_candidate_evidence._relay_protected_failure(
+        receipt,
+        suite="core",
+        output=tmp_path / "protected-bundle",
+    )
+
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert len((captured.out + captured.err).encode()) <= 16_384
+    assert len(lines) == 4
+    assert all(line.startswith("UNTRUSTED CANDIDATE-ORIGIN ") for line in lines)
+    assert FAILURE_RECEIPT_PREFIX not in captured.out
+    assert PHASE_DIAGNOSIS_PREFIX not in captured.out
+    assert "candidate-provided diagnosis 0" not in captured.out
+    assert "candidate-provided diagnosis 5" in captured.out
+    assert captured.out.count("tests/core/test_") == 20
+    assert '"omitted_failed_nodeids":5' in captured.out
+    assert (
+        "PROTECTED FAILURE RELAY: some candidate-origin diagnostics were omitted by bounds; "
+        "inspect the retained execution bundle."
+    ) in captured.err
 
 
 def _protected_identity_fixture(now: int = 2_000_000_000) -> tuple[dict, bytes, dict, dict, dict]:
