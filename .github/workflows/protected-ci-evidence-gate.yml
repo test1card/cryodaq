@@ -93,9 +93,11 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"
           for path in \
+            .gitattributes \
             .github/workflows/protected-ci-evidence-gate.yml \
             environment.yml \
             requirements-lock.txt \
+            requirements-protected-ci-lock.txt \
             tools/__init__.py \
             tools/candidate_evidence.py \
             tools/check_python_compile.py \
@@ -122,7 +124,10 @@ jobs:
       - name: Install immutable producer dependencies
         working-directory: judge
         run: |
-          python -m pip install -r requirements-lock.txt
+          # The judge executes the CANDIDATE's suite, so it needs the candidate's
+          # dependency set -- NOT this branch's product lock. See the header of
+          # requirements-protected-ci-lock.txt for why these cannot be one file.
+          python -m pip install -r requirements-protected-ci-lock.txt
           python -m pip check
 
       - name: Run exact candidate with immutable producer
@@ -209,9 +214,11 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"
           for path in \
+            .gitattributes \
             .github/workflows/protected-ci-evidence-gate.yml \
             environment.yml \
             requirements-lock.txt \
+            requirements-protected-ci-lock.txt \
             tools/__init__.py \
             tools/candidate_evidence.py \
             tools/check_python_compile.py \

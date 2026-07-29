@@ -5,25 +5,56 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
+
+from tools.ci_candidate_evidence import _PROTECTED_PRODUCER_FILES
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 PROTECTED_WORKFLOW = ROOT / ".github" / "workflows" / "protected-ci-evidence-gate.yml"
 CHECKOUT_PIN = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 UPLOAD_PIN = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-JUDGE_PATHS = (
-    "tools/__init__.py",
-    "tools/candidate_evidence.py",
-    "tools/ci_candidate_evidence.py",
-    "tools/ci_partition_execution_proof.py",
-    "tools/montana_candidate_gate.py",
-)
 
 
 def _workflow_trigger(payload: dict) -> dict:
     # PyYAML 1.1 parses the unquoted YAML key ``on`` as boolean true.
     return payload.get("on", payload.get(True))
+
+
+def _immutable_paths(step: dict) -> tuple[str, ...]:
+    lines = [line.strip() for line in step["run"].splitlines()]
+    start = lines.index("for path in \\") + 1
+    paths = []
+    for line in lines[start:]:
+        if line.endswith("; do"):
+            paths.append(line.removesuffix("; do"))
+            break
+        assert line.endswith("\\")
+        paths.append(line.removesuffix("\\").rstrip())
+    return tuple(paths)
+
+
+def _assert_immutable_path_consistency(
+    producer_files: tuple[str, ...],
+    producer_paths: tuple[str, ...],
+    judge_paths: tuple[str, ...],
+) -> None:
+    # The workflow's producer loop is _PROTECTED_PRODUCER_FILES with the candidate's
+    # product lock additionally verified, inserted immediately after environment.yml.
+    # Anchored to that NAME rather than to a fixed index: the previous form spelled
+    # the insertion point as `producer_files[:2]`, so adding `.gitattributes` to the
+    # producer tuple silently moved the product lock's expected position and the guard
+    # failed for a reason unrelated to the drift it exists to catch. A guard that
+    # breaks when an unrelated entry is added trains people to edit the guard.
+    anchor = producer_files.index("environment.yml") + 1
+    expected_producer_paths = (*producer_files[:anchor], "requirements-lock.txt", *producer_files[anchor:])
+    assert producer_paths == expected_producer_paths
+    assert judge_paths == (
+        *producer_paths,
+        "tools/ci_partition_execution_proof.py",
+        "tools/montana_candidate_gate.py",
+    )
 
 
 def _run_module(root: Path, module: str, arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -79,8 +110,11 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
         step for step in execution_steps if step.get("name") == "Install immutable producer dependencies"
     )
     assert dependencies["working-directory"] == "judge"
-    assert "pip install -r requirements-lock.txt" in dependencies["run"]
+    assert "pip install -r requirements-protected-ci-lock.txt" in dependencies["run"]
+    assert "pip install -r requirements-lock.txt" not in dependencies["run"]
     assert "pip install -e" not in dependencies["run"]
+    producer_byte_check = next(step for step in execution_steps if step["name"] == "Verify immutable producer object")
+    producer_paths = _immutable_paths(producer_byte_check)
     protected_run = next(step for step in execution_steps if step.get("id") == "protected-run")
     assert protected_run["continue-on-error"] is True
     assert "tools.ci_candidate_evidence protected-run" in protected_run["run"]
@@ -90,6 +124,7 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     assert protected_run["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
     identity = next(step for step in execution_steps if step.get("id") == "job-attestation")
     assert "tools.ci_candidate_evidence attest-job" in identity["run"]
+    assert identity["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
     upload = next(step for step in execution_steps if step.get("id") == "protected-upload")
     assert upload["uses"] == UPLOAD_PIN
     enforce_execution = next(
@@ -122,14 +157,10 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     assert byte_check["working-directory"] == "judge"
     assert 'test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"' in byte_check["run"]
     assert 'git rev-parse "${JUDGE_SHA:?}:$path"' in byte_check["run"]
-    for path in (
-        "tools/ci_candidate_evidence.py",
-        "tools/ci_candidate_runner.py",
-        "tools/ci_guard_execution.py",
-        "tools/ci_partition_execution_proof.py",
-        "tools/montana_candidate_gate.py",
-    ):
-        assert path in byte_check["run"]
+    judge_paths = _immutable_paths(byte_check)
+    _assert_immutable_path_consistency(_PROTECTED_PRODUCER_FILES, producer_paths, judge_paths)
+    assert "requirements-protected-ci-lock.txt" in producer_paths
+    assert "requirements-protected-ci-lock.txt" in judge_paths
 
     partition = indexed["partition-proof"]
     assert partition["working-directory"] == "judge"
@@ -187,7 +218,29 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     assert "montana-candidate-gate" not in main_text
 
 
+def test_immutable_path_consistency_rejects_drift() -> None:
+    payload = yaml.safe_load(PROTECTED_WORKFLOW.read_text(encoding="utf-8"))
+    producer_steps = payload["jobs"]["protected-execution"]["steps"]
+    proof_steps = payload["jobs"]["partition-execution-proof"]["steps"]
+    producer = _immutable_paths(
+        next(step for step in producer_steps if step["name"] == "Verify immutable producer object")
+    )
+    judge = _immutable_paths(next(step for step in proof_steps if step["name"] == "Verify immutable judge object"))
+
+    for drifted in (
+        (_PROTECTED_PRODUCER_FILES[:-1], producer, judge),
+        (_PROTECTED_PRODUCER_FILES, producer[:-1], judge),
+        (_PROTECTED_PRODUCER_FILES, producer, judge[:-1]),
+    ):
+        with pytest.raises(AssertionError):
+            _assert_immutable_path_consistency(*drifted)
+
+
 def test_candidate_weakened_validators_are_not_the_executed_judges(tmp_path: Path) -> None:
+    payload = yaml.safe_load(PROTECTED_WORKFLOW.read_text(encoding="utf-8"))
+    proof_steps = payload["jobs"]["partition-execution-proof"]["steps"]
+    byte_check = next(step for step in proof_steps if step["name"] == "Verify immutable judge object")
+    judge_paths = _immutable_paths(byte_check)
     candidate = tmp_path / "candidate"
     judge = tmp_path / "judge"
     bundle = tmp_path / "empty-bundle"
@@ -196,7 +249,7 @@ def test_candidate_weakened_validators_are_not_the_executed_judges(tmp_path: Pat
     (candidate / "tools" / "__init__.py").write_text("", encoding="utf-8")
     for module in ("ci_partition_execution_proof.py", "montana_candidate_gate.py"):
         (candidate / "tools" / module).write_text("raise SystemExit(0)\n", encoding="utf-8", newline="\n")
-    for path in JUDGE_PATHS:
+    for path in (path for path in judge_paths if path.startswith("tools/")):
         destination = judge / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(ROOT.joinpath(*path.split("/")).read_bytes())

@@ -3,3 +3,33 @@
 governance/red_reproductions/*.json -text
 tests/core/test_alarm_config_validation.py text eol=lf
 tests/core/test_alarm_v2_integration.py text eol=lf
+
+# *** PROTECTED PRODUCER BYTES. Do not remove or narrow. ***
+# tools/ci_candidate_evidence.py::_protected_producer_manifest hashes the RAW
+# WORKING-TREE BYTES of each file below and refuses any that differs from its
+# committed blob. Without an explicit eol pin, a Windows checkout with
+# core.autocrlf=true materialises CRLF while the blob holds LF, and the producer
+# then refuses its own files -- the evidence gate cannot run at all.
+#
+# This is not hypothetical: it has cost hosted runs on this campaign, and
+# `git hash-object` will NOT reveal it, because that command applies the same
+# autocrlf filter and reports a false match. Compare raw bytes, not filtered
+# hashes.
+#
+# .gitattributes itself is pinned AND bound into the producer manifest, so this
+# guarantee cannot be silently withdrawn by editing this file.
+.gitattributes text eol=lf
+.github/workflows/protected-ci-evidence-gate.yml text eol=lf
+environment.yml text eol=lf
+requirements-lock.txt text eol=lf
+requirements-protected-ci-lock.txt text eol=lf
+tools/__init__.py text eol=lf
+tools/candidate_evidence.py text eol=lf
+tools/check_python_compile.py text eol=lf
+tools/ci_candidate_evidence.py text eol=lf
+tools/ci_candidate_runner.py text eol=lf
+tools/ci_execution_roots.py text eol=lf
+tools/ci_guard_execution.py text eol=lf
+tools/ci_partition_execution_proof.py text eol=lf
+tools/governance_contract.py text eol=lf
+tools/montana_candidate_gate.py text eol=lf
