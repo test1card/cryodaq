@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from build_scripts import artifact_promotion as promotion
+from tests.qualification_support import qualification_receipt_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "a" * 40
@@ -42,23 +46,42 @@ def _wheel(path: Path) -> None:
         )
 
 
-def _receipt(artifact: Path, **changes: object) -> dict[str, object]:
+def _write_receipt(path: Path, receipt: dict[str, object]) -> None:
+    path.write_text(json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _legacy_self_hash_receipt(artifact: Path) -> dict[str, object]:
     receipt: dict[str, object] = {
         "artifact_digest": promotion.artifact_digest(artifact),
         "binding_digest": "",
         "commit": COMMIT,
         "config_digest": "sha256:" + "c" * 64,
-        "hardware_profile_id": "montana-stand-v1",
+        "hardware_profile_id": "attacker-invented-profile",
         "schema_version": 1,
         "tree": TREE,
     }
-    receipt.update(changes)
-    receipt["binding_digest"] = promotion.receipt_binding_digest(receipt)
+    bound = {key: value for key, value in receipt.items() if key != "binding_digest"}
+    raw = (json.dumps(bound, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    receipt["binding_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
     return receipt
 
 
-def _write_receipt(path: Path, receipt: dict[str, object]) -> None:
-    path.write_text(json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+def _forged_signed_schema_receipt(artifact: Path) -> dict[str, object]:
+    now = int(time.time())
+    return {
+        "schema": "cryodaq-lab-qualification-v1",
+        "key_id": "cryodaq-lab-qualification-rsa-v1",
+        "receipt_id": "f" * 32,
+        "commit": COMMIT,
+        "tree": TREE,
+        "artifact_sha256": promotion.artifact_digest(artifact),
+        "configuration_sha256": "sha256:" + "c" * 64,
+        "reviewed_source_binding_sha256": "sha256:" + "d" * 64,
+        "hardware_profile_id": "attacker-invented-profile",
+        "issued_at_unix_s": now - 1,
+        "expires_at_unix_s": now + 3600,
+        "signature": base64.b64encode(b"\0" * 256).decode(),
+    }
 
 
 def test_post_build_marks_onedir_unqualified(tmp_path: Path) -> None:
@@ -108,12 +131,15 @@ def test_promotion_without_receipt_is_refused(tmp_path: Path, capsys: pytest.Cap
             COMMIT,
             "--tree",
             TREE,
+            "--replay-directory",
+            str(tmp_path / "promotion-replay"),
         ]
     )
 
     assert result == 2
     assert capsys.readouterr().err == (
-        "PROMOTION_GATE_REFUSED: qualification receipt is missing or not a regular file\n"
+        "PROMOTION_GATE_REFUSED: qualification receipt verification failed: "
+        "qualification receipt is missing or not a regular file\n"
     )
 
 
@@ -124,7 +150,7 @@ def test_promotion_with_wrong_artifact_digest_is_refused(
     artifact = tmp_path / "CryoDAQ-checkpoint.unqualified.zip"
     receipt_path = tmp_path / "qualification.json"
     _onedir_zip(artifact)
-    _write_receipt(receipt_path, _receipt(artifact, artifact_digest="sha256:" + "0" * 64))
+    receipt_path.write_bytes(qualification_receipt_bytes())
 
     result = promotion.main(
         [
@@ -139,36 +165,84 @@ def test_promotion_with_wrong_artifact_digest_is_refused(
             COMMIT,
             "--tree",
             TREE,
+            "--replay-directory",
+            str(tmp_path / "promotion-replay"),
         ]
     )
 
     assert result == 2
-    assert capsys.readouterr().err == ("PROMOTION_GATE_REFUSED: qualification receipt does not match artifact digest\n")
+    assert capsys.readouterr().err == (
+        "PROMOTION_GATE_REFUSED: qualification receipt verification failed: "
+        "qualification receipt does not match the exact artifact context\n"
+    )
 
 
-def test_promotion_with_matching_receipt_succeeds(tmp_path: Path) -> None:
-    artifact = tmp_path / "CryoDAQ-checkpoint.unqualified.zip"
-    receipt_path = tmp_path / "qualification.json"
+def test_oc_037_legacy_self_hash_forgery_is_refused(tmp_path: Path) -> None:
+    artifact = tmp_path / "cryodaq-0.0.0-py3-none-any.whl"
+    receipt = tmp_path / "forged.json"
     output = tmp_path / "promoted"
-    _onedir_zip(artifact)
-    _write_receipt(receipt_path, _receipt(artifact))
+    _wheel(artifact)
+    _write_receipt(receipt, _legacy_self_hash_receipt(artifact))
 
-    promoted = promotion.promote(artifact, receipt_path, output, commit=COMMIT, tree=TREE)
+    with pytest.raises(promotion.PromotionRefused, match="missing or unknown fields"):
+        promotion.promote(
+            artifact,
+            receipt,
+            output,
+            commit=COMMIT,
+            tree=TREE,
+            replay_directory=tmp_path / "promotion-replay",
+        )
 
-    assert promoted.read_bytes() == artifact.read_bytes()
-    assert promotion.artifact_digest(promoted) == promotion.artifact_digest(artifact)
+    assert not output.exists()
 
 
-def test_receipt_binding_digest_tamper_is_refused(tmp_path: Path) -> None:
-    artifact = tmp_path / "CryoDAQ-checkpoint.unqualified.zip"
-    receipt_path = tmp_path / "qualification.json"
-    _onedir_zip(artifact)
-    receipt = _receipt(artifact)
-    receipt["hardware_profile_id"] = "different-profile"
-    _write_receipt(receipt_path, receipt)
+def test_new_schema_without_laboratory_signature_is_refused(tmp_path: Path) -> None:
+    artifact = tmp_path / "cryodaq-0.0.0-py3-none-any.whl"
+    receipt = tmp_path / "forged.json"
+    output = tmp_path / "promoted"
+    _wheel(artifact)
+    _write_receipt(receipt, _forged_signed_schema_receipt(artifact))
 
-    with pytest.raises(promotion.PromotionRefused, match="binding digest"):
-        promotion.validate_receipt(artifact, receipt_path, commit=COMMIT, tree=TREE)
+    with pytest.raises(promotion.PromotionRefused, match="signature is invalid"):
+        promotion.promote(
+            artifact,
+            receipt,
+            output,
+            commit=COMMIT,
+            tree=TREE,
+            replay_directory=tmp_path / "promotion-replay",
+        )
+
+    assert not output.exists()
+
+
+def test_p3_self_hash_verifier_is_not_a_transitional_api() -> None:
+    assert not hasattr(promotion, "receipt_binding_digest")
+
+
+def test_promotion_cli_requires_a_replay_ledger(tmp_path: Path) -> None:
+    artifact = tmp_path / "cryodaq-0.0.0-py3-none-any.whl"
+    _wheel(artifact)
+
+    with pytest.raises(SystemExit) as exc_info:
+        promotion.main(
+            [
+                "promote",
+                "--artifact",
+                str(artifact),
+                "--receipt",
+                str(tmp_path / "receipt.json"),
+                "--output-dir",
+                str(tmp_path / "promoted"),
+                "--commit",
+                COMMIT,
+                "--tree",
+                TREE,
+            ]
+        )
+
+    assert exc_info.value.code == 2
 
 
 def test_promotion_boundary_is_a_workflow_status() -> None:

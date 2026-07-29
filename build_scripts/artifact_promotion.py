@@ -1,4 +1,4 @@
-"""Fail-closed qualification-receipt boundary for release artifacts."""
+"""Fail-closed signed qualification boundary for release artifacts."""
 
 from __future__ import annotations
 
@@ -17,27 +17,20 @@ try:
 except ImportError:
     from artifact_identity import UNQUALIFIED_LABEL, UNQUALIFIED_LOCAL_VERSION
 
-_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(_SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SOURCE_ROOT))
+
+from cryodaq.core.qualification import (  # noqa: E402
+    QualificationReceiptError,
+    verify_artifact_qualification_receipt,
+)
+
 _GIT_OBJECT = re.compile(r"[0-9a-f]{40}\Z")
-_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-_RECEIPT_FIELDS = {
-    "artifact_digest",
-    "binding_digest",
-    "commit",
-    "config_digest",
-    "hardware_profile_id",
-    "schema_version",
-    "tree",
-}
-_MAX_RECEIPT_BYTES = 64 * 1024
 
 
 class PromotionRefused(ValueError):
     """The candidate is not eligible for release promotion."""
-
-
-def _sha256_bytes(raw: bytes) -> str:
-    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def artifact_digest(path: Path) -> str:
@@ -50,25 +43,13 @@ def artifact_digest(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def receipt_binding_digest(receipt: dict[str, Any]) -> str:
-    bound = {key: value for key, value in receipt.items() if key != "binding_digest"}
-    raw = (json.dumps(bound, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    return _sha256_bytes(raw)
-
-
-def _read_receipt(path: Path) -> dict[str, Any]:
+def _receipt_bytes(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise PromotionRefused("qualification receipt is missing or not a regular file")
-    raw = path.read_bytes()
-    if len(raw) > _MAX_RECEIPT_BYTES:
-        raise PromotionRefused("qualification receipt exceeds 64 KiB")
     try:
-        receipt = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PromotionRefused("qualification receipt is not valid UTF-8 JSON") from exc
-    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS:
-        raise PromotionRefused("qualification receipt schema fields are not exact")
-    return receipt
+        return path.read_bytes()
+    except OSError as exc:
+        raise PromotionRefused("qualification receipt is unreadable") from exc
 
 
 def _wheel_metadata(archive: zipfile.ZipFile) -> str:
@@ -104,7 +85,7 @@ def validate_unqualified_marker(path: Path) -> str:
             if path.suffix.lower() != ".zip":
                 raise PromotionRefused("only wheel or ONEDIR zip artifacts may be promoted")
             marker = _onedir_marker(archive)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
         raise PromotionRefused("artifact is not a readable wheel or ONEDIR zip") from exc
 
     expected_keys = {"label", "schema_version", "status", "version"}
@@ -122,29 +103,55 @@ def validate_unqualified_marker(path: Path) -> str:
     return version
 
 
-def validate_receipt(artifact: Path, receipt_path: Path, *, commit: str, tree: str) -> dict[str, Any]:
+def validate_receipt(
+    artifact: Path,
+    receipt_path: Path,
+    *,
+    commit: str,
+    tree: str,
+    replay_directory: Path,
+) -> dict[str, str]:
     if not _GIT_OBJECT.fullmatch(commit) or not _GIT_OBJECT.fullmatch(tree):
         raise PromotionRefused("candidate commit and tree must be full lowercase Git object IDs")
+    if replay_directory.is_symlink():
+        raise PromotionRefused("qualification replay directory must not be a symlink")
     version = validate_unqualified_marker(artifact)
-    receipt = _read_receipt(receipt_path)
-    if receipt["schema_version"] != 1:
-        raise PromotionRefused("qualification receipt schema version is unsupported")
-    if receipt["commit"] != commit or receipt["tree"] != tree:
-        raise PromotionRefused("qualification receipt does not match candidate commit and tree")
-    if receipt["artifact_digest"] != artifact_digest(artifact):
-        raise PromotionRefused("qualification receipt does not match artifact digest")
-    if not isinstance(receipt["config_digest"], str) or not _DIGEST.fullmatch(receipt["config_digest"]):
-        raise PromotionRefused("qualification receipt config digest is invalid")
-    profile = receipt["hardware_profile_id"]
-    if not isinstance(profile, str) or not _PROFILE.fullmatch(profile):
-        raise PromotionRefused("qualification receipt hardware profile ID is invalid")
-    if receipt["binding_digest"] != receipt_binding_digest(receipt):
-        raise PromotionRefused("qualification receipt binding digest is invalid")
-    return {"artifact_digest": receipt["artifact_digest"], "hardware_profile_id": profile, "version": version}
+    digest = artifact_digest(artifact)
+    try:
+        receipt = verify_artifact_qualification_receipt(
+            _receipt_bytes(receipt_path),
+            expected_commit=commit,
+            expected_tree=tree,
+            expected_artifact_sha256=digest,
+            replay_directory=replay_directory,
+        )
+    except (OSError, QualificationReceiptError, ValueError) as exc:
+        raise PromotionRefused(f"qualification receipt verification failed: {exc}") from exc
+    return {
+        "artifact_digest": receipt.context.artifact_sha256,
+        "configuration_digest": receipt.context.configuration_sha256,
+        "hardware_profile_id": receipt.context.hardware_profile_id,
+        "reviewed_source_binding_digest": receipt.context.reviewed_source_binding_sha256,
+        "version": version,
+    }
 
 
-def promote(artifact: Path, receipt: Path, output_dir: Path, *, commit: str, tree: str) -> Path:
-    result = validate_receipt(artifact, receipt, commit=commit, tree=tree)
+def promote(
+    artifact: Path,
+    receipt: Path,
+    output_dir: Path,
+    *,
+    commit: str,
+    tree: str,
+    replay_directory: Path,
+) -> Path:
+    result = validate_receipt(
+        artifact,
+        receipt,
+        commit=commit,
+        tree=tree,
+        replay_directory=replay_directory,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     destination = output_dir / artifact.name
     if destination.exists():
@@ -174,6 +181,7 @@ def _parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--output-dir", required=True, type=Path)
     promote_parser.add_argument("--commit", required=True)
     promote_parser.add_argument("--tree", required=True)
+    promote_parser.add_argument("--replay-directory", required=True, type=Path)
     return parser
 
 
@@ -184,7 +192,14 @@ def main(argv: list[str] | None = None) -> int:
             version = validate_unqualified_marker(args.artifact)
             print(json.dumps({"status": "UNQUALIFIED", "version": version}, sort_keys=True))
         else:
-            promote(args.artifact, args.receipt, args.output_dir, commit=args.commit, tree=args.tree)
+            promote(
+                args.artifact,
+                args.receipt,
+                args.output_dir,
+                commit=args.commit,
+                tree=args.tree,
+                replay_directory=args.replay_directory,
+            )
     except PromotionRefused as exc:
         print(f"PROMOTION_GATE_REFUSED: {exc}", file=sys.stderr)
         return 2
