@@ -125,7 +125,7 @@ def count_plain(path):
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except Exception:
         return 0, 0
-    code = sum(1 for l in lines if l.strip())
+    code = sum(1 for line in lines if line.strip())
     blank = len(lines) - code
     return code, blank
 
