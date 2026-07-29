@@ -290,8 +290,8 @@ def _git_blob_id(raw: bytes) -> str:
     return hashlib.sha1(framed).hexdigest()
 
 
-def _repository_has_git_metadata() -> bool:
-    """Does this checkout carry Git metadata at all?
+def _repository_has_git_metadata(git_repository: Path | None) -> bool:
+    """Does the repository UNDER VALIDATION carry Git metadata at all?
 
     A SEALED CANDIDATE is an exported tree with no ``.git`` whatsoever, so object
     binding there is not merely unverified, it is unverifiable -- and failing on it
@@ -299,18 +299,32 @@ def _repository_has_git_metadata() -> bool:
     repository that HAS Git but lacks a named object: there the absence is a real
     finding and must still be refused, which is why this asks about metadata rather
     than about whether some commit happens to resolve.
+
+    *** This asks about the repository under validation, NEVER about where this
+    module happens to live. Keying it on ``__file__`` is exactly what made the
+    protected evidence path unrunnable. The ordinary run imports these tools from
+    the sealed export, which has no ``.git``, so resolution was skipped. The
+    protected run imports the SAME tools from the JUDGE checkout, which IS a
+    repository, so resolution switched on and then hunted for the CANDIDATE's
+    objects inside the judge's object database, where they cannot exist. Identical
+    code, identical data, opposite outcome, decided purely by an import path. ***
     """
 
-    return (Path(__file__).resolve().parent.parent / ".git").exists()
+    return git_repository is not None and (git_repository / ".git").exists()
 
 
-def _git_object_id(root: Path, revision: str, *, kind: str, field: str) -> str:
-    """Resolve one locally available Git object or fail without trusting a claim."""
+def _git_object_id(git_repository: Path, revision: str, *, kind: str, field: str) -> str:
+    """Resolve one Git object in the repository under validation, or fail.
+
+    ``git_repository`` is the candidate's real checkout, deliberately distinct from
+    the materialized tree used for file reads: a sealed export carries the bytes but
+    none of the history, so the two authorities cannot be collapsed into one.
+    """
 
     revision_to_resolve = revision if ":" in revision else f"{revision}^{{{kind}}}"
     completed = subprocess.run(
         ["git", "rev-parse", "--verify", revision_to_resolve],
-        cwd=Path(__file__).resolve().parent.parent,
+        cwd=git_repository,
         capture_output=True,
         check=False,
     )
@@ -319,7 +333,7 @@ def _git_object_id(root: Path, revision: str, *, kind: str, field: str) -> str:
         raise GovernanceContractError(f"{field} does not resolve to a local Git {kind} object")
     typed = subprocess.run(
         ["git", "cat-file", "-e", f"{resolved}^{{{kind}}}"],
-        cwd=Path(__file__).resolve().parent.parent,
+        cwd=git_repository,
         capture_output=True,
         check=False,
     )
@@ -347,12 +361,35 @@ def _validate_red_reproduction_evidence(
     entry_id: str,
     guard_nodes: set[str],
     root: Path,
+    git_repository: Path | None = None,
+    require_git_resolution: bool = False,
 ) -> None:
     """Validate an executed local red receipt bound to Git and current guard bytes.
 
     This is intentionally a local-execution provenance tier, not a substitute
     for the sealed hosted-CI green artifact required to close a prevention.
+
+    Two distinct authorities, which must not be conflated:
+
+    ``root``
+        the materialized tree the receipt's files are read from. A sealed export.
+    ``git_repository``
+        the candidate's real checkout, used ONLY to resolve Git objects. ``None``
+        when no history is available.
+
+    ``require_git_resolution`` makes the caller's expectation explicit and
+    FAIL-CLOSED. The protected evidence path sets it, because there the candidate
+    checkout is always present and a silent downgrade to "no history, skip object
+    resolution" would hand back exactly the weaker check the protected path exists
+    to strengthen. An unset flag preserves the sealed-export behaviour, where the
+    absence of history is a fact about the tree rather than a missing input.
     """
+
+    if require_git_resolution and not _repository_has_git_metadata(git_repository):
+        raise GovernanceContractError(
+            f"{entry_id}.red_evidence requires Git object resolution but no candidate "
+            "repository was supplied; refusing to downgrade to an unresolved check"
+        )
 
     if not isinstance(value, Mapping) or not isinstance(value.get("locator"), str):
         return
@@ -421,12 +458,15 @@ def _validate_red_reproduction_evidence(
     # when Git was absent and silently skipped all of it, so the sealed candidate
     # accepted a forged receipt. That is the failure mode docs/DECISIONS.md:165-173
     # forbids by name: a Git-dependent check is RELOCATED, never turned into a pass.
-    resolvable = _repository_has_git_metadata()
+    resolvable = _repository_has_git_metadata(git_repository)
     resolved_commit = None
     if resolvable:
-        resolved_commit = _git_object_id(root, commit, kind="commit", field=f"{entry_id}.red_evidence defective commit")
+        assert git_repository is not None  # narrowed by _repository_has_git_metadata
+        resolved_commit = _git_object_id(
+            git_repository, commit, kind="commit", field=f"{entry_id}.red_evidence defective commit"
+        )
         resolved_tree = _git_object_id(
-            root, resolved_commit, kind="tree", field=f"{entry_id}.red_evidence defective tree"
+            git_repository, resolved_commit, kind="tree", field=f"{entry_id}.red_evidence defective tree"
         )
         if tree != resolved_tree:
             raise GovernanceContractError(f"{entry_id}.red_evidence defective tree does not match its defective commit")
@@ -442,10 +482,10 @@ def _validate_red_reproduction_evidence(
             or _GIT_OBJECT_ID.fullmatch(blob) is None
         ):
             raise GovernanceContractError(f"{entry_id}.red_evidence defective source blob binding is invalid")
-        if resolved_commit is None:
+        if resolved_commit is None or git_repository is None:
             continue
         resolved_blob = _git_object_id(
-            root,
+            git_repository,
             f"{resolved_commit}:{path}",
             kind="blob",
             field=f"{entry_id}.red_evidence defective source blob {path}",
@@ -666,8 +706,33 @@ def validate_publication_disposition_receipts(root: Path) -> dict[str, Any]:
     return dict(payload)
 
 
-def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, Any]:
+def validate_registry(
+    payload: Any,
+    *,
+    root: Path | None = None,
+    git_repository: Path | None = None,
+    require_git_resolution: bool = False,
+) -> dict[str, Any]:
+    # *** Callers that know the tree MUST pass it. The module-relative fallback below
+    # exists for in-repo callers (tests, local tooling) whose tree genuinely is this
+    # checkout. `tools/ci_guard_execution.py::_registry` READ the registry from its
+    # `root` argument and then called this function without it, so receipt paths
+    # silently resolved against wherever these tools were imported from. That is the
+    # whole of the protected-path failure. ***
     root = Path(__file__).resolve().parent.parent if root is None else root
+    # When the tree under validation IS itself a repository, that repository is the
+    # right place to resolve its own objects, and object resolution must keep running
+    # exactly as before. Omitting this silently disabled resolution for every in-repo
+    # caller: `tests/governance/test_red_reproduction.py` caught it immediately, with
+    # the `missing-defective-commit` and `wrong-defective-tree` mutations no longer
+    # raising. Those tests are red proofs that each validator branch matters, so a
+    # DID NOT RAISE there is a weakened guard, not a stale expectation.
+    #
+    # This is NOT a fallback that can rescue the protected path: there `root` is the
+    # sealed export, which has no `.git`, so this leaves `git_repository` None and
+    # `require_git_resolution` refuses unless the candidate checkout was passed.
+    if git_repository is None and (root / ".git").exists():
+        git_repository = root
     if not isinstance(payload, dict):
         raise GovernanceContractError("registry root must be a mapping")
     required_top = {
@@ -804,6 +869,8 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
             entry_id=record_id,
             guard_nodes=set(owned_nodes),
             root=root,
+            git_repository=git_repository,
+            require_git_resolution=require_git_resolution,
         )
         if record["status"] in {"closed", "expired"}:
             if "automation_limit" in record:
@@ -903,6 +970,8 @@ def validate_registry(payload: Any, *, root: Path | None = None) -> dict[str, An
             entry_id=pair_id,
             guard_nodes={pair["guard"]},
             root=root,
+            git_repository=git_repository,
+            require_git_resolution=require_git_resolution,
         )
         if pair["status"] in {"closed", "expired"}:
             if runtime["status"] not in {"closed", "expired"}:

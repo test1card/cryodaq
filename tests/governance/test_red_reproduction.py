@@ -154,4 +154,11 @@ def test_red_reproduction_receipt_refusals_are_independent(
     _rewrite_receipt(payload, directory, filename, receipt)
 
     with pytest.raises(GovernanceContractError, match=message):
-        validate_registry(payload, root=tmp_path)
+        # Two authorities, exactly as this module's own helper already documents: an
+        # ISOLATED evidence root, while Git lookups stay local and read-only. The
+        # validator used to infer the repository from its own __file__, which is what
+        # made the protected evidence path unrunnable -- there the module is imported
+        # from the judge checkout, which holds none of the candidate's objects. The
+        # repository is now STATED rather than inferred. The asserted refusals are
+        # unchanged: every mutation must still raise.
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)

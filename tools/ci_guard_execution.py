@@ -107,13 +107,29 @@ def suite_for_node(node: str) -> str:
     return "remaining"
 
 
-def _registry(root: Path) -> dict[str, Any]:
+def _registry(
+    root: Path,
+    *,
+    git_repository: Path | None = None,
+    require_git_resolution: bool = False,
+) -> dict[str, Any]:
     path = root / "governance" / "agent_preventions.yaml"
     try:
         payload = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeySafeLoader)
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise GuardExecutionError(f"cannot read canonical prevention registry: {exc}") from exc
-    return validate_registry(payload)
+    # *** `root` MUST be forwarded. This read the registry from `root` and then
+    # validated it without saying so, leaving validate_registry to fall back to its
+    # own module location for every receipt path. In the ordinary run that fallback
+    # happened to be the exported candidate and the bug was invisible; in the
+    # protected run it is the judge checkout, which carries no `governance/` at all,
+    # and the receipts became "unavailable". ***
+    return validate_registry(
+        payload,
+        root=root,
+        git_repository=git_repository,
+        require_git_resolution=require_git_resolution,
+    )
 
 
 def checkout_execution_selection(root: Path, suite: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -133,8 +149,17 @@ def active_guard_specs(
     *,
     platform: str | None = None,
     execution_root: str = "exported-commit",
+    git_repository: Path | None = None,
+    require_git_resolution: bool = False,
 ) -> tuple[GuardSpec, ...]:
-    """Return exact active guards applicable to one suite and platform."""
+    """Return exact active guards applicable to one suite and platform.
+
+    ``root`` is the materialized tree the registry and its receipts are read from.
+    ``git_repository`` is the candidate's real checkout, used only to resolve Git
+    objects, and is a separate authority because a sealed export has the bytes but
+    not the history. ``require_git_resolution`` makes the protected path fail closed
+    rather than silently degrade to the unresolved check.
+    """
 
     if suite not in DEFAULT_CI_SUITES:
         raise GuardExecutionError(f"guard suite is not a default CI partition: {suite!r}")
@@ -143,7 +168,11 @@ def active_guard_specs(
         raise GuardExecutionError(f"guard platform is invalid: {selected_platform!r}")
     if execution_root not in {"exported-commit", "git-index"}:
         raise GuardExecutionError(f"guard execution root is invalid: {execution_root!r}")
-    payload = _registry(root)
+    payload = _registry(
+        root,
+        git_repository=git_repository,
+        require_git_resolution=require_git_resolution,
+    )
     assignments: list[GuardSpec] = []
     for record in payload["records"]:
         assignments.extend(

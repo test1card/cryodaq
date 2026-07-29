@@ -53,7 +53,13 @@ _PROTECTED_RUNNER_BOOTSTRAP = (
 _PROTECTED_PRODUCER_FILES = (
     ".github/workflows/protected-ci-evidence-gate.yml",
     "environment.yml",
-    "requirements-lock.txt",
+    # *** The JUDGE's dependency input, not the product lock. requirements-lock.txt
+    # is the candidate's product lock, governed by the candidate's pyproject.toml and
+    # its drift gate; the judge no longer installs it. Pinning it here attested a file
+    # that no longer determines the producer's environment, while leaving the file
+    # that DOES determine it unattested. The product lock remains candidate dependency
+    # evidence and is still recorded in the execution bundle. ***
+    "requirements-protected-ci-lock.txt",
     "tools/__init__.py",
     "tools/candidate_evidence.py",
     "tools/check_python_compile.py",
@@ -534,6 +540,15 @@ def _protected_run(args: argparse.Namespace) -> int:
         str(destination),
         "--protected-producer-root",
         str(producer_root),
+        # The candidate's real checkout, supplied so the protected run can RESOLVE
+        # Git objects instead of skipping them. The judge holds none of the
+        # candidate's history and the sealed export holds no history at all, so
+        # without this the protected path is strictly weaker than the ordinary one
+        # it exists to strengthen. These are read-only rev-parse/cat-file lookups;
+        # the producer already runs them against this same checkout to export it,
+        # and they execute no candidate hook or program.
+        "--candidate-git-repository",
+        str(repository),
     )
     prior_suite = os.environ.get(FAILURE_RECEIPT_SUITE_ENV)
     os.environ[FAILURE_RECEIPT_SUITE_ENV] = args.suite
@@ -562,7 +577,43 @@ def _protected_run(args: argparse.Namespace) -> int:
         artifact_name=args.artifact_name,
         producer=producer_before,
     )
+    if receipt.returncode != 0:
+        _relay_protected_failure(receipt, suite=args.suite, output=args.output)
     return receipt.returncode
+
+
+def _relay_protected_failure(receipt: CandidateExecutionReceipt, *, suite: str, output: Path) -> None:
+    """Surface WHY a protected run failed, in bounded form.
+
+    This path previously wrote the bundle and returned the child's status without
+    printing anything at all: a failing protected execution produced an eight-second
+    silent exit 1, and the actual reason -- a guard-setup diagnosis naming the exact
+    prevention -- was recoverable only by downloading the uploaded artifact. A
+    required check that cannot say why it failed forces every diagnosis through an
+    artifact download, which is how a real defect stayed invisible.
+
+    Deliberately NOT a dump of the child's output: unbounded relay would let a
+    candidate flood the log and bury its own failure. Only the canonical failure
+    receipts and the structured phase diagnosis are echoed, and when neither exists a
+    single line points at the retained bundle.
+    """
+
+    text = f"{receipt.stdout.decode('utf-8', errors='replace')}\n{receipt.stderr.decode('utf-8', errors='replace')}"
+    relayed = False
+    for payload in _extract_failure_receipt_payloads(text, suite=suite):
+        print(f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}", flush=True)
+        relayed = True
+    for line in text.splitlines():
+        if line.startswith(PHASE_DIAGNOSIS_PREFIX):
+            print(line, flush=True)
+            relayed = True
+    if not relayed:
+        print(
+            f"candidate-suite={suite} protected-run-failed exit={receipt.returncode} "
+            f"without any failure receipt or phase diagnosis; retained bundle: {output}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _attest(args: argparse.Namespace) -> int:
