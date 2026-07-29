@@ -46,3 +46,7 @@ jobs:
       - name: Discriminate the restricted-token failure
         shell: pwsh
         run: python tools/diagnose_restricted_launch.py
+
+      - name: Trace which DLL the restricted child dies on
+        shell: pwsh
+        run: python tools/trace_restricted_loader.py
