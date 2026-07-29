@@ -60,9 +60,11 @@
 - **Последний релиз:** v0.64.1 (2026-07-08)
 - **Релизная основа:** последний локально доступный релизный тег — `v0.64.1`
   (2026-07-08).
-- **Активный кандидат:** `feat/montana-phase-a` — крупный, ещё не выпущенный
-  рефакторинг программной готовности к лаборатории. Зелёный CI или mock-тесты
-  сами по себе не означают лабораторную приёмку.
+- **Активная кампания:** Montana Cycle 2 — крупный, ещё не выпущенный
+  рефакторинг программной готовности к лаборатории. Этот README не утверждает
+  текущую branch или candidate SHA; live boundary задаёт `PROJECT_STATUS.md`.
+  Зелёный ordinary CI или mock-тесты сами по себе не означают лабораторную
+  приёмку.
 - **Граница доказательств:** проверки на реальных приборах, dummy load,
   независимом конечном элементе и с оператором остаются открытыми, пока не
   выполнены и не записаны процедуры из
@@ -84,8 +86,9 @@ batch фиксируется до обычной публикации в `DataBr
 остаётся открытой: текущий код содержит второй `SQLiteWriter`, RAG mutation-path
 и Telegram credential, которые нужно удалить или передать правильному владельцу.
 
-Кандидат проверяется на точном commit SHA раздельно в Windows, WSL/Linux,
-ONEDIR и hosted CI. Эти программные проверки не заменяют физические. Для
+Процедуры требуют проверять frozen candidate на точном commit SHA раздельно в
+Windows, WSL/Linux, ONEDIR и hosted CI; текущий текст не утверждает, что эти
+Cycle 2 gates уже выполнены. Эти программные проверки не заменяют физические. Для
 интервью с разработчиком, оператором или криогенным инженером используйте
 готовое задание и перечень вопросов в разделе
 [`Interview guide for another agent`](README.md#interview-guide-for-another-agent)
@@ -168,12 +171,15 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON-команды).
   loader -> LanceDB indexer -> top-K searcher; embeddings `qwen3-embedding:0.6b`
   (1024-dim) через Ollama. Индексация выполняется только офлайн: запустите
   `cryodaq-rag-index`, чтобы построить или перестроить индекс, затем используйте
-  `cryodaq-rag-search` для поиска. Работающий assistant предоставляет только
-  read-only поиск; команд перестроения, кнопки обновления и bootstrap при старте нет.
-- **Локальный сервис операторских запросов:** локальный Ollama-сервис (без внешних
-  API) классифицирует намерение оператора (IntentClassifier), маршрутизирует
+  `cryodaq-rag-search` для поиска. У работающего assistant нет команды
+  перестроения, кнопки обновления или bootstrap при старте, но отдельный текущий
+  RAG mutation-path оставляет общую observational-границу открытой.
+- **Локальный сервис операторских запросов:** локальный Ollama-сервис (без внешнего
+  model API) классифицирует намерение оператора (IntentClassifier), маршрутизирует
   запрос (QueryRouter) и отвечает по live-данным (BrokerSnapshot) и базе знаний
-  (KNOWLEDGE_QUERY). Read-only; полный audit-trail каждого model-вызова.
+  (KNOWLEDGE_QUERY). Query adapters должны быть read-only; service-level
+  write/credential exceptions выше остаются открытыми. Audit records создаются
+  на настроенных путях, но это не гарантия полноты для каждого failure mode.
 - **Replay исторических данных:** воспроизведение записей через DataBroker;
   predictor поверх replay-потока с decoupled-часами для ускоренного прогона;
   `cryodaq-replay-curve` для трансформации кривых; legacy channel-map для
@@ -356,8 +362,9 @@ cryodaq-rag-search               # семантический поиск по б
   `chamber.volume_l` для F13 leak rate
 - `config/instruments.local.yaml.example` — шаблон машино-специфических
   переопределений приборов (`instruments.local.yaml` — gitignored)
-- `config/channel_descriptors.yaml` — полная каноническая authority
-  descriptor/binding для всех приобретаемых каналов
+- `config/channel_descriptors.yaml` — tracked declared roster
+  descriptor/binding для приобретаемых каналов; physical reconciliation и
+  миграция оставшихся consumers остаются open gates
 - `config/channel_descriptors.local.yaml.example` — machine-specific полная
   замена manifest, а не частичный merge; перед реальным запуском её нужно
   сверить с physical roster
@@ -511,10 +518,13 @@ BrokerSnapshot и семантический поиск по базе знани
 RAG). Доступно из встроенного чата в overlay «База знаний» и через
 Telegram-бот.
 
-### Что НЕ делает
+### Текущая граница authority
 
-- Не имеет доступа к engine командам. Только чтение данных и текстовые каналы.
-- Не модифицирует state. Read-only.
+Целевая граница — только read-only engine queries и операторский текст.
+Текущий кандидат ей ещё не соответствует: у assistant остаются второй writer
+operator log, RAG mutation-path и Telegram credential. До удаления или передачи
+этих путей и независимой проверки нельзя называть весь assistant
+observational/read-only.
 
 ### Конфигурация
 

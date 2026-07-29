@@ -19,12 +19,14 @@
   схемой и conservative unavailable semantics, но production `ReplayEngine`
   wiring остаётся открытым reviewed slice. Кодек ограничивает payload до 8 MiB
   и не выдаёт instrument/control authority.
-- Добавлена каноническая descriptor authority для стабильной идентичности
-  приборов и каналов от acquisition и SQLite до archive/replay/report/GUI.
-  Machine-local manifest является whole-file replacement, проходит строгую
-  roster/binding validation и блокирует startup при неполной или противоречивой
-  конфигурации. Passive extension registry и ASC reference driver не могут
-  приобрести hazardous source authority через duck typing.
+- Добавлена каноническая descriptor authority на именованных путях acquisition,
+  SQLite и отдельных archive/replay/report/GUI consumers. Это не end-to-end
+  closure: archive-finalisation rows и часть GUI/interlock/assistant/notification
+  путей ещё не имеют descriptor authority или используют spelling; см.
+  `docs/OPEN_CELLS.md` (OC-008, OC-011, OC-023–OC-025). Machine-local manifest
+  является whole-file replacement и проходит строгую roster/binding validation.
+  Passive extension registry и ASC reference driver не могут приобрести
+  hazardous source authority через duck typing.
 - Добавлена точная Linux source-mode qualification для короткого mock-stack:
   sealed exact-SHA source/config snapshot, один пассивный LS218 fixture,
   locked process observer, subreaper-owned cleanup, bounded launcher log и две
@@ -52,9 +54,11 @@
   periodic-delivery workers являются observational, изолированы от engine event
   loop и не могут управлять приборами.
 - GUI остаётся панорамной operator-centric поверхностью: summary/POD только
-  дополняет dashboard, acknowledged active hazards сохраняются в evidence,
-  stale/disconnected truth не превращается в optimistic green, а все новые UI
-  изменения проходят co-versioned `docs/design-system/` gate.
+  дополняет dashboard, а именованные исправленные stale/disconnected paths не
+  превращают отсутствие данных в optimistic green. Product-wide
+  producer-revocation coverage и operator-scenario acceptance остаются OPEN
+  (OC-004); новые UI изменения должны проходить co-versioned
+  `docs/design-system/` gate.
 
 - Квитирование Alarm Engine v2 переведено на точную идентичность отдельного
   срабатывания. `GET /api/v1/alarms` теперь возвращает
@@ -144,12 +148,15 @@
 
 ---
 
-## [0.64.0] — 2026-07-08 — ночной excellence-прогон: fail-closed до конца, SQLite self-heal, жизненный цикл данных
+## [0.64.0] — 2026-07-08 — ночной hardening-прогон: scoped fail-closed fixes, SQLite self-heal, жизненный цикл данных
 
-Итог ночного аудита всего репозитория (собственный проход + четыре
-независимых внешних ревью по осям: safety-ядро, asyncio, storage-целостность,
-config-когерентность). Три из четырёх ревью нашли реальные дефекты — все
-закрыты с RED→GREEN-пинами. Главные: цепочка verified-off в safety-ядре
+Историческая запись ночного аудита (собственный проход + четыре заявленных
+внешних ревью по осям: safety-ядро, asyncio, storage-целостность,
+config-когерентность). Три из четырёх ревью нашли дефекты; исправлены все
+находки, перечисленные в этом release slice, с RED→GREEN-пинами. Это не
+доказательство полного аудита репозитория или завершённого fail-closed свойства:
+последующий Montana review нашёл дополнительные открытые классы. Главные
+исправления этого slice: цепочка verified-off в safety-ядре
 (две fail-open дыры), retention душил cold rotation (данные умирали, не
 дойдя до архива), SQLite-гейт самоисцеляется на Linux.
 
@@ -1335,9 +1342,10 @@ autonomous-run сидят под одним зонтиком — v0.54.0.
 
 - **F-ChannelLandmarks** — слой системного тождества каналов. В
   `config/physical_alarms.yaml` появляется опциональная секция
-  `landmarks:`, которая прикрепляет hardware-fixed каналы (Т11/Т12 —
-  ступени GM-cooler-а) к каноническим ролям плюс к операторским
-  алиасам (например, «азотная плита» → Т11).
+  `landmarks:`, которая объявляет Т11/Т12 как fixed-роли ступеней
+  GM-cooler-а плюс операторские алиасы (например, «азотная плита» → Т11).
+  Это software/config mapping; physical binding и calibration acceptance
+  остаются OPEN в `docs/lab_verification_checklist.md`.
 
   - Новая функция
     `cryodaq.core.physical_alarms_config.load_channel_landmarks()`
@@ -1996,13 +2004,13 @@ cooldown. Изначальная сортировка (коммит `fb59916`) �
 - Фикс плейсхолдера: UX-пробел из реализации idle-метки в `fb59916`.
 - 4 новых теста, 130/130 тестов analytics-view пройдено.
 
-## [0.52.3] — 2026-05-04 — корректное аппаратное соответствие Т11/Т12
+## [0.52.3] — 2026-05-04 — исправление заявленного соответствия Т11/Т12
 
 ### Исправлено
 
 - **C6 (зависшая находка из аудита F-X v3)** — `physical_alarms.yaml`
-  имел инвертированные cold/warm-каналы относительно реального
-  лабораторного железа. Исправлено:
+  имел инвертированные cold/warm-каналы относительно принятого тогда
+  stand mapping. Исправлено:
   - `cold_channel: "Т12"` (2-я ступень GM-cooler, пол ~2.9 K).
   - `warm_channel: "Т11"` (плита 1-й ступени, пол ~40 K).
   - Defaults в `cooldown_alarm.py` и `physical_alarms_config.py`
@@ -2010,15 +2018,18 @@ cooldown. Изначальная сортировка (коммит `fb59916`) �
   - Fallback-ы в `replay_alarm_history.py` перевёрнуты.
 - Display-метки в `channels.yaml` и `channel_manager.py`:
   «Теплообменник 1» → «Плита 1-й ступени» (Т11);
-  «Теплообменник 2» → «2-я ступень» (Т12). Физически точно.
+  «Теплообменник 2» → «2-я ступень» (Т12). Эта запись фиксирует
+  config/display intent, а не physical acceptance; gate остаётся OPEN в
+  `docs/lab_verification_checklist.md`.
 - `top_watch_bar.py`: `T_MIN_CHANNEL` Т11→Т12, `T_MAX_CHANNEL`
   Т12→Т11. Ячейка T_min теперь корректно показывает температуру
   cold-head 2-й ступени.
 - В `interlocks.yaml` уточнено описание `detector_warmup`
   (Т12 = 2-я ступень). Порог (10 K, Т12) уже был корректен;
   без изменений.
-- `vacuum_guard.py` `reference_temp_channel` (Т12) подтверждён;
-  без изменений.
+- `vacuum_guard.py` `reference_temp_channel` (Т12) совпал с принятым
+  config mapping и оставлен без изменений; физическая привязка не доказана
+  этим release note.
 
 ### Ссылки
 
@@ -3365,7 +3376,9 @@ IV.7.
   and deprecated `TEXT_MUTED` / `TEXT_PRIMARY` tokens removed. Host
   Integration Contract wired: `MainWindowV2._tick_status` connection
   mirror + `_ensure_overlay("instruments")` replay. Adaptive liveness
-  constants NOT tuned — verified against real instruments. Legacy
+  constants NOT tuned. Историческая release-запись утверждала проверку на
+  реальных приборах, но не сохранила объект и протокол измерения; это не
+  physical/laboratory acceptance evidence. Legacy
   widgets marked DEPRECATED in module docstrings; deletion slated
   for Phase II.13. Tests: 41 overlay cases + 7 host-wiring cases.
 
@@ -4383,14 +4396,16 @@ Keithley, алармы, давление.
 
 ---
 
-## [0.15.0] — 18-03-26 — Первый лабораторный релиз
+## [0.15.0] — 18-03-26 — исторически назван «первым лабораторным релизом»
 
-Явный release commit. Даже без сохранившегося тега, этот коммит
-остаётся чётким маркером «первая система, готовая для лаборатории».
+Явный release commit. Формулировка «первая система, готовая для лаборатории»
+была историческим названием, а не сохранённым physical/laboratory acceptance
+receipt; она не закрывает текущие gates из `docs/lab_verification_checklist.md`.
 
 ### Изменено
 
-- **Release v0.12.0** — первый production release commit.
+- **Release v0.12.0** — исторически описан как первый production release
+  commit; это publication label, не доказательство безопасного deployment.
 
 Диапазон коммитов: `c22eca9` (1 commit)
 
@@ -4607,8 +4622,10 @@ DiskMonitor.
 - **SafetyBroker** — выделенный канал безопасности, overflow=FAULT
   (не drop).
 - **Persistence-first ordering** — `SQLiteWriter.write_immediate()` WAL
-  commit ПЕРЕД публикацией в `DataBroker`. Гарантия: если данные видны
-  оператору — они уже на диске. 7 новых тестов.
+  commit ПЕРЕД публикацией archive-selected readings в `DataBroker`.
+  Историческая фраза «если данные видны оператору — они уже на диске» была
+  шире доказанного пути: SafetyBroker raw batches, synthetic events и другие
+  surfaces не входили в эту гарантию. 7 новых тестов.
 
 ### Изменено
 
@@ -4641,15 +4658,17 @@ Operator launcher, dual-channel Keithley, workflow теплопроводнос�
 
 ## [0.4.0] — 14-03-26 — Третий прибор и тестовая база
 
-Thyracont VSP63D (третий прибор), все вкладки GUI активны,
-руководство оператора, полная тестовая база.
+Thyracont VSP63D (третий прибор), вкладки GUI были wired/доступны в том
+release slice, руководство оператора и тогдашняя тестовая база. Это не
+operator-scenario или laboratory acceptance.
 
 ### Добавлено
 
 - **Thyracont VSP63D driver** — RS-232, протокол MV00, вакуумметр.
 - **Serial transport** — async pyserial wrapper.
 - **Вкладка Давление** — лог-шкала, цветовая индикация.
-- **Все 10 GUI вкладок** — полностью функциональны.
+- **Все 10 GUI вкладок** — wired и доступны в том release slice; прежнее
+  «полностью функциональны» не означало полную operability/acceptance coverage.
 - **`docs/operator_manual.md`** — руководство оператора на русском.
 - **Team workflow v2** — рабочие правила командной разработки
   (6 ролей, 4 инварианта).

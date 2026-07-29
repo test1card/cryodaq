@@ -17,9 +17,11 @@
 
 # CryoDAQ
 
-**CryoDAQ runs a cryogenics laboratory.** It reads the sensors, drives the instruments, keeps the
-hazardous ones from energizing when they shouldn't, records everything that happened, and tells a
-human when something needs attention at three in the morning.
+**CryoDAQ is acquisition, control, and operator-support software for a cryogenics
+laboratory.** It reads sensors, drives configured instruments, records
+measurements, and reports conditions requiring attention. Hazardous-output
+protection is fail-closed on the named, tested paths; real-instrument,
+independent final-element, and laboratory acceptance remain separate open gates.
 
 A cryostat cools test hardware to a few degrees above absolute zero and holds it there for days.
 While it does, a dozen thermometers, pressure gauges and a laser interferometer report what is
@@ -36,21 +38,25 @@ sensor link drops, and the display keeps showing the last number it saw, or fall
 reports a power source as `OFF` because nothing told it otherwise. An operator reads `OFF` and walks
 up to hardware that may still be live.
 
-CryoDAQ is built the other way round. A channel with no data reads `—`, never a plausible zero. A
-source with a dead link reads **UNKNOWN**, never `OFF`, and its controls disable — with no transport
-there is nothing to command over, and saying otherwise would be a lie with physical consequences. A
-summary that cannot answer a question says so, and names the next safe step. **Every screenshot
-below was taken with no instruments connected**, precisely because that is where the difference
-shows.
+CryoDAQ's named unavailable-state paths are built the other way round. In the
+screenshots below, a channel with no data reads `—`, and a source with a dead
+link reads **UNKNOWN**, not `OFF`; controls on that panel disable because there
+is no transport to command over. Those screenshots were taken with no
+instruments connected. This is demonstrated UI behavior, not a claim that every
+current or future producer/view has complete stale-state revocation coverage;
+that product-wide gate remains open in `docs/OPEN_CELLS.md`.
 
-The same principle runs underneath the interface. A reading is bound to the instrument that produced
-it, so one device's data cannot be mistaken for another's just because they share a label. Safety
-checks refuse to act on evidence they cannot authenticate. A configuration error stops the system at
-startup instead of being papered over at runtime.
+The candidate adds canonical reading descriptors and exact binding checks on
+named acquisition and safety paths. It does not yet make cross-device identity
+confusion impossible across every GUI, archive, interlock, Telegram, and report
+path; those remaining spelling- and descriptor-authority gaps are listed in
+`docs/OPEN_CELLS.md`. Safety configuration errors fail startup on the paths
+documented below; optional physical-alarm configuration still has explicitly
+documented fallback behavior.
 
 ### What is in it
 
-Sixteen live sensor channels across LakeShore, Keithley, Thyracont and Etalon hardware · scripted
+Configured sensor channels across LakeShore, Keithley, Thyracont and Etalon hardware · scripted
 experiment campaigns · automated sensor calibration with multi-format export · auto-generated
 reports · Telegram alerting with time-based escalation · anomaly detection and an alarm pipeline ·
 a question-answering layer over the lab's own documentation, running locally · replay of historical
@@ -97,9 +103,10 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
 - **Latest release:** v0.64.1 (2026-07-08)
 - **Released baseline:** the latest locally available release tag is `v0.64.1`
   (2026-07-08).
-- **Active candidate:** `feat/montana-phase-a` is a large, unreleased
-  software-side laboratory-readiness refactor. It is not accepted merely because
-  its mock tests or CI pass.
+- **Active campaign:** Montana Cycle 2 is a large, unreleased software-side
+  laboratory-readiness refactor. This README does not assert a current branch or
+  candidate SHA; `PROJECT_STATUS.md` defines the live boundary. The campaign is
+  not accepted merely because its mock tests or ordinary CI pass.
 - **Evidence boundary:** physical instrument, dummy-load, independent final-element,
   and laboratory acceptance gates remain open until the procedures in
   [`docs/lab_verification_checklist.md`](docs/lab_verification_checklist.md) are
@@ -111,8 +118,8 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
 
 ## Montana refactor: what changed
 
-Montana is the unreleased laboratory-readiness refactor on
-`feat/montana-phase-a`. It is moving CryoDAQ toward narrower ownership, explicit
+Montana is the unreleased laboratory-readiness refactor. Cycle 1 ended
+`NOT_PR_READY`; Cycle 2 is moving CryoDAQ toward narrower ownership, explicit
 evidence, and visible failure boundaries while preserving the information-dense
 operator workflow. Several boundaries remain open below, so this is a design
 direction and partially implemented candidate, not an accepted system property.
@@ -129,14 +136,18 @@ The most important changes are:
   publication. `SafetyBroker` separately receives the full raw batch for safety
   evaluation after the archive-selection/persistence branch; adaptive-throttle
   omissions and synthetic broker events are not claimed to be durably stored.
-- **Fail-closed hazardous output.** Source authority is capability-gated.
-  Verified OFF, emergency shutdown, interlocks, and bounded process cleanup were
-  strengthened; passive extension mechanisms cannot acquire actuator authority.
-- **Descriptor-qualified channel identity.** Canonical descriptors are carried
-  through acquisition, SQLite, cold archive, replay, reports, and GUI paths.
-  Startup validation of every safety/alarm/interlock pattern against that
-  authority fails closed: a configuration error terminates the engine with exit
-  code 2, and the launcher does not auto-restart it.
+- **Fail-closed hazardous output.** Source authority is currently restricted by
+  a reviewed one-model roster and driver-type equality; capability-derived
+  authority remains open under OC-007. Verified OFF, emergency shutdown,
+  interlocks, and bounded process cleanup were strengthened; passive extension
+  mechanisms cannot acquire actuator authority.
+- **Descriptor-qualified channel identity, incomplete end to end.** Canonical
+  descriptors are carried through named acquisition, SQLite, archive/replay,
+  report, and GUI paths. Archive-finalisation rows and multiple GUI, interlock,
+  assistant, and notification routes still fall back to spelling or lack
+  descriptor authority (OC-008, OC-011, OC-023–OC-025). Startup validation fails
+  closed for the exact safety bindings it resolves; this is not a claim that
+  every safety/alarm/interlock pattern is descriptor-bound.
 - **Process isolation and recovery.** The launcher supervises the engine, GUI
   bridge, assistant, and bounded report children with explicit lifecycle
   machinery. The assistant is process-isolated but does not yet satisfy the
@@ -370,12 +381,16 @@ hardening are not release or physical-acceptance claims; see **Status** above.
   loader -> LanceDB indexer -> top-K searcher; embeddings `qwen3-embedding:0.6b`
   (1024-dim) via Ollama. Indexing is offline only: run `cryodaq-rag-index` to
   build or rebuild the index, then use `cryodaq-rag-search` to query it. The
-  running assistant exposes read-only search only; it has no rebuild commands,
-  update button, or startup bootstrap.
-- **Local operator-query service:** a local Ollama service (no external APIs)
+  running assistant exposes no rebuild command, update button, or startup
+  bootstrap, but a separate current RAG mutation path keeps the assistant's
+  overall observational boundary open.
+- **Local operator-query service:** a local Ollama service (no external model APIs)
   classifies operator intent (IntentClassifier), routes the query
   (QueryRouter), and answers from live data (BrokerSnapshot) and the knowledge
-  base (KNOWLEDGE_QUERY). Read-only; full audit trail for every model call.
+  base (KNOWLEDGE_QUERY). The query adapters are intended to be read-only; the
+  service-level write/credential exceptions above remain open. Model-call audit
+  records are produced on the configured paths; this is not a completeness
+  guarantee for every failure mode.
 - **Historical-data replay:** replays records through the DataBroker; a predictor
   runs on top of the replay stream with a decoupled clock for accelerated
   playback; `cryodaq-replay-curve` for curve transforms; a legacy channel map
@@ -562,8 +577,9 @@ Active configuration files in the Montana candidate:
   `chamber.volume_l` for the F13 leak rate
 - `config/instruments.local.yaml.example` — template for machine-specific
   instrument overrides (`instruments.local.yaml` is gitignored)
-- `config/channel_descriptors.yaml` — complete canonical descriptor/binding
-  authority for every acquired channel
+- `config/channel_descriptors.yaml` — tracked declared descriptor/binding roster
+  for acquired channels; physical reconciliation and the remaining consumer
+  migrations are open gates
 - `config/channel_descriptors.local.yaml.example` — machine-specific *whole-file
   replacement*, never a partial merge; reconcile it with the physical roster
   before real-hardware use
@@ -692,7 +708,8 @@ deployment evidence; an unsafe runtime must be replaced.
 
 CryoDAQ runs a local text-generation service (current brand: Gemma, default
 model gemma4:e4b via Ollama; downgraded to gemma4:e2b on low-VRAM dev
-machines). No external APIs.
+machines). It uses no external model API; Telegram delivery is a separate
+external service and remains part of the open credential/authority boundary.
 
 ### What it does
 
@@ -711,10 +728,13 @@ routes the query to adapters: live data via BrokerSnapshot and semantic search
 over the knowledge base (KNOWLEDGE_QUERY → RAG). Available from the embedded chat
 in the "Knowledge base" overlay and via the Telegram bot.
 
-### What it does NOT do
+### Current authority boundary
 
-- Has no access to engine commands. Read-only data and text channels only.
-- Does not modify state. Read-only.
+The intended boundary is read-only engine queries plus operator text. The
+current candidate does not yet satisfy it: the assistant still has a second
+operator-log writer, a RAG mutation path, and a Telegram delivery credential.
+It must not be described as wholly observational or read-only until those paths
+are removed or reassigned and the gate is reviewed.
 
 ### Configuration
 

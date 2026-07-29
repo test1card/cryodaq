@@ -7,12 +7,13 @@
 # Exact canonical descriptor identities. If one stops updating for
 # stale_timeout_s, the safety manager faults.
 #
-# Architect rule (2026-05-07): только positionally-fixed reference
-# каналы gate the safety FSM. T11 (азотная/1-я ступень, ~40K floor) и T12
-# (холодная/2-я ступень, холодная точка, ~3K floor) — единственные каналы,
-# физически закреплённые между экспериментами. Другие T-каналы —
-# mobile per-experiment, использование их как critical_channels
-# создаёт ложные fault'ы при перестановке датчиков.
+# Правило конфигурации (2026-05-07): safety FSM используют только объявленные
+# reference-каналы T11 (азотная/1-я ступень, ~40K floor) и T12
+# (холодная/2-я ступень, холодная точка, ~3K floor). Их физическое крепление,
+# соответствие этим ролям и калибровка пока не подтверждены; gate —
+# docs/lab_verification_checklist.md. Другие T-каналы считаются
+# mobile per-experiment; использование их как critical_channels создаёт
+# ложные fault'ы при перестановке датчиков.
 critical_channels:
   - "Т11"     # opaque canonical identity; startup resolves exact (instrument_id, emitted_channel)
   - "Т12"     # opaque canonical identity; startup resolves exact (instrument_id, emitted_channel)

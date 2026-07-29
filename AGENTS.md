@@ -261,21 +261,20 @@ $env:PYTHONPATH = "$PWD\src"; .venv\Scripts\python.exe -m pytest -q tests/
 .venv\Scripts\python.exe -m ruff format --check --no-cache src tests
 ```
 
-A repo-wide `ruff format --check --no-cache src tests` is expected to be
-dirty: measured 2026-07-26 against a clean `montana/review-history` head
-(ruff 0.15.8), it reports 160 files would be reformatted out of 864 scanned.
-That is pre-existing formatting debt in files this slice did not touch, not
-a defect you introduced and not yours to fix under the "do not touch
-unrelated files" rule below. The gate actually enforced in CI
+A repo-wide `ruff format --check --no-cache src tests` has historically been
+dirty. **The 2026-07-26 observation of 160 files out of 864 (ruff 0.15.8) did
+not record an immutable commit/tree, so it is context, not reusable evidence or
+a current count.** Treat unrelated repo-wide formatting debt as user-owned;
+do not infer that a failure belongs to your slice or try to fix it wholesale.
+The gate actually enforced in CI
 (`.github/workflows/main.yml`, "Check formatting of changed Python files")
 only checks files changed since the commit pinned in that workflow's
-`FORMAT_BASE` variable; restricted to that same changed set, the check is
-clean. **Measured 2026-07-28 with pinned ruff 0.15.9 against the then-current
-head: every changed Python file was already formatted and none would be
-reformatted.** That is a measurement at one tree, not a standing property, and
-it moves with every commit — re-run the command below against your own head
-rather than repeating a stale figure. This file is permanent guidance, so it
-must not pin the commit that measurement was taken at; a guard enforces that.
+`FORMAT_BASE` variable. **A 2026-07-28 local observation said that changed set
+was clean with ruff 0.15.9, but it also omitted an immutable object binding and
+therefore supplies no evidence for another head.** Re-run the command below
+against your own head and record the exact object with any review receipt. This
+file is permanent guidance, so it must not pin a transient campaign commit; a
+guard enforces that.
 Reproduce the real gate locally with:
 
 ```bash

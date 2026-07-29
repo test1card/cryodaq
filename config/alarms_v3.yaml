@@ -4,9 +4,11 @@
 #
 # Криовакуумный стенд, проект Миллиметрон, АКЦ ФИАН
 #
-# Калиброванные датчики:  Т11 (азотная/первая ступень, 30–80 K)
-#                         Т12 (холодная/вторая ступень, 3–8 K)
-# Остальные:              только fault-детекция (0 K / 350+ K)
+# Config-группа `calibrated`: Т11 (заявлена азотная/первая ступень, 30–80 K)
+#                              Т12 (заявлена холодная/вторая ступень, 3–8 K)
+# Название группы историческое: физическая привязка и calibration acceptance
+# пока OPEN в docs/lab_verification_checklist.md.
+# Остальные: только fault-детекция (0 K / 350+ K)
 #
 # Физическое обоснование: alarm_tz_physics_v3.md
 #
@@ -114,7 +116,7 @@ global_alarms:
   # CooldownAlarm (predictor-based) and VacuumGuard.
   # See config/physical_alarms.yaml.
 
-  # --- Fault detection for calibrated sensors (retained — not replaced by F-X v3) ---
+  # --- Fault detection for config group `calibrated` (historical name) ---
   # Detects impossible raw values (<1K or >350K) indicating sensor hardware failure.
   # CooldownAlarm/VacuumGuard do not cover this — they evaluate physical state, not
   # sensor validity. This alarm remains a CRITICAL safety guard.

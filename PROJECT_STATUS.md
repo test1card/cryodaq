@@ -1,6 +1,7 @@
 # CryoDAQ — PROJECT_STATUS
 
-**Дата:** 2026-07-22 *(release baseline v0.64.1)*
+**Снимок release baseline:** 2026-07-22 *(v0.64.1)*
+**Последнее checkpoint-уточнение:** 2026-07-29
 **Релизная ветка:** master
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
@@ -14,9 +15,11 @@ boundary or establish release readiness, physical OFF, real-instrument,
 packaged-Windows, or laboratory acceptance.
 
 Cycle 1 terminated `NOT_PR_READY`, and the owner authorized Cycle 2 under the
-owner-ratified plan in `ROADMAP.md`. `master` is **four commits beyond
-`f5d6434d`**. The Cycle 1 judge SHA is no longer the Cycle 2 pin; a repaired
-default-branch commit is pending, so no successor SHA is asserted here.
+owner-ratified plan in `ROADMAP.md`. At that planning snapshot, `master` had
+advanced beyond `f5d6434d`; the exact distance was not bound to immutable
+evidence here and is not asserted as current. The Cycle 1 judge SHA is no
+longer the Cycle 2 pin; a repaired default-branch commit is pending, so no
+successor SHA is asserted here.
 
 The checkpoint claim is limited to protection against accidental or
 agent-induced validator and evidence-producer weakening, enforced by a judge
@@ -87,7 +90,12 @@ Open checkpoint and deployment invariants:
 
 ---
 
-## Физическая установка
+## Заявленный hardware roster release baseline (physical acceptance OPEN)
+
+The table below records the v0.64.1 declared/configured roster. It is not a
+receipt that these devices, interfaces, or channel bindings were physically
+verified on the current stand; that evidence belongs to
+`docs/lab_verification_checklist.md`.
 
 | Прибор | Интерфейс | Каналы | Драйвер |
 |---|---|---|---|

@@ -1,8 +1,9 @@
-# Channel mapping (2026-05-07, post-C6 + F-ChannelLandmarks):
-# Т11 — пассивная плита на 1-й ступени GM-cooler (~40K floor)
-# Т12 — 2-я ступень GM-cooler, холодная точка (~2.9K floor)
-# These are physically pinned (positionally fixed) channels.
-# Other Т* channels are mobile per-experiment — never reference them here.
+# Declared channel mapping (2026-05-07, post-C6 + F-ChannelLandmarks):
+# Т11 — configured as the passive plate on GM-cooler stage 1 (~40K floor)
+# Т12 — configured as GM-cooler stage 2 / cold point (~2.9K floor)
+# Physical attachment, role, and calibration remain OPEN under
+# docs/lab_verification_checklist.md. Other Т* channels are treated as
+# mobile per-experiment and are not declared for these roles here.
 cooldown:
   enabled: true
   channel_cold: "Т12"
