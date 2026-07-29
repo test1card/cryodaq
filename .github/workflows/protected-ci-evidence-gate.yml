@@ -58,7 +58,11 @@ jobs:
         suite: [core, gui, agents, remaining]
     env:
       ARTIFACT_NAME: cryodaq-protected-candidate-${{ matrix.os }}-${{ matrix.suite }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
-      GITHUB_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+      # NOTE: GITHUB_JOB_CHECK_RUN_ID is deliberately NOT set here. The `job` context
+      # is not available in job-level env -- only in container.env, services.*.env and
+      # step contexts -- so `${{ job.check_run_id }}` here made the whole workflow fail
+      # to start, with zero jobs and no diagnostic beyond "workflow file issue". It is
+      # set on the individual steps that consume it instead.
       GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
       JUDGE_SHA: ${{ github.workflow_sha }}
       PYTHONDONTWRITEBYTECODE: "1"
@@ -125,6 +129,8 @@ jobs:
         id: protected-run
         continue-on-error: true
         working-directory: judge
+        env:
+          GITHUB_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
           python -B -m tools.ci_candidate_evidence protected-run \
             --repository "${GITHUB_WORKSPACE:?}/candidate" \
@@ -140,6 +146,8 @@ jobs:
         id: job-attestation
         if: always()
         working-directory: judge
+        env:
+          GITHUB_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
           python -B -m tools.ci_candidate_evidence attest-job \
             --bundle "${RUNNER_TEMP:?}/cryodaq-protected-evidence" \

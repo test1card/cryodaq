@@ -62,7 +62,12 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
         "os": ["ubuntu-latest", "windows-latest"],
         "suite": ["core", "gui", "agents", "remaining"],
     }
-    assert execution["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
+    # *** The `job` context is NOT available in job-level env — only in container.env,
+    # services.*.env and step contexts. Asserting it at job level is what locked in a
+    # workflow GitHub refused to start: zero jobs, no diagnostic beyond "workflow file
+    # issue". The binding must live on the steps that consume it, and this guard now
+    # pins that placement so the invalid form cannot come back. ***
+    assert "GITHUB_JOB_CHECK_RUN_ID" not in execution["env"]
     assert execution["env"]["GITHUB_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
     assert execution["env"]["JUDGE_SHA"] == "${{ github.workflow_sha }}"
     execution_steps = execution["steps"]
@@ -81,6 +86,8 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     assert "tools.ci_candidate_evidence protected-run" in protected_run["run"]
     assert '--producer-root "${GITHUB_WORKSPACE:?}/judge"' in protected_run["run"]
     assert '--producer-revision "${JUDGE_SHA:?}"' in protected_run["run"]
+    # the signed job identity is bound at STEP level, where the `job` context exists
+    assert protected_run["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
     identity = next(step for step in execution_steps if step.get("id") == "job-attestation")
     assert "tools.ci_candidate_evidence attest-job" in identity["run"]
     upload = next(step for step in execution_steps if step.get("id") == "protected-upload")
