@@ -8,10 +8,12 @@ it cannot make a committed candidate appear green.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
 import subprocess
+import sys
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +24,7 @@ _OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 _FILE_MODES = {"100644", "100755"}
 _SYMLINK_MODE = "120000"
 _GITLINK_MODE = "160000"
+_SANDBOX_SHA256 = "3bd05eee9c0bc5a45bf7777a9f9796aa30319de461346e214ddaefc6bb19ff82"
 _WINDOWS_RESERVED = {
     "aux",
     "con",
@@ -272,6 +275,101 @@ def validate_exported_candidate(export_root: Path, manifest: CandidateManifest) 
         raise CandidateEvidenceError(f"exported candidate committed paths changed after execution: {changed!r}")
 
 
+def _grant_windows_restricted_state(state_root: Path) -> None:
+    """Label the candidate's scratch state Low so the low-integrity child can write it.
+
+    *** THIS IS THE HALF THAT MAKES THE BOUNDARY ASYMMETRIC, AND IT IS THE WHOLE POINT. ***
+    The candidate export is deliberately left UNLABELLED, and Windows treats unlabelled
+    objects as Medium: a Low-integrity process cannot write a Medium object no matter what
+    its DACL says, so the export is immutable to the child without any ACL work at all.
+    The scratch state is the one place the child must be able to write, so it is the one
+    place explicitly dropped to Low.
+
+    This replaces a DACL grant of full control to S-1-5-12, which belonged to the
+    withdrawn WRITE_RESTRICTED design. Under MIC there is no restricting SID, so that
+    grant would have been inert -- and inert in the dangerous direction: the child would
+    have found its own state unwritable and every honest run would have failed.
+
+    Measured on a hosted windows-latest runner, 10/10, with exactly this arrangement:
+    CPython starts, the state root stays writable, and export write, ACL rewrite, rename,
+    delete-recreate, hardlink and new-file are all refused.
+    """
+
+    completed = subprocess.run(
+        [
+            "icacls.exe",
+            str(state_root),
+            "/setintegritylevel",
+            "(OI)(CI)L",
+            "/T",
+            "/C",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise CandidateEvidenceError(
+            f"failed to label candidate scratch state low-integrity: {completed.stderr.strip()}"
+        )
+
+
+def _verified_sandbox_launcher() -> Path:
+    launcher = Path(__file__).with_name("candidate_sandbox.py").resolve(strict=True)
+    actual = hashlib.sha256(launcher.read_bytes()).hexdigest()
+    if actual != _SANDBOX_SHA256:
+        raise CandidateEvidenceError(
+            f"candidate sandbox helper is not the producer-pinned blob: expected={_SANDBOX_SHA256} actual={actual}"
+        )
+    return launcher
+
+
+def _run_sandboxed_candidate(
+    command: Sequence[str],
+    *,
+    export_root: Path,
+    state_root: Path,
+    environment: Mapping[str, str],
+    timeout: float,
+) -> subprocess.CompletedProcess[bytes]:
+    launcher = _verified_sandbox_launcher()
+    helper = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(launcher),
+        str(export_root),
+        str(state_root),
+        "--",
+        *command,
+    ]
+    if os.name == "nt":
+        _grant_windows_restricted_state(state_root)
+        return subprocess.run(
+            helper,
+            cwd=state_root,
+            env=environment,
+            capture_output=True,
+            text=False,
+            check=False,
+            timeout=timeout,
+        )
+    posix_helper = (
+        helper if environment.get("CRYODAQ_CANDIDATE_SANDBOX_ACTIVE") == "1" else ["sudo", "-n", "--", *helper]
+    )
+    return subprocess.run(
+        posix_helper,
+        cwd=state_root,
+        input=json.dumps(dict(environment), ensure_ascii=False).encode("utf-8"),
+        capture_output=True,
+        text=False,
+        check=False,
+        timeout=timeout,
+    )
+
+
 def execute_exported_candidate(
     repo: Path,
     revision: str,
@@ -320,20 +418,20 @@ def execute_exported_candidate(
     environment["CRYODAQ_CANDIDATE_COMMIT"] = manifest.commit
     environment["CRYODAQ_CANDIDATE_TREE"] = manifest.tree
     environment["CRYODAQ_CANDIDATE_MANIFEST_SHA256"] = manifest.sha256
+    environment["CRYODAQ_CANDIDATE_SANDBOX_LAUNCHER"] = str(_verified_sandbox_launcher())
     runtime_root = state_root / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     environment["CRYODAQ_STATE_ROOT"] = str(runtime_root)
     try:
-        completed = subprocess.run(
-            list(command),
-            cwd=export_root,
-            env=environment,
-            capture_output=True,
-            text=False,
-            check=False,
+        completed = _run_sandboxed_candidate(
+            command,
+            export_root=export_root,
+            state_root=state_root,
+            environment=environment,
             timeout=timeout,
         )
     finally:
+        _verified_sandbox_launcher()
         validate_exported_candidate(export_root, manifest)
     return CandidateExecutionReceipt(
         commit=manifest.commit,
