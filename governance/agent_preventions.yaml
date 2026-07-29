@@ -4777,3 +4777,25 @@ records:
     automation_limit: An independent audit found these gaps — coalescing registered exemption descriptors can hide an addition; a guard's execution dependencies are not covered because a live-candidate import can influence them; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
     red_evidence: local_exact_object_comparisons_reject_3d6d1a22_1d2c43ad_and_0f505dd6_with_stable_lost_challenge_and_added_exemption_ids_2026_07_28_pending_immutable_capture
     green_evidence: pending
+
+  - id: REPLAY-COMPARISON-EVIDENCE-035
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every observational tool that emits a clean comparative or nothing-found outcome from required comparison authority and persisted input evidence, including historical alarm replay.
+    classification: comparison_evidence_false_clean
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: An operator or reviewer can accept a clean comparison when required authority is absent or every eligible input is unusable, mistaking absence of evidence for equivalence.
+    invariant: A clean comparison outcome requires every required comparison authority and usable input evidence; missing authority or a dataset with no usable eligible input yields a distinct unavailable or non-comparative outcome and never a clean summary.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/replay/test_replay_predictor.py::test_comparison_requires_usable_status_with_identical_values
+        ci_partition: remaining
+      - node: tests/replay/test_replay_predictor.py::test_cli_comparison_requires_legacy_authority_with_valid_control
+        ci_partition: remaining
+    red_evidence: missing_project_root_legacy_alarm_authority_and_identical_finite_sensor_error_rows_each_produced_no_differences_2026_07_29_pending_immutable_capture
+    green_evidence: pending
