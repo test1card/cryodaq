@@ -31,12 +31,16 @@ Always exits 0. This measures; it does not gate and it changes no sandbox behavi
 from __future__ import annotations
 
 import ctypes
+import itertools
 import json
 import subprocess
 import sys
 import tempfile
 from ctypes import wintypes
 from pathlib import Path
+
+_OUTPUT_DIR: Path | None = None  # set to a LOW-labelled directory before any child runs
+_COUNTER = itertools.count()
 
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -141,7 +145,12 @@ def low_integrity_token() -> wintypes.HANDLE:
 
 def run_low(token: wintypes.HANDLE, code: str, cwd: str | None = None) -> tuple[int, str]:
     """Run one snippet of Python under the low-integrity token; return (rc, output)."""
-    out_path = Path(tempfile.mkstemp(suffix=".out")[1])
+    # *** The child is LOW integrity, so its output file must live somewhere LOW. ***
+    # tempfile puts it in the user temp dir at MEDIUM, which a low-integrity child
+    # cannot write -- the child then dies opening its own stdout with no output at
+    # all, which reads exactly like the boundary failing. That is MIC working
+    # correctly against the harness, and it cost one hosted run to see.
+    out_path = _OUTPUT_DIR / f"out-{next(_COUNTER)}.txt"
     # The child must CLOSE this file, not merely flush it. Leaving it open makes the
     # parent's cleanup unlink fail with WinError 32, which aborted the entire probe on
     # the first hosted run.
@@ -216,7 +225,12 @@ def main() -> int:
     state.mkdir()
     (export / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
     # export deliberately left UNLABELLED -> treated as medium
+    global _OUTPUT_DIR
+    _OUTPUT_DIR = root / "probe-out"
+    _OUTPUT_DIR.mkdir()
+    output_low = label_low(_OUTPUT_DIR)
     print(f"state root labelled Low: {label_low(state)}")
+    print(f"probe output dir labelled Low: {output_low}")
     print(f"export root left unlabelled (medium) at {export}\n")
 
     token = low_integrity_token()
