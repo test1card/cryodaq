@@ -348,10 +348,17 @@ def _validate_population(
         raise PartitionExecutionProofError(f"{suite}: job log and candidate artifact population receipts differ")
     totals = {
         field: sum(payload["population"][field] for payload in payloads)
-        for field in ("collected", "deselected", "executed", "skipped")
+        for field in ("call_executed", "collected", "deselected", "executed", "skipped")
     }
     if totals["collected"] < 1:
         raise PartitionExecutionProofError(f"{suite}: collected=0")
+    missing_call_indices = [
+        payload["invocation_index"] for payload in payloads if payload["population"]["call_executed"] < 1
+    ]
+    if missing_call_indices:
+        raise PartitionExecutionProofError(
+            f"{suite}: call_executed=0 for pytest invocation(s) {missing_call_indices!r}"
+        )
     totals["receipt_count"] = len(payloads)
     return totals
 
@@ -560,7 +567,8 @@ def main(argv: list[str] | None = None, *, api: Any | None = None) -> int:
         print(
             f"EXECUTED {partition['os']}/{partition['suite']}: "
             f"collected={partition['population']['collected']} "
-            f"executed={partition['population']['executed']}"
+            f"executed={partition['population']['executed']} "
+            f"call_executed={partition['population']['call_executed']}"
         )
     return 0
 
