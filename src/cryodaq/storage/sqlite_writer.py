@@ -647,6 +647,7 @@ def _check_sqlite_version() -> None:
 # _signal_persistence_failure like disk-full does.
 _LOCKED_FAILURE_THRESHOLD = 3
 _LOCKED_FAILURE_SPAN_S = 15.0
+_LOCKED_RETRY_DELAY_S = 0.1
 
 
 _COMMIT_RECEIPT_PROVENANCE = object()
@@ -7144,8 +7145,8 @@ class SQLiteWriter:
         midnight is correctly split across daily DB files.
 
         Returns True iff every day's sub-batch was durably persisted; False
-        if any sub-batch was swallowed (disk-full / locked-DB — see
-        _write_day_batch). This is a LOCAL result of this one call, not
+        if any sub-batch reached a persistence fault (disk-full / sustained
+        locked-DB — see _write_day_batch). This is a LOCAL result of this one call, not
         shared writer state (R1, Phase A recheck) — concurrent
         write_immediate() calls on the same writer can otherwise interleave
         on the single-worker executor and clobber a shared drop flag before
@@ -7175,8 +7176,8 @@ class SQLiteWriter:
         before the owner task was created. A batch crossing UTC midnight is
         split into ordered, single-day transactions. One receipt covering the
         original batch is issued only after every daily transaction commits;
-        ``None`` means a disk-full/locked failure left no publication authority
-        (even if an earlier day already committed).
+        ``None`` means a disk-full/sustained-lock fault left no publication
+        authority (even if an earlier day already committed).
         """
 
         owner = self._live_channel_catalog
@@ -7306,8 +7307,9 @@ class SQLiteWriter:
         """Write a single day's readings to the given connection.
 
         Returns True if the batch was durably committed (or there was
-        nothing to write), False if it was swallowed (disk-full / locked-DB
-        below the A6 signalling threshold — see below). The caller
+        nothing to write), False if persistence faulted (disk-full or a
+        sustained locked-DB failure — see below). Transient locked/busy
+        failures retain and retry these exact rows. The caller
         (_write_batch) folds this per-day result into the per-call return
         of write_immediate().
 
@@ -7381,111 +7383,103 @@ class SQLiteWriter:
         if not rows:
             return True
         catalog_was_installed = self._descriptor_catalog_installed
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            # Verify after acquiring the writer lock. An external connection
-            # must not be able to install a trigger or corrupt FK data between
-            # this guard and the receipted INSERT below.
-            self._verify_descriptor_write_boundary(conn)
-            if self._channel_catalog is not None and not catalog_was_installed:
-                # Install once per daily connection, in the same transaction as
-                # its first readings. A failed first write therefore cannot
-                # leave catalog authority behind without any persisted sample.
-                install_catalog(conn, self._channel_catalog, within_transaction=True)
-            conn.executemany(
-                "INSERT INTO main.readings "
-                "(timestamp, instrument_id, channel, value, unit, status, descriptor_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?);",
-                rows,
-            )
-            descriptor_guard_after_write = (
-                self._descriptor_guard_state(conn) if self._channel_catalog is not None else None
-            )
-            conn.commit()
-            if self._channel_catalog is not None:
-                self._descriptor_catalog_installed = True
-                # Publish only the baseline sampled while BEGIN IMMEDIATE still
-                # excluded external writers. A commit landing immediately after
-                # ours must remain observable as a change on the next batch.
-                assert descriptor_guard_after_write is not None
-                self._descriptor_connection_guard = descriptor_guard_after_write
-            # A successful write resets the locked-DB streak (roadmap A6).
-            self._locked_failure_count = 0
-            self._locked_failure_first_ts = None
-        except sqlite3.OperationalError as exc:
-            conn.rollback()
-            # Disk-full graceful degradation (Phase 2a H.1).
-            # Detect by exact PHRASES to avoid false positives like
-            # "database disk image is malformed" (SQLITE_CORRUPT) or
-            # "disk I/O error" (SQLITE_IOERR), which are NOT disk-full.
-            # Phrases cover SQLITE_FULL on Linux/macOS/Windows + quota.
-            msg = str(exc).lower()
-            disk_full_phrases = (
-                "database or disk is full",
-                "database is full",
-                "no space left on device",
-                "not enough space on the disk",
-                "disk quota exceeded",
-            )
-            if any(phrase in msg for phrase in disk_full_phrases):
-                if not self._disk_full:
-                    logger.critical(
-                        "DISK FULL detected in SQLite write: %s. Pausing polling, triggering safety fault.",
-                        exc,
-                    )
-                self._disk_full = True
-                self._signal_persistence_failure(f"disk full: {exc}")
-                # Do NOT re-raise. Re-raising would propagate up to
-                # write_immediate / scheduler and cause the historic tight
-                # CRITICAL-log loop. The flag + signalled callback are the
-                # signalling mechanism now.
-                return False
+        while True:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                # Verify after acquiring the writer lock. An external connection
+                # must not be able to install a trigger or corrupt FK data between
+                # this guard and the receipted INSERT below.
+                self._verify_descriptor_write_boundary(conn)
+                if self._channel_catalog is not None and not catalog_was_installed:
+                    # Install once per daily connection, in the same transaction as
+                    # its first readings. A failed first write therefore cannot
+                    # leave catalog authority behind without any persisted sample.
+                    install_catalog(conn, self._channel_catalog, within_transaction=True)
+                conn.executemany(
+                    "INSERT INTO main.readings "
+                    "(timestamp, instrument_id, channel, value, unit, status, descriptor_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?);",
+                    rows,
+                )
+                descriptor_guard_after_write = (
+                    self._descriptor_guard_state(conn) if self._channel_catalog is not None else None
+                )
+                conn.commit()
+                if self._channel_catalog is not None:
+                    self._descriptor_catalog_installed = True
+                    # Publish only the baseline sampled while BEGIN IMMEDIATE still
+                    # excluded external writers. A commit landing immediately after
+                    # ours must remain observable as a change on the next batch.
+                    assert descriptor_guard_after_write is not None
+                    self._descriptor_connection_guard = descriptor_guard_after_write
+                # A successful write resets the locked-DB streak (roadmap A6).
+                self._locked_failure_count = 0
+                self._locked_failure_first_ts = None
+                break
+            except sqlite3.OperationalError as exc:
+                conn.rollback()
+                # Disk-full graceful degradation (Phase 2a H.1).
+                # Detect by exact PHRASES to avoid false positives like
+                # "database disk image is malformed" (SQLITE_CORRUPT) or
+                # "disk I/O error" (SQLITE_IOERR), which are NOT disk-full.
+                # Phrases cover SQLITE_FULL on Linux/macOS/Windows + quota.
+                msg = str(exc).lower()
+                disk_full_phrases = (
+                    "database or disk is full",
+                    "database is full",
+                    "no space left on device",
+                    "not enough space on the disk",
+                    "disk quota exceeded",
+                )
+                if any(phrase in msg for phrase in disk_full_phrases):
+                    if not self._disk_full:
+                        logger.critical(
+                            "DISK FULL detected in SQLite write: %s. Pausing polling, triggering safety fault.",
+                            exc,
+                        )
+                    self._disk_full = True
+                    self._signal_persistence_failure(f"disk full: {exc}")
+                    # Do NOT re-raise. Re-raising would propagate up to
+                    # write_immediate / scheduler and cause the historic tight
+                    # CRITICAL-log loop. The flag + signalled callback are the
+                    # signalling mechanism now.
+                    return False
 
-            # Locked-DB parity (roadmap A6): "database is locked"/"database
-            # is busy" is usually transient (WAL writer contention) and
-            # clears on retry. Only a sustained lock — >= _LOCKED_FAILURE_THRESHOLD
-            # CONSECUTIVE failures spanning >= _LOCKED_FAILURE_SPAN_S — is
-            # treated like disk-full. Both conditions must hold: a burst of
-            # quick failures or sporadic non-consecutive ones must not signal.
-            locked_phrases = ("database is locked", "database is busy")
-            if any(phrase in msg for phrase in locked_phrases):
-                now = time.monotonic()
-                if self._locked_failure_count == 0:
-                    self._locked_failure_first_ts = now
-                self._locked_failure_count += 1
-                span = now - self._locked_failure_first_ts
-                if self._locked_failure_count >= _LOCKED_FAILURE_THRESHOLD and span >= _LOCKED_FAILURE_SPAN_S:
-                    logger.critical(
-                        "LOCKED DB: %d consecutive database is locked/busy "
-                        "failures spanning %.1fs. Triggering safety fault.",
-                        self._locked_failure_count,
-                        span,
-                    )
-                    self._signal_persistence_failure(f"database locked: {exc}")
-                else:
-                    # Below threshold: swallowed (no raise) but never silent —
-                    # the batch was lost and the log must say so.
+                # Locked-DB parity (roadmap A6): retain and retry this exact
+                # batch while contention is transient. Only a sustained lock —
+                # >= _LOCKED_FAILURE_THRESHOLD consecutive failures spanning
+                # >= _LOCKED_FAILURE_SPAN_S — is treated like disk-full.
+                locked_phrases = ("database is locked", "database is busy")
+                if any(phrase in msg for phrase in locked_phrases):
+                    now = time.monotonic()
+                    if self._locked_failure_count == 0:
+                        self._locked_failure_first_ts = now
+                    self._locked_failure_count += 1
+                    span = now - self._locked_failure_first_ts
+                    if self._locked_failure_count >= _LOCKED_FAILURE_THRESHOLD and span >= _LOCKED_FAILURE_SPAN_S:
+                        logger.critical(
+                            "LOCKED DB: batch NOT persisted after %d consecutive "
+                            "database is locked/busy failures spanning %.1fs. "
+                            "Triggering safety fault.",
+                            self._locked_failure_count,
+                            span,
+                        )
+                        self._signal_persistence_failure(f"database locked; batch not persisted: {exc}")
+                        return False
                     logger.warning(
-                        "Batch write failed, database locked/busy (%d/%d, %.1fs): %s",
+                        "Batch write blocked, retaining and retrying same batch (%d/%d, %.1fs): %s",
                         self._locked_failure_count,
                         _LOCKED_FAILURE_THRESHOLD,
                         span,
                         exc,
                     )
-                # F1/R1 (Phase A gate + recheck, CRITICAL): the batch was
-                # swallowed, not persisted — report it via the return value
-                # (not shared writer state) so the caller (_write_batch) can
-                # fold it into write_immediate()'s own per-call result and
-                # the scheduler can skip publishing to any broker,
-                # regardless of whether the A6 signalling threshold was hit.
-                # Do NOT re-raise — same graceful-degradation rationale as
-                # disk-full above (avoid the historic tight CRITICAL-log loop).
-                return False
-            # Any other OperationalError keeps the existing semantics.
-            raise
-        except Exception:
-            conn.rollback()
-            raise
+                    time.sleep(_LOCKED_RETRY_DELAY_S)
+                    continue
+                # Any other OperationalError keeps the existing semantics.
+                raise
+            except Exception:
+                conn.rollback()
+                raise
 
         # Periodic explicit PASSIVE checkpoint (~once per minute at 1 Hz batch
         # cadence). Prevents WAL file growth under concurrent reader pressure.
@@ -9103,8 +9097,9 @@ class SQLiteWriter:
         данные попадают в DataBroker ТОЛЬКО после записи на диск.
         При ошибке — логирует CRITICAL и пробрасывает исключение.
 
-        Returns True iff the batch was durably persisted, False if it was
-        swallowed (disk-full / locked-DB — see _write_batch). This result is
+        Returns True iff the batch was durably persisted, False if it reached
+        a persistence fault (disk-full / sustained locked-DB — see
+        _write_batch). This result is
         per-call (R1, Phase A recheck): callers must not rely on any shared
         writer state, since concurrent write_immediate() calls on the same
         writer share one executor and could otherwise clobber each other's

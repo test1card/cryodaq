@@ -1,13 +1,13 @@
-"""A6: locked-DB parity — sustained `database is locked`/`busy` write_immediate
-failures must route into _signal_persistence_failure, like disk-full does.
+"""A6: locked-DB parity and retained retry for live reading batches.
 
-Threshold: >= 3 CONSECUTIVE failures spanning >= 15s. Both conditions must
-hold — a burst of quick transient failures or sporadic non-consecutive
-failures must NOT signal. A successful write resets the tracking.
+Transient `database is locked`/`busy` failures retry the same batch. A sustained
+lock routes into _signal_persistence_failure like disk-full does at >= 3
+consecutive failures spanning >= 15s. Both threshold conditions must hold.
 """
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
@@ -56,30 +56,38 @@ def _fake_clock(monkeypatch: pytest.MonkeyPatch, times: list[float]) -> None:
     monkeypatch.setattr(sqlite_writer_module.time, "monotonic", lambda: next(it))
 
 
-def test_three_consecutive_locked_failures_spanning_15s_signals(tmp_path, monkeypatch):
+def test_sustained_locked_batch_spanning_15s_signals_fault(tmp_path, monkeypatch):
     writer = SQLiteWriter(tmp_path)
     signal = MagicMock()
     monkeypatch.setattr(writer, "_signal_persistence_failure", signal)
+    monkeypatch.setattr(sqlite_writer_module.time, "sleep", lambda _seconds: None)
     _fake_clock(monkeypatch, [0.0, 8.0, 15.0])
 
-    for _ in range(3):
-        poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
-        writer._write_day_batch(poisoned, [_reading()])
+    poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
+    persisted = writer._write_day_batch(poisoned, [_reading()])
 
+    assert persisted is False
     signal.assert_called_once()
-    assert "database locked" in signal.call_args[0][0].lower()
+    assert "database locked; batch not persisted" in signal.call_args[0][0].lower()
 
 
-def test_three_consecutive_locked_failures_within_15s_does_not_signal(tmp_path, monkeypatch):
+def test_three_locked_failures_within_15s_retry_to_success(tmp_path, monkeypatch):
     writer = SQLiteWriter(tmp_path)
     signal = MagicMock()
     monkeypatch.setattr(writer, "_signal_persistence_failure", signal)
+    monkeypatch.setattr(sqlite_writer_module.time, "sleep", lambda _seconds: None)
     _fake_clock(monkeypatch, [0.0, 5.0, 10.0])
 
-    for _ in range(3):
-        poisoned = _poisoned_conn(sqlite3.OperationalError("database is busy"))
-        writer._write_day_batch(poisoned, [_reading()])
+    transient = _healthy_conn()
+    transient.executemany.side_effect = [
+        sqlite3.OperationalError("database is busy"),
+        sqlite3.OperationalError("database is busy"),
+        sqlite3.OperationalError("database is busy"),
+        None,
+    ]
+    persisted = writer._write_day_batch(transient, [_reading()])
 
+    assert persisted is True
     signal.assert_not_called()
 
 
@@ -87,34 +95,41 @@ def test_two_failures_success_two_failures_does_not_signal(tmp_path, monkeypatch
     writer = SQLiteWriter(tmp_path)
     signal = MagicMock()
     monkeypatch.setattr(writer, "_signal_persistence_failure", signal)
+    monkeypatch.setattr(sqlite_writer_module.time, "sleep", lambda _seconds: None)
     # Two failures spanning 8s, a success, then two more failures spanning
     # 8s. Total elapsed since the first failure is well over 15s, but the
     # success must break the streak — neither half reaches 3 consecutive.
     _fake_clock(monkeypatch, [0.0, 8.0, 20.0, 28.0])
 
-    for _ in range(2):
-        poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
-        writer._write_day_batch(poisoned, [_reading()])
-
-    writer._write_day_batch(_healthy_conn(), [_reading()])
-
-    for _ in range(2):
-        poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
-        writer._write_day_batch(poisoned, [_reading()])
+    first = _healthy_conn()
+    first.executemany.side_effect = [
+        sqlite3.OperationalError("database is locked"),
+        sqlite3.OperationalError("database is locked"),
+        None,
+    ]
+    second = _healthy_conn()
+    second.executemany.side_effect = [
+        sqlite3.OperationalError("database is locked"),
+        sqlite3.OperationalError("database is locked"),
+        None,
+    ]
+    assert writer._write_day_batch(first, [_reading()]) is True
+    assert writer._write_day_batch(second, [_reading()]) is True
 
     signal.assert_not_called()
 
 
 def test_successful_write_resets_tracking(tmp_path, monkeypatch):
     writer = SQLiteWriter(tmp_path)
+    monkeypatch.setattr(sqlite_writer_module.time, "sleep", lambda _seconds: None)
     _fake_clock(monkeypatch, [0.0])
 
-    poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
-    writer._write_day_batch(poisoned, [_reading()])
-    assert writer._locked_failure_count == 1
-    assert writer._locked_failure_first_ts == 0.0
-
-    writer._write_day_batch(_healthy_conn(), [_reading()])
+    transient = _healthy_conn()
+    transient.executemany.side_effect = [
+        sqlite3.OperationalError("database is locked"),
+        None,
+    ]
+    assert writer._write_day_batch(transient, [_reading()]) is True
     assert writer._locked_failure_count == 0
     assert writer._locked_failure_first_ts is None
 
@@ -149,31 +164,84 @@ def test_other_operational_errors_still_raise_and_do_not_track(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_single_locked_failure_below_threshold_returns_not_persisted(tmp_path, monkeypatch):
-    """Even a single (non-signalling) locked failure must report the batch
-    as NOT persisted via the return value — the scheduler must not publish
-    it regardless of whether the A6 threshold was crossed."""
+def test_single_locked_failure_is_retried_not_dropped(tmp_path, monkeypatch):
     writer = SQLiteWriter(tmp_path)
-    monkeypatch.setattr(writer, "_signal_persistence_failure", MagicMock())
+    signal = MagicMock()
+    monkeypatch.setattr(writer, "_signal_persistence_failure", signal)
+    monkeypatch.setattr(sqlite_writer_module.time, "sleep", lambda _seconds: None)
     _fake_clock(monkeypatch, [0.0])
 
-    poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
-    persisted = writer._write_day_batch(poisoned, [_reading()])
+    transient = _healthy_conn()
+    transient.executemany.side_effect = [
+        sqlite3.OperationalError("database is locked"),
+        None,
+    ]
+    persisted = writer._write_day_batch(transient, [_reading()])
 
-    assert persisted is False, (
-        "A swallowed locked-DB failure must report not-persisted via the "
-        "return value, even below the signalling threshold (F1)"
-    )
+    assert persisted is True
+    signal.assert_not_called()
 
 
-def test_write_batch_returns_true_on_healthy_write(tmp_path):
-    """_write_batch() reports persistence per call via its return value — a
-    real, healthy write against tmp_path must return True."""
+def test_healthy_write_succeeds_without_retry_delay(tmp_path, monkeypatch):
+    """A normal real write commits without entering the lock retry delay."""
     writer = SQLiteWriter(tmp_path)
+    retry_delay = MagicMock(side_effect=AssertionError("healthy write entered locked retry delay"))
+    monkeypatch.setattr(sqlite_writer_module.time, "sleep", retry_delay)
 
     persisted = writer._write_batch([_reading()])
 
     assert persisted is True
+    retry_delay.assert_not_called()
+
+
+async def test_locked_write_retries_same_batch_until_durable(tmp_path):
+    """A transient real SQLite writer lock must delay, not discard, the batch."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    reading = _reading()
+    owned = writer._ensure_connection(reading.timestamp.date())
+    owned.execute("PRAGMA busy_timeout=25")
+    database = tmp_path / f"data_{reading.timestamp.date().isoformat()}.db"
+    lock = sqlite3.connect(database)
+    lock.execute("BEGIN IMMEDIATE")
+
+    write = asyncio.create_task(writer.write_immediate([reading]))
+    await asyncio.sleep(0.1)
+    lock.rollback()
+    lock.close()
+
+    assert await write is True
+    row = owned.execute(
+        "SELECT instrument_id, channel, value FROM readings WHERE timestamp=?",
+        (reading.timestamp.timestamp(),),
+    ).fetchone()
+    assert row == (reading.instrument_id, reading.channel, reading.value)
+    await writer.stop()
+
+
+async def test_sustained_real_lock_faults_without_claiming_persistence(tmp_path, monkeypatch):
+    """A real lock held past the policy boundary returns False and signals."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    reading = _reading()
+    owned = writer._ensure_connection(reading.timestamp.date())
+    owned.execute("PRAGMA busy_timeout=10")
+    database = tmp_path / f"data_{reading.timestamp.date().isoformat()}.db"
+    lock = sqlite3.connect(database)
+    lock.execute("BEGIN IMMEDIATE")
+    signal = MagicMock()
+    monkeypatch.setattr(writer, "_signal_persistence_failure", signal)
+    monkeypatch.setattr(sqlite_writer_module, "_LOCKED_FAILURE_SPAN_S", 0.05)
+    monkeypatch.setattr(sqlite_writer_module, "_LOCKED_RETRY_DELAY_S", 0.01)
+
+    persisted = await writer.write_immediate([reading])
+
+    assert persisted is False
+    signal.assert_called_once()
+    assert "database locked; batch not persisted" in signal.call_args.args[0]
+    lock.rollback()
+    lock.close()
+    await writer.stop()
 
 
 def test_other_operational_error_raise_path_propagates(tmp_path):
@@ -186,16 +254,8 @@ def test_other_operational_error_raise_path_propagates(tmp_path):
         writer._write_day_batch(poisoned, [_reading()])
 
 
-async def test_interleaved_write_immediate_first_drop_not_masked_by_second_success(tmp_path):
-    """R1 residual (Phase A recheck, CRITICAL): concurrent scheduler poll
-    tasks share one SQLiteWriter and its single-worker executor. Call A's
-    write_immediate() drops its batch (locked/busy, swallowed); call B's
-    write_immediate() succeeds right after, on the same writer. A's return
-    value must still be False — a shared `_last_batch_dropped` flag would
-    let B's success reset it before A's caller ever checked it. Sequential
-    direct calls are enough: no real thread race is needed to show the
-    result is bound per-call, not shared mutable writer state.
-    """
+async def test_interleaved_write_immediate_first_retry_not_masked_by_second_success(tmp_path):
+    """Each queued call returns only after its own retained batch commits."""
     writer = SQLiteWriter(tmp_path)
     await writer.start_immediate()
 
@@ -206,10 +266,12 @@ async def test_interleaved_write_immediate_first_drop_not_masked_by_second_succe
         nonlocal calls
         calls += 1
         if calls == 1:
-            # Call A: simulate the swallowed locked/busy failure directly
-            # against a poisoned connection, bypassing real disk I/O.
-            poisoned = _poisoned_conn(sqlite3.OperationalError("database is locked"))
-            return writer._write_day_batch(poisoned, batch)
+            transient = _healthy_conn()
+            transient.executemany.side_effect = [
+                sqlite3.OperationalError("database is locked"),
+                None,
+            ]
+            return writer._write_day_batch(transient, batch)
         # Call B: real, healthy write.
         return real_write_batch(batch)
 
@@ -217,7 +279,7 @@ async def test_interleaved_write_immediate_first_drop_not_masked_by_second_succe
         persisted_a = await writer.write_immediate([_reading()])
         persisted_b = await writer.write_immediate([_reading()])
 
-    assert persisted_a is False, "call A must report its own drop"
-    assert persisted_b is True, "call B's success must not affect A's result"
+    assert persisted_a is True, "call A must report its own retained retry"
+    assert persisted_b is True, "call B must report its own success"
 
     await writer.stop()

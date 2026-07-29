@@ -1401,14 +1401,9 @@ class Scheduler:
             if getattr(self._sqlite_writer, "is_disk_full", False):
                 return
 
-            # R1 (Phase A recheck, CRITICAL): a locked/busy write below the A6
-            # signalling threshold is swallowed without raising (see
-            # sqlite_writer._write_day_batch) — write_immediate() reports this
-            # via its per-call return value, NOT shared writer state (a shared
-            # flag could be reset by a concurrent poll task's later, successful
-            # write on the same writer before this caller checked it). Mirror
-            # the disk-full gate above: skip publish to both brokers. The drop
-            # itself stays loud via A6's existing warning/critical log.
+            # A sustained locked/busy failure or disk-full fault returns False
+            # after the writer has retained/retried transient contention.
+            # Keep the result local to this call and refuse publication.
             if not persisted:
                 return
             persistence_authoritative = True
