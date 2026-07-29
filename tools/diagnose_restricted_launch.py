@@ -40,6 +40,7 @@ Exit code is always 0: this is a measurement, not a gate.
 from __future__ import annotations
 
 import ctypes
+import shutil
 import subprocess
 import sys
 from ctypes import wintypes
@@ -233,11 +234,19 @@ def main() -> int:
     token = build_token()
     print()
 
+    # D separates two causes that A/B/C alone cannot: "CPython's loader specifically"
+    # versus "any binary outside System32". cmd.exe is System32 and python.exe is not,
+    # so a System32-only filesystem effect would masquerade as a CPython fault.
+    git = shutil.which("git")
     cases = [
-        ("A  cmd.exe  (minimal loader)", comspec, [comspec, "/c", "exit 7"]),
+        ("A  cmd.exe  (System32, minimal loader)", comspec, [comspec, "/c", "exit 7"]),
         ("B  python   (full CPython loader)", sys.executable, [sys.executable, "-c", "raise SystemExit(7)"]),
         ("C  python -I -B (as the sandbox)", sys.executable, [sys.executable, "-I", "-B", "-c", "raise SystemExit(7)"]),
     ]
+    if git:
+        cases.append(("D  git.exe (non-System32, non-Python)", git, [git, "--version"]))
+    else:
+        print("NOTE: git.exe not found; control D unavailable")
     outcomes = {}
     for label, application, argv in cases:
         code = launch(token, application, argv)
@@ -256,8 +265,17 @@ def main() -> int:
     print("=" * 72)
     kinds = set(outcomes.values())
     if outcomes.get("A") == "ok" and {outcomes.get("B"), outcomes.get("C")} == {"dll"}:
-        print("DISCRIMINATED: process creation under this token is FINE. The fault is specific")
-        print("to what CPython's loader does under a write-restricted token.")
+        print("Process creation under this token is FINE (cmd.exe ran and exited 7).")
+        if outcomes.get("D") == "ok":
+            print("DISCRIMINATED: git.exe also ran, and it is neither System32 nor Python.")
+            print("The fault is SPECIFIC TO CPYTHON's loader under a write-restricted token.")
+        elif outcomes.get("D") == "dll":
+            print("DISCRIMINATED: git.exe ALSO died in DLL init, and it is not Python.")
+            print("So this is NOT a CPython fault. It affects any non-System32 binary and points")
+            print("at the restricting SID's access to the tool directories.")
+        else:
+            print("PARTIAL: no non-System32 non-Python control ran, so 'CPython specifically'")
+            print("versus 'anything outside System32' is NOT separated.")
     elif kinds == {"dll"}:
         print("DISCRIMINATED: every target dies in DLL init, including cmd.exe. The fault is")
         print("fundamental to the restricted token, not to CPython.")
