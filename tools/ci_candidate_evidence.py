@@ -109,8 +109,11 @@ def canonical_failure_receipt(payload: Mapping[str, Any]) -> str:
     # Fixture callers from the former schema remain useful for testing receipt
     # transport, but are rendered as the current, explicit zero-population form.
     normalized.setdefault("collection_complete", True)
-    normalized.setdefault("population", {"collected": 0, "deselected": 0, "executed": 0, "skipped": 0})
-    normalized["schema_version"] = 3
+    normalized.setdefault(
+        "population",
+        {"call_executed": 0, "collected": 0, "deselected": 0, "executed": 0, "skipped": 0},
+    )
+    normalized["schema_version"] = 4
     payload_raw = _canonical(normalized)
     return _canonical({"payload": normalized, "sha256": _digest(payload_raw)}).decode("utf-8").rstrip("\n")
 
@@ -121,6 +124,7 @@ class _FailureReceiptState:
         self.invocation_index = invocation_index
         self.nodes: list[str] = []
         self._seen: set[str] = set()
+        self.call_executed: set[str] = set()
         self.executed: set[str] = set()
         self.skipped: set[str] = set()
         self.deselected = 0
@@ -168,6 +172,8 @@ def pytest_runtest_logreport(report: Any) -> None:
     state = _FAILURE_RECEIPT_ACTIVE_STATE
     if state is not None:
         state.executed.add(report.nodeid)
+        if report.when == "call":
+            state.call_executed.add(report.nodeid)
         if report.failed:
             state.add(report.nodeid)
         if report.skipped:
@@ -206,12 +212,13 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
         "failed_nodeids": state.nodes,
         "invocation_index": state.invocation_index,
         "population": {
+            "call_executed": len(state.call_executed),
             "collected": state.collected,
             "deselected": state.deselected,
             "executed": len(state.executed),
             "skipped": len(state.skipped),
         },
-        "schema_version": 3,
+        "schema_version": 4,
         "suite": state.suite,
     }
     line = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}"
@@ -999,7 +1006,7 @@ def _extract_failure_receipt_payloads(output: str, *, suite: str) -> list[dict[s
         failed_nodeids = payload.get("failed_nodeids")
         invocation_index = payload.get("invocation_index")
         if (
-            payload.get("schema_version") != 3
+            payload.get("schema_version") != 4
             or payload.get("suite") != suite
             or not isinstance(invocation_index, int)
             or isinstance(invocation_index, bool)
@@ -1013,9 +1020,10 @@ def _extract_failure_receipt_payloads(output: str, *, suite: str) -> list[dict[s
         if (
             payload.get("collection_complete") is not True
             or not isinstance(population, dict)
-            or set(population) != {"collected", "deselected", "executed", "skipped"}
+            or set(population) != {"call_executed", "collected", "deselected", "executed", "skipped"}
             or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in population.values())
             or population["collected"] != population["executed"] + population["deselected"]
+            or population["call_executed"] > population["executed"]
             or population["skipped"] > population["executed"]
         ):
             raise CiCandidateEvidenceError("candidate receipt population is incomplete or inconsistent")
@@ -1356,7 +1364,12 @@ def validate_protected_execution_bundle(
         expected_count is None
         or announced != set(range(1, expected_count + 1))
         or indices != list(range(1, expected_count + 1))
-        or any(payload["population"]["collected"] < 1 or payload["population"]["executed"] < 1 for payload in payloads)
+        or any(
+            payload["population"]["collected"] < 1
+            or payload["population"]["executed"] < 1
+            or payload["population"]["call_executed"] < 1
+            for payload in payloads
+        )
     ):
         raise CiCandidateEvidenceError("protected producer did not prove positive pytest execution coverage")
     github = execution.get("github")
@@ -1377,6 +1390,7 @@ def validate_protected_execution_bundle(
         now=now,
     )
     return {
+        "call_executed": sum(payload["population"]["call_executed"] for payload in payloads),
         "check_run_id": claims["check_run_id"],
         "collected": sum(payload["population"]["collected"] for payload in payloads),
         "executed": sum(payload["population"]["executed"] for payload in payloads),
@@ -1416,7 +1430,8 @@ def _verify_protected(args: argparse.Namespace) -> int:
     print(
         "PROTECTED EXECUTION ACCEPTED "
         f"suite={result['suite']} check_run_id={result['check_run_id']} "
-        f"collected={result['collected']} executed={result['executed']}"
+        f"collected={result['collected']} executed={result['executed']} "
+        f"call_executed={result['call_executed']}"
     )
     return 0
 

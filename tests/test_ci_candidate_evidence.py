@@ -42,6 +42,7 @@ from tools.ci_guard_execution import (
     canonical_receipt,
     current_guard_platform,
 )
+from tools.ci_partition_execution_proof import PartitionExecutionProofError, _validate_population
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
@@ -264,22 +265,31 @@ def _write_protected_command_bundle(
     command: tuple[str, ...],
     producer: dict,
     target_sha: str,
+    candidate_output: str | None = None,
 ) -> None:
-    stdout = (
-        "candidate-suite=core command=1/1\n"
-        + FAILURE_RECEIPT_PREFIX
-        + canonical_failure_receipt(
-            {
-                "collection_complete": True,
-                "failed_nodeids": [],
-                "invocation_index": 1,
-                "population": {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0},
-                "schema_version": 3,
-                "suite": "core",
-            }
+    if candidate_output is None:
+        candidate_output = (
+            "candidate-suite=core command=1/1\n"
+            + FAILURE_RECEIPT_PREFIX
+            + canonical_failure_receipt(
+                {
+                    "collection_complete": True,
+                    "failed_nodeids": [],
+                    "invocation_index": 1,
+                    "population": {
+                        "call_executed": 1,
+                        "collected": 1,
+                        "deselected": 0,
+                        "executed": 1,
+                        "skipped": 0,
+                    },
+                    "schema_version": 4,
+                    "suite": "core",
+                }
+            )
+            + "\n"
         )
-        + "\n"
-    ).encode()
+    stdout = candidate_output.encode()
     stderr = b""
     candidate = {
         "commit": target_sha,
@@ -326,6 +336,7 @@ def _validate_production_protected_command(
     *,
     command: tuple[str, ...],
     bundle_target_sha: str = "b" * 40,
+    candidate_output: str | None = None,
 ) -> dict:
     repository = tmp_path / "candidate"
     producer_root = tmp_path / "producer"
@@ -336,6 +347,7 @@ def _validate_production_protected_command(
         command=command,
         producer=producer,
         target_sha=bundle_target_sha,
+        candidate_output=candidate_output,
     )
     monkeypatch.setattr(ci_candidate_evidence, "validate_candidate_manifest", lambda *_args: None)
     monkeypatch.setattr(ci_candidate_evidence, "_protected_producer_manifest", lambda *_args: producer)
@@ -367,7 +379,13 @@ def test_protected_verifier_accepts_the_command_generated_by_protected_run(
 
     result = _validate_production_protected_command(tmp_path, monkeypatch, command=command)
 
-    assert result == {"check_run_id": "98765", "collected": 1, "executed": 1, "suite": "core"}
+    assert result == {
+        "call_executed": 1,
+        "check_run_id": "98765",
+        "collected": 1,
+        "executed": 1,
+        "suite": "core",
+    }
 
 
 @pytest.mark.parametrize(
@@ -409,7 +427,13 @@ def test_protected_verifier_accepts_producer_local_paths(
         ),
     )
 
-    assert result == {"check_run_id": "98765", "collected": 1, "executed": 1, "suite": "core"}
+    assert result == {
+        "call_executed": 1,
+        "check_run_id": "98765",
+        "collected": 1,
+        "executed": 1,
+        "suite": "core",
+    }
 
 
 def test_protected_verifier_refuses_command_missing_candidate_git_repository(
@@ -807,7 +831,7 @@ def test_protected_runner_refuses_forged_receipt_and_preserves_honest_control(tm
             "collection_complete": True,
             "failed_nodeids": [],
             "invocation_index": 1,
-            "population": {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0},
+            "population": {"call_executed": 1, "collected": 1, "deselected": 0, "executed": 1, "skipped": 0},
             "suite": "core",
         }
     )
@@ -833,6 +857,7 @@ def test_protected_runner_refuses_forged_receipt_and_preserves_honest_control(tm
     assert subverted.returncode == 0
     forged_payloads = _extract_failure_receipt_payloads(subverted.stdout, suite="core")
     assert forged_payloads[0]["population"] == {
+        "call_executed": 1,
         "collected": 1,
         "deselected": 0,
         "executed": 1,
@@ -869,7 +894,7 @@ def test_protected_runner_refuses_forged_receipt_and_preserves_honest_control(tm
     assert completed.returncode == 1, completed.stdout + completed.stderr
     payloads = _extract_failure_receipt_payloads(completed.stdout + completed.stderr, suite="core")
     assert [payload["population"] for payload in payloads] == [
-        {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0}
+        {"call_executed": 1, "collected": 1, "deselected": 0, "executed": 1, "skipped": 0}
     ]
     assert [payload["failed_nodeids"] for payload in payloads] == [["tests/core/test_real.py::test_real"]]
 
@@ -913,7 +938,7 @@ def test_protected_runner_refuses_forged_receipt_and_preserves_honest_control(tm
     assert honest.returncode == 0, honest.stdout + honest.stderr
     honest_payloads = _extract_failure_receipt_payloads(honest.stdout + honest.stderr, suite="core")
     assert [payload["population"] for payload in honest_payloads] == [
-        {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0}
+        {"call_executed": 1, "collected": 1, "deselected": 0, "executed": 1, "skipped": 0}
     ]
     assert list(candidate.rglob("*.pyc")) == []
 
@@ -975,8 +1000,14 @@ def test_protected_failure_relay_labels_and_caps_valid_candidate_origin_details(
             "collection_complete": True,
             "failed_nodeids": nodes,
             "invocation_index": 1,
-            "population": {"collected": 25, "deselected": 0, "executed": 25, "skipped": 0},
-            "schema_version": 3,
+            "population": {
+                "call_executed": 25,
+                "collected": 25,
+                "deselected": 0,
+                "executed": 25,
+                "skipped": 0,
+            },
+            "schema_version": 4,
             "suite": "core",
         }
     )
@@ -1034,6 +1065,7 @@ def test_protected_failure_relay_raw_subprocess_output_respects_byte_budget() ->
                 "failed_nodeids": nodes,
                 "invocation_index": invocation_index,
                 "population": {
+                    "call_executed": len(nodes),
                     "collected": len(nodes),
                     "deselected": 0,
                     "executed": len(nodes),
@@ -1044,8 +1076,8 @@ def test_protected_failure_relay_raw_subprocess_output_respects_byte_budget() ->
         )
 
     candidate_lines = [
-        failure_receipt(invocation_index=1, final_ascii_bytes=188),
-        failure_receipt(invocation_index=2, final_ascii_bytes=186),
+        failure_receipt(invocation_index=1, final_ascii_bytes=169),
+        failure_receipt(invocation_index=2, final_ascii_bytes=167),
     ]
     rendered = [ci_candidate_evidence._bounded_protected_relay_line(line, suite="core") for line in candidate_lines]
     assert all(line is not None for line in rendered)
@@ -1338,9 +1370,84 @@ def test_failure_receipt_plugin_uses_pytest_report_nodeids_verbatim(tmp_path: Pa
         "tests/path with whitespace/test_failure.py::test_p[a - b]",
     )
     assert _extract_failure_receipt_payloads(output, suite="remaining")[0]["population"] == {
+        "call_executed": 1,
         "collected": 1,
         "deselected": 0,
         "executed": 1,
+        "skipped": 0,
+    }
+
+
+def _run_population_probe(
+    tmp_path: Path,
+    *,
+    setup_skip: bool,
+    suite: str = "remaining",
+) -> subprocess.CompletedProcess[str]:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_population.py").write_text(
+        "def test_population():\n    assert True\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    if setup_skip:
+        (tests / "conftest.py").write_text(
+            "import pytest\n"
+            "\n"
+            "@pytest.fixture(autouse=True)\n"
+            "def skip_during_setup():\n"
+            "    pytest.skip('setup skip control')\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    environment = dict(os.environ)
+    environment["PYTEST_PLUGINS"] = "tools.ci_candidate_evidence"
+    environment["CRYODAQ_CANDIDATE_FAILURE_RECEIPT_SUITE"] = suite
+    environment[FAILURE_RECEIPT_INDEX_ENV] = "1"
+    environment["PYTHONPATH"] = str(ROOT)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "--tb=short"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        encoding="utf-8",
+        text=True,
+        check=False,
+    )
+
+
+def test_population_proof_rejects_genuine_all_setup_skipped_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = _run_population_probe(tmp_path, setup_skip=True, suite="core")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    output = f"candidate-suite=core command=1/1\n{completed.stdout}{completed.stderr}"
+    with pytest.raises(PartitionExecutionProofError, match="call_executed=0"):
+        _validate_population(output, output, suite="core")
+    command = _production_protected_command(tmp_path, monkeypatch)
+    with pytest.raises(CiCandidateEvidenceError, match="positive pytest execution coverage"):
+        _validate_production_protected_command(
+            tmp_path,
+            monkeypatch,
+            command=command,
+            candidate_output=output,
+        )
+
+
+def test_population_proof_accepts_genuine_real_call_phase(tmp_path: Path) -> None:
+    completed = _run_population_probe(tmp_path, setup_skip=False)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    output = f"candidate-suite=remaining command=1/1\n{completed.stdout}{completed.stderr}"
+    assert _validate_population(output, output, suite="remaining") == {
+        "call_executed": 1,
+        "collected": 1,
+        "deselected": 0,
+        "executed": 1,
+        "receipt_count": 1,
         "skipped": 0,
     }
 
@@ -1589,8 +1696,8 @@ def test_failure_receipt_population_rejects_unaccounted_collected_tests() -> Non
         "collection_complete": True,
         "failed_nodeids": [],
         "invocation_index": 1,
-        "population": {"collected": 3, "deselected": 0, "executed": 2, "skipped": 0},
-        "schema_version": 3,
+        "population": {"call_executed": 2, "collected": 3, "deselected": 0, "executed": 2, "skipped": 0},
+        "schema_version": 4,
         "suite": "remaining",
     }
     marker = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}\n"
