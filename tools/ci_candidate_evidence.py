@@ -662,6 +662,12 @@ def _bounded_protected_relay_line(line: str, *, suite: str) -> str | None:
     return rendered
 
 
+def _emit_protected_relay_line(line: str, *, stderr: bool = False) -> None:
+    stream = sys.stderr if stderr else sys.stdout
+    stream.buffer.write(f"{line}\n".encode())
+    stream.buffer.flush()
+
+
 def _relay_protected_failure(receipt: CandidateExecutionReceipt, *, suite: str, output: Path) -> None:
     """Relay only bounded, explicitly untrusted candidate-origin failure details."""
 
@@ -683,7 +689,7 @@ def _relay_protected_failure(receipt: CandidateExecutionReceipt, *, suite: str, 
             omitted = True
         relayed.append(rendered)
     if not relayed:
-        print(_PROTECTED_RELAY_FALLBACK, file=sys.stderr, flush=True)
+        _emit_protected_relay_line(_PROTECTED_RELAY_FALLBACK, stderr=True)
         return
 
     selected = list(relayed)
@@ -696,12 +702,12 @@ def _relay_protected_failure(receipt: CandidateExecutionReceipt, *, suite: str, 
         selected.pop(0)
         omitted = True
     if not selected:
-        print(_PROTECTED_RELAY_FALLBACK, file=sys.stderr, flush=True)
+        _emit_protected_relay_line(_PROTECTED_RELAY_FALLBACK, stderr=True)
         return
     for line in selected:
-        print(line, flush=True)
+        _emit_protected_relay_line(line)
     if omitted:
-        print(_PROTECTED_RELAY_OMITTED, file=sys.stderr, flush=True)
+        _emit_protected_relay_line(_PROTECTED_RELAY_OMITTED, stderr=True)
 
 
 def _attest(args: argparse.Namespace) -> int:
