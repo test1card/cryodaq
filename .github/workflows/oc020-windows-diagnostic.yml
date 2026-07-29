@@ -1,0 +1,48 @@
+name: OC-020 Windows restricted-token diagnostic
+
+# SCRATCH BRANCH ONLY. Measurement, never a gate.
+#
+# The candidate sandbox's Windows child exits 0xC0000142 (STATUS_DLL_INIT_FAILED)
+# with empty output on windows-latest — it dies during DLL initialisation before
+# any Python runs. The reviewer's condition for resuming OC-020 is that new
+# loader-level evidence produce a discriminating hypothesis first.
+#
+# The experiment cannot be run on a developer machine: that shell's token holds
+# zero privileges, so it lacks SeAssignPrimaryTokenPrivilege and cannot create the
+# process at all. A hosted windows-latest runner is administrative, so the process
+# can be created and the failure actually observed.
+#
+# This workflow changes no sandbox behaviour and gates nothing. It runs one
+# read-only measurement and always exits 0.
+
+on:
+  push:
+    branches:
+      - "scratch/oc020-windiag"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  restricted-token-diagnostic:
+    name: discriminate 0xC0000142
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Report the runner's privilege posture
+        shell: pwsh
+        run: |
+          Write-Output "whoami: $(whoami)"
+          Write-Output "--- privileges held by this process ---"
+          whoami /priv
+
+      - name: Discriminate the restricted-token failure
+        shell: pwsh
+        run: python tools/diagnose_restricted_launch.py
