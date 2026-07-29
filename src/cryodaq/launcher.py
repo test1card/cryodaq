@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import parse_global_off_evidence
+from cryodaq.engine import _resolve_mock_mode
 from cryodaq.gui.shell.annunciation_controller import decode_projection
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
 from cryodaq.gui.state.operator_snapshot_ingress import start_operator_snapshot_ingress
@@ -2708,8 +2709,8 @@ class LauncherWindow(QMainWindow):
             replay_session_id = secrets.token_hex(16)
             env[_REPLAY_READY_NONCE_ENV] = replay_ready_nonce
             env[_REPLAY_SESSION_ID_ENV] = replay_session_id
-        if self._mock and self._replay_source is None:
-            env["CRYODAQ_MOCK"] = "1"
+        if self._replay_source is None:
+            env["CRYODAQ_MOCK"] = "1" if self._mock else "0"
         # IV.4 F2: propagate the GUI-persisted debug-mode flag to the
         # engine subprocess so the engine uses DEBUG logging without
         # having to re-read QSettings from its own process. Env var is
@@ -6063,7 +6064,10 @@ def main() -> None:
 
     setup_logging("launcher", level=resolve_log_level())
 
-    mock = args.mock or os.environ.get("CRYODAQ_MOCK") == "1"
+    try:
+        mock = _resolve_mock_mode(cli_mock=args.mock)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     soak_bridge_handshake = _consume_soak_bridge_handshake(
         cli_mock=args.mock,

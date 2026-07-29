@@ -7786,6 +7786,23 @@ def _release_engine_lock(fd: int) -> None:
 #: Launcher detects this and refuses to auto-restart.
 ENGINE_CONFIG_ERROR_EXIT_CODE = 2
 
+_MOCK_ENV = "CRYODAQ_MOCK"
+_MOCK_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_MOCK_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _resolve_mock_mode(*, cli_mock: bool) -> bool:
+    """Resolve mock mode once; reject malformed environment configuration."""
+    raw = os.environ.get(_MOCK_ENV)
+    if raw is None:
+        return cli_mock
+    normalized = raw.strip().lower()
+    if normalized in _MOCK_TRUE_VALUES:
+        return True
+    if normalized in _MOCK_FALSE_VALUES:
+        return cli_mock
+    raise ValueError(f"Invalid {_MOCK_ENV}={raw!r}; expected one of 1/true/yes/on or 0/false/no/off")
+
 
 def main() -> None:
     """Точка входа cryodaq-engine."""
@@ -7807,10 +7824,13 @@ def main() -> None:
 
     setup_logging("engine", level=resolve_log_level())
 
+    try:
+        mock = _resolve_mock_mode(cli_mock=args.mock)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     if args.force:
         _force_kill_existing()
-
-    mock = args.mock or os.environ.get("CRYODAQ_MOCK", "").lower() in ("1", "true")
 
     lock_fd = _acquire_engine_lock()
     try:

@@ -66,6 +66,68 @@ def _pipe_backed_process(pid: int) -> MagicMock:
     return process
 
 
+def test_mock_environment_true_is_shared_across_launcher_and_engine(monkeypatch) -> None:
+    import cryodaq.engine as engine
+    import cryodaq.launcher as launcher
+
+    monkeypatch.setenv("CRYODAQ_MOCK", "true")
+
+    assert launcher._resolve_mock_mode is engine._resolve_mock_mode
+    assert launcher._resolve_mock_mode(cli_mock=False) is True
+    assert engine._resolve_mock_mode(cli_mock=False) is True
+
+
+def test_mock_environment_contract_accepts_booleans_and_rejects_malformed(monkeypatch) -> None:
+    from cryodaq.engine import _resolve_mock_mode
+
+    for value in ("1", "true", "yes", "on", " TRUE "):
+        monkeypatch.setenv("CRYODAQ_MOCK", value)
+        assert _resolve_mock_mode(cli_mock=False) is True
+    for value in ("0", "false", "no", "off", " FALSE "):
+        monkeypatch.setenv("CRYODAQ_MOCK", value)
+        assert _resolve_mock_mode(cli_mock=False) is False
+        assert _resolve_mock_mode(cli_mock=True) is True
+
+    monkeypatch.setenv("CRYODAQ_MOCK", "tru")
+    with pytest.raises(ValueError, match="Invalid CRYODAQ_MOCK"):
+        _resolve_mock_mode(cli_mock=True)
+
+
+def test_start_engine_canonicalizes_mock_mode_in_child_environment(monkeypatch, tmp_path) -> None:
+    import cryodaq.launcher as mod
+
+    monkeypatch.setenv("CRYODAQ_MOCK", "true")
+
+    for mock, expected in ((False, "0"), (True, "1")):
+        captured: dict[str, object] = {}
+        fake = _make_fake_self(replay_source=None)
+        fake._mock = mock
+
+        def fake_popen(command, **kwargs):
+            captured["command"] = command
+            captured["environment"] = kwargs["env"]
+            return _pipe_backed_process(99)
+
+        try:
+            with (
+                patch("cryodaq.launcher._is_port_busy", return_value=False),
+                patch("cryodaq.launcher.subprocess.Popen", side_effect=fake_popen),
+                patch(
+                    "cryodaq.launcher._create_engine_stderr_logger",
+                    return_value=(None, None, Path("/tmp/x.log")),
+                ),
+                patch("cryodaq.launcher.LauncherWindow._wait_engine_ready"),
+                patch("cryodaq.paths.get_data_dir", return_value=tmp_path),
+                patch("cryodaq.logging_setup.read_debug_mode_from_qsettings", return_value=False),
+            ):
+                mod.LauncherWindow._start_engine(fake)
+        finally:
+            mod.LauncherWindow._close_engine_stderr_stream(fake)
+
+        assert captured["environment"]["CRYODAQ_MOCK"] == expected
+        assert ("--mock" in captured["command"]) is mock
+
+
 def test_start_engine_calls_hint_in_non_replay_path() -> None:
     """_start_engine must call _check_predictor_bootstrap_hint when not in replay mode."""
     import cryodaq.launcher as mod
