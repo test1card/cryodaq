@@ -1,8 +1,12 @@
 """Phase E replay harness tests — predictor-based alarm validation."""
+
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,8 +23,7 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
     """Create synthetic SQLite DB + config files + phase metadata."""
     channels_yaml = tmp_path / "channels.yaml"
     channels_yaml.write_text(
-        "channels:\n  Т11:\n    name: '2 ступень'\n"
-        "  Т12:\n    name: 'Азотная плита'\n",
+        "channels:\n  Т11:\n    name: '2 ступень'\n  Т12:\n    name: 'Азотная плита'\n",
         encoding="utf-8",
     )
     physical_yaml = tmp_path / "physical_alarms.yaml"
@@ -30,6 +33,9 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
         "vacuum:\n  enabled: true\n",
         encoding="utf-8",
     )
+    model_path = tmp_path / "model" / "predictor_model.json"
+    model_path.parent.mkdir()
+    model_path.write_text("{}", encoding="utf-8")
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -42,8 +48,7 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
     )
     for ts, ch, val in readings:
         con.execute(
-            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status) VALUES (?,?,?,?,?,?)",
             (ts, "test", ch, val, "K", "OK"),
         )
     con.commit()
@@ -53,13 +58,15 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
     artifact_dir = data_dir / "exp-001"
     artifact_dir.mkdir()
     (artifact_dir / "metadata.json").write_text(
-        json.dumps({
-            "experiment_id": "exp-001",
-            "phases": [
-                {"phase": "cooldown", "started_at": _COOLDOWN_START},
-                {"phase": "measurement", "started_at": _MEASUREMENT_START},
-            ],
-        }),
+        json.dumps(
+            {
+                "experiment_id": "exp-001",
+                "phases": [
+                    {"phase": "cooldown", "started_at": _COOLDOWN_START},
+                    {"phase": "measurement", "started_at": _MEASUREMENT_START},
+                ],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -68,7 +75,8 @@ def _make_env(tmp_path: Path, readings: list[tuple[float, str, float]]) -> dict:
         "until_ts": _BASE_TS + 100 * 3600,
         "data_dir": data_dir,
         "physical_alarms_yaml": physical_yaml,
-        "alarms_yaml": tmp_path / "alarms_v3.yaml",  # non-existent → no legacy
+        "alarms_yaml": None,
+        "predictor_model_path": model_path,
     }
 
 
@@ -120,6 +128,7 @@ def test_nominal_cooldown_no_predictor_alarms(tmp_path):
 
     assert result["summary"]["newly_fired"] == 0
     assert result["summary"]["total_readings"] > 0
+    assert result["outcome"] == "no_differences"
 
 
 def test_stuck_plateau_predictor_fires(tmp_path):
@@ -164,10 +173,10 @@ def test_stuck_plateau_predictor_fires(tmp_path):
             result = replay(**env)
 
     assert result["summary"]["total_readings"] > 0
+    assert result["outcome"] == "differences_found"
     # Real _predictor_fires must fire for plateau readings (t_elapsed >> threshold)
     assert result["summary"]["newly_fired"] > 0, (
-        f"Expected predictor to fire on stalled plateau, got newly_fired="
-        f"{result['summary']['newly_fired']}"
+        f"Expected predictor to fire on stalled plateau, got newly_fired={result['summary']['newly_fired']}"
     )
     # Fired records must reference the cold channel and cooldown phase
     fired_records = result["newly_fired"]
@@ -182,8 +191,7 @@ def test_stuck_plateau_predictor_fires(tmp_path):
     assert all("timestamp" in r and r["timestamp"] for r in fired_records)
 
 
-def test_no_model_uses_model_disabled_count(tmp_path):
-    """Missing predictor model → model_disabled_count tracks unprocessed readings."""
+def test_invalid_model_is_unavailable(tmp_path):
     readings = [((_COOLDOWN_START + i * 1800), "Т11", 100.0) for i in range(10)]
     readings += [((_COOLDOWN_START + i * 1800), "Т12", 200.0) for i in range(10)]
 
@@ -192,22 +200,112 @@ def test_no_model_uses_model_disabled_count(tmp_path):
     with patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=None):
         result = replay(**env)
 
-    assert result["summary"]["model_disabled_count"] > 0
-    assert result["summary"]["total_readings"] > 0
-    # No predictor alarms without a model
-    assert result["summary"]["newly_fired"] == 0
+    assert result["outcome"] == "unavailable"
+    assert "summary" not in result
+    assert "predictor model is invalid" in result["errors"][0]
 
 
 def test_summary_has_required_keys(tmp_path):
     readings = [(_COOLDOWN_START, "Т11", 100.0), (_COOLDOWN_START, "Т12", 200.0)]
     env = _make_env(tmp_path, readings)
 
-    with patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=None):
+    with (
+        patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=_fake_model()),
+        patch("cryodaq.tools.replay_alarm_history._predictor_fires", return_value=False),
+    ):
         result = replay(**env)
 
     required = {
-        "total_readings", "cold_channel", "warm_channel",
-        "legacy_alarms", "predictor_alarms", "suppressed", "newly_fired",
-        "identical_fire", "identical_quiet", "phase_unknown_count", "model_disabled_count",
+        "total_readings",
+        "cold_channel",
+        "warm_channel",
+        "legacy_alarms",
+        "predictor_alarms",
+        "suppressed",
+        "newly_fired",
+        "identical_fire",
+        "identical_quiet",
+        "phase_unknown_count",
+        "model_disabled_count",
+        "predictor_evaluated_count",
     }
     assert required <= set(result["summary"])
+
+
+def test_no_eligible_readings_is_unavailable(tmp_path):
+    env = _make_env(tmp_path, [])
+
+    with (
+        patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=_fake_model()),
+        patch("cryodaq.tools.replay_alarm_history._predictor_fires", return_value=False),
+    ):
+        result = replay(**env)
+
+    assert result["outcome"] == "unavailable"
+    assert "summary" not in result
+    assert "no eligible" in result["errors"][0]
+
+
+def test_relative_inputs_anchor_to_project_root_from_unrelated_cwd(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    unrelated_cwd = tmp_path / "unrelated"
+    project_root.mkdir()
+    unrelated_cwd.mkdir()
+    env = _make_env(
+        project_root,
+        [(_COOLDOWN_START, "Т11", 100.0), (_COOLDOWN_START, "Т12", 200.0)],
+    )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(project_root))
+    monkeypatch.chdir(unrelated_cwd)
+    env.update(
+        data_dir=Path("data"),
+        physical_alarms_yaml=Path("physical_alarms.yaml"),
+        predictor_model_path=Path("model/predictor_model.json"),
+    )
+
+    with (
+        patch("cryodaq.tools.replay_alarm_history._try_load_predictor", return_value=_fake_model()),
+        patch("cryodaq.tools.replay_alarm_history._predictor_fires", return_value=False),
+    ):
+        result = replay(**env)
+
+    assert result["outcome"] == "no_differences"
+    assert result["provenance"]["project_root"] == str(project_root.resolve())
+    assert result["provenance"]["data_dir"] == str((project_root / "data").resolve())
+
+
+def test_cli_unrelated_cwd_missing_inputs_is_unavailable(tmp_path):
+    project_root = tmp_path / "project"
+    unrelated_cwd = tmp_path / "unrelated"
+    project_root.mkdir()
+    unrelated_cwd.mkdir()
+    output = tmp_path / "report.json"
+    env = os.environ.copy()
+    env["CRYODAQ_ROOT"] = str(project_root)
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(source_root), env.get("PYTHONPATH"))))
+
+    completed = subprocess.run(  # noqa: S603 - production CLI boundary
+        [
+            sys.executable,
+            "-m",
+            "cryodaq.tools.replay_alarm_history",
+            "--since",
+            "2026-04-01",
+            "--until",
+            "2026-05-01",
+            "--output",
+            str(output),
+        ],
+        cwd=unrelated_cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["outcome"] == "unavailable"
+    assert "summary" not in report
+    assert report["provenance"]["project_root"] == str(project_root.resolve())
