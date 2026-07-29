@@ -668,7 +668,10 @@ def _candidate_preflight(
     write_refusals = {"alias": _write_must_be_refused(export_root, "alias")}
     if original_export_root is not None and original_export_root != export_root:
         write_refusals["original"] = _write_must_be_refused(original_export_root, "original")
-    write_refusals["trusted_launcher"] = _existing_file_write_must_be_refused(launcher.resolve(strict=True))
+    # Resolved by the caller while it still has the identity to walk the
+    # ancestors. Doing it here runs after the privilege drop, where the walk
+    # meets /home/runner at 0751 and raises instead of reporting a refusal.
+    write_refusals["trusted_launcher"] = _existing_file_write_must_be_refused(launcher)
 
     symlink_creation = "not-required"
     if os.name == "nt":
@@ -777,7 +780,7 @@ def _run_landlocked_candidate(
     _candidate_preflight(
         export_root,
         state_root,
-        launcher=Path(environment["CRYODAQ_CANDIDATE_SANDBOX_LAUNCHER"]),
+        launcher=Path(environment["CRYODAQ_CANDIDATE_SANDBOX_LAUNCHER"]).resolve(strict=True),
         platform_diagnostic={
             "boundary": "landlock",
             "capability_effective": capability_line,
@@ -840,6 +843,11 @@ def _posix_child(
         _rewrite_path(_rewrite_path(part, export_root, export_alias), state_root, state_alias) for part in command
     ]
     _linux_check(libc.prctl(38, 1, 0, 0, 0), "set no_new_privs")
+    # Resolve the trusted launcher while this process can still walk its
+    # ancestors. After _drop_posix() the walk runs as `nobody` and meets
+    # /home/runner at 0751 -- traversable but not readable -- so resolve()
+    # raises PermissionError instead of the preflight reporting a refusal.
+    trusted_launcher = Path(environment["CRYODAQ_CANDIDATE_SANDBOX_LAUNCHER"]).resolve(strict=True)
     _drop_posix(state_root)
     no_new_privs = libc.prctl(39, 0, 0, 0, 0)
     if no_new_privs != 1:
@@ -852,7 +860,7 @@ def _posix_child(
     _candidate_preflight(
         export_alias,
         state_alias,
-        launcher=Path(environment["CRYODAQ_CANDIDATE_SANDBOX_LAUNCHER"]),
+        launcher=trusted_launcher,
         original_export_root=export_root,
         platform_diagnostic={
             "alias_export_dev": export_alias_identity.st_dev,
@@ -938,7 +946,7 @@ def _restricted_windows_child(
     _candidate_preflight(
         cwd,
         state_root,
-        launcher=Path(os.environ["CRYODAQ_CANDIDATE_SANDBOX_LAUNCHER"]),
+        launcher=Path(os.environ["CRYODAQ_CANDIDATE_SANDBOX_LAUNCHER"]).resolve(strict=True),
         platform_diagnostic=platform_diagnostic,
     )
     os.chdir(cwd)
