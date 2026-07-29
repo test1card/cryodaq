@@ -17,16 +17,53 @@
 
 # CryoDAQ
 
-Data acquisition, control, and analysis stack for a cryogenics laboratory.
-Replaces a 3-year-old LabVIEW VI that drove the instruments and sent email alerts.
-Adds: scripted FSM campaigns, automated calibration with multi-format export,
-auto-generated DOCX reports, Telegram alerts with time-based escalation, sensor anomaly detection
-with an alarm pipeline, plugin analytics, a local operator-query layer with a
-knowledge base (RAG), historical-data replay mode,
-interferometric length metrology (Etalon MultiLine), and a large cross-platform
-regression test suite.
+**CryoDAQ runs a cryogenics laboratory.** It reads the sensors, drives the instruments, keeps the
+hazardous ones from energizing when they shouldn't, records everything that happened, and tells a
+human when something needs attention at three in the morning.
 
-Built for ASC LPI (the Millimetron project).
+A cryostat cools test hardware to a few degrees above absolute zero and holds it there for days.
+While it does, a dozen thermometers, pressure gauges and a laser interferometer report what is
+happening inside — and a programmable current source can put real power into hardware sitting in a
+vacuum at 4 K. Getting that wrong damages equipment that took months to build. CryoDAQ is the
+software in the middle.
+
+### The idea it is built around
+
+**When the software does not know something, it says so.**
+
+That sounds obvious. It is not what most instrument software does. The usual failure is quiet: a
+sensor link drops, and the display keeps showing the last number it saw, or falls back to `0.0`, or
+reports a power source as `OFF` because nothing told it otherwise. An operator reads `OFF` and walks
+up to hardware that may still be live.
+
+CryoDAQ is built the other way round. A channel with no data reads `—`, never a plausible zero. A
+source with a dead link reads **UNKNOWN**, never `OFF`, and its controls disable — with no transport
+there is nothing to command over, and saying otherwise would be a lie with physical consequences. A
+summary that cannot answer a question says so, and names the next safe step. **Every screenshot
+below was taken with no instruments connected**, precisely because that is where the difference
+shows.
+
+The same principle runs underneath the interface. A reading is bound to the instrument that produced
+it, so one device's data cannot be mistaken for another's just because they share a label. Safety
+checks refuse to act on evidence they cannot authenticate. A configuration error stops the system at
+startup instead of being papered over at runtime.
+
+### What is in it
+
+Sixteen live sensor channels across LakeShore, Keithley, Thyracont and Etalon hardware · scripted
+experiment campaigns · automated sensor calibration with multi-format export · auto-generated
+reports · Telegram alerting with time-based escalation · anomaly detection and an alarm pipeline ·
+a question-answering layer over the lab's own documentation, running locally · replay of historical
+data through the live interface · interferometric length metrology · and a cross-platform
+regression suite of several thousand tests.
+
+It replaced a three-year-old LabVIEW program that drove the instruments and sent email.
+
+### Where it runs
+
+CryoDAQ was written for the Astro Space Center of the Lebedev Physical Institute, for cryogenic
+materials testing on the **Millimetron** space observatory — measuring how mirror structures deform
+as they cool toward the temperatures they will meet in orbit.
 
 ## What it looks like
 
