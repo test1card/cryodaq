@@ -142,7 +142,17 @@ def low_integrity_token() -> wintypes.HANDLE:
 def run_low(token: wintypes.HANDLE, code: str, cwd: str | None = None) -> tuple[int, str]:
     """Run one snippet of Python under the low-integrity token; return (rc, output)."""
     out_path = Path(tempfile.mkstemp(suffix=".out")[1])
-    wrapped = f"import sys\nsys.stdout=open(r'{out_path}','w',encoding='utf-8')\n{code}\nsys.stdout.flush()"
+    # The child must CLOSE this file, not merely flush it. Leaving it open makes the
+    # parent's cleanup unlink fail with WinError 32, which aborted the entire probe on
+    # the first hosted run.
+    wrapped = (
+        "import sys\n"
+        f"_f=open(r'{out_path}','w',encoding='utf-8')\n"
+        "sys.stdout=_f\n"
+        f"{code}\n"
+        "sys.stdout=sys.__stdout__\n"
+        "_f.close()"
+    )
     startup = StartupInfo()
     startup.cb = ctypes.sizeof(startup)
     startup.flags = STARTF_USESTDHANDLES
@@ -174,7 +184,11 @@ def run_low(token: wintypes.HANDLE, code: str, cwd: str | None = None) -> tuple[
         text = out_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         text = ""
-    out_path.unlink(missing_ok=True)
+    try:
+        out_path.unlink(missing_ok=True)
+    except OSError:
+        # cleanup must never be able to abort a measurement
+        pass
     return code_out.value, text
 
 
