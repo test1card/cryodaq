@@ -125,12 +125,14 @@ def test_publication_receipt_requires_explicit_candidate_repository(tmp_path: Pa
 
 
 def test_publication_receipt_refuses_nonexistent_commit(tmp_path: Path) -> None:
-    payload = json.loads(TRACKED_RECEIPT.read_text(encoding="utf-8"))
+    repository, binding = _repository(tmp_path)
+    payload = _payload(binding)
     payload["receipts"][0]["attestation"]["commit"] = "f" * 40
-    _write_receipt(tmp_path, payload)
+    receipt_root = tmp_path / "receipt"
+    _write_receipt(receipt_root, payload)
 
     with pytest.raises(GovernanceContractError, match="does not resolve to a local Git commit"):
-        validate_publication_disposition_receipts(tmp_path, git_repository=ROOT)
+        validate_publication_disposition_receipts(receipt_root, git_repository=repository)
 
 
 def test_publication_receipt_accepts_exact_object_and_range_binding(tmp_path: Path) -> None:

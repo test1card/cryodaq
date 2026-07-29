@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -429,11 +430,75 @@ def _publication_receipts() -> dict:
     return json.loads(PUBLICATION_RECEIPTS_PATH.read_text(encoding="utf-8"))
 
 
+def _publication_repository(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    repository = tmp_path / "candidate"
+    repository.mkdir()
+
+    def git(*arguments: str) -> bytes:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repository,
+            capture_output=True,
+            check=True,
+        ).stdout
+
+    git("init", "-q")
+    git("config", "user.email", "publication@example.invalid")
+    git("config", "user.name", "Publication Fixture")
+    source = repository / "sample.txt"
+    source.write_bytes(b"base\n")
+    git("add", "sample.txt")
+    git("commit", "-q", "-m", "base")
+    base_commit = git("rev-parse", "HEAD").decode("ascii").strip()
+    source.write_bytes(b"candidate\n")
+    git("commit", "-q", "-am", "candidate")
+    commit = git("rev-parse", "HEAD").decode("ascii").strip()
+    tree = git("rev-parse", f"{commit}^{{tree}}").decode("ascii").strip()
+    diff = git(
+        "-c",
+        "diff.orderFile=",
+        "diff-tree",
+        "--no-commit-id",
+        "--raw",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--abbrev=40",
+        base_commit,
+        commit,
+    )
+    paths = git(
+        "-c",
+        "diff.orderFile=",
+        "diff-tree",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        "-z",
+        "--no-renames",
+        base_commit,
+        commit,
+    )
+    return repository, {
+        "commit": commit,
+        "tree": tree,
+        "base_commit": base_commit,
+        "diff_sha256": f"sha256:{hashlib.sha256(diff).hexdigest()}",
+        "path_manifest_sha256": f"sha256:{hashlib.sha256(paths).hexdigest()}",
+    }
+
+
 def _validate_publication_receipts(tmp_path: Path, payload: dict) -> None:
-    path = tmp_path / "governance" / "publication_disposition_receipts.json"
-    path.parent.mkdir()
+    repository, binding = _publication_repository(tmp_path)
+    for receipt in payload["receipts"]:
+        receipt["attestation"].update(binding)
+        for reviewer in receipt["reviewers"]:
+            reviewer.update(binding)
+    receipt_root = tmp_path / "receipt"
+    path = receipt_root / "governance" / "publication_disposition_receipts.json"
+    path.parent.mkdir(parents=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
-    validate_publication_disposition_receipts(tmp_path, git_repository=ROOT)
+    validate_publication_disposition_receipts(receipt_root, git_repository=repository)
 
 
 def test_publication_receipt_records_real_nonapproval_and_disagreement() -> None:
