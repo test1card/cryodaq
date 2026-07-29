@@ -783,7 +783,21 @@ def _candidate_preflight(
     write_refusals = {"alias": _write_must_be_refused(export_root, "alias")}
     if original_export_root is not None and original_export_root != export_root:
         write_refusals["original"] = _write_must_be_refused(original_export_root, "original")
-    write_refusals["trusted_launcher"] = _existing_file_write_must_be_refused(launcher.resolve(strict=True))
+    # *** DO NOT resolve() here. *** This function is reached from three call sites and
+    # TWO of them are already deprivileged when they arrive: `_posix_child` after
+    # `_drop_posix()`, and `_run_landlocked_candidate` in the re-entered non-root
+    # process. `Path.resolve()` walks every ancestor, and as `nobody` that walk meets
+    # /home/runner at mode 0751 -- traversable but not readable -- so it raises
+    # PermissionError instead of the preflight reporting a refusal, and every hosted
+    # ubuntu job dies before the boundary is exercised at all.
+    #
+    # The assertion never needed a resolved path: an open-for-write on the raw path is
+    # refused just the same, and that refusal is exactly what is being measured.
+    #
+    # This cost two hosted runs. The first time I hoisted the resolve above the drop in
+    # ONE caller and shipped, having verified only that caller. Fixing the callee fixes
+    # all three at once, which is why the fix belongs here and not at the call sites.
+    write_refusals["trusted_launcher"] = _existing_file_write_must_be_refused(launcher)
 
     symlink_creation = "not-required"
     if os.name == "nt":
