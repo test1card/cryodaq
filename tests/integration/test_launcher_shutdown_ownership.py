@@ -41,6 +41,21 @@ class _Timer:
         return None
 
 
+def _verified_global_off_result() -> dict[str, object]:
+    return {
+        "ok": True,
+        "active_channels": [],
+        "off_evidence": {
+            "off_tier": "verified_off",
+            "channel_off_results": {
+                "smua": "device_reported_off",
+                "smub": "device_reported_off",
+            },
+            "verified_off": True,
+        },
+    }
+
+
 class _ThreadWorker:
     """Small QThread-shaped owner backed by a real non-daemon thread."""
 
@@ -75,10 +90,10 @@ class _Bridge:
         self.receipt_sent = True
         return {
             "ok": True,
-            "schema": "cryodaq.engine_shutdown.v1",
+            "schema": "cryodaq.engine_shutdown.v2",
             "engine_instance_id": command["engine_instance_id"],
             "request_id": command["request_id"],
-            "global_off_verified": True,
+            "off_evidence": _verified_global_off_result()["off_evidence"],
             "teardown_requested": True,
             "delivery_state": "dispatched",
             "commit_state": "committed",
@@ -210,7 +225,7 @@ async def test_launcher_retains_command_path_until_exact_shutdown_receipt() -> N
         assert channel is None
         off_started.set()
         await release_off.wait()
-        return {"ok": True, "active_channels": []}
+        return _verified_global_off_result()
 
     context.safety_manager.emergency_off = AsyncMock(side_effect=delayed_off)
     address = _free_tcp_address()
@@ -599,10 +614,10 @@ def test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold(
         _engine_shutdown_transport_identity=None,
         _engine_shutdown_receipt={
             "ok": True,
-            "schema": "cryodaq.engine_shutdown.v1",
+            "schema": "cryodaq.engine_shutdown.v2",
             "engine_instance_id": "a" * 32,
             "request_id": request_id,
-            "global_off_verified": True,
+            "off_evidence": _verified_global_off_result()["off_evidence"],
             "teardown_requested": True,
             "delivery_state": "dispatched",
             "commit_state": "committed",

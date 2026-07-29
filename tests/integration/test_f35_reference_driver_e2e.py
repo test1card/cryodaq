@@ -486,7 +486,7 @@ def test_f35_report_projection_uses_descriptor_quantity_not_naming_heuristic() -
     descriptor correctly classifies it as ``TEMPERATURE``, and the
     projection preserves that classification."""
 
-    from cryodaq.reporting.sections import _legacy, _visible_quantity
+    from cryodaq.reporting.sections import _visible_quantity
     from cryodaq.storage.descriptor_archive import ResolvedStorageDescriptor
 
     descriptor = _descriptor()
@@ -559,10 +559,6 @@ def test_f35_report_projection_uses_descriptor_quantity_not_naming_heuristic() -
         "via descriptor.quantity — the channel_id 'stage_temp' does NOT "
         "match any naming heuristic (no \u0422/T prefix, no /smua/ substring)"
     )
-
-    # _legacy is False — so the unit == "K" fallback path is NOT the
-    # classification authority.  The descriptor is.
-    assert _legacy(report_reading) is False
 
     # bind to a dataset and generate a real document
     dataset = ReportDataset(

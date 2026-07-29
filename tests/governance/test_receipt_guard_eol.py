@@ -50,13 +50,23 @@ def _copy_receipt_evidence(tmp_path: Path) -> dict[str, Any]:
     return payload
 
 
-def test_receipt_bound_guards_are_checked_out_with_lf() -> None:
+def test_receipt_bound_guards_are_checked_out_with_lf(tmp_path: Path) -> None:
     """Git must preserve every raw-bound guard's exact attested bytes."""
 
     paths = sorted(_raw_bound_guard_paths())
+    attributes_root = tmp_path / "attributes"
+    attributes_root.mkdir()
+    attributes_raw = (ROOT / ".gitattributes").read_bytes()
+    (attributes_root / ".gitattributes").write_bytes(attributes_raw)
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=attributes_root,
+        check=True,
+        capture_output=True,
+    )
     completed = subprocess.run(
         ["git", "check-attr", "-z", "text", "eol", "--", *paths],
-        cwd=ROOT,
+        cwd=attributes_root,
         check=True,
         capture_output=True,
     )
@@ -67,6 +77,8 @@ def test_receipt_bound_guards_are_checked_out_with_lf() -> None:
         for path, name, value in zip(fields[::3], fields[1::3], fields[2::3], strict=True)
     }
     assert attributes == {(path, "text"): "set" for path in paths} | {(path, "eol"): "lf" for path in paths}
+    assert b"\r" not in attributes_raw
+    assert all(b"\r" not in (ROOT / path).read_bytes() for path in paths)
 
 
 def test_receipt_guard_blob_still_rejects_a_real_source_mismatch(tmp_path: Path) -> None:
