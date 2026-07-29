@@ -51,6 +51,9 @@ _PROTECTED_RUNNER_BOOTSTRAP = (
     "runpy.run_module('tools.ci_candidate_runner',run_name='__main__',alter_sys=True)"
 )
 _PROTECTED_PRODUCER_FILES = (
+    # Bound so the eol pins that keep every file below byte-stable cannot be
+    # withdrawn without the producer manifest noticing.
+    ".gitattributes",
     ".github/workflows/protected-ci-evidence-gate.yml",
     "environment.yml",
     # *** The JUDGE's dependency input, not the product lock. requirements-lock.txt
@@ -1214,7 +1217,13 @@ def validate_protected_execution_bundle(
     producer_text = str(producer_root.resolve(strict=True))
     if (
         not isinstance(command, list)
-        or len(command) != 11
+        # 13, not 11: --candidate-git-repository was added to the producer invocation
+        # so the protected run can RESOLVE Git objects instead of skipping them. This
+        # verifier was not updated with it, so every otherwise-successful protected
+        # bundle was rejected here and the required PROTECTED EXECUTION ACCEPTED
+        # results were unreachable. The producer and its verifier describe the same
+        # command and must be changed together.
+        or len(command) != 13
         or command[1:4] != ["-I", "-c", _PROTECTED_RUNNER_BOOTSTRAP]
         or command[4:]
         != [
@@ -1225,6 +1234,11 @@ def validate_protected_execution_bundle(
             command[8],
             "--protected-producer-root",
             producer_text,
+            "--candidate-git-repository",
+            # Bound to the candidate checkout this bundle is being verified against,
+            # not merely required to be present: an unbound value would let the
+            # producer resolve objects in some other repository.
+            str(repository.resolve(strict=True)),
         ]
         or not isinstance(command[0], str)
         or not command[0]

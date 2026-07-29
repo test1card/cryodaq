@@ -93,6 +93,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"
           for path in \
+            .gitattributes \
             .github/workflows/protected-ci-evidence-gate.yml \
             environment.yml \
             requirements-lock.txt \
@@ -213,6 +214,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${JUDGE_SHA:?}"
           for path in \
+            .gitattributes \
             .github/workflows/protected-ci-evidence-gate.yml \
             environment.yml \
             requirements-lock.txt \
