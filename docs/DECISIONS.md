@@ -177,3 +177,16 @@ remove.
 Artifacts embedding a hash of the file inventory must be regenerated **after** all content is final
 **and staged**. Regenerating against a working tree whose changes are not yet staged produces an
 artifact that goes stale the moment they are staged — while the gate reports green.
+
+## [Owner] 2026-07-29 — Montana checkpoint threat model and Cycle 2 authority
+
+> This checkpoint protects against accidental or agent-induced validator and
+> evidence-producer weakening, enforced by a judge loaded from the protected
+> default branch. It does not claim Byzantine-candidate resistance inside
+> pytest, and must never be described as if it does.
+
+Cycle 1 terminated `NOT_PR_READY`. The owner authorized Cycle 2 under the
+owner-ratified plan in `ROADMAP.md`. This decision defines checkpoint scope and
+authorizes the cycle; it is not review evidence. The owner supplied the ruling
+and does not sign the independent review or hosted-evidence receipts required
+by the plan.

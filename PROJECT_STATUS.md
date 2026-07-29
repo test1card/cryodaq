@@ -6,6 +6,64 @@
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Активная кампания:** см. `docs/campaigns/` — при наличии активной кампании запись ведётся там.
 
+## Montana checkpoint boundary — 2026-07-29
+
+The release boundary remains tag `v0.64.1`. The Montana work is a
+non-deployable software checkpoint campaign; it does not move the release
+boundary or establish release readiness, physical OFF, real-instrument,
+packaged-Windows, or laboratory acceptance.
+
+Cycle 1 terminated `NOT_PR_READY`, and the owner authorized Cycle 2 under the
+owner-ratified plan in `ROADMAP.md`. `master` is **four commits beyond
+`f5d6434d`**. The Cycle 1 judge SHA is no longer the Cycle 2 pin; a repaired
+default-branch commit is pending, so no successor SHA is asserted here.
+
+The checkpoint claim is limited to protection against accidental or
+agent-induced validator and evidence-producer weakening, enforced by a judge
+loaded from the protected default branch. It does **not** claim
+Byzantine-candidate resistance inside pytest. The current guard-root repair is
+authored but not independently reviewed: it roots Git resolution in the
+repository under validation and refuses protected execution when required
+candidate-repository context is missing. Local diagnostics do not close the
+independent-review or hosted-proof gates. Ordinary CI separately executes the
+exact-checkout guard with Git resolution; only the sealed export subrun skips
+resolution when it has no repository, so ordinary CI coverage is not
+compromised.
+
+The protected CI lock (requirements-protected-ci-lock.txt) is version-pinned
+without artifact hashes. It is an owner-authored, candidate-compatible snapshot
+pending independent review and hosted proof; it must not be described as
+reviewed.
+
+Open checkpoint and deployment invariants:
+
+1. **OC-020 — BLOCKS-DEPLOYMENT disclosure debt, not a checkpoint blocker.**
+   Mutate-execute-restore remains possible in an ordinary same-authority pytest
+   model. Linux honest `core`/`agents` controls pass, while Linux `gui` fails the
+   same 13 nodes reproducibly. On Windows, `AdjustTokenPrivileges` succeeds and
+   the implementation incorrectly treats `ERROR_NOT_ALL_ASSIGNED` during
+   privilege removal as fatal. The 10/10 probe measured Mandatory Integrity
+   Control alone and contains zero privilege-API calls; the integrated
+   MIC-plus-privilege-stripping sandbox has never been measured green. These
+   results are diagnostics, not closure, Windows acceptance, or physical-safety
+   evidence.
+2. **OC-035 — checkpoint prerequisite.** Cycle 2 must independently review the
+   repaired default-branch judge and re-prove hosted OIDC/REST job binding, the
+   candidate-bound check, and P7 evidence. The claim excludes a malicious
+   default-branch commit, compromised runner or GitHub identity, and same-process
+   Byzantine behavior. A required-check setting enabled after the requested
+   fast-forward protects later changes, not that fast-forward.
+3. **OC-036 — checkpoint prerequisite for accidental/agent-induced producer
+   substitution.** The protected producer and pytest plugin come from the
+   default-branch judge, so candidate copies cannot accidentally weaken them.
+   Candidate tests still share the pytest process and OS account; deliberate
+   plugin mutation, protocol forgery, background tampering, and equivalent
+   hostile behavior remain BLOCKS-DEPLOYMENT disclosure debt.
+4. **OC-039 — BLOCKS-DEPLOYMENT disclosure debt, not an independent checkpoint
+   blocker.** The measured fixed-port/startup race fails only in the safe
+   direction, and its diagnostic retry is not a fix. If it makes P7 red, the
+   one-shot cycle terminates because required hosted evidence is red.
+
 ---
 
 ## Масштаб проекта на границе релиза v0.64.1
