@@ -255,12 +255,11 @@ def main() -> int:
         "write": f"open(r'{export / 'main.py'}','w').write('MUTATED')",
         # NB: this must NOT raise SystemExit -- that exits before either marker is
         # printed, so the result is neither "refused" nor "succeeded" and scores
-        # INCONCLUSIVE. Report the icacls outcome explicitly instead.
+        # INCONCLUSIVE. It must also stay a SINGLE line: the caller wraps it in a
+        # one-space-indented try block, so any embedded newline breaks the block.
         "acl-rewrite": (
             f"import subprocess;_r=subprocess.run(['icacls.exe',r'{export}','/grant','*S-1-1-0:(F)'],"
-            "capture_output=True)
-"
-            " raise OSError('icacls refused') if _r.returncode else None"
+            "capture_output=True);assert _r.returncode==0,'icacls refused'"
         ),
         "rename": f"import os;os.replace(r'{export / 'main.py'}', r'{export / 'renamed.py'}')",
         "delete-recreate": (
