@@ -18,7 +18,7 @@ import urllib.request
 from collections import Counter, deque
 from collections.abc import Mapping
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from tools.candidate_evidence import CandidateExecutionReceipt, execute_exported_candidate, validate_candidate_manifest
@@ -1305,7 +1305,6 @@ def validate_protected_execution_bundle(
     if execution.get("producer") != expected_producer:
         raise CiCandidateEvidenceError("protected execution receipt does not bind the immutable producer")
     command = execution.get("command")
-    producer_text = str(producer_root.resolve(strict=True))
     if (
         not isinstance(command, list)
         # 13, not 11: --candidate-git-repository was added to the producer invocation
@@ -1318,23 +1317,34 @@ def validate_protected_execution_bundle(
         or command[1:4] != ["-I", "-c", _PROTECTED_RUNNER_BOOTSTRAP]
         or command[4:]
         != [
-            producer_text,
+            # Producer paths are runner-local too. Their identity is the
+            # immutable producer manifest checked immediately above; the two
+            # command positions must still name the same absolute path.
+            command[4],
             "--suite",
             expected_suite,
             "--root",
             command[8],
             "--protected-producer-root",
-            producer_text,
+            command[4],
             "--candidate-git-repository",
-            # Bound to the candidate checkout this bundle is being verified against,
-            # not merely required to be present: an unbound value would let the
-            # producer resolve objects in some other repository.
-            str(repository.resolve(strict=True)),
+            # This path is local to the producer runner and cannot equal the
+            # verifier's path across an OS matrix. Repository identity is bound
+            # above instead: the immutable producer passes the same repository
+            # used to export the candidate, whose commit/tree/manifest are checked
+            # against the target checkout.
+            command[12],
         ]
         or not isinstance(command[0], str)
         or not command[0]
+        or not isinstance(command[4], str)
+        or not command[4]
+        or not (PurePosixPath(command[4]).is_absolute() or PureWindowsPath(command[4]).is_absolute())
         or not isinstance(command[8], str)
         or not command[8]
+        or not isinstance(command[12], str)
+        or not command[12]
+        or not (PurePosixPath(command[12]).is_absolute() or PureWindowsPath(command[12]).is_absolute())
     ):
         raise CiCandidateEvidenceError("protected execution command did not invoke the pinned producer")
     output = (raw["stdout.bin"] + b"\n" + raw["stderr.bin"]).decode("utf-8", errors="replace")
