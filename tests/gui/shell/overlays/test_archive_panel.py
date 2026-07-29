@@ -1179,6 +1179,41 @@ def test_hdf5_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     assert len(_StubHDF5Exporter.calls) == 1
 
 
+def test_hdf5_export_archive_location_failure_is_reported(app, monkeypatch, tmp_path, reset_stub_state):
+    import cryodaq.paths as paths_module
+    import cryodaq.storage.hdf5_export as hdf5_module
+
+    panel = ArchivePanel()
+    panel.set_connected(True)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    requested: list[Path] = []
+
+    from PySide6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        staticmethod(lambda *a, **k: str(out_dir)),
+    )
+    monkeypatch.setattr(paths_module, "get_data_dir", lambda: tmp_path)
+
+    def unavailable(data_dir: Path) -> Path:
+        requested.append(data_dir)
+        raise paths_module.ArchiveLocationMigrationRequiredError("C:\\TOP-SECRET\\legacy archive")
+
+    monkeypatch.setattr(paths_module, "get_archive_dir", unavailable)
+    monkeypatch.setattr(hdf5_module, "HDF5Exporter", _StubHDF5Exporter)
+
+    panel._export_hdf5_btn.click()
+    assert _wait_until(lambda: not panel._export_in_flight)
+
+    assert requested == [tmp_path]
+    assert _StubHDF5Exporter.calls == []
+    assert "TOP-SECRET" not in panel._banner_label.text()
+    assert theme.STATUS_FAULT in panel._banner_label.styleSheet()
+
+
 def test_xlsx_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
     panel.set_connected(True)

@@ -29,7 +29,6 @@ SQLite + холодный Parquet), поэтому день, вытесненн�
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -46,20 +45,13 @@ logger = logging.getLogger(__name__)
 
 
 def _archived_days(archive_dir: Path) -> set[str]:
-    """Return the set of ``YYYY-MM-DD`` days already rotated to cold Parquet."""
-    index_path = archive_dir / "index.json"
-    if not index_path.exists():
-        return set()
-    try:
-        idx = json.loads(index_path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.error("Archive index.json at %s is unreadable — skipping cold days", index_path)
-        return set()
+    """Return rotated days, rejecting unavailable or malformed index authority."""
+    idx = ArchiveReader(archive_dir.parent, archive_dir)._load_index()
     days: set[str] = set()
-    for entry in idx.get("files", []):
-        day = _day_from_db_name(str(entry.get("original_name", "")))
-        if day is not None:
-            days.add(day)
+    for entry in idx["files"]:
+        day = _day_from_db_name(entry["original_name"])
+        assert day is not None
+        days.add(day)
     return days
 
 

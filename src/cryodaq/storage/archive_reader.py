@@ -114,6 +114,15 @@ class BoundedReadIssue:
     source: str
 
 
+class ArchiveUnavailableError(RuntimeError):
+    """A discovered archive source could not be read completely."""
+
+    def __init__(self, code: BoundedReadIssueCode, source: str) -> None:
+        safe_source = str(source)[:96]
+        self.issue = BoundedReadIssue(code=code, source=safe_source)
+        super().__init__(f"archive unavailable: {code.value} [{safe_source}]")
+
+
 @dataclass(frozen=True, slots=True)
 class BoundedReadingRow:
     timestamp: float
@@ -2052,6 +2061,8 @@ class ArchiveReader:
         ``end`` **exclusive**; ``None`` bounds mean unbounded. ``value`` is
         decoded (a sentinel / error / legacy ±inf row surfaces as ``NaN``);
         ``status`` is returned verbatim. Rows are sorted by timestamp ascending.
+        A discovered source that cannot be read completely raises
+        :class:`ArchiveUnavailableError`; partial rows are never returned.
         """
         channel_set = set(channels) if channels else None
         instrument_set = set(instrument_ids) if instrument_ids else None
@@ -2131,6 +2142,8 @@ class ArchiveReader:
         (both sources store it that way), ``tags`` is the raw JSON string. The
         caller applies experiment_id filtering / tags decoding so hot and cold
         rows behave identically. Time range is inclusive on both ends.
+        A missing or unusable source raises :class:`ArchiveUnavailableError`;
+        partial journal rows are never returned.
         """
         from_epoch = from_day = None
         to_epoch = to_day = None
@@ -2144,20 +2157,29 @@ class ArchiveReader:
         index = self._load_index()
         # day → [("parquet", operator_log_rel), ...] | [("sqlite", db_path)]. A
         # rotated day's SQLite is normally gone, so its operator_log lives only
-        # in the companion Parquet — and only if that day carried operator_log
-        # rows at all (entries without operator_log_path simply had none). But if
-        # a hot daily DB reappears for an already-rotated day (restore / backdate
-        # / stranded pre-sweep), BOTH exist — union them (F2) so a restored
-        # journal entry is not shadowed on the audit path while exports see it.
+        # in the companion Parquet. The current index has no versioned authority
+        # proving that an absent operator_log_path means a known zero-row
+        # journal, so absence is unavailable rather than empty. If a hot daily
+        # DB reappears for an already-rotated day (restore / backdate / stranded
+        # pre-sweep), BOTH proven sources are unioned (F2).
         # Parquet source(s) read first → archived wins on an exact-row clash.
         sources: dict[str, list[tuple[str, str]]] = {}
         for entry in index.get("files", []):
             day = _day_from_db_name(entry["original_name"])
             if day is None:
                 continue
+            day_value = date.fromisoformat(day)
+            if from_day is not None and day_value < from_day:
+                continue
+            if to_day is not None and day_value > to_day:
+                continue
             ol_rel = entry.get("operator_log_path")
-            if ol_rel:
-                sources.setdefault(day, []).append(("parquet", ol_rel))
+            if not ol_rel:
+                raise ArchiveUnavailableError(
+                    BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
+                    f"{day}:operator_log",
+                )
+            sources.setdefault(day, []).append(("parquet", ol_rel))
         if self._data_dir.exists():
             for db_path in self._data_dir.glob("data_????-??-??.db"):
                 day = _day_from_db_name(db_path.name)
@@ -2206,6 +2228,8 @@ class ArchiveReader:
         out: list[OperatorLogRow],
     ) -> None:
         try:
+            relative = db_path.relative_to(self._data_dir).as_posix()
+            db_path = self._contained_regular(self._data_dir, relative)
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
             try:
@@ -2213,7 +2237,10 @@ class ArchiveReader:
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='operator_log'"
                 ).fetchone()
                 if exists is None:
-                    return
+                    raise ArchiveUnavailableError(
+                        BoundedReadIssueCode.SQLITE_READ,
+                        db_path.name,
+                    )
                 query = "SELECT timestamp, experiment_id, author, source, message, tags FROM operator_log"
                 cond: list[str] = []
                 params: list[object] = []
@@ -2239,8 +2266,13 @@ class ArchiveReader:
                     )
             finally:
                 conn.close()
-        except Exception:
-            logger.exception("Failed to read operator_log from SQLite %s — partial result", db_path.name)
+        except ArchiveUnavailableError:
+            raise
+        except Exception as exc:
+            raise ArchiveUnavailableError(
+                self._sqlite_issue_for(exc),
+                db_path.name,
+            ) from None
 
     def _read_parquet_operator_log(
         self,
@@ -2249,15 +2281,16 @@ class ArchiveReader:
         to_epoch: float | None,
         out: list[OperatorLogRow],
     ) -> None:
-        parquet_path = self._archive_dir / archive_rel
-        if not parquet_path.exists():
-            logger.warning("Archived operator_log Parquet missing: %s — skipping", archive_rel)
-            return
+        source = f"operator_log:{PurePosixPath(archive_rel).name}"
         try:
             import pyarrow.parquet as pq
 
-            table = pq.read_table(
-                str(parquet_path),
+            parquet_path = self._contained_regular(self._archive_dir, archive_rel)
+            parquet_file = pq.ParquetFile(str(parquet_path))
+            required = {"timestamp", "experiment_id", "author", "source", "message", "tags"}
+            if not required <= set(parquet_file.schema_arrow.names):
+                raise _ParquetSchemaError("operator_log columns are incomplete")
+            table = parquet_file.read(
                 columns=["timestamp", "experiment_id", "author", "source", "message", "tags"],
             )
             # CR-3 schema keeps timestamp as a raw epoch float (lossless audit).
@@ -2284,8 +2317,26 @@ class ArchiveReader:
                         str(tags if tags is not None else "[]"),
                     )
                 )
+        except FileNotFoundError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.SOURCE_MISSING,
+                source,
+            ) from None
+        except _ParquetSchemaError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.PARQUET_SCHEMA,
+                source,
+            ) from None
+        except OSError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.PARQUET_READ,
+                source,
+            ) from None
         except Exception:
-            logger.exception("Failed to read operator_log Parquet %s — partial result", archive_rel)
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.PARQUET_METADATA,
+                source,
+            ) from None
 
     def _read_sqlite_rows(
         self,
@@ -2297,6 +2348,8 @@ class ArchiveReader:
         out: list[FullRow],
     ) -> None:
         try:
+            relative = db_path.relative_to(self._data_dir).as_posix()
+            db_path = self._contained_regular(self._data_dir, relative)
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
             try:
@@ -2335,8 +2388,13 @@ class ArchiveReader:
                     )
             finally:
                 conn.close()
-        except Exception:
-            logger.exception("Failed to read SQLite %s — partial result", db_path.name)
+        except ArchiveUnavailableError:
+            raise
+        except Exception as exc:
+            raise ArchiveUnavailableError(
+                self._sqlite_issue_for(exc),
+                db_path.name,
+            ) from None
 
     def _read_parquet_rows(
         self,
@@ -2347,15 +2405,16 @@ class ArchiveReader:
         instruments: set[str] | None,
         out: list[FullRow],
     ) -> None:
-        parquet_path = self._archive_dir / archive_rel
-        if not parquet_path.exists():
-            logger.warning("Archived Parquet file missing: %s — skipping", archive_rel)
-            return
+        source = f"readings:{PurePosixPath(archive_rel).name}"
         try:
             import pyarrow.parquet as pq
 
-            table = pq.read_table(
-                str(parquet_path),
+            parquet_path = self._contained_regular(self._archive_dir, archive_rel)
+            parquet_file = pq.ParquetFile(str(parquet_path))
+            required = {"timestamp", "instrument_id", "channel", "value", "unit", "status"}
+            if not required <= set(parquet_file.schema_arrow.names):
+                raise _ParquetSchemaError("readings columns are incomplete")
+            table = parquet_file.read(
                 columns=["timestamp", "instrument_id", "channel", "value", "unit", "status"],
             )
             ts_us = table.column("timestamp").cast("int64").to_pylist()
@@ -2375,8 +2434,26 @@ class ArchiveReader:
                 if instruments is not None and inst not in instruments:
                     continue
                 out.append((epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status)))
+        except FileNotFoundError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.SOURCE_MISSING,
+                source,
+            ) from None
+        except _ParquetSchemaError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.PARQUET_SCHEMA,
+                source,
+            ) from None
+        except OSError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.PARQUET_READ,
+                source,
+            ) from None
         except Exception:
-            logger.exception("Failed to read Parquet %s — partial result", archive_rel)
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.PARQUET_METADATA,
+                source,
+            ) from None
 
     def _merge_overlap_day(
         self,
@@ -2491,14 +2568,66 @@ class ArchiveReader:
 
     def _load_index(self) -> dict:
         index_path = self._archive_dir / "index.json"
-        if not index_path.exists():
+        index_present = index_path.exists() or index_path.is_symlink()
+        if not index_present:
+            try:
+                has_cold_artifact = self._archive_dir.exists() and any(self._archive_dir.rglob("*.parquet"))
+            except OSError:
+                raise ArchiveUnavailableError(
+                    BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
+                    "index",
+                ) from None
+            if has_cold_artifact:
+                raise ArchiveUnavailableError(
+                    BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
+                    "index",
+                )
             return {"files": []}
         try:
-            return json.loads(index_path.read_text(encoding="utf-8"))
+            document = self._read_bounded_index(index_path)
+            if type(document) is not dict or set(document) != {"files"}:
+                raise ValueError("invalid index schema")
+            entries = document["files"]
+            if type(entries) is not list or len(entries) > 100_000:
+                raise ValueError("invalid index entries")
+            seen: set[str] = set()
+            for entry in entries:
+                if type(entry) is not dict:
+                    raise ValueError("invalid index entry")
+                name = entry.get("original_name")
+                archive_rel = entry.get("archive_path")
+                if type(name) is not str or type(archive_rel) is not str:
+                    raise ValueError("invalid index entry fields")
+                day = _day_from_db_name(name)
+                if day is None or name != f"data_{day}.db" or name in seen:
+                    raise ValueError("invalid index day authority")
+                self._validate_archive_relative(archive_rel)
+                operator_rel = entry.get("operator_log_path")
+                if operator_rel is not None:
+                    if type(operator_rel) is not str:
+                        raise ValueError("invalid operator_log path")
+                    self._validate_archive_relative(operator_rel)
+                seen.add(name)
+            return document
+        except ArchiveUnavailableError:
+            raise
+        except _IndexOversizeError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE,
+                "index",
+            ) from None
         except Exception:
-            logger.error(
-                "Archive index.json at %s is corrupt — query cannot determine which days "
-                "have been rotated to Parquet. Inspect and repair or delete the file manually.",
-                index_path,
-            )
-            raise RuntimeError(f"Archive index.json corrupt: {index_path}")
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
+                "index",
+            ) from None
+
+    @staticmethod
+    def _validate_archive_relative(relative: str) -> None:
+        if not relative or len(relative) > 1024 or "\\" in relative or "\x00" in relative:
+            raise ValueError("invalid archive path")
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            raise ValueError("invalid archive path")
+        if len(pure.parts[0]) >= 2 and pure.parts[0][1] == ":":
+            raise ValueError("invalid archive path")

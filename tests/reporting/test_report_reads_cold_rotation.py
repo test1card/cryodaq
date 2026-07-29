@@ -9,10 +9,15 @@ hot DBs directly. This pins the fix that routes ``_load_readings`` through
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
+import cryodaq.reporting.data as reporting_data
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.paths import ArchiveLocationMigrationRequiredError
 from cryodaq.reporting.data import ReportDataExtractor
 from cryodaq.storage.cold_rotation import ColdRotationService
 from cryodaq.storage.sqlite_writer import SQLiteWriter
@@ -110,3 +115,52 @@ async def test_load_operator_log_reads_rotated_cold_day(tmp_path: Path) -> None:
     tagged = next(r for r in records if r.message == "cooldown started")
     assert tagged.tags == ("cooldown",), "tags must JSON-decode to a tuple"
     assert tagged.experiment_id == "exp-42"
+
+
+def test_report_reading_loader_propagates_archive_location_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(_data_dir: Path) -> Path:
+        raise ArchiveLocationMigrationRequiredError("migration required")
+
+    monkeypatch.setattr(reporting_data, "get_archive_dir", unavailable, raising=False)
+
+    with pytest.raises(ArchiveLocationMigrationRequiredError, match="migration required"):
+        ReportDataExtractor(tmp_path)._load_readings(
+            datetime(2026, 4, 14, tzinfo=UTC),
+            datetime(2026, 4, 15, tzinfo=UTC),
+        )
+
+
+def test_report_operator_log_loader_propagates_archive_location_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(_data_dir: Path) -> Path:
+        raise ArchiveLocationMigrationRequiredError("migration required")
+
+    monkeypatch.setattr(reporting_data, "get_archive_dir", unavailable, raising=False)
+
+    with pytest.raises(ArchiveLocationMigrationRequiredError, match="migration required"):
+        ReportDataExtractor(tmp_path)._load_operator_log(
+            datetime(2026, 4, 14, tzinfo=UTC),
+            datetime(2026, 4, 15, tzinfo=UTC),
+            None,
+        )
+
+
+def test_report_operator_log_rejects_missing_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "data_2026-04-14.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE readings (timestamp REAL, instrument_id TEXT, channel TEXT, value REAL, unit TEXT, status TEXT)"
+    )
+    conn.close()
+
+    with pytest.raises(RuntimeError) as caught:
+        ReportDataExtractor(tmp_path)._load_operator_log(
+            datetime(2026, 4, 14, tzinfo=UTC),
+            datetime(2026, 4, 15, tzinfo=UTC),
+            None,
+        )
+
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"

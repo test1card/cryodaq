@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import openpyxl
+import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.sentinel import SENTINEL
@@ -325,3 +327,29 @@ def test_xlsx_masks_sentinel_row(tmp_path: Path) -> None:
         "non-finite number leaked into XLSX"
     )
     assert 4.5 in values, "usable reading must still be exported"
+
+
+def test_xlsx_export_rejects_missing_indexed_source_before_writing(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = data_dir / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "original_name": "data_2026-03-14.db",
+                        "archive_path": "year=2026/month=03/data_2026-03-14.db.parquet",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "must-not-exist.xlsx"
+
+    with pytest.raises(RuntimeError) as caught:
+        XLSXExporter(data_dir).export(output_path)
+
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"
+    assert not output_path.exists()

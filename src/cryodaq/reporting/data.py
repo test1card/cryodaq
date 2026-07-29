@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cryodaq.paths import get_archive_dir
 from cryodaq.report_state import (
     ALLOWED_REPORT_INPUT_SUFFIXES,
     MAX_SOURCE_FILE_BYTES,
@@ -265,12 +266,16 @@ class ReportDataExtractor:
         # daily SQLite file, its readings live only in Parquet, so a direct hot
         # scan would silently lose them when regenerating an old report.
         # query_rows unions hot SQLite + cold Parquet and already decodes the
-        # NaN-доктрина sentinel (do NOT decode again here). archive_dir default
-        # matches the CSV/XLSX exporters and cold_rotation (data_dir/"archive").
+        # NaN-доктрина sentinel (do NOT decode again here). Resolve archive_dir
+        # through the migration-aware authority shared with exporters/rotation.
         # Semantics mirror those exporters: start inclusive, end exclusive (the
         # old direct scan was end-inclusive; no real report lands a reading on
         # the exact end microsecond), all channels, sorted by timestamp.
-        rows = ArchiveReader(self._data_dir, self._data_dir / "archive").query_rows(start_time, end_time, None)
+        rows = ArchiveReader(self._data_dir, get_archive_dir(self._data_dir)).query_rows(
+            start_time,
+            end_time,
+            None,
+        )
         return [
             HistoricalReading(
                 timestamp=_parse_timestamp(raw_ts),
@@ -295,7 +300,7 @@ class ReportDataExtractor:
         # direct hot scan would go blind. query_operator_log unions hot + cold and
         # applies the inclusive time range; the experiment_id filter and tags
         # decode stay here so hot and cold rows behave identically.
-        reader = ArchiveReader(self._data_dir, self._data_dir / "archive")
+        reader = ArchiveReader(self._data_dir, get_archive_dir(self._data_dir))
         rows: list[OperatorLogRecord] = []
         for raw_ts, exp_id, author, source, message, tags in reader.query_operator_log(start_time, end_time):
             # Mirrors the old SQL `experiment_id = ? OR experiment_id IS NULL`.

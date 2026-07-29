@@ -10,6 +10,7 @@ exports (the hot ``data_*.db`` is gone once rotated). ``source_data`` and the
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -399,3 +400,56 @@ def test_hdf5_export_days_unions_hot_and_cold(tmp_path: Path) -> None:
     days = hdf5_export_days(data_dir, archive_dir)
     assert old_day.date().isoformat() in days, "rotated day missing from enumeration"
     assert recent_day.date().isoformat() in days, "hot day missing from enumeration"
+
+
+def test_hdf5_export_rejects_missing_indexed_source_before_writing(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    (archive_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "original_name": "data_2026-03-14.db",
+                        "archive_path": "year=2026/month=03/data_2026-03-14.db.parquet",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "must-not-exist.h5"
+
+    with pytest.raises(RuntimeError) as caught:
+        HDF5Exporter(data_dir, archive_dir).export(date(2026, 3, 14), output_path)
+
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"
+    assert not output_path.exists()
+
+
+def test_hdf5_export_days_rejects_malformed_index(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    (archive_dir / "index.json").write_text('{"files": "not-a-list"}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as caught:
+        hdf5_export_days(tmp_path / "data", archive_dir)
+
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"
+
+
+def test_hdf5_export_days_rejects_missing_index_with_cold_artifact(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    artifact = archive_dir / "year=2026" / "month=03" / "data_2026-03-14.db.parquet"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"retained cold artifact")
+
+    with pytest.raises(RuntimeError) as caught:
+        hdf5_export_days(tmp_path / "data", archive_dir)
+
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"
+
+
+def test_hdf5_export_days_allows_absent_empty_archive(tmp_path: Path) -> None:
+    assert hdf5_export_days(tmp_path / "data", tmp_path / "archive") == []

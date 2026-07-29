@@ -1213,13 +1213,13 @@ class ArchivePanel(OverlayPanelBase, QWidget):
 
         from datetime import date
 
-        from cryodaq.paths import get_data_dir
+        from cryodaq.paths import get_archive_dir, get_data_dir
         from cryodaq.storage.hdf5_export import HDF5Exporter, hdf5_export_days
 
         data_dir = get_data_dir()
-        archive_dir = data_dir / "archive"
 
         def runner() -> int:
+            archive_dir = get_archive_dir(data_dir)
             # Enumerate hot ∪ cold days so rotated (Parquet) days export too —
             # a plain data_*.db glob goes blind over rotated history.
             exporter = HDF5Exporter(data_dir, archive_dir)

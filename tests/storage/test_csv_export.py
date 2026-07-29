@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import csv
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage.csv_export import CSVExporter
@@ -224,3 +227,29 @@ def test_csv_masks_sentinel_value(tmp_path: Path) -> None:
     assert bad["value"].strip().lower() not in {"inf", "-inf", "nan"}
     assert bad["value"] == "", "non-usable value must be blank, status preserved"
     assert by_status["ok"]["value"] not in ("", None)
+
+
+def test_csv_export_rejects_missing_indexed_source_before_writing(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = data_dir / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "original_name": "data_2026-03-14.db",
+                        "archive_path": "year=2026/month=03/data_2026-03-14.db.parquet",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "must-not-exist.csv"
+
+    with pytest.raises(RuntimeError) as caught:
+        CSVExporter(data_dir).export(output_path)
+
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"
+    assert not output_path.exists()

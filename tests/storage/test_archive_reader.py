@@ -92,6 +92,13 @@ def _write_index(archive_dir: Path, entries: list[dict]) -> None:
     )
 
 
+def _assert_archive_unavailable(call) -> RuntimeError:
+    with pytest.raises(RuntimeError) as caught:
+        call()
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"
+    return caught.value
+
+
 # ---------------------------------------------------------------------------
 # test_query_archived_uses_parquet
 # ---------------------------------------------------------------------------
@@ -564,6 +571,124 @@ def test_query_operator_log_no_archive_dir(tmp_path: Path) -> None:
     reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "archive")
     rows = reader.query_operator_log(day.replace(hour=0), day.replace(hour=23))
     assert [r[4] for r in rows] == ["hot only"]
+
+
+def test_query_rows_rejects_missing_indexed_parquet(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    hot_day = datetime(2026, 4, 15, tzinfo=UTC)
+    _create_sqlite_db(
+        data_dir / "data_2026-04-15.db",
+        [(hot_day.timestamp(), "ls", "T", 4.2, "K", "ok")],
+    )
+    _write_index(
+        archive_dir,
+        [
+            {
+                "original_name": "data_2026-04-14.db",
+                "archive_path": "year=2026/month=04/data_2026-04-14.db.parquet",
+            }
+        ],
+    )
+
+    reader = ArchiveReader(data_dir, archive_dir)
+    error = _assert_archive_unavailable(lambda: reader.query_rows(None, None, None))
+
+    assert error.issue.code.value == "source_missing"
+
+
+def test_query_rows_rejects_corrupt_indexed_parquet(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    archive_rel = "year=2026/month=04/data_2026-04-14.db.parquet"
+    corrupt = archive_dir / archive_rel
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"not a parquet file")
+    _write_index(
+        archive_dir,
+        [{"original_name": "data_2026-04-14.db", "archive_path": archive_rel}],
+    )
+
+    error = _assert_archive_unavailable(lambda: ArchiveReader(data_dir, archive_dir).query_rows(None, None, None))
+
+    assert error.issue.code.value in {"parquet_metadata", "parquet_read"}
+
+
+def test_query_rows_rejects_sqlite_with_invalid_readings_schema(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db_path = data_dir / "data_2026-04-14.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE unrelated (value REAL)")
+    conn.close()
+
+    error = _assert_archive_unavailable(
+        lambda: ArchiveReader(data_dir, tmp_path / "archive").query_rows(None, None, None)
+    )
+
+    assert error.issue.code.value == "sqlite_read"
+
+
+def test_query_operator_log_rejects_missing_sqlite_table(tmp_path: Path) -> None:
+    day = datetime(2026, 4, 14, tzinfo=UTC)
+    _create_sqlite_db(
+        tmp_path / "data_2026-04-14.db",
+        [(day.timestamp(), "ls", "T", 4.2, "K", "ok")],
+    )
+
+    error = _assert_archive_unavailable(
+        lambda: ArchiveReader(tmp_path, tmp_path / "archive").query_operator_log(day, day + timedelta(hours=1))
+    )
+
+    assert error.issue.code.value == "sqlite_read"
+
+
+def test_query_operator_log_rejects_missing_indexed_sidecar(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    _write_index(
+        archive_dir,
+        [
+            {
+                "original_name": "data_2026-04-14.db",
+                "archive_path": "year=2026/month=04/data_2026-04-14.db.parquet",
+                "operator_log_path": ("year=2026/month=04/data_2026-04-14.db.operator_log.parquet"),
+            }
+        ],
+    )
+
+    error = _assert_archive_unavailable(lambda: ArchiveReader(tmp_path, archive_dir).query_operator_log(None, None))
+
+    assert error.issue.code.value == "source_missing"
+
+
+def test_query_operator_log_rejects_unproven_empty_cold_journal(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    _write_index(
+        archive_dir,
+        [
+            {
+                "original_name": "data_2026-04-14.db",
+                "archive_path": "year=2026/month=04/data_2026-04-14.db.parquet",
+            }
+        ],
+    )
+
+    error = _assert_archive_unavailable(lambda: ArchiveReader(tmp_path, archive_dir).query_operator_log(None, None))
+
+    assert error.issue.code.value == "archive_index_invalid"
+
+
+def test_empty_archive_queries_are_complete_empty_success(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    data_dir.mkdir()
+    _write_index(archive_dir, [])
+    reader = ArchiveReader(data_dir, archive_dir)
+
+    assert reader.query_rows(None, None, None) == []
+    assert reader.query_operator_log(None, None) == []
 
 
 # ---------------------------------------------------------------------------
