@@ -151,8 +151,14 @@ class FakeApi:
             "collection_complete": True,
             "failed_nodeids": [],
             "invocation_index": 1,
-            "population": {"collected": 3, "deselected": 0, "executed": 3, "skipped": 0},
-            "schema_version": 3,
+            "population": {
+                "call_executed": 3,
+                "collected": 3,
+                "deselected": 0,
+                "executed": 3,
+                "skipped": 0,
+            },
+            "schema_version": 4,
             "suite": suite,
         }
         receipt = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(population)}"
@@ -328,8 +334,14 @@ def test_zero_collected_partition_refuses(evidence_repository: tuple[Path, str])
         "collection_complete": True,
         "failed_nodeids": [],
         "invocation_index": 1,
-        "population": {"collected": 0, "deselected": 0, "executed": 0, "skipped": 0},
-        "schema_version": 3,
+        "population": {
+            "call_executed": 0,
+            "collected": 0,
+            "deselected": 0,
+            "executed": 0,
+            "skipped": 0,
+        },
+        "schema_version": 4,
         "suite": "core",
     }
     receipt = f"{FAILURE_RECEIPT_PREFIX}{canonical_failure_receipt(payload)}"
@@ -442,8 +454,14 @@ def test_job_log_population_receipt_mismatch_refuses_distinctly(
         "collection_complete": True,
         "failed_nodeids": [],
         "invocation_index": 1,
-        "population": {"collected": 1, "deselected": 0, "executed": 1, "skipped": 0},
-        "schema_version": 3,
+        "population": {
+            "call_executed": 1,
+            "collected": 1,
+            "deselected": 0,
+            "executed": 1,
+            "skipped": 0,
+        },
+        "schema_version": 4,
         "suite": "agents",
     }
     api.downloads[f"repos/{REPOSITORY_NAME}/actions/jobs/{detail['id']}/logs"] = (
