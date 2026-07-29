@@ -490,6 +490,7 @@ def run_suite(
     root: Path,
     basetemp: Path | None = None,
     protected_producer_root: Path | None = None,
+    candidate_git_repository: Path | None = None,
 ) -> int:
     try:
         manifest = compile_python_tree(root)
@@ -505,7 +506,21 @@ def run_suite(
     print(f"candidate-suite={suite} compiled-sources={len(manifest)}", flush=True)
     try:
         platform = current_guard_platform()
-        active_specs = active_guard_specs(root, suite, platform=platform)
+        # A protected run executes this module from the JUDGE checkout against a
+        # sealed export, so neither location can supply the candidate's history.
+        # The candidate's real repository is passed in explicitly, and when it is
+        # present the protected path REQUIRES object resolution rather than
+        # accepting the sealed export's unresolved tier.
+        active_specs = active_guard_specs(
+            root,
+            suite,
+            platform=platform,
+            git_repository=candidate_git_repository,
+            # Keyed on the protected path ALONE. Conditioning this on the repository
+            # also being present would mean a missing repository silently downgrades
+            # to the unresolved tier -- the precise fallback this must refuse.
+            require_git_resolution=protected_producer_root is not None,
+        )
         active_nodes = tuple(spec.node for spec in active_specs)
         active_platforms = {spec.node: spec.platform for spec in active_specs}
         commands = _suite_commands(
@@ -634,11 +649,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--suite", choices=sorted(_SELECTIONS), required=True)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--protected-producer-root", type=Path)
+    parser.add_argument("--candidate-git-repository", type=Path)
     args = parser.parse_args(argv)
     return run_suite(
         args.suite,
         root=args.root,
         protected_producer_root=args.protected_producer_root,
+        candidate_git_repository=args.candidate_git_repository,
     )
 
 
