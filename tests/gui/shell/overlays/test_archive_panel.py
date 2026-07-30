@@ -102,7 +102,7 @@ def _entry(
 # ----------------------------------------------------------------------
 
 
-def test_panel_renders_core_surfaces(app):
+def test_panel_renders_core_surfaces(app, monkeypatch):
     panel = ArchivePanel()
     assert panel.objectName() == "archivePanel"
     assert panel._table is not None
@@ -119,7 +119,7 @@ def test_panel_renders_core_surfaces(app):
     titles = [lbl.text() for lbl in panel.findChildren(QLabel) if lbl.text().startswith("АРХИВ")]
     assert "АРХИВ ЭКСПЕРИМЕНТОВ" in titles
     # Export buttons are enabled once connected.
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     assert panel._export_csv_btn.isEnabled()
     # Clicking CSV with a cancelled dialog does not crash or leave in-flight.
     from unittest import mock as _mock
@@ -608,7 +608,7 @@ def test_disconnect_cancels_force_prompt_and_reconnect_keeps_pending_disabled(
 
 def test_export_csv_click_cancel_no_worker(app, monkeypatch):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
@@ -624,7 +624,7 @@ def test_export_csv_click_cancel_no_worker(app, monkeypatch):
 
 def test_export_hdf5_click_cancel_no_worker(app, monkeypatch):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
@@ -635,7 +635,7 @@ def test_export_hdf5_click_cancel_no_worker(app, monkeypatch):
 
 def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
@@ -647,7 +647,7 @@ def test_export_xlsx_click_cancel_no_worker(app, monkeypatch):
 def test_export_parquet_click_cancel_no_worker(app, monkeypatch):
     """IV.4 F1: cancelling the Parquet QFileDialog does not spawn a worker."""
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     from PySide6.QtWidgets import QFileDialog
 
     monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))
@@ -665,7 +665,7 @@ def test_export_parquet_click_starts_worker(app, monkeypatch, tmp_path):
     export in-flight flag. We fake only the low-level parquet helper so the
     real _start_export_worker / button wiring runs end-to-end."""
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     from PySide6.QtWidgets import QFileDialog
 
     output = tmp_path / "export.parquet"
@@ -699,7 +699,7 @@ def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
     parquet_archive helper with the chosen output path and bulk
     [2000, now] range."""
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     from PySide6.QtWidgets import QFileDialog
 
     output = tmp_path / "export.parquet"
@@ -739,9 +739,9 @@ def test_export_parquet_runner_calls_export_helper(app, monkeypatch, tmp_path):
     assert (datetime.now(UTC) - captured["end_time"]).total_seconds() < 5.0
 
 
-def test_export_in_flight_disables_all_export_buttons(app):
+def test_export_in_flight_disables_all_export_buttons(app, monkeypatch):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     assert panel._export_csv_btn.isEnabled()
     panel._export_in_flight = True
     panel._update_control_enablement()
