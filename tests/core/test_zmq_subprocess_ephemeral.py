@@ -89,6 +89,8 @@ def _run_cmd_forward(
     reply_payloads: list[str] | None = None,
     safe_cmds: list[dict] | None = None,
     timeout_s: float = 5.0,
+    reply_queue: stdlib_queue.Queue | None = None,
+    diagnostics: dict[str, object] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Drive ``zmq_bridge_main`` in this thread until all ``cmds`` are
     consumed and replies drained. Returns ``(replies, control_messages)``.
@@ -102,9 +104,10 @@ def _run_cmd_forward(
     data_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     safe_cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
-    reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
+    reply_q: stdlib_queue.Queue = reply_queue if reply_queue is not None else stdlib_queue.Queue(maxsize=100)
     safe_reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     shutdown = threading.Event()
+    bridge_owner_exceptions: list[str] = []
 
     # Seed cmd_q with the whole batch up-front, then run the loop in a
     # thread. A sentinel (shutdown.set()) after all replies arrive
@@ -150,17 +153,22 @@ def _run_cmd_forward(
         from cryodaq.core import zmq_subprocess
 
         def _run():
-            zmq_subprocess.zmq_bridge_main(
-                _TEST_PUB_ADDR,
-                _TEST_CMD_ADDR,
-                data_q,
-                cmd_q,
-                reply_q,
-                shutdown,
-                safe_cmd_queue=safe_cmd_q if safe_cmds is not None else None,
-                safe_cmd_addr=(zmq_subprocess.DEFAULT_SAFE_CMD_ADDR if safe_cmds is not None else _TEST_SAFE_CMD_ADDR),
-                safe_reply_queue=safe_reply_q if safe_cmds is not None else None,
-            )
+            try:
+                zmq_subprocess.zmq_bridge_main(
+                    _TEST_PUB_ADDR,
+                    _TEST_CMD_ADDR,
+                    data_q,
+                    cmd_q,
+                    reply_q,
+                    shutdown,
+                    safe_cmd_queue=safe_cmd_q if safe_cmds is not None else None,
+                    safe_cmd_addr=(
+                        zmq_subprocess.DEFAULT_SAFE_CMD_ADDR if safe_cmds is not None else _TEST_SAFE_CMD_ADDR
+                    ),
+                    safe_reply_queue=safe_reply_q if safe_cmds is not None else None,
+                )
+            except BaseException as exc:
+                bridge_owner_exceptions.append(f"{type(exc).__name__}: {exc}")
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
@@ -175,14 +183,45 @@ def _run_cmd_forward(
                 reply_q,
                 *((safe_reply_q,) if safe_cmds is not None else ()),
             ):
-                try:
-                    replies.append(output_queue.get_nowait())
-                except stdlib_queue.Empty:
-                    continue
-                progressed = True
+                while len(replies) < expected_replies:
+                    try:
+                        replies.append(output_queue.get_nowait())
+                    except stdlib_queue.Empty:
+                        break
+                    progressed = True
             if not progressed:
                 time.sleep(0.001)
 
+        pending_replies: list[dict] = []
+        for output_queue in (
+            reply_q,
+            *((safe_reply_q,) if safe_cmds is not None else ()),
+        ):
+            while True:
+                try:
+                    pending_replies.append(output_queue.get_nowait())
+                except stdlib_queue.Empty:
+                    break
+        collected_reply_ids = [reply.get("_rid") for reply in replies]
+        pending_reply_ids = [reply.get("_rid") for reply in pending_replies]
+        unaccounted_reply_ids = [cmd.get("_rid") for cmd in (*cmds, *(safe_cmds or []))]
+        for reply_id in (*collected_reply_ids, *pending_reply_ids):
+            if reply_id in unaccounted_reply_ids:
+                unaccounted_reply_ids.remove(reply_id)
+        req_sockets = [
+            socket for socket in sockets if getattr(socket, "created_socket_type", None) == _FAKE_REQ_SOCKET_TYPE
+        ]
+        if diagnostics is not None:
+            diagnostics.update(
+                collected_reply_ids=collected_reply_ids,
+                pending_reply_ids=pending_reply_ids,
+                unaccounted_reply_ids=unaccounted_reply_ids,
+                req_sockets_created=len(req_sockets),
+                req_sockets_sent=sum(socket.send_string.call_count for socket in req_sockets),
+                req_sockets_closed=sum(socket.close.call_count for socket in req_sockets),
+                cmd_q_qsize=cmd_q.qsize(),
+                bridge_owner_exceptions=bridge_owner_exceptions.copy(),
+            )
         shutdown.set()
         thread.join(timeout=timeout_s)
 
@@ -201,6 +240,21 @@ def _run_cmd_forward(
             control.append(msg)
 
     return replies, control
+
+
+def _format_reply_collector_diagnostics(diagnostics: dict[str, object]) -> str:
+    return (
+        "reply collector diagnostics: "
+        f"collected_reply_ids={diagnostics['collected_reply_ids']}; "
+        f"pending_reply_ids={diagnostics['pending_reply_ids']}; "
+        f"unaccounted_reply_ids={diagnostics['unaccounted_reply_ids']}; "
+        "req_sockets(created/sent/closed)="
+        f"{diagnostics['req_sockets_created']}/"
+        f"{diagnostics['req_sockets_sent']}/"
+        f"{diagnostics['req_sockets_closed']}; "
+        f"cmd_q_qsize={diagnostics['cmd_q_qsize']}; "
+        f"bridge_owner_exceptions={diagnostics['bridge_owner_exceptions']}"
+    )
 
 
 def _select_req_sockets(sockets: list[MagicMock]) -> list[MagicMock]:
@@ -275,13 +329,65 @@ def test_cmd_forward_creates_fresh_socket_per_command(_sockets):
     SUB socket for sub_drain. If this breaks, the ephemeral lifecycle
     has regressed back to the shared-socket design."""
     cmds = [{"cmd": "safety_status", "_rid": f"r{i}"} for i in range(5)]
-    replies, _control = _run_cmd_forward(cmds, sockets=_sockets)
+    diagnostics: dict[str, object] = {}
+    replies, _control = _run_cmd_forward(
+        cmds,
+        sockets=_sockets,
+        diagnostics=diagnostics,
+    )
 
-    assert len(replies) == 5
+    assert len(replies) == 5, _format_reply_collector_diagnostics(diagnostics)
     # 1 SUB socket (sub_drain_loop) + 5 REQ sockets (one per command).
     assert len(_sockets) == 6, (
         f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)} — ephemeral REQ lifecycle regressed"
     )
+
+
+def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
+    class _PublishOnlyFirstReplyQueue(stdlib_queue.Queue):
+        def __init__(self) -> None:
+            super().__init__(maxsize=100)
+            self.attempted_reply_ids: list[object] = []
+            self.published_reply_ids: list[object] = []
+
+        def put(
+            self,
+            item: dict[str, object],
+            block: bool = True,
+            timeout: float | None = None,
+        ) -> None:
+            reply_id = item.get("_rid")
+            self.attempted_reply_ids.append(reply_id)
+            if self.published_reply_ids:
+                return
+            self.published_reply_ids.append(reply_id)
+            super().put(item, block=block, timeout=timeout)
+
+    cmds = [{"cmd": "safety_status", "_rid": f"r{i}"} for i in range(5)]
+    reply_queue = _PublishOnlyFirstReplyQueue()
+    diagnostics: dict[str, object] = {}
+
+    replies, _control = _run_cmd_forward(
+        cmds,
+        sockets=_sockets,
+        timeout_s=1.0,
+        reply_queue=reply_queue,
+        diagnostics=diagnostics,
+    )
+
+    assert reply_queue.attempted_reply_ids == ["r0", "r1", "r2", "r3", "r4"]
+    assert reply_queue.published_reply_ids == ["r0"]
+    assert diagnostics["req_sockets_created"] == 5
+    assert diagnostics["req_sockets_sent"] == 5
+    assert diagnostics["req_sockets_closed"] == 5
+    with pytest.raises(AssertionError) as failure:
+        assert len(replies) == 5, _format_reply_collector_diagnostics(diagnostics)
+    assert "collected_reply_ids=['r0']" in str(failure.value)
+    assert "pending_reply_ids=[]" in str(failure.value)
+    assert "unaccounted_reply_ids=['r1', 'r2', 'r3', 'r4']" in str(failure.value)
+    assert "req_sockets(created/sent/closed)=5/5/5" in str(failure.value)
+    assert "cmd_q_qsize=0" in str(failure.value)
+    assert "bridge_owner_exceptions=[]" in str(failure.value)
 
 
 def test_cmd_forward_closes_socket_after_success(_sockets):

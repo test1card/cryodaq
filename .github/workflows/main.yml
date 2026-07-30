@@ -50,8 +50,10 @@ jobs:
       # only inside the run. Recording that SHA in the candidate manifest produced evidence the
       # protected judge could not bind: it resolves the manifest commit against a checkout of the PR
       # head, so `git rev-parse --verify <merge-sha>^{commit}` failed and the partition proof refused —
-      # correctly. This lane therefore executes, and names, the PR head. The merge tree is validated
-      # separately by the merge-validation job below, so nothing is dropped by binding here.
+      # correctly. This lane therefore executes, and names, the PR head. `candidate_identity` proves
+      # the synthetic merge has exactly the base and head parents and the same tree as the head,
+      # refusing the run otherwise. That preserves tree-content coverage; it does not execute suites
+      # against the merge commit.
       EVIDENCE_SHA: ${{ needs.candidate_identity.outputs.evidence_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -242,7 +244,7 @@ jobs:
             merge_tree="$(git rev-parse --verify "${merge_commit}^{tree}")"
             head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"
             if [[ "$merge_tree" != "$head_tree" ]]; then
-              echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree. Enable the full Windows/Ubuntu merge-validation matrix."
+              echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree. Update the PR branch onto master to restore tree equality, or implement a merge-validation lane."
               exit 1
             fi
             candidate="$head_commit"

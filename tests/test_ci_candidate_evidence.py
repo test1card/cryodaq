@@ -279,6 +279,41 @@ def test_pull_request_head_identity_is_used_when_event_sha_is_merge(
         ci_candidate_evidence._run(ambient_args)
 
 
+def test_attest_uses_bundle_identity_when_event_sha_is_merge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail locally and legibly on identity drift that the protected judge would reject later."""
+    bundle, _, _, candidate, _, _ = _bundle(tmp_path)
+    candidate_sha = candidate["commit"]
+    event_sha = ("0" if candidate_sha != "0" * 40 else "1") * 40
+    for key, value in _github(event_sha).items():
+        monkeypatch.setenv(key.upper(), value)
+
+    observed_candidate_shas: list[str] = []
+    production_github_environment = ci_candidate_evidence._github_environment
+
+    def observed_github_environment(*, candidate_sha: str) -> dict[str, str]:
+        observed_candidate_shas.append(candidate_sha)
+        return production_github_environment(candidate_sha=candidate_sha)
+
+    monkeypatch.setattr(ci_candidate_evidence, "_github_environment", observed_github_environment)
+    output = tmp_path / "manifest-bound-attestation.json"
+    args = SimpleNamespace(
+        artifact_digest="sha256:" + "8" * 64,
+        artifact_id="1234",
+        artifact_name="cryodaq-candidate-ubuntu-latest-core-1",
+        bundle=bundle,
+        output=output,
+    )
+
+    assert ci_candidate_evidence._attest(args) == 0
+    attestation = json.loads(output.read_bytes())
+    assert observed_candidate_shas == [candidate_sha]
+    assert attestation["github"]["github_sha"] == candidate_sha
+    assert attestation["github"]["github_sha"] != event_sha
+
+
 def _production_protected_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, ...]:
     repository = tmp_path / "candidate"
     producer_root = tmp_path / "producer"
@@ -2037,8 +2072,13 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         'base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"',
         'test "$first_parent" = "$base_commit"',
     ]
-    assert 'candidate="$head_commit"' in commands
-    assert 'printf \'evidence_sha=%s\\n\' "$candidate" >>"$GITHUB_OUTPUT"' in commands
+    candidate_assignments = [line for line in commands if line.startswith("candidate=")]
+    assert candidate_assignments == [
+        'candidate="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"',
+        'candidate="$head_commit"',
+    ]
+    output_command = 'printf \'evidence_sha=%s\\n\' "$candidate" >>"$GITHUB_OUTPUT"'
+    assert commands.index(candidate_assignments[-1]) < commands.index(output_command)
 
     assert test_job["env"]["EVIDENCE_SHA"] == evidence_output
     checkout = next(step for step in test_job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@"))

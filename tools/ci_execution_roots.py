@@ -19,6 +19,9 @@ class ExecutionSelection:
 # is therefore the only authority for all tests that require the exact Git
 # checkout.  The checkout runner and exported-suite exclusions both derive from
 # it; workflow YAML invokes the runner and never repeats any selection.
+# Any addition that reads the checkout's commit identity, parents, or ancestry
+# voids the pull_request tree-equality waiver in `.github/workflows/main.yml`
+# and requires a merge-validation lane.
 EXECUTION_ROOTS = (
     ExecutionSelection(
         execution_root="git-index",
