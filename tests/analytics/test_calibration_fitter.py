@@ -78,7 +78,7 @@ def test_extract_pairs_basic(data_dir) -> None:
         "Т1",
         "Т2",
         raw_channel="Т2_raw",
-    )
+    ).pairs
     assert len(pairs) == 200
 
     # Sort by SRDG so index is predictable (extractor may return any order)
@@ -125,7 +125,7 @@ def test_extract_filters_ovl(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 103.0, "ref", "tgt", raw_channel="tgt_raw")
+    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 103.0, "ref", "tgt", raw_channel="tgt_raw").pairs
     assert len(pairs) == 1
     assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.1)
 
@@ -149,7 +149,7 @@ def test_time_alignment_filter(tmp_path) -> None:
 
     pairs = CalibrationFitter.extract_pairs(
         tmp_path, 99.0, 120.0, "ref", "tgt", raw_channel="tgt_raw", max_time_delta_s=2.0
-    )
+    ).pairs
     assert len(pairs) == 1
     # Only the aligned pair (srdg=82.5, krdg=77.0) should survive
     assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.01), f"Wrong pair retained: {pairs[0]}; expected (82.5, 77.0)"
@@ -211,7 +211,7 @@ def test_downsample_preserves_curvature() -> None:
 
 
 def test_downsample_preserves_boundaries(data_dir) -> None:
-    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw")
+    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw").pairs
     downsampled = CalibrationFitter.adaptive_downsample(pairs, target_count=50)
 
     srdg_min = min(s for s, _ in pairs)
@@ -228,7 +228,7 @@ def test_downsample_preserves_boundaries(data_dir) -> None:
 
 
 def test_breakpoints_douglas_peucker(data_dir) -> None:
-    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw")
+    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw").pairs
     downsampled = CalibrationFitter.adaptive_downsample(pairs, target_count=100)
     breakpoints = CalibrationFitter.generate_breakpoints(downsampled, tolerance_mk=100.0)
 
@@ -263,7 +263,7 @@ def test_breakpoints_max_limit() -> None:
 
 
 def test_coverage_statistics(data_dir) -> None:
-    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw")
+    pairs = CalibrationFitter.extract_pairs(data_dir, 1000.0, 2000.0, "Т1", "Т2", raw_channel="Т2_raw").pairs
     coverage = CalibrationFitter.compute_coverage(pairs, n_bins=10)
 
     assert len(coverage) == 10
@@ -303,7 +303,7 @@ def test_coverage_empty_regions(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, 999.0, 1050.0, "ref", "tgt", raw_channel="tgt_raw")
+    pairs = CalibrationFitter.extract_pairs(tmp_path, 999.0, 1050.0, "ref", "tgt", raw_channel="tgt_raw").pairs
     coverage = CalibrationFitter.compute_coverage(pairs, n_bins=10)
 
     # compute_coverage bins over temperature (krdg = second element of pairs).
@@ -338,7 +338,7 @@ def test_coverage_empty_regions(tmp_path) -> None:
 # ------------------------------------------------------------------
 
 
-def test_fit_end_to_end(data_dir, tmp_path) -> None:
+def test_positive_control_complete_readable_range_fits_and_saves_curve(data_dir, tmp_path) -> None:
     cal_dir = tmp_path / "cal"
     cal_dir.mkdir()
     store = CalibrationStore(cal_dir)
@@ -363,6 +363,7 @@ def test_fit_end_to_end(data_dir, tmp_path) -> None:
     assert result.curve is not None
     assert result.metrics["rmse_k"] < 1.0  # relaxed for synthetic data
     assert result.sensor_id == "Т2_cal"
+    assert len(list((cal_dir / "curves").rglob("*.json"))) == 1
 
 
 # ------------------------------------------------------------------
@@ -465,7 +466,7 @@ def test_extract_pairs_reads_rotated_cold_day(tmp_path, monkeypatch: pytest.Monk
     asyncio.run(_seed_and_rotate())
     assert not (tmp_path / "data_2026-04-14.db").exists(), "rotation must delete the hot DB"
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, base_ts, base_ts + 100, "Т1", "Т2", raw_channel="Т2_raw")
+    pairs = CalibrationFitter.extract_pairs(tmp_path, base_ts, base_ts + 100, "Т1", "Т2", raw_channel="Т2_raw").pairs
     assert len(pairs) == 20, f"rotated cold-day calibration pairs lost: {len(pairs)}"
 
 
@@ -493,6 +494,116 @@ def test_extract_pairs_drops_error_status(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 301.0, "ref", "tgt", raw_channel="tgt_raw")
+    pairs = CalibrationFitter.extract_pairs(tmp_path, 99.0, 301.0, "ref", "tgt", raw_channel="tgt_raw").pairs
     assert len(pairs) == 1, "only the both-OK pair may survive"
     assert pairs[0] == pytest.approx((82.5, 77.0), abs=0.1)
+
+
+# ------------------------------------------------------------------
+# Fail-closed source-read contract
+# ------------------------------------------------------------------
+
+
+def _add_corrupt_day_file(data_dir: Path) -> Path:
+    """Create a day-file that SQLite can open but cannot read as a database."""
+    corrupt_path = data_dir / "data_2026-03-18.db"
+    corrupt_path.write_bytes(b"not a sqlite database")
+    return corrupt_path
+
+
+def test_extract_pairs_reports_corrupt_source_without_silently_truncating(data_dir) -> None:
+    corrupt_path = _add_corrupt_day_file(data_dir)
+
+    extraction = CalibrationFitter.extract_pairs(
+        data_dir,
+        1000.0,
+        2000.0,
+        "Т1",
+        "Т2",
+        raw_channel="Т2_raw",
+    )
+
+    assert len(extraction.pairs) == 200
+    assert extraction.skipped_sources == (corrupt_path,)
+
+
+def test_fit_refuses_unreadable_source_before_fitting_or_saving(data_dir, tmp_path) -> None:
+    corrupt_path = _add_corrupt_day_file(data_dir)
+    cal_dir = tmp_path / "cal"
+    store = CalibrationStore(cal_dir)
+
+    try:
+        CalibrationFitter().fit(
+            data_dir,
+            1000.0,
+            2000.0,
+            "Т1",
+            "Т2",
+            store,
+            raw_channel="Т2_raw",
+            min_points_per_zone=3,
+            target_rmse_k=0.5,
+        )
+    except RuntimeError as exc:
+        assert "Refusing calibration fit" in str(exc)
+        assert "data_2026-03-18.db" in str(exc)
+    else:
+        saved = [str(path.relative_to(cal_dir)) for path in cal_dir.rglob("*.json")]
+        pytest.fail(f"fit completed from truncated input and saved calibration files: {saved}")
+
+    assert corrupt_path.exists()
+    assert list(cal_dir.rglob("*.json")) == []
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["calibration_v2_extract", "calibration_v2_coverage", "calibration_v2_fit"],
+)
+def test_engine_returns_distinct_failure_for_unreadable_calibration_source(
+    action, data_dir, tmp_path, monkeypatch
+) -> None:
+    from cryodaq import engine
+
+    corrupt_path = _add_corrupt_day_file(data_dir)
+    monkeypatch.setattr(engine, "_DATA_DIR", data_dir)
+    store = CalibrationStore(tmp_path / "cal")
+
+    result = engine._run_calibration_v2_command(
+        action,
+        {
+            "start_ts": 1000.0,
+            "end_ts": 2000.0,
+            "reference_channel": "Т1",
+            "target_channel": "Т2",
+            "raw_channel": "Т2_raw",
+        },
+        store,
+    )
+
+    assert result == {
+        "ok": False,
+        "error_code": "calibration_source_unreadable",
+        "error": "Calibration source data could not be read; no result was produced.",
+        "unreadable_sources": [str(corrupt_path)],
+    }
+    assert list((tmp_path / "cal").rglob("*.json")) == []
+
+
+def test_positive_control_empty_readable_range_returns_ok_with_zero_pairs(data_dir, tmp_path, monkeypatch) -> None:
+    from cryodaq import engine
+
+    monkeypatch.setattr(engine, "_DATA_DIR", data_dir)
+
+    result = engine._run_calibration_v2_command(
+        "calibration_v2_extract",
+        {
+            "start_ts": 1.0,
+            "end_ts": 2.0,
+            "reference_channel": "Т1",
+            "target_channel": "Т2",
+            "raw_channel": "Т2_raw",
+        },
+        CalibrationStore(tmp_path / "cal"),
+    )
+
+    assert result == {"ok": True, "pair_count": 0, "pairs_sample": []}

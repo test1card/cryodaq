@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,23 @@ class CalibrationFitResult:
     breakpoints: list[tuple[float, float]]
 
 
+@dataclass(frozen=True)
+class CalibrationPairExtraction:
+    """Pairs read from the requested range plus every source that was skipped."""
+
+    pairs: list[tuple[float, float]]
+    skipped_sources: tuple[Path, ...]
+
+
+class CalibrationSourceReadError(RuntimeError):
+    """A fit was refused because its source extraction was incomplete."""
+
+    def __init__(self, skipped_sources: tuple[Path, ...]) -> None:
+        self.skipped_sources = skipped_sources
+        sources = ", ".join(str(path) for path in skipped_sources)
+        super().__init__(f"Refusing calibration fit because source data was unreadable: {sources}")
+
+
 class CalibrationFitter:
     """Post-run calibration pipeline: extract → downsample → breakpoints → fit."""
 
@@ -50,10 +68,12 @@ class CalibrationFitter:
         *,
         raw_channel: str | None = None,
         max_time_delta_s: float = 2.0,
-    ) -> list[tuple[float, float]]:
+    ) -> CalibrationPairExtraction:
         """Extract time-aligned (SRDG, KRDG) pairs from SQLite data files.
 
-        Returns list of ``(sensor_raw_value, reference_temperature_K)`` tuples.
+        Returns pairs and the paths of sources that could not be read.  The
+        result deliberately is not a sequence so callers must choose how to
+        handle an incomplete extraction before consuming ``pairs``.
         """
         if not isinstance(raw_channel, str) or not raw_channel.strip():
             raise ValueError("raw_channel must be explicitly configured")
@@ -64,30 +84,34 @@ class CalibrationFitter:
         # day-of-filename gated) so recording clock skew never drops a pair.
         krdg_data: list[tuple[float, float]] = []  # (timestamp, value)
         srdg_data: list[tuple[float, float]] = []
+        skipped_sources: list[Path] = []
 
         for db_path in sorted(data_dir.glob("data_????-??-??.db")):
             try:
-                conn = sqlite3.connect(str(db_path), timeout=5)
-                conn.execute("PRAGMA journal_mode=WAL")
-                cursor = conn.execute(
-                    "SELECT timestamp, value, status FROM readings "
-                    "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
-                    "ORDER BY timestamp",
-                    (reference_channel, start_ts, end_ts),
-                )
-                # NaN-доктрина: decode at ingest — a non-OK status / sentinel
-                # becomes NaN and the finite-filter below drops it.
-                krdg_data.extend((ts, decode(v, s)) for ts, v, s in cursor.fetchall())
+                with closing(sqlite3.connect(str(db_path), timeout=5)) as conn:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    cursor = conn.execute(
+                        "SELECT timestamp, value, status FROM readings "
+                        "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
+                        "ORDER BY timestamp",
+                        (reference_channel, start_ts, end_ts),
+                    )
+                    # NaN-доктрина: decode at ingest — a non-OK status / sentinel
+                    # becomes NaN and the finite-filter below drops it.
+                    file_krdg_data = [(ts, decode(v, s)) for ts, v, s in cursor.fetchall()]
 
-                cursor = conn.execute(
-                    "SELECT timestamp, value, status FROM readings "
-                    "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
-                    "ORDER BY timestamp",
-                    (raw_channel, start_ts, end_ts),
-                )
-                srdg_data.extend((ts, decode(v, s)) for ts, v, s in cursor.fetchall())
-                conn.close()
+                    cursor = conn.execute(
+                        "SELECT timestamp, value, status FROM readings "
+                        "WHERE channel = ? AND timestamp >= ? AND timestamp <= ? "
+                        "ORDER BY timestamp",
+                        (raw_channel, start_ts, end_ts),
+                    )
+                    file_srdg_data = [(ts, decode(v, s)) for ts, v, s in cursor.fetchall()]
+                # Publish a source's rows only after both channel reads succeed.
+                krdg_data.extend(file_krdg_data)
+                srdg_data.extend(file_srdg_data)
             except Exception:
+                skipped_sources.append(db_path)
                 logger.warning("Failed to read %s", db_path, exc_info=True)
 
         # Cold path: a day older than the F17 rotation threshold has had its
@@ -111,8 +135,9 @@ class CalibrationFitter:
                 elif channel == raw_channel:
                     srdg_data.append((float(ts), value))
 
+        extraction_failures = tuple(skipped_sources)
         if not krdg_data or not srdg_data:
-            return []
+            return CalibrationPairExtraction(pairs=[], skipped_sources=extraction_failures)
 
         # Sort by timestamp: hot files are already ordered, but cold rows may
         # predate them. searchsorted below requires krdg_ts strictly ascending.
@@ -149,7 +174,7 @@ class CalibrationFitter:
 
             pairs.append((srdg_val, krdg_val))
 
-        return pairs
+        return CalibrationPairExtraction(pairs=pairs, skipped_sources=extraction_failures)
 
     # ------------------------------------------------------------------
     # Downsample
@@ -363,7 +388,7 @@ class CalibrationFitter:
         sensor_id = f"{target_channel}_cal"
 
         # 1. Extract
-        raw_pairs = self.extract_pairs(
+        extraction = self.extract_pairs(
             data_dir,
             start_ts,
             end_ts,
@@ -371,6 +396,9 @@ class CalibrationFitter:
             target_channel,
             raw_channel=raw_channel,
         )
+        if extraction.skipped_sources:
+            raise CalibrationSourceReadError(extraction.skipped_sources)
+        raw_pairs = extraction.pairs
         if len(raw_pairs) < max(4, min_points_per_zone):
             raise ValueError(
                 f"Not enough calibration pairs: {len(raw_pairs)} (need at least {max(4, min_points_per_zone)})"

@@ -1973,37 +1973,62 @@ def _run_calibration_v2_command(
     calibration_store: Any,
 ) -> dict[str, Any]:
     """Sync calibration fitter commands — runs in thread to avoid blocking event loop."""
-    from cryodaq.analytics.calibration_fitter import CalibrationFitter
+    from cryodaq.analytics.calibration_fitter import (
+        CalibrationFitter,
+        CalibrationSourceReadError,
+    )
 
     fitter = CalibrationFitter()
+    raw_channel = cmd.get("raw_channel")
+
+    def _source_read_failure(skipped_sources: tuple[Path, ...]) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error_code": "calibration_source_unreadable",
+            "error": "Calibration source data could not be read; no result was produced.",
+            "unreadable_sources": [str(path) for path in skipped_sources],
+        }
+
     if action == "calibration_v2_extract":
-        pairs = fitter.extract_pairs(
+        extraction = fitter.extract_pairs(
             _DATA_DIR,
             float(cmd.get("start_ts", 0)),
             float(cmd.get("end_ts", 0)),
             str(cmd["reference_channel"]),
             str(cmd["target_channel"]),
+            raw_channel=raw_channel,
         )
+        if extraction.skipped_sources:
+            return _source_read_failure(extraction.skipped_sources)
+        pairs = extraction.pairs
         return {"ok": True, "pair_count": len(pairs), "pairs_sample": pairs[:20]}
     if action == "calibration_v2_coverage":
-        pairs = fitter.extract_pairs(
+        extraction = fitter.extract_pairs(
             _DATA_DIR,
             float(cmd.get("start_ts", 0)),
             float(cmd.get("end_ts", 0)),
             str(cmd["reference_channel"]),
             str(cmd["target_channel"]),
+            raw_channel=raw_channel,
         )
+        if extraction.skipped_sources:
+            return _source_read_failure(extraction.skipped_sources)
+        pairs = extraction.pairs
         coverage = fitter.compute_coverage(pairs)
         return {"ok": True, "coverage": coverage, "total_points": len(pairs)}
     if action == "calibration_v2_fit":
-        result = fitter.fit(
-            _DATA_DIR,
-            float(cmd.get("start_ts", 0)),
-            float(cmd.get("end_ts", 0)),
-            str(cmd["reference_channel"]),
-            str(cmd["target_channel"]),
-            calibration_store,
-        )
+        try:
+            result = fitter.fit(
+                _DATA_DIR,
+                float(cmd.get("start_ts", 0)),
+                float(cmd.get("end_ts", 0)),
+                str(cmd["reference_channel"]),
+                str(cmd["target_channel"]),
+                calibration_store,
+                raw_channel=raw_channel,
+            )
+        except CalibrationSourceReadError as exc:
+            return _source_read_failure(exc.skipped_sources)
         return {
             "ok": True,
             "sensor_id": result.sensor_id,
