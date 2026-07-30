@@ -19,9 +19,17 @@ class ExecutionSelection:
 # is therefore the only authority for all tests that require the exact Git
 # checkout.  The checkout runner and exported-suite exclusions both derive from
 # it; workflow YAML invokes the runner and never repeats any selection.
-# Any addition that reads the checkout's commit identity, parents, or ancestry
-# voids the pull_request tree-equality waiver in `.github/workflows/main.yml`
-# and requires a merge-validation lane.
+# Any addition that DISTINGUISHES an equal-tree merge commit from its head --
+# by branching on commit identity, parent count, or ancestry -- voids the
+# pull_request tree-equality waiver in `.github/workflows/main.yml` and requires
+# a merge-validation lane.
+#
+# Merely *reading* HEAD does not.  `_head_snapshot` in
+# tests/scripts/test_soak_mock_stack_runner.py resolves HEAD only to archive
+# that tree, and archives identical bytes at either commit.  This distinction is
+# the whole basis of the waiver and was mis-stated here on the first attempt:
+# "reads git history" and "can tell the two commits apart" are different
+# predicates, and only the second one voids anything.
 EXECUTION_ROOTS = (
     ExecutionSelection(
         execution_root="git-index",

@@ -107,7 +107,7 @@ def _run_cmd_forward(
     reply_q: stdlib_queue.Queue = reply_queue if reply_queue is not None else stdlib_queue.Queue(maxsize=100)
     safe_reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     shutdown = threading.Event()
-    bridge_owner_exceptions: list[str] = []
+    bridge_owner_exceptions: list[BaseException] = []
 
     # Seed cmd_q with the whole batch up-front, then run the loop in a
     # thread. A sentinel (shutdown.set()) after all replies arrive
@@ -168,7 +168,7 @@ def _run_cmd_forward(
                     safe_reply_queue=safe_reply_q if safe_cmds is not None else None,
                 )
             except BaseException as exc:
-                bridge_owner_exceptions.append(f"{type(exc).__name__}: {exc}")
+                bridge_owner_exceptions.append(exc)
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
@@ -211,6 +211,8 @@ def _run_cmd_forward(
         req_sockets = [
             socket for socket in sockets if getattr(socket, "created_socket_type", None) == _FAKE_REQ_SOCKET_TYPE
         ]
+        shutdown.set()
+        thread.join(timeout=timeout_s)
         if diagnostics is not None:
             diagnostics.update(
                 collected_reply_ids=collected_reply_ids,
@@ -220,10 +222,10 @@ def _run_cmd_forward(
                 req_sockets_sent=sum(socket.send_string.call_count for socket in req_sockets),
                 req_sockets_closed=sum(socket.close.call_count for socket in req_sockets),
                 cmd_q_qsize=cmd_q.qsize(),
-                bridge_owner_exceptions=bridge_owner_exceptions.copy(),
+                bridge_owner_exceptions=[f"{type(exc).__name__}: {exc}" for exc in bridge_owner_exceptions],
             )
-        shutdown.set()
-        thread.join(timeout=timeout_s)
+        if bridge_owner_exceptions:
+            raise bridge_owner_exceptions[0]
 
     # Drain any control messages that landed on data_queue.
     control: list[dict] = []
@@ -388,6 +390,39 @@ def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
     assert "req_sockets(created/sent/closed)=5/5/5" in str(failure.value)
     assert "cmd_q_qsize=0" in str(failure.value)
     assert "bridge_owner_exceptions=[]" in str(failure.value)
+
+
+def test_run_cmd_forward_propagates_owner_failure_after_expected_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.core import zmq_subprocess
+
+    def _publish_then_raise(
+        _pub_addr: str,
+        _cmd_addr: str,
+        _data_queue: stdlib_queue.Queue,
+        cmd_queue: stdlib_queue.Queue,
+        reply_queue: stdlib_queue.Queue,
+        _shutdown: threading.Event,
+        **_kwargs: object,
+    ) -> None:
+        command = cmd_queue.get(timeout=1.0)
+        reply_queue.put({"ok": True, "_rid": command["_rid"]})
+        raise RuntimeError("bridge exploded after expected reply")
+
+    diagnostics: dict[str, object] = {}
+    monkeypatch.setattr(zmq_subprocess, "zmq_bridge_main", _publish_then_raise)
+
+    with pytest.raises(RuntimeError, match="bridge exploded after expected reply"):
+        _run_cmd_forward(
+            [{"cmd": "safety_status", "_rid": "expected-r0"}],
+            sockets=[],
+            diagnostics=diagnostics,
+            timeout_s=0.25,
+        )
+
+    assert diagnostics["collected_reply_ids"] == ["expected-r0"]
+    assert diagnostics["bridge_owner_exceptions"] == ["RuntimeError: bridge exploded after expected reply"]
 
 
 def test_cmd_forward_closes_socket_after_success(_sockets):

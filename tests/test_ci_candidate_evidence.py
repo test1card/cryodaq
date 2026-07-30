@@ -117,6 +117,66 @@ def _candidate_repository(tmp_path: Path) -> Path:
     return repository
 
 
+def _candidate_identity_repository(tmp_path: Path) -> tuple[Path, str, str, str]:
+    repository = _candidate_repository(tmp_path)
+    base_commit = _git(repository, "rev-parse", "HEAD")
+    (repository / "candidate.py").write_text("VALUE = 2\n", encoding="utf-8", newline="\n")
+    _git(repository, "add", "candidate.py")
+    _git(repository, "commit", "-m", "pull request head")
+    head_commit = _git(repository, "rev-parse", "HEAD")
+    merge_commit = _git(
+        repository,
+        "commit-tree",
+        f"{head_commit}^{{tree}}",
+        "-p",
+        base_commit,
+        "-p",
+        head_commit,
+        "-m",
+        "synthetic merge",
+    )
+    return repository, base_commit, head_commit, merge_commit
+
+
+def _assert_candidate_identity_output(
+    workflow: dict,
+    repository: Path,
+    output: Path,
+    *,
+    event_name: str,
+    event_sha: str,
+    expected_sha: str,
+    base_sha: str = "",
+    head_sha: str = "",
+) -> None:
+    bind = next(step for step in workflow["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind")
+    output.unlink(missing_ok=True)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "EVENT_NAME": event_name,
+            "EVENT_SHA": event_sha,
+            "PR_BASE_SHA": base_sha,
+            "PR_HEAD_SHA": head_sha,
+            "GITHUB_OUTPUT": output.resolve().as_posix(),
+        }
+    )
+    completed = subprocess.run(
+        ["bash"],
+        cwd=repository,
+        env=environment,
+        input=bind["run"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    emitted = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    if emitted["evidence_sha"] != expected_sha:
+        raise AssertionError(f"candidate_identity emitted {emitted['evidence_sha']}; expected {expected_sha}")
+
+
 def _github(commit: str) -> dict[str, str]:
     return {
         "github_job": "test",
@@ -2045,7 +2105,9 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert "--timeout-method=thread" in strict
 
 
-def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull_request_heads() -> None:
+def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull_request_heads(
+    tmp_path: Path,
+) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     test_job = payload["jobs"]["test"]
     identity_job = payload["jobs"]["candidate_identity"]
@@ -2072,13 +2134,25 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         'base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"',
         'test "$first_parent" = "$base_commit"',
     ]
-    candidate_assignments = [line for line in commands if line.startswith("candidate=")]
-    assert candidate_assignments == [
-        'candidate="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"',
-        'candidate="$head_commit"',
-    ]
-    output_command = 'printf \'evidence_sha=%s\\n\' "$candidate" >>"$GITHUB_OUTPUT"'
-    assert commands.index(candidate_assignments[-1]) < commands.index(output_command)
+    repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
+    _assert_candidate_identity_output(
+        payload,
+        repository,
+        tmp_path / "push-output",
+        event_name="push",
+        event_sha=head_commit,
+        expected_sha=head_commit,
+    )
+    _assert_candidate_identity_output(
+        payload,
+        repository,
+        tmp_path / "pull-request-output",
+        event_name="pull_request",
+        event_sha=merge_commit,
+        base_sha=base_commit,
+        head_sha=head_commit,
+        expected_sha=head_commit,
+    )
 
     assert test_job["env"]["EVIDENCE_SHA"] == evidence_output
     checkout = next(step for step in test_job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@"))
@@ -2087,6 +2161,44 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
     for step_id in ("active-remaining", "candidate"):
         assert '--revision "${EVIDENCE_SHA:?}"' in indexed[step_id]["run"]
         assert "${GITHUB_SHA:?}" not in indexed[step_id]["run"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        'declare candidate="$merge_commit"',
+        'export candidate="$merge_commit"',
+        'readonly candidate="$merge_commit"',
+        'head_commit_x=1; candidate="$merge_commit"',
+        "printf -v candidate '%s' \"$merge_commit\"",
+    ),
+    ids=("declare", "export", "readonly", "same-line", "printf-indirect"),
+)
+def test_ci_workflow_candidate_identity_tripwire_rejects_candidate_rebinding_mutations(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    payload = copy.deepcopy(yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")))
+    bind = next(step for step in payload["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind")
+    script_lines = bind["run"].splitlines()
+    output_index = next(index for index, line in enumerate(script_lines) if "GITHUB_OUTPUT" in line)
+    branch_end = max(index for index, line in enumerate(script_lines[:output_index]) if line.strip() == "fi")
+    script_lines.insert(branch_end, f"  {mutation}")
+    bind["run"] = "\n".join(script_lines) + "\n"
+    repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
+    with pytest.raises(AssertionError) as rejected:
+        _assert_candidate_identity_output(
+            payload,
+            repository,
+            tmp_path / "mutant-output",
+            event_name="pull_request",
+            event_sha=merge_commit,
+            base_sha=base_commit,
+            head_sha=head_commit,
+            expected_sha=head_commit,
+        )
+    assert str(rejected.value) == f"candidate_identity emitted {merge_commit}; expected {head_commit}"
+    print(f"{mutation}: RED — {rejected.value}")
 
 
 def test_montana_candidate_gate_workflow_command_rejects_violation_and_accepts_control(tmp_path: Path) -> None:
