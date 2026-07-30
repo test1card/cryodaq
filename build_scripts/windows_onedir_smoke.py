@@ -535,9 +535,27 @@ def _run_job_timeout_cell(executable: Path, root: Path, evidence_dir: Path) -> d
     )
     generation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     command = frozen_report_command(executable, "exp-timeout", generation)
-    # Leave only a short child deadline so ReportGenerator must terminate the
-    # fake soffice tree and degrade to DOCX-only.
-    command[-1] = f"--deadline-epoch={time.time() + 16:.6f}"
+    # The child deadline must be long enough that the fake soffice path is
+    # actually reached, and short enough that ReportGenerator still has to
+    # terminate the tree and degrade to DOCX-only rather than converting.
+    #
+    # A previous fixed 16-second budget could not guarantee the first half. The
+    # renderer subtracts _SOFFICE_TERMINATION_RESERVE_S (5s) and
+    # _REPORT_COMMIT_TAIL_RESERVE_S (8s) from whatever remains before it will
+    # start a conversion at all, so 16 seconds left at most three for a cold
+    # frozen start plus report preparation — and a hosted Windows runner spends
+    # most of that unpacking a bundle with dozens of native extension modules.
+    # When the conversion window collapses, the fake soffice never records its
+    # nested PID and the cell fails without having exercised the path it exists
+    # to prove.
+    #
+    # Derive the allowance from production's own manual budget instead of a
+    # magic number, so this fixture tracks the product rather than drifting from
+    # it.
+    from cryodaq.report_process import DEFAULT_MANUAL_TIMEOUT_S
+
+    child_deadline_s = float(DEFAULT_MANUAL_TIMEOUT_S)
+    command[-1] = f"--deadline-epoch={time.time() + child_deadline_s:.6f}"
     env = os.environ.copy()
     env.update(
         {
@@ -557,7 +575,10 @@ def _run_job_timeout_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         from cryodaq.report_process import _create_windows_job
 
         job = _create_windows_job(process)
-        stdout, stderr = process.communicate(timeout=35)
+        # Must outlast the child's own deadline, or this timeout kills the EXE
+        # before its degradation path runs and we would be observing our own
+        # impatience instead of the product's behaviour.
+        stdout, stderr = process.communicate(timeout=child_deadline_s + 30.0)
     except BaseException:
         if job is not None:
             job.close()
