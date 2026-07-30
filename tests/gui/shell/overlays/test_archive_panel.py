@@ -1099,9 +1099,22 @@ def _patch_xlsx(monkeypatch, tmp_path):
     monkeypatch.setattr(paths_module, "get_data_dir", lambda: tmp_path)
 
 
+def _connect_with_loaded_archive(panel: ArchivePanel, monkeypatch: pytest.MonkeyPatch) -> None:
+    import cryodaq.gui.shell.overlays.archive_panel as module
+
+    def unexpected_refresh(*_args, **_kwargs) -> None:
+        pytest.fail("loaded export setup unexpectedly started an archive refresh")
+
+    monkeypatch.setattr(module, "ZmqCommandWorker", unexpected_refresh)
+    panel._on_refresh_result({"ok": True, "entries": [_entry(experiment_id="loaded")]})
+    panel.set_connected(True)
+    assert panel._connected is True
+    assert panel._refresh_in_flight is False
+
+
 def test_csv_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     output = tmp_path / "out.csv"
 
     from PySide6.QtWidgets import QFileDialog
@@ -1127,7 +1140,7 @@ def test_csv_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
 
 def test_csv_export_failure(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     output = tmp_path / "out.csv"
 
     from PySide6.QtWidgets import QFileDialog
@@ -1154,7 +1167,7 @@ def test_csv_export_failure(app, monkeypatch, tmp_path, reset_stub_state):
 
 def test_hdf5_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     # One fake data_*.db so the hdf5 slot iterates once.
     db_file = tmp_path / "data_2026-04-19.db"
     db_file.write_bytes(b"")
@@ -1184,7 +1197,7 @@ def test_hdf5_export_archive_location_failure_is_reported(app, monkeypatch, tmp_
     import cryodaq.storage.hdf5_export as hdf5_module
 
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     requested: list[Path] = []
@@ -1216,7 +1229,7 @@ def test_hdf5_export_archive_location_failure_is_reported(app, monkeypatch, tmp_
 
 def test_xlsx_export_happy_path(app, monkeypatch, tmp_path, reset_stub_state):
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     output = tmp_path / "out.xlsx"
 
     from PySide6.QtWidgets import QFileDialog
@@ -1247,7 +1260,7 @@ def test_export_thread_retained_during_run_then_pruned(app, monkeypatch, tmp_pat
     import threading
 
     panel = ArchivePanel()
-    panel.set_connected(True)
+    _connect_with_loaded_archive(panel, monkeypatch)
     output = tmp_path / "out.csv"
 
     from PySide6.QtWidgets import QFileDialog
