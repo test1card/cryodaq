@@ -1099,13 +1099,43 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
                 assignment_name is not None and assignment_name in registered_names | directly_gathered_names
             ), f"{name} creates an owner that its final settlement cannot gather"
 
+        # Publication *discovery* must not be load-sensitive, in either spelling. This guard originally
+        # inspected only `asyncio.wait`, so a discovery wait written as `asyncio.wait_for(queue.get())`
+        # passed straight through it — which is exactly how a two-second discovery budget reached the
+        # protected runner and went red there instead of here.
+        def is_queue_discovery(call: ast.Call) -> bool:
+            if signature(call) != ("asyncio", "wait_for") or not call.args:
+                return False
+            inner = call.args[0]
+            return isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute) and inner.func.attr == "get"
+
         discovery_waits = [
-            node for node in ast.walk(function) if isinstance(node, ast.Call) and signature(node) == ("asyncio", "wait")
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and (signature(node) == ("asyncio", "wait") or is_queue_discovery(node))
         ]
         for wait in discovery_waits:
             timeout = next((keyword.value for keyword in wait.keywords if keyword.arg == "timeout"), None)
             assert isinstance(timeout, ast.Constant) and type(timeout.value) in {int, float}
             assert timeout.value >= 5.0, f"{name} uses a load-sensitive publication discovery timeout"
+
+        # A discovery timeout caught and turned into a silent `return` converts a slow runner into a
+        # hang: the envelope arrives after the test stopped listening, nobody claims it, and the real
+        # cause resurfaces much later as an unrelated owner cancellation with no trace of the abandoned
+        # claim. These regressions must fail where the evidence went missing, not downstream of it.
+        for handler in (node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler)):
+            caught = handler.type
+            if isinstance(caught, ast.Name):
+                names_caught = {caught.id}
+            elif isinstance(caught, ast.Tuple):
+                names_caught = {elt.id for elt in caught.elts if isinstance(elt, ast.Name)}
+            else:
+                names_caught = set()
+            if "TimeoutError" not in names_caught:
+                continue
+            assert not any(isinstance(stmt, (ast.Return, ast.Pass)) for stmt in handler.body), (
+                f"{name} swallows a discovery TimeoutError instead of failing loudly"
+            )
 
 
 def test_all_repository_python_sources_compile_before_pytest_evidence() -> None:

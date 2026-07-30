@@ -713,7 +713,6 @@ async def test_equal_semantics_distinct_request_race_publishes_one_and_terminall
     writer = SQLiteWriter(tmp_path)
     owners: list[asyncio.Task[object]] = []
     publications: list[RequiredPublication] = []
-    drain_owner: asyncio.Task[None] | None = None
 
     try:
         await writer.start(asyncio.Queue())
@@ -777,24 +776,28 @@ async def test_equal_semantics_distinct_request_race_publishes_one_and_terminall
             prepared_request_ids.append(retained.request_id)
         commands = [_mutation(command) for command in exact_commands]
 
-        async def drain_required_publications() -> None:
-            while len(publications) < 2:
-                try:
-                    publication = await asyncio.wait_for(required_queue.get(), timeout=2.0)
-                except TimeoutError:
-                    return
-                assert type(publication) is RequiredPublication
-                publications.append(publication)
-                publication.claim()
-                publication.acknowledge()
-                required_queue.task_done()
-
         owners.extend(asyncio.create_task(_handle_gui_command(command, context=context)) for command in commands)
         assert set(prepared_request_ids) == {command["request_id"] for command in commands}
         assert alarms.get_active()["a"].acknowledged is False
-        drain_owner = asyncio.create_task(drain_required_publications())
+
+        # Exactly one publication is expected, so consume exactly one — and give publication discovery
+        # its own fail-loud clock, separate from terminal settlement.
+        #
+        # The previous helper drained in a loop bounded by two publications while this test asserts one,
+        # and swallowed its discovery timeout with a bare `return`. That made a slow commit unobservable:
+        # the drain abandoned discovery, nobody ever claimed the envelope that arrived moments later, and
+        # the owners waited until the outer gather cancelled them — surfacing as a TimeoutError with no
+        # indication that the cause was an abandoned claim. A test that gives up on the evidence it exists
+        # to collect, and reports the resulting silence as an ordinary timeout, is the same defect this
+        # branch removes from the product.
+        publication = await asyncio.wait_for(required_queue.get(), timeout=5.0)
+        assert type(publication) is RequiredPublication
+        publications.append(publication)
+        publication.claim()
+        publication.acknowledge()
+        required_queue.task_done()
+
         results = await asyncio.wait_for(asyncio.gather(*owners), timeout=5.0)
-        await asyncio.wait_for(drain_owner, timeout=3.0)
 
         assert all("publication_state" in result for result in results), (
             f"ACK race returned an unclassified result: {results!r}"
@@ -804,6 +807,7 @@ async def test_equal_semantics_distinct_request_race_publishes_one_and_terminall
         published = by_state["published"]
         aborted = by_state["aborted"]
         assert len(publications) == 1
+        assert required_queue.empty()
         assert published["ok"] is True and published["event_emitted"] is True
         assert aborted["ok"] is False
         assert aborted["committed"] is False
@@ -829,14 +833,10 @@ async def test_equal_semantics_distinct_request_race_publishes_one_and_terminall
         assert sorted(retained_states.values()) == ["aborted", "published"]
         assert await writer.committed_alarm_ack_outbox() == ()
     finally:
-        if drain_owner is not None and not drain_owner.done():
-            drain_owner.cancel()
         for owner in owners:
             if not owner.done():
                 owner.cancel()
         await asyncio.gather(*owners, return_exceptions=True)
-        if drain_owner is not None:
-            await asyncio.gather(drain_owner, return_exceptions=True)
         await writer.stop()
 
 
