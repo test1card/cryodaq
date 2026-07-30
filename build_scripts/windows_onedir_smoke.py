@@ -359,6 +359,19 @@ def _seed_experiment(data_dir: Path, experiment_id: str) -> None:
             "report_enabled": True,
             "report_sections": [],
         },
+        # A real finalized experiment always carries measurement authority: the producer
+        # writes these four keys at src/cryodaq/core/experiment.py:2469-2472. Seeding a
+        # finalized experiment without them describes a state the product never emits,
+        # and reporting now correctly refuses it, because absence of evidence must not
+        # be usable as proof that zero rows were measured. Declaring an honest, complete,
+        # untruncated, issue-free zero-row result is what makes this an ordinary empty
+        # report rather than unavailable evidence.
+        "summary_metadata": {
+            "measured_value_rows": 0,
+            "measured_values_complete": True,
+            "measured_values_truncated": False,
+            "measured_values_issues": [],
+        },
         "artifact_index": [],
         "result_tables": [],
         "run_records": [],
