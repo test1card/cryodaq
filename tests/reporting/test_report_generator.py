@@ -137,6 +137,40 @@ def _doc_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+def _remove_measured_values_archive(experiment_root: Path, metadata: dict[str, object]) -> None:
+    metadata["result_tables"] = [
+        item
+        for item in metadata.get("result_tables", [])
+        if isinstance(item, dict) and item.get("table_id") != "measured_values"
+    ]
+    metadata["artifact_index"] = [
+        item
+        for item in metadata.get("artifact_index", [])
+        if isinstance(item, dict) and Path(str(item.get("path", ""))).name != "measured_values.csv"
+    ]
+    (experiment_root / "archive" / "tables" / "measured_values.csv").unlink(missing_ok=True)
+
+
+def _corrupt_sqlite_freelist_trunk(db_path: Path) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        conn.execute("CREATE TABLE freelist_seed (payload BLOB NOT NULL)")
+        conn.executemany(
+            "INSERT INTO freelist_seed(payload) VALUES (?)",
+            [(b"x" * 3000,) for _ in range(16)],
+        )
+        conn.commit()
+        conn.execute("DROP TABLE freelist_seed")
+        conn.commit()
+
+    raw = bytearray(db_path.read_bytes())
+    first_trunk_page = int.from_bytes(raw[32:36], "big")
+    assert first_trunk_page > 0
+    trunk_offset = (first_trunk_page - 1) * page_size
+    raw[trunk_offset : trunk_offset + 4] = first_trunk_page.to_bytes(4, "big")
+    db_path.write_bytes(raw)
+
+
 def test_direct_generator_rejects_experiment_traversal(tmp_path: Path) -> None:
     with pytest.raises(ReportContractError):
         ReportGenerator(tmp_path).generate("../outside")
@@ -512,6 +546,44 @@ async def test_report_generation_can_use_archived_measured_values_without_live_d
     assert "T_STAGE" in csv_text, "T_STAGE not found in archive CSV"
 
 
+@pytest.mark.parametrize(
+    ("measured_values_complete", "measured_values_issues"),
+    [
+        pytest.param(False, [], id="explicit-incomplete"),
+        pytest.param(True, ["sqlite_read:2026-03-16:sqlite"], id="explicit-issue"),
+    ],
+)
+async def test_report_header_only_archive_cannot_outvote_measurement_failure_metadata(
+    manager: ExperimentManager,
+    tmp_path: Path,
+    measured_values_complete: bool,
+    measured_values_issues: list[str],
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Incomplete empty archive",
+        title="Incomplete empty archive",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    archive_csv = experiment_root / "archive" / "tables" / "measured_values.csv"
+    assert len(archive_csv.read_text(encoding="utf-8").splitlines()) == 1
+
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    summary = metadata["summary_metadata"]
+    summary["measured_values_complete"] = measured_values_complete
+    summary["measured_values_issues"] = measured_values_issues
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    (tmp_path / "data_2026-03-16.db").unlink()
+
+    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
 async def test_report_with_no_measured_values_table_keeps_ordinary_empty_state(
     manager: ExperimentManager,
     tmp_path: Path,
@@ -617,6 +689,127 @@ async def test_report_empty_measurements_require_exact_finalized_zero_row_author
             conn.execute("CREATE TABLE unrelated (value REAL)")
             conn.commit()
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
+async def test_report_empty_measurements_require_finalized_status_when_sqlite_matches(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Unfinalized empty",
+        title="Unfinalized empty",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    _remove_measured_values_archive(experiment_root, metadata)
+    metadata["experiment"]["status"] = "RUNNING"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    db_path = tmp_path / "data_2026-03-16.db"
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            "UPDATE experiments SET status = ? WHERE experiment_id = ?",
+            ("RUNNING", exp_id),
+        )
+        conn.commit()
+
+    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
+async def test_report_empty_measurements_reject_corrupt_sqlite_freelist_with_readable_binding(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Corrupt empty",
+        title="Corrupt empty",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    _remove_measured_values_archive(experiment_root, metadata)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    db_path = tmp_path / "data_2026-03-16.db"
+    _corrupt_sqlite_freelist_trunk(db_path)
+    with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute(
+            "SELECT experiment_id FROM experiments WHERE experiment_id = ?",
+            (exp_id,),
+        ).fetchone() == (exp_id,)
+        assert conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]
+
+    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
+async def test_report_empty_measurements_reject_unrelated_sqlite_table(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Unrelated schema",
+        title="Unrelated schema",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    _remove_measured_values_archive(experiment_root, metadata)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with closing(sqlite3.connect(tmp_path / "data_2026-03-16.db")) as conn:
+        conn.execute("CREATE TABLE unrelated (value REAL)")
+        conn.commit()
+
+    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
+        ReportGenerator(tmp_path).generate(exp_id)
+
+
+async def test_report_empty_measurements_reject_sqlite_experiment_binding_mismatch(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    exp_id = manager.start_experiment(
+        name="Mismatched binding",
+        title="Mismatched binding",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata_path = experiment_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    _remove_measured_values_archive(experiment_root, metadata)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with closing(sqlite3.connect(tmp_path / "data_2026-03-16.db")) as conn:
+        conn.execute(
+            "UPDATE experiments SET status = ? WHERE experiment_id = ?",
+            ("ABORTED", exp_id),
+        )
+        conn.commit()
 
     with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
         ReportGenerator(tmp_path).generate(exp_id)

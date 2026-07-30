@@ -270,6 +270,18 @@ class ReportDataExtractor:
         end_time: datetime,
     ) -> _ReadingsResolution:
         """Resolve measurements without conflating an empty result with damage."""
+        summary = metadata.get("summary_metadata")
+        if isinstance(summary, dict):
+            if summary.get("measured_values_complete") is False:
+                return _ReadingsResolution(
+                    _ReadingsState.UNAVAILABLE_INCONSISTENT,
+                    detail="finalized metadata declares measured values incomplete",
+                )
+            if summary.get("measured_values_issues"):
+                return _ReadingsResolution(
+                    _ReadingsState.UNAVAILABLE_INCONSISTENT,
+                    detail="finalized metadata records measured value issues",
+                )
         counts = self._declared_measurement_counts(metadata)
         archive_path = self._resolve_archived_table(
             metadata,
