@@ -1084,3 +1084,72 @@ def test_runner_activation_rejects_windows_before_evidence_or_allocation(monkeyp
     assert not imports & {"argparse", "urllib", "requests", "httpx", "aiohttp"}
     assert runner.__all__ == ()
     assert not hasattr(runner, "main")
+
+
+@_POSIX_EVIDENCE
+def test_tree_sha256_ignores_access_time_only_changes(tmp_path: Path) -> None:
+    """Reading a sealed snapshot must not make the guard reject it.
+
+    The symlink stability check previously compared whole ``os.stat_result``
+    values, which include access time. On ext4 with ``relatime`` an
+    ``os.readlink()`` updates a symlink's atime once that atime is older than its
+    mtime, so hashing a tree could fail purely because hashing had looked at it —
+    a property measured through a comparison the act of measuring perturbs.
+    Access time is not part of the digest, so it must affect neither acceptance
+    nor the resulting hash.
+    """
+    target = tmp_path / "target"
+    target.write_text("payload", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    before = runner._tree_sha256(tmp_path)
+
+    # Force relatime's actual update condition: atime strictly older than mtime.
+    stamp = link.lstat()
+    runner.os.utime(
+        link,
+        ns=(stamp.st_mtime_ns - 10_000_000_000, stamp.st_mtime_ns),
+        follow_symlinks=False,
+    )
+
+    after = runner._tree_sha256(tmp_path)
+    assert after == before, "access-time drift must not alter the sealed tree digest"
+
+
+@_POSIX_EVIDENCE
+def test_tree_sha256_still_refuses_a_retargeted_link(tmp_path: Path) -> None:
+    """The relaxed comparison must not weaken what the guard exists to catch."""
+    first = tmp_path / "first"
+    first.write_text("one", encoding="utf-8")
+    second = tmp_path / "second"
+    second.write_text("two", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(first)
+
+    original = runner._tree_sha256(tmp_path)
+
+    link.unlink()
+    link.symlink_to(second)
+    assert runner._tree_sha256(tmp_path) != original, "a retargeted link must change the digest"
+
+    # And a link whose target moves while it is being hashed must still raise,
+    # which is the condition the guard was written for.
+    real_readlink = runner.os.readlink
+    calls: list[str] = []
+
+    def _readlink_then_retarget(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        value = real_readlink(path, *args, **kwargs)
+        if str(path).endswith("link") and not calls:
+            calls.append(str(path))
+            link.unlink()
+            link.symlink_to(first)
+        return value
+
+    runner.os.readlink = _readlink_then_retarget  # type: ignore[assignment]
+    try:
+        with pytest.raises(runner._RunnerFoundationError, match="link changed during hashing"):
+            runner._tree_sha256(tmp_path)
+    finally:
+        runner.os.readlink = real_readlink  # type: ignore[assignment]
+    assert calls, "the retargeting hook must have run"

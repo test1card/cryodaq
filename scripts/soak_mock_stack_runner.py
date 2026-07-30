@@ -806,6 +806,30 @@ class _ExecutionSnapshot:
             raise _RunnerFoundationError("sealed exact-six snapshot changed during execution")
 
 
+def _snapshot_fingerprint(entry: os.stat_result) -> bytes:
+    """Serialize exactly the metadata a tree digest depends on.
+
+    Stability checks must compare this fingerprint rather than a whole
+    ``os.stat_result``: the latter also covers access time, which is not hashed
+    and which merely reading an entry can perturb.
+    """
+
+    return json.dumps(
+        [
+            entry.st_mode,
+            entry.st_dev,
+            entry.st_ino,
+            entry.st_uid,
+            entry.st_gid,
+            entry.st_nlink,
+            entry.st_size,
+            entry.st_mtime_ns,
+            entry.st_ctime_ns,
+        ],
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
 def _tree_sha256(root: Path) -> str:
     digest = hashlib.sha256()
     root_info = root.lstat()
@@ -827,23 +851,20 @@ def _tree_sha256(root: Path) -> str:
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix().encode()
         info = path.lstat()
-        metadata = json.dumps(
-            [
-                info.st_mode,
-                info.st_dev,
-                info.st_ino,
-                info.st_uid,
-                info.st_gid,
-                info.st_nlink,
-                info.st_size,
-                info.st_mtime_ns,
-                info.st_ctime_ns,
-            ],
-            separators=(",", ":"),
-        ).encode("ascii")
+        metadata = _snapshot_fingerprint(info)
         if stat.S_ISLNK(info.st_mode):
             target = os.readlink(path).encode()
-            if path.lstat() != info:
+            # Compare exactly the metadata this digest depends on, and require the
+            # target itself to be unchanged. A full ``os.stat_result`` comparison
+            # also covers access time, which is not hashed and which reading the
+            # link can itself perturb: on ext4 with ``relatime``, once atime is
+            # older than mtime an ``os.readlink()`` updates it, so the guard would
+            # reject a snapshot solely because it had looked at it. Comparing
+            # identity alone would be the opposite error, ignoring same-inode
+            # changes to metadata the digest does depend on. Re-reading the target
+            # is strictly stronger than the previous check for the property that
+            # actually matters: that the link still points where it did.
+            if _snapshot_fingerprint(path.lstat()) != metadata or os.readlink(path).encode() != target:
                 raise _RunnerFoundationError("sealed snapshot link changed during hashing")
             digest.update(b"L\0" + relative + b"\0" + metadata + b"\0" + target + b"\0")
         elif stat.S_ISREG(info.st_mode):
