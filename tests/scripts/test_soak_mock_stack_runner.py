@@ -1087,23 +1087,25 @@ def test_runner_activation_rejects_windows_before_evidence_or_allocation(monkeyp
 
 
 @_POSIX_EVIDENCE
-def test_tree_sha256_ignores_access_time_only_changes(tmp_path: Path) -> None:
-    """Reading a sealed snapshot must not make the guard reject it.
+def test_tree_sha256_survives_its_own_access_time_side_effect(tmp_path: Path) -> None:
+    """Hashing a sealed snapshot must not make the guard reject it.
 
     The symlink stability check previously compared whole ``os.stat_result``
     values, which include access time. On ext4 with ``relatime`` an
     ``os.readlink()`` updates a symlink's atime once that atime is older than its
-    mtime, so hashing a tree could fail purely because hashing had looked at it —
-    a property measured through a comparison the act of measuring perturbs.
-    Access time is not part of the digest, so it must affect neither acceptance
-    nor the resulting hash.
+    mtime — so ``_tree_sha256`` perturbed, and then rejected on, a field it does
+    not even hash. Access time must therefore affect neither acceptance nor the
+    digest.
+
+    The access-time drift is established *before* the first hash on purpose.
+    ``os.utime`` also updates the inode's ctime, which the digest does include,
+    so setting it up afterwards would change the digest for a legitimate reason
+    and prove nothing about atime.
     """
     target = tmp_path / "target"
     target.write_text("payload", encoding="utf-8")
     link = tmp_path / "link"
     link.symlink_to(target)
-
-    before = runner._tree_sha256(tmp_path)
 
     # Force relatime's actual update condition: atime strictly older than mtime.
     stamp = link.lstat()
@@ -1113,8 +1115,11 @@ def test_tree_sha256_ignores_access_time_only_changes(tmp_path: Path) -> None:
         follow_symlinks=False,
     )
 
-    after = runner._tree_sha256(tmp_path)
-    assert after == before, "access-time drift must not alter the sealed tree digest"
+    # The first call is where the pre-fix guard raised, because its own readlink
+    # bumped the atime it then compared.
+    first = runner._tree_sha256(tmp_path)
+    second = runner._tree_sha256(tmp_path)
+    assert first == second, "hashing must be repeatable despite its own access-time side effect"
 
 
 @_POSIX_EVIDENCE
