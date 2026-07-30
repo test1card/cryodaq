@@ -290,6 +290,63 @@ def test_complete_matrix_records_nonzero_population_for_all_cells(
     assert receipt["ancillary_workflows"]["windows-onedir-smoke"]["in_scope"] is False
 
 
+def test_head_only_judge_refuses_pull_request_merge_manifest(
+    evidence_repository: tuple[Path, str],
+) -> None:
+    """This consumer control must pass before and after the producer fix.
+
+    Do not relax it: the judge must refuse an unresolvable merge-only manifest.
+    """
+
+    repository, head_sha = evidence_repository
+    api = FakeApi(repository, head_sha)
+    assert (
+        prove(
+            api,
+            repository=repository,
+            repository_name=REPOSITORY_NAME,
+            run_id=api.run_id,
+            sha=head_sha,
+        )["result"]
+        == "accepted"
+    )
+
+    merge_sha = "f" * 40
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "--verify", f"{merge_sha}^{{commit}}"],
+            cwd=repository,
+            capture_output=True,
+            check=False,
+        ).returncode
+        != 0
+    )
+    artifact = next(item for item in api.artifacts if item["name"] == "cryodaq-candidate-ubuntu-latest-agents-1")
+    bundle_endpoint = f"repos/{REPOSITORY_NAME}/actions/artifacts/{artifact['id']}/zip"
+    with zipfile.ZipFile(io.BytesIO(api.downloads[bundle_endpoint])) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    candidate = json.loads(files["candidate-manifest.json"])
+    candidate["commit"] = merge_sha
+    files["candidate-manifest.json"] = _canonical(candidate)
+    bundle = json.loads(files["bundle-manifest.json"])
+    bundle["files"]["candidate-manifest.json"] = _digest(files["candidate-manifest.json"])
+    files["bundle-manifest.json"] = _canonical(bundle)
+    api.downloads[bundle_endpoint] = _zip(files)
+
+    with pytest.raises(PartitionExecutionProofError) as refused:
+        prove(
+            api,
+            repository=repository,
+            repository_name=REPOSITORY_NAME,
+            run_id=api.run_id,
+            sha=head_sha,
+        )
+
+    message = str(refused.value)
+    assert "ubuntu-latest/agents: candidate manifest is invalid:" in message
+    assert f"git rev-parse --verify {merge_sha}^{{commit}} failed:" in message
+
+
 def test_cli_acceptance_writes_sha_bound_receipt(
     evidence_repository: tuple[Path, str],
     tmp_path: Path,

@@ -198,7 +198,12 @@ def test_run_publishes_exact_population_receipts_to_the_job_log(
         stderr=b"candidate diagnostic that is not population evidence\n",
         stdout=f"candidate-suite=agents command=1/1\n{marker}".encode(),
     )
-    monkeypatch.setattr(ci_candidate_evidence, "_github_environment", lambda: {})
+    monkeypatch.setattr(ci_candidate_evidence, "_git", lambda *_args: "a" * 40)
+    monkeypatch.setattr(
+        ci_candidate_evidence,
+        "_github_environment",
+        lambda *, candidate_sha: {"github_sha": candidate_sha},
+    )
     monkeypatch.setattr(ci_candidate_evidence, "execute_exported_candidate", lambda *_args, **_kwargs: receipt)
     monkeypatch.setattr(ci_candidate_evidence, "write_execution_bundle", lambda *_args, **_kwargs: {})
 
@@ -218,6 +223,60 @@ def test_run_publishes_exact_population_receipts_to_the_job_log(
     assert result == 0
     assert captured.out == marker
     assert captured.err == ""
+
+
+def test_pull_request_head_identity_is_used_when_event_sha_is_merge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _candidate_repository(tmp_path)
+    executed_commit = _git(repository, "rev-parse", "HEAD")
+    (repository / "candidate.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _git(repository, "add", "candidate.py")
+    _git(repository, "commit", "-m", "ephemeral merge event")
+    event_sha = _git(repository, "rev-parse", "HEAD")
+    assert event_sha != executed_commit
+    for key, value in _github(event_sha).items():
+        monkeypatch.setenv(key.upper(), value)
+
+    def execute_lightweight_candidate(repository, revision, *, destination, timeout, **_kwargs):
+        return execute_exported_candidate(
+            repository,
+            revision,
+            command=(sys.executable, "-c", "print('executed candidate')"),
+            destination=destination,
+            timeout=timeout,
+        )
+
+    monkeypatch.setattr(ci_candidate_evidence, "execute_exported_candidate", execute_lightweight_candidate)
+    args = SimpleNamespace(
+        artifact_name="cryodaq-candidate-ubuntu-latest-core-1",
+        destination=tmp_path / "executed-candidate",
+        output=tmp_path / "bundle",
+        repository=repository,
+        revision=executed_commit,
+        suite="core",
+        timeout=60,
+    )
+
+    assert ci_candidate_evidence._run(args) == 0
+    execution = json.loads((args.output / "execution-receipt.json").read_bytes())
+    candidate = json.loads((args.output / "candidate-manifest.json").read_bytes())
+    assert execution["github"]["github_sha"] == executed_commit
+    assert execution["github"]["github_sha"] != event_sha
+    assert execution["commit"] == candidate["commit"] == executed_commit
+
+    production_github_environment = ci_candidate_evidence._github_environment
+    monkeypatch.setattr(
+        ci_candidate_evidence,
+        "_github_environment",
+        lambda *, candidate_sha: production_github_environment(candidate_sha=os.environ["GITHUB_SHA"]),
+    )
+    ambient_args = SimpleNamespace(**vars(args))
+    ambient_args.destination = tmp_path / "ambient-bound-candidate"
+    ambient_args.output = tmp_path / "ambient-bound-bundle"
+    with pytest.raises(CiCandidateEvidenceError, match="GitHub SHA does not match the executed candidate commit"):
+        ci_candidate_evidence._run(ambient_args)
 
 
 def _production_protected_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, ...]:
@@ -1852,6 +1911,9 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     assert payload["permissions"] == {"contents": "read"}
     job = payload["jobs"]["test"]
+    evidence_output = "${{ needs.candidate_identity.outputs.evidence_sha }}"
+    assert job["needs"] == "candidate_identity"
+    assert job["env"]["EVIDENCE_SHA"] == evidence_output
     matrix = job["strategy"]["matrix"]
     assert matrix == {
         "os": ["ubuntu-latest", "windows-latest"],
@@ -1874,11 +1936,12 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     )
 
     assert checkout["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+    assert checkout["with"]["ref"] == evidence_output
     assert active["if"] == "matrix.suite == 'remaining'"
-    assert "${GITHUB_SHA:?}" in active["run"]
+    assert "${GITHUB_SHA:?}" not in active["run"]
     assert "tools.ci_active_checkout_runner" in active["run"]
     assert '--repository "${GITHUB_WORKSPACE:?}"' in active["run"]
-    assert '--revision "${GITHUB_SHA:?}"' in active["run"]
+    assert '--revision "${EVIDENCE_SHA:?}"' in active["run"]
     assert all(selection not in active["run"] for root in EXECUTION_ROOTS for selection in (*root.files, *root.nodes))
     # The former guard only searched raw workflow text, so a comment containing
     # every selection passed even while the executable pytest arguments drifted.
@@ -1889,7 +1952,8 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert "if" not in candidate
     assert "continue-on-error" not in candidate
     assert "tools.ci_candidate_evidence run" in candidate["run"]
-    assert '--revision "${GITHUB_SHA:?}"' in candidate["run"]
+    assert "${GITHUB_SHA:?}" not in candidate["run"]
+    assert '--revision "${EVIDENCE_SHA:?}"' in candidate["run"]
     assert all("tools.montana_candidate_gate" not in str(step.get("run", "")) for step in steps)
     upload_pin = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     assert upload["uses"] == upload_pin
@@ -1944,6 +2008,45 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert Path(strict_response_files[0][1:]).read_text(encoding="utf-8").splitlines() == list(active_nodes)
     assert "--timeout=120" in strict
     assert "--timeout-method=thread" in strict
+
+
+def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull_request_heads() -> None:
+    payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    test_job = payload["jobs"]["test"]
+    identity_job = payload["jobs"]["candidate_identity"]
+    evidence_output = "${{ needs.candidate_identity.outputs.evidence_sha }}"
+    assert test_job["needs"] == "candidate_identity"
+    assert "continue-on-error" not in identity_job
+    assert all("continue-on-error" not in step for step in identity_job["steps"])
+    assert identity_job["outputs"] == {"evidence_sha": "${{ steps.bind.outputs.evidence_sha }}"}
+
+    identity_steps = {step.get("id"): step for step in identity_job["steps"] if step.get("id")}
+    bind = identity_steps["bind"]
+    commands = tuple(
+        line.strip() for line in bind["run"].splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+    assert '<<<"$(git rev-list --parents -n 1 "$merge_commit")"' in commands
+    assert 'test "$recorded" = "$merge_commit"' in commands
+    assert 'test "$first_parent" = "$base_commit"' in commands
+    assert 'test "$second_parent" = "$head_commit"' in commands
+    assert 'test -z "${extra:-}"' in commands
+    assert 'merge_tree="$(git rev-parse --verify "${merge_commit}^{tree}")"' in commands
+    assert 'head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"' in commands
+    assert 'if [[ "$merge_tree" != "$head_tree" ]]; then' in commands
+    assert [line for line in commands if "base_commit" in line] == [
+        'base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"',
+        'test "$first_parent" = "$base_commit"',
+    ]
+    assert 'candidate="$head_commit"' in commands
+    assert 'printf \'evidence_sha=%s\\n\' "$candidate" >>"$GITHUB_OUTPUT"' in commands
+
+    assert test_job["env"]["EVIDENCE_SHA"] == evidence_output
+    checkout = next(step for step in test_job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == evidence_output
+    indexed = {step.get("id"): step for step in test_job["steps"] if step.get("id")}
+    for step_id in ("active-remaining", "candidate"):
+        assert '--revision "${EVIDENCE_SHA:?}"' in indexed[step_id]["run"]
+        assert "${GITHUB_SHA:?}" not in indexed[step_id]["run"]
 
 
 def test_montana_candidate_gate_workflow_command_rejects_violation_and_accepts_control(tmp_path: Path) -> None:

@@ -462,18 +462,29 @@ def validate_execution_and_attestation(
         raise CiCandidateEvidenceError("receipt does not bind workflow run attempt and uploaded artifact digest")
 
 
-def _github_environment() -> dict[str, str]:
+def _github_environment(*, candidate_sha: str) -> dict[str, str]:
+    """Capture the run identity, binding ``github_sha`` to the commit actually executed.
+
+    ``GITHUB_SHA`` is deliberately NOT read here. On a ``pull_request`` event it is GitHub's ephemeral
+    merge commit, which exists only inside the run: recording it produced a manifest the protected judge
+    could not resolve, so the partition proof refused. It also disagreed with
+    ``write_execution_bundle``'s own requirement that the identity match the executed candidate.
+
+    ``candidate_sha`` is the resolved commit this evidence describes, mirroring
+    :func:`_protected_github_environment`, which has always bound it this way. The parameter is
+    mandatory precisely so a caller cannot silently fall back to the event SHA again.
+    """
     keys = (
         "GITHUB_JOB",
         "GITHUB_REPOSITORY",
         "GITHUB_RUN_ATTEMPT",
         "GITHUB_RUN_ID",
-        "GITHUB_SHA",
         "GITHUB_WORKFLOW",
         "GITHUB_WORKFLOW_REF",
         "RUNNER_OS",
     )
     values = {key.lower(): os.environ.get(key, "") for key in keys}
+    values["github_sha"] = candidate_sha
     if any(not value for value in values.values()):
         raise CiCandidateEvidenceError("required GitHub execution identity is absent")
     return values
@@ -516,7 +527,7 @@ def _protected_github_environment(*, candidate_sha: str) -> dict[str, str]:
 
 def _run(args: argparse.Namespace) -> int:
     repo = args.repository.resolve(strict=True)
-    github = _github_environment()
+    github = _github_environment(candidate_sha=_git(repo, "rev-parse", "--verify", f"{args.revision}^{{commit}}"))
     command = (sys.executable, "-B", "-m", "tools.ci_candidate_runner", "--suite", args.suite)
     prior_suite = os.environ.get(FAILURE_RECEIPT_SUITE_ENV)
     os.environ[FAILURE_RECEIPT_SUITE_ENV] = args.suite
@@ -718,13 +729,19 @@ def _relay_protected_failure(receipt: CandidateExecutionReceipt, *, suite: str, 
 
 
 def _attest(args: argparse.Namespace) -> int:
+    # The attestation must name the same commit the bundle it attests describes, not the event SHA that
+    # happened to be in the environment. The bundle's own candidate manifest is the authority here.
+    manifest = json.loads((args.bundle / "candidate-manifest.json").read_bytes().decode("utf-8"))
+    candidate_sha = manifest.get("commit")
+    if type(candidate_sha) is not str or re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None:
+        raise CiCandidateEvidenceError("bundle candidate manifest does not carry a usable commit identity")
     write_artifact_attestation(
         bundle=args.bundle,
         output=args.output,
         artifact_name=args.artifact_name,
         artifact_id=args.artifact_id,
         artifact_digest=args.artifact_digest,
-        github=_github_environment(),
+        github=_github_environment(candidate_sha=candidate_sha),
     )
     return 0
 

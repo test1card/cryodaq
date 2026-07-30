@@ -22,6 +22,7 @@ permissions:
 
 jobs:
   test:
+    needs: candidate_identity
     name: test (${{ matrix.os }}, ${{ matrix.suite }})
     runs-on: ${{ matrix.os }}
     defaults:
@@ -44,10 +45,19 @@ jobs:
       PYTHONUTF8: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       CANDIDATE_ARTIFACT: cryodaq-candidate-${{ matrix.os }}-${{ matrix.suite }}-${{ github.run_attempt }}
+      # The one identity this lane produces evidence for. On `push` it is the pushed commit; on
+      # `pull_request` GitHub's default checkout would be the EPHEMERAL MERGE COMMIT, whose SHA exists
+      # only inside the run. Recording that SHA in the candidate manifest produced evidence the
+      # protected judge could not bind: it resolves the manifest commit against a checkout of the PR
+      # head, so `git rev-parse --verify <merge-sha>^{commit}` failed and the partition proof refused —
+      # correctly. This lane therefore executes, and names, the PR head. The merge tree is validated
+      # separately by the merge-validation job below, so nothing is dropped by binding here.
+      EVIDENCE_SHA: ${{ needs.candidate_identity.outputs.evidence_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.candidate_identity.outputs.evidence_sha }}
 
       - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
@@ -88,7 +98,7 @@ jobs:
           set -euo pipefail
           python -m tools.ci_active_checkout_runner \
             --repository "${GITHUB_WORKSPACE:?}" \
-            --revision "${GITHUB_SHA:?}" \
+            --revision "${EVIDENCE_SHA:?}" \
             --suite remaining \
             --basetemp "${RUNNER_TEMP:?}/cryodaq-active-remaining-pytest"
 
@@ -139,7 +149,7 @@ jobs:
         run: |
           python -m tools.ci_candidate_evidence run \
             --repository "${GITHUB_WORKSPACE:?}" \
-            --revision "${GITHUB_SHA:?}" \
+            --revision "${EVIDENCE_SHA:?}" \
             --suite "${{ matrix.suite }}" \
             --destination "${RUNNER_TEMP:?}/cryodaq-candidate" \
             --output "${RUNNER_TEMP:?}/cryodaq-candidate-evidence" \
@@ -193,3 +203,48 @@ jobs:
           fi
           test "${{ steps.candidate-upload.outcome }}" = success
           test "${{ steps.candidate-attestation-upload.outcome }}" = success
+
+  candidate_identity:
+    name: Bind candidate and prove PR merge-tree equivalence
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      evidence_sha: ${{ steps.bind.outputs.evidence_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - id: bind
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
+          if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
+            merge_commit="$candidate"
+            base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"
+            head_commit="$(git rev-parse --verify "${PR_HEAD_SHA:?}^{commit}")"
+            read -r recorded first_parent second_parent extra \
+              <<<"$(git rev-list --parents -n 1 "$merge_commit")"
+            test "$recorded" = "$merge_commit"
+            test "$first_parent" = "$base_commit"
+            test "$second_parent" = "$head_commit"
+            test -z "${extra:-}"
+            # This conditional waiver trips on tree divergence, not on whether master advanced:
+            # only identical trees prove the PR-head execution covers the synthetic merge tree.
+            merge_tree="$(git rev-parse --verify "${merge_commit}^{tree}")"
+            head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"
+            if [[ "$merge_tree" != "$head_tree" ]]; then
+              echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree. Enable the full Windows/Ubuntu merge-validation matrix."
+              exit 1
+            fi
+            candidate="$head_commit"
+          fi
+          printf 'evidence_sha=%s\n' "$candidate" >>"$GITHUB_OUTPUT"
