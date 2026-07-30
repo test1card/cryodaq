@@ -111,6 +111,7 @@ def test_on_reading_is_noop_and_does_not_crash():
         # Route through the shell dispatcher — archive must be unaffected.
         w._dispatch_reading(_finalized_reading())
         from PySide6.QtCore import QCoreApplication
+
         QCoreApplication.processEvents()
         # No state mutation expected.
         assert w._archive_panel._entries == []
@@ -186,8 +187,17 @@ def test_export_cancel_leaves_no_in_flight_worker(monkeypatch):
     _app()
     w = MainWindowV2()
     try:
-        w._last_reading_time = time.monotonic()
+        import cryodaq.gui.shell.overlays.archive_panel as archive_module
+
+        def unexpected_refresh(*_args, **_kwargs) -> None:
+            raise AssertionError("loaded export setup unexpectedly started an archive refresh")
+
+        monkeypatch.setattr(archive_module, "ZmqCommandWorker", unexpected_refresh)
         w._ensure_overlay("archive")
+        assert w._archive_panel is not None
+        w._archive_panel._on_refresh_result({"ok": True, "entries": [{"experiment_id": "loaded"}]})
+        w._last_reading_time = time.monotonic()
+        w._tick_status()
         from PySide6.QtWidgets import QFileDialog
 
         monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: ("", "")))

@@ -19,6 +19,7 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 import cryodaq.gui.zmq_client as _zmq_client
+from cryodaq.gui.shell.overlays import archive_panel as _archive_panel
 
 _REAL_ZMQ_COMMAND_WORKER = _zmq_client.ZmqCommandWorker
 
@@ -54,6 +55,7 @@ def real_zmq_worker(monkeypatch):
     """Opt a test into the real QThread worker for settlement coverage."""
 
     monkeypatch.setattr(_zmq_client, "ZmqCommandWorker", _REAL_ZMQ_COMMAND_WORKER)
+    monkeypatch.setattr(_archive_panel, "ZmqCommandWorker", _REAL_ZMQ_COMMAND_WORKER)
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +69,8 @@ def _isolate_shell_test(monkeypatch, gui_worker_root_epoch):
         lambda _cmd, *, cancellation_requested=None: {"ok": False, "stub": True},
     )
     monkeypatch.setattr(zc, "ZmqCommandWorker", _SyncCommandWorkerStub)
+    monkeypatch.setattr(_archive_panel, "ZmqCommandWorker", _SyncCommandWorkerStub)
+    assert _archive_panel.ZmqCommandWorker is zc.ZmqCommandWorker
     yield gui_worker_root_epoch
     from PySide6.QtCore import QThread, QTimer
     from PySide6.QtWidgets import QApplication
