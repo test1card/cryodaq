@@ -93,6 +93,7 @@ jobs:
           --output-dir promoted
           --commit "$CANDIDATE_COMMIT"
           --tree "$CANDIDATE_TREE"
+          --replay-directory "$RUNNER_TEMP/qualification-replay"
 
       - name: Publish only the receipt-matched artifact
         env:

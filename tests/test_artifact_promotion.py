@@ -245,6 +245,51 @@ def test_promotion_cli_requires_a_replay_ledger(tmp_path: Path) -> None:
     assert exc_info.value.code == 2
 
 
+def test_workflow_promote_invocation_actually_parses() -> None:
+    """The workflow's own argument list must satisfy the CLI it invokes.
+
+    ``test_promotion_boundary_is_a_workflow_status`` asserts the workflow *mentions* the promote
+    command; it cannot notice that the command would die in argument parsing. That gap is how a
+    required ``--replay-directory`` was added to the parser while the only caller kept the old
+    argument list, leaving every dispatched promotion run exiting 2 before any receipt was verified —
+    a release gate that could never run, with nothing red to say so.
+
+    The argument list is read out of the YAML rather than restated here on purpose: a hand-copied
+    list would prove something about this test, not about the file CI executes.
+    """
+    workflow = ROOT / ".github" / "workflows" / "qualified-artifact-promotion.yml"
+    text = workflow.read_text(encoding="utf-8")
+
+    run_block = text.split("python build_scripts/artifact_promotion.py promote", 1)[1]
+    run_block = run_block.split("- name:", 1)[0]
+
+    substitutions = {
+        "$CANDIDATE_PATH": "cryodaq-0.0.0-py3-none-any.whl",
+        "$RECEIPT_PATH": "receipt.json",
+        "$CANDIDATE_COMMIT": COMMIT,
+        "$CANDIDATE_TREE": TREE,
+        "$RUNNER_TEMP": "/tmp/runner",
+    }
+    argv: list[str] = ["promote"]
+    for raw in run_block.splitlines():
+        line = raw.strip()
+        if not line.startswith("--"):
+            continue
+        flag, _, value = line.partition(" ")
+        value = value.strip().strip('"')
+        for name, replacement in substitutions.items():
+            value = value.replace(name, replacement)
+        argv += [flag, value] if value else [flag]
+
+    assert "--replay-directory" in argv, "workflow must supply the replay ledger the CLI requires"
+
+    # parse_args raises SystemExit(2) on a missing required argument, so reaching the namespace is
+    # the whole assertion: CI's invocation is one the parser accepts.
+    parsed = promotion._parser().parse_args(argv)
+    assert parsed.command == "promote"
+    assert parsed.replay_directory is not None
+
+
 def test_promotion_boundary_is_a_workflow_status() -> None:
     workflow = ROOT / ".github" / "workflows" / "qualified-artifact-promotion.yml"
 
