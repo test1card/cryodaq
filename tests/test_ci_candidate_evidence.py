@@ -46,6 +46,41 @@ from tools.ci_partition_execution_proof import PartitionExecutionProofError, _va
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
+
+EXPECTED_CANDIDATE_BIND_SCRIPT = """\
+set -euo pipefail
+event_commit="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
+readonly event_commit
+if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
+  readonly merge_commit="$event_commit"
+  base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"
+  readonly base_commit
+  head_commit="$(git rev-parse --verify "${PR_HEAD_SHA:?}^{commit}")"
+  readonly head_commit
+  read -r recorded first_parent second_parent extra \\
+    <<<"$(git rev-list --parents -n 1 "$merge_commit")"
+  test "$recorded" = "$merge_commit"
+  test "$first_parent" = "$base_commit"
+  test "$second_parent" = "$head_commit"
+  test -z "${extra:-}"
+  # This conditional waiver trips on tree divergence, not on whether master advanced:
+  # only identical trees prove the PR-head execution covers the synthetic merge tree.
+  merge_tree="$(git rev-parse --verify "${merge_commit}^{tree}")"
+  readonly merge_tree
+  head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"
+  readonly head_tree
+  if [[ "$merge_tree" != "$head_tree" ]]; then
+    echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree." \\
+      "Update the PR branch onto master to restore tree equality, or implement a merge-validation lane."
+    exit 1
+  fi
+  readonly evidence_sha="$head_commit"
+else
+  readonly evidence_sha="$event_commit"
+fi
+printf 'evidence_sha=%s\\n' "$evidence_sha" >>"$GITHUB_OUTPUT"
+"""
+
 _TEST_RSA_N = int(
     "144213369889660769855716200362748636527524704993124183993247717235988361522506184974991920355036560388"
     "366276959147365747029452972518703338318347201985495410054559751553741677646681751794016799009575695058"
@@ -101,6 +136,18 @@ def _git(repository: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _workflow_bash_executable(repository: Path) -> str:
+    if os.name != "nt":
+        return "bash"
+    git_exec_path = Path(_git(repository, "--exec-path")).resolve()
+    if len(git_exec_path.parents) < 3:
+        raise AssertionError(f"Git exec path cannot identify the Git for Windows root: {git_exec_path}")
+    bash = git_exec_path.parents[2] / "bin" / "bash.exe"
+    if not bash.is_file():
+        raise AssertionError(f"Git for Windows bash is unavailable: {bash}")
+    return str(bash)
+
+
 def _candidate_repository(tmp_path: Path) -> Path:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -150,6 +197,7 @@ def _assert_candidate_identity_output(
     head_sha: str = "",
 ) -> None:
     bind = next(step for step in workflow["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind")
+    _git(repository, "checkout", "--detach", event_sha)
     output.unlink(missing_ok=True)
     environment = os.environ.copy()
     environment.update(
@@ -162,7 +210,7 @@ def _assert_candidate_identity_output(
         }
     )
     completed = subprocess.run(
-        ["bash"],
+        [_workflow_bash_executable(repository)],
         cwd=repository,
         env=environment,
         input=bind["run"],
@@ -2119,6 +2167,23 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
 
     identity_steps = {step.get("id"): step for step in identity_job["steps"] if step.get("id")}
     bind = identity_steps["bind"]
+    assert set(bind) == {"env", "id", "run", "shell"}
+    assert bind["shell"] == "bash"
+    identity_checkout = next(
+        step for step in identity_job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@")
+    )
+    assert identity_checkout["with"] == {
+        "fetch-depth": 0,
+        "persist-credentials": False,
+        "ref": "${{ github.sha }}",
+    }
+    assert bind["env"] == {
+        "EVENT_NAME": "${{ github.event_name }}",
+        "EVENT_SHA": "${{ github.sha }}",
+        "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+        "PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    }
+    assert bind["run"] == EXPECTED_CANDIDATE_BIND_SCRIPT
     commands = tuple(
         line.strip() for line in bind["run"].splitlines() if line.strip() and not line.lstrip().startswith("#")
     )
@@ -2128,10 +2193,13 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
     assert 'test "$second_parent" = "$head_commit"' in commands
     assert 'test -z "${extra:-}"' in commands
     assert 'merge_tree="$(git rev-parse --verify "${merge_commit}^{tree}")"' in commands
+    assert "readonly merge_tree" in commands
     assert 'head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"' in commands
+    assert "readonly head_tree" in commands
     assert 'if [[ "$merge_tree" != "$head_tree" ]]; then' in commands
     assert [line for line in commands if "base_commit" in line] == [
         'base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"',
+        "readonly base_commit",
         'test "$first_parent" = "$base_commit"',
     ]
     repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
@@ -2163,28 +2231,60 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         assert "${GITHUB_SHA:?}" not in indexed[step_id]["run"]
 
 
+def test_ci_workflow_candidate_identity_tripwire_refuses_unresolved_trees(tmp_path: Path) -> None:
+    payload = copy.deepcopy(yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")))
+    bind = next(step for step in payload["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind")
+    bind["run"] = bind["run"].replace(
+        "set -euo pipefail\n",
+        """\
+set -euo pipefail
+git() {
+  if [[ "$*" == *'^{tree}'* ]]; then
+    return 19
+  fi
+  command git "$@"
+}
+""",
+        1,
+    )
+    repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
+    output = tmp_path / "unresolved-tree-output"
+    with pytest.raises(AssertionError):
+        _assert_candidate_identity_output(
+            payload,
+            repository,
+            output,
+            event_name="pull_request",
+            event_sha=merge_commit,
+            base_sha=base_commit,
+            head_sha=head_commit,
+            expected_sha=head_commit,
+        )
+    assert not output.exists()
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
-        'declare candidate="$merge_commit"',
-        'export candidate="$merge_commit"',
-        'readonly candidate="$merge_commit"',
-        'head_commit_x=1; candidate="$merge_commit"',
-        "printf -v candidate '%s' \"$merge_commit\"",
+        'evidence_sha="$(git rev-parse --verify HEAD^{commit})"',
+        'evidence_sha="$merge_commit"',
+        'declare evidence_sha="$merge_commit"',
+        'export evidence_sha="$merge_commit"',
+        'readonly evidence_sha="$merge_commit"',
+        'head_commit_x=1; evidence_sha="$merge_commit"',
+        "printf -v evidence_sha '%s' \"$merge_commit\"",
     ),
-    ids=("declare", "export", "readonly", "same-line", "printf-indirect"),
+    ids=("ambient-head", "plain", "declare", "export", "readonly", "same-line", "printf-indirect"),
 )
-def test_ci_workflow_candidate_identity_tripwire_rejects_candidate_rebinding_mutations(
+def test_ci_workflow_candidate_identity_tripwire_rejects_evidence_binding_mutations(
     tmp_path: Path,
     mutation: str,
 ) -> None:
     payload = copy.deepcopy(yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")))
     bind = next(step for step in payload["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind")
-    script_lines = bind["run"].splitlines()
-    output_index = next(index for index, line in enumerate(script_lines) if "GITHUB_OUTPUT" in line)
-    branch_end = max(index for index, line in enumerate(script_lines[:output_index]) if line.strip() == "fi")
-    script_lines.insert(branch_end, f"  {mutation}")
-    bind["run"] = "\n".join(script_lines) + "\n"
+    legitimate_binding = '  readonly evidence_sha="$head_commit"'
+    assert bind["run"].splitlines().count(legitimate_binding) == 1
+    bind["run"] = bind["run"].replace(legitimate_binding, f"  {mutation}", 1)
     repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
     with pytest.raises(AssertionError) as rejected:
         _assert_candidate_identity_output(

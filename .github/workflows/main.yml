@@ -228,11 +228,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          candidate="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
+          event_commit="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
+          readonly event_commit
           if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
-            merge_commit="$candidate"
+            readonly merge_commit="$event_commit"
             base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"
+            readonly base_commit
             head_commit="$(git rev-parse --verify "${PR_HEAD_SHA:?}^{commit}")"
+            readonly head_commit
             read -r recorded first_parent second_parent extra \
               <<<"$(git rev-list --parents -n 1 "$merge_commit")"
             test "$recorded" = "$merge_commit"
@@ -242,11 +245,16 @@ jobs:
             # This conditional waiver trips on tree divergence, not on whether master advanced:
             # only identical trees prove the PR-head execution covers the synthetic merge tree.
             merge_tree="$(git rev-parse --verify "${merge_commit}^{tree}")"
+            readonly merge_tree
             head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"
+            readonly head_tree
             if [[ "$merge_tree" != "$head_tree" ]]; then
-              echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree. Update the PR branch onto master to restore tree equality, or implement a merge-validation lane."
+              echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree." \
+                "Update the PR branch onto master to restore tree equality, or implement a merge-validation lane."
               exit 1
             fi
-            candidate="$head_commit"
+            readonly evidence_sha="$head_commit"
+          else
+            readonly evidence_sha="$event_commit"
           fi
-          printf 'evidence_sha=%s\n' "$candidate" >>"$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$evidence_sha" >>"$GITHUB_OUTPUT"

@@ -24,12 +24,13 @@ class ExecutionSelection:
 # pull_request tree-equality waiver in `.github/workflows/main.yml` and requires
 # a merge-validation lane.
 #
-# Merely *reading* HEAD does not.  `_head_snapshot` in
-# tests/scripts/test_soak_mock_stack_runner.py resolves HEAD only to archive
-# that tree, and archives identical bytes at either commit.  This distinction is
-# the whole basis of the waiver and was mis-stated here on the first attempt:
-# "reads git history" and "can tell the two commits apart" are different
-# predicates, and only the second one voids anything.
+# `_head_snapshot` in tests/scripts/test_soak_mock_stack_runner.py passes HEAD
+# to `git archive`. Equal-tree commits do not produce byte-identical tar streams:
+# the pax commit comment and member mtimes can differ. The extracted child gets no
+# commit SHA. The seal hashes mtimes only to detect within-invocation drift; no
+# selected assertion compares their absolute values across commits. Equal paths,
+# bytes, and modes therefore drive the same pass/fail result. Any future behavioral
+# use of commit/archive metadata voids the waiver above.
 EXECUTION_ROOTS = (
     ExecutionSelection(
         execution_root="git-index",

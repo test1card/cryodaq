@@ -213,6 +213,7 @@ def _run_cmd_forward(
         ]
         shutdown.set()
         thread.join(timeout=timeout_s)
+        bridge_owner_alive = thread.is_alive()
         if diagnostics is not None:
             diagnostics.update(
                 collected_reply_ids=collected_reply_ids,
@@ -222,8 +223,11 @@ def _run_cmd_forward(
                 req_sockets_sent=sum(socket.send_string.call_count for socket in req_sockets),
                 req_sockets_closed=sum(socket.close.call_count for socket in req_sockets),
                 cmd_q_qsize=cmd_q.qsize(),
+                bridge_owner_alive=bridge_owner_alive,
                 bridge_owner_exceptions=[f"{type(exc).__name__}: {exc}" for exc in bridge_owner_exceptions],
             )
+        if bridge_owner_alive:
+            raise AssertionError("bridge owner did not settle after bounded shutdown join")
         if bridge_owner_exceptions:
             raise bridge_owner_exceptions[0]
 
@@ -255,6 +259,7 @@ def _format_reply_collector_diagnostics(diagnostics: dict[str, object]) -> str:
         f"{diagnostics['req_sockets_sent']}/"
         f"{diagnostics['req_sockets_closed']}; "
         f"cmd_q_qsize={diagnostics['cmd_q_qsize']}; "
+        f"bridge_owner_alive={diagnostics['bridge_owner_alive']}; "
         f"bridge_owner_exceptions={diagnostics['bridge_owner_exceptions']}"
     )
 
@@ -389,6 +394,7 @@ def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
     assert "unaccounted_reply_ids=['r1', 'r2', 'r3', 'r4']" in str(failure.value)
     assert "req_sockets(created/sent/closed)=5/5/5" in str(failure.value)
     assert "cmd_q_qsize=0" in str(failure.value)
+    assert "bridge_owner_alive=False" in str(failure.value)
     assert "bridge_owner_exceptions=[]" in str(failure.value)
 
 
@@ -422,7 +428,50 @@ def test_run_cmd_forward_propagates_owner_failure_after_expected_reply(
         )
 
     assert diagnostics["collected_reply_ids"] == ["expected-r0"]
+    assert diagnostics["bridge_owner_alive"] is False
     assert diagnostics["bridge_owner_exceptions"] == ["RuntimeError: bridge exploded after expected reply"]
+
+
+def test_run_cmd_forward_refuses_success_while_owner_is_unsettled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.core import zmq_subprocess
+
+    release_owner = threading.Event()
+    owner_released = threading.Event()
+
+    def _publish_then_raise_after_release(
+        _pub_addr: str,
+        _cmd_addr: str,
+        _data_queue: stdlib_queue.Queue,
+        cmd_queue: stdlib_queue.Queue,
+        reply_queue: stdlib_queue.Queue,
+        _shutdown: threading.Event,
+        **_kwargs: object,
+    ) -> None:
+        command = cmd_queue.get(timeout=1.0)
+        reply_queue.put({"ok": True, "_rid": command["_rid"]})
+        release_owner.wait(timeout=1.0)
+        owner_released.set()
+        raise RuntimeError("bridge exploded after delayed settlement")
+
+    diagnostics: dict[str, object] = {}
+    monkeypatch.setattr(zmq_subprocess, "zmq_bridge_main", _publish_then_raise_after_release)
+
+    try:
+        with pytest.raises(AssertionError, match="bridge owner did not settle"):
+            _run_cmd_forward(
+                [{"cmd": "safety_status", "_rid": "expected-r0"}],
+                sockets=[],
+                diagnostics=diagnostics,
+                timeout_s=0.05,
+            )
+    finally:
+        release_owner.set()
+
+    assert owner_released.wait(timeout=1.0)
+    assert diagnostics["bridge_owner_alive"] is True
+    assert diagnostics["bridge_owner_exceptions"] == []
 
 
 def test_cmd_forward_closes_socket_after_success(_sockets):
