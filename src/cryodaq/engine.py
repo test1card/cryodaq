@@ -960,8 +960,9 @@ async def _drain_dispatch_tasks(
 
 
 # ─────────────────────────── Audible faults (A3) ──────────────────────────
-# Safety faults and a dead sensor outside RUNNING used to be log-only — an
-# operator had to be staring at the log to notice. The helpers below reuse
+# Safety faults and a dead-sensor decline outside the active source lifecycle
+# used to be log-only — an operator had to be staring at the log to notice.
+# The helpers below reuse
 # the SAME alarm_fired/Telegram dispatch channel alarm-v2, cooldown-alarm,
 # vacuum-guard and the task supervisor already use (no new channel
 # invented), extracted as importable module-level functions so they are
@@ -1010,17 +1011,16 @@ async def _dispatch_alarm_notification(
 
 
 def _should_dispatch_dead_channel_alarm(key: str, escalated: bool, already_sent: set[str]) -> bool:
-    """Once-per-episode edge-trigger for the outside-RUNNING dead-channel alert.
+    """Once-per-episode edge-trigger for an inactive-source dead-channel alert.
 
-    ``on_interlock_dead_channel`` stays log-only outside RUNNING by design
-    (SafetyManager's decision, unchanged) and — also by design — is retried
-    on every subsequent non-usable sample so the fault still latches the
-    moment RUNNING begins (see interlock.py's ``_NonUsableWindow.escalated``
-    docstring). Dispatching sound on every one of those retries would beep
-    on every poll; fire at most once per continuous decline episode, and
-    clear once escalation succeeds (RUNNING began / fault latched — that
-    path gets its own CRITICAL alarm via ``_safety_fault_log_callback``) so
-    a later, distinct dead episode still alerts.
+    ``on_interlock_dead_channel`` stays log-only outside RUN_PERMITTED/RUNNING
+    by design and is retried on every subsequent non-usable sample so the
+    fault still latches when an active source lifecycle begins (see
+    interlock.py's ``_NonUsableWindow.escalated`` docstring). Dispatching
+    sound on every retry would beep on every poll; fire at most once per
+    continuous decline episode, and clear once escalation succeeds (active
+    lifecycle began / fault latched — that path gets its own CRITICAL alarm
+    via ``_safety_fault_log_callback``) so a later distinct episode alerts.
     """
     if escalated:
         already_sent.discard(key)

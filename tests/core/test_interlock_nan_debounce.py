@@ -4,8 +4,8 @@ Semantics under test:
 - Transient non-usable reading (NaN / error-status) on an interlock-protected
   channel → CRITICAL log + alarm-v2 event, NO trip.
 - Persistent non-usable (≥min_duration_s AND ≥min_samples consecutive) while
-  the safety state is RUNNING → escalate to SafetyManager FAULT_LATCHED.
-- Outside RUNNING → log/alarm only, never fault.
+  the source lifecycle is RUN_PERMITTED or RUNNING → SafetyManager FAULT_LATCHED.
+- Outside the active source lifecycle → log/alarm only, never fault.
 - A usable reading resets the debounce window.
 - Non-usability is the doctrine predicate (is_usable), not a float check:
   finite value + error status still counts as non-usable.
@@ -184,11 +184,11 @@ async def test_persistent_nonusable_faults_via_real_safety_manager() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (c) same persistence while NOT running → no fault
+# (c) same persistence outside the active source lifecycle → no fault
 # ---------------------------------------------------------------------------
 
 
-async def test_dead_channel_no_fault_when_not_running() -> None:
+async def test_dead_channel_no_fault_outside_active_source_lifecycle() -> None:
     broker = SafetyBroker()
     mgr = SafetyManager(broker, keithley_driver=None, mock=True)
     await mgr.start()
@@ -196,7 +196,7 @@ async def test_dead_channel_no_fault_when_not_running() -> None:
         assert mgr.state == SafetyState.SAFE_OFF
         await mgr.on_interlock_dead_channel("overheat_zone", "Т5 Зона нагрева", value=float("nan"))
         assert mgr.state == SafetyState.SAFE_OFF, (
-            "dead interlock channel while NOT running must never fault"
+            "dead interlock channel while source lifecycle is inactive must not fault"
         )
     finally:
         await mgr.stop()
@@ -282,16 +282,16 @@ async def test_usable_threshold_breach_still_trips() -> None:
 
 # ---------------------------------------------------------------------------
 # S1 (CRITICAL fail-open): escalated flag must NOT leak when escalation is
-# declined because the manager is not RUNNING.
+# declined because the manager is outside RUN_PERMITTED/RUNNING.
 # ---------------------------------------------------------------------------
 
 
-async def test_escalated_flag_not_leaked_when_not_running() -> None:
-    """A window that reaches the escalation threshold while the manager is NOT
-    RUNNING must not stay marked escalated. Otherwise the still-dead channel
-    never faults once RUNNING begins (until a usable reading resets it) — a
+async def test_escalated_flag_not_leaked_outside_active_source_lifecycle() -> None:
+    """A window reaching threshold outside the active source lifecycle must
+    not stay marked escalated. Otherwise the still-dead channel never faults
+    once RUN_PERMITTED/RUNNING begins (until a usable reading resets it) — a
     fail-open session leak. Fail-closed: escalated stays False, and the first
-    non-usable sample after RUNNING begins latches FAULT.
+    non-usable sample after the active source lifecycle begins latches FAULT.
     """
     broker = SafetyBroker()
     mgr = SafetyManager(broker, keithley_driver=None, mock=True)
@@ -311,11 +311,11 @@ async def test_escalated_flag_not_leaked_when_not_running() -> None:
         assert mgr.state == SafetyState.SAFE_OFF
         for off in (0.0, 3.0, 6.0, 9.0, 12.0):
             await engine._process_reading(_reading(value=float("nan"), offset_s=off))
-        assert mgr.state == SafetyState.SAFE_OFF, "must not fault while not RUNNING"
+        assert mgr.state == SafetyState.SAFE_OFF, "must not fault while the source lifecycle is inactive"
         window = engine._nonusable_windows["Т5 Зона нагрева"]
         assert window.escalated is False, (
-            "escalation declined (not RUNNING) must NOT mark the window escalated — "
-            "otherwise the dead channel never re-escalates once RUNNING begins"
+            "declined inactive-lifecycle escalation must NOT mark the window "
+            "escalated — otherwise the dead channel never re-escalates"
         )
 
         # Transition to RUNNING.

@@ -8,12 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cryodaq.core.broker import DataBroker
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import (
     SafetyManager,
     SafetyShutdownUnverifiedError,
     SafetyState,
 )
+from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     DriverTrustClass,
@@ -39,7 +41,13 @@ from tests.qualification_support import issued_test_qualification_receipt
 _CREATED_MANAGERS: list[SafetyManager] = []
 
 
-def _manager(*, mock: bool = False, driver: object | None = None) -> SafetyManager:
+def _manager(
+    *,
+    mock: bool = False,
+    driver: object | None = None,
+    safety_broker: SafetyBroker | None = None,
+    data_broker: DataBroker | None = None,
+) -> SafetyManager:
     if isinstance(driver, MagicMock):
         # A MagicMock attribute is callable but not awaitable. Give every
         # started fixture the real async driver lifecycle shape so teardown
@@ -64,7 +72,7 @@ def _manager(*, mock: bool = False, driver: object | None = None) -> SafetyManag
             simulation=mock,
         )
     manager = SafetyManager(
-        SafetyBroker(),
+        safety_broker or SafetyBroker(),
         keithley_driver=driver,
         reviewed_source_runtime_binding=binding,
         qualification_receipt=(
@@ -73,6 +81,7 @@ def _manager(*, mock: bool = False, driver: object | None = None) -> SafetyManag
             else None
         ),
         mock=mock,
+        data_broker=data_broker,
     )
     _CREATED_MANAGERS.append(manager)
     return manager
@@ -129,6 +138,76 @@ async def _qualify_generation(
         "test qualification",
     )
     assert committed.verified_off is expected_verified_off
+
+
+class _KeithleyObservationPlant:
+    """Deterministic transport plant for output-observation authority tests."""
+
+    resource = "USB0::0x05E6::0x2604::04089762::INSTR"
+    identity = "Keithley Instruments Inc., Model 2604B, 04089762, 4.0.8"
+
+    def __init__(self) -> None:
+        self.output_state = {"smua": 0, "smub": 0}
+        self.output_reply_override: dict[str, str] = {}
+        self.block_idle_channel: str | None = None
+        self.idle_query_entered = asyncio.Event()
+        self.idle_query_release = asyncio.Event()
+        self._idle_query_blocked = False
+        self._off_nonce = re.compile(r"CRYODAQ_OFF_V1\|([0-9a-f]{32})\|%g")
+
+    def apply_write(self, command: str) -> None:
+        if ".source.output =" not in command:
+            return
+        channel = "smua" if command.startswith("smua.") else "smub"
+        self.output_state[channel] = 1 if command.endswith(".OUTPUT_ON") else 0
+
+    async def query(self, command: str, timeout_ms: int | None = None) -> str:
+        del timeout_ms
+        if command == "*IDN?":
+            return self.identity
+        match = self._off_nonce.search(command)
+        if match is not None:
+            channel = "smua" if "smua.source.output" in command else "smub"
+            return f"CRYODAQ_OFF_V1|{match.group(1)}|{self.output_state[channel]}"
+        for channel, state in self.output_state.items():
+            if command == f"print({channel}.source.output)":
+                reply = self.output_reply_override.get(channel, str(state))
+                if self.block_idle_channel == channel and not self._idle_query_blocked:
+                    self._idle_query_blocked = True
+                    self.idle_query_entered.set()
+                    await self.idle_query_release.wait()
+                return reply
+        if ".measure.iv()" in command:
+            return "1e-3\t10.0"
+        if ".source.compliance" in command:
+            return "false"
+        return "0"
+
+
+async def _connected_observation_driver() -> tuple[
+    Keithley2604B,
+    _KeithleyObservationPlant,
+    MagicMock,
+]:
+    plant = _KeithleyObservationPlant()
+    driver = Keithley2604B("k2604", plant.resource, mock=False)
+    transport = MagicMock()
+    transport.open = AsyncMock()
+    transport.close = AsyncMock()
+    transport.query = AsyncMock(side_effect=plant.query)
+    transport.write = AsyncMock(side_effect=plant.apply_write)
+    driver._transport = transport
+    await driver.connect()
+    assert driver.output_state_unverified is False
+    return driver, plant, transport
+
+
+async def _yield_until(predicate, *, message: str) -> None:
+    for _ in range(100):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    pytest.fail(message)
 
 
 _CUT = CommonCut(
@@ -233,6 +312,291 @@ def test_ready_requires_monitor_current_inputs_connection_and_exact_off_proof() 
     assert "reviewed_source_off_unverified" in _codes(unproved)
 
 
+@pytest.mark.parametrize("unsafe_kind", ("output_on", "invalid_readback"))
+async def test_scheduler_observation_faults_external_sibling_of_managed_source(
+    unsafe_kind: str,
+) -> None:
+    driver, plant, _transport = await _connected_observation_driver()
+    data_broker = DataBroker()
+    channel_states = await data_broker.subscribe(
+        "unsafe_sibling_channel_states",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    safety_broker = SafetyBroker()
+    safety_tap = safety_broker.subscribe("unsafe_sibling_production_path", maxsize=100)
+    writer = MagicMock()
+    writer.is_disk_full = False
+    writer.descriptor_authoritative = False
+    writer.write_immediate = AsyncMock(return_value=True)
+    scheduler = Scheduler(
+        data_broker,
+        safety_broker=safety_broker,
+        sqlite_writer=writer,
+    )
+    scheduler.add(InstrumentConfig(driver=driver))
+    state = scheduler._instruments[driver.name]
+    manager = _manager(
+        driver=driver,
+        safety_broker=safety_broker,
+        data_broker=data_broker,
+    )
+    manager._config.critical_channels = []
+    try:
+        await _qualify_generation(manager, driver, expected_verified_off=True)
+        manager._transition(SafetyState.READY, "qualified before managed run")
+        started = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert started["ok"] is True
+        assert manager._active_sources == {"smua"}
+        assert driver.active_channels == ["smua"]
+
+        if unsafe_kind == "output_on":
+            plant.output_state["smub"] = 1
+        else:
+            plant.output_reply_override["smub"] = "not-an-output-state"
+        readings = await driver.read_channels()
+        await scheduler._process_readings(state, readings)
+
+        assert any(reading.channel == "k2604/smub/voltage" for reading in readings)
+        assert any(
+            observation.channel == "smub" and observation.kind == unsafe_kind
+            for observation in driver.unsafe_output_observations
+        )
+        assert driver.output_state_unverified is True
+        safety_channels = []
+        while not safety_tap.empty():
+            safety_reading = safety_tap.get_nowait()
+            safety_channels.append(safety_reading.channel)
+            safety_tap.task_done()
+        assert "k2604/smub/voltage" in safety_channels
+        writer.write_immediate.assert_awaited_once()
+
+        await manager._run_checks()
+
+        assert manager.state is SafetyState.FAULT_LATCHED
+        assert f"positively observed unmanaged {unsafe_kind} on smub" in manager.fault_reason
+        assert plant.output_state == {"smua": 0, "smub": 0}
+        assert driver.output_state_unverified is False
+        assert driver.active_channels == []
+        assert manager._active_sources == set()
+        assert driver.unsafe_output_observations == ()
+
+        published = []
+        while not channel_states.empty():
+            published.append(channel_states.get_nowait())
+            channel_states.task_done()
+        final_states = {reading.metadata["channel"]: reading.metadata["state"] for reading in published[-2:]}
+        assert final_states == {"smua": "off", "smub": "fault"}
+    finally:
+        await manager.stop()
+        await driver.disconnect()
+
+
+async def test_observations_replace_per_channel_and_reconnect_rejects_late_generation() -> None:
+    driver, plant, _transport = await _connected_observation_driver()
+    try:
+        plant.output_state["smua"] = 1
+        await driver.read_channels()
+        first = driver.unsafe_output_observations
+        assert len(first) == 1
+        assert first[0].channel == "smua"
+        assert first[0].kind == "output_on"
+
+        await driver.read_channels()
+        repeated = driver.unsafe_output_observations
+        assert len(repeated) == 1
+        assert repeated[0].channel == "smua"
+        assert repeated[0].sequence > first[0].sequence
+
+        plant.output_reply_override["smub"] = "not-an-output-state"
+        await driver.read_channels()
+        by_channel = {observation.channel: observation for observation in driver.unsafe_output_observations}
+        assert by_channel["smua"].kind == "output_on"
+        assert by_channel["smub"].kind == "invalid_readback"
+
+        stale_generation = by_channel["smua"].connection_generation
+        stale_epoch = by_channel["smua"].command_epoch
+        await driver.disconnect()
+        assert driver.unsafe_output_observations == ()
+        plant.output_reply_override.clear()
+        await driver.connect()
+        assert driver.source_connection_generation != stale_generation
+        assert (
+            driver._record_unsafe_output_observation(
+                "smua",
+                connection_generation=stale_generation,
+                command_epoch=stale_epoch,
+                operation="read_channels_idle_output_query",
+                kind="output_on",
+            )
+            is False
+        )
+        assert driver.unsafe_output_observations == ()
+    finally:
+        if driver.connected:
+            await driver.disconnect()
+
+
+@pytest.mark.parametrize(
+    "invalid_provenance",
+    (
+        "connection_generation",
+        "command_epoch",
+        "operation",
+        "kind",
+        "start_operation",
+        "off_operation",
+        "active_channel",
+        "connect_transition",
+        "disconnect_transition",
+        "disconnected",
+    ),
+)
+async def test_positive_observation_requires_every_current_idle_read_condition(
+    invalid_provenance: str,
+) -> None:
+    driver, _plant, _transport = await _connected_observation_driver()
+    generation = driver.source_connection_generation
+    epoch = driver._source_command_epoch["smua"]
+    operation = "read_channels_idle_output_query"
+    kind = "output_on"
+    try:
+        if invalid_provenance == "connection_generation":
+            generation -= 1
+        elif invalid_provenance == "command_epoch":
+            epoch -= 1
+        elif invalid_provenance == "operation":
+            operation = "start_source"
+        elif invalid_provenance == "kind":
+            kind = "off"
+        elif invalid_provenance == "start_operation":
+            driver._source_start_token["smua"] = epoch
+        elif invalid_provenance == "off_operation":
+            driver._source_off_depth["smua"] = 1
+        elif invalid_provenance == "active_channel":
+            driver._channels["smua"].active = True
+        elif invalid_provenance == "connect_transition":
+            driver._connect_in_progress = True
+        elif invalid_provenance == "disconnect_transition":
+            driver._disconnect_in_progress = True
+        else:
+            driver._connected = False
+
+        assert (
+            driver._record_unsafe_output_observation(
+                "smua",
+                connection_generation=generation,
+                command_epoch=epoch,
+                operation=operation,
+                kind=kind,
+            )
+            is False
+        )
+        assert driver.unsafe_output_observations == ()
+    finally:
+        driver._source_start_token["smua"] = None
+        driver._source_off_depth["smua"] = 0
+        driver._channels["smua"].active = False
+        driver._connect_in_progress = False
+        driver._disconnect_in_progress = False
+        driver._connected = True
+        await driver.disconnect()
+
+
+async def test_manager_owned_off_rejects_late_on_read_without_false_ready_fault() -> None:
+    driver, plant, _transport = await _connected_observation_driver()
+    manager = _manager(driver=driver)
+    manager._config.critical_channels = []
+    try:
+        await _qualify_generation(manager, driver, expected_verified_off=True)
+        manager._transition(SafetyState.READY, "qualified before owned OFF")
+        plant.output_state["smua"] = 1
+        plant.block_idle_channel = "smua"
+        read_task = asyncio.create_task(driver.read_channels())
+        await plant.idle_query_entered.wait()
+
+        off_task = asyncio.create_task(manager.emergency_off(channel=None))
+        await _yield_until(
+            lambda: driver._source_off_depth["smua"] > 0,
+            message="manager-owned OFF did not preclaim the driver command epoch",
+        )
+        assert driver.output_state_unverified is True
+        await manager._run_checks()
+        assert manager.state is SafetyState.READY
+        assert driver.unsafe_output_observations == ()
+
+        plant.idle_query_release.set()
+        await asyncio.wait_for(read_task, timeout=2.0)
+        off_result = await asyncio.wait_for(off_task, timeout=2.0)
+        assert off_result["ok"] is True
+        assert manager.state is SafetyState.SAFE_OFF
+        assert plant.output_state == {"smua": 0, "smub": 0}
+        assert driver.unsafe_output_observations == ()
+
+        prior_generation = driver.source_connection_generation
+        assert (
+            await manager.disconnect_reviewed_source(
+                driver,
+                manager._reviewed_source_runtime_binding,  # type: ignore[arg-type]
+                None,
+                "observation generation replacement",
+            )
+            is True
+        )
+        await driver.connect()
+        await _qualify_generation(manager, driver, expected_verified_off=True)
+        assert driver.source_connection_generation != prior_generation
+        await manager._run_checks()
+        assert manager.state is not SafetyState.FAULT_LATCHED
+        assert driver.unsafe_output_observations == ()
+    finally:
+        plant.idle_query_release.set()
+        await manager.stop()
+        if driver.connected:
+            await driver.disconnect()
+
+
+async def test_two_managed_channels_have_no_unmanaged_positive_observation() -> None:
+    driver, _plant, _transport = await _connected_observation_driver()
+    safety_broker = SafetyBroker()
+    writer = MagicMock()
+    writer.is_disk_full = False
+    writer.descriptor_authoritative = False
+    writer.write_immediate = AsyncMock(return_value=True)
+    scheduler = Scheduler(
+        DataBroker(),
+        safety_broker=safety_broker,
+        sqlite_writer=writer,
+    )
+    scheduler.add(InstrumentConfig(driver=driver))
+    state = scheduler._instruments[driver.name]
+    manager = _manager(driver=driver, safety_broker=safety_broker)
+    manager._config.critical_channels = []
+    manager._keithley_heartbeat_bindings = {
+        "smua": frozenset({("k2604", "k2604/smua/voltage")}),
+        "smub": frozenset({("k2604", "k2604/smub/voltage")}),
+    }
+    try:
+        await _qualify_generation(manager, driver, expected_verified_off=True)
+        manager._transition(SafetyState.READY, "qualified before dual managed run")
+        assert (await manager.request_run(0.1, 1.0, 0.1, channel="smua"))["ok"] is True
+        assert (await manager.request_run(0.1, 1.0, 0.1, channel="smub"))["ok"] is True
+        readings = await driver.read_channels()
+        await scheduler._process_readings(state, readings)
+        await asyncio.sleep(0)
+
+        assert driver.active_channels == ["smua", "smub"]
+        assert manager._active_sources == {"smua", "smub"}
+        assert driver.unsafe_output_observations == ()
+        assert manager._current_unmanaged_output_hazard() is None
+        await manager._run_checks()
+        assert manager.state is SafetyState.RUNNING
+        assert manager._active_sources == {"smua", "smub"}
+    finally:
+        await manager.stop()
+        await driver.disconnect()
+
+
 @pytest.mark.parametrize("begin_ready", (False, True))
 async def test_request_run_requires_current_exact_reviewed_off_proof(
     begin_ready: bool,
@@ -320,6 +684,7 @@ async def test_second_channel_unverified_target_fails_closed(target_result: obje
             if isinstance(target_result, BaseException):
                 raise target_result
             return target_result
+        driver.output_state_unverified = False
         return SourceOffResult.DEVICE_REPORTED_OFF
 
     driver = MagicMock()

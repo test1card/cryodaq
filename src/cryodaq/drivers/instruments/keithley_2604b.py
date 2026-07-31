@@ -339,6 +339,18 @@ class ChannelRuntime:
     active: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class UnsafeOutputObservation:
+    """One current-generation positive observation from the idle read path."""
+
+    channel: SmuChannel
+    connection_generation: int
+    command_epoch: int
+    operation: str
+    kind: str
+    sequence: int
+
+
 class Keithley2604B(InstrumentDriver):
     def __init__(
         self,
@@ -382,9 +394,9 @@ class Keithley2604B(InstrumentDriver):
         # Compliance tracking: consecutive cycles where SMU reports compliance.
         self._compliance_count: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
         self._mock_temp = _MOCK_T0
-        # F2: set True when the crash-recovery force-OFF on connect() cannot be
-        # readback-verified (outputs may still be ON). A blocking RUN
-        # precondition in SafetyManager, cleared by a later verified OFF.
+        # Exact negative cache: True whenever either channel lacks current
+        # readback-verified OFF evidence, including connect recovery, source
+        # start, unmanaged output ON, or unusable output readback.
         self._unsafe_output_state = True
         # Connection-scoped evidence: only OFF readback collected in the
         # current connection generation may authorize transport teardown.
@@ -414,6 +426,15 @@ class Keithley2604B(InstrumentDriver):
             "smua": None,
             "smub": None,
         }
+        # Positive per-channel evidence is deliberately separate from the
+        # global negative OFF cache above.  Only the idle output-state query
+        # may create one of these observations, and every source/lifecycle
+        # authority change revokes it synchronously.
+        self._unsafe_output_observations: dict[SmuChannel, UnsafeOutputObservation | None] = {
+            "smua": None,
+            "smub": None,
+        }
+        self._unsafe_output_observation_sequence = 0
 
     def _raise_if_operationally_barred(self, operation: str) -> None:
         """Reject ordinary traffic after teardown uncertainty or transport loss."""
@@ -780,6 +801,8 @@ class Keithley2604B(InstrumentDriver):
                 if not runtime.active:
                     # Check output state — source may be OFF or left ON from
                     # a previous session.  measure.iv() errors when output is OFF.
+                    observation_generation = self._connection_generation
+                    observation_epoch = self._source_command_epoch[smu_channel]
                     output_raw = await self._operational_query(
                         f"print({smu_channel}.source.output)",
                         timeout_ms=3000,
@@ -788,7 +811,13 @@ class Keithley2604B(InstrumentDriver):
                     try:
                         output_on = _parse_output_enabled(output_raw)
                     except ValueError as exc:
-                        self._invalidate_channel_off_evidence(smu_channel, advance_epoch=True)
+                        self._record_unsafe_output_observation(
+                            smu_channel,
+                            connection_generation=observation_generation,
+                            command_epoch=observation_epoch,
+                            operation="read_channels_idle_output_query",
+                            kind="invalid_readback",
+                        )
                         log.error(
                             "%s: invalid output state on %s: %s",
                             self.name,
@@ -808,7 +837,25 @@ class Keithley2604B(InstrumentDriver):
                         continue
 
                     # Output is ON but not managed by us — read for monitoring.
-                    self._invalidate_channel_off_evidence(smu_channel, advance_epoch=True)
+                    observation_committed = self._record_unsafe_output_observation(
+                        smu_channel,
+                        connection_generation=observation_generation,
+                        command_epoch=observation_epoch,
+                        operation="read_channels_idle_output_query",
+                        kind="output_on",
+                    )
+                    if not observation_committed:
+                        # The query completed after an owned OFF/start/lifecycle
+                        # cut.  Its old-generation ON result is not current
+                        # plant authority, and measuring after that transition
+                        # could itself race the now-authoritative OFF.
+                        readings.extend(
+                            self._error_readings_for_channel(
+                                smu_channel,
+                                output_evidence=output_evidence,
+                            )
+                        )
+                        continue
                     raw = await self._operational_query(f"print({smu_channel}.measure.iv())")
                     iv_evidence = raw
                     current, voltage = self._parse_iv_response(raw, smu_channel)
@@ -1395,13 +1442,52 @@ class Keithley2604B(InstrumentDriver):
         self._output_off_verified[smu_channel] = False
         self._output_off_verified_generation[smu_channel] = None
         self._output_off_verified_epoch[smu_channel] = None
+        self._unsafe_output_observations[smu_channel] = None
         self._unsafe_output_state = True
 
     def _revoke_off_evidence(self) -> None:
         self._output_off_verified = {"smua": False, "smub": False}
         self._output_off_verified_generation = {"smua": None, "smub": None}
         self._output_off_verified_epoch = {"smua": None, "smub": None}
+        self._unsafe_output_observations = {"smua": None, "smub": None}
         self._unsafe_output_state = True
+
+    def _record_unsafe_output_observation(
+        self,
+        smu_channel: SmuChannel,
+        *,
+        connection_generation: int,
+        command_epoch: int,
+        operation: str,
+        kind: str,
+    ) -> bool:
+        """Commit positive unsafe evidence only from one still-current read."""
+
+        if (
+            operation != "read_channels_idle_output_query"
+            or kind not in {"output_on", "invalid_readback"}
+            or not self._connected
+            or self._connect_in_progress
+            or self._disconnect_in_progress
+            or connection_generation != self._connection_generation
+            or command_epoch != self._source_command_epoch[smu_channel]
+            or self._source_start_token[smu_channel] is not None
+            or self._source_off_depth[smu_channel] != 0
+            or self._channels[smu_channel].active
+        ):
+            return False
+
+        self._invalidate_channel_off_evidence(smu_channel, advance_epoch=True)
+        self._unsafe_output_observation_sequence += 1
+        self._unsafe_output_observations[smu_channel] = UnsafeOutputObservation(
+            channel=smu_channel,
+            connection_generation=self._connection_generation,
+            command_epoch=self._source_command_epoch[smu_channel],
+            operation=operation,
+            kind=kind,
+            sequence=self._unsafe_output_observation_sequence,
+        )
+        return True
 
     def _begin_off_operation(self, channels: list[SmuChannel]) -> dict[SmuChannel, int]:
         """Preclaim OFF authority for every target before the first await."""
@@ -1521,6 +1607,7 @@ class Keithley2604B(InstrumentDriver):
         runtime.p_target = 0.0
         self._last_v[smu_channel] = 0.0
         self._compliance_count[smu_channel] = 0
+        self._unsafe_output_observations[smu_channel] = None
         self._output_off_verified[smu_channel] = True
         self._output_off_verified_generation[smu_channel] = self._connection_generation
         self._output_off_verified_epoch[smu_channel] = proof_epoch
@@ -1538,12 +1625,39 @@ class Keithley2604B(InstrumentDriver):
 
     @property
     def output_state_unverified(self) -> bool:
-        """True when the crash-recovery force-OFF on connect() could not be
-        readback-verified (outputs may still be ON). SafetyManager treats this
-        as a blocking RUN precondition until a later verified OFF clears it."""
+        """Whether either channel lacks exact current-generation OFF proof.
+
+        Connect recovery, source start, unmanaged output ON, and unusable
+        output readback all invalidate the proof. SafetyManager treats this
+        exact negative fact as authoritative until a later verified OFF clears
+        it.
+        """
         if not self.mock and not (self._connected or self._recovery_transport_open):
             return True
         return self._unsafe_output_state
+
+    @property
+    def unsafe_output_observations(self) -> tuple[UnsafeOutputObservation, ...]:
+        """Current positive idle-read observations, never actuation authority."""
+
+        if not self._connected or self._connect_in_progress or self._disconnect_in_progress:
+            return ()
+        current: list[UnsafeOutputObservation] = []
+        for smu_channel in SMU_CHANNELS:
+            observation = self._unsafe_output_observations[smu_channel]
+            if (
+                observation is not None
+                and observation.channel == smu_channel
+                and observation.connection_generation == self._connection_generation
+                and observation.command_epoch == self._source_command_epoch[smu_channel]
+                and observation.operation == "read_channels_idle_output_query"
+                and observation.kind in {"output_on", "invalid_readback"}
+                and self._source_start_token[smu_channel] is None
+                and self._source_off_depth[smu_channel] == 0
+                and not self._channels[smu_channel].active
+            ):
+                current.append(observation)
+        return tuple(current)
 
     @property
     def any_active(self) -> bool:

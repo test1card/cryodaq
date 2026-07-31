@@ -80,6 +80,13 @@ class SafetyEvent:
     value: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class _RunAuthorityRevocation:
+    reason: str
+    full_shutdown: bool
+    fault_required: bool
+
+
 @dataclass
 class SafetyConfig:
     critical_channels: list[re.Pattern[str]] = field(default_factory=list)
@@ -286,6 +293,7 @@ class SafetyManager:
         # so a settled historical abort does not permanently inhibit RUN.
         self._abort_generation = 0
         self._full_abort_generation = 0
+        self._latched_fault_abort_generation: int | None = None
 
         # A global OFF is one physical operation for one exact driver/source
         # generation and abort epoch. Concurrent callers share this retained
@@ -1022,6 +1030,7 @@ class SafetyManager:
         channel: str | None = None,
     ) -> dict[str, Any]:
         start_abort_generation = self._abort_generation
+        start_full_abort_generation = self._full_abort_generation
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
 
@@ -1336,6 +1345,7 @@ class SafetyManager:
                     "error": "Interlock trip during start — source not activated",
                 }
 
+            expected_active_sources = frozenset(self._active_sources | {smu_channel})
             self._active_sources.add(smu_channel)
             if self._state != SafetyState.RUNNING:
                 self._transition(
@@ -1386,12 +1396,261 @@ class SafetyManager:
                     raise cancellation
                 assert publish_error is not None
                 raise publish_error
+            revocation = self._post_publication_run_revocation(
+                smu_channel=smu_channel,
+                expected_active_sources=expected_active_sources,
+                start_abort_generation=start_abort_generation,
+                start_full_abort_generation=start_full_abort_generation,
+            )
+            if revocation is not None:
+                return await self._settle_post_publication_run_revocation(
+                    smu_channel=smu_channel,
+                    revocation=revocation,
+                )
             return {
                 "ok": True,
                 "state": self._state.value,
                 "channel": smu_channel,
                 "active_channels": sorted(self._active_sources),
             }
+
+    def _current_unmanaged_output_hazard(self) -> tuple[SmuChannel | None, str] | None:
+        """Consume only an exact current positive observation capability."""
+
+        driver = self._keithley
+        if driver is None:
+            return None
+        try:
+            inspect.getattr_static(driver, "unsafe_output_observations")
+        except AttributeError:
+            # Legacy test doubles have no positive-observation capability.
+            # The sealed production Keithley implementation always has it.
+            return None
+
+        observations = getattr(driver, "unsafe_output_observations", None)
+        if type(observations) is not tuple:
+            return None, "reviewed source exposed malformed unsafe-output observations"
+
+        seen: set[SmuChannel] = set()
+        for observation in observations:
+            try:
+                observed_channel = observation.channel
+                connection_generation = observation.connection_generation
+                command_epoch = observation.command_epoch
+                operation = observation.operation
+                kind = observation.kind
+                sequence = observation.sequence
+            except (AttributeError, TypeError):
+                return None, "reviewed source exposed malformed unsafe-output observation provenance"
+            current_generation = getattr(driver, "source_connection_generation", None)
+            if (
+                type(observed_channel) is not str
+                or observed_channel not in SMU_CHANNELS
+                or observed_channel in seen
+                or type(connection_generation) is not int
+                or type(current_generation) is not int
+                or connection_generation != current_generation
+                or type(command_epoch) is not int
+                or command_epoch < 0
+                or operation != "read_channels_idle_output_query"
+                or kind not in {"output_on", "invalid_readback"}
+                or type(sequence) is not int
+                or sequence <= 0
+            ):
+                return None, "reviewed source exposed stale or malformed unsafe-output observation provenance"
+            seen.add(observed_channel)
+            if observed_channel not in self._active_sources:
+                return (
+                    observed_channel,
+                    f"positively observed unmanaged {kind} on {observed_channel}",
+                )
+        return None
+
+    def _exact_driver_active_source_cut(
+        self,
+    ) -> tuple[bool, frozenset[SmuChannel] | None]:
+        """Return whether the driver exposes an exact, well-formed active cut."""
+
+        driver = self._keithley
+        if driver is None:
+            return False, None
+        try:
+            inspect.getattr_static(driver, "active_channels")
+        except AttributeError:
+            return False, None
+        active = getattr(driver, "active_channels", None)
+        if type(active) is not list:
+            return True, None
+        if any(type(channel) is not str or channel not in SMU_CHANNELS for channel in active) or len(active) != len(
+            set(active)
+        ):
+            return True, None
+        return True, frozenset(active)
+
+    def _post_publication_run_revocation(
+        self,
+        *,
+        smu_channel: SmuChannel,
+        expected_active_sources: frozenset[SmuChannel],
+        start_abort_generation: int,
+        start_full_abort_generation: int,
+    ) -> _RunAuthorityRevocation | None:
+        """Reconcile the final authority cut after RUN publication settles."""
+
+        self._observe_terminal_safety_children()
+        reasons: list[str] = []
+        fault_required = False
+        full_shutdown = False
+
+        if self._state is SafetyState.FAULT_LATCHED:
+            reasons.append(f"fault latched: {self._fault_reason}")
+            full_shutdown = True
+        elif self._state is not SafetyState.RUNNING:
+            reasons.append(f"state changed to {self._state.value}")
+            fault_required = True
+            full_shutdown = True
+
+        if not self._safety_children_authoritative():
+            reasons.append("safety child authority changed")
+            fault_required = self._state is not SafetyState.FAULT_LATCHED
+            full_shutdown = True
+        if self._pending_child_fault_settlements:
+            reasons.append("safety child fault settlement is still in progress")
+            fault_required = self._state is not SafetyState.FAULT_LATCHED
+            full_shutdown = True
+
+        abort_changed = self._abort_generation != start_abort_generation
+        full_abort_changed = self._full_abort_generation != start_full_abort_generation
+        if abort_changed:
+            reasons.append(
+                "global abort generation changed" if full_abort_changed else "channel abort generation changed"
+            )
+            full_shutdown = full_shutdown or full_abort_changed
+
+        if frozenset(self._active_sources) != expected_active_sources:
+            reasons.append("SafetyManager active-source ownership changed")
+            fault_required = self._state is not SafetyState.FAULT_LATCHED
+            full_shutdown = True
+
+        cut_present, driver_active_sources = self._exact_driver_active_source_cut()
+        if cut_present and driver_active_sources != expected_active_sources:
+            reasons.append("reviewed source active-channel cut disagrees with SafetyManager ownership")
+            fault_required = self._state is not SafetyState.FAULT_LATCHED
+            full_shutdown = True
+
+        hazard = self._current_unmanaged_output_hazard()
+        if hazard is not None:
+            _hazard_channel, hazard_reason = hazard
+            reasons.append(hazard_reason)
+            fault_required = self._state is not SafetyState.FAULT_LATCHED
+            full_shutdown = True
+
+        if not reasons:
+            return None
+        if not abort_changed and not full_shutdown:
+            # Every unexplained authority change is global and fault-worthy.
+            fault_required = self._state is not SafetyState.FAULT_LATCHED
+            full_shutdown = True
+        return _RunAuthorityRevocation(
+            reason=f"RUN authority revoked after publication for {smu_channel}: " + "; ".join(reasons),
+            full_shutdown=full_shutdown,
+            fault_required=fault_required,
+        )
+
+    async def _settle_post_publication_run_revocation(
+        self,
+        *,
+        smu_channel: SmuChannel,
+        revocation: _RunAuthorityRevocation,
+    ) -> dict[str, Any]:
+        """Settle the revoked RUN cut before issuing a negative receipt."""
+
+        caller_cancelled: asyncio.CancelledError | None = None
+        off_confirmed = False
+        if revocation.fault_required and self._state is not SafetyState.FAULT_LATCHED:
+            fault_task = asyncio.create_task(
+                self._fault(
+                    revocation.reason,
+                    channel=smu_channel,
+                    source="run_post_publication_reconciliation",
+                ),
+                name=f"post_publication_run_fault_{smu_channel}",
+            )
+            _result, fault_error, fault_cancelled = await _settle_shielded_hardware_task(fault_task)
+            caller_cancelled = fault_cancelled
+            if fault_error is not None:
+                logger.critical("Post-publication RUN fault settlement failed: %s", fault_error)
+            off_confirmed = not self._active_sources and self._reviewed_source_off_evidence.verified_off
+        else:
+            off_scope = None if revocation.full_shutdown else smu_channel
+            off_task = asyncio.create_task(
+                self._ensure_output_off(off_scope),
+                name=f"post_publication_run_off_{smu_channel}",
+            )
+            off_result, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
+            caller_cancelled = off_cancelled
+            off_confirmed = off_error is None and off_result is True
+            if off_error is not None:
+                logger.critical("Post-publication RUN rollback failed: %s", off_error)
+            if off_confirmed:
+                if revocation.full_shutdown:
+                    self._active_sources.clear()
+                else:
+                    self._active_sources.discard(smu_channel)
+            elif self._state is not SafetyState.FAULT_LATCHED:
+                fault_task = asyncio.create_task(
+                    self._fault(
+                        f"{revocation.reason}; rollback could not confirm OFF",
+                        channel=smu_channel,
+                        source="run_post_publication_reconciliation",
+                    ),
+                    name=f"post_publication_run_off_failure_{smu_channel}",
+                )
+                _result, fault_error, fault_cancelled = await _settle_shielded_hardware_task(fault_task)
+                caller_cancelled = caller_cancelled or fault_cancelled
+                if fault_error is not None:
+                    logger.critical("Post-publication RUN rollback fault failed: %s", fault_error)
+
+        if self._state is not SafetyState.FAULT_LATCHED:
+            if self._active_sources:
+                if self._state is not SafetyState.RUNNING:
+                    self._transition(
+                        SafetyState.RUNNING,
+                        f"Revoked start for {smu_channel}; existing sources remain",
+                        channel=smu_channel,
+                    )
+                else:
+                    self._refresh_operator_safety_snapshot()
+            else:
+                self._transition(
+                    SafetyState.SAFE_OFF,
+                    f"Revoked start settled OFF for {smu_channel}",
+                    channel=smu_channel,
+                )
+        else:
+            self._refresh_operator_safety_snapshot()
+
+        # A competing fault can publish before the previously blocked RUN
+        # event. Publish one final owner cut after that event settles so the
+        # last observable state cannot remain stale ON.
+        publish_task = asyncio.create_task(
+            self._publish_keithley_channel_states(f"run_revoked:{smu_channel}"),
+            name=f"publish_revoked_run_{smu_channel}",
+        )
+        _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
+        caller_cancelled = caller_cancelled or publish_cancelled
+        if publish_error is not None:
+            logger.warning("Revoked RUN state publication failed: %s", publish_error)
+        if caller_cancelled is not None:
+            raise caller_cancelled
+        return {
+            "ok": False,
+            "state": self._state.value,
+            "channel": smu_channel,
+            "active_channels": sorted(self._active_sources),
+            "output_off_confirmed": off_confirmed,
+            "error": revocation.reason,
+        }
 
     async def request_stop(self, *, channel: str | None = None) -> dict[str, Any]:
         """Own stop intent and the complete lock-to-publication settlement."""
@@ -2045,6 +2304,11 @@ class SafetyManager:
         observed = max(time.monotonic(), previous.observed_monotonic_s)
         lifecycle = SafetyLifecycle(self._state.value)
         children_authoritative = self._safety_children_authoritative()
+        # The driver's exact negative cache must dominate an older positive
+        # receipt. read_channels() sets it when unmanaged output is ON or the
+        # output readback is unusable; neither condition can remain verified OFF.
+        if self._keithley is not None and getattr(self._keithley, "output_state_unverified", None) is True:
+            self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         verified_off = (
             children_authoritative
             and self._reviewed_source_connected
@@ -2454,7 +2718,7 @@ class SafetyManager:
         # This prevents a mutation that resumes from an await from committing
         # after monitor/rate/persistence faults that do not originate in an
         # operator command.
-        self._register_abort_intent(full=True)
+        self._latched_fault_abort_generation = self._register_abort_intent(full=True)
         self._fault_revision += 1
         # 1. Latch fault state IMMEDIATELY — no awaits before this.
         #    _transition is synchronous, so request_run() will see
@@ -2506,10 +2770,18 @@ class SafetyManager:
         caller_cancelled: asyncio.CancelledError | None = None
 
         if self._keithley is not None:
-            shutdown_task = asyncio.create_task(self._keithley.emergency_off())
+            # Share the retained global-OFF owner with post-publication
+            # reconciliation and any concurrent safe-direction waiter.  This
+            # keeps SafetyManager as the sole actuation owner instead of
+            # fanning one fault into parallel driver emergency_off calls.
+            shutdown_task = asyncio.create_task(
+                self._ensure_output_off(
+                    owner_abort_generation=self._latched_fault_abort_generation,
+                )
+            )
             result, error, cancelled = await _settle_shielded_hardware_task(shutdown_task)
             caller_cancelled = cancelled
-            outputs_confirmed_off = error is None and result is SourceOffResult.DEVICE_REPORTED_OFF
+            outputs_confirmed_off = error is None and result is True
             if error is not None:
                 logger.critical("FAULT: emergency_off failed: %s", error)
 
@@ -2530,7 +2802,8 @@ class SafetyManager:
         if self._keithley is not None:
             retained_generation = self._has_current_reviewed_connection_generation()
             self._reviewed_source_connected = retained_generation
-            self._reviewed_source_off_evidence = self._global_off_evidence_for_result(result)
+            if not outputs_confirmed_off:
+                self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._refresh_operator_safety_snapshot()
 
         # 4. Post-mortem log emission — shielded — MUST happen after hardware
@@ -2572,15 +2845,20 @@ class SafetyManager:
             # concurrent waiters cannot fan out into duplicate operations.
             return await self._keithley.emergency_off()
 
-    def _global_output_off_owner(self) -> asyncio.Task[Any]:
+    def _global_output_off_owner(
+        self,
+        *,
+        owner_abort_generation: int | None = None,
+    ) -> asyncio.Task[Any]:
         """Return the retained owner for this exact source/abort generation."""
+        required_abort_generation = self._abort_generation if owner_abort_generation is None else owner_abort_generation
         task = self._global_off_owner_task
         if (
             task is not None
             and not task.done()
             and self._global_off_owner_driver is self._keithley
             and self._global_off_owner_generation is self._reviewed_source_generation
-            and self._global_off_owner_abort_generation == self._abort_generation
+            and self._global_off_owner_abort_generation == required_abort_generation
         ):
             return task
 
@@ -2591,7 +2869,7 @@ class SafetyManager:
         self._global_off_owner_task = task
         self._global_off_owner_driver = self._keithley
         self._global_off_owner_generation = self._reviewed_source_generation
-        self._global_off_owner_abort_generation = self._abort_generation
+        self._global_off_owner_abort_generation = required_abort_generation
         return task
 
     def _release_global_output_off_owner(self, task: asyncio.Task[Any]) -> None:
@@ -2602,7 +2880,12 @@ class SafetyManager:
             self._global_off_owner_generation = None
             self._global_off_owner_abort_generation = -1
 
-    async def _ensure_output_off(self, channel: str | None = None) -> bool:
+    async def _ensure_output_off(
+        self,
+        channel: str | None = None,
+        *,
+        owner_abort_generation: int | None = None,
+    ) -> bool:
         """Force Keithley output OFF. True iff the driver CONFIRMED it.
 
         CR-2: propagates the driver's confirmation bool so callers can fail
@@ -2613,7 +2896,9 @@ class SafetyManager:
             return True
         caller_cancelled: asyncio.CancelledError | None = None
         off_task = (
-            self._global_output_off_owner()
+            self._global_output_off_owner(
+                owner_abort_generation=owner_abort_generation,
+            )
             if channel is None
             else asyncio.create_task(self._keithley.emergency_off(channel))
         )
@@ -2814,18 +3099,19 @@ class SafetyManager:
         if not self._mock and not self._active_sources and not self._reviewed_source_off_evidence.verified_off:
             return False, ("Reviewed source OFF state is UNVERIFIED - confirm exact OFF before RUN")
 
-        # F2: a connected Keithley whose crash-recovery force-OFF could not be
-        # readback-verified may still be sourcing. Block RUN (only RUN — this is
-        # a precondition, so measurement/diagnostics/manual retry stay available)
-        # until a later verified OFF clears the flag. Fail-closed, no lockout.
+        # A connected Keithley whose current OFF proof was absent or invalidated
+        # by recovery, unmanaged output, or unusable readback may still be
+        # sourcing. Block RUN (only RUN — this is a precondition, so
+        # measurement/diagnostics/manual retry stay available) until a later
+        # verified OFF clears the flag. Fail-closed, no lockout.
         if (
             self._keithley is not None
             and not self._active_sources
             and getattr(self._keithley, "output_state_unverified", False)
         ):
             return False, (
-                "Keithley output state UNVERIFIED after connect (crash-recovery "
-                "force-OFF unconfirmed) — issue emergency off before RUN"
+                "Keithley output state UNVERIFIED (current OFF proof absent or "
+                "invalidated) — issue emergency off before RUN"
             )
 
         if self._state == SafetyState.FAULT_LATCHED:
@@ -2879,6 +3165,16 @@ class SafetyManager:
     async def _run_checks(self) -> None:
         now = time.monotonic()
         self._refresh_operator_safety_snapshot()
+
+        unmanaged_hazard = self._current_unmanaged_output_hazard()
+        if unmanaged_hazard is not None and self._state is not SafetyState.FAULT_LATCHED:
+            hazard_channel, hazard_reason = unmanaged_hazard
+            await self._fault(
+                f"Reviewed source unsafe-output observation: {hazard_reason}",
+                channel=hazard_channel or "",
+                source="reviewed_source_output_observation",
+            )
+            return
 
         qualification_refusal = self._energizing_mutation_refusal()
         if qualification_refusal is not None and self._state in (SafetyState.RUN_PERMITTED, SafetyState.RUNNING):
@@ -3167,35 +3463,37 @@ class SafetyManager:
 
         Called by InterlockEngine once a channel it protects has been
         non-usable (NaN / error-status) for ``nonusable_escalation`` long
-        enough. SafetyManager is the sole authority for the RUNNING gate:
+        enough. SafetyManager is the sole authority for the active source lifecycle:
 
-        - state == RUNNING (actively sourcing): latch FAULT_LATCHED +
-          emergency_off. Т1–Т10 are protected ONLY by interlocks
+        - state in {RUN_PERMITTED, RUNNING}: latch FAULT_LATCHED +
+          emergency_off. RUN_PERMITTED includes the in-flight OUTPUT_ON
+          boundary. Т1–Т10 are protected ONLY by interlocks
           (critical_channels covers just Т11/Т12), so a heated, sourcing zone
           with a persistently dead sensor is fail-open without this.
-        - outside RUNNING: log only, never fault — a stale/dead sensor while
-          idle must not block readiness recovery paths (preconditions already
-          gate readiness on channel health).
+        - outside the active source lifecycle: log only, never fault — a
+          stale/dead sensor while idle must not block readiness recovery paths
+          (preconditions already gate readiness on channel health).
 
         Returns
         -------
         bool
             ``True`` iff a fault is now latched (this call latched it, or the
             state was already FAULT_LATCHED). ``False`` iff escalation was
-            declined because the state is not RUNNING. S1 fail-closed contract:
-            InterlockEngine marks the debounce window ``escalated`` ONLY on
-            ``True``. A ``False`` leaves the window un-escalated so the next
-            non-usable sample retries — the first sample after RUNNING begins
-            then faults, instead of the dead channel leaking through forever.
+            declined because the state is outside RUN_PERMITTED/RUNNING. S1
+            fail-closed contract: InterlockEngine marks the debounce window
+            ``escalated`` ONLY on ``True``. A ``False`` leaves the window
+            un-escalated so the next non-usable sample retries — the first
+            sample after an active source lifecycle begins then faults, instead
+            of the dead channel leaking through forever.
         """
         if self._state == SafetyState.FAULT_LATCHED:
             # Already latched (possibly by this very escalation on a prior
             # sample) — the window is correctly escalated, do not retry.
             return True
-        if self._state != SafetyState.RUNNING:
+        if self._state not in (SafetyState.RUN_PERMITTED, SafetyState.RUNNING):
             logger.critical(
                 "Интерлок-канал %s устойчиво непригоден, но состояние %s "
-                "(источник неактивен) — fault не латчится (P2-5).",
+                "(опасный жизненный цикл источника неактивен) — fault не латчится (P2-5).",
                 channel,
                 self._state.value,
             )
