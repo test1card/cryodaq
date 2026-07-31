@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,38 @@ def _expected_immutable_paths() -> tuple[str, ...]:
     producer_files = _PROTECTED_PRODUCER_FILES
     anchor = producer_files.index("environment.yml") + 1
     return (*producer_files[:anchor], "requirements-lock.txt", *producer_files[anchor:])
+
+
+def test_every_protected_producer_file_is_pinned_to_lf(tmp_path: Path) -> None:
+    attributes_root = tmp_path / "attributes"
+    attributes_root.mkdir()
+    attributes_raw = (ROOT / ".gitattributes").read_bytes()
+    (attributes_root / ".gitattributes").write_bytes(attributes_raw)
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=attributes_root,
+        check=True,
+        capture_output=True,
+    )
+    completed = subprocess.run(
+        ["git", "check-attr", "-z", "text", "eol", "--", *_PROTECTED_PRODUCER_FILES],
+        cwd=attributes_root,
+        check=True,
+        capture_output=True,
+    )
+    fields = completed.stdout.split(b"\0")
+    assert fields.pop() == b""
+    attributes = {
+        (path.decode("utf-8"), name.decode("utf-8")): value.decode("utf-8")
+        for path, name, value in zip(fields[::3], fields[1::3], fields[2::3], strict=True)
+    }
+    assert attributes == {
+        (path, attribute): value
+        for path in _PROTECTED_PRODUCER_FILES
+        for attribute, value in (("text", "set"), ("eol", "lf"))
+    }
+    assert b"\r" not in attributes_raw
+    assert all(b"\r" not in (ROOT / path).read_bytes() for path in _PROTECTED_PRODUCER_FILES)
 
 
 def _assert_workflow_source(step: dict) -> None:

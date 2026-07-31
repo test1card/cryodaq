@@ -31,5 +31,6 @@ tools/ci_candidate_runner.py text eol=lf
 tools/ci_execution_roots.py text eol=lf
 tools/ci_guard_execution.py text eol=lf
 tools/ci_partition_execution_proof.py text eol=lf
+tools/ci_required_workflow_context.py text eol=lf
 tools/governance_contract.py text eol=lf
 tools/montana_candidate_gate.py text eol=lf
