@@ -2537,6 +2537,14 @@ false_green_pairs:
     ci_partition: gui
     red_evidence: real_thread_only_type_checks_silently_skipped_nonstandard_non_none_feeder_owners_and_could_credit_candidate_cleanup_without_exact_terminal_capability_2026_07_23_pending_immutable_capture
     green_evidence: pending
+  - id: CI-WORKFLOW-CONTEXT-JOIN-FALSE-GREEN-202
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-BINDING-001
+    guard: tests/governance/test_ci_partition_execution_proof.py::test_production_proof_rejects_mandated_identity_mutations
+    ci_partition: remaining
+    red_evidence: reviewer_confirmed_blanket_same_sha_join_and_missing_exact_context_supersession_2026_07_31_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: GOVERNANCE-PREVENTION-MAP-001
@@ -4078,8 +4086,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: CI can execute one tree while hashing or uploading another, omit exact run or artifact identity, or let a registry artifact claim conceal the candidate tree and suite it attests.
-    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, and uploaded artifact digest; every registry artifact evidence claim carries the receipt tree and exact suite coverage, while a multi-partition closure requires a sealed aggregate bundle naming exactly every covered guard partition.
+    consequence: CI can execute one tree while hashing or uploading another, omit exact run or artifact identity, let an unrelated same-SHA automatic run publish the retained required check, hide a relevant failure behind stale or ambiguous pull-request association data, or let a registry artifact claim conceal the candidate tree and suite it attests.
+    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, uploaded artifact digest, and a trusted expected target context carried through the final retained-name check decision; relevance is classified before strict normalization or attempt adjudication from bounded server-filtered populations, every relevant non-first attempt is zero credit, push/PR association reconciles bounded API and embedded evidence by stable repository and PR IDs with exact base/head fields, and cancellation is superseded only by a strictly later normalized timestamp; every registry artifact evidence claim carries the receipt tree and exact suite coverage, while a multi-partition closure requires a sealed aggregate bundle naming exactly every covered guard partition.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4114,6 +4122,32 @@ records:
       - node: tests/test_ci_candidate_evidence.py::test_candidate_runner_rejects_zero_exit_without_exact_passed_guard_receipt
         ci_partition: remaining
       - node: tests/test_ci_candidate_evidence.py::test_strict_guard_receipt_parser_rejects_forged_marker_semantics
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_manual_or_rerun_replay_cannot_earn_partition_acceptance
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_artifact_attempt_cannot_override_rest_run_attempt
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_context_join_adjudicates_only_exact_candidate_lineage
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_selected_pull_request_success_and_exact_push_counterpart_are_joined
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_workflow_run_required_fields_and_integer_id_attempt_types_fail_closed
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_workflow_run_list_shape_and_total_count_type_fail_closed
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_workflow_run_total_count_must_equal_the_bounded_page_population
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_workflow_run_total_count_must_remain_consistent_across_pages
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_workflow_run_page_and_item_overflow_fail_closed
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_workflow_run_listing_bounds_are_small_and_explicit
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_workflow_run_listing_rejects_duplicate_selected_or_context_ids
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_production_proof_rejects_mandated_identity_mutations
+        ci_partition: remaining
+      - node: tests/governance/test_protected_ci_evidence_gate.py::test_required_check_completion_is_bound_to_trigger_target_context
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_artifact_evidence_requires_receipt_tree_and_suite_binding
         ci_partition: remaining
