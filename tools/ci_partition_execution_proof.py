@@ -403,16 +403,10 @@ def _could_be_relevant_run(expected: Mapping[str, Any], value: Mapping[str, Any]
     if isinstance(path, str) and path != ".github/workflows/main.yml":
         return False
     head_sha = value.get("head_sha")
-    head_branch = value.get("head_branch")
     if isinstance(head_sha, str) and _SHA.fullmatch(head_sha) and head_sha != expected["head_sha"]:
         return False
-    if isinstance(head_branch, str) and head_branch and head_branch != expected["head_branch"]:
-        return False
     repository_id = _routing_repository_id(value.get("repository"))
-    head_repository_id = _routing_repository_id(value.get("head_repository"))
     if repository_id is not None and repository_id != expected["repository"][0]:
-        return False
-    if head_repository_id is not None and head_repository_id != expected["head_repository"][0]:
         return False
     return True
 
@@ -426,7 +420,6 @@ def _bounded_workflow_runs(
     queries: dict[str, dict[str, int]] = {}
     for event in sorted(_AUTOMATIC_EVENTS):
         base_query = {
-            "branch": expected["head_branch"],
             "event": event,
             "head_sha": expected["head_sha"],
         }
@@ -537,9 +530,9 @@ def _pull_request_compatible(full: tuple[Any, ...], association: tuple[Any, ...]
 
 def _association_join(
     selected: Mapping[str, Any],
-    listed_runs: list[dict[str, Any]],
+    relevant_runs: list[dict[str, Any]],
     api_associations: tuple[tuple[Any, ...], ...],
-) -> tuple[tuple[tuple[Any, ...], ...], frozenset[tuple[int, int]]]:
+) -> tuple[tuple[Any, ...], ...]:
     by_id = {item[0]: item for item in api_associations}
     by_number = {item[1]: item for item in api_associations}
     full_by_key: dict[tuple[int, int], tuple[Any, ...]] = {}
@@ -556,16 +549,13 @@ def _association_join(
         if previous != pull_request:
             raise PartitionExecutionProofError(f"{label} contradicts another embedded pull request identity")
 
-    same_context = [
-        run for run in listed_runs if _stable_common_run_context(run) == _stable_common_run_context(selected)
-    ]
     if selected["event"] == "push":
-        for run in same_context:
+        for run in relevant_runs:
             for pull_request in run["pull_requests"]:
                 reconcile(pull_request, f"run {run['id']} pull request {pull_request[1]}")
         pr_run_keys = {
             (run["pull_requests"][0][0], run["pull_requests"][0][1])
-            for run in same_context
+            for run in relevant_runs
             if run["event"] == "pull_request"
         }
         for association in api_associations:
@@ -577,46 +567,24 @@ def _association_join(
     else:
         target = selected["pull_requests"][0]
         reconcile(target, f"selected pull request {target[1]}")
-        for run in same_context:
+        for run in relevant_runs:
             for pull_request in run["pull_requests"]:
                 if (pull_request[0], pull_request[1]) == (target[0], target[1]):
                     reconcile(pull_request, f"run {run['id']} pull request {pull_request[1]}")
 
-    reconciled = tuple(full_by_key.get((item[0], item[1]), item) for item in api_associations)
-    return reconciled, frozenset((item[0], item[1]) for item in reconciled)
+    return tuple(full_by_key.get((item[0], item[1]), item) for item in api_associations)
 
 
 def _is_relevant_context(
     selected: Mapping[str, Any],
     candidate: Mapping[str, Any],
-    association_keys: frozenset[tuple[int, int]],
 ) -> bool:
-    if (
-        candidate["name"] != "CryoDAQ CI"
-        or candidate["path"] != ".github/workflows/main.yml"
-        or _stable_common_run_context(candidate) != _stable_common_run_context(selected)
-        or candidate["event"] not in _AUTOMATIC_EVENTS
-    ):
-        return False
-    if candidate["event"] == selected["event"]:
-        return _exact_run_context(candidate) == _exact_run_context(selected)
-    if selected["event"] == "pull_request":
-        return (
-            candidate["event"] == "push"
-            and (
-                selected["pull_requests"][0][0],
-                selected["pull_requests"][0][1],
-            )
-            in association_keys
-        )
-    candidate_pull_request = candidate["pull_requests"][0]
     return (
-        candidate["event"] == "pull_request"
-        and (
-            candidate_pull_request[0],
-            candidate_pull_request[1],
-        )
-        in association_keys
+        candidate["name"] == "CryoDAQ CI"
+        and candidate["path"] == ".github/workflows/main.yml"
+        and candidate["repository"][0] == selected["repository"][0]
+        and candidate["head_sha"] == selected["head_sha"]
+        and candidate["event"] in _AUTOMATIC_EVENTS
     )
 
 
@@ -697,8 +665,8 @@ def _context_join(
     if selected_records[0] != selected:
         raise PartitionExecutionProofError("selected workflow run differs between detail and list REST evidence")
 
-    associations, association_keys = _association_join(selected, listed_runs, api_associations)
-    relevant = [item for item in listed_runs if _is_relevant_context(selected, item, association_keys)]
+    relevant = [item for item in listed_runs if _is_relevant_context(selected, item)]
+    associations = _association_join(selected, relevant, api_associations)
     if sum(item["id"] == selected["id"] for item in relevant) != 1:
         raise PartitionExecutionProofError("selected workflow run is absent from its exact context join")
     retries = sorted(item["id"] for item in relevant if item["run_attempt"] != 1)

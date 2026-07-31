@@ -280,18 +280,17 @@ class FakeApi:
     def get_json(self, endpoint: str) -> dict[str, Any]:
         if "/actions/workflows/main.yml/runs?" in endpoint:
             query = parse_qs(endpoint.split("?", 1)[1], strict_parsing=True)
+            assert "branch" not in query
             page_number = int(query["page"][0])
             event = query["event"][0]
             custom = self.workflow_page_payloads.get((event, page_number))
             if custom is not None:
                 return custom
-            branch = query["branch"][0]
             head_sha = query["head_sha"][0]
             filtered = [
                 run
                 for run in self.workflow_runs
                 if run.get("event") == event
-                and run.get("head_branch") == branch
                 and run.get("head_sha") == head_sha
                 and run.get("name") == "CryoDAQ CI"
                 and run.get("path") == ".github/workflows/main.yml"
@@ -512,10 +511,10 @@ def test_artifact_attempt_cannot_override_rest_run_attempt(
 @pytest.mark.parametrize(
     ("case", "accepted"),
     (
-        ("unrelated-same-sha-branch", True),
+        ("same-sha-other-branch", False),
         ("unrelated-repository", True),
-        ("unrelated-fork", True),
-        ("unrelated-pr", True),
+        ("same-sha-fork-head", False),
+        ("same-sha-other-pr", False),
         ("unrelated-pr-base", False),
         ("different-merge-sha", True),
         ("cancelled-exact-context-superseded", True),
@@ -524,14 +523,14 @@ def test_artifact_attempt_cannot_override_rest_run_attempt(
         ("attempt-two-cannot-supersede-cancelled-counterpart", False),
     ),
 )
-def test_context_join_adjudicates_only_exact_candidate_lineage(
+def test_context_join_adjudicates_every_automatic_same_repository_sha(
     evidence_repository: tuple[Path, str],
     case: str,
     accepted: bool,
 ) -> None:
     repository, sha = evidence_repository
     api = FakeApi(repository, sha)
-    if case in {"unrelated-pr", "unrelated-pr-base", "different-merge-sha", "failed-push-counterpart"}:
+    if case in {"same-sha-other-pr", "unrelated-pr-base", "different-merge-sha", "failed-push-counterpart"}:
         _select_pull_request(api)
 
     sibling = _automatic_run(
@@ -540,13 +539,13 @@ def test_context_join_adjudicates_only_exact_candidate_lineage(
         conclusion="failure",
         created_at="2026-07-28T09:00:00Z",
     )
-    if case == "unrelated-same-sha-branch":
+    if case == "same-sha-other-branch":
         sibling["head_branch"] = "other-branch"
     elif case == "unrelated-repository":
         sibling["repository"] = {"full_name": "other/repository", "id": REPOSITORY_ID + 1}
-    elif case == "unrelated-fork":
+    elif case == "same-sha-fork-head":
         sibling["head_repository"] = {"full_name": "fork/cryodaq", "id": REPOSITORY_ID + 1}
-    elif case == "unrelated-pr":
+    elif case == "same-sha-other-pr":
         sibling["pull_requests"][0]["id"] += 1
         sibling["pull_requests"][0]["number"] += 1
     elif case == "unrelated-pr-base":
@@ -908,7 +907,7 @@ def test_irrelevant_records_are_routed_before_strict_normalization_and_server_bo
             {
                 "event": "push",
                 "head_branch": "other-branch",
-                "head_sha": sha,
+                "head_sha": "d" * 40,
                 "name": "CryoDAQ CI",
                 "path": ".github/workflows/main.yml",
             },
@@ -1347,6 +1346,50 @@ def test_cli_acceptance_writes_sha_bound_receipt(
     assert receipt["sha"] == sha
     assert receipt["run_id"] == api.run_id
     assert len(receipt["partitions"]) == 8
+
+
+def test_cli_refuses_failing_automatic_sibling_on_same_sha(
+    evidence_repository: tuple[Path, str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository, sha = evidence_repository
+    api = FakeApi(repository, sha)
+    sibling = _automatic_run(
+        api,
+        run_id=api.run_id - 1,
+        conclusion="failure",
+        created_at="2026-07-28T09:00:00Z",
+    )
+    sibling["head_branch"] = "other-branch"
+    api.workflow_runs.insert(0, sibling)
+    output = tmp_path / "partition-proof.json"
+    event_payload = tmp_path / "event.json"
+    event_payload.write_text(json.dumps({"workflow_run": api.run}), encoding="utf-8")
+
+    result = main(
+        [
+            "--repository",
+            str(repository),
+            "--repo",
+            REPOSITORY_NAME,
+            "--run-id",
+            str(api.run_id),
+            "--sha",
+            sha,
+            "--check-name",
+            CHECK_NAME,
+            "--event-payload",
+            str(event_payload),
+            "--output",
+            str(output),
+        ],
+        api=api,
+    )
+
+    assert result == 1
+    assert not output.exists()
+    assert f"run {sibling['id']} is completed/failure" in capsys.readouterr().err
 
 
 def test_zero_collected_partition_refuses(evidence_repository: tuple[Path, str]) -> None:
