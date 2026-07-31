@@ -156,6 +156,24 @@ class _BoundedSource:
     index_entry: dict[str, object] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexedParquetReceipt:
+    relative_path: str
+    row_count: int
+    size_bytes: int
+    checksum_md5: str
+    schema: str | None
+
+
+@dataclass(slots=True)
+class _OpenedIndexedParquet:
+    path: Path
+    stream: BinaryIO
+    parquet: object
+    receipt: _IndexedParquetReceipt
+    identity: tuple[int, int, int, int, int, int, int]
+
+
 @dataclass(slots=True)
 class _CollectedRow:
     timestamp_us: int
@@ -332,6 +350,27 @@ class _BoundedReadingCollector:
 
     def note_examined(self) -> None:
         self.rows_examined += 1
+
+    def merge_verified(self, staged: _BoundedReadingCollector) -> None:
+        """Merge one fully verified source without losing global cap authority."""
+        self.rows_examined += staged.rows_examined
+        self.rows_dropped_by_caps += staged.rows_dropped_by_caps
+        self.truncated = self.truncated or staged.truncated
+        for row in sorted(staged._by_key.values(), key=lambda item: item.rank):
+            self.offer(
+                timestamp_us=row.timestamp_us,
+                instrument_id=row.instrument_id,
+                channel=row.channel,
+                value=row.value,
+                unit=row.unit,
+                status=row.status,
+                authority=row.authority,
+                descriptor=row.descriptor,
+            )
+
+    def reject_unverified(self, staged: _BoundedReadingCollector) -> None:
+        """Account for work while quarantining every row from a failed source."""
+        self.rows_examined += staged.rows_examined
 
     def discard_if_current(
         self,
@@ -518,13 +557,14 @@ class ArchiveReader:
                     issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                     discovery_ok = False
                     break
+                source_channels: set[str] = set()
                 if source.kind == "sqlite":
                     ok = self._discover_sqlite_channels(
                         source,
                         start_us=start_us,
                         end_us=end_us,
                         max_channels=max_channels,
-                        channels=discovered,
+                        channels=source_channels,
                         deadline_monotonic=deadline_monotonic,
                         batch_rows=batch_rows,
                         issues=issues,
@@ -535,7 +575,7 @@ class ArchiveReader:
                         start_us=start_us,
                         end_us=end_us,
                         max_channels=max_channels,
-                        channels=discovered,
+                        channels=source_channels,
                         deadline_monotonic=deadline_monotonic,
                         batch_rows=batch_rows,
                         max_arrow_batch_bytes=max_arrow_batch_bytes,
@@ -544,6 +584,7 @@ class ArchiveReader:
                 if not ok:
                     discovery_ok = False
                     break
+                discovered.update(source_channels)
                 if len(discovered) > max_channels:
                     issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
                     discovery_ok = False
@@ -573,6 +614,11 @@ class ArchiveReader:
                 issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                 complete = False
                 break
+            staged = _BoundedReadingCollector(
+                max_points_per_channel=max_points_per_channel,
+                max_total_points=max_total_points,
+                max_retained_bytes=max_retained_bytes,
+            )
             if source.kind == "sqlite":
                 ok = self._read_sqlite_bounded(
                     source,
@@ -581,7 +627,7 @@ class ArchiveReader:
                     channels=selected,
                     deadline_monotonic=deadline_monotonic,
                     batch_rows=batch_rows,
-                    collector=collector,
+                    collector=staged,
                     issues=issues,
                 )
             else:
@@ -593,9 +639,13 @@ class ArchiveReader:
                     deadline_monotonic=deadline_monotonic,
                     batch_rows=batch_rows,
                     max_arrow_batch_bytes=max_arrow_batch_bytes,
-                    collector=collector,
+                    collector=staged,
                     issues=issues,
                 )
+            if ok:
+                collector.merge_verified(staged)
+            else:
+                collector.reject_unverified(staged)
             complete = ok and complete
         return BoundedReadingQueryResult(
             rows=collector.finish(),
@@ -817,6 +867,18 @@ class ArchiveReader:
                 return None
             except Exception:
                 issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
+                return None
+        else:
+            try:
+                has_cold_artifact = self._archive_dir.exists() and any(self._archive_dir.rglob("*.parquet"))
+            except OSError:
+                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
+                return None
+            if has_cold_artifact:
+                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
+                return None
+            if time.monotonic() >= deadline_monotonic:
+                issues.add(BoundedReadIssueCode.DEADLINE, "index")
                 return None
 
         planned: list[_BoundedSource] = []
@@ -1201,73 +1263,35 @@ class ArchiveReader:
         end_us: int,
         deadline_monotonic: float,
     ) -> tuple[
-        BinaryIO,
-        object,
+        _OpenedIndexedParquet,
         object,
         object,
         list[int],
         list[int],
-        tuple[int, int, int, int],
         bool,
     ]:
         import pyarrow as pa
         import pyarrow.compute as pc
-        import pyarrow.parquet as pq
 
         if time.monotonic() >= deadline_monotonic:
             raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
-        path_identity = self._identity(source.path)
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(source.path, flags)
-        handle: BinaryIO | None = None
+        opened: _OpenedIndexedParquet | None = None
         try:
-            info = os.fstat(descriptor)
-            handle_identity = (
-                info.st_dev,
-                info.st_ino,
-                stat.S_IFMT(info.st_mode),
-                info.st_nlink,
+            if source.index_entry is None:
+                raise OSError("indexed Parquet source has no receipt")
+            relative = source.index_entry.get("archive_path")
+            if type(relative) is not str:
+                raise OSError("indexed Parquet source has no canonical path")
+            opened = self._open_indexed_parquet(
+                source.index_entry,
+                expected_relative=relative,
+                operator_log=False,
+                deadline_monotonic=deadline_monotonic,
             )
-            if handle_identity != path_identity or not stat.S_ISREG(info.st_mode) or getattr(info, "st_nlink", 1) != 1:
-                raise OSError("Parquet source identity mismatch")
-            if info.st_size < 12:
-                raise _ParquetMetadataError("Parquet file too small")
-            handle = os.fdopen(descriptor, "rb", closefd=True)
-            descriptor = -1
-            handle.seek(-8, os.SEEK_END)
-            trailer = handle.read(8)
-            if len(trailer) != 8 or trailer[4:] != b"PAR1":
-                raise _ParquetMetadataError("invalid Parquet trailer")
-            footer_length = struct.unpack("<I", trailer[:4])[0]
-            if footer_length > 8 * 1024 * 1024 or footer_length + 8 > info.st_size:
-                raise _ParquetMetadataError("invalid Parquet footer length")
-            handle.seek(0)
-            parquet = pq.ParquetFile(
-                handle,
-                pre_buffer=False,
-                thrift_string_size_limit=1_048_576,
-                thrift_container_size_limit=1_000_000,
-            )
-            if time.monotonic() >= deadline_monotonic:
-                raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
-            expected = pa.schema(
-                [
-                    ("timestamp", pa.timestamp("us", tz="UTC")),
-                    ("instrument_id", pa.string()),
-                    ("channel", pa.string()),
-                    ("value", pa.float64()),
-                    ("unit", pa.string()),
-                    ("status", pa.string()),
-                ]
-            )
+            if opened.path != source.path:
+                raise OSError("planned Parquet path disagrees with its receipt")
+            parquet = opened.parquet
             schema = parquet.schema_arrow
-            allowed_names = (expected.names, [*expected.names, "descriptor_hash"])
-            if schema.names not in allowed_names or any(
-                schema.field(name).type != expected.field(name).type for name in expected.names
-            ):
-                raise _ParquetSchemaError("unexpected Parquet schema")
-            if "descriptor_hash" in schema.names and schema.field("descriptor_hash").type != pa.string():
-                raise _ParquetSchemaError("unexpected descriptor_hash type")
             metadata = parquet.metadata
             if metadata.num_row_groups > 1_024:
                 raise _ParquetMetadataError("too many Parquet row groups")
@@ -1315,35 +1339,38 @@ class ArchiveReader:
             if time.monotonic() >= deadline_monotonic:
                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
             return (
-                handle,
-                parquet,
+                opened,
                 pa,
                 pc,
                 eligible,
                 starts,
-                path_identity,
                 metadata_partial,
             )
         except Exception:
-            if handle is not None:
-                handle.close()
-            elif descriptor >= 0:
-                os.close(descriptor)
+            if opened is not None:
+                opened.stream.close()
             raise
 
     @staticmethod
-    def _hash_open_file(descriptor: int, *, deadline_monotonic: float) -> str:
-        digest = hashlib.md5()
+    def _hash_open_file(
+        descriptor: int,
+        *,
+        deadline_monotonic: float | None,
+    ) -> str:
+        # The persisted format uses legacy MD5 as an accidental-integrity
+        # checksum. It is not a claim of cryptographic adversary resistance.
+        digest = hashlib.md5(usedforsecurity=False)
         os.lseek(descriptor, 0, os.SEEK_SET)
         while True:
-            if time.monotonic() >= deadline_monotonic:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
             block = os.read(descriptor, 65_536)
             if not block:
                 break
             digest.update(block)
-        if time.monotonic() >= deadline_monotonic:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
+        os.lseek(descriptor, 0, os.SEEK_SET)
         return digest.hexdigest()
 
     @staticmethod
@@ -1629,18 +1656,15 @@ class ArchiveReader:
         max_arrow_batch_bytes: int,
         issues: _IssueLedger,
     ) -> bool:
-        handle = None
-        identity = None
+        opened: _OpenedIndexedParquet | None = None
         ok = True
         try:
             (
-                handle,
-                parquet,
+                opened,
                 pa,
                 pc,
                 groups,
                 _starts,
-                identity,
                 metadata_partial,
             ) = self._prepare_bounded_parquet(
                 source,
@@ -1648,6 +1672,7 @@ class ArchiveReader:
                 end_us=end_us,
                 deadline_monotonic=deadline_monotonic,
             )
+            parquet = opened.parquet
             if metadata_partial:
                 issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
                 ok = False
@@ -1734,16 +1759,19 @@ class ArchiveReader:
             issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
             ok = False
         finally:
-            if handle is not None:
-                handle.close()
-            if identity is not None:
+            if opened is not None:
                 try:
-                    if self._identity(source.path) != identity:
-                        issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
-                        ok = False
-                except OSError:
+                    self._verify_opened_indexed_parquet(
+                        opened,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                except _DescriptorReadError as exc:
+                    issues.add(exc.code, source.token)
+                    ok = False
+                except Exception:
                     issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
                     ok = False
+                opened.stream.close()
         return ok
 
     def _read_parquet_bounded(
@@ -1759,18 +1787,15 @@ class ArchiveReader:
         collector: _BoundedReadingCollector,
         issues: _IssueLedger,
     ) -> bool:
-        handle = None
-        identity = None
+        opened: _OpenedIndexedParquet | None = None
         ok = True
         try:
             (
-                handle,
-                parquet,
+                opened,
                 pa,
                 pc,
                 groups,
                 starts,
-                identity,
                 metadata_partial,
             ) = self._prepare_bounded_parquet(
                 source,
@@ -1778,6 +1803,7 @@ class ArchiveReader:
                 end_us=end_us,
                 deadline_monotonic=deadline_monotonic,
             )
+            parquet = opened.parquet
             if metadata_partial:
                 issues.add(BoundedReadIssueCode.PARQUET_METADATA, source.token)
                 ok = False
@@ -1976,16 +2002,19 @@ class ArchiveReader:
             issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
             ok = False
         finally:
-            if handle is not None:
-                handle.close()
-            if identity is not None:
+            if opened is not None:
                 try:
-                    if self._identity(source.path) != identity:
-                        issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
-                        ok = False
-                except OSError:
+                    self._verify_opened_indexed_parquet(
+                        opened,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                except _DescriptorReadError as exc:
+                    issues.add(exc.code, source.token)
+                    ok = False
+                except Exception:
                     issues.add(BoundedReadIssueCode.PARQUET_READ, source.token)
                     ok = False
+                opened.stream.close()
         return ok
 
     def query(
@@ -2001,46 +2030,26 @@ class ArchiveReader:
         dict[str, list[tuple[float, float]]]
             ``{channel: [(unix_ts, value), ...]}`` sorted by timestamp ascending.
         """
-        channel_set = set(channels) if channels is not None else None
-        index = self._load_index()
-        archived_names: dict[str, str] = {
-            entry["original_name"]: entry["archive_path"] for entry in index.get("files", [])
-        }
-
-        result: dict[str, list[tuple[float, float]]] = {}
-
-        # Normalize to UTC first so epoch values and day boundaries are consistent.
         from_utc = from_ts.astimezone(UTC) if from_ts.tzinfo else from_ts.replace(tzinfo=UTC)
         to_utc = to_ts.astimezone(UTC) if to_ts.tzinfo else to_ts.replace(tzinfo=UTC)
-
-        from_epoch = from_utc.timestamp()
-        to_epoch = to_utc.timestamp()
-
-        # Iterate day by day across the query range
-        current_day = from_utc.date()
-        last_day = to_utc.date()
-        while current_day <= last_day:
-            db_name = f"data_{current_day.isoformat()}.db"
-            db_path = self._data_dir / db_name
-            is_archived = db_name in archived_names
-            hot_exists = db_path.exists()
-            if is_archived and hot_exists:
-                # Overlap day: a restored/backdated (or stranded pre-sweep) hot
-                # DB reappeared for an already-archived day. Union both, archived
-                # wins on an exact (channel, ts) clash — mirrors query_rows (F2)
-                # so history/journal reads no longer shadow rows exports see.
-                self._merge_overlap_day(archived_names[db_name], db_path, from_epoch, to_epoch, channel_set, result)
-            elif is_archived:
-                self._query_parquet(archived_names[db_name], from_epoch, to_epoch, channel_set, result)
-            elif hot_exists:
-                self._query_sqlite(db_path, from_epoch, to_epoch, channel_set, result)
-            current_day += timedelta(days=1)
-
-        # Sort each channel's data by timestamp
-        for ch in result:
-            result[ch].sort(key=lambda x: x[0])
-
-        return result
+        if to_utc < from_utc or channels == []:
+            return {}
+        rows = self.query_rows(
+            from_utc,
+            to_utc + timedelta(microseconds=1),
+            channels,
+        )
+        latest: dict[tuple[str, float], float] = {}
+        for timestamp, _instrument, channel, value, _unit, _status in rows:
+            epoch = _parse_timestamp(timestamp).timestamp()
+            latest[(channel, epoch)] = value
+        result: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        for (channel, epoch), value in sorted(
+            latest.items(),
+            key=lambda item: (item[0][0], item[0][1]),
+        ):
+            result[channel].append((epoch, value))
+        return dict(result)
 
     def query_rows(
         self,
@@ -2083,16 +2092,16 @@ class ArchiveReader:
         # backdated import), BOTH exist — union them so no on-disk data an
         # operator can see is silently shadowed. Exact (ts, instrument, channel)
         # duplicates are deduped below; genuinely new restored rows survive.
-        sources: dict[str, list[tuple[str, str]]] = {}
+        sources: dict[str, list[tuple[str, str, dict[str, object] | None]]] = {}
         for entry in index.get("files", []):
             day = _day_from_db_name(entry["original_name"])
             if day is not None:
-                sources.setdefault(day, []).append(("parquet", entry["archive_path"]))
+                sources.setdefault(day, []).append(("parquet", entry["archive_path"], entry))
         if self._data_dir.exists():
             for db_path in self._data_dir.glob("data_????-??-??.db"):
                 day = _day_from_db_name(db_path.name)
                 if day is not None:
-                    sources.setdefault(day, []).append(("sqlite", str(db_path)))
+                    sources.setdefault(day, []).append(("sqlite", str(db_path), None))
 
         out: list[FullRow] = []
         for day_iso in sorted(sources):
@@ -2109,10 +2118,19 @@ class ArchiveReader:
             # Within every source, the last physical row wins so the same hot
             # SQLite duplicate resolves identically after cold rotation.
             ordered_sources = sorted(sources[day_iso], key=lambda item: 0 if item[0] == "parquet" else 1)
-            for kind, ref in ordered_sources:
+            for kind, ref, index_entry in ordered_sources:
                 source_rows: list[FullRow] = []
                 if kind == "parquet":
-                    self._read_parquet_rows(ref, from_epoch, to_epoch, channel_set, instrument_set, source_rows)
+                    assert index_entry is not None
+                    self._read_parquet_rows(
+                        ref,
+                        index_entry,
+                        from_epoch,
+                        to_epoch,
+                        channel_set,
+                        instrument_set,
+                        source_rows,
+                    )
                 else:
                     self._read_sqlite_rows(Path(ref), from_epoch, to_epoch, channel_set, instrument_set, source_rows)
                 source_latest: dict[tuple[object, str, str], FullRow] = {}
@@ -2163,7 +2181,7 @@ class ArchiveReader:
         # DB reappears for an already-rotated day (restore / backdate / stranded
         # pre-sweep), BOTH proven sources are unioned (F2).
         # Parquet source(s) read first → archived wins on an exact-row clash.
-        sources: dict[str, list[tuple[str, str]]] = {}
+        sources: dict[str, list[tuple[str, str, dict[str, object] | None]]] = {}
         for entry in index.get("files", []):
             day = _day_from_db_name(entry["original_name"])
             if day is None:
@@ -2179,12 +2197,12 @@ class ArchiveReader:
                     BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
                     f"{day}:operator_log",
                 )
-            sources.setdefault(day, []).append(("parquet", ol_rel))
+            sources.setdefault(day, []).append(("parquet", ol_rel, entry))
         if self._data_dir.exists():
             for db_path in self._data_dir.glob("data_????-??-??.db"):
                 day = _day_from_db_name(db_path.name)
                 if day is not None:
-                    sources.setdefault(day, []).append(("sqlite", str(db_path)))
+                    sources.setdefault(day, []).append(("sqlite", str(db_path), None))
 
         overlap = any(len(srcs) > 1 for srcs in sources.values())
         out: list[OperatorLogRow] = []
@@ -2194,9 +2212,10 @@ class ArchiveReader:
                 continue
             if to_day is not None and day > to_day:
                 continue
-            for kind, ref in sources[day_iso]:
+            for kind, ref, index_entry in sources[day_iso]:
                 if kind == "parquet":
-                    self._read_parquet_operator_log(ref, from_epoch, to_epoch, out)
+                    assert index_entry is not None
+                    self._read_parquet_operator_log(ref, index_entry, from_epoch, to_epoch, out)
                 else:
                     self._read_sqlite_operator_log(Path(ref), from_epoch, to_epoch, out)
 
@@ -2274,25 +2293,234 @@ class ArchiveReader:
                 db_path.name,
             ) from None
 
+    @classmethod
+    def _indexed_parquet_receipt(
+        cls,
+        index_entry: dict[str, object],
+        *,
+        operator_log: bool,
+    ) -> _IndexedParquetReceipt:
+        if operator_log:
+            relative_path = index_entry.get("operator_log_path")
+            row_count = index_entry.get("operator_log_rows")
+            size_bytes = index_entry.get("operator_log_size_bytes")
+            checksum = index_entry.get("operator_log_checksum_md5")
+            schema = index_entry.get("operator_log_schema")
+        else:
+            relative_path = index_entry.get("archive_path")
+            row_count = index_entry.get("row_count")
+            size_bytes = index_entry.get("size_bytes_archive")
+            checksum = index_entry.get("checksum_md5")
+            schema = None
+        if (
+            type(relative_path) is not str
+            or type(row_count) is not int
+            or row_count < 0
+            or type(size_bytes) is not int
+            or size_bytes <= 0
+            or type(checksum) is not str
+            or len(checksum) != 32
+            or any(character not in "0123456789abcdef" for character in checksum)
+            or (operator_log and schema not in {"operator_log_v1", "operator_log_v2"})
+        ):
+            raise OSError("indexed Parquet receipt is missing or malformed")
+        try:
+            cls._validate_archive_relative(relative_path)
+        except ValueError as exc:
+            raise OSError("indexed Parquet receipt path is not canonical") from exc
+        return _IndexedParquetReceipt(
+            relative_path=relative_path,
+            row_count=row_count,
+            size_bytes=size_bytes,
+            checksum_md5=checksum,
+            schema=schema if isinstance(schema, str) else None,
+        )
+
+    @staticmethod
+    def _receipt_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            stat.S_IFMT(info.st_mode),
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            _identity_change_time_ns(info),
+        )
+
+    def _verify_opened_indexed_parquet(
+        self,
+        opened: _OpenedIndexedParquet,
+        *,
+        deadline_monotonic: float | None,
+    ) -> None:
+        live_path = self._contained_regular(self._archive_dir, opened.receipt.relative_path)
+        before_file = os.fstat(opened.stream.fileno())
+        before_path = live_path.lstat()
+        if (
+            live_path != opened.path
+            or self._receipt_identity(before_file) != opened.identity
+            or self._receipt_identity(before_path) != opened.identity
+            or not stat.S_ISREG(before_file.st_mode)
+            or getattr(before_file, "st_nlink", 1) != 1
+            or opened.parquet.metadata.num_rows != opened.receipt.row_count
+        ):
+            raise OSError("indexed Parquet artifact does not match its receipt")
+        checksum = self._hash_open_file(
+            opened.stream.fileno(),
+            deadline_monotonic=deadline_monotonic,
+        )
+        after_file = os.fstat(opened.stream.fileno())
+        after_path = live_path.lstat()
+        if (
+            checksum != opened.receipt.checksum_md5
+            or self._receipt_identity(after_file) != opened.identity
+            or self._receipt_identity(after_path) != opened.identity
+        ):
+            raise OSError("indexed Parquet artifact changed while it was open")
+
+    def _open_indexed_parquet(
+        self,
+        index_entry: dict[str, object],
+        *,
+        expected_relative: str,
+        operator_log: bool,
+        deadline_monotonic: float | None,
+    ) -> _OpenedIndexedParquet:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        receipt = self._indexed_parquet_receipt(index_entry, operator_log=operator_log)
+        if receipt.relative_path != expected_relative:
+            raise OSError("indexed Parquet path disagrees with its receipt")
+        path = self._contained_regular(self._archive_dir, receipt.relative_path)
+        path_identity = self._receipt_identity(path.lstat())
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        stream: BinaryIO | None = None
+        try:
+            opened_info = os.fstat(descriptor)
+            if (
+                self._receipt_identity(opened_info) != path_identity
+                or not stat.S_ISREG(opened_info.st_mode)
+                or getattr(opened_info, "st_nlink", 1) != 1
+                or opened_info.st_size != receipt.size_bytes
+                or self._hash_open_file(
+                    descriptor,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                != receipt.checksum_md5
+                or self._receipt_identity(os.fstat(descriptor)) != path_identity
+                or self._receipt_identity(path.lstat()) != path_identity
+            ):
+                raise OSError("indexed Parquet artifact does not match its receipt")
+            if opened_info.st_size < 12:
+                raise _ParquetMetadataError("Parquet file too small")
+            stream = os.fdopen(descriptor, "rb", closefd=True)
+            descriptor = -1
+            stream.seek(-8, os.SEEK_END)
+            trailer = stream.read(8)
+            if len(trailer) != 8 or trailer[4:] != b"PAR1":
+                raise _ParquetMetadataError("invalid Parquet trailer")
+            footer_length = struct.unpack("<I", trailer[:4])[0]
+            if footer_length > 8 * 1024 * 1024 or footer_length + 8 > opened_info.st_size:
+                raise _ParquetMetadataError("invalid Parquet footer length")
+            stream.seek(0)
+            parquet = pq.ParquetFile(
+                stream,
+                pre_buffer=False,
+                thrift_string_size_limit=1_048_576,
+                thrift_container_size_limit=1_000_000,
+            )
+            if operator_log:
+                expected_v1 = pa.schema(
+                    [
+                        ("timestamp", pa.float64()),
+                        ("experiment_id", pa.string()),
+                        ("author", pa.string()),
+                        ("source", pa.string()),
+                        ("message", pa.string()),
+                        ("tags", pa.string()),
+                    ]
+                )
+                expected_v2 = pa.schema(
+                    [
+                        *expected_v1,
+                        ("request_id", pa.string()),
+                        ("request_fingerprint", pa.string()),
+                        ("row_id", pa.int64()),
+                    ]
+                )
+                expected_schema = expected_v2 if receipt.schema == "operator_log_v2" else expected_v1
+                if parquet.schema_arrow != expected_schema:
+                    raise _ParquetSchemaError("operator_log schema disagrees with its receipt")
+            else:
+                expected = pa.schema(
+                    [
+                        ("timestamp", pa.timestamp("us", tz="UTC")),
+                        ("instrument_id", pa.string()),
+                        ("channel", pa.string()),
+                        ("value", pa.float64()),
+                        ("unit", pa.string()),
+                        ("status", pa.string()),
+                    ]
+                )
+                schema = parquet.schema_arrow
+                allowed_names = (expected.names, [*expected.names, "descriptor_hash"])
+                if schema.names not in allowed_names or any(
+                    schema.field(name).type != expected.field(name).type for name in expected.names
+                ):
+                    raise _ParquetSchemaError("readings schema disagrees with its receipt")
+                if "descriptor_hash" in schema.names and schema.field("descriptor_hash").type != pa.string():
+                    raise _ParquetSchemaError("unexpected descriptor_hash type")
+            if parquet.metadata.num_rows != receipt.row_count:
+                raise OSError("Parquet row count disagrees with its receipt")
+            opened = _OpenedIndexedParquet(
+                path=path,
+                stream=stream,
+                parquet=parquet,
+                receipt=receipt,
+                identity=path_identity,
+            )
+            self._verify_opened_indexed_parquet(
+                opened,
+                deadline_monotonic=deadline_monotonic,
+            )
+            return opened
+        except Exception:
+            if stream is not None:
+                stream.close()
+            elif descriptor >= 0:
+                os.close(descriptor)
+            raise
+
     def _read_parquet_operator_log(
         self,
         archive_rel: str,
+        index_entry: dict[str, object],
         from_epoch: float | None,
         to_epoch: float | None,
         out: list[OperatorLogRow],
     ) -> None:
         source = f"operator_log:{PurePosixPath(archive_rel).name}"
+        opened: _OpenedIndexedParquet | None = None
         try:
-            import pyarrow.parquet as pq
-
-            parquet_path = self._contained_regular(self._archive_dir, archive_rel)
-            parquet_file = pq.ParquetFile(str(parquet_path))
-            required = {"timestamp", "experiment_id", "author", "source", "message", "tags"}
-            if not required <= set(parquet_file.schema_arrow.names):
-                raise _ParquetSchemaError("operator_log columns are incomplete")
-            table = parquet_file.read(
-                columns=["timestamp", "experiment_id", "author", "source", "message", "tags"],
+            opened = self._open_indexed_parquet(
+                index_entry,
+                expected_relative=archive_rel,
+                operator_log=True,
+                deadline_monotonic=None,
             )
+            table = opened.parquet.read(
+                columns=["timestamp", "experiment_id", "author", "source", "message", "tags"],
+                use_threads=False,
+            )
+            self._verify_opened_indexed_parquet(
+                opened,
+                deadline_monotonic=None,
+            )
+            opened.stream.close()
+            opened = None
             # CR-3 schema keeps timestamp as a raw epoch float (lossless audit).
             ts_list = table.column("timestamp").to_pylist()
             exp_list = table.column("experiment_id").to_pylist()
@@ -2300,6 +2528,7 @@ class ArchiveReader:
             source_list = table.column("source").to_pylist()
             message_list = table.column("message").to_pylist()
             tags_list = table.column("tags").to_pylist()
+            staged: list[OperatorLogRow] = []
             for ts, exp, author, source, message, tags in zip(
                 ts_list, exp_list, author_list, source_list, message_list, tags_list
             ):
@@ -2307,7 +2536,7 @@ class ArchiveReader:
                     continue
                 if to_epoch is not None and ts > to_epoch:  # inclusive both ends
                     continue
-                out.append(
+                staged.append(
                     (
                         ts,
                         exp,
@@ -2317,6 +2546,7 @@ class ArchiveReader:
                         str(tags if tags is not None else "[]"),
                     )
                 )
+            out.extend(staged)
         except FileNotFoundError:
             raise ArchiveUnavailableError(
                 BoundedReadIssueCode.SOURCE_MISSING,
@@ -2337,6 +2567,9 @@ class ArchiveReader:
                 BoundedReadIssueCode.PARQUET_METADATA,
                 source,
             ) from None
+        finally:
+            if opened is not None:
+                opened.stream.close()
 
     def _read_sqlite_rows(
         self,
@@ -2399,6 +2632,7 @@ class ArchiveReader:
     def _read_parquet_rows(
         self,
         archive_rel: str,
+        index_entry: dict[str, object],
         from_epoch: float | None,
         to_epoch: float | None,
         channels: set[str] | None,
@@ -2406,23 +2640,31 @@ class ArchiveReader:
         out: list[FullRow],
     ) -> None:
         source = f"readings:{PurePosixPath(archive_rel).name}"
+        opened: _OpenedIndexedParquet | None = None
         try:
-            import pyarrow.parquet as pq
-
-            parquet_path = self._contained_regular(self._archive_dir, archive_rel)
-            parquet_file = pq.ParquetFile(str(parquet_path))
-            required = {"timestamp", "instrument_id", "channel", "value", "unit", "status"}
-            if not required <= set(parquet_file.schema_arrow.names):
-                raise _ParquetSchemaError("readings columns are incomplete")
-            table = parquet_file.read(
-                columns=["timestamp", "instrument_id", "channel", "value", "unit", "status"],
+            opened = self._open_indexed_parquet(
+                index_entry,
+                expected_relative=archive_rel,
+                operator_log=False,
+                deadline_monotonic=None,
             )
+            table = opened.parquet.read(
+                columns=["timestamp", "instrument_id", "channel", "value", "unit", "status"],
+                use_threads=False,
+            )
+            self._verify_opened_indexed_parquet(
+                opened,
+                deadline_monotonic=None,
+            )
+            opened.stream.close()
+            opened = None
             ts_us = table.column("timestamp").cast("int64").to_pylist()
             inst_list = table.column("instrument_id").to_pylist()
             ch_list = table.column("channel").to_pylist()
             val_list = table.column("value").to_pylist()
             unit_list = table.column("unit").to_pylist()
             status_list = table.column("status").to_pylist()
+            staged: list[FullRow] = []
             for ts_int, inst, ch, val, unit, status in zip(ts_us, inst_list, ch_list, val_list, unit_list, status_list):
                 epoch = ts_int / 1_000_000.0
                 if from_epoch is not None and epoch < from_epoch:
@@ -2433,7 +2675,8 @@ class ArchiveReader:
                     continue
                 if instruments is not None and inst not in instruments:
                     continue
-                out.append((epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status)))
+                staged.append((epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status)))
+            out.extend(staged)
         except FileNotFoundError:
             raise ArchiveUnavailableError(
                 BoundedReadIssueCode.SOURCE_MISSING,
@@ -2454,113 +2697,9 @@ class ArchiveReader:
                 BoundedReadIssueCode.PARQUET_METADATA,
                 source,
             ) from None
-
-    def _merge_overlap_day(
-        self,
-        archive_rel: str,
-        db_path: Path,
-        from_epoch: float,
-        to_epoch: float,
-        channels: set[str] | None,
-        out: dict[str, list[tuple[float, float]]],
-    ) -> None:
-        """Union one archived Parquet day with a reappeared hot DB, deduped.
-
-        Archived rows read first and win on an exact (channel, ts) clash; a hot
-        row whose ts is not already present for that channel is appended, so a
-        restored/backdated reading surfaces instead of being shadowed. Called
-        only for a day that genuinely has both sources — pure-hot and pure-cold
-        days keep their byte-identical single-source fast path.
-        """
-        archived: dict[str, list[tuple[float, float]]] = {}
-        self._query_parquet(archive_rel, from_epoch, to_epoch, channels, archived)
-        hot: dict[str, list[tuple[float, float]]] = {}
-        self._query_sqlite(db_path, from_epoch, to_epoch, channels, hot)
-        for ch in archived.keys() | hot.keys():
-            merged = {ts: value for ts, value in hot.get(ch, ())}
-            # Archived cut wins across sources, while each source reader has
-            # already applied the same last-physical-row duplicate rule.
-            merged.update({ts: value for ts, value in archived.get(ch, ())})
-            out.setdefault(ch, []).extend(merged.items())
-
-    def _query_sqlite(
-        self,
-        db_path: Path,
-        from_epoch: float,
-        to_epoch: float,
-        channels: set[str] | None,
-        out: dict[str, list[tuple[float, float]]],
-    ) -> None:
-        latest: dict[tuple[float, str], tuple[float, float]] = {}
-        try:
-            conn = sqlite3.connect(str(db_path), timeout=5)
-            conn.row_factory = sqlite3.Row
-            try:
-                if channels is not None:
-                    placeholders = ",".join("?" * len(channels))
-                    cursor = conn.execute(
-                        f"SELECT timestamp, channel, value, status FROM readings "
-                        f"WHERE timestamp >= ? AND timestamp <= ? "
-                        f"AND channel IN ({placeholders}) ORDER BY timestamp, rowid",
-                        (from_epoch, to_epoch, *channels),
-                    )
-                else:
-                    cursor = conn.execute(
-                        "SELECT timestamp, channel, value, status FROM readings "
-                        "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp, rowid",
-                        (from_epoch, to_epoch),
-                    )
-                for row in cursor:
-                    ch = str(row["channel"])
-                    timestamp = float(row["timestamp"])
-                    # NaN-доктрина: mask sentinel / error / legacy ±inf at the read boundary.
-                    latest[(timestamp, ch)] = (timestamp, decode(float(row["value"]), row["status"]))
-            finally:
-                conn.close()
-            for (_timestamp, ch), row in latest.items():
-                out.setdefault(ch, []).append(row)
-        except Exception:
-            logger.exception("Failed to read SQLite %s — partial result", db_path.name)
-
-    def _query_parquet(
-        self,
-        archive_rel: str,
-        from_epoch: float,
-        to_epoch: float,
-        channels: set[str] | None,
-        out: dict[str, list[tuple[float, float]]],
-    ) -> None:
-        parquet_path = self._archive_dir / archive_rel
-        if not parquet_path.exists():
-            logger.warning("Archived Parquet file missing: %s — skipping", archive_rel)
-            return
-        try:
-            import pyarrow.parquet as pq
-
-            latest: dict[tuple[float, str], tuple[float, float]] = {}
-
-            table = pq.read_table(
-                str(parquet_path),
-                columns=["timestamp", "channel", "value", "status"],
-            )
-            ts_us = table.column("timestamp").cast("int64").to_pylist()
-            ch_list = table.column("channel").to_pylist()
-            val_list = table.column("value").to_pylist()
-            status_list = table.column("status").to_pylist()
-
-            for ts_int, ch, val, status in zip(ts_us, ch_list, val_list, status_list):
-                epoch = ts_int / 1_000_000.0
-                if epoch < from_epoch or epoch > to_epoch:
-                    continue
-                channel = str(ch)
-                if channels is not None and channel not in channels:
-                    continue
-                # NaN-доктрина: mask sentinel / error / legacy ±inf at the read boundary.
-                latest[(epoch, channel)] = (epoch, decode(float(val), status))
-            for (_timestamp, channel), row in latest.items():
-                out.setdefault(channel, []).append(row)
-        except Exception:
-            logger.exception("Failed to read Parquet %s — partial result", archive_rel)
+        finally:
+            if opened is not None:
+                opened.stream.close()
 
     # ------------------------------------------------------------------
     # Index helpers

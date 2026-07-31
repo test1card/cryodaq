@@ -2538,6 +2538,15 @@ false_green_pairs:
     red_evidence: real_thread_only_type_checks_silently_skipped_nonstandard_non_none_feeder_owners_and_could_credit_candidate_cleanup_without_exact_terminal_capability_2026_07_23_pending_immutable_capture
     green_evidence: pending
 
+  - id: ARCHIVE-RECEIPT-QUARANTINE-FALSE-GREEN-202
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-RECEIPT-AUTHORITY-036
+    guard: tests/storage/test_archive_receipt_integrity.py::test_failed_cold_source_rows_are_quarantined_after_postread_failure
+    ci_partition: remaining
+    red_evidence: local_rejected_dirty_proposal_returned_one_row_from_the_source_that_failed_postread_receipt_verification_2026_07_31_pending_immutable_integration_capture
+    green_evidence: pending
+
 records:
   - id: GOVERNANCE-PREVENTION-MAP-001
     status: open
@@ -4798,4 +4807,48 @@ records:
       - node: tests/replay/test_replay_predictor.py::test_cli_comparison_requires_legacy_authority_with_valid_control
         ci_partition: remaining
     red_evidence: missing_project_root_legacy_alarm_authority_and_identical_finite_sensor_error_rows_each_produced_no_differences_2026_07_29_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ARCHIVE-RECEIPT-AUTHORITY-036
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: ArchiveReader readings and operator-log Parquet opens, bounded cold-source collection, public query overlap handling, and SQLiteWriter readings-history consumption of cold evidence.
+    classification: archive_receipt_authority_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Replaced, malformed, receipt-less, or mid-read-mutated cold evidence can be returned as authoritative data, and a downstream history consumer can silently treat partial archive rows as complete.
+    invariant: Canonical contained relative path and every available persisted receipt field are authoritative; live file identity only corroborates them. Every cold Parquet source is verified before materialization and the same open object and pathname are verified again before its transactionally staged rows can escape. Missing or incomplete authority is explicit unavailability, including at the SQLiteWriter history boundary. Legacy MD5 remains an accidental-integrity checksum only.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/storage/test_archive_receipt_integrity.py::test_archive_receipt_mismatch_matrix_rejects_every_production_reader
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_failed_cold_source_rows_are_quarantined_after_postread_failure
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_history_raises_unavailable_before_returning_partial_cold_rows
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_missing_index_with_cold_artifact_is_unavailable_to_bounded_history
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_receipted_operator_log_v1_v2_and_exact_zero_rows_remain_compatible
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_receiptless_v1_replacement_is_explicitly_unavailable
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_exact_zero_row_readings_receipt_preserves_empty_history
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_main_reading_in_place_mutation_during_materialization_is_rejected
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_posix_pathname_replacement_of_opened_reading_is_rejected
+        ci_partition: remaining
+        platform: posix
+      - node: tests/storage/test_archive_receipt_integrity.py::test_windows_open_reading_handle_blocks_pathname_replacement
+        ci_partition: remaining
+        platform: windows
+      - node: tests/storage/test_archive_receipt_integrity.py::test_pure_cold_and_overlap_public_query_share_receipted_path
+        ci_partition: remaining
+      - node: tests/storage/test_archive_receipt_integrity.py::test_receipt_hashing_uses_constant_blocks_and_honors_deadline
+        ci_partition: remaining
+    red_evidence: local_junit_sha256_f714efbb47c490bd6882584fa45e623f1ac2dc183b978a3fe1775604a840654c_reproduced_runtime_and_false_green_failures_pending_immutable_integration_capture
     green_evidence: pending

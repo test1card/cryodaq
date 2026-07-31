@@ -81,6 +81,11 @@ def _cold(
         }
     )
     pq.write_table(table, path, row_group_size=row_group_size)
+    receipt = {
+        "row_count": table.num_rows,
+        "size_bytes_archive": path.stat().st_size,
+        "checksum_md5": hashlib.md5(path.read_bytes()).hexdigest(),
+    }
     (root / "index.json").write_text(
         json.dumps(
             {
@@ -88,6 +93,7 @@ def _cold(
                     {
                         "original_name": f"data_{day}.db",
                         "archive_path": relative.as_posix(),
+                        **receipt,
                     }
                 ]
             }
@@ -171,6 +177,9 @@ def _descriptor_cold(
     entry: dict[str, object] = {
         "original_name": f"data_{day}.db",
         "archive_path": relative.as_posix(),
+        "row_count": table.num_rows,
+        "size_bytes_archive": path.stat().st_size,
+        "checksum_md5": hashlib.md5(path.read_bytes()).hexdigest(),
         "channel_descriptors_path": sidecar_rel.as_posix(),
         "channel_descriptors_rows": 1,
         "channel_descriptors_checksum": hashlib.md5(sidecar.read_bytes()).hexdigest(),
@@ -204,7 +213,18 @@ def _descriptor_hot(root: Path, day: str, start: datetime, descriptor: ChannelDe
     return path
 
 
-def _repeat_descriptor_readings(path: Path, start: datetime, count: int) -> None:
+def _refresh_readings_receipt(entry: dict[str, object], path: Path) -> None:
+    entry["row_count"] = pq.read_metadata(path).num_rows
+    entry["size_bytes_archive"] = path.stat().st_size
+    entry["checksum_md5"] = hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def _repeat_descriptor_readings(
+    path: Path,
+    entry: dict[str, object],
+    start: datetime,
+    count: int,
+) -> None:
     parquet = pq.ParquetFile(path)
     original = parquet.read().to_pylist()[0]
     rows = []
@@ -213,6 +233,7 @@ def _repeat_descriptor_readings(path: Path, start: datetime, count: int) -> None
         row["timestamp"] = start + timedelta(microseconds=index)
         rows.append(row)
     pq.write_table(pa.Table.from_pylist(rows, schema=parquet.schema_arrow), path, row_group_size=1)
+    _refresh_readings_receipt(entry, path)
 
 
 def test_bounded_rows_preserve_fields_null_and_end_exclusive(tmp_path: Path) -> None:
@@ -399,7 +420,7 @@ def test_none_channels_fails_closed_when_indexed_source_is_missing(tmp_path: Pat
     assert BoundedReadIssueCode.SOURCE_MISSING in {issue.code for issue in result.issues}
 
 
-def test_legacy_text_timestamp_is_partial(tmp_path: Path) -> None:
+def test_legacy_text_timestamp_quarantines_its_source(tmp_path: Path) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     path = _hot_db(
         tmp_path / "data",
@@ -418,7 +439,7 @@ def test_legacy_text_timestamp_is_partial(tmp_path: Path) -> None:
         start,
         start + timedelta(seconds=1),
     )
-    assert len(result.rows) == 1
+    assert result.rows == ()
     assert result.complete is False
     assert BoundedReadIssueCode.LEGACY_TIMESTAMP_UNSUPPORTED in {issue.code for issue in result.issues}
 
@@ -470,7 +491,7 @@ def test_parquet_reader_uses_projected_batches(tmp_path: Path, monkeypatch: pyte
     assert result.rows[0].value == 1.0
 
 
-def test_parquet_null_key_is_visible_partial_not_silently_filtered(
+def test_parquet_null_key_quarantines_its_source(
     tmp_path: Path,
 ) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
@@ -488,7 +509,7 @@ def test_parquet_null_key_is_visible_partial_not_silently_filtered(
         start + timedelta(seconds=1),
     )
     assert result.complete is False
-    assert [row.value for row in result.rows] == [1.0]
+    assert result.rows == ()
     assert BoundedReadIssueCode.INVALID_ROW in {issue.code for issue in result.issues}
 
 
@@ -505,6 +526,9 @@ def test_invalid_parquet_footer_is_rejected_before_table_read(tmp_path: Path) ->
                     {
                         "original_name": "data_2026-07-10.db",
                         "archive_path": "year=2026/bad.parquet",
+                        "row_count": 0,
+                        "size_bytes_archive": target.stat().st_size,
+                        "checksum_md5": hashlib.md5(target.read_bytes()).hexdigest(),
                     }
                 ]
             }
@@ -870,6 +894,7 @@ def test_descriptor_corruption_matrix_never_downgrades_to_legacy(
             pa.array(["°C"], type=pa.string()),
         )
         pq.write_table(table, readings)
+        _refresh_readings_receipt(entry, readings)
     (archive / "index.json").write_text(json.dumps({"files": [entry]}), encoding="utf-8")
     result = _query(ArchiveReader(tmp_path / "data", archive), start, start + timedelta(seconds=1))
     assert result.rows == ()
@@ -900,7 +925,8 @@ def test_hot_cold_dedup_never_splices_descriptor_from_losing_row(tmp_path: Path)
 
 def test_descriptor_envelope_bytes_count_toward_retained_cap(tmp_path: Path) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
-    readings, _sidecar, _entry = _descriptor_cold(tmp_path / "archive", "2026-07-10", start)
+    archive = tmp_path / "archive"
+    readings, _sidecar, entry = _descriptor_cold(archive, "2026-07-10", start)
     original = pq.ParquetFile(readings).read().to_pylist()[0]
     rows = []
     for index in range(120):
@@ -908,6 +934,8 @@ def test_descriptor_envelope_bytes_count_toward_retained_cap(tmp_path: Path) -> 
         row["timestamp"] = start + timedelta(microseconds=index)
         rows.append(row)
     pq.write_table(pa.Table.from_pylist(rows, schema=pq.ParquetFile(readings).schema_arrow), readings)
+    _refresh_readings_receipt(entry, readings)
+    (archive / "index.json").write_text(json.dumps({"files": [entry]}), encoding="utf-8")
     result = _query(
         ArchiveReader(tmp_path / "data", tmp_path / "archive"),
         start,
@@ -940,8 +968,15 @@ def test_descriptor_reference_cardinality_is_bounded_before_sidecar_read(tmp_pat
         }
     )
     pq.write_table(table, path)
+    entry = {
+        "original_name": "data_2026-07-10.db",
+        "archive_path": relative.as_posix(),
+        "row_count": table.num_rows,
+        "size_bytes_archive": path.stat().st_size,
+        "checksum_md5": hashlib.md5(path.read_bytes()).hexdigest(),
+    }
     (archive / "index.json").write_text(
-        json.dumps({"files": [{"original_name": "data_2026-07-10.db", "archive_path": relative.as_posix()}]}),
+        json.dumps({"files": [entry]}),
         encoding="utf-8",
     )
     result = _query(ArchiveReader(tmp_path / "data", archive), start, start + timedelta(seconds=1))
@@ -1051,15 +1086,20 @@ def test_sidecar_open_handle_blocks_replacement_on_windows(
     archive = tmp_path / "archive"
     _readings, sidecar, _entry = _descriptor_cold(archive, "2026-07-10", start)
     saved = sidecar.with_suffix(".saved")
+    sidecar_info = sidecar.stat()
+    sidecar_identity = (sidecar_info.st_dev, sidecar_info.st_ino)
     real_hash = ArchiveReader._hash_open_file
     calls = 0
+    attempted = False
     blocked: list[int | None] = []
 
     def attempt_replace_during_hash(descriptor: int, *, deadline_monotonic: float) -> str:
-        nonlocal calls
+        nonlocal attempted, calls
         calls += 1
         result = real_hash(descriptor, deadline_monotonic=deadline_monotonic)
-        if calls == 1:
+        info = os.fstat(descriptor)
+        if not attempted and (info.st_dev, info.st_ino) == sidecar_identity:
+            attempted = True
             try:
                 sidecar.replace(saved)
             except PermissionError as exc:
@@ -1078,7 +1118,8 @@ def test_sidecar_open_handle_blocks_replacement_on_windows(
     assert result.complete is True
     assert len(result.rows) == 1
     assert result.issues == ()
-    assert calls == 2
+    assert calls >= 5
+    assert attempted is True
     assert blocked == [32]
     assert sidecar.is_file()
     assert saved.exists() is False
@@ -1148,8 +1189,9 @@ def test_slow_multibatch_readings_reference_scan_stops_at_deadline(
 ) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     archive = tmp_path / "archive"
-    readings, _sidecar, _entry = _descriptor_cold(archive, "2026-07-10", start)
-    _repeat_descriptor_readings(readings, start, 128)
+    readings, _sidecar, entry = _descriptor_cold(archive, "2026-07-10", start)
+    _repeat_descriptor_readings(readings, entry, start, 128)
+    (archive / "index.json").write_text(json.dumps({"files": [entry]}), encoding="utf-8")
     real_next = ArchiveReader._next_descriptor_reference_batch
     calls = 0
     clock = [0.0]
@@ -1186,8 +1228,9 @@ def test_slow_readings_reference_scalar_decode_stops_at_deadline(
 ) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     archive = tmp_path / "archive"
-    readings, _sidecar, _entry = _descriptor_cold(archive, "2026-07-10", start)
-    _repeat_descriptor_readings(readings, start, 64)
+    readings, _sidecar, entry = _descriptor_cold(archive, "2026-07-10", start)
+    _repeat_descriptor_readings(readings, entry, start, 64)
+    (archive / "index.json").write_text(json.dumps({"files": [entry]}), encoding="utf-8")
     real_value = ArchiveReader._descriptor_reference_value
     calls = 0
     clock = [0.0]
@@ -1326,7 +1369,7 @@ def test_deadline_crossed_during_first_row_text_decode_emits_no_row(
     assert BoundedReadIssueCode.DEADLINE in {issue.code for issue in result.issues}
 
 
-def test_deadline_crossed_by_collector_discards_only_post_deadline_row(
+def test_deadline_crossed_by_collector_quarantines_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1362,12 +1405,12 @@ def test_deadline_crossed_by_collector_discards_only_post_deadline_row(
         start + timedelta(seconds=1),
         deadline_monotonic=1.0,
     )
-    assert [row.value for row in result.rows] == [1.0]
+    assert result.rows == ()
     assert result.complete is False
     assert BoundedReadIssueCode.DEADLINE in {issue.code for issue in result.issues}
 
 
-def test_deadline_crossed_during_descriptor_resolution_keeps_prior_only(
+def test_deadline_crossed_during_descriptor_resolution_quarantines_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1400,11 +1443,11 @@ def test_deadline_crossed_during_descriptor_resolution_keeps_prior_only(
         start + timedelta(seconds=1),
         deadline_monotonic=1.0,
     )
-    assert [row.value for row in result.rows] == [1.0]
+    assert result.rows == ()
     assert BoundedReadIssueCode.DEADLINE in {issue.code for issue in result.issues}
 
 
-def test_final_batch_exhaustion_and_metadata_observe_deadline(
+def test_final_batch_exhaustion_quarantines_source_and_observes_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1432,7 +1475,7 @@ def test_final_batch_exhaustion_and_metadata_observe_deadline(
         start + timedelta(seconds=1),
         deadline_monotonic=1.0,
     )
-    assert [row.value for row in result.rows] == [1.0]
+    assert result.rows == ()
     assert result.complete is False
     assert BoundedReadIssueCode.DEADLINE in {issue.code for issue in result.issues}
 

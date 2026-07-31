@@ -9590,17 +9590,22 @@ class SQLiteWriter:
         # newest first, under one row/byte/deadline budget for the whole request.
         # The cold end is strictly before the oldest hot day so an ordinary
         # rotation cannot make the hot and cold paths read the same source.
-        archive_index = get_archive_dir(self._data_dir) / "index.json"
+        archive_dir = get_archive_dir(self._data_dir)
+        archive_index = archive_dir / "index.json"
         cold_needed = (
             filtered_remaining > 0 and any(hot_deficits.values())
             if channels and hot_deficits is not None
             else unfiltered_remaining > 0
         )
-        if archive_index.exists() and cold_needed:
+        if archive_dir.exists() and cold_needed:
             # Local import breaks the archive_reader → sqlite_writer cycle.
-            from cryodaq.storage.archive_reader import ArchiveReader
+            from cryodaq.storage.archive_reader import (
+                ArchiveReader,
+                ArchiveUnavailableError,
+                BoundedReadIssueCode,
+            )
 
-            reader = ArchiveReader(self._data_dir, archive_index.parent)
+            reader = ArchiveReader(self._data_dir, archive_dir)
             hot_days: list[date] = []
             for db_path in db_files:
                 try:
@@ -9633,7 +9638,10 @@ class SQLiteWriter:
                     try:
                         if time.monotonic() >= cold_deadline:
                             raise TimeoutError("cold history deadline expired before index read")
-                        index = reader._read_bounded_index(archive_index)
+                        if archive_index.exists() or archive_index.is_symlink():
+                            index = reader._read_bounded_index(archive_index)
+                        else:
+                            index = reader._load_index()
                         if not isinstance(index, dict) or set(index) != {"files"}:
                             raise ValueError("invalid bounded archive index schema")
                         entries = index["files"]
@@ -9657,9 +9665,16 @@ class SQLiteWriter:
                             archived_days.append(archived_day)
                         if time.monotonic() >= cold_deadline:
                             raise TimeoutError("cold history deadline expired during index read")
+                    except TimeoutError:
+                        raise ArchiveUnavailableError(
+                            BoundedReadIssueCode.DEADLINE,
+                            "history:index",
+                        ) from None
                     except Exception:
-                        logger.warning("Bounded cold history index read failed", exc_info=True)
-                        cold_from = None
+                        raise ArchiveUnavailableError(
+                            BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
+                            "history:index",
+                        ) from None
                     else:
                         if archived_days:
                             earliest = min(archived_days)
@@ -9697,8 +9712,10 @@ class SQLiteWriter:
                         and cold_start < cold_end
                     ):
                         if time.monotonic() >= deadline:
-                            logger.warning("Cold history read stopped at its bounded deadline")
-                            break
+                            raise ArchiveUnavailableError(
+                                BoundedReadIssueCode.DEADLINE,
+                                "history:cold",
+                            )
                         chunk_start = max(cold_start, cold_end - _HISTORY_COLD_CHUNK)
                         query_channels = list(deficits) if deficits is not None else [None]
                         for channel in query_channels:
@@ -9729,10 +9746,13 @@ class SQLiteWriter:
                                     max_retained_bytes=cold_bytes_remaining,
                                     deadline_monotonic=deadline,
                                 )
+                            except ArchiveUnavailableError:
+                                raise
                             except Exception:
-                                logger.warning("Bounded cold history read failed", exc_info=True)
-                                stop_cold = True
-                                break
+                                raise ArchiveUnavailableError(
+                                    BoundedReadIssueCode.PARQUET_READ,
+                                    "history:cold",
+                                ) from None
 
                             retained_bytes = bounded.retained_encoded_bytes
                             if (
@@ -9740,11 +9760,23 @@ class SQLiteWriter:
                                 or retained_bytes < 0
                                 or retained_bytes > cold_bytes_remaining
                             ):
-                                logger.warning("Bounded cold history returned an invalid byte count")
-                                stop_cold = True
-                                break
+                                raise ArchiveUnavailableError(
+                                    BoundedReadIssueCode.PARQUET_READ,
+                                    "history:retained-bytes",
+                                )
+                            if not bounded.complete:
+                                issue = bounded.issues[0] if bounded.issues else None
+                                raise ArchiveUnavailableError(
+                                    issue.code if issue is not None else BoundedReadIssueCode.PARQUET_READ,
+                                    issue.source if issue is not None else "history:incomplete",
+                                )
                             cold_bytes_remaining -= retained_bytes
                             accepted = bounded.rows[-row_cap:]
+                            if bounded.truncated and len(accepted) < row_cap:
+                                raise ArchiveUnavailableError(
+                                    BoundedReadIssueCode.PARQUET_READ,
+                                    "history:truncated",
+                                )
                             for row in accepted:
                                 value = float("nan") if row.value is None else row.value
                                 result.setdefault(row.channel, []).append((row.timestamp, value))
@@ -9753,19 +9785,18 @@ class SQLiteWriter:
                                 assert channel is not None
                                 deficits[channel] = max(0, deficit - len(accepted))
                                 filtered_remaining -= len(accepted)
-                            if not bounded.complete or (bounded.truncated and len(accepted) < row_cap):
-                                logger.warning(
-                                    "Cold history read returned partial bounded evidence "
-                                    "(complete=%s, truncated=%s, issues=%d)",
-                                    bounded.complete,
-                                    bounded.truncated,
-                                    len(bounded.issues) + bounded.issue_overflow,
-                                )
-                                stop_cold = True
-                                break
                         if stop_cold:
                             break
                         cold_end = chunk_start
+                    if (
+                        cold_rows_remaining > 0
+                        and cold_start < cold_end
+                        and cold_bytes_remaining < _HISTORY_COLD_MIN_RETAINED_BYTES
+                    ):
+                        raise ArchiveUnavailableError(
+                            BoundedReadIssueCode.PARQUET_BATCH_OVERSIZE,
+                            "history:byte-budget",
+                        )
 
         if not channels:
             # The cold reader has its own date/source bounds but returns a

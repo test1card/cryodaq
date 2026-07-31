@@ -159,6 +159,9 @@ def _write_cold(
                     {
                         "original_name": f"data_{day}.db",
                         "archive_path": relative.as_posix(),
+                        "row_count": len(rows),
+                        "size_bytes_archive": path.stat().st_size,
+                        "checksum_md5": hashlib.md5(path.read_bytes()).hexdigest(),
                         "channel_descriptors_path": sidecar_relative.as_posix(),
                         "channel_descriptors_rows": 1,
                         "channel_descriptors_checksum": hashlib.md5(sidecar.read_bytes()).hexdigest(),
