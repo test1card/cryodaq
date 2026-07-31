@@ -216,6 +216,7 @@ class SafetyManager:
         self._pending_child_fault_settlements: set[asyncio.Task[Any]] = set()
         self._shutdown_hold_fault_settlement: asyncio.Task[Any] | None = None
         self._consumed_child_tasks: set[asyncio.Task[Any]] = set()
+        self._stop_cancelled_child_tasks: dict[asyncio.Task[Any], int] = {}
 
         # F36 owner-native operator cut.  This cache is replaced only on the
         # SafetyManager event-loop thread and its getter performs no sampling,
@@ -428,6 +429,7 @@ class SafetyManager:
         self._failed_child_role = None
         self._failed_child_reason = None
         self._consumed_child_tasks.clear()
+        self._stop_cancelled_child_tasks.clear()
         self._collect_task = asyncio.create_task(self._collect_loop(), name="safety_collect")
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="safety_monitor")
         self._collect_task.add_done_callback(
@@ -472,16 +474,14 @@ class SafetyManager:
         monitor_task = self._monitor_task
         previous_failed_role = self._failed_child_role
         previous_failed_reason = self._failed_child_reason
-        consumed_before_stop = frozenset(
-            task for task in (collect_task, monitor_task) if task is not None and task in self._consumed_child_tasks
-        )
 
         def _restore_shutdown_owner_cut() -> None:
             """Roll a failed tentative stop back to retained owner truth."""
 
             self._stopping_child_generation = None
-            self._failed_child_role = previous_failed_role
-            self._failed_child_reason = previous_failed_reason
+            if self._failed_child_role is None:
+                self._failed_child_role = previous_failed_role
+                self._failed_child_reason = previous_failed_reason
             self._safety_monitor_active = bool(
                 self._failed_child_role is None
                 and collect_task is not None
@@ -490,9 +490,6 @@ class SafetyManager:
                 and not collect_task.done()
                 and not monitor_task.done()
             )
-            for task in (collect_task, monitor_task):
-                if task is not None and task.done() and task not in consumed_before_stop:
-                    self._consumed_child_tasks.discard(task)
             self._observe_terminal_safety_children()
             self._refresh_operator_safety_snapshot()
 
@@ -524,9 +521,10 @@ class SafetyManager:
             _restore_shutdown_owner_cut()
 
         # Establish the synchronous mutation/lifecycle cut before the first
-        # hardware await. A child that exits while stop_source() is blocked is
-        # an expected member of this exact stopping generation, never a fresh
-        # fault which can erase or race the shutdown result.
+        # hardware await. The cut blocks new authority, but does not classify
+        # child exits: only an exact cancellation request issued by this stop
+        # is expected. Every earlier failure, return, or cancellation remains
+        # an authority loss that must fault and settle.
         self._stopping_child_generation = generation
         self._register_abort_intent(full=True)
         self._safety_monitor_active = False
@@ -539,13 +537,17 @@ class SafetyManager:
 
         cancelled: asyncio.CancelledError | None = None
         safe_off_error: BaseException | None = None
-        if self._active_sources:
+        reconciliation_reason, reconciliation_cancelled = await self._reconcile_hazardous_success("manager stop")
+        cancelled = reconciliation_cancelled
+        if reconciliation_reason is None and self._active_sources:
             safe_off_task = asyncio.create_task(
                 self._safe_off("system stop", channels=set(self._active_sources)),
                 name="safety_manager_stop_sources",
             )
             _result, safe_off_error, safe_off_cancelled = await _settle_shielded_hardware_task(safe_off_task)
-            cancelled = safe_off_cancelled
+            cancelled = cancelled or safe_off_cancelled
+            reconciliation_reason, reconciliation_cancelled = await self._reconcile_hazardous_success("manager stop")
+            cancelled = cancelled or reconciliation_cancelled
 
         # Per-channel stop is not the terminal shutdown receipt. Demand an
         # exact global OFF confirmation before relinquishing either safety
@@ -577,26 +579,12 @@ class SafetyManager:
         # all of them. No older result may be the last writer before shutdown.
         pending_faults = tuple(dict.fromkeys((*pending_before_global_proof, *self._pending_child_fault_settlements)))
         if pending_faults:
-            bounded_drain = asyncio.create_task(
-                asyncio.wait(
-                    pending_faults,
-                    timeout=_CHILD_FAULT_SETTLEMENT_DEADLINE_S,
-                ),
+            drained, drain_cancelled = await self._drain_child_fault_settlements(
+                pending_faults,
                 name="safety_child_fault_pre_stop_drain",
             )
-            drain_result, drain_error, drain_cancelled = await _settle_shielded_hardware_task(bounded_drain)
             cancelled = cancelled or drain_cancelled
-            if drain_error is not None:
-                logger.critical("Safety child fault pre-stop drain failed: %s", drain_error)
-                still_pending = set(pending_faults)
-            else:
-                assert drain_result is not None
-                _done, still_pending = drain_result
-            if still_pending:
-                logger.critical(
-                    "Safety child fault settlement remained live after %.1fs during stop; ownership is retained",
-                    _CHILD_FAULT_SETTLEMENT_DEADLINE_S,
-                )
+            if not drained:
                 _restore_shutdown_owner_cut()
                 if cancelled is not None:
                     raise cancelled
@@ -620,7 +608,9 @@ class SafetyManager:
         tasks = tuple(task for task in (collect_task, monitor_task) if task is not None)
         for task in tasks:
             if not task.done():
-                task.cancel()
+                preexisting_cancellations = task.cancelling()
+                if task.cancel() and preexisting_cancellations == 0:
+                    self._stop_cancelled_child_tasks[task] = task.cancelling()
 
         async def _settle_children() -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -634,6 +624,37 @@ class SafetyManager:
         if settlement_error is not None:
             logger.critical("Safety child stop settlement failed: %s", settlement_error)
 
+        for role, task in (("collect", collect_task), ("monitor", monitor_task)):
+            if task is not None:
+                self._operator_child_done(task, role=role, generation=generation)
+
+        child_faults = tuple(self._pending_child_fault_settlements)
+        drained, drain_cancelled = await self._drain_child_fault_settlements(
+            child_faults,
+            name="safety_child_fault_post_stop_drain",
+        )
+        cancelled = cancelled or drain_cancelled
+        if not drained:
+            _restore_shutdown_owner_cut()
+            if cancelled is not None:
+                raise cancelled
+            raise SafetyShutdownUnverifiedError(
+                "SafetyManager shutdown HOLD: child fault settlement is still in progress"
+            )
+
+        final_proof_task = asyncio.create_task(
+            self._ensure_output_off(),
+            name="safety_manager_post_child_global_off_proof",
+        )
+        final_result, final_error, final_cancelled = await _settle_shielded_hardware_task(final_proof_task)
+        cancelled = cancelled or final_cancelled
+        if final_error is not None or final_result is not True:
+            _begin_shutdown_hold(final_error)
+            if cancelled is not None:
+                raise cancelled
+            raise SafetyShutdownUnverifiedError(hold_reason) from final_error
+        self._active_sources.clear()
+
         if self._child_generation == generation:
             if self._collect_task is collect_task:
                 self._collect_task = None
@@ -644,6 +665,8 @@ class SafetyManager:
         self._complete_stopping_generation_if_settled(generation)
         if cancelled is not None:
             raise cancelled
+        if reconciliation_reason is not None:
+            raise SafetyShutdownUnverifiedError(reconciliation_reason)
         if safe_off_error is not None:
             raise safe_off_error
 
@@ -720,6 +743,38 @@ class SafetyManager:
 
         task.add_done_callback(_settled)
 
+    async def _drain_child_fault_settlements(
+        self,
+        owners: tuple[asyncio.Task[Any], ...] = (),
+        *,
+        name: str,
+    ) -> tuple[bool, asyncio.CancelledError | None]:
+        """Boundedly settle the frozen and currently retained fault owners."""
+
+        pending = tuple(dict.fromkeys((*owners, *self._pending_child_fault_settlements)))
+        if not pending:
+            return True, None
+        bounded_drain = asyncio.create_task(
+            asyncio.wait(
+                pending,
+                timeout=_CHILD_FAULT_SETTLEMENT_DEADLINE_S,
+            ),
+            name=name,
+        )
+        drain_result, drain_error, drain_cancelled = await _settle_shielded_hardware_task(bounded_drain)
+        if drain_error is not None:
+            logger.critical("Safety child fault settlement drain failed: %s", drain_error)
+            return False, drain_cancelled
+        assert drain_result is not None
+        _done, still_pending = drain_result
+        if still_pending:
+            logger.critical(
+                "Safety child fault settlement remained live after %.1fs; ownership is retained",
+                _CHILD_FAULT_SETTLEMENT_DEADLINE_S,
+            )
+            return False, drain_cancelled
+        return True, drain_cancelled
+
     def _observe_terminal_safety_children(self) -> None:
         """Synchronously consume exact owned children already known terminal."""
 
@@ -762,7 +817,11 @@ class SafetyManager:
         if generation != self._child_generation or task is not current:
             return
         self._consumed_child_tasks.add(task)
-        if self._stopping_child_generation == generation:
+        if (
+            self._stopping_child_generation == generation
+            and outcome == "cancelled"
+            and self.is_stop_cancelled_child(task)
+        ):
             return
 
         self._reviewed_source_generation = None
@@ -782,6 +841,12 @@ class SafetyManager:
             name=f"safety_{role}_{outcome}_fault_settlement",
         )
         self._retain_child_fault_settlement(settlement, reason=reason)
+
+    def is_stop_cancelled_child(self, task: asyncio.Task[Any]) -> bool:
+        """Return whether stop owns the exact task's only cancellation request."""
+
+        cancellation_count = self._stop_cancelled_child_tasks.get(task)
+        return bool(cancellation_count is not None and task.cancelled() and task.cancelling() == cancellation_count)
 
     def replace_operator_child(self, role: str, task: asyncio.Task[Any]) -> None:
         """Adopt one supervisor replacement without restoring safety authority."""
@@ -1487,6 +1552,121 @@ class SafetyManager:
             return True, None
         return True, frozenset(active)
 
+    def _hazardous_success_conflict(self) -> tuple[SmuChannel | None, str] | None:
+        """Return exact known activity that forbids hazardous-command success."""
+
+        try:
+            hazard = self._current_unmanaged_output_hazard()
+        except Exception as exc:
+            return None, f"reviewed source unsafe-output observation inspection failed: {exc}"
+        if hazard is not None:
+            return hazard
+
+        try:
+            cut_present, driver_active_sources = self._exact_driver_active_source_cut()
+        except Exception as exc:
+            return None, f"reviewed source active-channel cut inspection failed: {exc}"
+        if not cut_present:
+            return None
+        if driver_active_sources is None:
+            return None, "reviewed source exposed a malformed active-channel cut"
+
+        manager_active_sources = frozenset(self._active_sources)
+        unmanaged = driver_active_sources - manager_active_sources
+        if unmanaged:
+            channel = min(unmanaged)
+            return channel, f"reviewed source exact active cut contains unmanaged {channel}"
+        missing = manager_active_sources - driver_active_sources
+        if missing:
+            channel = min(missing)
+            return channel, f"SafetyManager ownership is absent from the reviewed source exact cut for {channel}"
+        return None
+
+    async def _reconcile_hazardous_success(
+        self,
+        operation: str,
+    ) -> tuple[str | None, asyncio.CancelledError | None]:
+        """Fault, globally settle, and re-prove every known ownership conflict."""
+
+        self._observe_terminal_safety_children()
+        conflict = self._hazardous_success_conflict()
+        if conflict is None:
+            return None, None
+
+        channel, detail = conflict
+        reason = f"{operation} hazardous-success reconciliation failed: {detail}"
+        fault_channel = channel or ""
+        pending_before_settlement = tuple(self._pending_child_fault_settlements)
+        self._begin_fault_latch(
+            reason,
+            channel=fault_channel,
+            source="hazardous_success_reconciliation",
+        )
+        settlement = asyncio.create_task(
+            self._settle_latched_fault(
+                reason,
+                channel=fault_channel,
+                source="hazardous_success_reconciliation",
+            ),
+            name="hazardous_success_fault_settlement",
+        )
+        _result, settlement_error, caller_cancelled = await _settle_shielded_hardware_task(settlement)
+        if settlement_error is not None:
+            logger.critical("Hazardous-success fault settlement failed: %s", settlement_error)
+
+        drained, drain_cancelled = await self._drain_child_fault_settlements(
+            pending_before_settlement,
+            name="hazardous_success_prior_fault_drain",
+        )
+        caller_cancelled = caller_cancelled or drain_cancelled
+        if not drained:
+            logger.critical("Hazardous-success reconciliation retained an unsettled child fault owner")
+
+        proof_task = asyncio.create_task(
+            self._ensure_output_off(),
+            name="hazardous_success_global_off_proof",
+        )
+        proof_result, proof_error, proof_cancelled = await _settle_shielded_hardware_task(proof_task)
+        caller_cancelled = caller_cancelled or proof_cancelled
+        if proof_error is None and proof_result is True:
+            self._active_sources.clear()
+        else:
+            logger.critical("Hazardous-success reconciliation could not re-prove global OFF: %s", proof_error)
+
+        self._observe_terminal_safety_children()
+        late_settlements = tuple(self._pending_child_fault_settlements)
+        if late_settlements:
+            late_drained, late_cancelled = await self._drain_child_fault_settlements(
+                late_settlements,
+                name="hazardous_success_late_fault_drain",
+            )
+            caller_cancelled = caller_cancelled or late_cancelled
+            if late_drained:
+                ordered_proof = asyncio.create_task(
+                    self._ensure_output_off(),
+                    name="hazardous_success_ordered_global_off_proof",
+                )
+                ordered_result, ordered_error, ordered_cancelled = await _settle_shielded_hardware_task(ordered_proof)
+                caller_cancelled = caller_cancelled or ordered_cancelled
+                if ordered_error is None and ordered_result is True:
+                    self._active_sources.clear()
+                else:
+                    logger.critical(
+                        "Hazardous-success reconciliation lost ordered global OFF proof: %s",
+                        ordered_error,
+                    )
+
+        self._refresh_operator_safety_snapshot()
+        publish_task = asyncio.create_task(
+            self._publish_keithley_channel_states("hazardous_success_reconciled"),
+            name="hazardous_success_final_publish",
+        )
+        _result, publish_error, publish_cancelled = await _settle_shielded_hardware_task(publish_task)
+        caller_cancelled = caller_cancelled or publish_cancelled
+        if publish_error is not None:
+            logger.warning("Hazardous-success final state publication failed: %s", publish_error)
+        return reason, caller_cancelled
+
     def _post_publication_run_revocation(
         self,
         *,
@@ -1678,6 +1858,19 @@ class SafetyManager:
     ) -> dict[str, Any]:
         async with self._cmd_lock:
             channels = self._resolve_channels(channel)
+            operation_name = "targeted stop" if channel is not None else "operator stop"
+            reconciliation_reason, reconciliation_cancelled = await self._reconcile_hazardous_success(operation_name)
+            if reconciliation_cancelled is not None:
+                raise reconciliation_cancelled
+            if reconciliation_reason is not None:
+                return {
+                    "ok": False,
+                    "state": self._state.value,
+                    "channels": sorted(channels),
+                    "active_channels": sorted(self._active_sources),
+                    "applied_off_channels": [],
+                    "error": reconciliation_reason,
+                }
             if self._state == SafetyState.FAULT_LATCHED:
                 await self._ensure_output_off(channel)
                 return {
@@ -1692,7 +1885,10 @@ class SafetyManager:
                 channels=channels,
                 expected_abort_generation=expected_abort_generation,
             )
+            reconciliation_reason, reconciliation_cancelled = await self._reconcile_hazardous_success(operation_name)
             await self._publish_keithley_channel_states("stop")
+            if reconciliation_cancelled is not None:
+                raise reconciliation_cancelled
             self._observe_terminal_safety_children()
             interrupted = interrupted or (
                 self._abort_generation != expected_abort_generation
@@ -1709,9 +1905,12 @@ class SafetyManager:
                     "active_channels": sorted(self._active_sources),
                     "applied_off_channels": sorted(applied_off),
                     "error": (
-                        f"Stop failed, fault latched: {self._fault_reason}"
-                        if self._state == SafetyState.FAULT_LATCHED
-                        else "Stop interrupted by a competing safety-authority change"
+                        reconciliation_reason
+                        or (
+                            f"Stop failed, fault latched: {self._fault_reason}"
+                            if self._state == SafetyState.FAULT_LATCHED
+                            else "Stop interrupted by a competing safety-authority change"
+                        )
                     ),
                 }
             return {
@@ -1834,6 +2033,19 @@ class SafetyManager:
     async def _emergency_off_locked(self, channel: str | None) -> dict[str, Any]:
         """emergency_off body; MUST be called holding ``_cmd_lock``."""
         channels = self._resolve_channels(channel)
+        operation_name = "targeted emergency OFF" if channel is not None else "global emergency OFF"
+        reconciliation_reason, reconciliation_cancelled = await self._reconcile_hazardous_success(operation_name)
+        if reconciliation_cancelled is not None:
+            raise reconciliation_cancelled
+        if reconciliation_reason is not None:
+            return {
+                "ok": False,
+                "state": self._state.value,
+                "channels": sorted(channels),
+                "active_channels": sorted(self._active_sources),
+                "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
+                "error": reconciliation_reason,
+            }
         confirmed = await self._ensure_output_off(channel)
         if not confirmed:
             # FAIL CLOSED (CR-2). The driver could not confirm output OFF
@@ -1863,6 +2075,19 @@ class SafetyManager:
             }
         self._active_sources.difference_update(channels)
         self._refresh_operator_safety_snapshot()
+
+        reconciliation_reason, reconciliation_cancelled = await self._reconcile_hazardous_success(operation_name)
+        if reconciliation_cancelled is not None:
+            raise reconciliation_cancelled
+        if reconciliation_reason is not None:
+            return {
+                "ok": False,
+                "state": self._state.value,
+                "channels": sorted(channels),
+                "active_channels": sorted(self._active_sources),
+                "off_evidence": self._reviewed_source_off_evidence.receipt_payload(),
+                "error": reconciliation_reason,
+            }
 
         if self._state == SafetyState.FAULT_LATCHED:
             result = {

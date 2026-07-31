@@ -20,6 +20,7 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.engine import EngineCommandContext, _handle_gui_command
+from cryodaq.engine_wiring.supervision import TaskSupervisor
 from tests.qualification_support import issued_test_qualification_receipt
 
 
@@ -219,6 +220,198 @@ async def _yield_until(predicate, *, message: str) -> None:
             return
         await asyncio.sleep(0)
     pytest.fail(message)
+
+
+async def _l05_started_child_manager(
+    outcome: str,
+) -> tuple[
+    SafetyManager,
+    _ExactRunSource,
+    TaskSupervisor,
+    asyncio.Task[None],
+    asyncio.Event,
+    AsyncMock,
+    AsyncMock,
+    list[str],
+]:
+    """Start the real child lifecycle with one deterministically controlled child."""
+
+    collect_entered = asyncio.Event()
+    collect_release = asyncio.Event()
+
+    async def controlled_collect() -> None:
+        collect_entered.set()
+        await collect_release.wait()
+        if outcome == "runtime_error":
+            raise RuntimeError("L05 controlled collect failure")
+        if outcome == "normal_exit":
+            return
+        await asyncio.Event().wait()
+
+    source = _ExactRunSource()
+    binding = _issue_registry_runtime_binding(
+        driver=source,
+        timing=AcquisitionTiming(1.0, 1.0, 1.0),
+        registry_provenance="test:l05-child-settlement",
+        trust_class=DriverTrustClass.REVIEWED_SOURCE,
+        simulation=False,
+    )
+    ordered_events: list[str] = []
+
+    async def audit_fault(**_kwargs: object) -> None:
+        ordered_events.append("audit")
+
+    audit = AsyncMock(side_effect=audit_fault)
+    manager = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=source,
+        reviewed_source_runtime_binding=binding,
+        qualification_receipt=issued_test_qualification_receipt(),
+        mock=False,
+        fault_log_callback=audit,
+    )
+    manager._config.critical_channels = []
+    manager._collect_loop = controlled_collect  # type: ignore[method-assign]
+    original_off = source.emergency_off
+
+    async def tracked_off(channel: str | None = None) -> SourceOffResult:
+        ordered_events.append("off")
+        return await original_off(channel)
+
+    source.emergency_off = tracked_off  # type: ignore[method-assign]
+    await manager.start()
+    await collect_entered.wait()
+    generation = await manager.begin_reviewed_source_connect(source, binding, "L05 child test")
+    assert await manager.complete_reviewed_source_connect(source, binding, generation, "L05 child test")
+    collect_task = manager._collect_task
+    assert collect_task is not None
+
+    event_bus = MagicMock()
+    event_bus.publish = AsyncMock()
+    dispatch_tasks: set[asyncio.Task[object]] = set()
+    supervisor = TaskSupervisor(
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id=None),
+        safety_manager=manager,
+        alarm_dispatch_tasks=dispatch_tasks,
+        logger_=MagicMock(),
+    )
+    supervisor.register(
+        "safety_collect",
+        collect_task,
+        controlled_collect,
+        safety_critical=True,
+    )
+    return (
+        manager,
+        source,
+        supervisor,
+        collect_task,
+        collect_release,
+        audit,
+        event_bus.publish,
+        ordered_events,
+    )
+
+
+async def test_manager_stop_suppresses_only_its_exact_child_cancellation() -> None:
+    (
+        manager,
+        source,
+        supervisor,
+        collect_task,
+        collect_release,
+        audit,
+        alarm_publish,
+        _events,
+    ) = await _l05_started_child_manager("stop_cancel")
+    supervisor.stop()
+    try:
+        await manager.stop()
+        await asyncio.sleep(0)
+
+        assert collect_task.cancelled()
+        assert manager.is_stop_cancelled_child(collect_task) is True
+        assert audit.await_count == 0
+        assert alarm_publish.await_count == 0
+        assert manager.state is SafetyState.SAFE_OFF
+        assert source.off_calls.count(None) >= 2
+    finally:
+        collect_release.set()
+        source.global_off_release.set()
+        if manager._collect_task is not None or manager._monitor_task is not None:
+            await manager.stop()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_outcome"),
+    (
+        ("runtime_error", "failed"),
+        ("normal_exit", "completed"),
+        ("external_cancel", "cancelled"),
+    ),
+)
+async def test_manager_stop_faults_and_audits_non_stop_child_outcomes(
+    outcome: str,
+    expected_outcome: str,
+) -> None:
+    (
+        manager,
+        source,
+        supervisor,
+        collect_task,
+        collect_release,
+        audit,
+        alarm_publish,
+        ordered_events,
+    ) = await _l05_started_child_manager(outcome)
+    source.block_global_off = True
+    supervisor.stop()
+    stop_task: asyncio.Task[None] | None = None
+    release_owner: asyncio.Task[None] | None = None
+    try:
+        if outcome == "external_cancel":
+
+            async def release_when_stop_owns_global_off() -> None:
+                await source.global_off_entered.wait()
+                source.global_off_release.set()
+
+            release_owner = asyncio.create_task(release_when_stop_owns_global_off())
+            collect_task.cancel()
+            await manager.stop()
+            await release_owner
+        else:
+            stop_task = asyncio.create_task(manager.stop())
+            await source.global_off_entered.wait()
+            collect_release.set()
+            await _yield_until(
+                collect_task.done,
+                message="controlled safety child did not reach its terminal outcome",
+            )
+            source.global_off_release.set()
+            await stop_task
+
+        await _yield_until(
+            lambda: audit.await_count == 1 and alarm_publish.await_count >= 1,
+            message="stopping-window child loss was not faulted and audited by both owners",
+        )
+        assert manager.state is SafetyState.FAULT_LATCHED
+        assert manager._failed_child_reason == f"safety_collect_{expected_outcome}"
+        assert f"({expected_outcome})" in manager.fault_reason
+        assert audit.await_args.kwargs["source"] == "safety_collect"
+        assert source.off_calls.count(None) >= 4
+        assert "audit" in ordered_events
+        assert ordered_events[-1] == "off"
+        assert manager._pending_child_fault_settlements == set()
+    finally:
+        collect_release.set()
+        source.global_off_release.set()
+        if stop_task is not None and not stop_task.done():
+            await stop_task
+        if release_owner is not None and not release_owner.done():
+            await release_owner
+        if manager._collect_task is not None or manager._monitor_task is not None:
+            await manager.stop()
 
 
 # ---------------------------------------------------------------------------

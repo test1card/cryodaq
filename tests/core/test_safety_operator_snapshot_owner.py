@@ -392,6 +392,77 @@ async def test_scheduler_observation_faults_external_sibling_of_managed_source(
         await driver.disconnect()
 
 
+@pytest.mark.parametrize(
+    "operation",
+    ("targeted_stop", "targeted_emergency_off", "manager_stop"),
+)
+async def test_hazardous_success_reconciles_production_driver_sibling_on(
+    operation: str,
+) -> None:
+    driver, plant, _transport = await _connected_observation_driver()
+    data_broker = DataBroker()
+    channel_states = await data_broker.subscribe(
+        f"l05_hazardous_success_{operation}",
+        maxsize=100,
+        filter_fn=lambda reading: reading.channel.startswith("analytics/keithley_channel_state/"),
+    )
+    audit = AsyncMock()
+    manager = _manager(driver=driver, data_broker=data_broker)
+    manager._fault_log_callback = audit
+    manager._config.critical_channels = []
+    try:
+        await _qualify_generation(manager, driver, expected_verified_off=True)
+        manager._transition(SafetyState.READY, "qualified before L05 sibling observation")
+        started = await manager.request_run(0.1, 1.0, 0.1, channel="smua")
+        assert started["ok"] is True
+        assert manager._active_sources == {"smua"}
+        assert driver.active_channels == ["smua"]
+
+        plant.output_state["smub"] = 1
+        await driver.read_channels()
+        assert any(
+            observation.channel == "smub" and observation.kind == "output_on"
+            for observation in driver.unsafe_output_observations
+        )
+
+        if operation == "targeted_stop":
+            result = await manager.request_stop(channel="smua")
+            assert result["ok"] is False
+        elif operation == "targeted_emergency_off":
+            result = await manager.emergency_off(channel="smua")
+            assert result["ok"] is False
+        else:
+            with pytest.raises(SafetyShutdownUnverifiedError, match="unmanaged output_on on smub"):
+                await manager.stop()
+
+        assert manager.state is SafetyState.FAULT_LATCHED
+        assert "positively observed unmanaged output_on on smub" in manager.fault_reason
+        assert audit.await_count >= 1
+        assert "positively observed unmanaged output_on on smub" in audit.await_args.kwargs["message"]
+        assert plant.output_state == {"smua": 0, "smub": 0}
+        assert driver.active_channels == []
+        assert driver.unsafe_output_observations == ()
+        assert driver.output_state_unverified is False
+        assert manager._active_sources == set()
+        assert manager._reviewed_source_off_evidence.verified_off is True
+
+        final_states: dict[str, str] = {}
+        while not channel_states.empty():
+            reading = channel_states.get_nowait()
+            final_states[reading.metadata["channel"]] = reading.metadata["state"]
+            channel_states.task_done()
+        assert final_states == {"smua": "off", "smub": "off"}
+    finally:
+        if (
+            manager._collect_task is not None
+            or manager._monitor_task is not None
+            or manager._pending_child_fault_settlements
+        ):
+            await manager.stop()
+        if driver.connected:
+            await driver.disconnect()
+
+
 async def test_observations_replace_per_channel_and_reconnect_rejects_late_generation() -> None:
     driver, plant, _transport = await _connected_observation_driver()
     try:
@@ -1795,7 +1866,7 @@ async def test_already_latched_child_death_revokes_snapshot_before_blocked_off(
     assert "exited unexpectedly" in fault_log.await_args.kwargs["message"]
 
 
-async def test_stop_establishes_child_cut_before_active_source_off_await(
+async def test_stop_cut_does_not_suppress_child_exit_before_exact_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     child_release = asyncio.Event()
@@ -1817,6 +1888,8 @@ async def test_stop_establishes_child_cut_before_active_source_off_await(
     driver = MagicMock()
     driver.stop_source = AsyncMock(side_effect=blocked_stop)
     manager = _manager(mock=True, driver=driver)
+    fault_log = AsyncMock()
+    manager._fault_log_callback = fault_log
     manager._publish_keithley_channel_states = AsyncMock()  # type: ignore[method-assign]
     monkeypatch.setattr(manager, "_collect_loop", terminal_child)
     monkeypatch.setattr(manager, "_monitor_loop", live_monitor)
@@ -1829,17 +1902,24 @@ async def test_stop_establishes_child_cut_before_active_source_off_await(
     child_release.set()
     assert manager._collect_task is not None
     await manager._collect_task
-    await asyncio.sleep(0)
+    await _yield_until(
+        lambda: fault_log.await_count == 1 and not manager._pending_child_fault_settlements,
+        message="stopping-window child exit did not settle its distinct fault audit",
+    )
 
-    assert manager._pending_child_fault_settlements == set()
-    assert manager.state is not SafetyState.FAULT_LATCHED
+    assert manager.state is SafetyState.FAULT_LATCHED
+    assert manager._failed_child_reason == "safety_collect_completed"
     assert manager._stopping_child_generation == manager._child_generation
 
     stop_release.set()
     await stopping
-    assert manager.state is SafetyState.SAFE_OFF
+    assert manager.state is SafetyState.FAULT_LATCHED
     assert manager._active_sources == set()
-    assert manager._failed_child_role is None
+    assert manager._failed_child_role == "collect"
+    assert manager._pending_child_fault_settlements == set()
+    assert manager._collect_task is None
+    assert manager._monitor_task is None
+    assert fault_log.await_args.kwargs["source"] == "safety_collect"
 
 
 async def test_pending_old_child_settlement_blocks_new_generation(
@@ -2059,7 +2139,7 @@ async def test_repeated_shutdown_hold_retries_coalesce_retained_owner_but_issue_
     assert manager._shutdown_hold_fault_settlement is None
 
     await manager.stop()
-    assert off_calls == [1, 2, 3, 4]
+    assert off_calls == [1, 2, 3, 4, 5]
     assert manager._collect_task is None
     assert manager._monitor_task is None
 
@@ -2167,7 +2247,7 @@ async def test_successful_retry_waits_for_older_inconclusive_hold_settlement(
     assert manager._stopping_child_generation is None
 
     await manager.stop()
-    assert off_calls == [1, 2, 3, 4]
+    assert off_calls == [1, 2, 3, 4, 5]
 
 
 async def test_older_inconclusive_hold_cannot_follow_newer_proof_into_success(
@@ -2333,7 +2413,7 @@ async def test_failed_stop_does_not_reconsume_child_processed_before_entry(
     assert manager._consumed_child_tasks == set()
 
 
-async def test_failed_stop_reclassifies_child_consumed_under_stop_cut_once(
+async def test_failed_stop_preserves_child_consumed_under_stop_cut_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     child_release = asyncio.Event()
@@ -2376,7 +2456,7 @@ async def test_failed_stop_reclassifies_child_consumed_under_stop_cut_once(
     assert manager._collect_task is not None
     await manager._collect_task
     await asyncio.sleep(0)
-    assert settlement_sources == []
+    assert settlement_sources == ["safety_collect"]
 
     off_release.set()
     with pytest.raises(SafetyShutdownUnverifiedError, match="global OFF could not be verified"):

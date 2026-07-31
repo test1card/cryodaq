@@ -100,15 +100,18 @@ def _handle_supervised_task_exit(
     on_fault_latch: Callable[[str, BaseException], None],
     safety_critical: bool = False,
     running_s: float = 0.0,
+    fault_immediately: bool = False,
 ) -> str:
     """Decide + act on a supervised long-lived task's termination.
 
     A2(b): the done-callback core. Every registered task is long-lived, so
     every terminal outcome while the engine is live—including cancellation or
     a clean return—is authority loss and follows the alarm/restart path.
-    During shutdown every outcome is expected. After
-    ``_SAFETY_TASK_MAX_RESTARTS`` failed safety restarts the supervisor latches
-    FAULT via SafetyManager instead of looping forever.
+    During shutdown only an identity-bound cancellation issued by the owning
+    stop is expected for a safety child. Other safety-child outcomes latch
+    immediately instead of restarting into teardown. After
+    ``_SAFETY_TASK_MAX_RESTARTS`` failed live safety restarts the supervisor
+    latches FAULT via SafetyManager instead of looping forever.
     Side effects are injected so the policy is testable in isolation.
 
     ``running_s`` (F3) is how long THIS incarnation ran before dying. A run
@@ -118,9 +121,9 @@ def _handle_supervised_task_exit(
 
     Returns one of ``"ignored" | "restart" | "fault_latch"``.
     """
-    # Engine shutdown is the only context where every terminal outcome is
-    # expected. A registered task that terminates while live has lost the
-    # long-lived authority it was created to maintain.
+    # ``stopping`` is already narrowed by TaskSupervisor to non-safety tasks
+    # or an exact SafetyManager-owned stop cancellation. Every other terminal
+    # outcome has lost the long-lived authority it was created to maintain.
     if stopping:
         return "ignored"
     if task.cancelled():
@@ -140,6 +143,10 @@ def _handle_supervised_task_exit(
         exc_info=(type(exc), exc, exc.__traceback__),
     )
     on_alarm(name, exc)  # operator-visible/audible alert via existing alarm path
+
+    if safety_critical and fault_immediately:
+        on_fault_latch(name, exc)
+        return "fault_latch"
 
     if running_s >= _SUPERVISE_RESET_WINDOW_S:
         # F3: previous incarnation recovered and ran healthily — this crash
@@ -247,10 +254,16 @@ class TaskSupervisor:
 
         def _done(t: asyncio.Task[Any]) -> None:
             spawned_at = self._spawn_times.get(name, time.monotonic())
+            expected_stop_cancellation = False
+            if self.engine_stopping and safety_critical and t.cancelled():
+                is_stop_cancelled_child = getattr(self._safety_manager, "is_stop_cancelled_child", None)
+                expected_stop_cancellation = bool(
+                    callable(is_stop_cancelled_child) and is_stop_cancelled_child(t) is True
+                )
             _handle_supervised_task_exit(
                 name=name,
                 task=t,
-                stopping=self.engine_stopping,
+                stopping=self.engine_stopping and (not safety_critical or expected_stop_cancellation),
                 restart_counts=self._restarts,
                 logger_=self._logger,
                 on_alarm=self.dispatch_supervisor_alarm,
@@ -261,6 +274,7 @@ class TaskSupervisor:
                 on_fault_latch=self.dispatch_safety_fault_latch,
                 safety_critical=safety_critical,
                 running_s=time.monotonic() - spawned_at,
+                fault_immediately=self.engine_stopping and safety_critical and not expected_stop_cancellation,
             )
 
         task.add_done_callback(_done)
