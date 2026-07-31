@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from tools.candidate_evidence import CandidateEvidenceError, validate_candidate_manifest
 from tools.ci_candidate_evidence import (
@@ -31,6 +32,14 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 _JOB = re.compile(r"test \((ubuntu-latest|windows-latest), (agents|core|gui|remaining)\)")
 _ARTIFACT = re.compile(r"cryodaq-candidate-(ubuntu-latest|windows-latest)-(agents|core|gui|remaining)-([1-9][0-9]*)")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+_AUTOMATIC_EVENTS = frozenset({"pull_request", "push"})
+_WORKFLOW_RUN_PAGE_SIZE = 20
+_WORKFLOW_RUN_PAGE_LIMIT = 2
+_WORKFLOW_RUN_ITEM_LIMIT = 32
+_PULL_REQUEST_PAGE_SIZE = 20
+_PULL_REQUEST_PAGE_LIMIT = 2
+_PULL_REQUEST_ITEM_LIMIT = 32
+_REQUIRED_CHECK_NAME = "CryoDAQ protected CI evidence gate"
 _REQUIRED_OSES = frozenset({"ubuntu-latest", "windows-latest"})
 _REQUIRED_SUITES = frozenset({"agents", "core", "gui", "remaining"})
 _CANDIDATE_STEP = "Run exact exported candidate suite"
@@ -143,6 +152,15 @@ class GitHubApi:
             raise PartitionExecutionProofError(f"GitHub returned a non-object for {endpoint}")
         return payload
 
+    def get_list(self, endpoint: str) -> list[dict[str, Any]]:
+        try:
+            payload = json.loads(self._request(endpoint).decode("utf-8", errors="strict"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise PartitionExecutionProofError(f"GitHub returned invalid JSON for {endpoint}: {exc}") from exc
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise PartitionExecutionProofError(f"GitHub returned a non-object list for {endpoint}")
+        return payload
+
     def get_pages(self, endpoint: str) -> list[dict[str, Any]]:
         try:
             payload = json.loads(self._request(endpoint, "--paginate", "--slurp").decode("utf-8", errors="strict"))
@@ -164,6 +182,576 @@ def _page_items(pages: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
             raise PartitionExecutionProofError(f"GitHub page omits a valid {key!r} list")
         items.extend(value)
     return items
+
+
+def _positive_integer(value: Any, label: str) -> int:
+    if type(value) is not int or value < 1:
+        raise PartitionExecutionProofError(f"{label} must be an exact positive integer")
+    return value
+
+
+def _repository_identity(value: Any, label: str) -> tuple[int, str]:
+    if not isinstance(value, Mapping):
+        raise PartitionExecutionProofError(f"{label} is missing")
+    repository_id = _positive_integer(value.get("id"), f"{label} ID")
+    full_name = value.get("full_name")
+    if not isinstance(full_name, str) or _REPOSITORY.fullmatch(full_name) is None:
+        raise PartitionExecutionProofError(f"{label} full_name is invalid")
+    return repository_id, full_name
+
+
+def _pull_request_endpoint(
+    value: Any,
+    label: str,
+    *,
+    allow_deleted_repository: bool = False,
+) -> tuple[str, str, int | None]:
+    if not isinstance(value, Mapping):
+        raise PartitionExecutionProofError(f"{label} is missing")
+    ref = value.get("ref")
+    sha = value.get("sha")
+    repository = value.get("repo")
+    if not isinstance(ref, str) or not ref:
+        raise PartitionExecutionProofError(f"{label} ref is invalid")
+    if not isinstance(sha, str) or _SHA.fullmatch(sha) is None:
+        raise PartitionExecutionProofError(f"{label} SHA is invalid")
+    if repository is None and allow_deleted_repository:
+        repository_id = None
+    elif not isinstance(repository, Mapping):
+        raise PartitionExecutionProofError(f"{label} repository is missing")
+    else:
+        repository_id = _positive_integer(repository.get("id"), f"{label} repository ID")
+    return ref, sha, repository_id
+
+
+def _pull_request_identity(
+    value: Any,
+    label: str,
+    *,
+    allow_deleted_head_repository: bool = False,
+) -> tuple[Any, ...]:
+    if not isinstance(value, Mapping):
+        raise PartitionExecutionProofError(f"{label} is not an object")
+    return (
+        _positive_integer(value.get("id"), f"{label} ID"),
+        _positive_integer(value.get("number"), f"{label} number"),
+        _pull_request_endpoint(value.get("base"), f"{label} base"),
+        _pull_request_endpoint(
+            value.get("head"),
+            f"{label} head",
+            allow_deleted_repository=allow_deleted_head_repository,
+        ),
+    )
+
+
+def _unique_pull_requests(pull_requests: tuple[tuple[Any, ...], ...], label: str) -> None:
+    pull_request_ids = [item[0] for item in pull_requests]
+    pull_request_numbers = [item[1] for item in pull_requests]
+    if len(pull_request_ids) != len(set(pull_request_ids)):
+        raise PartitionExecutionProofError(f"{label} contains duplicate pull request IDs")
+    if len(pull_request_numbers) != len(set(pull_request_numbers)):
+        raise PartitionExecutionProofError(f"{label} contains duplicate pull request numbers")
+
+
+def _workflow_run(value: Any, label: str) -> dict[str, Any]:
+    required = {
+        "conclusion",
+        "created_at",
+        "event",
+        "head_branch",
+        "head_repository",
+        "head_sha",
+        "id",
+        "name",
+        "path",
+        "pull_requests",
+        "repository",
+        "run_attempt",
+        "status",
+    }
+    if not isinstance(value, Mapping):
+        raise PartitionExecutionProofError(f"{label} is not an object")
+    missing = sorted(required - set(value))
+    if missing:
+        raise PartitionExecutionProofError(f"{label} is missing required fields: {missing!r}")
+
+    run_id = _positive_integer(value["id"], f"{label} ID")
+    run_attempt = _positive_integer(value["run_attempt"], f"{label} run_attempt")
+    event = value["event"]
+    head_branch = value["head_branch"]
+    head_sha = value["head_sha"]
+    name = value["name"]
+    path = value["path"]
+    status = value["status"]
+    conclusion = value["conclusion"]
+    if not isinstance(event, str) or not event:
+        raise PartitionExecutionProofError(f"{label} event is invalid")
+    if not isinstance(head_branch, str) or not head_branch:
+        raise PartitionExecutionProofError(f"{label} head_branch is invalid")
+    if not isinstance(head_sha, str) or _SHA.fullmatch(head_sha) is None:
+        raise PartitionExecutionProofError(f"{label} head_sha is invalid")
+    if not isinstance(name, str) or not name or not isinstance(path, str) or not path:
+        raise PartitionExecutionProofError(f"{label} workflow identity is invalid")
+    if not isinstance(status, str) or not status:
+        raise PartitionExecutionProofError(f"{label} status is invalid")
+    if conclusion is not None and (not isinstance(conclusion, str) or not conclusion):
+        raise PartitionExecutionProofError(f"{label} conclusion is invalid")
+    created_at = _time(value["created_at"], f"{label} created_at")
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        raise PartitionExecutionProofError(f"{label} created_at lacks an explicit timezone")
+
+    repository = _repository_identity(value["repository"], f"{label} repository")
+    head_repository = _repository_identity(value["head_repository"], f"{label} head_repository")
+    pull_requests_value = value["pull_requests"]
+    if not isinstance(pull_requests_value, list):
+        raise PartitionExecutionProofError(f"{label} pull_requests is not a list")
+    pull_requests = tuple(
+        sorted(
+            (
+                _pull_request_identity(item, f"{label} pull_requests[{index}]")
+                for index, item in enumerate(pull_requests_value)
+            ),
+            key=lambda item: (item[1], item[0]),
+        )
+    )
+    _unique_pull_requests(pull_requests, label)
+    for pull_request in pull_requests:
+        if (
+            pull_request[2][2] != repository[0]
+            or pull_request[3][0] != head_branch
+            or pull_request[3][1] != head_sha
+            or pull_request[3][2] != head_repository[0]
+        ):
+            raise PartitionExecutionProofError(f"{label} pull request base/head identity is inconsistent")
+    if event == "pull_request":
+        if len(pull_requests) != 1:
+            raise PartitionExecutionProofError(f"{label} pull_request event must identify exactly one pull request")
+    return {
+        "conclusion": conclusion,
+        "created_at": created_at,
+        "event": event,
+        "head_branch": head_branch,
+        "head_repository": head_repository,
+        "head_sha": head_sha,
+        "id": run_id,
+        "name": name,
+        "path": path,
+        "pull_requests": pull_requests,
+        "repository": repository,
+        "run_attempt": run_attempt,
+        "status": status,
+    }
+
+
+def _workflow_run_page(payload: Any, page_number: int) -> tuple[int, list[Mapping[str, Any]]]:
+    if not isinstance(payload, Mapping):
+        raise PartitionExecutionProofError(f"workflow run list page {page_number} is not an object")
+    total_count = payload.get("total_count")
+    workflow_runs = payload.get("workflow_runs")
+    if type(total_count) is not int or total_count < 0:
+        raise PartitionExecutionProofError(
+            f"workflow run list page {page_number} total_count is not an exact nonnegative integer"
+        )
+    if not isinstance(workflow_runs, list) or any(not isinstance(item, Mapping) for item in workflow_runs):
+        raise PartitionExecutionProofError(f"workflow run list page {page_number} workflow_runs is not an object list")
+    if len(workflow_runs) > _WORKFLOW_RUN_PAGE_SIZE:
+        raise PartitionExecutionProofError(f"workflow run list page {page_number} exceeds the page item limit")
+    return total_count, workflow_runs
+
+
+def _stable_common_run_context(run: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        run["repository"][0],
+        run["head_repository"][0],
+        run["head_branch"],
+        run["head_sha"],
+    )
+
+
+def _exact_run_context(run: Mapping[str, Any]) -> tuple[Any, ...]:
+    pull_request = run["pull_requests"][0] if run["event"] == "pull_request" else None
+    return run["event"], _stable_common_run_context(run), pull_request
+
+
+def _target_context_key(run: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        run["id"],
+        run["run_attempt"],
+        run["event"],
+        run["name"],
+        run["path"],
+        _stable_common_run_context(run),
+        run["pull_requests"],
+    )
+
+
+def _routing_repository_id(value: Any) -> int | None:
+    if not isinstance(value, Mapping):
+        return None
+    repository_id = value.get("id")
+    return repository_id if type(repository_id) is int and repository_id > 0 else None
+
+
+def _could_be_relevant_run(expected: Mapping[str, Any], value: Mapping[str, Any]) -> bool:
+    event = value.get("event")
+    if isinstance(event, str) and event not in _AUTOMATIC_EVENTS:
+        return False
+    name = value.get("name")
+    path = value.get("path")
+    if isinstance(name, str) and name != "CryoDAQ CI":
+        return False
+    if isinstance(path, str) and path != ".github/workflows/main.yml":
+        return False
+    head_sha = value.get("head_sha")
+    head_branch = value.get("head_branch")
+    if isinstance(head_sha, str) and _SHA.fullmatch(head_sha) and head_sha != expected["head_sha"]:
+        return False
+    if isinstance(head_branch, str) and head_branch and head_branch != expected["head_branch"]:
+        return False
+    repository_id = _routing_repository_id(value.get("repository"))
+    head_repository_id = _routing_repository_id(value.get("head_repository"))
+    if repository_id is not None and repository_id != expected["repository"][0]:
+        return False
+    if head_repository_id is not None and head_repository_id != expected["head_repository"][0]:
+        return False
+    return True
+
+
+def _bounded_workflow_runs(
+    api: Any,
+    repository_name: str,
+    expected: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    queries: dict[str, dict[str, int]] = {}
+    for event in sorted(_AUTOMATIC_EVENTS):
+        base_query = {
+            "branch": expected["head_branch"],
+            "event": event,
+            "head_sha": expected["head_sha"],
+        }
+
+        def fetch(page_number: int) -> tuple[int, list[Mapping[str, Any]]]:
+            query = urlencode(
+                {
+                    **base_query,
+                    "per_page": _WORKFLOW_RUN_PAGE_SIZE,
+                    "page": page_number,
+                }
+            )
+            payload = api.get_json(f"repos/{repository_name}/actions/workflows/main.yml/runs?{query}")
+            return _workflow_run_page(payload, page_number)
+
+        total_count, first_page = fetch(1)
+        page_count = max(1, (total_count + _WORKFLOW_RUN_PAGE_SIZE - 1) // _WORKFLOW_RUN_PAGE_SIZE)
+        if page_count > _WORKFLOW_RUN_PAGE_LIMIT:
+            raise PartitionExecutionProofError(
+                f"{event} workflow run list requires {page_count} pages, "
+                f"exceeding page limit {_WORKFLOW_RUN_PAGE_LIMIT}"
+            )
+        if total_count > _WORKFLOW_RUN_ITEM_LIMIT:
+            raise PartitionExecutionProofError(
+                f"{event} workflow run list total_count={total_count} exceeds item limit {_WORKFLOW_RUN_ITEM_LIMIT}"
+            )
+        raw_runs = list(first_page)
+        for page_number in range(2, page_count + 1):
+            page_total, page_runs = fetch(page_number)
+            if page_total != total_count:
+                raise PartitionExecutionProofError(
+                    f"{event} workflow run list total_count changed from "
+                    f"{total_count} to {page_total} on page {page_number}"
+                )
+            raw_runs.extend(page_runs)
+        if len(raw_runs) != total_count:
+            noun = "item" if len(raw_runs) == 1 else "items"
+            raise PartitionExecutionProofError(
+                f"{event} workflow run list total_count={total_count} differs from {len(raw_runs)} listed {noun}"
+            )
+        for index, item in enumerate(raw_runs):
+            if _could_be_relevant_run(expected, item):
+                runs.append(_workflow_run(item, f"{event} workflow run list item {index}"))
+        queries[event] = {"listed_total_count": total_count, "page_count": page_count}
+    run_ids = [item["id"] for item in runs]
+    if len(run_ids) != len(set(run_ids)):
+        raise PartitionExecutionProofError("duplicate workflow run ID in bounded relevant list")
+    return runs, {
+        "item_limit_per_event": _WORKFLOW_RUN_ITEM_LIMIT,
+        "listed_total_count": sum(query["listed_total_count"] for query in queries.values()),
+        "page_limit_per_event": _WORKFLOW_RUN_PAGE_LIMIT,
+        "page_size": _WORKFLOW_RUN_PAGE_SIZE,
+        "queries": queries,
+        "relevant_item_count": len(runs),
+    }
+
+
+def _pull_request_page(payload: Any, page_number: int) -> list[Mapping[str, Any]]:
+    if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
+        raise PartitionExecutionProofError(f"pull request association page {page_number} is not an object list")
+    if len(payload) > _PULL_REQUEST_PAGE_SIZE:
+        raise PartitionExecutionProofError(f"pull request association page {page_number} exceeds the page item limit")
+    return payload
+
+
+def _bounded_pull_request_associations(
+    api: Any,
+    repository_name: str,
+    sha: str,
+) -> tuple[tuple[tuple[Any, ...], ...], dict[str, int]]:
+    associations: list[tuple[Any, ...]] = []
+    page_count = 0
+    for page_number in range(1, _PULL_REQUEST_PAGE_LIMIT + 1):
+        endpoint = f"repos/{repository_name}/commits/{sha}/pulls?per_page={_PULL_REQUEST_PAGE_SIZE}&page={page_number}"
+        raw_page = _pull_request_page(api.get_list(endpoint), page_number)
+        page_count = page_number
+        associations.extend(
+            _pull_request_identity(
+                item,
+                f"pull request association page {page_number} item {index}",
+                allow_deleted_head_repository=True,
+            )
+            for index, item in enumerate(raw_page)
+        )
+        if len(associations) > _PULL_REQUEST_ITEM_LIMIT:
+            raise PartitionExecutionProofError(
+                f"pull request association count exceeds item limit {_PULL_REQUEST_ITEM_LIMIT}"
+            )
+        if len(raw_page) < _PULL_REQUEST_PAGE_SIZE:
+            break
+    _unique_pull_requests(tuple(associations), "bounded pull request associations")
+    return tuple(sorted(associations, key=lambda item: (item[1], item[0]))), {
+        "item_limit": _PULL_REQUEST_ITEM_LIMIT,
+        "listed_count": len(associations),
+        "page_limit": _PULL_REQUEST_PAGE_LIMIT,
+        "page_size": _PULL_REQUEST_PAGE_SIZE,
+        "pages_fetched": page_count,
+    }
+
+
+def _pull_request_compatible(full: tuple[Any, ...], association: tuple[Any, ...]) -> bool:
+    return (
+        full[:3] == association[:3]
+        and full[3][:2] == association[3][:2]
+        and (association[3][2] is None or full[3][2] == association[3][2])
+    )
+
+
+def _association_join(
+    selected: Mapping[str, Any],
+    listed_runs: list[dict[str, Any]],
+    api_associations: tuple[tuple[Any, ...], ...],
+) -> tuple[tuple[tuple[Any, ...], ...], frozenset[tuple[int, int]]]:
+    by_id = {item[0]: item for item in api_associations}
+    by_number = {item[1]: item for item in api_associations}
+    full_by_key: dict[tuple[int, int], tuple[Any, ...]] = {}
+
+    def reconcile(pull_request: tuple[Any, ...], label: str) -> None:
+        association_by_id = by_id.get(pull_request[0])
+        association_by_number = by_number.get(pull_request[1])
+        if association_by_id is None or association_by_number is None or association_by_id != association_by_number:
+            raise PartitionExecutionProofError(f"{label} is absent or ambiguous in bounded API association evidence")
+        if not _pull_request_compatible(pull_request, association_by_id):
+            raise PartitionExecutionProofError(f"{label} contradicts bounded API association evidence")
+        key = (pull_request[0], pull_request[1])
+        previous = full_by_key.setdefault(key, pull_request)
+        if previous != pull_request:
+            raise PartitionExecutionProofError(f"{label} contradicts another embedded pull request identity")
+
+    same_context = [
+        run for run in listed_runs if _stable_common_run_context(run) == _stable_common_run_context(selected)
+    ]
+    if selected["event"] == "push":
+        for run in same_context:
+            for pull_request in run["pull_requests"]:
+                reconcile(pull_request, f"run {run['id']} pull request {pull_request[1]}")
+        pr_run_keys = {
+            (run["pull_requests"][0][0], run["pull_requests"][0][1])
+            for run in same_context
+            if run["event"] == "pull_request"
+        }
+        for association in api_associations:
+            key = (association[0], association[1])
+            if key not in pr_run_keys:
+                raise PartitionExecutionProofError(
+                    f"associated pull request {association[1]} has no bounded workflow run counterpart"
+                )
+    else:
+        target = selected["pull_requests"][0]
+        reconcile(target, f"selected pull request {target[1]}")
+        for run in same_context:
+            for pull_request in run["pull_requests"]:
+                if (pull_request[0], pull_request[1]) == (target[0], target[1]):
+                    reconcile(pull_request, f"run {run['id']} pull request {pull_request[1]}")
+
+    reconciled = tuple(full_by_key.get((item[0], item[1]), item) for item in api_associations)
+    return reconciled, frozenset((item[0], item[1]) for item in reconciled)
+
+
+def _is_relevant_context(
+    selected: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    association_keys: frozenset[tuple[int, int]],
+) -> bool:
+    if (
+        candidate["name"] != "CryoDAQ CI"
+        or candidate["path"] != ".github/workflows/main.yml"
+        or _stable_common_run_context(candidate) != _stable_common_run_context(selected)
+        or candidate["event"] not in _AUTOMATIC_EVENTS
+    ):
+        return False
+    if candidate["event"] == selected["event"]:
+        return _exact_run_context(candidate) == _exact_run_context(selected)
+    if selected["event"] == "pull_request":
+        return (
+            candidate["event"] == "push"
+            and (
+                selected["pull_requests"][0][0],
+                selected["pull_requests"][0][1],
+            )
+            in association_keys
+        )
+    candidate_pull_request = candidate["pull_requests"][0]
+    return (
+        candidate["event"] == "pull_request"
+        and (
+            candidate_pull_request[0],
+            candidate_pull_request[1],
+        )
+        in association_keys
+    )
+
+
+def _pull_request_receipt(pull_request: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "base": {
+            "ref": pull_request[2][0],
+            "repository_id": pull_request[2][2],
+            "sha": pull_request[2][1],
+        },
+        "head": {
+            "ref": pull_request[3][0],
+            "repository_id": pull_request[3][2],
+            "sha": pull_request[3][1],
+        },
+        "id": pull_request[0],
+        "number": pull_request[1],
+    }
+
+
+def _target_context_receipt(run: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "event": run["event"],
+        "head_branch": run["head_branch"],
+        "head_repository": {
+            "full_name": run["head_repository"][1],
+            "id": run["head_repository"][0],
+        },
+        "head_sha": run["head_sha"],
+        "pull_requests": [_pull_request_receipt(item) for item in run["pull_requests"]],
+        "repository": {
+            "full_name": run["repository"][1],
+            "id": run["repository"][0],
+        },
+        "run_attempt": run["run_attempt"],
+        "run_id": run["id"],
+        "workflow": {"name": run["name"], "path": run["path"]},
+    }
+
+
+def _stable_target_context_receipt(run: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "event": run["event"],
+        "head_branch": run["head_branch"],
+        "head_repository_id": run["head_repository"][0],
+        "head_sha": run["head_sha"],
+        "pull_requests": [_pull_request_receipt(item) for item in run["pull_requests"]],
+        "repository_id": run["repository"][0],
+        "run_attempt": run["run_attempt"],
+        "run_id": run["id"],
+        "workflow": {"name": run["name"], "path": run["path"]},
+    }
+
+
+def _required_check_receipt(check_name: str, expected: Mapping[str, Any]) -> dict[str, Any]:
+    if check_name != _REQUIRED_CHECK_NAME:
+        raise PartitionExecutionProofError("required check name is not the retained protected-CI constant")
+    target_context = _target_context_receipt(expected)
+    return {
+        "name": check_name,
+        "stable_target_context": _stable_target_context_receipt(expected),
+        "target_context": target_context,
+        "target_context_sha256": _digest(_canonical(target_context)),
+    }
+
+
+def _context_join(
+    selected: Mapping[str, Any],
+    listed_runs: list[dict[str, Any]],
+    *,
+    api_associations: tuple[tuple[Any, ...], ...],
+    association_bounds: Mapping[str, int],
+    query_bounds: Mapping[str, Any],
+) -> dict[str, Any]:
+    selected_records = [item for item in listed_runs if item["id"] == selected["id"]]
+    if len(selected_records) != 1:
+        raise PartitionExecutionProofError("selected workflow run is not unique in the bounded workflow run list")
+    if selected_records[0] != selected:
+        raise PartitionExecutionProofError("selected workflow run differs between detail and list REST evidence")
+
+    associations, association_keys = _association_join(selected, listed_runs, api_associations)
+    relevant = [item for item in listed_runs if _is_relevant_context(selected, item, association_keys)]
+    if sum(item["id"] == selected["id"] for item in relevant) != 1:
+        raise PartitionExecutionProofError("selected workflow run is absent from its exact context join")
+    retries = sorted(item["id"] for item in relevant if item["run_attempt"] != 1)
+    if retries:
+        raise PartitionExecutionProofError(
+            f"relevant workflow run attempts are not first-attempt evidence: {retries!r}"
+        )
+    superseded: list[dict[str, int]] = []
+    problems: list[str] = []
+    for item in relevant:
+        if item["id"] == selected["id"]:
+            continue
+        if item["status"] == "completed" and item["conclusion"] == "success":
+            continue
+        if item["status"] == "completed" and item["conclusion"] == "cancelled":
+            replacements = [
+                candidate
+                for candidate in relevant
+                if _exact_run_context(candidate) == _exact_run_context(item)
+                and candidate["created_at"] > item["created_at"]
+                and candidate["status"] == "completed"
+                and candidate["conclusion"] == "success"
+            ]
+            if replacements:
+                replacement = min(replacements, key=lambda candidate: (candidate["created_at"], candidate["id"]))
+                superseded.append(
+                    {
+                        "cancelled_run_id": item["id"],
+                        "replacement_run_id": replacement["id"],
+                    }
+                )
+                continue
+        problems.append(
+            f"run {item['id']} is {item['status']}/{item['conclusion']}; "
+            "only exact-context cancelled runs may be superseded by a later first-attempt success"
+        )
+    if problems:
+        raise PartitionExecutionProofError("workflow run context is not acceptable: " + "; ".join(problems))
+
+    return {
+        "association_bounds": dict(association_bounds),
+        "association_set": [_pull_request_receipt(item) for item in associations],
+        "item_limit": query_bounds["item_limit_per_event"],
+        "joined_run_ids": sorted(item["id"] for item in relevant),
+        "listed_total_count": query_bounds["listed_total_count"],
+        "page_limit": query_bounds["page_limit_per_event"],
+        "page_size": query_bounds["page_size"],
+        "queries": query_bounds["queries"],
+        "relevant_item_count": query_bounds["relevant_item_count"],
+        "selected": _target_context_receipt(selected),
+        "selected_stable_target_context": _stable_target_context_receipt(selected),
+        "superseded_cancelled_runs": sorted(superseded, key=lambda item: item["cancelled_run_id"]),
+    }
 
 
 def _job_cells(
@@ -375,6 +963,10 @@ def _partition_receipt(
     attempt: int,
     sha: str,
 ) -> dict[str, Any]:
+    if attempt != run.get("run_attempt"):
+        raise PartitionExecutionProofError(
+            f"{key[0]}/{key[1]}: artifact attempt {attempt} differs from REST run attempt {run.get('run_attempt')!r}"
+        )
     bundle_id = bundle_artifact["id"]
     attestation_id = attestation_artifact["id"]
     bundle_files = _zip_files(
@@ -469,6 +1061,8 @@ def _partition_receipt(
 def prove(
     api: Any,
     *,
+    check_name: str,
+    expected_context: Mapping[str, Any],
     repository: Path,
     repository_name: str,
     run_id: int,
@@ -480,18 +1074,45 @@ def prove(
         raise PartitionExecutionProofError("repository must be owner/name")
     if _SHA.fullmatch(sha) is None:
         raise PartitionExecutionProofError("SHA must be an exact lowercase 40-hex commit")
-    if run_id < 1:
-        raise PartitionExecutionProofError("run ID must be positive")
+    _positive_integer(run_id, "requested run ID")
     repository = repository.resolve(strict=True)
     declared = _declared_matrix(repository, sha)
-    run = api.get_json(f"repos/{repository_name}/actions/runs/{run_id}")
+    expected = _workflow_run(expected_context, "expected target context")
     if (
-        run.get("id") != run_id
-        or run.get("head_sha") != sha
-        or run.get("name") != "CryoDAQ CI"
-        or run.get("path") != ".github/workflows/main.yml"
+        expected["id"] != run_id
+        or expected["head_sha"] != sha
+        or expected["name"] != "CryoDAQ CI"
+        or expected["path"] != ".github/workflows/main.yml"
+        or expected["event"] not in _AUTOMATIC_EVENTS
+        or expected["run_attempt"] != 1
+    ):
+        raise PartitionExecutionProofError(
+            "expected target context is not the requested first-attempt automatic CryoDAQ CI execution"
+        )
+    required_check = _required_check_receipt(check_name, expected)
+    run = api.get_json(f"repos/{repository_name}/actions/runs/{run_id}")
+    selected = _workflow_run(run, "selected workflow run")
+    if (
+        selected["id"] != run_id
+        or selected["head_sha"] != sha
+        or selected["name"] != "CryoDAQ CI"
+        or selected["path"] != ".github/workflows/main.yml"
+        or selected["repository"][1] != repository_name
     ):
         raise PartitionExecutionProofError("workflow run is not the requested CryoDAQ CI SHA")
+    if selected["event"] not in _AUTOMATIC_EVENTS or selected["run_attempt"] != 1:
+        raise PartitionExecutionProofError("workflow run is not a first-attempt automatic CryoDAQ CI execution")
+    if _target_context_key(selected) != _target_context_key(expected):
+        raise PartitionExecutionProofError("workflow run does not match the trusted expected target context")
+    listed_runs, query_bounds = _bounded_workflow_runs(api, repository_name, expected)
+    api_associations, association_bounds = _bounded_pull_request_associations(api, repository_name, sha)
+    context_join = _context_join(
+        selected,
+        listed_runs,
+        api_associations=api_associations,
+        association_bounds=association_bounds,
+        query_bounds=query_bounds,
+    )
     pages = api.get_pages(f"repos/{repository_name}/actions/runs/{run_id}/jobs?filter=latest&per_page=100")
     details = _job_cells(api, repository_name, run_id, _page_items(pages, "jobs"), declared)
     problems = _state_problems(run, sha, declared, details)
@@ -526,16 +1147,73 @@ def prove(
         )
     return {
         "ancillary_workflows": _ANCILLARY,
+        "context_join": context_join,
         "declared_matrix": [{"os": os_name, "suite": suite} for os_name, suite in declared],
         "partitions": partitions,
         "repository": repository_name,
+        "required_check": required_check,
         "result": "accepted",
-        "run_attempt": run.get("run_attempt"),
+        "run_attempt": selected["run_attempt"],
         "run_id": run_id,
         "schema_version": 1,
         "sha": sha,
-        "workflow": {"name": run["name"], "path": run["path"]},
+        "workflow": {"name": selected["name"], "path": selected["path"]},
     }
+
+
+def verify_receipt_target_context(
+    receipt: Mapping[str, Any],
+    *,
+    check_name: str,
+    expected_context: Mapping[str, Any],
+    repository_name: str,
+    run_id: int,
+    sha: str,
+) -> None:
+    """Re-bind the retained check decision to the trusted workflow-run event."""
+
+    if _REPOSITORY.fullmatch(repository_name) is None:
+        raise PartitionExecutionProofError("repository must be owner/name")
+    if _SHA.fullmatch(sha) is None:
+        raise PartitionExecutionProofError("SHA must be an exact lowercase 40-hex commit")
+    _positive_integer(run_id, "requested run ID")
+    expected = _workflow_run(expected_context, "expected target context")
+    if (
+        expected["id"] != run_id
+        or expected["head_sha"] != sha
+        or expected["name"] != "CryoDAQ CI"
+        or expected["path"] != ".github/workflows/main.yml"
+        or expected["event"] not in _AUTOMATIC_EVENTS
+        or expected["run_attempt"] != 1
+    ):
+        raise PartitionExecutionProofError("expected target context is not the requested automatic run")
+    required_check = _required_check_receipt(check_name, expected)
+    context_join = receipt.get("context_join")
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("result") != "accepted"
+        or receipt.get("repository") != repository_name
+        or receipt.get("run_id") != run_id
+        or receipt.get("run_attempt") != 1
+        or receipt.get("sha") != sha
+        or receipt.get("required_check") != required_check
+        or not isinstance(context_join, Mapping)
+        or context_join.get("selected_stable_target_context") != required_check["stable_target_context"]
+    ):
+        raise PartitionExecutionProofError(
+            "partition receipt is not bound to the retained check name and trusted target context"
+        )
+
+
+def _workflow_run_from_event(path: Path) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PartitionExecutionProofError(f"workflow event payload is unreadable: {exc}") from exc
+    workflow_run = payload.get("workflow_run") if isinstance(payload, Mapping) else None
+    if not isinstance(workflow_run, Mapping):
+        raise PartitionExecutionProofError("workflow event payload omits workflow_run")
+    return workflow_run
 
 
 def main(argv: list[str] | None = None, *, api: Any | None = None) -> int:
@@ -544,11 +1222,30 @@ def main(argv: list[str] | None = None, *, api: Any | None = None) -> int:
     parser.add_argument("--repo", required=True, help="GitHub owner/name")
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--sha", required=True)
-    parser.add_argument("--output", type=Path, required=True, help="new JSON proof receipt path")
+    parser.add_argument("--check-name", required=True)
+    parser.add_argument("--event-payload", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--output", type=Path, help="new JSON proof receipt path")
+    mode.add_argument("--verify-receipt", type=Path, help="existing receipt to bind before the final check decision")
     args = parser.parse_args(argv)
     try:
+        expected_context = _workflow_run_from_event(args.event_payload)
+        if args.verify_receipt is not None:
+            verify_receipt_target_context(
+                _json(args.verify_receipt.read_bytes(), "partition execution proof receipt"),
+                check_name=args.check_name,
+                expected_context=expected_context,
+                repository_name=args.repo,
+                run_id=args.run_id,
+                sha=args.sha,
+            )
+            print(f"CI PARTITION TARGET CONTEXT ACCEPTED: sha={args.sha} run={args.run_id} check={args.check_name}")
+            return 0
+        assert args.output is not None
         receipt = prove(
             api or GitHubApi(),
+            check_name=args.check_name,
+            expected_context=expected_context,
             repository=args.repository,
             repository_name=args.repo,
             run_id=args.run_id,

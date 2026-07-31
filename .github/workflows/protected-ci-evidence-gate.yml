@@ -20,6 +20,8 @@ jobs:
       id: ${{ steps.candidate-check.outputs.id }}
     env:
       CHECK_NAME: CryoDAQ protected CI evidence gate
+      TARGET_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      TARGET_RUN_ID: ${{ github.event.workflow_run.id }}
       TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
       - name: Start candidate-bound required check
@@ -28,10 +30,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          event_digest="$(sha256sum "${GITHUB_EVENT_PATH:?}" | cut -d' ' -f1)"
+          external_id="workflow-run-event-sha256:${event_digest:?}"
           check_id="$(
             gh api --method POST "repos/${GITHUB_REPOSITORY:?}/check-runs" \
               -f "name=${CHECK_NAME:?}" \
               -f "head_sha=${TARGET_SHA:?}" \
+              -f "external_id=${external_id:?}" \
               -f status=in_progress \
               -f "details_url=${GITHUB_SERVER_URL:?}/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}" \
               --jq .id
@@ -250,7 +255,23 @@ jobs:
             --repo "${GITHUB_REPOSITORY:?}" \
             --run-id "${TARGET_RUN_ID:?}" \
             --sha "${TARGET_SHA:?}" \
+            --check-name "${CHECK_NAME:?}" \
+            --event-payload "${GITHUB_EVENT_PATH:?}" \
             --output "${RUNNER_TEMP:?}/cryodaq-partition-proof/partition-execution-proof.json"
+
+      - name: Bind partition receipt to trusted target context
+        id: context-proof
+        working-directory: judge
+        run: |
+          set -euo pipefail
+          python -B -m tools.ci_partition_execution_proof \
+            --repository "${GITHUB_WORKSPACE:?}/candidate" \
+            --repo "${GITHUB_REPOSITORY:?}" \
+            --run-id "${TARGET_RUN_ID:?}" \
+            --sha "${TARGET_SHA:?}" \
+            --check-name "${CHECK_NAME:?}" \
+            --event-payload "${GITHUB_EVENT_PATH:?}" \
+            --verify-receipt "${RUNNER_TEMP:?}/cryodaq-partition-proof/partition-execution-proof.json"
 
       - name: Download exact candidate-workflow bundles
         id: candidate-download
@@ -319,7 +340,7 @@ jobs:
 
       - name: Upload accepted partition receipt
         id: proof-upload
-        if: ${{ steps.partition-proof.outcome == 'success' && steps.montana-proof.outcome == 'success' && steps.protected-proof.outcome == 'success' }}
+        if: ${{ steps.partition-proof.outcome == 'success' && steps.context-proof.outcome == 'success' && steps.montana-proof.outcome == 'success' && steps.protected-proof.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cryodaq-partition-proof-${{ env.TARGET_RUN_ID }}-${{ env.TARGET_RUN_ATTEMPT }}
@@ -330,6 +351,7 @@ jobs:
       - name: Complete candidate-bound required check
         if: ${{ always() && needs.candidate-check.outputs.id != '' }}
         env:
+          CONTEXT_OUTCOME: ${{ steps.context-proof.outcome }}
           EXECUTION_OUTCOME: ${{ needs.protected-execution.result }}
           GH_TOKEN: ${{ github.token }}
           MONTANA_OUTCOME: ${{ steps.montana-proof.outcome }}
@@ -342,12 +364,21 @@ jobs:
           title="Protected CI evidence refused"
           if test "$EXECUTION_OUTCOME" = success &&
              test "$PARTITION_OUTCOME" = success &&
+             test "$CONTEXT_OUTCOME" = success &&
              test "$MONTANA_OUTCOME" = success &&
              test "$PROTECTED_OUTCOME" = success &&
              test "$UPLOAD_OUTCOME" = success; then
             conclusion=success
             title="Protected CI evidence accepted"
           fi
+          event_digest="$(sha256sum "${GITHUB_EVENT_PATH:?}" | cut -d' ' -f1)"
+          expected_external_id="workflow-run-event-sha256:${event_digest:?}"
+          check_record="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY:?}/check-runs/${{ needs.candidate-check.outputs.id }}" \
+              --jq '[.name, .head_sha, .external_id] | @tsv'
+          )"
+          test "$check_record" = "${CHECK_NAME:?}	${TARGET_SHA:?}	${expected_external_id:?}"
           gh api --method PATCH \
             "repos/${GITHUB_REPOSITORY:?}/check-runs/${{ needs.candidate-check.outputs.id }}" \
             -f status=completed \

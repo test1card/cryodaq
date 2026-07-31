@@ -84,6 +84,9 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     check_start = next(step for step in check_job["steps"] if step["id"] == "candidate-check")
     assert "check-runs" in check_start["run"]
     assert "head_sha=${TARGET_SHA:?}" in check_start["run"]
+    assert 'sha256sum "${GITHUB_EVENT_PATH:?}"' in check_start["run"]
+    assert "workflow-run-event-sha256:" in check_start["run"]
+    assert '"external_id=${external_id:?}"' in check_start["run"]
     assert "status=in_progress" in check_start["run"]
 
     execution = jobs["protected-execution"]
@@ -169,6 +172,17 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     assert '--repository "${GITHUB_WORKSPACE:?}/candidate"' in partition["run"]
     assert '--run-id "${TARGET_RUN_ID:?}"' in partition["run"]
     assert '--sha "${TARGET_SHA:?}"' in partition["run"]
+    assert '--check-name "${CHECK_NAME:?}"' in partition["run"]
+    assert '--event-payload "${GITHUB_EVENT_PATH:?}"' in partition["run"]
+
+    context = indexed["context-proof"]
+    assert context["working-directory"] == "judge"
+    assert "tools.ci_partition_execution_proof" in context["run"]
+    assert '--check-name "${CHECK_NAME:?}"' in context["run"]
+    assert '--event-payload "${GITHUB_EVENT_PATH:?}"' in context["run"]
+    assert (
+        '--verify-receipt "${RUNNER_TEMP:?}/cryodaq-partition-proof/partition-execution-proof.json"' in context["run"]
+    )
 
     montana = indexed["montana-proof"]
     assert montana["working-directory"] == "judge"
@@ -192,14 +206,15 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     proof_upload = indexed["proof-upload"]
     assert proof_upload["uses"] == UPLOAD_PIN
     assert proof_upload["if"] == (
-        "${{ steps.partition-proof.outcome == 'success' && steps.montana-proof.outcome == 'success' "
-        "&& steps.protected-proof.outcome == 'success' }}"
+        "${{ steps.partition-proof.outcome == 'success' && steps.context-proof.outcome == 'success' "
+        "&& steps.montana-proof.outcome == 'success' && steps.protected-proof.outcome == 'success' }}"
     )
     assert proof_upload["with"]["if-no-files-found"] == "error"
 
     complete = next(step for step in steps if step["name"] == "Complete candidate-bound required check")
     assert "always()" in complete["if"]
     assert complete["env"] == {
+        "CONTEXT_OUTCOME": "${{ steps.context-proof.outcome }}",
         "EXECUTION_OUTCOME": "${{ needs.protected-execution.result }}",
         "GH_TOKEN": "${{ github.token }}",
         "MONTANA_OUTCOME": "${{ steps.montana-proof.outcome }}",
@@ -209,9 +224,14 @@ def test_protected_workflow_runs_after_completion_with_pinned_judges() -> None:
     }
     assert 'test "$EXECUTION_OUTCOME" = success' in complete["run"]
     assert 'test "$PARTITION_OUTCOME" = success' in complete["run"]
+    assert 'test "$CONTEXT_OUTCOME" = success' in complete["run"]
     assert 'test "$MONTANA_OUTCOME" = success' in complete["run"]
     assert 'test "$PROTECTED_OUTCOME" = success' in complete["run"]
     assert 'test "$UPLOAD_OUTCOME" = success' in complete["run"]
+    assert 'sha256sum "${GITHUB_EVENT_PATH:?}"' in complete["run"]
+    assert "workflow-run-event-sha256:" in complete["run"]
+    assert "[.name, .head_sha, .external_id] | @tsv" in complete["run"]
+    assert 'test "$check_record" = "${CHECK_NAME:?}' in complete["run"]
     assert 'test "$conclusion" = success' in complete["run"]
 
     main_text = MAIN_WORKFLOW.read_text(encoding="utf-8")
@@ -235,6 +255,26 @@ def test_immutable_path_consistency_rejects_drift() -> None:
     ):
         with pytest.raises(AssertionError):
             _assert_immutable_path_consistency(*drifted)
+
+
+def test_required_check_completion_is_bound_to_trigger_target_context() -> None:
+    payload = yaml.safe_load(PROTECTED_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = payload["jobs"]
+    start = next(step for step in jobs["candidate-check"]["steps"] if step.get("id") == "candidate-check")
+    proof_steps = jobs["partition-execution-proof"]["steps"]
+    indexed = {step["id"]: step for step in proof_steps if "id" in step}
+    complete = next(step for step in proof_steps if step["name"] == "Complete candidate-bound required check")
+
+    assert "GITHUB_EVENT_PATH" in start["run"]
+    assert "external_id=" in start["run"]
+    assert "GITHUB_EVENT_PATH" in indexed["partition-proof"]["run"]
+    assert "GITHUB_EVENT_PATH" in indexed["context-proof"]["run"]
+    assert "verify-receipt" in indexed["context-proof"]["run"]
+    assert "steps.context-proof.outcome == 'success'" in indexed["proof-upload"]["if"]
+    assert complete["env"]["CONTEXT_OUTCOME"] == "${{ steps.context-proof.outcome }}"
+    assert 'test "$CONTEXT_OUTCOME" = success' in complete["run"]
+    assert ".external_id" in complete["run"]
+    assert "${CHECK_NAME:?}" in complete["run"]
 
 
 @pytest.mark.parametrize(
@@ -270,8 +310,10 @@ def test_candidate_weakened_validators_are_not_the_executed_judges(tmp_path: Pat
     candidate = tmp_path / "candidate"
     judge = tmp_path / "judge"
     bundle = tmp_path / "empty-bundle"
+    event_payload = tmp_path / "event.json"
     (candidate / "tools").mkdir(parents=True)
     bundle.mkdir()
+    event_payload.write_text('{"workflow_run":{}}\n', encoding="utf-8", newline="\n")
     (candidate / "tools" / "__init__.py").write_text("", encoding="utf-8")
     for module in ("ci_partition_execution_proof.py", "montana_candidate_gate.py"):
         (candidate / "tools" / module).write_text("raise SystemExit(0)\n", encoding="utf-8", newline="\n")
@@ -289,6 +331,10 @@ def test_candidate_weakened_validators_are_not_the_executed_judges(tmp_path: Pat
         "1",
         "--sha",
         "0" * 40,
+        "--check-name",
+        "CryoDAQ protected CI evidence gate",
+        "--event-payload",
+        str(event_payload),
         "--output",
         str(tmp_path / "proof.json"),
     ]
