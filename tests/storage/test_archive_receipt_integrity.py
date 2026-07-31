@@ -104,6 +104,44 @@ def _bounded(reader: ArchiveReader, start: datetime, end: datetime):
     )
 
 
+@pytest.mark.parametrize("surface", ["direct", "bounded", "operator_log"])
+def test_consistently_receipted_wrong_day_artifact_is_rejected(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    artifact_day = datetime(2026, 4, 14, 12, tzinfo=UTC)
+    declared_day = artifact_day + timedelta(days=1)
+    archive_dir, entries = _rotate_days(tmp_path, [(artifact_day, 1.0)])
+    entry = entries[0]
+    artifact = _artifact(archive_dir, entry)
+    assert (
+        entry["checksum_md5"]
+        == hashlib.md5(
+            artifact.read_bytes(),
+            usedforsecurity=False,
+        ).hexdigest()
+    )
+    entry["original_name"] = f"data_{declared_day.date().isoformat()}.db"
+    _write_index(archive_dir, entries)
+
+    reader = ArchiveReader(tmp_path, archive_dir)
+    start = declared_day.replace(hour=0)
+    end = start + timedelta(days=1)
+    if surface == "bounded":
+        result = _bounded(reader, start, end)
+        assert result.rows == ()
+        assert result.complete is False
+        assert BoundedReadIssueCode.ARCHIVE_INDEX_INVALID in {issue.code for issue in result.issues}
+        return
+
+    with pytest.raises(ArchiveUnavailableError) as caught:
+        if surface == "operator_log":
+            reader.query_operator_log(start, end - timedelta(microseconds=1))
+        else:
+            reader.query_rows(start, end, None)
+    assert caught.value.issue.code is BoundedReadIssueCode.ARCHIVE_INDEX_INVALID
+
+
 @pytest.mark.parametrize(
     "fault",
     [

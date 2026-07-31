@@ -71,6 +71,107 @@ def _day_from_db_name(name: str) -> str | None:
     return day_part
 
 
+def _archive_relative_path(relative: str) -> PurePosixPath:
+    if not relative or len(relative) > 1024 or "\\" in relative or "\x00" in relative:
+        raise ValueError("invalid archive path")
+    pure = PurePosixPath(relative)
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+        raise ValueError("invalid archive path")
+    if len(pure.parts[0]) >= 2 and pure.parts[0][1] == ":":
+        raise ValueError("invalid archive path")
+    return pure
+
+
+def _validate_partitioned_artifact(relative: object, day: date, basenames: set[str]) -> str:
+    if type(relative) is not str:
+        raise ValueError("invalid archive artifact path")
+    pure = _archive_relative_path(relative)
+    expected_partition = (f"year={day.year}", f"month={day.month:02d}")
+    if len(pure.parts) != 3 or pure.parts[:2] != expected_partition or pure.name not in basenames:
+        raise ValueError("archive artifact disagrees with declared day")
+    return relative
+
+
+def validate_archive_index_authority(document: object) -> dict[str, object]:
+    """Bind every indexed artifact path to one declared database day."""
+    if not isinstance(document, dict) or set(document) != {"files"}:
+        raise ValueError("invalid index schema")
+    entries = document["files"]
+    if type(entries) is not list or len(entries) > 100_000:
+        raise ValueError("invalid index entries")
+
+    seen_names: set[str] = set()
+    seen_artifacts: set[str] = set()
+    for entry in entries:
+        if type(entry) is not dict:
+            raise ValueError("invalid index entry")
+        name = entry.get("original_name")
+        if type(name) is not str:
+            raise ValueError("invalid index entry fields")
+        day_text = _day_from_db_name(name)
+        if day_text is None or name != f"data_{day_text}.db" or name in seen_names:
+            raise ValueError("invalid index day authority")
+        seen_names.add(name)
+        day = date.fromisoformat(day_text)
+
+        readings_path = _validate_partitioned_artifact(
+            entry.get("archive_path"),
+            day,
+            {
+                f"data_{day_text}.parquet",
+                f"data_{day_text}.db.parquet",
+                f"data_{day_text}.readings.parquet",
+            },
+        )
+        artifact_paths = [readings_path]
+
+        operator_fields = {
+            "operator_log_path",
+            "operator_log_rows",
+            "operator_log_size_bytes",
+            "operator_log_checksum_md5",
+            "operator_log_schema",
+        }
+        if any(field in entry for field in operator_fields):
+            schema = entry.get("operator_log_schema")
+            if schema not in {"operator_log_v1", "operator_log_v2"}:
+                raise ValueError("invalid operator_log authority")
+            operator_path = _validate_partitioned_artifact(
+                entry.get("operator_log_path"),
+                day,
+                {
+                    f"data_{day_text}.operator_log.parquet",
+                    f"data_{day_text}.db.operator_log.parquet",
+                    f"data_{day_text}.{schema}.parquet",
+                },
+            )
+            artifact_paths.append(operator_path)
+
+        descriptor_fields = {
+            "channel_descriptors_path",
+            "channel_descriptors_rows",
+            "channel_descriptors_checksum",
+            "channel_descriptors_size_bytes",
+        }
+        if any(field in entry for field in descriptor_fields):
+            descriptor_path = _validate_partitioned_artifact(
+                entry.get("channel_descriptors_path"),
+                day,
+                {
+                    f"data_{day_text}.channel_descriptors.parquet",
+                    f"data_{day_text}.db.channel_descriptors.parquet",
+                    f"data_{day_text}.readings.channel_descriptors.parquet",
+                },
+            )
+            artifact_paths.append(descriptor_path)
+
+        for artifact_path in artifact_paths:
+            if artifact_path in seen_artifacts:
+                raise ValueError("duplicate archive artifact authority")
+            seen_artifacts.add(artifact_path)
+    return document
+
+
 # Full row emitted by :meth:`ArchiveReader.query_rows` — value is already
 # decoded (NaN-доктрина); status is the raw discriminator string.
 FullRow = tuple[object, str, str, float, str, str]
@@ -154,6 +255,23 @@ class _BoundedSource:
     path: Path
     token: str
     index_entry: dict[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchiveIndexToken:
+    present: bool
+    checksum_sha256: str | None
+    identity: tuple[int, int, int, int, int, int, int] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchiveIndexSnapshot:
+    document: dict[str, object]
+    token: _ArchiveIndexToken
+
+
+class _IndexDocument(dict[str, object]):
+    snapshot_token: _ArchiveIndexToken
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,31 +639,33 @@ class ArchiveReader:
         end_us = _epoch_microseconds(end_utc)
         issues = _IssueLedger()
         last_eligible_day = (end_utc - timedelta(microseconds=1)).date()
-        sources = self._bounded_sources(start_utc.date(), last_eligible_day, deadline_monotonic, issues)
+        if time.monotonic() >= deadline_monotonic:
+            issues.add(BoundedReadIssueCode.DEADLINE, "index")
+            return self._bounded_result(expected_index=None, issues=issues, complete=False)
+        try:
+            index_snapshot = self._load_index_snapshot()
+        except ArchiveUnavailableError as exc:
+            issues.add(exc.issue.code, exc.issue.source)
+            return self._bounded_result(expected_index=None, issues=issues, complete=False)
+        sources = self._bounded_sources(
+            start_utc.date(),
+            last_eligible_day,
+            index_snapshot,
+            deadline_monotonic,
+            issues,
+        )
         if sources is None:
-            return BoundedReadingQueryResult(
-                rows=(),
+            return self._bounded_result(
+                expected_index=index_snapshot.token,
+                issues=issues,
                 complete=False,
-                truncated=False,
-                issues=tuple(issues.items),
-                issue_overflow=issues.overflow,
-                discovered_channels=(),
-                rows_examined=0,
-                rows_dropped_by_caps=0,
-                retained_encoded_bytes=0,
             )
 
         if explicit_channels is None and (issues.items or issues.overflow):
-            return BoundedReadingQueryResult(
-                rows=(),
+            return self._bounded_result(
+                expected_index=index_snapshot.token,
+                issues=issues,
                 complete=False,
-                truncated=False,
-                issues=tuple(issues.items),
-                issue_overflow=issues.overflow,
-                discovered_channels=(),
-                rows_examined=0,
-                rows_dropped_by_caps=0,
-                retained_encoded_bytes=0,
             )
 
         selected = explicit_channels
@@ -590,16 +710,11 @@ class ArchiveReader:
                     discovery_ok = False
                     break
             if not discovery_ok:
-                return BoundedReadingQueryResult(
-                    rows=(),
+                return self._bounded_result(
+                    expected_index=index_snapshot.token,
+                    issues=issues,
                     complete=False,
-                    truncated=False,
-                    issues=tuple(issues.items),
-                    issue_overflow=issues.overflow,
                     discovered_channels=tuple(sorted(discovered)[:max_channels]),
-                    rows_examined=0,
-                    rows_dropped_by_caps=0,
-                    retained_encoded_bytes=0,
                 )
             selected = tuple(sorted(discovered))
         discovered_channels = tuple(selected)
@@ -647,16 +762,49 @@ class ArchiveReader:
             else:
                 collector.reject_unverified(staged)
             complete = ok and complete
-        return BoundedReadingQueryResult(
-            rows=collector.finish(),
-            complete=complete and not issues.items and issues.overflow == 0,
+        rows = collector.finish()
+        return self._bounded_result(
+            expected_index=index_snapshot.token,
+            issues=issues,
+            complete=complete,
+            rows=rows,
             truncated=collector.truncated,
-            issues=tuple(issues.items),
-            issue_overflow=issues.overflow,
             discovered_channels=discovered_channels,
             rows_examined=collector.rows_examined,
             rows_dropped_by_caps=collector.rows_dropped_by_caps,
             retained_encoded_bytes=collector.retained_encoded_bytes,
+        )
+
+    def _bounded_result(
+        self,
+        *,
+        expected_index: _ArchiveIndexToken | None,
+        issues: _IssueLedger,
+        complete: bool,
+        rows: tuple[BoundedReadingRow, ...] = (),
+        truncated: bool = False,
+        discovered_channels: tuple[str, ...] = (),
+        rows_examined: int = 0,
+        rows_dropped_by_caps: int = 0,
+        retained_encoded_bytes: int = 0,
+    ) -> BoundedReadingQueryResult:
+        if expected_index is not None:
+            snapshot_issue = self._index_snapshot_issue(expected_index)
+            if snapshot_issue is not None:
+                issues.add(snapshot_issue, "index:changed")
+                rows = ()
+                complete = False
+                retained_encoded_bytes = 0
+        return BoundedReadingQueryResult(
+            rows=rows,
+            complete=complete and not issues.items and issues.overflow == 0,
+            truncated=truncated,
+            issues=tuple(issues.items),
+            issue_overflow=issues.overflow,
+            discovered_channels=discovered_channels,
+            rows_examined=rows_examined,
+            rows_dropped_by_caps=rows_dropped_by_caps,
+            retained_encoded_bytes=retained_encoded_bytes,
         )
 
     @staticmethod
@@ -821,65 +969,86 @@ class ArchiveReader:
             or len(payload) != opened.st_size
         ):
             raise OSError("index changed while reading")
-        return json.loads(bytes(payload).decode("utf-8", errors="strict"))
+        payload_bytes = bytes(payload)
+        parsed = json.loads(payload_bytes.decode("utf-8", errors="strict"))
+        if type(parsed) is not dict:
+            raise ValueError("invalid index schema")
+        document = _IndexDocument(parsed)
+        document.snapshot_token = _ArchiveIndexToken(
+            present=True,
+            checksum_sha256=hashlib.sha256(payload_bytes).hexdigest(),
+            identity=after_identity,
+        )
+        return document
+
+    def _capture_index_snapshot(self) -> _ArchiveIndexSnapshot:
+        index_path = self._archive_dir / "index.json"
+        if not (index_path.exists() or index_path.is_symlink()):
+            return _ArchiveIndexSnapshot(
+                document={"files": []},
+                token=_ArchiveIndexToken(False, None, None),
+            )
+        document = validate_archive_index_authority(self._read_bounded_index(index_path))
+        token = getattr(document, "snapshot_token", None)
+        if not isinstance(document, dict) or type(token) is not _ArchiveIndexToken:
+            raise OSError("index snapshot token is unavailable")
+        return _ArchiveIndexSnapshot(document=document, token=token)
+
+    def _load_index_snapshot(self) -> _ArchiveIndexSnapshot:
+        try:
+            snapshot = self._capture_index_snapshot()
+            if not snapshot.token.present:
+                has_cold_artifact = self._archive_dir.exists() and any(self._archive_dir.rglob("*.parquet"))
+                if has_cold_artifact:
+                    raise ValueError("cold artifact exists without index authority")
+            return snapshot
+        except ArchiveUnavailableError:
+            raise
+        except _IndexOversizeError:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE,
+                "index",
+            ) from None
+        except Exception:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
+                "index",
+            ) from None
+
+    def _index_snapshot_issue(self, expected: _ArchiveIndexToken) -> BoundedReadIssueCode | None:
+        try:
+            current = self._capture_index_snapshot()
+        except _IndexOversizeError:
+            return BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE
+        except Exception:
+            return BoundedReadIssueCode.ARCHIVE_INDEX_INVALID
+        if current.token != expected:
+            return BoundedReadIssueCode.ARCHIVE_INDEX_INVALID
+        return None
+
+    def _assert_index_snapshot(self, expected: _ArchiveIndexToken) -> None:
+        issue = self._index_snapshot_issue(expected)
+        if issue is not None:
+            raise ArchiveUnavailableError(issue, "index:changed")
 
     def _bounded_sources(
         self,
         first_day: date,
         last_day: date,
+        index_snapshot: _ArchiveIndexSnapshot,
         deadline_monotonic: float,
         issues: _IssueLedger,
     ) -> tuple[_BoundedSource, ...] | None:
         indexed: dict[str, dict[str, object]] = {}
-        index_path = self._archive_dir / "index.json"
-        index_was_present = index_path.exists() or index_path.is_symlink()
-        index_document: object | None = None
-        if index_was_present:
-            try:
-                if time.monotonic() >= deadline_monotonic:
-                    issues.add(BoundedReadIssueCode.DEADLINE, "index")
-                    return None
-                doc = self._read_bounded_index(index_path)
-                index_document = doc
-                if not isinstance(doc, dict) or set(doc) != {"files"}:
-                    raise ValueError("invalid index schema")
-                entries = doc["files"]
-                if not isinstance(entries, list) or len(entries) > 100_000:
-                    raise ValueError("invalid index entries")
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        raise ValueError("invalid index entry")
-                    name = entry.get("original_name")
-                    archive_path = entry.get("archive_path")
-                    if not isinstance(name, str) or not isinstance(archive_path, str):
-                        raise ValueError("invalid index entry fields")
-                    day_text = _day_from_db_name(name)
-                    if day_text is None or name != f"data_{day_text}.db":
-                        continue
-                    day = date.fromisoformat(day_text)
-                    if not first_day <= day <= last_day:
-                        continue
-                    if name in indexed:
-                        raise ValueError("duplicate day authority")
-                    indexed[name] = entry
-            except _IndexOversizeError:
-                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE, "index")
-                return None
-            except Exception:
-                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
-                return None
-        else:
-            try:
-                has_cold_artifact = self._archive_dir.exists() and any(self._archive_dir.rglob("*.parquet"))
-            except OSError:
-                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
-                return None
-            if has_cold_artifact:
-                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
-                return None
-            if time.monotonic() >= deadline_monotonic:
-                issues.add(BoundedReadIssueCode.DEADLINE, "index")
-                return None
+        entries = index_snapshot.document["files"]
+        assert isinstance(entries, list)
+        for entry in entries:
+            assert isinstance(entry, dict)
+            name = entry["original_name"]
+            assert isinstance(name, str)
+            day = date.fromisoformat(name.removeprefix("data_").removesuffix(".db"))
+            if first_day <= day <= last_day:
+                indexed[name] = entry
 
         planned: list[_BoundedSource] = []
         current = last_day
@@ -915,22 +1084,6 @@ class ArchiveReader:
         if time.monotonic() >= deadline_monotonic:
             issues.add(BoundedReadIssueCode.DEADLINE, "index:post-plan")
             return None
-        index_is_present = index_path.exists() or index_path.is_symlink()
-        if index_is_present != index_was_present:
-            issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index:changed")
-            return None
-        if index_is_present:
-            try:
-                post_plan_document = self._read_bounded_index(index_path)
-            except _IndexOversizeError:
-                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE, "index")
-                return None
-            except Exception:
-                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index")
-                return None
-            if post_plan_document != index_document:
-                issues.add(BoundedReadIssueCode.ARCHIVE_INDEX_INVALID, "index:changed")
-                return None
         return tuple(planned)
 
     @staticmethod
@@ -2034,10 +2187,12 @@ class ArchiveReader:
         to_utc = to_ts.astimezone(UTC) if to_ts.tzinfo else to_ts.replace(tzinfo=UTC)
         if to_utc < from_utc or channels == []:
             return {}
+        index_snapshot = self._load_index_snapshot()
         rows = self.query_rows(
             from_utc,
             to_utc + timedelta(microseconds=1),
             channels,
+            _index_snapshot=index_snapshot,
         )
         latest: dict[tuple[str, float], float] = {}
         for timestamp, _instrument, channel, value, _unit, _status in rows:
@@ -2049,6 +2204,7 @@ class ArchiveReader:
             key=lambda item: (item[0][0], item[0][1]),
         ):
             result[channel].append((epoch, value))
+        self._assert_index_snapshot(index_snapshot.token)
         return dict(result)
 
     def query_rows(
@@ -2057,6 +2213,8 @@ class ArchiveReader:
         end: datetime | None,
         channels: list[str] | None,
         instrument_ids: list[str] | None = None,
+        *,
+        _index_snapshot: _ArchiveIndexSnapshot | None = None,
     ) -> list[FullRow]:
         """Full readings rows across hot SQLite + cold Parquet for export.
 
@@ -2085,7 +2243,8 @@ class ArchiveReader:
             e = end.astimezone(UTC) if end.tzinfo else end.replace(tzinfo=UTC)
             to_epoch, to_day = e.timestamp(), e.date()
 
-        index = self._load_index()
+        index_snapshot = _index_snapshot or self._load_index_snapshot()
+        index = index_snapshot.document
         # day → [("parquet", archive_rel), ...] | [("sqlite", db_path)]. Normally
         # a rotated day has only its Parquet (the hot .db was deleted). But if a
         # hot daily DB reappears for an already-archived day (manual restore /
@@ -2141,6 +2300,7 @@ class ArchiveReader:
             out.extend(day_rows.values())
 
         out.sort(key=lambda r: _ts_sort_key(r[0]))
+        self._assert_index_snapshot(index_snapshot.token)
         return out
 
     def query_operator_log(
@@ -2172,7 +2332,8 @@ class ArchiveReader:
             e = end.astimezone(UTC) if end.tzinfo else end.replace(tzinfo=UTC)
             to_epoch, to_day = e.timestamp(), e.date()
 
-        index = self._load_index()
+        index_snapshot = self._load_index_snapshot()
+        index = index_snapshot.document
         # day → [("parquet", operator_log_rel), ...] | [("sqlite", db_path)]. A
         # rotated day's SQLite is normally gone, so its operator_log lives only
         # in the companion Parquet. The current index has no versioned authority
@@ -2233,6 +2394,7 @@ class ArchiveReader:
             out = deduped
 
         out.sort(key=lambda r: _ts_sort_key(r[0]))
+        self._assert_index_snapshot(index_snapshot.token)
         return out
 
     # ------------------------------------------------------------------
@@ -2706,67 +2868,10 @@ class ArchiveReader:
     # ------------------------------------------------------------------
 
     def _load_index(self) -> dict:
-        index_path = self._archive_dir / "index.json"
-        index_present = index_path.exists() or index_path.is_symlink()
-        if not index_present:
-            try:
-                has_cold_artifact = self._archive_dir.exists() and any(self._archive_dir.rglob("*.parquet"))
-            except OSError:
-                raise ArchiveUnavailableError(
-                    BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
-                    "index",
-                ) from None
-            if has_cold_artifact:
-                raise ArchiveUnavailableError(
-                    BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
-                    "index",
-                )
-            return {"files": []}
-        try:
-            document = self._read_bounded_index(index_path)
-            if type(document) is not dict or set(document) != {"files"}:
-                raise ValueError("invalid index schema")
-            entries = document["files"]
-            if type(entries) is not list or len(entries) > 100_000:
-                raise ValueError("invalid index entries")
-            seen: set[str] = set()
-            for entry in entries:
-                if type(entry) is not dict:
-                    raise ValueError("invalid index entry")
-                name = entry.get("original_name")
-                archive_rel = entry.get("archive_path")
-                if type(name) is not str or type(archive_rel) is not str:
-                    raise ValueError("invalid index entry fields")
-                day = _day_from_db_name(name)
-                if day is None or name != f"data_{day}.db" or name in seen:
-                    raise ValueError("invalid index day authority")
-                self._validate_archive_relative(archive_rel)
-                operator_rel = entry.get("operator_log_path")
-                if operator_rel is not None:
-                    if type(operator_rel) is not str:
-                        raise ValueError("invalid operator_log path")
-                    self._validate_archive_relative(operator_rel)
-                seen.add(name)
-            return document
-        except ArchiveUnavailableError:
-            raise
-        except _IndexOversizeError:
-            raise ArchiveUnavailableError(
-                BoundedReadIssueCode.ARCHIVE_INDEX_OVERSIZE,
-                "index",
-            ) from None
-        except Exception:
-            raise ArchiveUnavailableError(
-                BoundedReadIssueCode.ARCHIVE_INDEX_INVALID,
-                "index",
-            ) from None
+        snapshot = self._load_index_snapshot()
+        self._assert_index_snapshot(snapshot.token)
+        return snapshot.document
 
     @staticmethod
     def _validate_archive_relative(relative: str) -> None:
-        if not relative or len(relative) > 1024 or "\\" in relative or "\x00" in relative:
-            raise ValueError("invalid archive path")
-        pure = PurePosixPath(relative)
-        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
-            raise ValueError("invalid archive path")
-        if len(pure.parts[0]) >= 2 and pure.parts[0][1] == ":":
-            raise ValueError("invalid archive path")
+        _archive_relative_path(relative)

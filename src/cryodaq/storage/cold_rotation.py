@@ -28,6 +28,7 @@ import pyarrow.parquet as pq
 
 from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.storage._sqlite import sqlite3
+from cryodaq.storage.archive_reader import validate_archive_index_authority
 from cryodaq.storage.descriptor_archive import (
     MAX_ARCHIVE_DESCRIPTORS,
     ArchivedDescriptor,
@@ -1329,7 +1330,8 @@ class ColdRotationService:
         if not path.exists():
             return {"files": []}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            document = json.loads(path.read_text(encoding="utf-8"))
+            return validate_archive_index_authority(document)
         except Exception:
             logger.error(
                 "Archive index.json at %s is corrupt — aborting rotation to protect archive "
@@ -1393,6 +1395,7 @@ class ColdRotationService:
             entry["channel_descriptors_checksum"] = descriptor_checksum
             entry["channel_descriptors_size_bytes"] = descriptor_size_bytes
         idx["files"].append(entry)
+        validate_archive_index_authority(idx)
         # Atomic write (temp + os.replace): a crash mid-write must never leave a
         # truncated index.json that bricks both rotation and ArchiveReader reads.
         atomic_write_text(

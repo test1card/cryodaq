@@ -22,7 +22,7 @@ from cryodaq.channels.descriptors import (
 )
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.storage._sqlite import sqlite3
-from cryodaq.storage.archive_reader import ArchiveReader, BoundedReadIssueCode
+from cryodaq.storage.archive_reader import ArchiveReader, ArchiveUnavailableError, BoundedReadIssueCode
 from cryodaq.storage.channel_descriptors import initialize_descriptor_storage, install_catalog
 from cryodaq.storage.descriptor_archive import (
     ArchivedDescriptor,
@@ -67,7 +67,7 @@ def _cold(
     *,
     row_group_size: int = 2,
 ) -> Path:
-    relative = Path(f"year={day[:4]}") / f"data_{day}.parquet"
+    relative = Path(f"year={day[:4]}") / f"month={day[5:7]}" / f"data_{day}.parquet"
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.table(
@@ -146,7 +146,7 @@ def _descriptor_cold(
 ) -> tuple[Path, Path, dict[str, object]]:
     descriptor = descriptor or _descriptor()
     envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
-    relative = Path(f"year={day[:4]}") / f"data_{day}.parquet"
+    relative = Path(f"year={day[:4]}") / f"month={day[5:7]}" / f"data_{day}.parquet"
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.table(
@@ -397,7 +397,7 @@ def test_none_channels_fails_closed_when_indexed_source_is_missing(tmp_path: Pat
                 "files": [
                     {
                         "original_name": "data_2026-07-10.db",
-                        "archive_path": "year=2026/missing.parquet",
+                        "archive_path": "year=2026/month=07/data_2026-07-10.parquet",
                     }
                 ]
             }
@@ -516,7 +516,7 @@ def test_parquet_null_key_quarantines_its_source(
 def test_invalid_parquet_footer_is_rejected_before_table_read(tmp_path: Path) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     archive = tmp_path / "archive"
-    target = archive / "year=2026" / "bad.parquet"
+    target = archive / "year=2026" / "month=07" / "data_2026-07-10.parquet"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"not-parquet!")
     (archive / "index.json").write_text(
@@ -525,7 +525,7 @@ def test_invalid_parquet_footer_is_rejected_before_table_read(tmp_path: Path) ->
                 "files": [
                     {
                         "original_name": "data_2026-07-10.db",
-                        "archive_path": "year=2026/bad.parquet",
+                        "archive_path": "year=2026/month=07/data_2026-07-10.parquet",
                         "row_count": 0,
                         "size_bytes_archive": target.stat().st_size,
                         "checksum_md5": hashlib.md5(target.read_bytes()).hexdigest(),
@@ -798,6 +798,98 @@ def test_rotation_index_publish_then_hot_unlink_cannot_return_false_complete(
     assert BoundedReadIssueCode.ARCHIVE_INDEX_INVALID in {issue.code for issue in result.issues}
 
 
+def test_direct_rotation_after_snapshot_before_hot_discovery_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = datetime(2026, 7, 10, tzinfo=UTC)
+    hot = _hot_db(
+        tmp_path / "data",
+        "2026-07-10",
+        [(start.timestamp(), "i", "T", 1.0, "K", "ok")],
+    )
+    archive = tmp_path / "archive"
+    _cold(
+        archive,
+        "2026-07-10",
+        [(start, "i", "T", 1.0, "K", "ok")],
+    )
+    index = archive / "index.json"
+    published = index.read_text(encoding="utf-8")
+    index.write_text('{"files": []}', encoding="utf-8")
+    original = ArchiveReader._read_bounded_index
+    captured = False
+
+    def rotate_after_snapshot(path: Path) -> object:
+        nonlocal captured
+        document = original(path)
+        if not captured:
+            captured = True
+            replacement = archive / "index.next"
+            replacement.write_text(published, encoding="utf-8")
+            replacement.replace(index)
+            hot.unlink()
+        return document
+
+    monkeypatch.setattr(
+        ArchiveReader,
+        "_read_bounded_index",
+        staticmethod(rotate_after_snapshot),
+    )
+
+    with pytest.raises(ArchiveUnavailableError) as caught:
+        ArchiveReader(tmp_path / "data", archive).query_rows(
+            start,
+            start + timedelta(seconds=1),
+            None,
+        )
+
+    assert captured is True
+    assert caught.value.issue.code is BoundedReadIssueCode.ARCHIVE_INDEX_INVALID
+
+
+def test_bounded_index_replacement_after_materialization_discards_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = datetime(2026, 7, 10, tzinfo=UTC)
+    archive = tmp_path / "archive"
+    _cold(
+        archive,
+        "2026-07-10",
+        [(start, "i", "T", 1.0, "K", "ok")],
+    )
+    index = archive / "index.json"
+    original_finish = archive_reader_module._BoundedReadingCollector.finish
+    replaced = False
+
+    def replace_after_materialization(collector: object):
+        nonlocal replaced
+        rows = original_finish(collector)
+        if rows and not replaced:
+            replaced = True
+            replacement = archive / "index.next"
+            replacement.write_bytes(index.read_bytes())
+            replacement.replace(index)
+        return rows
+
+    monkeypatch.setattr(
+        archive_reader_module._BoundedReadingCollector,
+        "finish",
+        replace_after_materialization,
+    )
+    result = _query(
+        ArchiveReader(tmp_path / "data", archive),
+        start,
+        start + timedelta(seconds=1),
+    )
+
+    assert replaced is True
+    assert result.rows == ()
+    assert result.complete is False
+    assert BoundedReadIssueCode.ARCHIVE_INDEX_INVALID in {issue.code for issue in result.issues}
+
+
 def test_hot_and_cold_descriptor_resolution_are_value_equivalent(tmp_path: Path) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     descriptor = _descriptor()
@@ -952,7 +1044,7 @@ def test_descriptor_envelope_bytes_count_toward_retained_cap(tmp_path: Path) -> 
 def test_descriptor_reference_cardinality_is_bounded_before_sidecar_read(tmp_path: Path) -> None:
     start = datetime(2026, 7, 10, tzinfo=UTC)
     archive = tmp_path / "archive"
-    relative = Path("year=2026/data_2026-07-10.parquet")
+    relative = Path("year=2026/month=07/data_2026-07-10.parquet")
     path = archive / relative
     path.parent.mkdir(parents=True)
     count = 4097

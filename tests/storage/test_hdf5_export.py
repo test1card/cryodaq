@@ -370,6 +370,28 @@ def test_hdf5_export_reads_rotated_day(tmp_path: Path) -> None:
     assert values == [pytest.approx(70.0)], "rotated value missing from HDF5"
 
 
+def test_hdf5_export_rejects_receipted_wrong_day_before_writing(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    archive_dir = tmp_path / "archive"
+    artifact_day = _TODAY - timedelta(days=40)
+    declared_day = artifact_day + timedelta(days=1)
+    _write_day(data_dir, [_reading("T1", 70.0, ts=artifact_day.replace(hour=12))])
+    service = ColdRotationService(data_dir=data_dir, archive_dir=archive_dir, age_days=30)
+    assert asyncio.run(service.run_once(now=_TODAY))
+
+    index_path = archive_dir / "index.json"
+    document = json.loads(index_path.read_text(encoding="utf-8"))
+    document["files"][0]["original_name"] = f"data_{declared_day.date().isoformat()}.db"
+    index_path.write_text(json.dumps(document), encoding="utf-8")
+    output_path = tmp_path / "must-not-exist-wrong-day.h5"
+
+    with pytest.raises(RuntimeError) as caught:
+        HDF5Exporter(data_dir, archive_dir).export(declared_day.date(), output_path)
+
+    assert type(caught.value).__name__ == "ArchiveUnavailableError"
+    assert not output_path.exists()
+
+
 def test_hdf5_rotated_day_masks_sentinel(tmp_path: Path) -> None:
     """A sentinel row rotated to Parquet must surface as NaN with status intact."""
     data_dir = tmp_path / "data"

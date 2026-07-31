@@ -866,7 +866,8 @@ def test_query_and_operator_log_union_restored_hot_over_archived_day(tmp_path: P
 def test_query_parquet_masks_nonfinite(tmp_path: Path) -> None:
     day = datetime(2026, 4, 14, tzinfo=UTC)
     base_ts = day.timestamp()
-    parquet_path = tmp_path / "arch" / "cold.parquet"
+    archive_relative = "year=2026/month=04/data_2026-04-14.parquet"
+    parquet_path = tmp_path / "arch" / archive_relative
     _create_parquet(
         parquet_path,
         [
@@ -880,8 +881,8 @@ def test_query_parquet_masks_nonfinite(tmp_path: Path) -> None:
         [
             {
                 "original_name": "data_2026-04-14.db",
-                "archive_path": "cold.parquet",
-            }
+                "archive_path": archive_relative,
+            },
         ],
     )
     reader = ArchiveReader(data_dir=tmp_path, archive_dir=tmp_path / "arch")
