@@ -25,6 +25,10 @@ SQLite + холодный Parquet), поэтому день, вытесненн�
         ├── current   (dataset, float64)
         ├── resistance(dataset, float64)
         └── power     (dataset, float64)
+
+Instrument and channel group names in the tree above are sanitized and
+uniquified for use as HDF5 paths.  Their exact identities are carried by the
+``instrument_id`` and ``channel_id`` attributes on the corresponding groups.
 """
 
 from __future__ import annotations
@@ -189,8 +193,10 @@ class HDF5Exporter:
         count = 0
         for inst_id, channels in data.items():
             inst_group = hf.create_group(_unique_child_name(hf, _sanitize_name(inst_id)))
+            inst_group.attrs["instrument_id"] = inst_id
             for ch_name, ch_data in channels.items():
                 ch_group = inst_group.create_group(_unique_child_name(inst_group, _sanitize_name(ch_name)))
+                ch_group.attrs["channel_id"] = ch_name
                 ch_group.create_dataset(
                     "timestamp",
                     data=ch_data.timestamps,
