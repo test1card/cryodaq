@@ -222,8 +222,9 @@ class InterlockEngine:
             Optional async/sync callback ``(InterlockCondition, Reading)`` fired
             by P2-5 when a channel is PERSISTENTLY non-usable (see
             ``nonusable_escalation`` config). SafetyManager wiring routes this to
-            ``on_interlock_dead_channel`` which gates the fault on RUNNING —
-            SafetyManager remains the sole authority.
+            ``on_interlock_dead_channel`` which gates the fault on the active
+            source lifecycle (RUN_PERMITTED or RUNNING) — SafetyManager remains
+            the sole authority.
         """
         self._broker = broker
         self._actions = actions
@@ -518,7 +519,7 @@ class InterlockEngine:
         оператор не должен терять эксперимент из-за мгновенного сбоя датчика.
         Персистентность (≥ min_samples подряд И ≥ min_duration_s по времени
         измерения) → эскалация в SafetyManager (``dead_channel_handler``),
-        который сам решает, латчить ли fault (только в состоянии RUNNING).
+        который сам решает, латчить ли fault (в RUN_PERMITTED или RUNNING).
         """
         window = self._nonusable_windows.get(reading.channel)
         if window is None:
@@ -552,10 +553,10 @@ class InterlockEngine:
 
         # Персистентность → эскалация. S1 fail-closed: окно помечается
         # escalated ТОЛЬКО когда handler подтвердил латч fault (вернул True).
-        # Если SafetyManager отклонил эскалацию (не в RUNNING — например
-        # RUN_PERMITTED во время start_source или сразу после stop), окно
-        # остаётся не-escalated и КАЖДОЕ последующее непригодное показание
-        # повторяет попытку; первое же показание после перехода в RUNNING
+        # Если SafetyManager отклонил эскалацию вне активного жизненного цикла
+        # источника (например, SAFE_OFF или READY), окно остаётся
+        # не-escalated и КАЖДОЕ последующее непригодное показание повторяет
+        # попытку; первое же показание после перехода в RUN_PERMITTED/RUNNING
         # латчит fault. Без этого мёртвый канал молча утекал бы навсегда.
         if (
             not window.escalated

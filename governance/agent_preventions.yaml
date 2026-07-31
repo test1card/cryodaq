@@ -2885,11 +2885,13 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: Localized or mutable human prose can satisfy a test while the machine authority fields are missing, optimistic, or contradictory.
-    invariant: Machine decisions and regression guards bind exact structured fields and types; localized human text is observational and never supplies authority.
+    invariant: Machine decisions and regression guards bind exact structured fields and types; a positive activation receipt is issued only after the final post-publication state, child, abort-generation, ownership, and exact-source cut remains current; localized human text is observational and never supplies authority.
     rule_refs:
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/core/test_zmq_bridge_subprocess_threading.py::test_cmd_socket_recovers_after_timeout
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_post_publication_authority_cut_revokes_run_receipt_and_start_audit
         ci_partition: core
     red_evidence: localized_substring_assertion_omitted_delivery_commit_and_retry_authority_2026_07_23_pending_artifact_binding
     green_evidence: pending
@@ -3814,13 +3816,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Keithley configured identity, serial binding, connect, generation-bound transport-close settlement, recovery, and global OFF proof.
+    applies_to: Keithley configured identity, serial binding, connect, generation-bound transport-close settlement, recovery, global OFF proof, and per-channel positive unsafe-output observations.
     classification: instrument_authority_escape
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A wrong instrument or incomplete two-channel OFF can acquire measurement authority.
-    invariant: Exact configured identity and serial plus nonce-bound verified two-channel OFF precede Keithley authority.
+    invariant: Exact configured identity and serial plus nonce-bound verified two-channel OFF precede Keithley authority; an unmanaged ON or invalid readback is exposed only as a current connection-generation, channel-command-epoch, idle-read observation, while owned OFF/start/connect/disconnect transitions revoke stale observations without granting actuation authority.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -3838,6 +3840,16 @@ records:
         ci_partition: remaining
       - node: tests/drivers/test_keithley_connect_safety.py::test_incomplete_transport_close_blocks_keithley_disconnect_and_reconnect
         ci_partition: remaining
+      - node: tests/core/test_safety_operator_snapshot_owner.py::test_scheduler_observation_faults_external_sibling_of_managed_source
+        ci_partition: core
+      - node: tests/core/test_safety_operator_snapshot_owner.py::test_observations_replace_per_channel_and_reconnect_rejects_late_generation
+        ci_partition: core
+      - node: tests/core/test_safety_operator_snapshot_owner.py::test_positive_observation_requires_every_current_idle_read_condition
+        ci_partition: core
+      - node: tests/core/test_safety_operator_snapshot_owner.py::test_manager_owned_off_rejects_late_on_read_without_false_ready_fault
+        ci_partition: core
+      - node: tests/core/test_safety_operator_snapshot_owner.py::test_two_managed_channels_have_no_unmanaged_positive_observation
+        ci_partition: core
     red_evidence: incomplete_identity_and_off_proof_pending_artifact_binding
     green_evidence: pending
 
