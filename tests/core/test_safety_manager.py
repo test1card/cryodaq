@@ -230,6 +230,7 @@ async def _l05_started_child_manager(
     TaskSupervisor,
     asyncio.Task[None],
     asyncio.Event,
+    asyncio.Event,
     AsyncMock,
     AsyncMock,
     list[str],
@@ -238,10 +239,18 @@ async def _l05_started_child_manager(
 
     collect_entered = asyncio.Event()
     collect_release = asyncio.Event()
+    external_cancel_caught = asyncio.Event()
 
     async def controlled_collect() -> None:
         collect_entered.set()
-        await collect_release.wait()
+        if outcome == "external_cancel":
+            try:
+                await collect_release.wait()
+            except asyncio.CancelledError:
+                external_cancel_caught.set()
+                await asyncio.Event().wait()
+        else:
+            await collect_release.wait()
         if outcome == "runtime_error":
             raise RuntimeError("L05 controlled collect failure")
         if outcome == "normal_exit":
@@ -311,6 +320,7 @@ async def _l05_started_child_manager(
         audit,
         event_bus.publish,
         ordered_events,
+        external_cancel_caught,
     )
 
 
@@ -324,6 +334,7 @@ async def test_manager_stop_suppresses_only_its_exact_child_cancellation() -> No
         audit,
         alarm_publish,
         _events,
+        _external_cancel_caught,
     ) = await _l05_started_child_manager("stop_cancel")
     supervisor.stop()
     try:
@@ -364,22 +375,29 @@ async def test_manager_stop_faults_and_audits_non_stop_child_outcomes(
         audit,
         alarm_publish,
         ordered_events,
+        external_cancel_caught,
     ) = await _l05_started_child_manager(outcome)
     source.block_global_off = True
     supervisor.stop()
     stop_task: asyncio.Task[None] | None = None
-    release_owner: asyncio.Task[None] | None = None
     try:
         if outcome == "external_cancel":
-
-            async def release_when_stop_owns_global_off() -> None:
-                await source.global_off_entered.wait()
-                source.global_off_release.set()
-
-            release_owner = asyncio.create_task(release_when_stop_owns_global_off())
             collect_task.cancel()
-            await manager.stop()
-            await release_owner
+            await external_cancel_caught.wait()
+            assert not collect_task.done()
+            assert collect_task.cancelling() == 1
+            assert manager.is_stop_cancelled_child(collect_task) is False
+
+            stop_task = asyncio.create_task(manager.stop())
+            await source.global_off_entered.wait()
+            assert not collect_task.done()
+            assert collect_task.cancelling() == 1
+            assert manager.is_stop_cancelled_child(collect_task) is False
+            source.global_off_release.set()
+            await stop_task
+            assert collect_task.cancelled()
+            assert collect_task.cancelling() == 2
+            assert manager.is_stop_cancelled_child(collect_task) is False
         else:
             stop_task = asyncio.create_task(manager.stop())
             await source.global_off_entered.wait()
@@ -399,7 +417,8 @@ async def test_manager_stop_faults_and_audits_non_stop_child_outcomes(
         assert manager._failed_child_reason == f"safety_collect_{expected_outcome}"
         assert f"({expected_outcome})" in manager.fault_reason
         assert audit.await_args.kwargs["source"] == "safety_collect"
-        assert source.off_calls.count(None) >= 4
+        minimum_off_proofs = 3 if outcome == "external_cancel" else 4
+        assert source.off_calls.count(None) >= minimum_off_proofs
         assert "audit" in ordered_events
         assert ordered_events[-1] == "off"
         assert manager._pending_child_fault_settlements == set()
@@ -408,8 +427,6 @@ async def test_manager_stop_faults_and_audits_non_stop_child_outcomes(
         source.global_off_release.set()
         if stop_task is not None and not stop_task.done():
             await stop_task
-        if release_owner is not None and not release_owner.done():
-            await release_owner
         if manager._collect_task is not None or manager._monitor_task is not None:
             await manager.stop()
 
