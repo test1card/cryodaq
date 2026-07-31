@@ -1,4 +1,18 @@
-"""Create and verify one exact native required-workflow context receipt."""
+"""Create and verify one exact native required-workflow context receipt.
+
+Schema 2 binds a `pull_request` candidate to its head CAUSALLY: the executed
+object must be a two-parent merge whose second parent is the exact pull-request
+head.  Schema 1 instead required `github.sha` to equal the payload's
+`merge_commit_sha`.  That field is computed by a background job and the webhook
+payload carries whatever value existed when the event was serialised, so a
+`synchronize` payload can name the merge of the PREVIOUS head while the run
+executes the merge of the new one.  Both hosted candidates refused there; the
+schema 1 message did not name which of its three facts diverged, and the other
+two hold by construction, so this is the remaining explanation rather than a
+directly observed one.  Every refusal now names the diverging fact, so the next
+occurrence is diagnosable from the log alone.  The parent header is the property
+itself, so nothing downstream depends on when GitHub recomputed a field.
+"""
 
 from __future__ import annotations
 
@@ -126,6 +140,25 @@ def _git(repository: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def _commit_parents(repository: Path, commit: str) -> tuple[str, ...]:
+    """Return the parent SHAs recorded in the commit object itself.
+
+    The raw object is read rather than walked, because a shallow graft rewrites
+    what a traversal reports: `git rev-list` presents a boundary merge commit as
+    parentless, while the object header keeps both parents.  Reading the header
+    keeps this measurement independent of the checkout's fetch depth.
+    """
+
+    parents: list[str] = []
+    for line in _git(repository, "cat-file", "commit", commit).splitlines():
+        if not line:
+            break
+        key, _, value = line.partition(" ")
+        if key == "parent":
+            parents.append(_sha(value.strip(), "candidate parent"))
+    return tuple(parents)
+
+
 def build_receipt(
     event_raw: bytes,
     *,
@@ -175,16 +208,39 @@ def build_receipt(
     if event_name == "pull_request":
         subject: dict[str, Any] = {"kind": "pull_request", "pull_request": _pull_request(event, event_repository)}
         pull_request = subject["pull_request"]
-        event_pull_request = event["pull_request"]
+        head_sha = pull_request["head"]["sha"]
         expected_target_ref = f"refs/pull/{pull_request['number']}/merge"
-        expected_target_sha = _sha(event_pull_request.get("merge_commit_sha"), "pull request merge_commit_sha")
-        if commit != target_sha or target_ref != expected_target_ref or target_sha != expected_target_sha:
-            raise RequiredWorkflowContextError("candidate or GitHub target differs from the exact pull request")
+        parents = _commit_parents(root, commit)
+        divergences: list[str] = []
+        if commit != target_sha:
+            divergences.append(f"candidate commit {commit} is not the executed GITHUB_SHA {target_sha}")
+        if target_ref != expected_target_ref:
+            divergences.append(f"GITHUB_REF {target_ref} is not {expected_target_ref}")
+        if len(parents) != 2:
+            divergences.append(
+                f"candidate {commit} records {len(parents)} parents, so it is not this pull request's merge candidate"
+            )
+        elif parents[1] != head_sha:
+            divergences.append(f"candidate second parent {parents[1]} is not the exact pull request head {head_sha}")
+        if divergences:
+            raise RequiredWorkflowContextError(
+                "candidate or GitHub target differs from the exact pull request: " + "; ".join(divergences)
+            )
+        pull_request["merge_parents"] = {"base": parents[0], "head": parents[1]}
     else:
         merge_group = _merge_group(event)
         subject = {"kind": "merge_group", "merge_group": merge_group}
-        if commit != merge_group["head_sha"] or target_sha != commit or target_ref != merge_group["head_ref"]:
-            raise RequiredWorkflowContextError("candidate or GitHub target differs from the merge group head")
+        divergences = []
+        if commit != merge_group["head_sha"]:
+            divergences.append(f"candidate commit {commit} is not the merge group head {merge_group['head_sha']}")
+        if target_sha != commit:
+            divergences.append(f"executed GITHUB_SHA {target_sha} is not the candidate commit {commit}")
+        if target_ref != merge_group["head_ref"]:
+            divergences.append(f"GITHUB_REF {target_ref} is not the merge group head ref {merge_group['head_ref']}")
+        if divergences:
+            raise RequiredWorkflowContextError(
+                "candidate or GitHub target differs from the merge group head: " + "; ".join(divergences)
+            )
 
     return {
         "candidate": {"commit": commit, "tree": tree},
@@ -196,7 +252,7 @@ def build_receipt(
         "github_target": {"ref": target_ref, "sha": target_sha},
         "repository": event_repository,
         "run": {"attempt": run_attempt, "id": _integer_from_environment(environment, "GITHUB_RUN_ID")},
-        "schema_version": 1,
+        "schema_version": 2,
         "subject": subject,
         "workflow": {
             "name": _environment(environment, "GITHUB_WORKFLOW"),

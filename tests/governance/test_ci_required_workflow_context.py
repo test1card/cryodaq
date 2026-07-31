@@ -30,20 +30,43 @@ def _git(repository: Path, *arguments: str) -> str:
 
 @pytest.fixture
 def candidate_repository(tmp_path: Path) -> tuple[Path, str, str]:
+    """Build the shape GitHub actually executes: a two-parent merge candidate.
+
+    A `pull_request` run checks out `refs/pull/N/merge`, never the branch head.
+    An earlier fixture committed one ordinary commit and called it the
+    candidate, so every assertion below ran against a single-parent object and
+    the production shape was never exercised.
+    """
+
     repository = tmp_path / "candidate"
     repository.mkdir()
     _git(repository, "init", "-q")
     _git(repository, "config", "user.name", "Required Context Test")
     _git(repository, "config", "user.email", "required-context@example.invalid")
+    _git(repository, "checkout", "-q", "-b", "master")
+    (repository / "base.py").write_text("BASE = 1\n", encoding="utf-8", newline="\n")
+    _git(repository, "add", "base.py")
+    _git(repository, "commit", "-q", "-m", "base")
+    _git(repository, "checkout", "-q", "-b", "feature")
     (repository / "candidate.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
     _git(repository, "add", "candidate.py")
-    _git(repository, "commit", "-m", "candidate")
+    _git(repository, "commit", "-q", "-m", "candidate")
+    _git(repository, "checkout", "-q", "master")
+    _git(repository, "merge", "-q", "--no-ff", "-m", "merge", "feature")
     commit = _git(repository, "rev-parse", "HEAD")
     tree = _git(repository, "rev-parse", "HEAD^{tree}")
     return repository, commit, tree
 
 
-def _pull_request_event(candidate_sha: str, *, pr_id: int = 1007, number: int = 7) -> dict:
+def _pull_request_event(
+    repository: Path,
+    candidate_sha: str,
+    *,
+    pr_id: int = 1007,
+    number: int = 7,
+    head_sha: str | None = None,
+    merge_commit_sha: str | None = None,
+) -> dict:
     return {
         "action": "synchronize",
         "number": number,
@@ -51,15 +74,15 @@ def _pull_request_event(candidate_sha: str, *, pr_id: int = 1007, number: int = 
             "base": {
                 "ref": "master",
                 "repo": {"full_name": "owner/cryodaq", "id": 41},
-                "sha": "b" * 40,
+                "sha": _git(repository, "rev-parse", f"{candidate_sha}^1"),
             },
             "head": {
                 "ref": "feature",
                 "repo": {"full_name": "contributor/cryodaq", "id": 84},
-                "sha": "a" * 40,
+                "sha": head_sha or _git(repository, "rev-parse", f"{candidate_sha}^2"),
             },
             "id": pr_id,
-            "merge_commit_sha": candidate_sha,
+            "merge_commit_sha": merge_commit_sha or candidate_sha,
             "number": number,
         },
         "repository": {"full_name": "owner/cryodaq", "id": 41},
@@ -111,7 +134,7 @@ def test_pull_request_receipt_is_canonical_and_exact(
     repository, commit, tree = candidate_repository
     event_path = tmp_path / "event.json"
     receipt_path = tmp_path / "receipt.json"
-    event = _pull_request_event(commit)
+    event = _pull_request_event(repository, commit)
     environment = _environment(commit)
     _write_event(event_path, event)
 
@@ -120,18 +143,21 @@ def test_pull_request_receipt_is_canonical_and_exact(
     assert receipt["candidate"] == {"commit": commit, "tree": tree}
     assert receipt["event"]["name"] == "pull_request"
     assert receipt["run"] == {"attempt": 1, "id": 9001}
+    base_sha = _git(repository, "rev-parse", f"{commit}^1")
+    head_sha = _git(repository, "rev-parse", f"{commit}^2")
     assert receipt["subject"]["pull_request"] == {
         "base": {
             "ref": "master",
             "repository": {"full_name": "owner/cryodaq", "id": 41},
-            "sha": "b" * 40,
+            "sha": base_sha,
         },
         "head": {
             "ref": "feature",
             "repository": {"full_name": "contributor/cryodaq", "id": 84},
-            "sha": "a" * 40,
+            "sha": head_sha,
         },
         "id": 1007,
+        "merge_parents": {"base": base_sha, "head": head_sha},
         "number": 7,
     }
     assert receipt_path.read_bytes().endswith(b"\n")
@@ -183,7 +209,7 @@ def test_workflow_source_must_be_exact_same_repository_protected_path(
 ) -> None:
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
-    _write_event(event_path, _pull_request_event(commit))
+    _write_event(event_path, _pull_request_event(repository, commit))
     environment = _environment(commit)
     environment["GITHUB_WORKFLOW_REF"] = workflow_ref
 
@@ -197,7 +223,7 @@ def test_non_native_or_manual_events_are_rejected(
 ) -> None:
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
-    _write_event(event_path, _pull_request_event(commit))
+    _write_event(event_path, _pull_request_event(repository, commit))
 
     with pytest.raises(RequiredWorkflowContextError, match="only pull_request and merge_group"):
         create_receipt(
@@ -211,7 +237,7 @@ def test_non_native_or_manual_events_are_rejected(
 def test_retry_attempt_is_rejected(candidate_repository: tuple[Path, str, str], tmp_path: Path) -> None:
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
-    _write_event(event_path, _pull_request_event(commit))
+    _write_event(event_path, _pull_request_event(repository, commit))
     environment = _environment(commit)
     environment["GITHUB_RUN_ATTEMPT"] = "2"
 
@@ -228,12 +254,72 @@ def test_pull_request_github_target_must_match_event(
 ) -> None:
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
-    _write_event(event_path, _pull_request_event(commit))
+    _write_event(event_path, _pull_request_event(repository, commit))
     environment = _environment(commit)
     environment[field] = value
 
     with pytest.raises(RequiredWorkflowContextError, match="exact pull request"):
         create_receipt(event_path, tmp_path / "receipt.json", repository=repository, environ=environment)
+
+
+def test_lagging_payload_merge_commit_sha_does_not_refuse_the_executed_merge(
+    candidate_repository: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    """The production case both hosted candidates hit.
+
+    A `synchronize` payload carries the merge commit GitHub had computed for the
+    PREVIOUS head, while the run executes the merge of the new one.  The
+    executed object is correct, so refusing here reports a divergence that does
+    not exist.
+    """
+
+    repository, commit, _tree = candidate_repository
+    event_path = tmp_path / "event.json"
+    receipt_path = tmp_path / "receipt.json"
+    _write_event(event_path, _pull_request_event(repository, commit, merge_commit_sha="c" * 40))
+    environment = _environment(commit)
+
+    receipt = create_receipt(event_path, receipt_path, repository=repository, environ=environment)
+
+    assert receipt["candidate"]["commit"] == commit
+    assert receipt["subject"]["pull_request"]["merge_parents"]["head"] == _git(repository, "rev-parse", f"{commit}^2")
+    verify_receipt(event_path, receipt_path, repository=repository, environ=environment)
+
+
+def test_merge_candidate_not_built_from_the_pull_request_head_is_refused(
+    candidate_repository: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    repository, commit, _tree = candidate_repository
+    event_path = tmp_path / "event.json"
+    _write_event(event_path, _pull_request_event(repository, commit, head_sha="a" * 40))
+
+    with pytest.raises(RequiredWorkflowContextError, match="second parent .* is not the exact pull request head"):
+        create_receipt(event_path, tmp_path / "receipt.json", repository=repository, environ=_environment(commit))
+
+
+def test_executing_the_branch_head_instead_of_the_merge_candidate_is_refused(
+    candidate_repository: tuple[Path, str, str], tmp_path: Path
+) -> None:
+    """The hazard the payload equality was reaching for, tested directly.
+
+    Executing the branch head under a `pull_request` context would certify a
+    tree that was never merged against the base.  The candidate must be the
+    two-parent merge object, whatever any payload field says.
+    """
+
+    repository, commit, _tree = candidate_repository
+    head_sha = _git(repository, "rev-parse", f"{commit}^2")
+    event_path = tmp_path / "event.json"
+    _write_event(event_path, _pull_request_event(repository, commit))
+    _git(repository, "checkout", "-q", "--detach", head_sha)
+
+    with pytest.raises(RequiredWorkflowContextError, match="records 1 parents, so it is not this pull request"):
+        create_receipt(
+            event_path,
+            tmp_path / "receipt.json",
+            repository=repository,
+            environ=_environment(head_sha, target_sha=head_sha),
+        )
 
 
 @pytest.mark.parametrize("later_kind", ["pull_request", "merge_group"])
@@ -247,11 +333,11 @@ def test_later_same_head_context_cannot_verify_earlier_receipt(
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
     receipt_path = tmp_path / "receipt.json"
-    _write_event(event_path, _pull_request_event(commit, pr_id=1007, number=7))
+    _write_event(event_path, _pull_request_event(repository, commit, pr_id=1007, number=7))
     create_receipt(event_path, receipt_path, repository=repository, environ=_environment(commit, run_id=9001))
 
     if later_kind == "pull_request":
-        later_event = _pull_request_event(commit, pr_id=1008, number=8)
+        later_event = _pull_request_event(repository, commit, pr_id=1008, number=8)
         later_environment = _environment(commit, run_id=9002, target_ref="refs/pull/8/merge")
     else:
         later_ref = "refs/heads/gh-readonly-queue/master/pr-8"
@@ -276,7 +362,7 @@ def test_verify_rejects_semantically_equal_noncanonical_bytes(
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
     receipt_path = tmp_path / "receipt.json"
-    _write_event(event_path, _pull_request_event(commit))
+    _write_event(event_path, _pull_request_event(repository, commit))
     environment = _environment(commit)
     receipt = create_receipt(event_path, receipt_path, repository=repository, environ=environment)
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8", newline="\n")
@@ -289,7 +375,7 @@ def test_every_bound_identity_mutation_is_rejected(candidate_repository: tuple[P
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
     receipt_path = tmp_path / "receipt.json"
-    _write_event(event_path, _pull_request_event(commit))
+    _write_event(event_path, _pull_request_event(repository, commit))
     environment = _environment(commit)
     original = create_receipt(event_path, receipt_path, repository=repository, environ=environment)
     mutations = []
@@ -299,6 +385,7 @@ def test_every_bound_identity_mutation_is_rejected(candidate_repository: tuple[P
         (("workflow", "sha"), "d" * 40),
         (("github_target", "ref"), "refs/pull/8/merge"),
         (("subject", "pull_request", "id"), 1008),
+        (("subject", "pull_request", "merge_parents", "head"), "d" * 40),
         (("candidate", "tree"), "e" * 40),
         (("event", "payload_sha256"), "sha256:" + "f" * 64),
     ):
@@ -325,7 +412,7 @@ def test_cli_fails_closed_without_writing_on_invalid_context(
     repository, commit, _tree = candidate_repository
     event_path = tmp_path / "event.json"
     receipt_path = tmp_path / "receipt.json"
-    _write_event(event_path, _pull_request_event(commit))
+    _write_event(event_path, _pull_request_event(repository, commit))
     environment = _environment(commit)
     environment["GITHUB_RUN_ATTEMPT"] = "2"
     for key, value in environment.items():
