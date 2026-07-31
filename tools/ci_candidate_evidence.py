@@ -86,6 +86,7 @@ _PROTECTED_PRODUCER_FILES = (
     "tools/ci_candidate_runner.py",
     "tools/ci_execution_roots.py",
     "tools/ci_guard_execution.py",
+    "tools/ci_required_workflow_context.py",
     "tools/governance_contract.py",
 )
 
@@ -492,6 +493,7 @@ def _github_environment(*, candidate_sha: str) -> dict[str, str]:
 
 def _protected_github_environment(*, candidate_sha: str) -> dict[str, str]:
     keys = (
+        "GITHUB_EVENT_NAME",
         "GITHUB_JOB",
         "GITHUB_JOB_CHECK_RUN_ID",
         "GITHUB_REPOSITORY",
@@ -891,9 +893,11 @@ def validate_protected_job_identity(
     jwks: Mapping[str, Any],
     job: Mapping[str, Any],
     expected_repository: str,
+    expected_event_name: str,
     expected_target_run_id: str,
     expected_target_run_attempt: str,
     expected_target_sha: str,
+    expected_source_head_sha: str,
     now: int | None = None,
 ) -> dict[str, Any]:
     if (
@@ -908,6 +912,7 @@ def validate_protected_job_identity(
     github = execution.get("github")
     producer = execution.get("producer")
     expected_github_fields = {
+        "github_event_name",
         "github_job",
         "github_job_check_run_id",
         "github_repository",
@@ -928,6 +933,8 @@ def validate_protected_job_identity(
         or not isinstance(producer, Mapping)
         or producer.get("commit") != github.get("github_workflow_sha")
         or github.get("github_repository") != expected_repository
+        or expected_event_name not in {"merge_group", "pull_request"}
+        or github.get("github_event_name") != expected_event_name
         or github.get("github_sha") != expected_target_sha
         or github.get("target_run_id") != expected_target_run_id
         or github.get("target_run_attempt") != expected_target_run_attempt
@@ -941,12 +948,12 @@ def validate_protected_job_identity(
     )
     claim_expectations = {
         "check_run_id": github["github_job_check_run_id"],
-        "event_name": "workflow_run",
+        "event_name": expected_event_name,
         "repository": expected_repository,
         "run_attempt": github["github_run_attempt"],
         "run_id": github["github_run_id"],
         "runner_environment": "github-hosted",
-        "sha": producer["commit"],
+        "sha": expected_target_sha,
         "workflow": github["github_workflow"],
         "workflow_ref": github["github_workflow_ref"],
         "workflow_sha": producer["commit"],
@@ -963,7 +970,7 @@ def validate_protected_job_identity(
     if (
         job.get("id") != job_id
         or job.get("run_id") != protected_run_id
-        or job.get("head_sha") != producer["commit"]
+        or job.get("head_sha") != expected_source_head_sha
         or job.get("status") != "completed"
         or job.get("conclusion") != "success"
         or job_completed < job_started
@@ -1273,9 +1280,11 @@ def validate_protected_execution_bundle(
     producer_root: Path,
     expected_suite: str,
     expected_repository: str,
+    expected_event_name: str,
     expected_target_run_id: str,
     expected_target_run_attempt: str,
     expected_target_sha: str,
+    expected_source_head_sha: str,
     expected_workflow_sha: str,
     jobs: list[Mapping[str, Any]],
     jwks: Mapping[str, Any],
@@ -1401,9 +1410,11 @@ def validate_protected_execution_bundle(
         jwks=jwks,
         job=matching_jobs[0],
         expected_repository=expected_repository,
+        expected_event_name=expected_event_name,
         expected_target_run_id=expected_target_run_id,
         expected_target_run_attempt=expected_target_run_attempt,
         expected_target_sha=expected_target_sha,
+        expected_source_head_sha=expected_source_head_sha,
         now=now,
     )
     return {
@@ -1437,9 +1448,11 @@ def _verify_protected(args: argparse.Namespace) -> int:
         producer_root=args.producer_root,
         expected_suite=args.suite,
         expected_repository=args.github_repository,
+        expected_event_name=args.event_name,
         expected_target_run_id=args.target_run_id,
         expected_target_run_attempt=args.target_run_attempt,
         expected_target_sha=args.target_sha,
+        expected_source_head_sha=args.source_head_sha,
         expected_workflow_sha=args.workflow_sha,
         jobs=jobs,
         jwks=_fetch_oidc_jwks(),
@@ -1493,10 +1506,12 @@ def main(argv: list[str] | None = None) -> int:
     verify_protected.add_argument("--producer-root", type=Path, required=True)
     verify_protected.add_argument("--suite", choices=("agents", "core", "gui", "remaining"), required=True)
     verify_protected.add_argument("--github-repository", required=True)
+    verify_protected.add_argument("--event-name", choices=("merge_group", "pull_request"), required=True)
     verify_protected.add_argument("--jobs", type=Path, required=True)
     verify_protected.add_argument("--target-run-id", required=True)
     verify_protected.add_argument("--target-run-attempt", required=True)
     verify_protected.add_argument("--target-sha", required=True)
+    verify_protected.add_argument("--source-head-sha", required=True)
     verify_protected.add_argument("--workflow-sha", required=True)
     verify_protected.set_defaults(handler=_verify_protected)
     summarize = subparsers.add_parser("summarize")

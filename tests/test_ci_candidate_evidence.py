@@ -564,9 +564,11 @@ def _validate_production_protected_command(
         producer_root=producer_root,
         expected_suite="core",
         expected_repository="owner/cryodaq",
+        expected_event_name="pull_request",
         expected_target_run_id="54321",
         expected_target_run_attempt="4",
         expected_target_sha="b" * 40,
+        expected_source_head_sha="d" * 40,
         expected_workflow_sha=producer["commit"],
         jobs=[{"id": 98765}],
         jwks={},
@@ -1309,11 +1311,17 @@ def test_protected_failure_relay_raw_subprocess_output_respects_byte_budget() ->
     assert len(completed.stdout + completed.stderr) <= 16_384
 
 
-def _protected_identity_fixture(now: int = 2_000_000_000) -> tuple[dict, bytes, dict, dict, dict]:
+def _protected_identity_fixture(
+    now: int = 2_000_000_000,
+    *,
+    event_name: str = "pull_request",
+    source_head_sha: str = "d" * 40,
+) -> tuple[dict, bytes, dict, dict, dict]:
     issued_at = now - 600
     producer_sha = "a" * 40
     candidate_sha = "b" * 40
     github = {
+        "github_event_name": event_name,
         "github_job": "protected-execution",
         "github_job_check_run_id": "98765",
         "github_repository": "owner/cryodaq",
@@ -1337,7 +1345,7 @@ def _protected_identity_fixture(now: int = 2_000_000_000) -> tuple[dict, bytes, 
     claims = {
         "aud": audience,
         "check_run_id": github["github_job_check_run_id"],
-        "event_name": "workflow_run",
+        "event_name": event_name,
         "exp": issued_at + 300,
         "iat": issued_at,
         "iss": "https://token.actions.githubusercontent.com",
@@ -1347,7 +1355,7 @@ def _protected_identity_fixture(now: int = 2_000_000_000) -> tuple[dict, bytes, 
         "run_attempt": github["github_run_attempt"],
         "run_id": github["github_run_id"],
         "runner_environment": "github-hosted",
-        "sha": producer_sha,
+        "sha": candidate_sha,
         "workflow": github["github_workflow"],
         "workflow_ref": github["github_workflow_ref"],
         "workflow_sha": producer_sha,
@@ -1362,7 +1370,7 @@ def _protected_identity_fixture(now: int = 2_000_000_000) -> tuple[dict, bytes, 
     job = {
         "completed_at": datetime.fromtimestamp(issued_at + 30, UTC).isoformat(),
         "conclusion": "success",
-        "head_sha": producer_sha,
+        "head_sha": source_head_sha,
         "id": 98765,
         "run_id": 12345,
         "started_at": datetime.fromtimestamp(issued_at - 30, UTC).isoformat(),
@@ -1381,9 +1389,11 @@ def test_signed_job_identity_binds_receipt_to_exact_rest_job_run_and_shas() -> N
         jwks=jwks,
         job=job,
         expected_repository="owner/cryodaq",
+        expected_event_name="pull_request",
         expected_target_run_id="54321",
         expected_target_run_attempt="4",
         expected_target_sha="b" * 40,
+        expected_source_head_sha="d" * 40,
         now=now,
     )
     assert claims["check_run_id"] == "98765"
@@ -1398,24 +1408,29 @@ def test_signed_job_identity_binds_receipt_to_exact_rest_job_run_and_shas() -> N
             jwks=jwks,
             job=wrong_job,
             expected_repository="owner/cryodaq",
+            expected_event_name="pull_request",
             expected_target_run_id="54321",
             expected_target_run_attempt="4",
             expected_target_sha="b" * 40,
+            expected_source_head_sha="d" * 40,
             now=now,
         )
-    for field, value in (
-        ("expected_target_run_id", "54322"),
-        ("expected_target_run_attempt", "5"),
-        ("expected_target_sha", "d" * 40),
+    for field, value, error in (
+        ("expected_target_run_id", "54322", "different target"),
+        ("expected_target_run_attempt", "5", "different target"),
+        ("expected_target_sha", "d" * 40, "different target"),
+        ("expected_source_head_sha", "e" * 40, "REST job"),
     ):
         arguments = {
             "expected_repository": "owner/cryodaq",
+            "expected_event_name": "pull_request",
             "expected_target_run_id": "54321",
             "expected_target_run_attempt": "4",
             "expected_target_sha": "b" * 40,
+            "expected_source_head_sha": "d" * 40,
         }
         arguments[field] = value
-        with pytest.raises(CiCandidateEvidenceError, match="different target"):
+        with pytest.raises(CiCandidateEvidenceError, match=error):
             validate_protected_job_identity(
                 execution,
                 attestation,
@@ -1427,6 +1442,33 @@ def test_signed_job_identity_binds_receipt_to_exact_rest_job_run_and_shas() -> N
             )
 
 
+def test_merge_group_signed_identity_binds_rest_and_candidate_to_group_sha() -> None:
+    now = 2_000_000_000
+    execution, execution_raw, attestation, jwks, job = _protected_identity_fixture(
+        now,
+        event_name="merge_group",
+        source_head_sha="b" * 40,
+    )
+
+    claims = validate_protected_job_identity(
+        execution,
+        attestation,
+        execution_raw=execution_raw,
+        jwks=jwks,
+        job=job,
+        expected_repository="owner/cryodaq",
+        expected_event_name="merge_group",
+        expected_target_run_id="54321",
+        expected_target_run_attempt="4",
+        expected_target_sha="b" * 40,
+        expected_source_head_sha="b" * 40,
+        now=now,
+    )
+
+    assert claims["event_name"] == "merge_group"
+    assert claims["sha"] == "b" * 40
+
+
 def test_signed_job_identity_refuses_absent_forged_and_misbound_oidc() -> None:
     now = 2_000_000_000
     execution, execution_raw, attestation, jwks, job = _protected_identity_fixture(now)
@@ -1435,9 +1477,11 @@ def test_signed_job_identity_refuses_absent_forged_and_misbound_oidc() -> None:
         "jwks": jwks,
         "job": job,
         "expected_repository": "owner/cryodaq",
+        "expected_event_name": "pull_request",
         "expected_target_run_id": "54321",
         "expected_target_run_attempt": "4",
         "expected_target_sha": "b" * 40,
+        "expected_source_head_sha": "d" * 40,
         "now": now,
     }
     with pytest.raises(CiCandidateEvidenceError, match="absent"):

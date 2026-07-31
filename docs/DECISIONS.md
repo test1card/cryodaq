@@ -190,3 +190,26 @@ owner-ratified plan in `ROADMAP.md`. This decision defines checkpoint scope and
 authorizes the cycle; it is not review evidence. The owner supplied the ruling
 and does not sign the independent review or hosted-evidence receipts required
 by the plan.
+
+## [Coordinator] Native required-workflow identity is not a status name
+
+A repository rule admits a candidate only when it natively binds the required
+workflow identity and the current `pull_request` or `merge_group` run identity.
+A required-status name cannot provide that authority: required status checks do
+not account for workflow or event identity, and an earlier success for the same
+commit can be reused when a later pull request B presents that commit.
+
+This repository is currently personal-hosted and therefore needs migration to
+an organization/enterprise host with ruleset required-workflow support before
+that admission invariant can close. The personal-repository required-status
+setting remains useful as a fail-closed operational fallback, but it is
+non-equivalent evidence and must never be described as native workflow binding.
+The required workflow must use its native `pull_request` and `merge_group`
+job checks; manually creating or patching a check run does not gain admission
+authority.
+
+The tempting `pull_request_target` workaround was rejected because GitHub binds
+that trigger’s `GITHUB_SHA` and `GITHUB_REF` to the pull request’s base/default
+branch, while a required status must pass on the latest pull-request head SHA.
+That native job therefore cannot prove the candidate head merely because it can
+read the pull-request payload.

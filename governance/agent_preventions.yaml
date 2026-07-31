@@ -2556,12 +2556,12 @@ false_green_pairs:
     green_evidence: pending
 
   - id: CI-SAME-SHA-CONTEXT-REUSE-FALSE-GREEN-203
-    status: open
+    status: reopened
     scope: repository
     runtime_prevention_id: EVIDENCE-BINDING-001
-    guard: tests/governance/test_ci_partition_execution_proof.py::test_context_join_adjudicates_every_automatic_same_repository_sha
+    guard: tests/governance/test_ci_required_workflow_context.py::test_later_same_head_context_cannot_verify_earlier_receipt
     ci_partition: remaining
-    red_evidence: same_repository_same_sha_automatic_sibling_contexts_could_be_reused_without_complete_adjudication_2026_07_31_pending_immutable_capture
+    red_evidence: a_later_pull_request_B_could_reuse_an_earlier_same_sha_success_because_a_personal_repository_required_status_name_does_not_bind_the_native_ruleset_workflow_pull_request_or_merge_group_run_identity_2026_07_31_pending_immutable_capture
     green_evidence: pending
   - id: ARCHIVE-DAY-PATH-MISBINDING-FALSE-GREEN-204
     status: open
@@ -4144,18 +4144,19 @@ records:
     green_evidence: pending
 
   - id: EVIDENCE-BINDING-001
-    status: open
+    status: reopened
     scope: repository
     authority_source: AGENTS.md
-    applies_to: Every local or hosted candidate, package, artifact, CI, publication evidence receipt, and registry artifact evidence claim.
+    applies_to: Every local or hosted candidate, package, artifact, CI, publication evidence receipt, registry artifact evidence claim, and repository rule that admits a pull-request or merge-group candidate.
     classification: ci_artifact_misbinding
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: CI can execute one tree while hashing or uploading another, omit exact run or artifact identity, let an unrelated same-SHA automatic run publish the retained required check, hide a relevant failure behind stale or ambiguous pull-request association data, or let a registry artifact claim conceal the candidate tree and suite it attests.
-    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, uploaded artifact digest, and a trusted expected target context carried through the final retained-name check decision; relevance is classified before strict normalization or attempt adjudication from bounded server-filtered populations, every relevant non-first attempt is zero credit, push/PR association reconciles bounded API and embedded evidence by stable repository and PR IDs with exact base/head fields, and cancellation is superseded only by a strictly later normalized timestamp; every registry artifact evidence claim carries the receipt tree and exact suite coverage, while a multi-partition closure requires a sealed aggregate bundle naming exactly every covered guard partition.
+    consequence: CI can execute one tree while hashing or uploading another, omit exact run or artifact identity, let an unrelated same-SHA automatic run publish the retained required check, let a later pull request B reuse an earlier same-SHA success under a colliding status name, hide a relevant failure behind stale or ambiguous pull-request association data, or let a registry artifact claim conceal the candidate tree and suite it attests.
+    invariant: Receipts bind checked-out and executed tree, workflow, dependencies, run attempt, uploaded artifact digest, and a trusted expected target context carried through the final decision. Repository admission additionally requires an organization- or enterprise-level native ruleset required-workflow binding to the exact workflow identity and the current pull_request or merge_group run identity; a personal-repository required-status name is a non-equivalent fallback and cannot close that invariant. The guard set includes the temporal regression in which a later pull request B presents the same commit SHA after an earlier success and must not inherit that success. The required workflow publishes only native job checks and never creates or patches a check run. Relevance is classified before strict normalization or attempt adjudication from bounded server-filtered populations, every relevant non-first attempt is zero credit, push/PR association reconciles bounded API and embedded evidence by stable repository and PR IDs with exact base/head fields, and cancellation is superseded only by a strictly later normalized timestamp; every registry artifact evidence claim carries the receipt tree and exact suite coverage, while a multi-partition closure requires a sealed aggregate bundle naming exactly every covered guard partition.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
+      - docs/DECISIONS.md#coordinator-native-required-workflow-identity-is-not-a-status-name
     guards:
       - node: tests/test_ci_candidate_evidence.py::test_executed_and_uploaded_candidate_manifests_are_identical
         ci_partition: remaining
@@ -4195,6 +4196,8 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_ci_partition_execution_proof.py::test_context_join_adjudicates_every_automatic_same_repository_sha
         ci_partition: remaining
+      - node: tests/governance/test_ci_required_workflow_context.py::test_later_same_head_context_cannot_verify_earlier_receipt
+        ci_partition: remaining
       - node: tests/governance/test_ci_partition_execution_proof.py::test_cli_refuses_failing_automatic_sibling_on_same_sha
         ci_partition: remaining
       - node: tests/governance/test_ci_partition_execution_proof.py::test_selected_pull_request_success_and_exact_push_counterpart_are_joined
@@ -4215,7 +4218,13 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_ci_partition_execution_proof.py::test_production_proof_rejects_mandated_identity_mutations
         ci_partition: remaining
-      - node: tests/governance/test_protected_ci_evidence_gate.py::test_required_check_completion_is_bound_to_trigger_target_context
+      - node: tests/governance/test_protected_ci_evidence_gate.py::test_protected_workflow_is_native_and_candidate_bound
+        ci_partition: remaining
+      - node: tests/governance/test_protected_ci_evidence_gate.py::test_native_final_job_is_fail_closed_and_uploads_only_accepted_context
+        ci_partition: remaining
+      - node: tests/governance/test_protected_ci_evidence_gate.py::test_workflow_has_no_ordinary_ci_or_manual_check_authority
+        ci_partition: remaining
+      - node: tests/governance/test_protected_ci_evidence_gate.py::test_immutable_path_consistency_rejects_drift
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_artifact_evidence_requires_receipt_tree_and_suite_binding
         ci_partition: remaining
