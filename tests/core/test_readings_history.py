@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import os
 import time
@@ -401,6 +402,12 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
                         {
                             "original_name": f"data_{cold_day.date().isoformat()}.db",
                             "archive_path": rel,
+                            "row_count": table.num_rows,
+                            "size_bytes_archive": ppath.stat().st_size,
+                            "checksum_md5": hashlib.md5(
+                                ppath.read_bytes(),
+                                usedforsecurity=False,
+                            ).hexdigest(),
                         }
                     ]
                 }
@@ -481,6 +488,12 @@ def test_read_readings_history_unbounded_unions_cold_archive(tmp_path: Path) -> 
                         {
                             "original_name": f"data_{cold_day.date().isoformat()}.db",
                             "archive_path": rel,
+                            "row_count": table.num_rows,
+                            "size_bytes_archive": ppath.stat().st_size,
+                            "checksum_md5": hashlib.md5(
+                                ppath.read_bytes(),
+                                usedforsecurity=False,
+                            ).hexdigest(),
                         }
                     ]
                 }
