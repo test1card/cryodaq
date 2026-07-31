@@ -1143,17 +1143,22 @@ def test_sidecar_replace_read_restore_cannot_change_opened_inode(
     archive = tmp_path / "archive"
     _readings, sidecar, _entry = _descriptor_cold(archive, "2026-07-10", start)
     saved = sidecar.with_suffix(".saved")
+    sidecar_info = sidecar.stat()
+    sidecar_identity = (sidecar_info.st_dev, sidecar_info.st_ino)
     real_hash = ArchiveReader._hash_open_file
-    calls = 0
+    sidecar_hash_calls = 0
 
     def replace_around_hash(descriptor: int, *, deadline_monotonic: float) -> str:
-        nonlocal calls
-        calls += 1
+        nonlocal sidecar_hash_calls
         result = real_hash(descriptor, deadline_monotonic=deadline_monotonic)
-        if calls == 1:
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) != sidecar_identity:
+            return result
+        sidecar_hash_calls += 1
+        if sidecar_hash_calls == 1:
             sidecar.replace(saved)
             sidecar.write_bytes(b"attacker replacement")
-        elif calls == 2:
+        elif sidecar_hash_calls == 2:
             sidecar.unlink()
             saved.replace(sidecar)
         return result
@@ -1166,7 +1171,7 @@ def test_sidecar_replace_read_restore_cannot_change_opened_inode(
     )
     assert result.complete is True
     assert len(result.rows) == 1
-    assert calls == 2
+    assert sidecar_hash_calls == 2
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows denies replacing an open file")
