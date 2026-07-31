@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,8 +21,10 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import (
     ArchiveReader,
+    ArchiveUnavailableError,
     BoundedReadingQueryResult,
     BoundedReadingRow,
+    BoundedReadIssueCode,
 )
 from cryodaq.storage.broker_replay import ReplaySource
 from cryodaq.storage.channel_descriptors import (
@@ -599,7 +600,7 @@ async def test_filtered_hot_history_discards_partial_file_on_malformed_real(
         await writer.stop()
 
 
-async def test_cold_history_uses_pre_materialization_row_byte_and_window_caps(
+async def test_cold_history_propagates_byte_budget_unavailability_after_bounded_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -656,16 +657,14 @@ async def test_cold_history_uses_pre_materialization_row_byte_and_window_caps(
     monkeypatch.setattr(ArchiveReader, "query_reading_rows_bounded", bounded_query)
     writer = SQLiteWriter(tmp_path)
     try:
-        history = writer._read_readings_history(
-            to_ts=datetime(2026, 7, 20, tzinfo=UTC).timestamp(),
-            limit_per_channel=100,
-        )
+        with pytest.raises(ArchiveUnavailableError) as caught:
+            writer._read_readings_history(
+                to_ts=datetime(2026, 7, 20, tzinfo=UTC).timestamp(),
+                limit_per_channel=100,
+            )
         assert len(calls) == 2
         assert len({call["deadline_monotonic"] for call in calls}) == 1
-        assert sum(len(points) for points in history.values()) == 2
-        values = [value for _, value in history["probe.1"]]
-        assert values[0] == 2.0
-        assert math.isnan(values[1])
+        assert caught.value.issue.code is BoundedReadIssueCode.PARQUET_BATCH_OVERSIZE
     finally:
         await writer.stop()
 
