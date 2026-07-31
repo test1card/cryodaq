@@ -253,34 +253,56 @@ async def test_hdf5_preserves_status(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. D-C16 — channel names that sanitize to the same string must not crash
+# 8. D-C16 — instrument/channel names that sanitize alike retain exact identity
 # ---------------------------------------------------------------------------
 
 
 async def test_hdf5_sanitize_name_collision(tmp_path: Path) -> None:
-    """Two distinct names collapsing to one sanitized name must not raise.
+    """Sanitized/colliding group names must retain exact source identities.
 
-    'A:B' and 'A B' both sanitize to 'A_B'; naive require_group reuse then
-    fails on the second create_dataset('timestamp').
+    Instrument IDs 'rack/ls218s' and 'rack ls218s' both sanitize to
+    'rack_ls218s'.  The shipped channel ID 'Keithley_1/smua/voltage' and the
+    distinct 'Keithley_1 smua/voltage' likewise collide after sanitization.
+    Opaque suffixes alone cannot recover either exact identity.
     """
     ts = datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC)
+    expected = [
+        ("rack/ls218s", "Keithley_1/smua/voltage", 1.0),
+        ("rack/ls218s", "Keithley_1 smua/voltage", 2.0),
+        ("rack ls218s", "Keithley_1/smua/voltage", 3.0),
+        ("rack ls218s", "Keithley_1 smua/voltage", 4.0),
+    ]
     day = _write_day(
         tmp_path,
         [
-            _reading("A:B", 1.0, "K", ts=ts),
-            _reading("A B", 2.0, "K", ts=datetime(2026, 3, 14, 10, 0, 1, tzinfo=UTC)),
+            _reading(
+                channel_id,
+                value,
+                "K",
+                ts=ts + timedelta(seconds=index),
+                instrument_id=instrument_id,
+            )
+            for index, (instrument_id, channel_id, value) in enumerate(expected)
         ],
     )
     output_path = tmp_path / "collide.h5"
 
     count = HDF5Exporter(tmp_path).export(day, output_path)  # must not raise
-    assert count == 2, f"expected 2 exported readings, got {count}"
+    assert count == len(expected), f"expected {len(expected)} exported readings, got {count}"
 
     with h5py.File(str(output_path), "r") as hf:
-        inst = hf["ls218s"]
-        # Both channels must be represented as distinct groups
-        ch_groups = [k for k in inst if isinstance(inst[k], h5py.Group)]
-        assert len(ch_groups) == 2, f"collision dropped a channel: {ch_groups}"
+        recovered = {
+            (
+                inst_group.attrs["instrument_id"],
+                channel_group.attrs["channel_id"],
+                float(channel_group["value"][0]),
+            )
+            for inst_group in hf.values()
+            if isinstance(inst_group, h5py.Group)
+            for channel_group in inst_group.values()
+            if isinstance(channel_group, h5py.Group)
+        }
+        assert recovered == set(expected)
 
 
 # ---------------------------------------------------------------------------
