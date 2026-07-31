@@ -2555,6 +2555,47 @@ false_green_pairs:
     red_evidence: local_rejected_dirty_proposal_returned_one_row_from_the_source_that_failed_postread_receipt_verification_2026_07_31_pending_immutable_integration_capture
     green_evidence: pending
 
+  - id: CI-SAME-SHA-CONTEXT-REUSE-FALSE-GREEN-203
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-BINDING-001
+    guard: tests/governance/test_ci_partition_execution_proof.py::test_context_join_adjudicates_every_automatic_same_repository_sha
+    ci_partition: remaining
+    red_evidence: same_repository_same_sha_automatic_sibling_contexts_could_be_reused_without_complete_adjudication_2026_07_31_pending_immutable_capture
+    green_evidence: pending
+  - id: ARCHIVE-DAY-PATH-MISBINDING-FALSE-GREEN-204
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-RECEIPT-AUTHORITY-036
+    guard: tests/storage/test_hdf5_export.py::test_hdf5_export_rejects_receipted_wrong_day_before_writing
+    ci_partition: remaining
+    red_evidence: a_consistently_receipted_wrong_day_archive_could_be_exported_as_authoritative_hdf5_2026_07_31_pending_immutable_capture
+    green_evidence: pending
+  - id: ARCHIVE-ROTATION-SNAPSHOT-RACE-FALSE-GREEN-205
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-RECEIPT-AUTHORITY-036
+    guard: tests/storage/test_archive_reader_bounded.py::test_bounded_index_replacement_after_materialization_discards_rows
+    ci_partition: remaining
+    red_evidence: bounded_archive_rows_could_escape_after_the_index_authority_snapshot_was_replaced_2026_07_31_pending_immutable_capture
+    green_evidence: pending
+  - id: SAFETY-CHILD-SETTLEMENT-FALSE-GREEN-206
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SHUTDOWN-OWNER-SETTLEMENT-014
+    guard: tests/core/test_safety_manager.py::test_manager_stop_faults_and_audits_non_stop_child_outcomes
+    ci_partition: core
+    red_evidence: safety_manager_stop_could_suppress_a_child_terminal_outcome_that_was_not_its_exact_stop_cancellation_2026_07_31_pending_immutable_capture
+    green_evidence: pending
+  - id: SAFETY-KNOWN-SIBLING-ON-FALSE-GREEN-207
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SAFETY-HAZARDOUS-SUCCESS-037
+    guard: tests/core/test_safety_operator_snapshot_owner.py::test_hazardous_success_reconciles_production_driver_sibling_on
+    ci_partition: core
+    red_evidence: targeted_or_manager_stop_could_report_success_while_a_known_production_driver_sibling_remained_energized_2026_07_31_pending_immutable_capture
+    green_evidence: pending
+
 records:
   - id: GOVERNANCE-PREVENTION-MAP-001
     status: open
@@ -3028,6 +3069,10 @@ records:
       - node: tests/core/test_broker.py::test_exact_queue_owner_prevents_stale_unsubscribe_from_removing_replacement
         ci_partition: core
       - node: tests/core/test_shutdown_settlement.py::test_subscriber_stop_retains_exact_queue_when_replacement_owns_name
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_manager_stop_suppresses_only_its_exact_child_cancellation
+        ci_partition: core
+      - node: tests/core/test_safety_manager.py::test_manager_stop_faults_and_audits_non_stop_child_outcomes
         ci_partition: core
     red_evidence: unobserved_done_failures_false_success_infinite_retry_and_dependency_cleanup_skip_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
@@ -4148,7 +4193,9 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_ci_partition_execution_proof.py::test_artifact_attempt_cannot_override_rest_run_attempt
         ci_partition: remaining
-      - node: tests/governance/test_ci_partition_execution_proof.py::test_context_join_adjudicates_only_exact_candidate_lineage
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_context_join_adjudicates_every_automatic_same_repository_sha
+        ci_partition: remaining
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_cli_refuses_failing_automatic_sibling_on_same_sha
         ci_partition: remaining
       - node: tests/governance/test_ci_partition_execution_proof.py::test_selected_pull_request_success_and_exact_push_counterpart_are_joined
         ci_partition: remaining
@@ -4896,5 +4943,29 @@ records:
         ci_partition: remaining
       - node: tests/storage/test_archive_receipt_integrity.py::test_receipt_hashing_uses_constant_blocks_and_honors_deadline
         ci_partition: remaining
+      - node: tests/storage/test_hdf5_export.py::test_hdf5_export_rejects_receipted_wrong_day_before_writing
+        ci_partition: remaining
+      - node: tests/storage/test_archive_reader_bounded.py::test_bounded_index_replacement_after_materialization_discards_rows
+        ci_partition: remaining
     red_evidence: local_junit_sha256_f714efbb47c490bd6882584fa45e623f1ac2dc183b978a3fe1775604a840654c_reproduced_runtime_and_false_green_failures_pending_immutable_integration_capture
+    green_evidence: pending
+
+  - id: SAFETY-HAZARDOUS-SUCCESS-037
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every targeted or manager hazardous-output stop result and every known production-driver sibling output reconciled before success publication.
+    classification: hazardous_success_with_energized_sibling
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A targeted or manager stop can publish success while another known production-driver sibling remains energized, leaving hazardous output active behind a false safe state.
+    invariant: No targeted or manager stop success may coexist with a known energized sibling; any such sibling requires fault and audit publication, coalesced global OFF, and fresh verified-OFF reproof before success can be published.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_safety_operator_snapshot_owner.py::test_hazardous_success_reconciles_production_driver_sibling_on
+        ci_partition: core
+    red_evidence: production_driver_sibling_remained_energized_while_targeted_or_manager_stop_could_publish_success_2026_07_31_pending_immutable_capture
     green_evidence: pending
