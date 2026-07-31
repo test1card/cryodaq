@@ -86,8 +86,13 @@ def _validate_partitioned_artifact(relative: object, day: date, basenames: set[s
     if type(relative) is not str:
         raise ValueError("invalid archive artifact path")
     pure = _archive_relative_path(relative)
-    expected_partition = (f"year={day.year}", f"month={day.month:02d}")
-    if len(pure.parts) != 3 or pure.parts[:2] != expected_partition or pure.name not in basenames:
+    expected_year = f"year={day.year}"
+    current_partition = len(pure.parts) == 3 and pure.parts[:2] == (
+        expected_year,
+        f"month={day.month:02d}",
+    )
+    legacy_partition = len(pure.parts) == 2 and pure.parts[0] == expected_year
+    if not (current_partition or legacy_partition) or pure.name not in basenames:
         raise ValueError("archive artifact disagrees with declared day")
     return relative
 

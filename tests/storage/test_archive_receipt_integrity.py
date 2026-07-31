@@ -21,6 +21,7 @@ from cryodaq.storage.archive_reader import (  # noqa: E402
     ArchiveReader,
     ArchiveUnavailableError,
     BoundedReadIssueCode,
+    validate_archive_index_authority,
 )
 from cryodaq.storage.cold_rotation import ColdRotationService  # noqa: E402
 from cryodaq.storage.sqlite_writer import SQLiteWriter  # noqa: E402
@@ -102,6 +103,29 @@ def _bounded(reader: ArchiveReader, start: datetime, end: datetime):
         batch_rows=64,
         max_arrow_batch_bytes=65_536,
     )
+
+
+def test_legacy_year_partition_remains_exactly_day_bound() -> None:
+    entry = {
+        "original_name": "data_2026-04-14.db",
+        "archive_path": "year=2026/data_2026-04-14.parquet",
+        "operator_log_path": "year=2026/data_2026-04-14.operator_log.parquet",
+        "operator_log_schema": "operator_log_v2",
+        "channel_descriptors_path": "year=2026/data_2026-04-14.channel_descriptors.parquet",
+    }
+    document = {"files": [entry]}
+    assert validate_archive_index_authority(document) is document
+
+    wrong_authorities = {
+        "archive_path": "year=2025/data_2026-04-14.parquet",
+        "operator_log_path": "year=2026/data_2026-04-13.operator_log.parquet",
+        "channel_descriptors_path": "year=2026/data_2026-04-15.channel_descriptors.parquet",
+    }
+    for field, wrong_path in wrong_authorities.items():
+        invalid_entry = dict(entry)
+        invalid_entry[field] = wrong_path
+        with pytest.raises(ValueError, match="disagrees with declared day"):
+            validate_archive_index_authority({"files": [invalid_entry]})
 
 
 @pytest.mark.parametrize("surface", ["direct", "bounded", "operator_log"])
