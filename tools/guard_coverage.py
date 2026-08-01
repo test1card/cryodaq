@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -84,19 +85,125 @@ def _git_environment(*, neutralize_history: bool = True) -> Iterator[dict[str, s
         yield environment
 
 
-def _verify_repository(repo: Path) -> None:
-    """Fail closed unless ``rev-parse`` resolves the requested repository exactly.
+@dataclass(frozen=True)
+class RepositoryAuthority:
+    """One immutable worktree, Git directory, and common-directory binding."""
 
-    Equivalent to the production G4 authority boundary: the requested
-    repository is verified once, before any revision resolution, because every
-    later ``_git``/``_git_file`` call reuses this one sanitized boundary. An
-    unavailable top-level, an ambiguous resolution, or a foreign resolved root
-    is unavailable evidence and never an implicit pass.
-    """
+    worktree: Path
+    git_dir: Path
+    common_dir: Path
+    marker: Path
+    marker_bytes: bytes | None
+    backpointer_bytes: bytes | None
+    commondir_bytes: bytes | None
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise GuardCoverageError(f"repository authority path is unavailable: {path}") from exc
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & reparse)
+
+
+def _read_authority_file(path: Path, label: str) -> bytes:
+    if _is_link_or_reparse(path) or not path.is_file():
+        raise GuardCoverageError(f"repository {label} authority is not a regular file")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise GuardCoverageError(f"repository {label} authority is unreadable") from exc
+    if not payload or b"\0" in payload:
+        raise GuardCoverageError(f"repository {label} authority is malformed")
+    return payload
+
+
+def _authority_line(payload: bytes, label: str, *, prefix: str | None = None) -> str:
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise GuardCoverageError(f"repository {label} authority is not UTF-8") from exc
+    if len(lines) != 1 or not lines[0].strip():
+        raise GuardCoverageError(f"repository {label} authority is malformed")
+    value = lines[0]
+    if prefix is not None:
+        if not value.startswith(prefix) or not value[len(prefix) :].strip():
+            raise GuardCoverageError(f"repository {label} authority is malformed")
+        value = value[len(prefix) :]
+    return value
+
+
+def _declared_path(base: Path, value: str, label: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = base / path
+    try:
+        return path.resolve(strict=True)
+    except OSError as exc:
+        raise GuardCoverageError(f"repository {label} authority path is unavailable") from exc
+
+
+def _assert_repository_authority(authority: RepositoryAuthority) -> None:
+    """Prove the filesystem registration still matches the bound Git authority."""
+
+    marker = authority.marker
+    if authority.marker_bytes is None:
+        if _is_link_or_reparse(marker) or not marker.is_dir():
+            raise GuardCoverageError("repository direct Git authority is not a real directory")
+        if marker.resolve(strict=True) != authority.git_dir or authority.common_dir != authority.git_dir:
+            raise GuardCoverageError("repository direct Git authority is inconsistent")
+        return
+
+    if _read_authority_file(marker, "worktree marker") != authority.marker_bytes:
+        raise GuardCoverageError("repository worktree marker authority changed")
+    marker_target = _declared_path(
+        marker.parent,
+        _authority_line(authority.marker_bytes, "worktree marker", prefix="gitdir: "),
+        "worktree marker",
+    )
+    if marker_target != authority.git_dir:
+        raise GuardCoverageError("repository worktree marker does not bind the discovered Git directory")
+
+    backpointer = authority.git_dir / "gitdir"
+    commondir = authority.git_dir / "commondir"
+    if authority.backpointer_bytes is None or authority.commondir_bytes is None:
+        raise GuardCoverageError("repository linked-worktree authority is incomplete")
+    if _read_authority_file(backpointer, "Git-directory backpointer") != authority.backpointer_bytes:
+        raise GuardCoverageError("repository Git-directory backpointer authority changed")
+    if _read_authority_file(commondir, "common-directory pointer") != authority.commondir_bytes:
+        raise GuardCoverageError("repository common-directory authority changed")
+    backpointer_target = _declared_path(
+        authority.git_dir,
+        _authority_line(authority.backpointer_bytes, "Git-directory backpointer"),
+        "Git-directory backpointer",
+    )
+    common_target = _declared_path(
+        authority.git_dir,
+        _authority_line(authority.commondir_bytes, "common-directory pointer"),
+        "common-directory pointer",
+    )
+    if backpointer_target != marker.resolve(strict=True) or common_target != authority.common_dir:
+        raise GuardCoverageError("repository linked-worktree authority is inconsistent")
+
+
+def _repository_authority(repo: Path) -> RepositoryAuthority:
+    """Discover and bind one self-consistent repository before revision lookup."""
 
     with _git_environment() as environment:
         completed = subprocess.run(
-            ["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--show-toplevel"],
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(repo),
+                "rev-parse",
+                "--is-inside-work-tree",
+                "--show-toplevel",
+                "--path-format=absolute",
+                "--absolute-git-dir",
+                "--git-common-dir",
+            ],
             capture_output=True,
             text=True,
             env=environment,
@@ -105,15 +212,43 @@ def _verify_repository(repo: Path) -> None:
     if completed.returncode:
         stderr = completed.stderr.strip()
         raise GuardCoverageError(
-            "guard coverage requires the requested repository to resolve exactly; "
-            f"rev-parse --show-toplevel failed: {stderr or 'top-level unavailable'}"
+            "guard coverage requires one self-consistent repository authority; "
+            f"Git discovery failed: {stderr or 'repository unavailable'}"
         )
-    resolved = completed.stdout.strip()
-    if not resolved or Path(resolved).resolve() != repo:
-        raise GuardCoverageError(
-            "guard coverage requires the requested repository to resolve exactly; "
-            f"{repo} resolved to {resolved or '<empty>'}"
-        )
+    values = completed.stdout.splitlines()
+    if len(values) != 4 or values[0] != "true":
+        raise GuardCoverageError("guard coverage requires one worktree-bound repository authority")
+    try:
+        top_level = Path(values[1]).resolve(strict=True)
+        git_dir = Path(values[2]).resolve(strict=True)
+        common_dir = Path(values[3]).resolve(strict=True)
+    except OSError as exc:
+        raise GuardCoverageError("repository discovery returned an unavailable authority path") from exc
+    if top_level != repo or not git_dir.is_dir() or not common_dir.is_dir():
+        raise GuardCoverageError("repository discovery does not bind the exact requested worktree")
+
+    marker = repo / ".git"
+    marker_bytes: bytes | None = None
+    backpointer_bytes: bytes | None = None
+    commondir_bytes: bytes | None = None
+    if marker.is_file() and not _is_link_or_reparse(marker):
+        marker_bytes = _read_authority_file(marker, "worktree marker")
+        try:
+            backpointer_bytes = _read_authority_file(git_dir / "gitdir", "Git-directory backpointer")
+            commondir_bytes = _read_authority_file(git_dir / "commondir", "common-directory pointer")
+        except GuardCoverageError as exc:
+            raise GuardCoverageError("repository linked-worktree authority is incomplete") from exc
+    authority = RepositoryAuthority(
+        worktree=repo,
+        git_dir=git_dir,
+        common_dir=common_dir,
+        marker=marker,
+        marker_bytes=marker_bytes,
+        backpointer_bytes=backpointer_bytes,
+        commondir_bytes=commondir_bytes,
+    )
+    _assert_repository_authority(authority)
+    return authority
 
 
 @dataclass(frozen=True)
@@ -137,7 +272,7 @@ class Comparison:
 
 
 def _git(
-    repo: Path,
+    authority: RepositoryAuthority,
     *arguments: str,
     text: bool = True,
     neutralize_history: bool = True,
@@ -145,8 +280,13 @@ def _git(
     try:
         with _git_environment(neutralize_history=neutralize_history) as environment:
             completed = subprocess.run(
-                ["git", *arguments],
-                cwd=repo,
+                [
+                    "git",
+                    f"--git-dir={authority.git_dir}",
+                    f"--work-tree={authority.worktree}",
+                    *arguments,
+                ],
+                cwd=authority.worktree,
                 capture_output=True,
                 text=text,
                 check=False,
@@ -165,21 +305,20 @@ def _git(
     return completed.stdout
 
 
-def _preflight_repository_authority(repo: Path) -> None:
+def _preflight_repository_authority(authority: RepositoryAuthority) -> None:
     """Reject repository-local state that can reinterpret revision authority.
 
-    The comparator accepts ordinary local configuration only after
-    ``_verify_repository`` proves that it still resolves the exact requested
-    worktree. Active graft, shallow, or replacement state instead changes the
-    commit graph itself. That is unavailable comparison evidence, so reject it
-    before resolving either requested revision rather than trying to enumerate
-    and compensate for every possible history rewrite.
+    The immutable authority already proves the exact requested worktree and
+    explicitly binds every Git call to its registered Git directory. Active
+    graft, shallow, or replacement state instead changes the commit graph
+    itself. That is unavailable comparison evidence, so reject it before
+    resolving either requested revision.
     """
 
     for label, relative in (("graft", "info/grafts"), ("shallow", "shallow")):
         raw_path = str(
             _git(
-                repo,
+                authority,
                 "rev-parse",
                 "--path-format=absolute",
                 "--git-path",
@@ -199,7 +338,7 @@ def _preflight_repository_authority(repo: Path) -> None:
 
     replacements = str(
         _git(
-            repo,
+            authority,
             "--no-replace-objects",
             "for-each-ref",
             "--format=%(refname)",
@@ -211,15 +350,22 @@ def _preflight_repository_authority(repo: Path) -> None:
         raise GuardCoverageError("repository-local Git replacement authority is active")
 
 
-def _resolve(repo: Path, revision: str) -> str:
-    return str(_git(repo, "--no-replace-objects", "rev-parse", "--verify", f"{revision}^{{commit}}")).strip()
+def _resolve(authority: RepositoryAuthority, revision: str) -> str:
+    return str(_git(authority, "--no-replace-objects", "rev-parse", "--verify", f"{revision}^{{commit}}")).strip()
 
 
-def _git_file(repo: Path, revision: str, path: Path) -> bytes | None:
+def _git_file(authority: RepositoryAuthority, revision: str, path: Path) -> bytes | None:
     with _git_environment() as environment:
         completed = subprocess.run(
-            ["git", "--no-replace-objects", "show", f"{revision}:{path.as_posix()}"],
-            cwd=repo,
+            [
+                "git",
+                f"--git-dir={authority.git_dir}",
+                f"--work-tree={authority.worktree}",
+                "--no-replace-objects",
+                "show",
+                f"{revision}:{path.as_posix()}",
+            ],
+            cwd=authority.worktree,
             capture_output=True,
             check=False,
             env=environment,
@@ -264,19 +410,19 @@ def _load_inventory(raw: bytes, label: str) -> dict[str, Any]:
 
 
 def _inventories(
-    repo: Path,
+    authority: RepositoryAuthority,
     base: str,
     candidate: str,
     inventory_path: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    runtime_path = repo / inventory_path
+    runtime_path = authority.worktree / inventory_path
     try:
         bootstrap_raw = runtime_path.read_bytes()
     except OSError as exc:
         raise GuardCoverageError(f"bootstrap inventory is unavailable: {runtime_path}") from exc
     bootstrap = _load_inventory(bootstrap_raw, "bootstrap")
-    base_raw = _git_file(repo, base, inventory_path)
-    candidate_raw = _git_file(repo, candidate, inventory_path)
+    base_raw = _git_file(authority, base, inventory_path)
+    candidate_raw = _git_file(authority, candidate, inventory_path)
     if base_raw is None and candidate_raw is None:
         return bootstrap, bootstrap
     if base_raw is None:
@@ -288,17 +434,21 @@ def _inventories(
     return base_inventory, _load_inventory(candidate_raw, candidate)
 
 
-def _materialize(repo: Path, revision: str, destination: Path) -> None:
-    archive = _git(repo, "--no-replace-objects", "archive", "--format=tar", revision, text=False)
+def _materialize(authority: RepositoryAuthority, revision: str, destination: Path) -> None:
+    archive = _git(authority, "--no-replace-objects", "archive", "--format=tar", revision, text=False)
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
         stream.extractall(destination, filter="data")
 
 
-def _revision_source_controlled(repo: Path, revision: str, relative_path: str) -> bool:
+def _revision_source_controlled(
+    authority: RepositoryAuthority,
+    revision: str,
+    relative_path: str,
+) -> bool:
     """Resolve one path against the exact revision tree behind an exported root."""
 
     output = _git(
-        repo,
+        authority,
         "--no-replace-objects",
         "--literal-pathspecs",
         "ls-tree",
@@ -398,7 +548,7 @@ def _invoke_g4_docs_validator(
 
 
 def _run_challenge(
-    repo: Path,
+    authority: RepositoryAuthority,
     revision: str,
     revision_root: Path,
     guard_path: str,
@@ -441,7 +591,7 @@ def _run_challenge(
                     module,
                     revision_root,
                     {"docs/new_lab_acceptance_checklist.md": mutated},
-                    lambda relative_path: _revision_source_controlled(repo, revision, relative_path),
+                    lambda relative_path: _revision_source_controlled(authority, revision, relative_path),
                 )
             except AssertionError as exc:
                 passed = expected in str(exc)
@@ -666,11 +816,11 @@ def compare(
     inventory_path: Path = INVENTORY_PATH,
 ) -> Comparison:
     repo = repo.resolve(strict=True)
-    _verify_repository(repo)
-    _preflight_repository_authority(repo)
-    base = _resolve(repo, base_revision)
-    candidate = _resolve(repo, candidate_revision)
-    base_inventory, candidate_inventory = _inventories(repo, base, candidate, inventory_path)
+    authority = _repository_authority(repo)
+    _preflight_repository_authority(authority)
+    base = _resolve(authority, base_revision)
+    candidate = _resolve(authority, candidate_revision)
+    base_inventory, candidate_inventory = _inventories(authority, base, candidate, inventory_path)
     base_guards = base_inventory["guards"]
     candidate_guards = candidate_inventory["guards"]
     reductions: list[dict[str, Any]] = []
@@ -684,8 +834,8 @@ def compare(
         candidate_root = temporary_root / "candidate"
         base_root.mkdir()
         candidate_root.mkdir()
-        _materialize(repo, base, base_root)
-        _materialize(repo, candidate, candidate_root)
+        _materialize(authority, base, base_root)
+        _materialize(authority, candidate, candidate_root)
 
         for guard_id in sorted(base_guards.keys() | candidate_guards.keys()):
             base_guard = base_guards.get(guard_id)
@@ -696,11 +846,11 @@ def compare(
             guard_path = authoritative["path"]
             lost: list[str] = []
             for challenge_id, challenge in (base_guard or authoritative)["challenges"].items():
-                base_result = _run_challenge(repo, base, base_root, guard_path, challenge_id, challenge, "base")
+                base_result = _run_challenge(authority, base, base_root, guard_path, challenge_id, challenge, "base")
                 if not base_result.passed and base_result.detail.startswith("guard error:"):
                     raise GuardCoverageError(f"base challenge failed: {guard_id}:{challenge_id}: {base_result.detail}")
                 candidate_result = _run_challenge(
-                    repo,
+                    authority,
                     candidate,
                     candidate_root,
                     guard_path,
@@ -754,6 +904,7 @@ def compare(
             else:
                 approved.append(str(declaration["id"]))
 
+    _assert_repository_authority(authority)
     return Comparison(
         base=base,
         candidate=candidate,

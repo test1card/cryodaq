@@ -13,7 +13,9 @@ from tools.guard_coverage import (
     _git_file,
     _inventory_changes,
     _load_inventory,
+    _repository_authority,
     compare,
+    main,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -356,21 +358,23 @@ def test_g4_pre_signature_callback_body_type_error_is_a_base_failure(tmp_path: P
 def test_gitless_export_fails_hard_instead_of_skipping(tmp_path: Path) -> None:
     _write(tmp_path / INVENTORY_PATH, json.dumps(_c2_inventory(), indent=2) + "\n")
 
-    with pytest.raises(GuardCoverageError, match="requires the requested repository to resolve exactly"):
+    with pytest.raises(GuardCoverageError, match="requires one self-consistent repository authority"):
         compare(tmp_path, "HEAD^", "HEAD")
 
 
 def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
     tmp_path: Path,
     monkeypatch,
+    capsys,
 ) -> None:
-    """An inherited graft must not make ``HEAD^`` resolve back to ``HEAD``.
+    """Every Git read shares one self-consistent repository authority.
 
-    The self-parent graft changes the real production comparator's revision
-    authority: without sanitization, both requested revisions resolve to the
-    weakened candidate and the lost G4 challenge false-passes with no
-    reductions. The comparator owns its Git environment, so it must ignore
-    the inherited graft and observe the real parent/candidate reduction.
+    Inherited grafts are ignored; repository-local graph rewrites fail closed.
+    More importantly, a foreign Git directory whose ``core.worktree`` names the
+    requested root can make ``--show-toplevel`` echo that exact root while all
+    revisions and trees come from the foreign object database. Production
+    ``main()`` must reject that non-reciprocal worktree/Git-directory binding,
+    while ordinary and legitimate linked worktrees retain the real reduction.
     """
 
     requested = tmp_path / "requested"
@@ -420,6 +424,40 @@ def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
     assert final_red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
     assert final_red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
 
+    assert main(["--repo", str(requested), "--base", "HEAD^", "--candidate", "HEAD"]) == 1
+    ordinary_error = capsys.readouterr().err
+    assert "guard coverage regression" in ordinary_error
+    assert "G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001" in ordinary_error
+
+    linked = tmp_path / "legitimate-linked-worktree"
+    _git(requested, "worktree", "add", "--detach", str(linked), "HEAD")
+    assert main(["--repo", str(linked), "--base", "HEAD^", "--candidate", "HEAD"]) == 1
+    linked_error = capsys.readouterr().err
+    assert "guard coverage regression" in linked_error
+    assert "G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001" in linked_error
+
+    foreign = tmp_path / "foreign-authority"
+    foreign.mkdir()
+    _git(foreign, "init")
+    _write(foreign / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(foreign / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(foreign / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    _commit(foreign, "foreign strong base guard")
+    _write(foreign / "foreign-marker.txt", "second strong object\n")
+    foreign_head = _commit(foreign, "foreign strong candidate guard")
+    _git(foreign, "config", "core.worktree", str(requested))
+
+    requested_git = requested / ".git"
+    requested_git.rename(tmp_path / "requested-owned-git")
+    _write(requested_git, f"gitdir: {(foreign / '.git').as_posix()}\n")
+
+    assert Path(_git(requested, "rev-parse", "--show-toplevel")).resolve() == requested.resolve()
+    assert Path(_git(requested, "rev-parse", "--absolute-git-dir")).resolve() == (foreign / ".git").resolve()
+    assert _git(requested, "rev-parse", "HEAD") == foreign_head
+
+    assert main(["--repo", str(requested), "--base", "HEAD^", "--candidate", "HEAD"]) == 2
+    assert "repository linked-worktree authority is incomplete" in capsys.readouterr().err
+
 
 def test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root(
     tmp_path: Path,
@@ -447,7 +485,7 @@ def test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreig
     nested = foreign / "nested"
     nested.mkdir()
 
-    with pytest.raises(GuardCoverageError, match="requires the requested repository to resolve exactly"):
+    with pytest.raises(GuardCoverageError, match="repository discovery does not bind the exact requested worktree"):
         compare(nested, "HEAD^", "HEAD")
 
 
@@ -473,6 +511,6 @@ def test_git_file_reads_the_requested_repository_not_an_inherited_redirect(
     monkeypatch.setenv("GIT_DIR", str(strong / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(strong))
 
-    content = _git_file(requested, requested_revision, Path("identity.txt"))
+    content = _git_file(_repository_authority(requested), requested_revision, Path("identity.txt"))
 
     assert content == b"requested\n"
