@@ -728,6 +728,20 @@ def _g4_declared_ids(root: Path) -> set[str]:
     }
 
 
+def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:
+    """Return Git-tracked existence; unavailable Git metadata fails closed, never as absent."""
+
+    result = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative_path],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode not in {0, 1}:
+        result.check_returncode()
+    return result.returncode == 0
+
+
 def _g4_reference_error(root: Path, reference: str) -> str | None:
     if reference.startswith("make:"):
         target, separator, requirement = reference[5:].partition("|requires:")
@@ -737,7 +751,7 @@ def _g4_reference_error(root: Path, reference: str) -> str | None:
             return f"make reference lacks a checkable prerequisite: {reference}"
         if not re.search(rf"(?m)^{re.escape(target)}:\s*$", _read(makefile)):
             return f"make target does not exist: {target}"
-        exists = (root / required_path).exists()
+        exists = _g4_is_source_controlled(root, required_path)
         if exists != (status == "present"):
             return f"make prerequisite status differs: {required_path} is {'present' if exists else 'absent'}"
         return None
@@ -792,7 +806,7 @@ def _g4_procedures(text: str) -> dict[str, dict[str, str]]:
 
 
 def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> None:
-    """Validate G4 documents without Git or process state."""
+    """Validate G4 documents; make prerequisites require Git source-control evidence."""
 
     overrides = overrides or {}
     documents = {name: overrides.get(name, _read(root / name)) for name in _G4_DOCS}
@@ -834,6 +848,34 @@ def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> No
 
 def test_g4_executable_references_and_procedure_declarations() -> None:
     _validate_g4_docs(REPO_ROOT)
+
+
+@pytest.mark.parametrize(
+    ("reference", "error"),
+    (
+        (
+            "make:bootstrap-predictor|requires:Makefile|status:absent",
+            "make prerequisite status differs: Makefile is present",
+        ),
+        (
+            "make:bootstrap-predictor|requires:cooldown_v5/predictor_model.json|status:present",
+            "make prerequisite status differs: cooldown_v5/predictor_model.json is absent",
+        ),
+    ),
+)
+def test_g4_rejects_make_prerequisite_status_not_matching_source_control(reference: str, error: str) -> None:
+    with pytest.raises(AssertionError, match=re.escape(error)):
+        _validate_g4_docs(REPO_ROOT, {"docs/quickstart.md": f"[[ref:{reference}]]"})
+
+
+def test_g4_make_prerequisites_fail_closed_without_git_metadata(tmp_path: Path) -> None:
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _g4_reference_error(
+            tmp_path,
+            "make:bootstrap-predictor|requires:predictor_model.json|status:absent",
+        )
 
 
 @pytest.mark.parametrize(
