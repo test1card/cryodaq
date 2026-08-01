@@ -10,6 +10,7 @@ import pytest
 from tools.guard_coverage import (
     INVENTORY_PATH,
     GuardCoverageError,
+    _git_file,
     _inventory_changes,
     _load_inventory,
     compare,
@@ -275,5 +276,105 @@ def test_g4_pre_signature_callback_body_type_error_is_a_base_failure(tmp_path: P
 def test_gitless_export_fails_hard_instead_of_skipping(tmp_path: Path) -> None:
     _write(tmp_path / INVENTORY_PATH, json.dumps(_c2_inventory(), indent=2) + "\n")
 
-    with pytest.raises(GuardCoverageError, match="requires an exact Git checkout"):
+    with pytest.raises(GuardCoverageError, match="requires the requested repository to resolve exactly"):
         compare(tmp_path, "HEAD^", "HEAD")
+
+
+def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A weakened requested repository must stay red even when an inherited
+    GIT_DIR/GIT_WORK_TREE redirect points every Git call at a second strong
+    repository.
+
+    Without the sanitized authority boundary both revisions resolved against
+    the strong repository's object database, so both challenges loaded the
+    strong guard and the lost G4 procedure challenge reported no reduction.
+    """
+
+    strong = tmp_path / "strong"
+    strong.mkdir()
+    _git(strong, "init")
+    _write(strong / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(strong / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(strong / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    _commit(strong, "strong base guard")
+    _write(strong / "strong-repository-marker.txt", "unrelated second commit\n")
+    _commit(strong, "strong second commit keeps the strong guard at HEAD")
+
+    requested = tmp_path / "requested"
+    requested.mkdir()
+    _git(requested, "init")
+    _write(requested / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(requested / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(requested / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    _commit(requested, "requested base guard")
+    _write(requested / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=True))
+    _commit(requested, "weaken the requested G4 procedure guard")
+
+    monkeypatch.setenv("GIT_DIR", str(strong / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(strong))
+
+    red = compare(requested, "HEAD^", "HEAD")
+
+    assert not red.passed
+    assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+
+def test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root(
+    tmp_path: Path,
+) -> None:
+    """The requested-repository verification is fail-closed: a path whose
+    ``rev-parse --show-toplevel`` resolves anywhere but the requested
+    repository is unavailable evidence, never an implicit pass.
+
+    A directory nested inside a foreign repository borrows that repository's
+    objects for both revisions, so without the top-level check the comparison
+    reported no reduction; the authority boundary rejects it before any
+    revision is resolved.
+    """
+
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    _git(foreign, "init")
+    _write(foreign / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(foreign / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(foreign / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    _commit(foreign, "foreign base guard")
+    _write(foreign / "foreign-repository-marker.txt", "unrelated second commit\n")
+    _commit(foreign, "foreign second commit keeps the strong guard at HEAD")
+
+    nested = foreign / "nested"
+    nested.mkdir()
+
+    with pytest.raises(GuardCoverageError, match="requires the requested repository to resolve exactly"):
+        compare(nested, "HEAD^", "HEAD")
+
+
+def test_git_file_reads_the_requested_repository_not_an_inherited_redirect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """``_git_file`` shares the sanitized boundary: an inherited redirect into a
+    second repository must not satisfy a path read against the requested one."""
+
+    requested = tmp_path / "requested"
+    requested.mkdir()
+    _git(requested, "init")
+    _write(requested / "identity.txt", "requested\n")
+    requested_revision = _commit(requested, "requested marker")
+
+    strong = tmp_path / "strong"
+    strong.mkdir()
+    _git(strong, "init")
+    _write(strong / "identity.txt", "strong\n")
+    _commit(strong, "strong marker")
+
+    monkeypatch.setenv("GIT_DIR", str(strong / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(strong))
+
+    content = _git_file(requested, requested_revision, Path("identity.txt"))
+
+    assert content == b"requested\n"

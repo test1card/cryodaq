@@ -2627,6 +2627,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: pre_signature_G4_validator_rejected_the_revision_authority_keyword_and_the_base_failure_was_reported_as_a_gain_so_a_later_procedure_coverage_loss_was_skipped_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: GUARD-COVERAGE-INHERITED-REPOSITORY-REDIRECT-FALSE-GREEN-251
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
+    ci_partition: remaining
+    red_evidence: inherited_GIT_DIR_and_GIT_WORK_TREE_redirected_a_weakened_requested_repositorys_revision_resolution_inventory_read_archive_materialization_and_membership_query_into_a_second_strong_repository_so_both_revisions_loaded_the_strong_guard_and_the_lost_G4_procedure_challenge_reported_no_coverage_reduction_2026_08_01_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -2659,7 +2667,13 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_guard_coverage.py::test_g4_pre_signature_callback_body_type_error_is_a_base_failure
         ci_partition: remaining
-    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_and_pre_signature_archived_callback_skip_were_reproduced_2026_08_01_pending_immutable_capture
+      - node: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_git_file_reads_the_requested_repository_not_an_inherited_redirect
+        ci_partition: remaining
+    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_pre_signature_archived_callback_skip_and_guard_coverage_inherited_repository_redirect_were_reproduced_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
   - id: GOVERNANCE-PREVENTION-MAP-001

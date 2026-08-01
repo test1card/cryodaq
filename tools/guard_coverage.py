@@ -14,6 +14,7 @@ import importlib.util
 import inspect
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +32,73 @@ _STABLE_ID_RE = re.compile(r"^[A-Z][A-Z0-9-]*-\d{3}$")
 
 class GuardCoverageError(RuntimeError):
     """The comparison could not establish guard coverage."""
+
+
+_GIT_REDIRECT_ENVIRONMENT_KEYS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+)
+
+
+def _git_environment() -> dict[str, str]:
+    """Return a sanitized process environment for one Git authority boundary.
+
+    This mirrors the production G4 source-control authority in
+    ``tests/docs/test_docs_freshness.py::_g4_is_source_controlled``: an
+    inherited ``GIT_DIR``, ``GIT_WORK_TREE``, object-directory, namespace, or
+    ``GIT_CONFIG_*`` injection can redirect a command into a second
+    repository's object database, so a weakened requested repository
+    false-passes against a strong one. The full redirect surface is cleared
+    while the ordinary environment needed to locate the ``git`` executable and
+    the operating system (``PATH``, ``SystemRoot``, ...) is preserved.
+    Object replacement is already disabled per-command via
+    ``--no-replace-objects``, so a ``GIT_REPLACE_REF_DIR`` redirect cannot
+    substitute an ancestor tree either.
+    """
+
+    environment = os.environ.copy()
+    for key in _GIT_REDIRECT_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+    for key in tuple(environment):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            environment.pop(key, None)
+    return environment
+
+
+def _verify_repository(repo: Path) -> None:
+    """Fail closed unless ``rev-parse`` resolves the requested repository exactly.
+
+    Equivalent to the production G4 authority boundary: the requested
+    repository is verified once, before any revision resolution, because every
+    later ``_git``/``_git_file`` call reuses this one sanitized boundary. An
+    unavailable top-level, an ambiguous resolution, or a foreign resolved root
+    is unavailable evidence and never an implicit pass.
+    """
+
+    completed = subprocess.run(
+        ["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        env=_git_environment(),
+        check=False,
+    )
+    if completed.returncode:
+        stderr = completed.stderr.strip()
+        raise GuardCoverageError(
+            "guard coverage requires the requested repository to resolve exactly; "
+            f"rev-parse --show-toplevel failed: {stderr or 'top-level unavailable'}"
+        )
+    resolved = completed.stdout.strip()
+    if not resolved or Path(resolved).resolve() != repo:
+        raise GuardCoverageError(
+            "guard coverage requires the requested repository to resolve exactly; "
+            f"{repo} resolved to {resolved or '<empty>'}"
+        )
 
 
 @dataclass(frozen=True)
@@ -61,6 +129,7 @@ def _git(repo: Path, *arguments: str, text: bool = True) -> str | bytes:
             capture_output=True,
             text=text,
             check=False,
+            env=_git_environment(),
         )
     except OSError as exc:
         raise GuardCoverageError(
@@ -85,6 +154,7 @@ def _git_file(repo: Path, revision: str, path: Path) -> bytes | None:
         cwd=repo,
         capture_output=True,
         check=False,
+        env=_git_environment(),
     )
     if completed.returncode:
         return None
@@ -510,6 +580,7 @@ def compare(
     inventory_path: Path = INVENTORY_PATH,
 ) -> Comparison:
     repo = repo.resolve(strict=True)
+    _verify_repository(repo)
     base = _resolve(repo, base_revision)
     candidate = _resolve(repo, candidate_revision)
     base_inventory, candidate_inventory = _inventories(repo, base, candidate, inventory_path)
