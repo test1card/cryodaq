@@ -2633,7 +2633,7 @@ false_green_pairs:
     runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
     guard: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
     ci_partition: remaining
-    red_evidence: inherited_GIT_GRAFT_FILE_made_HEAD_parent_resolve_back_to_the_weakened_HEAD_so_the_real_comparator_loaded_the_same_candidate_for_both_sides_and_reported_passed_true_with_zero_reductions_2026_08_01_pending_immutable_capture
+    red_evidence: inherited_GIT_GRAFT_FILE_and_repository_local_info_grafts_shallow_and_replace_authority_could_reinterpret_or_hide_the_requested_parent_before_the_real_comparator_loaded_both_exact_trees_with_the_self_parent_graft_reporting_passed_true_and_zero_reductions_2026_08_01_pending_immutable_capture
     green_evidence: pending
   - id: GUARD-COVERAGE-ALLOWLIST-SHAPE-FALSE-GREEN-252
     status: open
@@ -2641,7 +2641,7 @@ false_green_pairs:
     runtime_prevention_id: GUARD-COVERAGE-REGRESSION-034
     guard: tests/governance/test_guard_coverage.py::test_guard_coverage_runs_current_c2_frozenset_allowlist_shape
     ci_partition: remaining
-    red_evidence: every_synthetic_comparator_fixture_used_a_mapping_allowlist_while_the_real_current_C2_guard_used_frozenset_so_the_green_suite_missed_an_AttributeError_from_the_production_exact_object_comparison_2026_08_01_pending_immutable_capture
+    red_evidence: every_synthetic_comparator_fixture_used_a_mapping_allowlist_while_the_real_current_C2_guard_used_frozenset_so_the_green_suite_missed_an_AttributeError_and_a_registered_mapping_purpose_equal_to_the_literal_undeclared_sentinel_collided_with_a_set_shaped_entry_to_report_zero_reductions_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
 records:
@@ -2654,8 +2654,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A missing committed object, inherited Git environment authority, active replacement ref, HEAD movement between verification and lookup, or incompatible archived callback invocation can make unavailable, foreign, substituted, mismatched, or unexecuted evidence satisfy an asserted prerequisite state.
-    invariant: G4 prerequisite checks and the guard-coverage comparator clear every inherited GIT_* authority variable, disable Git object replacement, resolve and verify one exact raw commit in the intended repository, query that same commit's readable tree, and fail closed when repository identity, ancestry, or tree evidence is unavailable or ambiguous. Archived validators receive that authority through an explicitly detected current keyword capability or their exact historical source-control hook; callback-body failures remain failures and are never retried as interface compatibility.
+    consequence: A missing committed object, inherited Git environment authority, active repository-local graph rewrite, HEAD movement between verification and lookup, or incompatible archived callback invocation can make unavailable, foreign, substituted, mismatched, or unexecuted evidence satisfy an asserted prerequisite state.
+    invariant: G4 prerequisite checks and the guard-coverage comparator clear every inherited GIT_* authority variable, replace system and global configuration with comparator-owned empty authority, and reject active repository-local graft, shallow, or replacement history before either revision is resolved. They resolve and verify one exact raw commit in the intended repository, query that same commit's readable tree, and fail closed when local configuration, repository identity, ancestry, or tree evidence is active, unavailable, or ambiguous. Archived validators receive that authority through an explicitly detected current keyword capability or their exact historical source-control hook; callback-body failures remain failures and are never retried as interface compatibility.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -2681,7 +2681,7 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_guard_coverage.py::test_git_file_reads_the_requested_repository_not_an_inherited_redirect
         ci_partition: remaining
-    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_pre_signature_archived_callback_skip_and_GIT_GRAFT_FILE_ancestry_substitution_were_reproduced_2026_08_01_pending_immutable_capture
+    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_pre_signature_archived_callback_skip_inherited_GIT_GRAFT_FILE_and_repository_local_graft_shallow_and_replace_history_authority_were_reproduced_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
   - id: GOVERNANCE-PREVENTION-MAP-001
@@ -4967,7 +4967,7 @@ records:
     guard_owner: reviewer
     disposition_owner: reviewer
     consequence: A guard-strengthening change can silently remove a proven challenge, add an exemption, or weaken its own declared corpus while the commit message still claims broader enforcement.
-    invariant: Given a trusted comparator, a caller-selected correct base, a completed run, already-passing base challenges, explicitly revision-bound G4 source-control membership, otherwise self-contained guard modules, and collision-free registered exemption descriptors, the exact-checkout comparison preserves every base-proven stable challenge and reports changes to the tracked inventory; such a loss requires an exact tracked approved reduction declaration. Exemption additions are reported per registered descriptor and can be missed when descriptors coalesce, so this is detection under stated conditions, not unconditional mechanical prevention.
+    invariant: Given a trusted comparator, a caller-selected correct base, a completed run, already-passing base challenges, explicitly revision-bound G4 source-control membership, otherwise self-contained guard modules, and collision-free registered exemption descriptors, the exact-checkout comparison preserves every base-proven stable challenge and reports changes to the tracked inventory; such a loss requires an exact tracked approved reduction declaration. Set-shaped C2 entries have a structural undeclared state that never enters registered-descriptor matching, while other exemption additions are reported per registered descriptor and can still be missed when descriptors coalesce, so this is detection under stated conditions, not unconditional mechanical prevention.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry

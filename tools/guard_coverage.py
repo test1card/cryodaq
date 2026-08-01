@@ -20,7 +20,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -34,28 +35,53 @@ class GuardCoverageError(RuntimeError):
     """The comparison could not establish guard coverage."""
 
 
-def _git_environment() -> dict[str, str]:
-    """Return a sanitized process environment for one Git authority boundary.
+@contextmanager
+def _git_environment(*, neutralize_history: bool = True) -> Iterator[dict[str, str]]:
+    """Yield a comparator-owned environment for one Git authority boundary.
 
     This mirrors the production G4 source-control authority in
     ``tests/docs/test_docs_freshness.py::_g4_is_source_controlled``. The
     comparator, not its caller, owns repository, revision, object, history, and
-    configuration authority. Every inherited ``GIT_*`` variable is therefore
-    removed rather than attempting to enumerate Git's growing environment
-    surface: graft and shallow files can rewrite ancestry without changing the
-    repository top-level, while directory, namespace, object, replacement, and
-    config variables can redirect other parts of the same comparison.
+    configuration authority. Every inherited ``GIT_*`` variable is removed
+    rather than attempting to enumerate Git's growing environment surface.
+    Comparator-owned empty graft and shallow files also override their
+    repository-local defaults; otherwise ``.git/info/grafts`` or
+    ``.git/shallow`` can rewrite ancestry without changing the repository
+    top-level. System/global configuration is replaced with an empty file.
 
     The ordinary environment needed to locate ``git`` and the operating system
     (``PATH``, ``SystemRoot``, ...) is preserved. Object replacement is also
     disabled per-command via ``--no-replace-objects`` as defense in depth.
     """
 
-    environment = os.environ.copy()
-    for key in tuple(environment):
-        if key.upper().startswith("GIT_"):
-            environment.pop(key, None)
-    return environment
+    with tempfile.TemporaryDirectory(prefix="cryodaq-guard-git-authority-") as temporary:
+        authority_root = Path(temporary)
+        empty_config = authority_root / "config"
+        empty_grafts = authority_root / "grafts"
+        empty_shallow = authority_root / "shallow"
+        for path in (empty_config, empty_grafts, empty_shallow):
+            path.write_bytes(b"")
+
+        environment = os.environ.copy()
+        for key in tuple(environment):
+            if key.upper().startswith("GIT_"):
+                environment.pop(key, None)
+        environment.update(
+            {
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_SYSTEM": str(empty_config),
+                "GIT_CONFIG_GLOBAL": str(empty_config),
+            }
+        )
+        if neutralize_history:
+            environment.update(
+                {
+                    "GIT_GRAFT_FILE": str(empty_grafts),
+                    "GIT_SHALLOW_FILE": str(empty_shallow),
+                    "GIT_REPLACE_REF_BASE": "refs/guard-coverage-disabled-replacements/",
+                }
+            )
+        yield environment
 
 
 def _verify_repository(repo: Path) -> None:
@@ -68,13 +94,14 @@ def _verify_repository(repo: Path) -> None:
     is unavailable evidence and never an implicit pass.
     """
 
-    completed = subprocess.run(
-        ["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        env=_git_environment(),
-        check=False,
-    )
+    with _git_environment() as environment:
+        completed = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            env=environment,
+            check=False,
+        )
     if completed.returncode:
         stderr = completed.stderr.strip()
         raise GuardCoverageError(
@@ -109,16 +136,22 @@ class Comparison:
         return not self.reductions
 
 
-def _git(repo: Path, *arguments: str, text: bool = True) -> str | bytes:
+def _git(
+    repo: Path,
+    *arguments: str,
+    text: bool = True,
+    neutralize_history: bool = True,
+) -> str | bytes:
     try:
-        completed = subprocess.run(
-            ["git", *arguments],
-            cwd=repo,
-            capture_output=True,
-            text=text,
-            check=False,
-            env=_git_environment(),
-        )
+        with _git_environment(neutralize_history=neutralize_history) as environment:
+            completed = subprocess.run(
+                ["git", *arguments],
+                cwd=repo,
+                capture_output=True,
+                text=text,
+                check=False,
+                env=environment,
+            )
     except OSError as exc:
         raise GuardCoverageError(
             "guard coverage requires an exact Git checkout and the requested objects; no comparison was performed"
@@ -132,18 +165,65 @@ def _git(repo: Path, *arguments: str, text: bool = True) -> str | bytes:
     return completed.stdout
 
 
+def _preflight_repository_authority(repo: Path) -> None:
+    """Reject repository-local state that can reinterpret revision authority.
+
+    The comparator accepts ordinary local configuration only after
+    ``_verify_repository`` proves that it still resolves the exact requested
+    worktree. Active graft, shallow, or replacement state instead changes the
+    commit graph itself. That is unavailable comparison evidence, so reject it
+    before resolving either requested revision rather than trying to enumerate
+    and compensate for every possible history rewrite.
+    """
+
+    for label, relative in (("graft", "info/grafts"), ("shallow", "shallow")):
+        raw_path = str(
+            _git(
+                repo,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                relative,
+                neutralize_history=False,
+            )
+        ).strip()
+        if not raw_path:
+            raise GuardCoverageError(f"repository-local Git {label} authority path is unavailable")
+        path = Path(raw_path)
+        try:
+            active = path.is_file() and bool(path.read_bytes().strip())
+        except OSError as exc:
+            raise GuardCoverageError(f"repository-local Git {label} authority is unreadable") from exc
+        if active:
+            raise GuardCoverageError(f"repository-local Git {label} authority is active")
+
+    replacements = str(
+        _git(
+            repo,
+            "--no-replace-objects",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/replace/",
+            neutralize_history=False,
+        )
+    ).strip()
+    if replacements:
+        raise GuardCoverageError("repository-local Git replacement authority is active")
+
+
 def _resolve(repo: Path, revision: str) -> str:
     return str(_git(repo, "--no-replace-objects", "rev-parse", "--verify", f"{revision}^{{commit}}")).strip()
 
 
 def _git_file(repo: Path, revision: str, path: Path) -> bytes | None:
-    completed = subprocess.run(
-        ["git", "--no-replace-objects", "show", f"{revision}:{path.as_posix()}"],
-        cwd=repo,
-        capture_output=True,
-        check=False,
-        env=_git_environment(),
-    )
+    with _git_environment() as environment:
+        completed = subprocess.run(
+            ["git", "--no-replace-objects", "show", f"{revision}:{path.as_posix()}"],
+            cwd=repo,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
     if completed.returncode:
         return None
     return completed.stdout
@@ -461,6 +541,7 @@ def _actual_exemptions(
     if module is None:
         return set()
     descriptors: list[dict[str, str]] = []
+    undeclared_descriptors: list[dict[str, str]] = []
     if guard_id == "C2-DESCRIPTOR-SELECTION":
         allowlist = getattr(module, "_ALLOWLIST", {})
         if isinstance(allowlist, Mapping):
@@ -471,7 +552,7 @@ def _actual_exemptions(
             # an entry, it has no purpose field with which to match a tracked
             # descriptor, so surface it as undeclared instead of granting an
             # exemption by shape alone.
-            allowlist_items = ((key, "UNDECLARED-SET-SHAPED-EXEMPTION") for key in allowlist)
+            allowlist_items = ((key, None) for key in allowlist)
         else:
             raise GuardCoverageError(f"C2 allowlist has unsupported shape: {type(allowlist).__name__}")
         for key, value in allowlist_items:
@@ -481,14 +562,16 @@ def _actual_exemptions(
             path, line = key
             purpose = value[0] if isinstance(value, tuple) else value
             symbol = _symbol_at_line(revision_root / path, int(line))
-            descriptors.append(
-                {
-                    "kind": "c2_allowlist",
-                    "path": str(path),
-                    "symbol": symbol,
-                    "purpose": str(purpose),
-                }
-            )
+            descriptor = {
+                "kind": "c2_allowlist",
+                "path": str(path),
+                "symbol": symbol,
+                "purpose": ("set-shaped allowlist entry has no declared purpose" if purpose is None else str(purpose)),
+            }
+            if purpose is None:
+                undeclared_descriptors.append(descriptor)
+            else:
+                descriptors.append(descriptor)
     elif guard_id == "C1-ENGINE-ADAPTER-SEAL":
         for locator in getattr(module, "_KNOWN_PRODUCTION_VIOLATIONS", {}):
             filename, symbol, *_rest = str(locator).split(":", 3)
@@ -519,7 +602,10 @@ def _actual_exemptions(
                     "purpose": "dict-annotated emergency_off bypass",
                 }
             )
-    return {_descriptor_id(descriptor, catalog) for descriptor in descriptors}
+    return {
+        *(_descriptor_id(descriptor, catalog) for descriptor in descriptors),
+        *(_descriptor_id(descriptor, ()) for descriptor in undeclared_descriptors),
+    }
 
 
 def _inventory_changes(
@@ -581,6 +667,7 @@ def compare(
 ) -> Comparison:
     repo = repo.resolve(strict=True)
     _verify_repository(repo)
+    _preflight_repository_authority(repo)
     base = _resolve(repo, base_revision)
     candidate = _resolve(repo, candidate_revision)
     base_inventory, candidate_inventory = _inventories(repo, base, candidate, inventory_path)

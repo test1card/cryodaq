@@ -235,6 +235,37 @@ def test_guard_coverage_runs_current_c2_frozenset_allowlist_shape(tmp_path: Path
     assert len(red.reductions) == 1
     assert red.reductions[0]["added_exemption_ids"][0].startswith("UNDECLARED[")
 
+    collision_inventory = _c2_inventory()
+    collision_inventory["guards"]["C2-DESCRIPTOR-SELECTION"]["exemptions"]["C2-EXEMPT-OC-010"]["purpose"] = (
+        "UNDECLARED-SET-SHAPED-EXEMPTION"
+    )
+    _write(repo / INVENTORY_PATH, json.dumps(collision_inventory, indent=2) + "\n")
+    mapping_collision = current_guard.replace(
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()",
+        "_ALLOWLIST = {('src/cryodaq/reporting/periodic_renderer.py', 2): 'UNDECLARED-SET-SHAPED-EXEMPTION'}",
+        1,
+    )
+    assert mapping_collision != current_guard
+    _write(repo / guard_path, mapping_collision)
+    collision_base = _commit(repo, "registered mapping purpose equals the old sentinel")
+
+    set_collision = current_guard.replace(
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()",
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({('src/cryodaq/reporting/periodic_renderer.py', 2)})",
+        1,
+    )
+    assert set_collision != current_guard
+    _write(repo / guard_path, set_collision)
+    collision_candidate = _commit(repo, "set entry collides with the old sentinel text")
+
+    collision_red = compare(repo, collision_base, collision_candidate)
+
+    assert not collision_red.passed
+    assert len(collision_red.reductions) == 1
+    assert collision_red.reductions[0]["added_exemption_ids"][0].startswith("UNDECLARED[")
+    assert collision_red.reductions[0]["removed_exemption_inventory_ids"] == []
+    assert collision_red.removed_exemptions == ("C2-DESCRIPTOR-SELECTION:C2-EXEMPT-OC-010",)
+
 
 def test_g4_archived_revision_binds_source_control_to_the_compared_tree(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -253,6 +284,10 @@ def test_g4_archived_revision_binds_source_control_to_the_compared_tree(tmp_path
     weakened = _commit(repo, "weaken G4 procedure guard")
     _git(repo, "replace", base, weakened)
 
+    with pytest.raises(GuardCoverageError, match="repository-local Git replacement authority is active"):
+        compare(repo, base, weakened)
+
+    _git(repo, "replace", "-d", base)
     red = compare(repo, base, weakened)
 
     assert not red.passed
@@ -357,6 +392,33 @@ def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
     assert not red.passed
     assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
     assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+    monkeypatch.delenv("GIT_GRAFT_FILE")
+    local_grafts = requested / ".git" / "info" / "grafts"
+    _write(local_grafts, f"{weakened} {weakened}\n")
+
+    with pytest.raises(GuardCoverageError, match="repository-local Git graft authority is active"):
+        compare(requested, "HEAD^", "HEAD")
+
+    local_grafts.unlink()
+    local_shallow = requested / ".git" / "shallow"
+    _write(local_shallow, f"{weakened}\n")
+
+    with pytest.raises(GuardCoverageError, match="repository-local Git shallow authority is active"):
+        compare(requested, "HEAD^", "HEAD")
+
+    local_shallow.unlink()
+    base = _git(requested, "rev-parse", "HEAD^")
+    _git(requested, "replace", base, weakened)
+
+    with pytest.raises(GuardCoverageError, match="repository-local Git replacement authority is active"):
+        compare(requested, "HEAD^", "HEAD")
+
+    _git(requested, "replace", "-d", base)
+    final_red = compare(requested, "HEAD^", "HEAD")
+    assert not final_red.passed
+    assert final_red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert final_red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
 
 
 def test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root(
