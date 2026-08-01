@@ -809,7 +809,7 @@ def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:
             "ls-tree",
             "-z",
             "--full-tree",
-            "HEAD",
+            head.stdout.strip(),
             "--",
             relative_path,
         ],
@@ -1108,6 +1108,49 @@ def test_g4_make_prerequisite_ignores_commit_replacement_refs(tmp_path: Path) ->
     reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
     assert _g4_reference_error(tmp_path, reference) == (
         "make prerequisite status differs: predictor_model.json is present"
+    )
+
+
+def test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    commit = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q"]
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Makefile"], cwd=tmp_path, check=True)
+    subprocess.run([*commit, "-m", "absent"], cwd=tmp_path, check=True)
+    (tmp_path / "predictor_model.json").write_text("model", encoding="utf-8")
+    subprocess.run(["git", "add", "predictor_model.json"], cwd=tmp_path, check=True)
+    subprocess.run([*commit, "-m", "present"], cwd=tmp_path, check=True)
+
+    original_run = subprocess.run
+    verified_commit = original_run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    calls: list[list[str]] = []
+
+    def move_head_after_verification(args, *run_args, **run_kwargs):
+        completed = original_run(args, *run_args, **run_kwargs)
+        command = list(args)
+        calls.append(command)
+        if command[-3:] == ["--verify", "--quiet", "HEAD^{commit}"]:
+            assert completed.stdout.strip() == verified_commit
+            original_run(["git", "reset", "--hard", "HEAD^"], cwd=tmp_path, check=True)
+        return completed
+
+    monkeypatch.setattr(subprocess, "run", move_head_after_verification)
+    reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
+    assert _g4_reference_error(tmp_path, reference) == (
+        "make prerequisite status differs: predictor_model.json is present"
+    )
+
+    query = next(command for command in calls if "ls-tree" in command)
+    assert query[query.index("--full-tree") + 1] == verified_commit
+    assert (
+        original_run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        != verified_commit
     )
 
 

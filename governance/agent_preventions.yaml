@@ -2611,6 +2611,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: removing_the_exact_revision_tree_callback_made_archived_base_and_weakened_candidate_challenges_both_fail_before_the_procedure_guard_and_reported_no_coverage_reduction_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: G4-HEAD-LS-TREE-RACE-FALSE-GREEN-227
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit
+    ci_partition: remaining
+    red_evidence: original_ls_tree_HEAD_queried_a_moved_commit_after_verifying_another_and_allowed_status_absent_to_pass_2026_08_01_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -2622,8 +2630,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A missing committed object, inherited repository redirect, or active replacement ref can make unavailable, foreign, or substituted evidence satisfy an asserted prerequisite state.
-    invariant: G4 prerequisite checks disable Git object replacement, query the intended repository's readable raw HEAD tree, and fail closed when repository identity or tree evidence is unavailable or ambiguous.
+    consequence: A missing committed object, inherited repository redirect, active replacement ref, or HEAD movement between verification and lookup can make unavailable, foreign, substituted, or mismatched evidence satisfy an asserted prerequisite state.
+    invariant: G4 prerequisite checks disable Git object replacement, resolve and verify one exact raw HEAD commit in the intended repository, query that same commit's readable tree, and fail closed when repository identity or tree evidence is unavailable or ambiguous.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -2637,7 +2645,9 @@ records:
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_commit_replacement_refs
         ci_partition: remaining
-    red_evidence: inherited_repository_selection_unreadable_head_tree_and_commit_replacement_ref_substitution_were_reproduced_2026_08_01_pending_immutable_capture
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit
+        ci_partition: remaining
+    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_and_verified_HEAD_to_ls_tree_race_were_reproduced_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
   - id: GOVERNANCE-PREVENTION-MAP-001
