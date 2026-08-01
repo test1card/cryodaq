@@ -2609,7 +2609,7 @@ records:
     status: open
     scope: product_contract
     authority_source: AGENTS.md
-    applies_to: Guards asserting persistence behaviour of the SQLite writer.
+    applies_to: The production committed-write path write_committed() -> _write_live_batch() -> _write_day_batch().
     classification: production_test_divergence
     correction_owner: reviewer
     guard_owner: primary

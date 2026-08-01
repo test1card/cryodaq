@@ -300,37 +300,37 @@ async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_pat
     this catches the N+1 regression the timer stood for, deterministically.
     """
 
+    # Eight rows is the PRODUCTION-SHAPED case, not an arbitrary small number: a
+    # shipped LS218 poll has eight configured channels, and `scheduler.py` passes
+    # each driver's combined reading list straight to committed persistence. A
+    # regression that degrades only small batches is invisible to 100 and 1000 --
+    # measured: routing batches of 16 rows or fewer per-row left this test green
+    # while an eight-row write issued eight batches, eight commits and eight
+    # BEGIN IMMEDIATEs.
+    poll, poll_rows = await _write_counting(tmp_path / "poll", 8)
     small, small_rows = await _write_counting(tmp_path / "small", 100)
     large, large_rows = await _write_counting(tmp_path / "large", 1000)
 
+    assert poll_rows == 8, f"Expected 8 persisted rows, got {poll_rows}"
     assert small_rows == 100, f"Expected 100 persisted rows, got {small_rows}"
     assert large_rows == 1000, f"Expected 1000 persisted rows, got {large_rows}"
 
-    assert large.main_readings_insert_batches == 1, (
-        "1000 readings issued "
-        f"{large.main_readings_insert_batches} main.readings insert batches; the write is not batched"
-    )
-    assert large.executemany_rows == 1000, (
-        f"executemany carried {large.executemany_rows} rows, expected all 1000 in one statement"
-    )
-    assert large.commit_calls == 1, f"1000 readings issued {large.commit_calls} commits, expected one"
-    # The readings write must NOT route through a raw cursor. Production
-    # `_OwnedControlConnection` defines execute/executemany/commit and validates
-    # authority around each one (`_execute` calls `validate_authority()` before,
-    # on failure, and after, then wraps the result in `_OwnedControlCursor`). It
-    # defines NO `cursor()` override, so `conn.cursor()` falls through
-    # `__getattr__` to a raw sqlite3 cursor and skips every one of those checks.
-    # Cursor batching is therefore NOT an equivalent refactor here: it would keep
-    # the batching property while dropping fail-closed persistence authority. This
-    # guard stays red for that route until production grows an authority-preserving
-    # `cursor()` wrapper, which is a production change and a separate PR.
-    assert large.cursor_calls == 0, (
-        f"the readings write used {large.cursor_calls} raw cursor(s); that route bypasses "
-        "_OwnedControlConnection.validate_authority() and must not be blessed as batched"
-    )
-    assert large.begin_immediate_calls == 1, (
-        f"1000 readings issued {large.begin_immediate_calls} transactions, expected one"
-    )
+    for label, counted, rows in (("8-row poll", poll, 8), ("100-row", small, 100), ("1000-row", large, 1000)):
+        assert counted.cursor_calls == 0, (
+            f"the {label} readings write used {counted.cursor_calls} raw cursor(s); that route "
+            "bypasses _OwnedControlConnection.validate_authority() and must not be blessed as batched"
+        )
+        assert counted.main_readings_insert_batches == 1, (
+            f"the {label} write issued {counted.main_readings_insert_batches} main.readings "
+            "insert batches; the write is not batched"
+        )
+        assert counted.commit_calls == 1, f"the {label} write issued {counted.commit_calls} commits, expected one"
+        assert counted.begin_immediate_calls == 1, (
+            f"the {label} write issued {counted.begin_immediate_calls} transactions, expected one"
+        )
+        assert counted.executemany_rows == rows, (
+            f"the {label} write carried {counted.executemany_rows} rows, expected all {rows} in one statement"
+        )
 
     # The decisive assertion: a ten-fold increase in rows must not change the
     # number of reading transactions, batches, or commits. A per-row insert or
@@ -344,6 +344,13 @@ async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_pat
     )
     assert large.begin_immediate_calls == small.begin_immediate_calls, (
         f"BEGIN IMMEDIATE calls scaled with row count: {small.begin_immediate_calls} -> {large.begin_immediate_calls}"
+    )
+    assert poll.main_readings_insert_batches == large.main_readings_insert_batches, (
+        "main.readings insert batches differ between a production-shaped 8-row poll and 1000 rows: "
+        f"{poll.main_readings_insert_batches} -> {large.main_readings_insert_batches}"
+    )
+    assert poll.commit_calls == large.commit_calls, (
+        f"commits differ between an 8-row poll and 1000 rows: {poll.commit_calls} -> {large.commit_calls}"
     )
 
 
