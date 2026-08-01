@@ -191,6 +191,51 @@ def test_guard_coverage_reduction_requires_exact_tracked_declaration(tmp_path: P
     assert green.approved == ("TEST-REDUCTION-001",)
 
 
+def test_guard_coverage_runs_current_c2_frozenset_allowlist_shape(tmp_path: Path) -> None:
+    """The real current C2 guard uses an empty ``frozenset`` allowlist.
+
+    Synthetic comparator fixtures historically used only mappings, so they
+    stayed green while a production exact-object comparison crashed before it
+    could produce a verdict. Exercise the current tracked guard source through
+    the real comparator instead of restating its allowlist shape in a fixture.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_c2_inventory(), indent=2) + "\n")
+    guard_path = Path("tests/analytics/test_c2_descriptor_selection_guard.py")
+    current_guard = (ROOT / guard_path).read_text(encoding="utf-8")
+    _write(repo / guard_path, current_guard)
+    _write(
+        repo / "src" / "cryodaq" / "reporting" / "periodic_renderer.py",
+        "def _channel_key(value):\n    return value\n",
+    )
+    base = _commit(repo, "current C2 guard")
+    _write(repo / "candidate-marker.txt", "same guard, second exact object\n")
+    candidate = _commit(repo, "candidate with unchanged C2 guard")
+
+    result = compare(repo, base, candidate)
+
+    assert result.passed
+    assert result.reductions == ()
+
+    with_set_exemption = current_guard.replace(
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()",
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({('src/cryodaq/reporting/periodic_renderer.py', 2)})",
+        1,
+    )
+    assert with_set_exemption != current_guard
+    _write(repo / guard_path, with_set_exemption)
+    added_exemption = _commit(repo, "add set-shaped exemption without a purpose")
+
+    red = compare(repo, candidate, added_exemption)
+
+    assert not red.passed
+    assert len(red.reductions) == 1
+    assert red.reductions[0]["added_exemption_ids"][0].startswith("UNDECLARED[")
+
+
 def test_g4_archived_revision_binds_source_control_to_the_compared_tree(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -284,24 +329,14 @@ def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """A weakened requested repository must stay red even when an inherited
-    GIT_DIR/GIT_WORK_TREE redirect points every Git call at a second strong
-    repository.
+    """An inherited graft must not make ``HEAD^`` resolve back to ``HEAD``.
 
-    Without the sanitized authority boundary both revisions resolved against
-    the strong repository's object database, so both challenges loaded the
-    strong guard and the lost G4 procedure challenge reported no reduction.
+    The self-parent graft changes the real production comparator's revision
+    authority: without sanitization, both requested revisions resolve to the
+    weakened candidate and the lost G4 challenge false-passes with no
+    reductions. The comparator owns its Git environment, so it must ignore
+    the inherited graft and observe the real parent/candidate reduction.
     """
-
-    strong = tmp_path / "strong"
-    strong.mkdir()
-    _git(strong, "init")
-    _write(strong / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
-    _write(strong / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
-    _write(strong / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
-    _commit(strong, "strong base guard")
-    _write(strong / "strong-repository-marker.txt", "unrelated second commit\n")
-    _commit(strong, "strong second commit keeps the strong guard at HEAD")
 
     requested = tmp_path / "requested"
     requested.mkdir()
@@ -311,10 +346,11 @@ def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
     _write(requested / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
     _commit(requested, "requested base guard")
     _write(requested / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=True))
-    _commit(requested, "weaken the requested G4 procedure guard")
+    weakened = _commit(requested, "weaken the requested G4 procedure guard")
 
-    monkeypatch.setenv("GIT_DIR", str(strong / ".git"))
-    monkeypatch.setenv("GIT_WORK_TREE", str(strong))
+    graft_file = tmp_path / "inherited-grafts"
+    _write(graft_file, f"{weakened} {weakened}\n")
+    monkeypatch.setenv("GIT_GRAFT_FILE", str(graft_file))
 
     red = compare(requested, "HEAD^", "HEAD")
 

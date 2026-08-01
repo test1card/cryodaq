@@ -34,38 +34,26 @@ class GuardCoverageError(RuntimeError):
     """The comparison could not establish guard coverage."""
 
 
-_GIT_REDIRECT_ENVIRONMENT_KEYS = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_NAMESPACE",
-)
-
-
 def _git_environment() -> dict[str, str]:
     """Return a sanitized process environment for one Git authority boundary.
 
     This mirrors the production G4 source-control authority in
-    ``tests/docs/test_docs_freshness.py::_g4_is_source_controlled``: an
-    inherited ``GIT_DIR``, ``GIT_WORK_TREE``, object-directory, namespace, or
-    ``GIT_CONFIG_*`` injection can redirect a command into a second
-    repository's object database, so a weakened requested repository
-    false-passes against a strong one. The full redirect surface is cleared
-    while the ordinary environment needed to locate the ``git`` executable and
-    the operating system (``PATH``, ``SystemRoot``, ...) is preserved.
-    Object replacement is already disabled per-command via
-    ``--no-replace-objects``, so a ``GIT_REPLACE_REF_DIR`` redirect cannot
-    substitute an ancestor tree either.
+    ``tests/docs/test_docs_freshness.py::_g4_is_source_controlled``. The
+    comparator, not its caller, owns repository, revision, object, history, and
+    configuration authority. Every inherited ``GIT_*`` variable is therefore
+    removed rather than attempting to enumerate Git's growing environment
+    surface: graft and shallow files can rewrite ancestry without changing the
+    repository top-level, while directory, namespace, object, replacement, and
+    config variables can redirect other parts of the same comparison.
+
+    The ordinary environment needed to locate ``git`` and the operating system
+    (``PATH``, ``SystemRoot``, ...) is preserved. Object replacement is also
+    disabled per-command via ``--no-replace-objects`` as defense in depth.
     """
 
     environment = os.environ.copy()
-    for key in _GIT_REDIRECT_ENVIRONMENT_KEYS:
-        environment.pop(key, None)
     for key in tuple(environment):
-        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+        if key.upper().startswith("GIT_"):
             environment.pop(key, None)
     return environment
 
@@ -474,7 +462,19 @@ def _actual_exemptions(
         return set()
     descriptors: list[dict[str, str]] = []
     if guard_id == "C2-DESCRIPTOR-SELECTION":
-        for key, value in getattr(module, "_ALLOWLIST", {}).items():
+        allowlist = getattr(module, "_ALLOWLIST", {})
+        if isinstance(allowlist, Mapping):
+            allowlist_items = allowlist.items()
+        elif isinstance(allowlist, (set, frozenset)):
+            # The current guard intentionally has no exemptions and represents
+            # that state as ``frozenset()``. If a later set-shaped guard adds
+            # an entry, it has no purpose field with which to match a tracked
+            # descriptor, so surface it as undeclared instead of granting an
+            # exemption by shape alone.
+            allowlist_items = ((key, "UNDECLARED-SET-SHAPED-EXEMPTION") for key in allowlist)
+        else:
+            raise GuardCoverageError(f"C2 allowlist has unsupported shape: {type(allowlist).__name__}")
+        for key, value in allowlist_items:
             if not isinstance(key, tuple) or len(key) != 2:
                 descriptors.append({"kind": "c2_allowlist", "path": "<malformed>", "symbol": "<malformed>"})
                 continue

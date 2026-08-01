@@ -261,11 +261,11 @@ The following table distinguishes three numbers that are easy to confuse:
 | Net source-inventory growth | 124,536 lines | Insertions minus deletions. |
 | Delivered-tree Git churn | 139,644 insertions / 9,554 deletions / 130,090 net | Source inventory plus the four regenerated architecture SVGs. |
 | Baseline repository text | 188,539 lines | Measured text inventory across the baseline tree. |
-| Candidate source-inventory text | 457,302 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
-| Delivered-tree text | 457,386 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
+| Candidate source-inventory text | 457,355 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
+| Delivered-tree text | 457,439 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
 | Baseline test Python | 80,529 lines | Python under `tests`. |
 | Candidate production Python | 154,227 lines | Candidate `src/cryodaq` inventory, not 134,090. |
-| Candidate test Python | 220,309 lines | Candidate `tests` inventory. |
+| Candidate test Python | 220,345 lines | Candidate `tests` inventory. |
 | Paths changed in candidate comparison | 489 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
 | Paths changed in delivered comparison | 493 | Candidate comparison plus the one surviving generated architecture SVG path. |
 | Baseline repository files | 779 | Inventory at `f5d6434`. |
@@ -623,12 +623,18 @@ same authority to the exact historical hook used by pre-signature validators.
 The adapter restores the archived module after each call and never interprets a
 callback-body `TypeError` as interface compatibility. The comparison itself runs
 behind that same sanitized Git authority boundary: every revision resolution,
-inventory read, archive materialization, and membership query clears inherited
-repository redirects (`GIT_DIR`, `GIT_WORK_TREE`, common and index directories,
-object-directory and alternates, namespace, and `GIT_CONFIG_*` injection),
-verifies that `rev-parse --show-toplevel` resolves exactly to the requested
-repository before any revision is resolved, and fails closed when the resolved
-top-level is foreign, ambiguous, or unavailable.
+inventory read, archive materialization, and membership query clears every
+inherited `GIT_*` variable, including repository redirects, graft and shallow
+ancestry overrides, replacement-ref selection, object directories, namespaces,
+and configuration injection. It also verifies that
+`rev-parse --show-toplevel` resolves exactly to the requested repository before
+any revision is resolved and fails closed when repository, ancestry, or tree
+authority is foreign, ambiguous, or unavailable.
+The exemption inventory also executes the current C2 guard's actual empty
+`frozenset` allowlist representation as well as historical purpose-bearing
+mappings. A set-shaped non-empty entry has no registered purpose field and is
+therefore reported as undeclared rather than being granted an exemption by
+container shape alone.
 
 The current reviewed-source path requires OFF evidence; a disconnect cannot be
 treated as safe if readback did not confirm removal of output. If a future
