@@ -851,21 +851,41 @@ def test_g4_executable_references_and_procedure_declarations() -> None:
 
 
 @pytest.mark.parametrize(
-    ("reference", "error"),
+    ("in_git_index", "on_disk", "declared_status", "opposite_status"),
     (
-        (
-            "make:bootstrap-predictor|requires:Makefile|status:absent",
-            "make prerequisite status differs: Makefile is present",
-        ),
-        (
-            "make:bootstrap-predictor|requires:cooldown_v5/predictor_model.json|status:present",
-            "make prerequisite status differs: cooldown_v5/predictor_model.json is absent",
-        ),
+        (False, True, "absent", "present"),
+        (True, False, "present", "absent"),
     ),
 )
-def test_g4_rejects_make_prerequisite_status_not_matching_source_control(reference: str, error: str) -> None:
-    with pytest.raises(AssertionError, match=re.escape(error)):
-        _validate_g4_docs(REPO_ROOT, {"docs/quickstart.md": f"[[ref:{reference}]]"})
+def test_g4_rejects_make_prerequisite_status_not_matching_source_control(
+    tmp_path: Path,
+    in_git_index: bool,
+    on_disk: bool,
+    declared_status: str,
+    opposite_status: str,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+    required_path = "predictor_model.json"
+    prerequisite = tmp_path / required_path
+
+    if in_git_index:
+        prerequisite.write_text("model", encoding="utf-8")
+        subprocess.run(["git", "add", "-f", required_path], cwd=tmp_path, check=True)
+    if not on_disk:
+        prerequisite.unlink()
+    elif not in_git_index:
+        prerequisite.write_text("model", encoding="utf-8")
+
+    assert prerequisite.exists() is on_disk
+    assert _g4_is_source_controlled(tmp_path, required_path) is in_git_index
+
+    reference = f"make:bootstrap-predictor|requires:{required_path}|status:{declared_status}"
+    assert _g4_reference_error(tmp_path, reference) is None
+
+    opposite_reference = f"make:bootstrap-predictor|requires:{required_path}|status:{opposite_status}"
+    expected = f"make prerequisite status differs: {required_path} is {declared_status}"
+    assert _g4_reference_error(tmp_path, opposite_reference) == expected
 
 
 def test_g4_make_prerequisites_fail_closed_without_git_metadata(tmp_path: Path) -> None:
