@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: SQLITE-LIVE-BATCH-PRODUCTION-PATH-FALSE-GREEN-208
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_batch_insert_is_batched_and_does_not_scale_with_row_count
+    ci_partition: core
+    red_evidence: catalog_free_write_batch_guard_could_not_observe_per_reading_transactions_on_the_deployed_path_2026_08_01_pending_immutable_capture
+    green_evidence: pending
   - id: AGENT-CONTEXT-DIRTY-BLOB-FALSE-GREEN-001
     status: open
     scope: repository
@@ -2597,6 +2605,25 @@ false_green_pairs:
     green_evidence: pending
 
 records:
+  - id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md
+    applies_to: Guards asserting persistence behaviour of the SQLite writer.
+    classification: production_test_divergence
+    correction_owner: reviewer
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A guard can report green CI evidence about a persistence property it cannot observe on the deployed write_committed path.
+    invariant: The batched-write guard drives public write_committed() on a catalog-backed writer and counts connection and cursor operations, asserting reading-transaction totals are identical for 100 and 1000 same-day readings.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    guards:
+      - node: tests/core/test_sqlite_writer.py::test_batch_insert_is_batched_and_does_not_scale_with_row_count
+        ci_partition: core
+    red_evidence: legacy_write_batch_guard_stayed_green_while_mutated_write_live_batch_issued_one_transaction_per_reading_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+
   - id: GOVERNANCE-PREVENTION-MAP-001
     status: open
     scope: repository
@@ -4780,6 +4807,7 @@ records:
       covered_classifications:
         - late_side_effect
         - markup_interpretation
+        - production_test_divergence
         - publication_loss
         - retained_handle_loss
         - stale_authority
