@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import multiprocessing
 import sqlite3
-import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -158,24 +157,98 @@ async def test_daily_rotation(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Batch-insert performance — 1000 readings complete in reasonable time
+# 5. Batch insert is actually batched — cost must not scale with row count
 # ---------------------------------------------------------------------------
 
 
-async def test_batch_insert_performance(tmp_path: Path) -> None:
+class _CountingConnection:
+    """Delegating wrapper that counts the calls a batch write makes."""
+
+    def __init__(self, real: object) -> None:
+        self._real = real
+        self.execute_calls = 0
+        self.executemany_calls = 0
+        self.commit_calls = 0
+        self.executemany_rows = 0
+
+    def execute(self, *args: object, **kwargs: object) -> object:
+        self.execute_calls += 1
+        return self._real.execute(*args, **kwargs)
+
+    def executemany(self, statement: str, parameters: object) -> object:
+        materialised = list(parameters)
+        self.executemany_calls += 1
+        self.executemany_rows += len(materialised)
+        return self._real.executemany(statement, materialised)
+
+    def commit(self) -> object:
+        self.commit_calls += 1
+        return self._real.commit()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def _write_counting(tmp_path: Path, count: int) -> tuple[_CountingConnection, int]:
+    """Write ``count`` readings and return the call counts plus persisted rows."""
+
     writer = SQLiteWriter(tmp_path)
-    big_batch = _batch(1000)
+    batch = _batch(count)
+    counter: _CountingConnection | None = None
+    real_ensure = writer._ensure_connection
 
-    t0 = time.monotonic()
-    writer._write_batch(big_batch)
-    elapsed = time.monotonic() - t0
+    def _wrapped(day: object) -> object:
+        nonlocal counter
+        if counter is None:
+            counter = _CountingConnection(real_ensure(day))
+        return counter
 
-    utc_date = big_batch[0].timestamp.date()
-    db_path = tmp_path / f"data_{utc_date.isoformat()}.db"
-    rows = _read_db(db_path)
+    writer._ensure_connection = _wrapped  # type: ignore[method-assign]
+    writer._write_batch(batch)
 
-    assert len(rows) == 1000, f"Expected 1000 persisted rows, got {len(rows)}"
-    assert elapsed < 5.0, f"Batch insert of 1000 rows took {elapsed:.2f}s (> 5s limit)"
+    db_path = tmp_path / f"data_{batch[0].timestamp.date().isoformat()}.db"
+    assert counter is not None
+    return counter, len(_read_db(db_path))
+
+
+async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_path: Path) -> None:
+    """The write must cost the same whether it carries 100 rows or 1000.
+
+    This replaces a wall-clock assertion (`elapsed < 5.0`). That threshold was a
+    proxy for a real regression — an accidental per-row commit instead of one
+    batched statement — but it measured the property through shared CI runner
+    load, which distorts it. The node failed on one run and passed on its
+    sibling at an identical SHA.
+
+    Call counts are the property itself. They do not move with machine load, so
+    this catches the N+1 regression the timer stood for, deterministically.
+    """
+
+    small, small_rows = _write_counting(tmp_path / "small", 100)
+    large, large_rows = _write_counting(tmp_path / "large", 1000)
+
+    assert small_rows == 100, f"Expected 100 persisted rows, got {small_rows}"
+    assert large_rows == 1000, f"Expected 1000 persisted rows, got {large_rows}"
+
+    assert large.executemany_calls == 1, (
+        f"1000 readings issued {large.executemany_calls} executemany calls; the write is not batched"
+    )
+    assert large.executemany_rows == 1000, (
+        f"executemany carried {large.executemany_rows} rows, expected all 1000 in one statement"
+    )
+
+    # The decisive assertion: a ten-fold increase in rows must not change the
+    # number of statements or commits. A per-row insert or per-row commit would
+    # move these, and no amount of runner load can.
+    assert large.executemany_calls == small.executemany_calls, (
+        f"executemany calls scaled with row count: {small.executemany_calls} -> {large.executemany_calls}"
+    )
+    assert large.commit_calls == small.commit_calls, (
+        f"commits scaled with row count: {small.commit_calls} -> {large.commit_calls}"
+    )
+    assert large.execute_calls == small.execute_calls, (
+        f"execute calls scaled with row count: {small.execute_calls} -> {large.execute_calls}"
+    )
 
 
 # ---------------------------------------------------------------------------
