@@ -49,6 +49,45 @@ def _c2_inventory() -> dict:
     }
 
 
+def _g4_inventory() -> dict:
+    payload = json.loads((ROOT / INVENTORY_PATH).read_text(encoding="utf-8"))
+    return {
+        "schema_version": 1,
+        "guards": {"G4-DOCUMENTATION-PROCEDURES": payload["guards"]["G4-DOCUMENTATION-PROCEDURES"]},
+        "reduction_declarations": [],
+    }
+
+
+def _g4_guard_source(*, weakened: bool) -> str:
+    physical_check = "if False:" if weakened else 'if result == "SOFTWARE-PROVABLE":'
+    return (
+        "from pathlib import Path\n"
+        "import subprocess\n\n"
+        "def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:\n"
+        "    root = root.resolve()\n"
+        "    repository = subprocess.run(\n"
+        "        ['git', '--no-replace-objects', '-C', str(root), 'rev-parse', '--show-toplevel'],\n"
+        "        capture_output=True, text=True,\n"
+        "    )\n"
+        "    if repository.returncode or Path(repository.stdout.strip()).resolve() != root:\n"
+        "        raise RuntimeError('source-control evidence is unavailable')\n"
+        "    return False\n\n"
+        "def _validate_g4_docs(root: Path, overrides=None, *, source_controlled=None) -> None:\n"
+        "    is_source_controlled = source_controlled or (\n"
+        "        lambda relative_path: _g4_is_source_controlled(root, relative_path)\n"
+        "    )\n"
+        "    if is_source_controlled('cooldown_v5/predictor_model.json'):\n"
+        "        raise AssertionError('source-control binding is wrong')\n"
+        "    checklist = (overrides or {}).get(\n"
+        "        'docs/new_lab_acceptance_checklist.md',\n"
+        "        (root / 'docs/new_lab_acceptance_checklist.md').read_text(encoding='utf-8'),\n"
+        "    )\n"
+        "    result = checklist.split('result: ', 1)[1].splitlines()[0]\n"
+        f"    {physical_check}\n"
+        "        raise AssertionError('acceptance evidence is external or physical, not SOFTWARE-PROVABLE')\n"
+    )
+
+
 def test_inventory_uses_stable_ids_and_never_line_number_identity() -> None:
     payload = _load_inventory((ROOT / INVENTORY_PATH).read_bytes(), "live")
     for guard in payload["guards"].values():
@@ -134,6 +173,30 @@ def test_guard_coverage_reduction_requires_exact_tracked_declaration(tmp_path: P
 
     assert green.passed
     assert green.approved == ("TEST-REDUCTION-001",)
+
+
+def test_g4_archived_revision_binds_source_control_to_the_compared_tree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(repo / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    base = _commit(repo, "base G4 guard")
+
+    # The candidate deliberately loses the procedure rejection. Coverage must
+    # distinguish that weakening after loading both revisions from Git-less
+    # archives; a shared archive-root Git failure must not make both challenges
+    # fail before the changed behavior is reached.
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=True))
+    weakened = _commit(repo, "weaken G4 procedure guard")
+    _git(repo, "replace", base, weakened)
+
+    red = compare(repo, base, weakened)
+
+    assert not red.passed
+    assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
 
 
 def test_gitless_export_fails_hard_instead_of_skipping(tmp_path: Path) -> None:

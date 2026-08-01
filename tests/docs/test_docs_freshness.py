@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tomllib
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 
@@ -829,7 +830,12 @@ def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:
     return True
 
 
-def _g4_reference_error(root: Path, reference: str) -> str | None:
+def _g4_reference_error(
+    root: Path,
+    reference: str,
+    *,
+    source_controlled: Callable[[str], bool] | None = None,
+) -> str | None:
     if reference.startswith("make:"):
         target, separator, requirement = reference[5:].partition("|requires:")
         required_path, status_separator, status = requirement.partition("|status:")
@@ -838,7 +844,11 @@ def _g4_reference_error(root: Path, reference: str) -> str | None:
             return f"make reference lacks a checkable prerequisite: {reference}"
         if not re.search(rf"(?m)^{re.escape(target)}:\s*$", _read(makefile)):
             return f"make target does not exist: {target}"
-        exists = _g4_is_source_controlled(root, required_path)
+        exists = (
+            source_controlled(required_path)
+            if source_controlled is not None
+            else _g4_is_source_controlled(root, required_path)
+        )
         if exists != (status == "present"):
             return f"make prerequisite status differs: {required_path} is {'present' if exists else 'absent'}"
         return None
@@ -892,7 +902,12 @@ def _g4_procedures(text: str) -> dict[str, dict[str, str]]:
     return procedures
 
 
-def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> None:
+def _validate_g4_docs(
+    root: Path,
+    overrides: dict[str, str] | None = None,
+    *,
+    source_controlled: Callable[[str], bool] | None = None,
+) -> None:
     """Validate G4 documents; make prerequisites require Git source-control evidence."""
 
     overrides = overrides or {}
@@ -902,7 +917,7 @@ def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> No
         for legacy in _G4_LEGACY_LINE_RE.findall(text):
             errors.append(f"{name}: line-number citation is forbidden: {legacy}")
         for reference in _G4_REFERENCE_RE.findall(text):
-            if error := _g4_reference_error(root, reference):
+            if error := _g4_reference_error(root, reference, source_controlled=source_controlled):
                 errors.append(f"{name}: {error}")
         unmarked = _G4_REFERENCE_RE.sub("", text)
         for reference in _G4_UNMARKED_REFERENCE_RE.findall(unmarked):

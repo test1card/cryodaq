@@ -75,12 +75,12 @@ def _git(repo: Path, *arguments: str, text: bool = True) -> str | bytes:
 
 
 def _resolve(repo: Path, revision: str) -> str:
-    return str(_git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}")).strip()
+    return str(_git(repo, "--no-replace-objects", "rev-parse", "--verify", f"{revision}^{{commit}}")).strip()
 
 
 def _git_file(repo: Path, revision: str, path: Path) -> bytes | None:
     completed = subprocess.run(
-        ["git", "show", f"{revision}:{path.as_posix()}"],
+        ["git", "--no-replace-objects", "show", f"{revision}:{path.as_posix()}"],
         cwd=repo,
         capture_output=True,
         check=False,
@@ -150,9 +150,36 @@ def _inventories(
 
 
 def _materialize(repo: Path, revision: str, destination: Path) -> None:
-    archive = _git(repo, "archive", "--format=tar", revision, text=False)
+    archive = _git(repo, "--no-replace-objects", "archive", "--format=tar", revision, text=False)
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
         stream.extractall(destination, filter="data")
+
+
+def _revision_source_controlled(repo: Path, revision: str, relative_path: str) -> bool:
+    """Resolve one path against the exact revision tree behind an exported root."""
+
+    output = _git(
+        repo,
+        "--no-replace-objects",
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        "--full-tree",
+        revision,
+        "--",
+        relative_path,
+        text=False,
+    )
+    if not output:
+        return False
+    entries = output.split(b"\0")
+    if entries[-1] == b"":
+        entries.pop()
+    expected = relative_path.encode("utf-8")
+    paths = [entry.split(b"\t", 1)[1] for entry in entries if b"\t" in entry]
+    if len(entries) != 1 or paths != [expected]:
+        raise GuardCoverageError(f"committed tree lookup returned ambiguous evidence for {relative_path}")
+    return True
 
 
 def _load_module(root: Path, relative: str, suffix: str) -> ModuleType | None:
@@ -175,6 +202,8 @@ def _probe_root(revision_root: Path, challenge_id: str) -> Path:
 
 
 def _run_challenge(
+    repo: Path,
+    revision: str,
     revision_root: Path,
     guard_path: str,
     challenge_id: str,
@@ -215,6 +244,7 @@ def _run_challenge(
                 module._validate_g4_docs(
                     revision_root,
                     {"docs/new_lab_acceptance_checklist.md": mutated},
+                    source_controlled=lambda relative_path: _revision_source_controlled(repo, revision, relative_path),
                 )
             except AssertionError as exc:
                 passed = expected in str(exc)
@@ -449,8 +479,10 @@ def compare(
             guard_path = authoritative["path"]
             lost: list[str] = []
             for challenge_id, challenge in (base_guard or authoritative)["challenges"].items():
-                base_result = _run_challenge(base_root, guard_path, challenge_id, challenge, "base")
+                base_result = _run_challenge(repo, base, base_root, guard_path, challenge_id, challenge, "base")
                 candidate_result = _run_challenge(
+                    repo,
+                    candidate,
                     candidate_root,
                     guard_path,
                     challenge_id,
