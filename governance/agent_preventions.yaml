@@ -2599,9 +2599,9 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
-    guard: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable
+    guard: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_commit_replacement_refs
     ci_partition: remaining
-    red_evidence: missing_head_tree_object_made_unavailable_source_control_evidence_look_like_an_authoritative_absent_prerequisite_2026_08_01_pending_immutable_capture
+    red_evidence: inherited_redirect_unreadable_head_tree_and_commit_replacement_refs_could_make_foreign_or_unavailable_source_control_evidence_look_like_an_authoritative_absent_prerequisite_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
 records:
@@ -2614,8 +2614,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A missing committed object or inherited repository redirect can make unavailable or foreign evidence satisfy an asserted prerequisite state.
-    invariant: G4 prerequisite checks query the intended repository's readable HEAD tree and fail closed when repository identity or tree evidence is unavailable or ambiguous.
+    consequence: A missing committed object, inherited repository redirect, or active replacement ref can make unavailable, foreign, or substituted evidence satisfy an asserted prerequisite state.
+    invariant: G4 prerequisite checks disable Git object replacement, query the intended repository's readable raw HEAD tree, and fail closed when repository identity or tree evidence is unavailable or ambiguous.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -2625,7 +2625,9 @@ records:
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable
         ci_partition: remaining
-    red_evidence: inherited_repository_selection_and_unreadable_head_tree_were_reproduced_2026_08_01_pending_immutable_capture
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_commit_replacement_refs
+        ci_partition: remaining
+    red_evidence: inherited_repository_selection_unreadable_head_tree_and_commit_replacement_ref_substitution_were_reproduced_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
   - id: GOVERNANCE-PREVENTION-MAP-001
